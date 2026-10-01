@@ -937,8 +937,12 @@ func mmrSeedHubAdmin(t *testing.T, s store.Store, userID string) {
 // exactly like the existing AddMember/RemoveMember hub-override logic, whose
 // own tests (rs5_global_admin_governance_test.go, rs5_r2_hardening_test.go)
 // also call the service directly rather than through the project.manage-
-// gated /members HTTP endpoints. The hub override is reached in production
-// through /api/v1/admin/role-bindings, which has no project.manage gate.
+// gated /members HTTP endpoints. In production, /api/v1/admin/role-bindings
+// has no project.manage gate, so it is one way to reach the hub override —
+// but not the only way: an actor with no built-in project role who passes
+// this endpoint's own project.manage gate via a custom role carrying
+// project.manage, and who also holds system role_binding.*, reaches the hub
+// override over this endpoint too (review r2 R2-5).
 func mmrServiceCtx(userID, email string) context.Context {
 	identity := NewAuthenticatedUser(userID, email, "Test User", "member", string(ClientTypeAPI))
 	ctx := contextWithIdentity(context.Background(), identity)

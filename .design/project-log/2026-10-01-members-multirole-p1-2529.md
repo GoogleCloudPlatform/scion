@@ -1,7 +1,7 @@
 # members-multirole P1 — atomic set/remove-all (ptone/scion#2529)
 
 **Branch**: `scion/members-multirole-p1`
-**Base**: `GoogleCloudPlatform/scion` main @ `7ddafd4`
+**Base**: `GoogleCloudPlatform/scion` main @ `e761178`
 **Scope**: design.md §12 P1 only (backend vertical slice), as amended by two
 mid-flight rulings from ptone: D1 blocks custom roles on agent principals
 (400 `principal_ineligible`), and D3 = authority model (c) from
@@ -48,8 +48,11 @@ the existing per-binding `POST`/`PATCH`/`DELETE /members[/{bindingID}]` API
     purpose-named step that applies a `rolePlan`'s delete-then-create, so the
     new engine never calls `tx.CreateRoleBinding`/`tx.DeleteRoleBinding`
     directly, keeping every such call enumerable per the existing RS1 O-3 AST
-    guard and classified in the `authzop` mutation catalog (both extended
-    additively — see Deviations). Replaced an earlier pair of generic
+    guard (unchanged — `applyRolePlanTx` already lives in
+    `project_membership_service.go`, the file the guard already allowlists)
+    and classified in the `authzop` mutation catalog (extended additively —
+    see Deviations; review r2 R2-5 correction: only the catalog was
+    extended, not the AST guard itself). Replaced an earlier pair of generic
     forwarders (`txCreateRoleBinding`/`txDeleteRoleBinding`) after review r1
     F3 flagged them as reusable primitives that left the governed call site
     invisible to the catalog.
@@ -64,11 +67,17 @@ the existing per-binding `POST`/`PATCH`/`DELETE /members[/{bindingID}]` API
   `membership_changed`.
 - **`pkg/hub/project_membership_service.go`**: additive only —
   `MembershipDecision.Details` (nil by default, used for
-  `requiredPermission`/`roleDefinitionId`/`currentRoleDefinitionIds`); the
-  default branch of `principalEligibleForRole` now returns true for
-  user/group and false for agent on a custom (non-built-in) role name — the
-  one eligibility switch for D1. `AddMember`/`UpdateMemberRole`/
-  `RemoveMember` are untouched.
+  `requiredPermission`/`roleDefinitionId`/`currentRoleDefinitionIds`);
+  `principalEligibleForRole` gates the custom (non-built-in) role-name branch
+  behind an explicit `!IsBuiltInProjectMembershipRole` guard (not the
+  switch's `default`), returning true for user/group and false for agent on
+  a custom role name; the switch's own `default` fails closed (`false`) for
+  an unmatched name the guard already said was built-in — the one
+  eligibility switch for D1 (review r2 R2-5 correction: this was reworded
+  from an earlier, stale description of the default branch granting
+  eligibility; review r1 L4 made it an explicit guard with a fail-closed
+  default instead). `AddMember`/`UpdateMemberRole`/`RemoveMember` are
+  untouched.
 
 ## Decisions folded in mid-flight
 
@@ -162,10 +171,15 @@ ported code carry the trailer
   existing `AddMember`/`RemoveMember` hub override, whose own tests
   (`rs5_global_admin_governance_test.go`, `rs5_r2_hardening_test.go`) also
   call the service directly rather than through the equally-gated `/members`
-  HTTP endpoints. In production the hub override is reached through
-  `/api/v1/admin/role-bindings`, which has no `project.manage` gate; that
-  endpoint is unchanged in P1 (design.md §7 explicitly did not port
-  miller79/scion PR #127's relaxation of it).
+  HTTP endpoints. In production, `/api/v1/admin/role-bindings` (unchanged in
+  P1; design.md §7 explicitly did not port miller79/scion PR #127's
+  relaxation of it) has no `project.manage` gate, so it is one way to reach
+  the hub override. It is not the only way: review r1 raised, and r2
+  confirmed, that this PUT/DELETE endpoint's own `project.manage` gate can
+  also be passed by an actor with no built-in project role of their own who
+  holds a custom role carrying `project.manage` — such an actor, if they
+  also hold system `role_binding.*`, reaches the hub override over this
+  endpoint too.
 
 ## Validation gate transcript
 
@@ -249,3 +263,67 @@ OwnerCustom|RS|D002|PM1|ProjectMember|Catalog|Classif|AST'`, `go test
 The branch was rebased onto a fresh `upstream-main` afterward. Per the P1
 broker throttle, the full `make test-hub-sqlite`/`make ci` were not run
 locally for this round; they run in the PR's GitHub CI.
+
+## Review round 2 fixes
+
+Closed every open finding from the second review round (0 Critical, 0 High,
+0 Medium, 2 Low, 6 Nit — every round-1 finding was independently re-verified
+closed, and no new High/Medium/Critical surfaced). No declines:
+
+- **R2-1** (Low): the `applyRolePlanTx` doc comment and its two
+  `authzop/catalog.go` exemption reasons said the last-owner check runs
+  *before* the call. It actually runs *after*, inside the same transaction,
+  as a post-state count whose violation rolls back every mutation the call
+  made. Reworded both to describe that ordering.
+- **R2-2** (Low): a narrow TOCTOU hardening inside the accepted FYI-2
+  residual. Phase P's `CanDelegate` call is evaluated once, pre-transaction,
+  against the actor's authority source at that moment; it is not re-run
+  in-tx. If that source itself changes between phases — e.g. a direct owner
+  who also holds hub `role_binding.*` is demoted from ownership by a
+  concurrent request before the lock lands — the grant could otherwise
+  commit under a ceiling `CanDelegate` never evaluated. Added an in-tx check
+  that refuses with 409 `membership_changed` if the actor's role,
+  hub-override status, or any asked custom-authority `Via` differs from its
+  pre-transaction value, plus a service-level test using a store wrapper to
+  simulate the concurrent demotion landing exactly between phases.
+- **R2-3, R2-7** (Nit): two test comments overstated what their assertions
+  proved — the escalation test (v)'s reason-text check does not prove the
+  request reached `reevaluateActorTx` (it reaches the pre-tx branch first),
+  and the audit-remove test's comment described the *removed* role's
+  original grant authority when the code (and the test) can only observe
+  the *remover's* authority. Both comments were corrected to describe only
+  what the assertions actually show.
+- **R2-4** (Nit): a bare `#127` issue reference, introduced ironically in
+  the commit that fixed the previous round's bare-reference finding (N2).
+  Reworded on this round's final history rewrite.
+- **R2-5** (Nit): four stale or inaccurate statements in this file (the
+  base SHA, the RS1 AST guard being "extended" when only the catalog was,
+  `principalEligibleForRole`'s default-branch description after review r1's
+  L4 made it an explicit guard, and an incomplete description of how the
+  hub override is reached in production) were corrected, along with the
+  matching test comment at `project_membership_set_test.go`'s
+  `mmrServiceCtx`.
+- **R2-6** (Nit): `roleKindBuiltIn`/`roleKindCustom` constants were added
+  next to `projectRoleKind` and used at every remaining
+  `"builtin"`/`"custom"` comparison and default-value site (5 places across
+  `project_membership_set.go` and `handlers_project_members.go`), closing
+  the gap N1 (review r1) left when it centralised the derivation but not
+  every call site's literal.
+- **R2-8** (Nit): the concurrent-PUT test accepted any combination of `{200,
+  409}` for its two racing requests, including both returning 409 — which
+  would mean the lock rejected both instead of serializing them. Added an
+  assertion that at least one request succeeds, per §12 P1.
+
+FYI-A and FYI-B required no action (consistent with Part 0 by design); FYI-C
+and FYI-D (round 1's accepted residuals) still apply unchanged.
+
+A finding-by-finding closure table (ID → commit/file:line → how closed) was
+produced for this round and shared with the reviewing agents; it is not
+duplicated here. The same throttled gate set as round 1 (`go test
+./pkg/hub/ -run 'SetMemberRoles|RoleSet|Escalation|OwnerCustom|RS|D002|
+PM1|ProjectMember|Catalog|Classif|AST'`, `go test ./pkg/hub/authzop/...`,
+`gofmt -l`, `go vet`, and a scoped `golangci-lint run
+--new-from-rev=upstream-main`) all pass on the fixed head, which was
+rebased onto a fresh `upstream-main` afterward. Per the P1 broker throttle,
+the full `make test-hub-sqlite`/`make ci` were not run locally for this
+round either; they run in the PR's GitHub CI.
