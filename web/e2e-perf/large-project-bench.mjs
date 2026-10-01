@@ -102,6 +102,7 @@ import {
   pickBurstTarget,
   displayStatusLabel,
   computePreStaleIds,
+  resolveBatchTickSettled,
   summarizeBurstScenario,
 } from './lib.mjs';
 
@@ -632,6 +633,117 @@ async function getStatusBadgeLabelDeep(page, agentId) {
   }, agentId);
 }
 
+// getStatusBadgeLabelsBatch is getStatusBadgeLabelDeep's multi-id form: ONE
+// page.evaluate call walks the document (and its shadow roots) once and
+// looks up EVERY id in `agentIds` during that single traversal, instead of
+// one full document walk per id. Used by the burst-settle poller below so
+// N concurrently-unsettled agents cost one DOM traversal per tick rather
+// than N.
+async function getStatusBadgeLabelsBatch(page, agentIds) {
+  const result = await page.evaluate((ids) => {
+    const out = {};
+    const remaining = new Set(ids);
+    function walk(root) {
+      for (const id of remaining) {
+        const link = root.querySelector(`a[href="/agents/${id}"]`);
+        if (link) {
+          const card = link.closest('.agent-card');
+          const badge = card ? card.querySelector('scion-status-badge') : null;
+          out[id] = badge ? badge.getAttribute('label') : null;
+        }
+      }
+      for (const id of Object.keys(out)) remaining.delete(id);
+      if (remaining.size === 0) return;
+      for (const el of root.querySelectorAll('*')) {
+        if (el.shadowRoot) {
+          walk(el.shadowRoot);
+          if (remaining.size === 0) return;
+        }
+      }
+    }
+    walk(document);
+    return out;
+  }, agentIds);
+  return new Map(Object.entries(result));
+}
+
+// createBurstSettlePoller returns a shared poller used by runBurstOnce to
+// watch multiple agents' status badges for their respective target phases
+// concurrently, with ONE page.evaluate (getStatusBadgeLabelsBatch) per tick
+// covering every currently-pending agent, instead of each agent running its
+// own independent page.evaluate + page.waitForTimeout(100) loop. 15
+// concurrent per-agent loops each doing a full shadow-DOM traversal measured
+// at ~68ms median (p90 98ms) per poll versus ~14ms for a single poller (see
+// the comment on waitFor below) -- this collapses that back toward the
+// single-poller cost regardless of --burst-count.
+//
+// Each caller's own POST-completion timestamp remains the anchor for its
+// settle time (passed into waitFor as `deadline`, and the caller itself
+// computes settleMs against its own postCompletedAt) -- batching the DOM
+// read must not change which moment a given agent's settle time is measured
+// from, only how many browser round-trips it costs to observe it.
+function createBurstSettlePoller(page) {
+  const pending = new Map(); // id -> target phase
+  const resolvers = new Map(); // id -> resolve function
+  let looping = false;
+
+  async function tick() {
+    if (pending.size === 0) return;
+    const labels = await getStatusBadgeLabelsBatch(page, [...pending.keys()]);
+    const settledNow = Date.now();
+    for (const id of resolveBatchTickSettled(pending, labels)) {
+      const resolve = resolvers.get(id);
+      pending.delete(id);
+      resolvers.delete(id);
+      resolve(settledNow);
+    }
+  }
+
+  async function loop() {
+    if (looping) return;
+    looping = true;
+    try {
+      while (pending.size > 0) {
+        await tick();
+        if (pending.size === 0) break;
+        await page.waitForTimeout(100);
+      }
+    } finally {
+      looping = false;
+    }
+  }
+
+  return {
+    // waitFor registers (id, target) with the shared poller and resolves
+    // with the Date.now() at which its badge was observed to match, or null
+    // if `deadlineMs` passes first. Registering immediately (re-)triggers
+    // the shared loop, so a newly-added id is covered by the very next
+    // tick -- including one already in flight, if it hasn't read the DOM
+    // yet -- rather than waiting for its own freshly-started timer.
+    waitFor(id, target, deadlineMs) {
+      return new Promise((resolve) => {
+        let done = false;
+        const finish = (value) => {
+          if (done) return;
+          done = true;
+          pending.delete(id);
+          resolvers.delete(id);
+          resolve(value);
+        };
+        pending.set(id, target);
+        resolvers.set(id, finish);
+        loop();
+        const remaining = deadlineMs - Date.now();
+        if (remaining <= 0) {
+          finish(null);
+        } else {
+          setTimeout(() => finish(null), remaining);
+        }
+      });
+    },
+  };
+}
+
 // postAgentStatus POSTs a status update (phase and/or activity) and returns
 // whether it was accepted.
 async function postAgentStatus(id, body) {
@@ -732,21 +844,26 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
   // between POST completions (0.24-1.40s observed in one capture -- the
   // same magnitude as the reported medians). Anchoring AND observing per
   // agent removes that inflation entirely, rather than merely measuring
-  // around it.
+  // around it. The DOM read itself is shared across agents (see
+  // createBurstSettlePoller) -- what stays per-agent is the anchor
+  // (postCompletedAt) each one's own settleMs is measured against, and the
+  // per-agent deadline passed into waitFor.
   //
   // This is a SAMPLING INTERVAL, not a floor -- the first poll happens
   // immediately after the POST resolves, so values well under 170ms are
   // common (per-agent minimums of 11-12ms have been observed), and "floor"
   // would wrongly imply they can't occur. What is true: each sample can
   // LAG the true DOM update by up to one poll interval -- `page.
-  // waitForTimeout(100)` plus a deep shadow-DOM badge read, which measures
-  // at ~14ms with one poller but ~68ms median (p90 98ms) with
-  // `--burst-count` (default 15) concurrent pollers sharing one page.
-  // Differences smaller than that combined interval (roughly 170-200ms)
-  // cannot be used to rank hub speed, even though many individual samples
-  // will themselves read well below it; see measurements.md section 3 for
-  // this caveat applied to actual numbers.
+  // waitForTimeout(100)` plus a deep shadow-DOM badge read, which used to
+  // measure at ~14ms with one poller but ~68ms median (p90 98ms) with
+  // `--burst-count` (default 15) concurrent pollers sharing one page before
+  // createBurstSettlePoller collapsed those into one shared evaluate call
+  // per tick. Differences smaller than that combined interval (roughly
+  // 170-200ms) cannot be used to rank hub speed, even though many
+  // individual samples will themselves read well below it; see
+  // measurements.md section 3 for this caveat applied to actual numbers.
   const burstStartedAt = Date.now();
+  const settlePoller = createBurstSettlePoller(page);
   const perAgent = await Promise.all(
     targets.map(async (a) => {
       const id = a.id;
@@ -763,16 +880,7 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
         return { id, ok: true, status: postRes.status, preStale: true, postCompletedAt };
       }
       const deadline = postCompletedAt + settleTimeoutMs;
-      let settledAt = null;
-      for (;;) {
-        const label = await getStatusBadgeLabelDeep(page, id);
-        if (label && label.toLowerCase() === target.toLowerCase()) {
-          settledAt = Date.now();
-          break;
-        }
-        if (Date.now() > deadline) break;
-        await page.waitForTimeout(100);
-      }
+      const settledAt = await settlePoller.waitFor(id, target, deadline);
       return {
         id,
         ok: true,

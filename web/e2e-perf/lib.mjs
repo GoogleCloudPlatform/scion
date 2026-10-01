@@ -316,6 +316,34 @@ export function computePreStaleIds(ids, preFireLabels, targetPhase) {
 }
 
 /**
+ * resolveBatchTickSettled compares one tick's freshly-read badge labels
+ * against each still-pending agent's target phase, for the shared
+ * burst-settle poller in large-project-bench.mjs's runBurstOnce. That
+ * poller reads every currently-pending agent's badge in a single
+ * page.evaluate call per tick (instead of one independent poll loop per
+ * agent) and uses this pure function to decide which of them just settled,
+ * so the match logic -- case-insensitive, only ids present in `pending`
+ * are considered -- is unit-testable without a real page.
+ *
+ * `pending` is a Map<id, targetPhase>; `labels` is a Map<id, label|null>
+ * read in that same tick. Returns the ids (a subset of pending's keys)
+ * whose label now matches their target; the caller removes them from
+ * `pending` and computes their settle time against their OWN POST
+ * completion timestamp, not this tick's -- batching the DOM read must not
+ * change which moment a given agent's settle time is measured from.
+ */
+export function resolveBatchTickSettled(pending, labels) {
+  const settledIds = [];
+  for (const [id, target] of pending) {
+    const label = labels.get(id);
+    if (label && target && label.toLowerCase() === target.toLowerCase()) {
+      settledIds.push(id);
+    }
+  }
+  return settledIds;
+}
+
+/**
  * summarizeBurstScenario reduces one scenario's per-run burst results
  * (`runBurstOnce`'s return values, one per run) into the scenario-level
  * statistics large-project-bench.mjs's report publishes. Extracted as a

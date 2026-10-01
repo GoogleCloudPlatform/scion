@@ -27,6 +27,7 @@ import {
   pickBurstTarget,
   displayStatusLabel,
   computePreStaleIds,
+  resolveBatchTickSettled,
   summarizeBurstScenario,
   BURST_TARGET_ROTATION,
 } from './lib.mjs';
@@ -316,6 +317,63 @@ test('computePreStaleIds returns an empty set when nothing is stale', () => {
   ]);
   const result = computePreStaleIds(['a1', 'a2'], preFireLabels, targetPhase);
   assert.equal(result.size, 0);
+});
+
+// ---- resolveBatchTickSettled ------------------------------------------------
+// Extracted from large-project-bench.mjs's shared burst-settle poller, which
+// reads every currently-pending agent's badge in one page.evaluate call per
+// tick instead of one independent poll loop per agent; this is the pure
+// match-and-select step run against that one batched read.
+
+test('resolveBatchTickSettled returns only ids whose label matches their target', () => {
+  const pending = new Map([
+    ['a1', 'error'],
+    ['a2', 'stopped'],
+  ]);
+  const labels = new Map([
+    ['a1', 'error'],
+    ['a2', 'running'],
+  ]);
+  assert.deepEqual(resolveBatchTickSettled(pending, labels), ['a1']);
+});
+
+test('resolveBatchTickSettled is case-insensitive', () => {
+  const pending = new Map([['a1', 'error']]);
+  const labels = new Map([['a1', 'ERROR']]);
+  assert.deepEqual(resolveBatchTickSettled(pending, labels), ['a1']);
+});
+
+test('resolveBatchTickSettled treats a missing or null label as not settled', () => {
+  const pending = new Map([
+    ['a1', 'error'],
+    ['a2', 'stopped'],
+  ]);
+  const labels = new Map([
+    ['a1', null],
+    // a2 absent entirely, e.g. not yet found by the DOM walk this tick.
+  ]);
+  assert.deepEqual(resolveBatchTickSettled(pending, labels), []);
+});
+
+test('resolveBatchTickSettled ignores labels for ids not in pending', () => {
+  const pending = new Map([['a1', 'error']]);
+  const labels = new Map([
+    ['a1', 'error'],
+    ['a2', 'error'], // already resolved/removed from pending by the caller
+  ]);
+  assert.deepEqual(resolveBatchTickSettled(pending, labels), ['a1']);
+});
+
+test('resolveBatchTickSettled returns an empty list when nothing in the batch settled', () => {
+  const pending = new Map([
+    ['a1', 'error'],
+    ['a2', 'stopped'],
+  ]);
+  const labels = new Map([
+    ['a1', 'running'],
+    ['a2', 'running'],
+  ]);
+  assert.deepEqual(resolveBatchTickSettled(pending, labels), []);
 });
 
 // ---- summarizeBurstScenario -----------------------------------------------
