@@ -33,6 +33,22 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+// Shared golden fixture (ptone/scion#2493 R2-2): the Go hub test
+// (pkg/hub/applied_config_explicit_edits_test.go) loads the SAME file as its
+// PATCH body, so the two cannot silently drift apart -- a future buildConfig
+// change that stops matching this file breaks this test, not a hand-copied
+// one in Go that nobody remembers to update.
+const GOLDEN_UNTOUCHED_BODY_PATH = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../../../pkg/hub/testdata/configure-untouched-body.json'
+);
+const goldenUntouchedBody: Record<string, unknown> = JSON.parse(
+  readFileSync(GOLDEN_UNTOUCHED_BODY_PATH, 'utf-8')
+);
 
 interface ScionConfigPayload {
   image?: string;
@@ -92,8 +108,12 @@ function stubFetch(): void {
  * on (as resolveDerivedConfig would at create), and one explicit env key.
  * This is the shape R1-1 reproduced against -- a live config that already
  * has real values the user never typed on this visit.
+ *
+ * appliedConfig lets a test override the agent's appliedConfig entirely
+ * (e.g. to put a key only in ac.env, not ic.env -- the live/InlineConfig
+ * mismatch ptone/scion#2493 R2-1 facet (b) is about).
  */
-function stubFetchWithLoadedAgent(): void {
+function stubFetchWithLoadedAgent(appliedConfig?: Record<string, unknown>): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
@@ -113,7 +133,7 @@ function stubFetchWithLoadedAgent(): void {
           name: 'agent-1',
           projectId: 'project-1',
           phase: 'created',
-          appliedConfig: {
+          appliedConfig: appliedConfig ?? {
             model: 'claude-opus',
             inlineConfig: {
               env: { EXPLICIT_KEY: 'explicit-value' },
@@ -160,8 +180,10 @@ async function mountAgentConfigure(): Promise<ConfigurePrivate> {
  * form state (and the loaded* snapshots) reflect the live config exactly as
  * a real page load would -- not the component's bare post-mount defaults.
  */
-async function mountAgentConfigureWithLoadedAgent(): Promise<ConfigurePrivate> {
-  stubFetchWithLoadedAgent();
+async function mountAgentConfigureWithLoadedAgent(
+  appliedConfig?: Record<string, unknown>
+): Promise<ConfigurePrivate> {
+  stubFetchWithLoadedAgent(appliedConfig);
   await import('./agent-configure.js');
   const el = document.createElement('scion-page-agent-configure');
   document.body.appendChild(el);
@@ -260,20 +282,54 @@ describe('agent-configure buildConfig — R1-1: untouched telemetry/auto-expose 
     expect(config).not.toHaveProperty('env');
   });
 
-  it('still echoes the full env (custom key plus current auto-expose state) once a custom env row is actually edited', async () => {
+  it('R2-1 facet (a): does not synthesize auto-expose keys when the live env never had them, even after editing an unrelated row', async () => {
     const c = await mountAgentConfigureWithLoadedAgent();
     const withEnvEntries = c as unknown as {
       envEntries: { key: string; value: string }[];
     };
+    // Sanity check: the live config (EXPLICIT_KEY only) never had any
+    // auto-expose keys, so the control is showing the global default, not a
+    // real live value.
+    expect(c.autoExposePortsEnabled).toBe(false);
+
     // Edit the one real explicit key the live config had.
     withEnvEntries.envEntries = [{ key: 'EXPLICIT_KEY', value: 'changed-value' }];
 
     const config = c.buildConfig();
     expect(config.env).toHaveProperty('EXPLICIT_KEY', 'changed-value');
-    // The auto-expose keys ride along at their unchanged current value, not
-    // because the user touched them, but so the hub's per-key env diff
-    // never reads their absence as a removal (ptone/scion#2493 R1-1).
-    expect(config.env).toHaveProperty('SCION_AUTO_EXPOSE_PORTS', 'false');
+    // Before the R2-1 fix, this synthesized SCION_AUTO_EXPOSE_PORTS:"false"
+    // here even though the agent's live env never set it -- freezing a
+    // global default into CreateInputs as an "edit" nobody made.
+    expect(config.env).not.toHaveProperty('SCION_AUTO_EXPOSE_PORTS');
+    expect(config.env).not.toHaveProperty('SCION_AUTO_EXPOSE_MODE');
+  });
+
+  it('R2-1 facet (b): the auto-expose control loads its real live value from ac.env even when ic.env has none, and re-sends that exact value after an unrelated row edit', async () => {
+    const c = await mountAgentConfigureWithLoadedAgent({
+      model: 'claude-opus',
+      env: { SCION_AUTO_EXPOSE_PORTS: 'true' },
+      // InlineConfig.Env is nil, as it is after any untouched Save/Start
+      // once buildConfig omits `env` (the PATCH handler still replaces
+      // InlineConfig wholesale -- options.md §7.2, not fixed here). Before
+      // R2-1, populateForm read auto-expose from ic.env ONLY, so this shape
+      // misread the control as the global default (false) instead of the
+      // agent's real, still-live value (true).
+      inlineConfig: { env: { EXPLICIT_KEY: 'explicit-value' } },
+    });
+    // The control must reflect the LIVE value, not the global default
+    // (stubbed false in stubFetchWithLoadedAgent's settings response).
+    expect(c.autoExposePortsEnabled).toBe(true);
+
+    const withEnvEntries = c as unknown as {
+      envEntries: { key: string; value: string }[];
+    };
+    withEnvEntries.envEntries = [{ key: 'EXPLICIT_KEY', value: 'changed-value' }];
+
+    const config = c.buildConfig();
+    expect(config.env).toHaveProperty('EXPLICIT_KEY', 'changed-value');
+    // Must re-send the REAL loaded value (true), never the global default
+    // (false) -- silently flipping live auto-expose off was R2-1 facet (b).
+    expect(config.env).toHaveProperty('SCION_AUTO_EXPOSE_PORTS', 'true');
   });
 
   it('sends telemetry only after the user actually toggles it', async () => {
@@ -291,5 +347,21 @@ describe('agent-configure buildConfig — R1-1: untouched telemetry/auto-expose 
     c.autoExposePortsEnabled = true;
     const config = c.buildConfig();
     expect(config.env).toHaveProperty('SCION_AUTO_EXPOSE_PORTS', 'true');
+  });
+});
+
+describe('agent-configure buildConfig — R2-2: untouched-form body matches the shared golden fixture', () => {
+  it('produces exactly pkg/hub/testdata/configure-untouched-body.json for an untouched, fully-loaded form', async () => {
+    // No image/auth/task/harnessConfig, no custom env, no telemetry: every
+    // field this scenario doesn't set is either absent (hub-side "empty
+    // means unchanged" fields) or explicit-empty (owned fields) in the
+    // output, and model/thinking_level/branch/user/agent_instructions/
+    // system_prompt/max_turns/max_model_calls/max_duration are all present
+    // -- the exact shape pkg/hub's TestApplyAgentUpdate_
+    // UntouchedSaveLeavesHubTelemetryAndEnvAlone PATCHes with, loaded from
+    // the SAME file.
+    const c = await mountAgentConfigureWithLoadedAgent({ model: 'golden-model' });
+    const config = c.buildConfig();
+    expect(config).toEqual(goldenUntouchedBody);
   });
 });
