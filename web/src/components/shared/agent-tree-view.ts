@@ -148,6 +148,18 @@ export class ScionAgentTreeView extends LitElement {
   @property({ type: String })
   orientation: Orientation = 'vertical';
 
+  /**
+   * Identifies which subset of the host's underlying agent data `agents`
+   * currently represents (e.g. a project or phase filter value). Leave at
+   * the default `''` if the host does no client-side filtering. Changing it
+   * tells `computeStableLayout` (#2481) that a shrink/growth of `agents` is
+   * the user picking a different view of the same data, not a delete — so it
+   * gets a fresh, re-fit layout (the pre-#2481 compacting behavior) instead
+   * of the stable-but-not-recompacted delete path.
+   */
+  @property({ type: String })
+  filterKey = '';
+
   @state() private showUsers = false;
   @state() private hoverId: string | null = null;
   @state() private collapsedIds: ReadonlySet<string> = new Set();
@@ -178,13 +190,10 @@ export class ScionAgentTreeView extends LitElement {
    * #2388) matches: status-only agent updates, pan, zoom and hover never
    * rebuild the forest or recompute node/edge geometry. Node status and
    * actions still come from the live `agents` array via `agentById` on every
-   * render — only positions and edge endpoints are cached.
-   *
-   * `agents`/`collapsedIds`/`showUsers`/`orientation` are kept alongside the
-   * layout (rather than just the signature) so that the next cache miss can
-   * hand `computeStableLayout` (#2481) the exact inputs the cached layout was
-   * computed from, which it needs to tell a pure agent removal apart from any
-   * other kind of structural change.
+   * render — only positions and edge endpoints are cached. The other fields
+   * besides `layout` are the exact inputs it was computed from, which
+   * `computeStableLayout` (#2481, see its doc comment) needs on the next
+   * cache miss.
    */
   private layoutCache: {
     signature: string;
@@ -192,6 +201,7 @@ export class ScionAgentTreeView extends LitElement {
     collapsedIds: ReadonlySet<string>;
     showUsers: boolean;
     orientation: Orientation;
+    filterKey: string;
     hiddenCounts: Map<string, number>;
     layout: ForestLayout;
   } | null = null;
@@ -643,16 +653,17 @@ export class ScionAgentTreeView extends LitElement {
     ) {
       this.didAutoFit = false;
     }
+    // A filter change (#2481 review round 1, R1) is the user picking a
+    // different view, not a delete — re-fit, same as pre-#2481.
+    if (changedProperties.has('filterKey') && changedProperties.get('filterKey') !== undefined) {
+      this.didAutoFit = false;
+    }
     if (changedProperties.has('agents')) {
       const oldAgents = changedProperties.get('agents') as Agent[] | undefined;
-      // Re-fit when agents arrive for the first time or when a new project
-      // enters scope (the set of distinct projectIds represented growing,
-      // not just the first agent — order and identity churn from SSE status
-      // updates must not reset the viewport). A project *leaving* scope does
-      // not re-fit (#2481): that happens when an agent delete empties a
-      // project out of a cross-project graph, and resetting the viewport
-      // then is the same jarring reset this issue is about, just for the
-      // whole canvas instead of one node.
+      // Re-fit on first arrival or when a project *enters* scope. A project
+      // *leaving* scope does not re-fit (#2481): that's what an agent delete
+      // does to a cross-project graph, and resetting the viewport then is
+      // the same jarring reset this issue is about, for the whole canvas.
       if (
         !oldAgents ||
         oldAgents.length === 0 ||
@@ -944,22 +955,21 @@ export class ScionAgentTreeView extends LitElement {
       // needed to get an accurate collapse-chip count regardless of which
       // path below produces the positions.
       hiddenCounts = descendantCounts(buildLineageForest(agents));
-      // computeStableLayout (#2481) reuses the previous layout's pixel
-      // positions for anything a plain agent removal doesn't touch, instead
-      // of unconditionally rebuilding the whole forest/geometry the way the
-      // old code above did. See its doc comment for the two removal shapes it
-      // handles and why it falls back to a full fresh layout otherwise.
+      // See computeStableLayout's doc comment (#2481) for what it reuses and
+      // when it falls back to a full fresh layout.
       layout = computeStableLayout(
         agents,
         this.collapsedIds,
         this.showUsers,
         this.orientation,
+        this.filterKey,
         this.layoutCache
           ? {
               agents: this.layoutCache.agents,
               collapsedIds: this.layoutCache.collapsedIds,
               showUsers: this.layoutCache.showUsers,
               orientation: this.layoutCache.orientation,
+              filterKey: this.layoutCache.filterKey,
               layout: this.layoutCache.layout,
             }
           : null
@@ -970,6 +980,7 @@ export class ScionAgentTreeView extends LitElement {
         collapsedIds: this.collapsedIds,
         showUsers: this.showUsers,
         orientation: this.orientation,
+        filterKey: this.filterKey,
         hiddenCounts,
         layout,
       };

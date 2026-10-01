@@ -1108,7 +1108,15 @@ export class ScionPageAgents extends LitElement {
     }
 
     if (this.viewMode === 'graph') {
-      return html`<scion-agent-tree-view .agents=${filtered}></scion-agent-tree-view>`;
+      // filterKey (#2481 review round 1, R1) lets the graph tell "the filter
+      // changed" (re-fit, same as before #2481) from "an agent was deleted"
+      // (stay in place) — every displayAgents input that can narrow or widen
+      // the list goes in, not just phaseFilter.
+      const filterKey = `${this.phaseFilter}|${this.modeFilter}|${this.labelFilter}`;
+      return html`<scion-agent-tree-view
+        .agents=${filtered}
+        filterKey=${filterKey}
+      ></scion-agent-tree-view>`;
     }
     return this.viewMode === 'grid' ? this.renderGrid() : this.renderTable();
   }

@@ -2732,6 +2732,7 @@ export class ScionPageProjectDetail extends LitElement {
                 : this.viewMode === 'graph'
                   ? html`<scion-agent-tree-view
                       .agents=${this.displayAgents}
+                      filterKey=${`${this.phaseFilter}|${this.labelFilter}`}
                     ></scion-agent-tree-view>`
                   : this.viewMode === 'grid'
                     ? this.renderAgentGrid()

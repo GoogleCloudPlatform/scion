@@ -34,6 +34,9 @@ import {
   buildLineageForest,
   layoutForest,
   layoutForestWithUsers,
+  NODE_W,
+  NODE_H,
+  type ForestLayout,
   type PositionedEdge,
 } from '../../shared/lineage.js';
 
@@ -153,6 +156,27 @@ function nodePositions(el: ScionAgentTreeView): Record<string, string | null> {
     positions[id] = wrapper.getAttribute('style');
   });
   return positions;
+}
+
+/** Fails with a readable diff if any two node/user rectangles in the
+ * component's current cached layout overlap (#2490 review round 1, C1). */
+function assertNoNodeOverlap(el: ScionAgentTreeView): void {
+  const layout = cachedLayout(el) as ForestLayout;
+  const rects = [
+    ...layout.nodes.map((n) => ({ id: n.agent.id, px: n.px, py: n.py })),
+    ...layout.users.map((u) => ({ id: `user:${u.id}`, px: u.px, py: u.py })),
+  ];
+  for (let i = 0; i < rects.length; i++) {
+    for (let j = i + 1; j < rects.length; j++) {
+      const a = rects[i];
+      const b = rects[j];
+      const overlapsX = a.px < b.px + NODE_W && b.px < a.px + NODE_W;
+      const overlapsY = a.py < b.py + NODE_H && b.py < a.py + NODE_H;
+      if (overlapsX && overlapsY) {
+        throw new Error(`${a.id} (${a.px},${a.py}) overlaps ${b.id} (${b.px},${b.py})`);
+      }
+    }
+  }
 }
 
 describe('scion-agent-tree-view layout cache (#2388)', () => {
@@ -454,11 +478,13 @@ describe('scion-agent-tree-view stable layout & keyed rendering on delete (#2481
     }
   });
 
-  it('removing a parent with children keeps unrelated trees in place', async () => {
+  it('removing a parent with children keeps unrelated trees in place and does not overlap (#2490 review round 1, C1)', async () => {
+    // a1 has no children, so delete r1 instead: a1 and a2 both orphan and
+    // get re-rooted, but the unrelated r2/b1 tree must not move or collide
+    // with the orphans. Named so the surviving root-1 would *not* trivially
+    // land back where it started under a naive global relayout.
     const before = nodePositions(el);
 
-    // a1 has no children, so delete r1 instead: a1 and a2 both orphan and
-    // get re-rooted, but the unrelated r2/b1 tree must not move.
     el.agents = el.agents.filter((a) => a.id !== 'r1');
     await el.updateComplete;
 
@@ -467,9 +493,35 @@ describe('scion-agent-tree-view stable layout & keyed rendering on delete (#2481
     expect(after['r2']).toBe(before['r2']);
     expect(after['b1']).toBe(before['b1']);
     // a1/a2 are still rendered (promoted to roots), just not necessarily at
-    // their old positions.
+    // their old positions, and must not overlap r2/b1 or each other.
     expect(after['a1']).toBeTruthy();
     expect(after['a2']).toBeTruthy();
+    assertNoNodeOverlap(el);
+  });
+
+  it('a widened, promoted tree that sorts after the anchored one still does not overlap it', async () => {
+    // Orphans ("zzz-...") sort *after* the anchored tree ("root-1"/root-2" in
+    // baseAgents), the opposite ordering from the test above — covering both
+    // directions of #2490 review round 1, C1.
+    el.agents = [
+      agent('anchor-root', 'anchor-root', ['user-1']),
+      agent('anchor-child', 'anchor-child', ['user-1', 'anchor-root']),
+      agent('victim', 'mmm-victim', ['user-2']),
+      agent('zzz-orphan-1', 'zzz-orphan-1', ['user-2', 'victim']),
+      agent('zzz-orphan-2', 'zzz-orphan-2', ['user-2', 'victim']),
+    ];
+    await el.updateComplete;
+    const before = nodePositions(el);
+
+    el.agents = el.agents.filter((a) => a.id !== 'victim');
+    await el.updateComplete;
+
+    const after = nodePositions(el);
+    expect(after['anchor-root']).toBe(before['anchor-root']);
+    expect(after['anchor-child']).toBe(before['anchor-child']);
+    expect(after['zzz-orphan-1']).toBeTruthy();
+    expect(after['zzz-orphan-2']).toBeTruthy();
+    assertNoNodeOverlap(el);
   });
 
   it('keeps DOM element identity for surviving nodes across a deletion (keyed repeat())', async () => {
@@ -485,26 +537,57 @@ describe('scion-agent-tree-view stable layout & keyed rendering on delete (#2481
     }
   });
 
-  it('keeps DOM edge element identity for surviving edges across a deletion (keyed repeat())', async () => {
+  it('keeps the DOM edge element after a removed one at the same object identity (keyed repeat())', async () => {
+    // Deleting a2 removes the *middle* edge (r1->a2) from [r1->a1, r1->a2,
+    // r2->b1]. Holding a direct reference to the r2->b1 element (the one
+    // *after* the removed edge, index 2) and checking it is still present by
+    // object identity — not merely "an edge with these attributes exists" —
+    // is what actually distinguishes keyed repeat() from plain .map():
+    // unkeyed positional diffing reuses the DOM node at index 1 (originally
+    // r1->a2) to display r2->b1's new data and drops the node that *was* at
+    // index 2 (the array only has 2 slots left), so this reference would be
+    // gone without the fix (confirmed by reverting repeat() to .map() here).
     const beforeEdges = Array.from(el.shadowRoot!.querySelectorAll('svg path.edge'));
     expect(beforeEdges).toHaveLength(3); // r1->a1, r1->a2, r2->b1
-
-    // Mark the r1->a1 edge (the one with the smallest d/path y1, i.e. the
-    // first edge in the surviving r1 tree) by tagging it directly — <path>
-    // carries no id/data attribute identifying its endpoints, so identity is
-    // the only thing we can check across the two renders.
-    const tagged = beforeEdges[0];
-    tagged.setAttribute('data-test-tag', 'x');
+    const survivor = beforeEdges[2];
 
     el.agents = el.agents.filter((a) => a.id !== 'a2');
     await el.updateComplete;
 
     const afterEdges = Array.from(el.shadowRoot!.querySelectorAll('svg path.edge'));
     expect(afterEdges).toHaveLength(2);
-    expect(afterEdges.some((p) => p.getAttribute('data-test-tag') === 'x')).toBe(true);
+    expect(afterEdges).toContain(survivor);
   });
 
-  it('does not reset pan/zoom or auto-fit when deleting a leaf agent', async () => {
+  it('keeps DOM element identity for a surviving user group across a deletion (keyed repeat())', async () => {
+    // user-1 is rendered before user-2 (sorted/grouped order); removing
+    // user-1's only agent must not reuse its DOM slot for user-2 under
+    // unkeyed rendering.
+    // Named so user-1's root sorts (and therefore renders) before user-2's.
+    (el as unknown as { showUsers: boolean }).showUsers = true;
+    el.agents = [agent('solo', 'aaa-solo', ['user-1']), agent('r2', 'zzz-root-2', ['user-2'])];
+    await el.updateComplete;
+
+    const userEls = () => Array.from(el.shadowRoot!.querySelectorAll('.node.user'));
+    expect(userEls()).toHaveLength(2);
+    const survivor = userEls()[1]; // user-2's card, rendered after user-1's
+
+    el.agents = el.agents.filter((a) => a.id !== 'solo'); // removes user-1 entirely
+    await el.updateComplete;
+
+    const after = userEls();
+    expect(after).toHaveLength(1);
+    expect(after).toContain(survivor);
+  });
+
+  it('does not reset pan/zoom or auto-fit when a delete empties a second project out of scope', async () => {
+    // A single-project leaf delete never reset auto-fit even before #2481
+    // (scopeChanged/scopeExpanded only look at projectId sets). The case
+    // #2481 actually describes is a *cross-project* graph where deleting the
+    // last agent of one project used to reset the viewport.
+    el.agents = [...el.agents, { ...agent('p2-root', 'p2-root', ['user-3']), projectId: 'p2' }];
+    await el.updateComplete;
+
     const view = el as unknown as {
       panX: number;
       panY: number;
@@ -516,13 +599,58 @@ describe('scion-agent-tree-view stable layout & keyed rendering on delete (#2481
     view.panY = -17;
     view.scale = 1.4;
 
-    el.agents = el.agents.filter((a) => a.id !== 'a2');
+    el.agents = el.agents.filter((a) => a.id !== 'p2-root'); // empties project p2 out of scope
     await el.updateComplete;
 
     expect(view.didAutoFit).toBe(true);
     expect(view.panX).toBe(42);
     expect(view.panY).toBe(-17);
     expect(view.scale).toBe(1.4);
+  });
+});
+
+describe('scion-agent-tree-view filterKey distinguishes a filter change from a delete (#2490 review round 1, R1)', () => {
+  let el: ScionAgentTreeView;
+
+  function baseAgents(): Agent[] {
+    return [
+      agent('r1', 'root-1', ['user-1']),
+      agent('a1', 'child-a', ['user-1', 'r1']),
+      agent('a2', 'child-b', ['user-1', 'r1']),
+    ];
+  }
+
+  beforeEach(async () => {
+    el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+    el.filterKey = 'running';
+    el.agents = baseAgents();
+    document.body.appendChild(el);
+    await el.updateComplete;
+  });
+
+  afterEach(() => {
+    el.remove();
+    document.body.innerHTML = '';
+  });
+
+  it('a shrink with filterKey unchanged keeps survivors at their exact previous position (a delete)', async () => {
+    const before = nodePositions(el);
+    el.agents = el.agents.filter((a) => a.id !== 'a2');
+    await el.updateComplete;
+    const after = nodePositions(el);
+    expect(after['r1']).toBe(before['r1']);
+    expect(after['a1']).toBe(before['a1']);
+  });
+
+  it('a shrink alongside a filterKey change re-fits instead of staying stable (a filter change)', async () => {
+    const view = el as unknown as { didAutoFit: boolean };
+    view.didAutoFit = true;
+
+    el.filterKey = 'stopped'; // e.g. the host's phase filter changed
+    el.agents = el.agents.filter((a) => a.id !== 'a2');
+    await el.updateComplete;
+
+    expect(view.didAutoFit).toBe(false);
   });
 });
 

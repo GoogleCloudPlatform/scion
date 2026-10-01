@@ -112,6 +112,36 @@ function compareIds(a: string, b: string): number {
 }
 
 /**
+ * Pixel endpoints for the edge between a positioned parent and child, given
+ * the flow direction. Vertical: parent bottom-center → child top-center.
+ * Horizontal: parent right-edge-center → child left-edge-center. The single
+ * source of truth for edge geometry — `layoutForest`, `layoutForestWithUsers`
+ * and `transposeLayout` all call this instead of inlining the math, and so
+ * does `computeStableLayout` when it rebuilds an edge from a node whose
+ * position it chose to preserve rather than recompute.
+ */
+export function edgeEndpoints(
+  orientation: Orientation,
+  parent: { px: number; py: number },
+  child: { px: number; py: number }
+): { x1: number; y1: number; x2: number; y2: number } {
+  if (orientation === 'horizontal') {
+    return {
+      x1: parent.px + NODE_W,
+      y1: parent.py + NODE_H / 2,
+      x2: child.px,
+      y2: child.py + NODE_H / 2,
+    };
+  }
+  return {
+    x1: parent.px + NODE_W / 2,
+    y1: parent.py + NODE_H,
+    x2: child.px + NODE_W / 2,
+    y2: child.py,
+  };
+}
+
+/**
  * A signature that changes iff a layout input the forest/layout functions
  * actually read would change: membership (add/remove), direct-parent
  * structure (reparent, via ancestry's last entry), the root user a tree is
@@ -154,7 +184,7 @@ export function topologySignature(
  * lowest id) is promoted to a root, and the rest of that cycle — plus any
  * ordinary descendants hanging off it — attach beneath it as usual.
  */
-export function buildLineageForest(agents: Agent[]): LineageNode[] {
+export function buildLineageForest(agents: readonly Agent[]): LineageNode[] {
   const byId = new Map<string, LineageNode>();
   for (const agent of agents) {
     byId.set(agent.id, { agent, children: [], x: 0, depth: 0 });
@@ -304,10 +334,11 @@ export function layoutForest(roots: LineageNode[]): ForestLayout {
     nodes.push({ agent: node.agent, px: px(node), py: py(node) });
     for (const child of node.children) {
       edges.push({
-        x1: px(node) + NODE_W / 2,
-        y1: py(node) + NODE_H,
-        x2: px(child) + NODE_W / 2,
-        y2: py(child),
+        ...edgeEndpoints(
+          'vertical',
+          { px: px(node), py: py(node) },
+          { px: px(child), py: py(child) }
+        ),
         parentId: node.agent.id,
         childId: child.agent.id,
       });
@@ -372,10 +403,7 @@ export function layoutForestWithUsers(roots: LineageNode[]): ForestLayout {
     for (const root of groupRoots) {
       const target = nodeById.get(root.agent.id)!;
       edges.push({
-        x1: px + NODE_W / 2,
-        y1: py + NODE_H,
-        x2: target.px + NODE_W / 2,
-        y2: target.py,
+        ...edgeEndpoints('vertical', { px, py }, { px: target.px, py: target.py }),
         parentId: userKey(uid),
         childId: root.agent.id,
       });
@@ -383,31 +411,6 @@ export function layoutForestWithUsers(roots: LineageNode[]): ForestLayout {
   }
 
   return { ...base, edges, users };
-}
-
-/**
- * Pixel endpoints for the edge between a positioned parent and child, given
- * the flow direction. Vertical: parent bottom-center → child top-center.
- * Horizontal: parent right-edge-center → child left-edge-center. Mirrors the
- * inline math in `layoutForest`'s vertical walk and `transposeLayout`'s
- * horizontal edge rebuild, factored out so `computeStableLayout` can recompute
- * an edge's pixels from a node whose position it chose to preserve rather
- * than recompute.
- */
-export function edgeEndpoints(
-  orientation: Orientation,
-  parent: { px: number; py: number },
-  child: { px: number; py: number }
-): { x1: number; y1: number; x2: number; y2: number } {
-  if (orientation === 'horizontal') {
-    return {
-      x1: parent.px + NODE_W,
-      y1: parent.py + NODE_H / 2,
-      x2: child.px,
-      y2: child.py + NODE_H / 2,
-    };
-  }
-  return { x1: parent.px + NODE_W / 2, y1: parent.py + NODE_H, x2: child.px, y2: child.py };
 }
 
 /**
@@ -440,10 +443,12 @@ export interface PureRemoval {
  * `oldAgents`, and every surviving agent has the same direct parent
  * (`parentIdOf`), root user (`rootUserOf`) and name as before — i.e. the only
  * topology input that changed is which IDs are present, not how the
- * survivors relate to each other. Returns null for any other kind of change
- * (an addition, a rename, a reparent among survivors, or no change at all),
- * since those don't have a well-defined "unaffected" region worth preserving
- * and are rare enough that a full reflow (the pre-#2481 behavior) is fine.
+ * survivors relate to each other. Returns null for any other kind of change:
+ * an addition, a rename, or a reparent among survivors fail the per-agent
+ * loop below; no change at all (identical lists) fails the length guard
+ * first. None of those have a well-defined "unaffected" region worth
+ * preserving, and are rare enough (or, for "no change", already handled by
+ * the caller's own layout cache) that a full reflow is fine.
  */
 export function detectPureRemoval(
   oldAgents: readonly Agent[],
@@ -475,6 +480,40 @@ export function detectPureRemoval(
   return { removedIds, orphanedIds };
 }
 
+/** The axis `computeStableLayout`'s placement step packs trees along: the one
+ * the tidy-tree algorithm's shared leaf counter writes to — `px` before a
+ * horizontal transpose, `py` after (see `transposeLayout`). */
+function packAxis(orientation: Orientation, p: { px: number; py: number }): number {
+  return orientation === 'horizontal' ? p.py : p.px;
+}
+
+/** The [min, max) extent a set of positioned rectangles spans along
+ * `packAxis`, or null for an empty set. */
+function packSpan(
+  orientation: Orientation,
+  positions: { px: number; py: number }[]
+): { min: number; max: number } | null {
+  if (positions.length === 0) return null;
+  const size = orientation === 'horizontal' ? NODE_H : NODE_W;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const p of positions) {
+    const a = packAxis(orientation, p);
+    min = Math.min(min, a);
+    max = Math.max(max, a + size);
+  }
+  return { min, max };
+}
+
+/** Shifts a positioned rectangle (or edge endpoint pair) along `packAxis`. */
+function packShift<T extends { px: number; py: number }>(
+  orientation: Orientation,
+  p: T,
+  offset: number
+): T {
+  return orientation === 'horizontal' ? { ...p, py: p.py + offset } : { ...p, px: p.px + offset };
+}
+
 /**
  * Builds the layout for `agents`, reusing `previous`'s pixel positions for
  * every node/user whose forest-root tree is unaffected by what changed since
@@ -486,36 +525,50 @@ export function detectPureRemoval(
  * unrelated tree laid out after it.
  *
  * Falls back to a full fresh layout (the pre-#2481 behavior) when there is no
- * previous layout, when `collapsedIds`/`showUsers`/`orientation` differ from
- * what `previous.layout` was built with (those have no "unaffected region"
- * concept — e.g. a previous *vertical* pixel is meaningless to reuse in a
- * fresh *horizontal* layout), or when `detectPureRemoval` reports something
- * other than a pure removal (see its doc comment).
+ * previous layout, when `collapsedIds`/`showUsers`/`orientation`/`filterKey`
+ * differ from what `previous.layout` was built with, or when
+ * `detectPureRemoval` reports something other than a pure removal (see its
+ * doc comment). `filterKey` lets a host distinguish "the data changed" (a
+ * real delete — stays on the stable path) from "I'm looking at a different
+ * subset of the same data" (a filter change — a fresh, re-fit layout, same as
+ * before this function existed): a filter narrowing is not a delete, and
+ * compacting/re-fitting for it is the behavior users already expect.
  *
  * Two removal shapes, handled differently:
  * - Clean removal (no `orphanedIds`): every removed ID was a leaf, so the
  *   remaining tree needs no re-rooting and the previous layout is still
- *   valid as-is. The removed nodes/edges (and any user left with no agents)
- *   are dropped in place; nothing else is recomputed, so nothing else can
- *   move. This is the common case (deleting a single leaf agent).
+ *   valid as-is. The removed nodes/edges are dropped in place; any user left
+ *   with no agents is dropped too, and any user that keeps some is recentred
+ *   over its surviving roots (leaving it at the old midpoint would drift
+ *   off-center once a sibling root is gone). Nothing else is recomputed, so
+ *   nothing else can move. This is the common case (deleting a leaf agent).
  * - Re-rooting removal (`orphanedIds` non-empty): a removed agent had
  *   surviving children, which `buildLineageForest` promotes to new roots, so
- *   that one tree must reflow. A full fresh layout is computed to get valid
- *   positions for the changed structure, then every node/user whose old root
- *   tree did NOT contain a removed agent has its previous pixel position
- *   restored — undoing any renumbering the shared layout call gave it. Edges
- *   are rebuilt from final positions to match.
+ *   the old tree(s) that contained a removed agent must reflow. Each such old
+ *   root-tree is laid out **in isolation** (`layoutForest`/
+ *   `layoutForestWithUsers` on just its surviving members) rather than folded
+ *   into one fresh layout of everything — a single shared layout call reuses
+ *   the same global leaf counter as the full reflow this function exists to
+ *   avoid, which can hand a reflowed tree numbers that collide with an
+ *   unaffected tree's preserved old pixels (see PR #2490 review round 1,
+ *   finding C1). Each isolated result is then placed where it cannot
+ *   collide with anything already positioned: in its old footprint if the
+ *   (possibly widened) tree still fits there, otherwise appended after the
+ *   rightmost edge of everything placed so far. Edges are rebuilt from final
+ *   positions to match.
  */
 export function computeStableLayout(
   agents: Agent[],
   collapsedIds: ReadonlySet<string>,
   showUsers: boolean,
   orientation: Orientation,
+  filterKey: string,
   previous: {
     agents: readonly Agent[];
     collapsedIds: ReadonlySet<string>;
     showUsers: boolean;
     orientation: Orientation;
+    filterKey: string;
     layout: ForestLayout;
   } | null
 ): ForestLayout {
@@ -531,81 +584,147 @@ export function computeStableLayout(
   if (
     previous.collapsedIds !== collapsedIds ||
     previous.showUsers !== showUsers ||
-    previous.orientation !== orientation
+    previous.orientation !== orientation ||
+    previous.filterKey !== filterKey
   ) {
     return freshLayout();
   }
   const removal = detectPureRemoval(previous.agents, agents);
   if (!removal) return freshLayout();
 
-  const oldNodePos = new Map(
-    previous.layout.nodes.map((n) => [n.agent.id, { px: n.px, py: n.py }])
-  );
-  const oldUserPos = new Map(previous.layout.users.map((u) => [u.id, { px: u.px, py: u.py }]));
-
+  // --- Clean removal: every removed id was a leaf ---------------------------
   if (removal.orphanedIds.size === 0) {
     const nodes = previous.layout.nodes.filter((n) => !removal.removedIds.has(n.agent.id));
-    const edges = previous.layout.edges.filter(
+    const nodeById = new Map(nodes.map((n) => [n.agent.id, n]));
+    const liveEdges = previous.layout.edges.filter(
       (e) => !removal.removedIds.has(e.parentId) && !removal.removedIds.has(e.childId)
     );
-    const liveUserKeys = new Set(
-      edges.map((e) => e.parentId).filter((id) => id.startsWith('user:'))
-    );
-    const users = previous.layout.users.filter((u) => liveUserKeys.has(userKey(u.id)));
-    return { nodes, edges, users, width: previous.layout.width, height: previous.layout.height };
+
+    // Recenter each surviving user over its remaining root children (R3 of
+    // PR #2490 review round 1): the old midpoint can drift off the group once
+    // a sibling root is gone. Linear in each root's packAxis position, so
+    // this matches what re-deriving from a fresh layoutForestWithUsers call
+    // (then transposing) would give — see packSpan's doc for why the
+    // transpose preserves midpoints.
+    const users = previous.layout.users.flatMap((u) => {
+      const rootIds = liveEdges.filter((e) => e.parentId === userKey(u.id)).map((e) => e.childId);
+      if (rootIds.length === 0) return []; // every root under this user is gone
+      const roots = rootIds.map((id) => nodeById.get(id)).filter((n): n is PositionedNode => !!n);
+      const span = packSpan(orientation, roots);
+      if (!span) return [u];
+      const center = (span.min + span.max - (orientation === 'horizontal' ? NODE_H : NODE_W)) / 2;
+      return [orientation === 'horizontal' ? { ...u, py: center } : { ...u, px: center }];
+    });
+    const userById = new Map(users.map((u) => [u.id, u]));
+
+    const edges = liveEdges.map((e) => {
+      if (!e.parentId.startsWith('user:')) return e;
+      const user = userById.get(e.parentId.slice('user:'.length));
+      const child = nodeById.get(e.childId);
+      if (!user || !child) return e;
+      return { ...e, ...edgeEndpoints(orientation, user, child) };
+    });
+
+    let width = PAD + NODE_W + PAD;
+    let height = PAD + NODE_H + PAD;
+    for (const n of nodes) {
+      width = Math.max(width, n.px + NODE_W + PAD);
+      height = Math.max(height, n.py + NODE_H + PAD);
+    }
+    for (const u of users) {
+      width = Math.max(width, u.px + NODE_W + PAD);
+      height = Math.max(height, u.py + NODE_H + PAD);
+    }
+    return { nodes, edges, users, width, height };
   }
 
-  const oldRootOf = rootIdsOf(buildLineageForest(previous.agents as Agent[]));
-  const affectedRoots = new Set<string>();
-  for (const id of removal.removedIds) {
-    const root = oldRootOf.get(id);
-    if (root) affectedRoots.add(root);
-  }
-  const isAffected = (agentId: string): boolean => affectedRoots.has(oldRootOf.get(agentId) ?? '');
-
-  const fresh = freshLayout();
-  const nodes = fresh.nodes.map((n) => {
-    if (isAffected(n.agent.id)) return n;
-    const old = oldNodePos.get(n.agent.id);
-    return old ? { ...n, ...old } : n;
-  });
-  const nodePos = new Map(nodes.map((n) => [n.agent.id, { px: n.px, py: n.py }]));
-
-  const affectedUsers = new Set<string>();
+  // --- Re-rooting removal: isolate and place each affected old tree --------
+  const oldRootOf = rootIdsOf(buildLineageForest(previous.agents));
+  const affectedRootIds = [
+    ...new Set(
+      [...removal.removedIds]
+        .map((id) => oldRootOf.get(id))
+        .filter((r): r is string => r !== undefined)
+    ),
+  ].sort(compareIds);
+  const affectedRootIdSet = new Set(affectedRootIds);
+  const isAffected = (agentId: string): boolean => {
+    const root = oldRootOf.get(agentId);
+    return root !== undefined && affectedRootIdSet.has(root);
+  };
+  const affectedUserIds = new Set<string>();
   for (const a of agents) {
     if (isAffected(a.id)) {
       const uid = rootUserOf(a);
-      if (uid) affectedUsers.add(uid);
+      if (uid) affectedUserIds.add(uid);
     }
   }
-  const users = fresh.users.map((u) => {
-    if (affectedUsers.has(u.id)) return u;
-    const old = oldUserPos.get(u.id);
-    return old ? { ...u, ...old } : u;
-  });
-  const userPos = new Map(users.map((u) => [u.id, { px: u.px, py: u.py }]));
+  const isAffectedKey = (key: string): boolean =>
+    key.startsWith('user:') ? affectedUserIds.has(key.slice('user:'.length)) : isAffected(key);
 
-  const posOf = (key: string): { px: number; py: number } | undefined =>
-    key.startsWith('user:') ? userPos.get(key.slice('user:'.length)) : nodePos.get(key);
-  const edges = fresh.edges.map((e) => {
-    const parent = posOf(e.parentId);
-    const child = posOf(e.childId);
-    if (!parent || !child) return e;
-    return { ...e, ...edgeEndpoints(orientation, parent, child) };
-  });
+  const placedNodes: PositionedNode[] = previous.layout.nodes.filter(
+    (n) => !isAffected(n.agent.id)
+  );
+  const placedUsers: PositionedUser[] = previous.layout.users.filter(
+    (u) => !affectedUserIds.has(u.id)
+  );
+  const placedEdges: PositionedEdge[] = previous.layout.edges.filter(
+    (e) => !isAffectedKey(e.parentId) && !isAffectedKey(e.childId)
+  );
 
-  let width = fresh.width;
-  let height = fresh.height;
-  for (const n of nodes) {
+  let frontier = packSpan(orientation, [...placedNodes, ...placedUsers])?.max ?? -Infinity;
+  const gap = orientation === 'horizontal' ? H_GAP_Y : GAP_X;
+
+  for (const rootId of affectedRootIds) {
+    const groupAgents = agents.filter((a) => oldRootOf.get(a.id) === rootId);
+    if (groupAgents.length === 0) continue; // the whole old tree was removed
+
+    let groupLayout = showUsers
+      ? layoutForestWithUsers(buildLineageForest(groupAgents))
+      : layoutForest(buildLineageForest(groupAgents));
+    if (orientation === 'horizontal') groupLayout = transposeLayout(groupLayout);
+
+    const groupSpan = packSpan(orientation, [...groupLayout.nodes, ...groupLayout.users]);
+    if (!groupSpan) continue; // unreachable: groupAgents is non-empty
+
+    const oldGroupPositions = previous.layout.nodes.filter(
+      (n) => oldRootOf.get(n.agent.id) === rootId
+    );
+    const oldGroupSpan = packSpan(orientation, oldGroupPositions);
+
+    const fitsOldFootprint =
+      oldGroupSpan !== null &&
+      oldGroupSpan.min >= frontier &&
+      groupSpan.max - groupSpan.min <= oldGroupSpan.max - oldGroupSpan.min;
+    const offset =
+      fitsOldFootprint && oldGroupSpan
+        ? oldGroupSpan.min - groupSpan.min
+        : (frontier === -Infinity ? 0 : frontier + gap) - groupSpan.min;
+
+    for (const n of groupLayout.nodes) placedNodes.push(packShift(orientation, n, offset));
+    for (const u of groupLayout.users) placedUsers.push(packShift(orientation, u, offset));
+    for (const e of groupLayout.edges) {
+      placedEdges.push(
+        orientation === 'horizontal'
+          ? { ...e, y1: e.y1 + offset, y2: e.y2 + offset }
+          : { ...e, x1: e.x1 + offset, x2: e.x2 + offset }
+      );
+    }
+    frontier = Math.max(frontier, groupSpan.max + offset);
+  }
+
+  let width = PAD + NODE_W + PAD;
+  let height = PAD + NODE_H + PAD;
+  for (const n of placedNodes) {
     width = Math.max(width, n.px + NODE_W + PAD);
     height = Math.max(height, n.py + NODE_H + PAD);
   }
-  for (const u of users) {
+  for (const u of placedUsers) {
     width = Math.max(width, u.px + NODE_W + PAD);
     height = Math.max(height, u.py + NODE_H + PAD);
   }
 
-  return { nodes, edges, users, width, height };
+  return { nodes: placedNodes, edges: placedEdges, users: placedUsers, width, height };
 }
 
 /**
@@ -649,10 +768,7 @@ export function transposeLayout(layout: ForestLayout): ForestLayout {
     const child = posByKey.get(e.childId);
     if (!parent || !child) continue;
     edges.push({
-      x1: parent.px + NODE_W,
-      y1: parent.py + NODE_H / 2,
-      x2: child.px,
-      y2: child.py + NODE_H / 2,
+      ...edgeEndpoints('horizontal', parent, child),
       parentId: e.parentId,
       childId: e.childId,
     });
