@@ -1209,6 +1209,14 @@ type Server struct {
 	// Nil in production and in most tests; always read through the
 	// nil-safe experimentRegistry() accessor, never directly.
 	experiments *experiments.Registry
+
+	// reincarnationRequesterResolveTimeout bounds
+	// buildReincarnationRequesterContext's store calls (design Amendment
+	// A26.14/A26.18). Zero means use defaultReincarnationRequesterResolveTimeout;
+	// always read through the requesterResolveTimeout() accessor, never
+	// directly. Per-Server rather than a package var so a test can shorten
+	// it on its own Server instance without racing other tests' workers.
+	reincarnationRequesterResolveTimeout time.Duration
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to

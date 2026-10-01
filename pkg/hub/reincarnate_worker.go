@@ -888,6 +888,22 @@ type reincarnationRequesterContext struct {
 	CreatorResolved bool
 }
 
+// defaultReincarnationRequesterResolveTimeout is the production value for
+// Server.requesterResolveTimeout() (design Amendment A26.14/A26.18).
+const defaultReincarnationRequesterResolveTimeout = 5 * time.Second
+
+// requesterResolveTimeout returns the timeout bounding
+// buildReincarnationRequesterContext's store calls. The zero value of the
+// Server field means defaultReincarnationRequesterResolveTimeout; a test
+// sets the field on its own Server instance to shorten it, with no shared
+// mutable state across tests (Amendment A26.18).
+func (s *Server) requesterResolveTimeout() time.Duration {
+	if s.reincarnationRequesterResolveTimeout == 0 {
+		return defaultReincarnationRequesterResolveTimeout
+	}
+	return s.reincarnationRequesterResolveTimeout
+}
+
 // buildReincarnationRequesterContext resolves the requester and, for a
 // self-migration, the creator hint, before the preamble is built (Amendments
 // A26.1, A26.2 R1). Self-migration (the AC-10/2c dogfood path) must never
@@ -902,10 +918,23 @@ type reincarnationRequesterContext struct {
 // own ID, but "never emit the agent's own handle" is stated as an absolute
 // rule.
 func (s *Server) buildReincarnationRequesterContext(ctx context.Context, agent *store.Agent, requestedBy string) reincarnationRequesterContext {
+	// Amendment A26.14: resolution is best-effort preamble metadata (A26.1
+	// 7c: it must never fail the reincarnation), but it runs on the
+	// worker's own ctx after the old container is already stopped, so an
+	// unbounded store call here could stall the migration with only the
+	// replica-safe sweep's 30-minute backstop to eventually notice. The
+	// derived, timeout-bound context is used only for the resolver calls
+	// below — it is never returned or threaded into any later worker step.
+	// On timeout, resolveReincarnationRequesterName's existing error path
+	// (a non-ErrNotFound error) yields the fallback and logs a WARN, the
+	// same as any other store error.
+	resolveCtx, cancel := context.WithTimeout(ctx, s.requesterResolveTimeout())
+	defer cancel()
+
 	if requestedBy != "" && requestedBy == agent.ID {
 		ctxOut := reincarnationRequesterContext{IsSelf: true}
 		if agent.CreatedBy != "" {
-			handle, resolved := s.resolveReincarnationRequesterName(ctx, agent.CreatedBy)
+			handle, resolved := s.resolveReincarnationRequesterName(resolveCtx, agent.CreatedBy)
 			if resolved && handle != "agent:"+agent.Slug {
 				ctxOut.CreatorHandle, ctxOut.CreatorResolved = handle, true
 			}
@@ -913,7 +942,7 @@ func (s *Server) buildReincarnationRequesterContext(ctx context.Context, agent *
 		return ctxOut
 	}
 
-	handle, resolved := s.resolveReincarnationRequesterName(ctx, requestedBy)
+	handle, resolved := s.resolveReincarnationRequesterName(resolveCtx, requestedBy)
 	return reincarnationRequesterContext{Handle: handle, Resolved: resolved}
 }
 
