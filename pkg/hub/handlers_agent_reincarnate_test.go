@@ -2621,17 +2621,15 @@ func (b *blockingUntilDoneStore) GetAgent(ctx context.Context, id string) (*stor
 
 // TestBuildReincarnationRequesterContext_A2614_TimeoutBound is the design
 // Amendment A26.14 test: an unbounded store call during requester resolution
-// must not stall the worker. With reincarnationRequesterResolveTimeout
-// shortened and a store whose GetUser/GetAgent block until their ctx is
-// done, the build must still return — with the unresolved fallback — well
-// within the shortened timeout.
-//
-// This test imposes its own bounded wait (a select with a generous
-// time.After), independent of the production timeout: if the production
-// timeout were removed, the blocking store's calls would hang on
-// context.Background() forever, and this test must fail promptly rather
-// than hang the suite — the select's time.After branch is what makes that
-// a clean failure instead of a hang.
+// must not stall the worker, on either resolution path — non-self (the
+// requester handle) or self (the creator hint). With
+// reincarnationRequesterResolveTimeout shortened and a store whose
+// GetUser/GetAgent block until their ctx is done, each subtest's build must
+// still return, with the unresolved fallback, within its own bounded wait
+// (a select with a generous time.After), independent of the production
+// timeout: if the production timeout were removed, the blocking store's
+// calls would hang on context.Background() forever, and the subtest must
+// fail promptly rather than hang the suite.
 func TestBuildReincarnationRequesterContext_A2614_TimeoutBound(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -2643,19 +2641,37 @@ func TestBuildReincarnationRequesterContext_A2614_TimeoutBound(t *testing.T) {
 
 	srv.store = &blockingUntilDoneStore{Store: s}
 
-	done := make(chan reincarnationRequesterContext, 1)
-	go func() {
-		done <- srv.buildReincarnationRequesterContext(context.Background(), agent, "some-other-requester-id")
-	}()
+	t.Run("non-self", func(t *testing.T) {
+		done := make(chan reincarnationRequesterContext, 1)
+		go func() {
+			done <- srv.buildReincarnationRequesterContext(context.Background(), agent, "some-other-requester-id")
+		}()
 
-	select {
-	case got := <-done:
-		assert.False(t, got.IsSelf)
-		assert.False(t, got.Resolved)
-		assert.Equal(t, reincarnationRequesterFallback, got.Handle)
-	case <-time.After(2 * time.Second):
-		t.Fatal("buildReincarnationRequesterContext did not return within the test's own bounded wait — the production timeout did not fire (or was removed)")
-	}
+		select {
+		case got := <-done:
+			assert.False(t, got.IsSelf)
+			assert.False(t, got.Resolved)
+			assert.Equal(t, reincarnationRequesterFallback, got.Handle)
+		case <-time.After(2 * time.Second):
+			t.Fatal("buildReincarnationRequesterContext did not return within the test's own bounded wait — the production timeout did not fire (or was removed)")
+		}
+	})
+
+	t.Run("self", func(t *testing.T) {
+		done := make(chan reincarnationRequesterContext, 1)
+		go func() {
+			done <- srv.buildReincarnationRequesterContext(context.Background(), agent, agent.ID)
+		}()
+
+		select {
+		case got := <-done:
+			assert.True(t, got.IsSelf)
+			assert.False(t, got.CreatorResolved)
+			assert.Empty(t, got.CreatorHandle)
+		case <-time.After(2 * time.Second):
+			t.Fatal("buildReincarnationRequesterContext did not return within the test's own bounded wait — the production timeout did not fire (or was removed)")
+		}
+	})
 }
 
 // AC-6: a start failure leaves state=failed with an error and phase=error,
