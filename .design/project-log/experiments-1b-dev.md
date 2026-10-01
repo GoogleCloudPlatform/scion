@@ -111,7 +111,12 @@ second rebases onto the other.
 
 ## Size
 
-13 web files changed, +1730/-64 against upstream `main` (`git diff
---stat`), plus this log. Most of that is `admin-experiments.ts` and its
-test file: an admin tab with four states (normal, 403, malformed, empty),
+13 web files changed against upstream `main` (excluding this log, which
+otherwise drifts the total with every fix commit): roughly 650 production
+lines (`feature-flags.ts`, `server-feature-flags.ts`, `admin-experiments.ts`,
+the four-change `admin-server-config.ts` edit, and a few literal swaps) and
+1,100 test lines (`feature-flags.test.ts`, `server-feature-flags.test.ts`,
+`admin-experiments.test.ts`, the `admin-server-config.test.ts` addition, and
+the e2e spec). Most of the total is `admin-experiments.ts` and its test
+file: an admin tab with four states (normal, 403, malformed, empty),
 sequential-write semantics, and a test for each state and write path.

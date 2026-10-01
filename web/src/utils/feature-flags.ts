@@ -170,7 +170,7 @@ export const NATIVE_CHAT_V2_FLAG = 'web.native_chat_v2';
 
 /**
  * Persistent terminal workspace flag (ptone/scion#1662, ptone/scion#2217).
- * Default ON. Controlled hub-wide from Settings → Server Config →
+ * Default ON. Controlled hub-wide from Admin → Server Config →
  * Experiments; a per-browser localStorage opt-out only applies when the
  * experiments fetch fails or on a signed-out page load.
  */
