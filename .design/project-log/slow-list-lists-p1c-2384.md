@@ -121,3 +121,44 @@ warnings, consistent with the file's existing style; new `*.test.ts` files
 hit the same pre-existing "TSConfig does not include this file" parse error
 every test file in this repo hits), `npx prettier --check` on every changed/
 new file (pass), `npx vitest run` (full suite, pass).
+
+## Round 1 review addendum
+
+Review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1c-rev-1.md`
+(REQUEST CHANGES: 1 critical, 5 required, 7 non-blocking). All 13 findings
+(B1-B6, N1-N6; N7 no change) fixed in one commit, rebased twice since (P1a
+moved to `043425ef` then `7c6140b0`); final SHA `a055b9f4`. Full mapping of
+each finding to its fix, file and test is in the dev report addendum:
+`gs://scion-xproject-exchange/slow-list/reports/lists-p1c-dev.md`.
+
+Summary of the fixes:
+- **B1 (critical):** the small-state window read a copied agent array, so
+  SSE updates never reached the list view. Now reads `this.agents` live via
+  a `getHeldAgents()` callback.
+- **B2:** a truncated legacy load left the window stuck in `'paged'`,
+  freezing live updates and stats for grid/tree/name-sort views above 500
+  agents. `loadLegacyAgents` now always exits `'paged'`.
+- **B3:** a view/sort change while paged could issue two requests (the
+  window's own `setViewState` plus `syncAgentsForViewState`). The window no
+  longer fetches on its own; `project-detail.ts` is the single decision
+  point.
+- **B4:** the persisted page size wasn't read by the host, so the first
+  request used the wrong `limit` while the pager showed the stored size.
+  Now read once in `connectedCallback`; the pager is a controlled component.
+- **B5:** no stale-response guard on the page-level loads. Added a
+  generation counter plus an `AbortController`.
+- **B6:** an off-page SSE upsert could inflate the member index for an
+  agent outside the committed label. New members are now gated by the
+  server's own add rule (project + label match).
+- **N1:** the paged-state chip now follows the design's table (counts-only
+  vs. newly-relevant) instead of firing on every off-page change.
+- **N2-N6:** stats assertions added to the R2-B2 test, report wording
+  corrected, a non-OK label commit restores the previous label, the delete
+  dialog falls back through the window/state for an agent's name while
+  paged, `serverOrderCompare` is reflexive, and W1 gained a dedicated
+  createdAt/updatedAt fallback case.
+
+Full suite (`npx vitest run --no-file-parallelism`), run after each of the
+two rebases: 3104/3106 then 3106/3107 passing; the one/two failures both
+times are the same pre-existing `agent-create-projects.test.ts` flake,
+unrelated to this branch (confirmed in the original report).
