@@ -33,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -234,6 +235,15 @@ type Server struct {
 	dispatchAttempts   map[string]*dispatchAttempt
 	dispatchAttemptsMu sync.Mutex
 
+	// launchRegistry is this replica's local bookkeeping for in-flight async
+	// launches (design t1-async-create-v11.md §3.8.1, §7 P1b-1). It is an
+	// optimisation only -- correctness comes from the Hub's answers.
+	launchRegistry *launchRegistry
+	// launchInstanceID identifies this broker process as a launch owner
+	// (design §3.2's LaunchInstanceID / launch_owner), generated once here at
+	// startup.
+	launchInstanceID string
+
 	stateDir string
 
 	// auxiliaryRuntimes holds runtime+manager pairs for non-default runtimes
@@ -322,6 +332,8 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		// stub that does not require live cluster/network access (see
 		// discoverAuxiliaryRuntimesForProjects and resolveManagerForOpts).
 		resolveAuxiliaryRuntime: agent.ResolveRuntime,
+		launchRegistry:          newLaunchRegistry(),
+		launchInstanceID:        uuid.NewString(),
 
 		// Subsystem loggers
 		agentLifecycleLog: logging.Subsystem("broker.agent-lifecycle"),
@@ -2032,6 +2044,48 @@ func (s *Server) resolveHubConnection(r *http.Request) *HubConnection {
 		}
 	}
 	return nil
+}
+
+// resolveHubNameForLaunch picks the hub connection name a launch's reports
+// should target, following design t1-async-create-v11.md §3.8.5's routing
+// order, stopping at the first that resolves to a connection with a
+// HubClient: (1) the X-Scion-Hub-Connection header (set by the control
+// channel, controlchannel.go); (2) the hub whose key authenticated the
+// request (brokerauth.go's authenticatingHubConnFromContext); (3) the only
+// connection. Returns "" when none of these resolve (e.g. more than one
+// connection and neither 1 nor 2 identified one) — the sender then fans out
+// to every connection with a HubClient (routing rule 4), exactly as
+// reportMessageFailure does.
+func (s *Server) resolveHubNameForLaunch(r *http.Request) string {
+	s.hubMu.RLock()
+	defer s.hubMu.RUnlock()
+
+	if connName := r.Header.Get("X-Scion-Hub-Connection"); connName != "" {
+		if conn, ok := s.hubConnections[connName]; ok && conn.HubClient != nil {
+			return connName
+		}
+	}
+	if connName := authenticatingHubConnFromContext(r.Context()); connName != "" {
+		if conn, ok := s.hubConnections[connName]; ok && conn.HubClient != nil {
+			return connName
+		}
+	}
+	var only string
+	count := 0
+	for name, conn := range s.hubConnections {
+		if conn.HubClient == nil {
+			continue
+		}
+		only = name
+		count++
+		if count > 1 {
+			return ""
+		}
+	}
+	if count == 1 {
+		return only
+	}
+	return ""
 }
 
 // resolveHubEndpointFromRequest returns the hub endpoint for the hub connection

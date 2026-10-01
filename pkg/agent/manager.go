@@ -50,6 +50,19 @@ type Manager interface {
 	// See AgentManager.Reprovision for the full contract.
 	Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error)
 
+	// Preflight resolves opts' template and harness config without
+	// provisioning, cloning, writing files or calling the runtime (design
+	// t1-async-create-v11.md §3.1 "Admission", §7 P1b-1). It returns
+	// config.ErrTemplateNotFound or config.ErrHarnessConfigNotFound exactly
+	// as Provision/Start would, so an async create's admission phase can
+	// surface those synchronously before accepting the launch.
+	Preflight(ctx context.Context, opts api.StartOptions) error
+
+	// CleanupLaunch deletes the runtime resources an aborted launch created
+	// (design §3.8.4). See AgentManager.CleanupLaunch for the UID-precondition
+	// and fresh-context contract.
+	CleanupLaunch(ctx context.Context, handles []ResourceHandle) error
+
 	// Start launches a new agent with the given configuration
 	Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error)
 

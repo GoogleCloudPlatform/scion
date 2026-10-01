@@ -16,7 +16,11 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
@@ -53,7 +57,92 @@ type RuntimeBrokerService interface {
 	// into its delivery buffer but failed to deliver, so the hub can mark
 	// them failed instead of leaving them "dispatched".
 	ReportMessageFailures(ctx context.Context, brokerID string, req *MessageFailuresReport) error
+
+	// ReportAgentLaunch sends one broker->hub launch report (design
+	// t1-async-create-v11.md §3.2, §7 P1b-1): a claim, checkpoint, progress
+	// update, keepalive, or terminal (succeeded/failed) for an async-launch
+	// agent create. The returned error is non-nil only for a condition the
+	// sender must treat as "unreachable, retry" (design §3.8.2 table): a
+	// transport failure, a 5xx, or a 404 that is not the structured
+	// agent_launch_unknown body (an old Hub node without this route,
+	// design §5 N-9). Every other outcome — the 200 result, the 403 (another
+	// broker owns the agent), the definitive 404 agent_launch_unknown, or the
+	// 409 stale_launch with its reason — is returned in the result with a nil
+	// error, so the sender can switch on it directly.
+	ReportAgentLaunch(ctx context.Context, brokerID, agentID string, req *AgentLaunchReport) (*AgentLaunchReportResult, error)
 }
+
+// AgentLaunchReport is the broker->hub launch report wire type (design §3.2).
+// It mirrors pkg/hub.AgentLaunchReport field for field; the two cannot share
+// a Go type because pkg/hub cannot depend on pkg/hubclient (and vice versa).
+type AgentLaunchReport struct {
+	LaunchID   string                 `json:"launchId"`
+	InstanceID string                 `json:"instanceId"`
+	Seq        int64                  `json:"seq"`
+	State      string                 `json:"state"` // claim | checkpoint | progress | succeeded | failed
+	Phase      string                 `json:"phase,omitempty"`
+	Step       string                 `json:"step,omitempty"`
+	Message    string                 `json:"message,omitempty"`
+	ErrorCode  string                 `json:"errorCode,omitempty"`
+	Agent      *AgentLaunchReportInfo `json:"agent,omitempty"` // succeeded only
+	At         time.Time              `json:"at,omitempty"`
+}
+
+// AgentLaunchReport.State values.
+const (
+	AgentLaunchReportStateClaim      = "claim"
+	AgentLaunchReportStateCheckpoint = "checkpoint"
+	AgentLaunchReportStateProgress   = "progress"
+	AgentLaunchReportStateSucceeded  = "succeeded"
+	AgentLaunchReportStateFailed     = "failed"
+)
+
+// AgentLaunchReportInfo is the succeeded report's agent echo. Only the
+// subset the Hub's P1a-ii ApplyLaunchReport applies (Runtime) is defined
+// here; the Hub ignores unknown JSON fields, so there is nothing to gain by
+// sending more before a later phase consumes it.
+type AgentLaunchReportInfo struct {
+	Runtime string `json:"runtime,omitempty"`
+}
+
+// AgentLaunchReportResult is ApplyLaunchReport's answer (design §3.2),
+// decoded from whichever of the four response shapes the Hub returned.
+type AgentLaunchReportResult struct {
+	// HTTPStatus is 0 for the 200 case; otherwise 403, 404 or 409.
+	HTTPStatus int
+	// Result is set when HTTPStatus == 0: "applied" | "duplicate" | "completed".
+	Result string
+	// Code is set for 404/409: "agent_launch_unknown" | "stale_launch".
+	Code string
+	// Reason is set for a 409 stale_launch: superseded | deleted | stopped |
+	// timed_out | lost | failed | not_launched | other_owner.
+	Reason string
+}
+
+// AgentLaunchReportResult.Result values.
+const (
+	AgentLaunchReportResultApplied   = "applied"
+	AgentLaunchReportResultDuplicate = "duplicate"
+	AgentLaunchReportResultCompleted = "completed"
+)
+
+// AgentLaunchReportResult.Code values.
+const (
+	AgentLaunchReportCodeUnknownLaunch = "agent_launch_unknown"
+	AgentLaunchReportCodeStaleLaunch   = "stale_launch"
+)
+
+// AgentLaunchReportResult.Reason values (409 stale_launch only).
+const (
+	AgentLaunchReportReasonSuperseded = "superseded"
+	AgentLaunchReportReasonDeleted    = "deleted"
+	AgentLaunchReportReasonStopped    = "stopped"
+	AgentLaunchReportReasonTimedOut   = "timed_out"
+	AgentLaunchReportReasonLost       = "lost"
+	AgentLaunchReportReasonFailed     = "failed"
+	AgentLaunchReportReasonNotLaunched = "not_launched"
+	AgentLaunchReportReasonOtherOwner = "other_owner"
+)
 
 // MessageFailure is one buffered delivery that failed on the broker.
 type MessageFailure struct {
@@ -282,4 +371,47 @@ func (s *runtimeBrokerService) ReportMessageFailures(ctx context.Context, broker
 		return err
 	}
 	return apiclient.CheckResponse(resp)
+}
+
+// ReportAgentLaunch posts one launch report. See the RuntimeBrokerService
+// doc comment for the error-vs-result split.
+func (s *runtimeBrokerService) ReportAgentLaunch(ctx context.Context, brokerID, agentID string, req *AgentLaunchReport) (*AgentLaunchReportResult, error) {
+	path := "/api/v1/runtime-brokers/" + url.PathEscape(brokerID) + "/agents/" + url.PathEscape(agentID) + "/launch"
+	resp, err := s.c.post(ctx, path, req, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var body struct {
+			Result string `json:"result"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			return nil, fmt.Errorf("decode launch report response: %w", err)
+		}
+		return &AgentLaunchReportResult{Result: body.Result}, nil
+
+	case http.StatusForbidden:
+		return &AgentLaunchReportResult{HTTPStatus: http.StatusForbidden}, nil
+
+	case http.StatusNotFound, http.StatusConflict:
+		var body struct {
+			Code   string `json:"code"`
+			Reason string `json:"reason"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if resp.StatusCode == http.StatusNotFound && body.Code != AgentLaunchReportCodeUnknownLaunch {
+			// design §5 N-9: a plain 404 from a Hub node without this route
+			// (e.g. a mixed-version HA cluster) means "no endpoint", which the
+			// broker must treat as retryable, never as a definitive unknown
+			// launch.
+			return nil, &apiclient.APIError{StatusCode: resp.StatusCode, Code: "no_endpoint", Message: "launch report route not found"}
+		}
+		return &AgentLaunchReportResult{HTTPStatus: resp.StatusCode, Code: body.Code, Reason: body.Reason}, nil
+
+	default:
+		return nil, apiclient.ParseErrorResponse(resp)
+	}
 }

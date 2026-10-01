@@ -138,6 +138,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 				Sync:        true,
 				Attach:      runtime.HasAttachSupport(rt),
 				Reprovision: true,
+				AsyncLaunch: true,
 			},
 			Profiles:       profiles,
 			DefaultProfile: defaultProfile,
@@ -179,6 +180,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			Sync:        true,
 			Attach:      runtime.HasAttachSupport(rt),
 			Reprovision: true,
+			AsyncLaunch: true,
 		}
 		// Ensure deployment-type labels are set on re-registration
 		if broker.Labels == nil {

@@ -172,6 +172,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			Attach:      scionrt.HasAttachSupport(s.runtime),
 			Exec:        true,
 			Reprovision: true,
+			AsyncLaunch: true,
 		},
 		Profiles: s.buildInfoProfiles(runtimeType),
 	}
@@ -991,84 +992,25 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	s.agentLifecycleLog.Info("Agent dispatch: buildStartContext complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(buildCtxStart).String())
 
-	// If WorkspaceStoragePath is set, download workspace from GCS (non-git bootstrap)
+	// If WorkspaceStoragePath is set, download workspace from GCS (non-git
+	// bootstrap). Factored into downloadWorkspaceFromGCS so the async-launch
+	// path (runLaunch) performs exactly the same step, in its goroutine,
+	// instead of here (design §3.1: "Launch is the GCS workspace download...
+	// plus Manager.Start, in a goroutine").
 	if req.WorkspaceStoragePath != "" {
-		// For hub-managed projects (ProjectSlug set), use the conventional path
-		// ~/.scion/projects/<slug>/ instead of the worktree-based path.
-		var workspaceDir string
-		var workspaceRoot string
-		if req.ProjectSlug != "" {
-			globalDir, err := config.GetGlobalDir()
-			if err != nil {
-				markAttemptFailed(http.StatusInternalServerError, "failed to resolve global dir")
-				span.SetStatus(codes.Error, err.Error())
-				RuntimeError(w, "Failed to get global dir: "+err.Error())
+		var attemptMsg string
+		var dlErr error
+		opts, attemptMsg, dlErr = s.downloadWorkspaceFromGCS(ctx, req, opts)
+		if dlErr != nil {
+			span.SetStatus(codes.Error, dlErr.Error())
+			if errors.Is(dlErr, errInvalidWorkspaceDir) {
+				markAttemptFailed(http.StatusBadRequest, attemptMsg)
+				BadRequest(w, dlErr.Error())
 				return
 			}
-			workspaceRoot = filepath.Join(globalDir, "projects")
-			workspaceDir = filepath.Join(workspaceRoot, req.ProjectSlug)
-		} else {
-			workspaceRoot = s.config.WorktreeBase
-			workspaceDir = filepath.Join(workspaceRoot, req.Name, "workspace")
-		}
-
-		// Validate before anything is created or written: req.ProjectSlug
-		// and req.Name are already constrained to a single path element
-		// above, but this still runs independently, the same gate every
-		// other workspace source goes through, before MkdirAll/SyncFromGCS
-		// ever touch the filesystem. Use the resolved, symlink-free path it
-		// returns for everything below, not the original join.
-		resolvedWorkspaceDir, verr := scionrt.ValidateWorkspaceSource(workspaceDir, workspaceRoot)
-		if verr != nil {
-			markAttemptFailed(http.StatusBadRequest, "invalid workspace directory")
-			span.SetStatus(codes.Error, verr.Error())
-			BadRequest(w, "Invalid workspace directory: "+verr.Error())
+			markAttemptFailed(http.StatusInternalServerError, attemptMsg)
+			RuntimeError(w, dlErr.Error())
 			return
-		}
-		workspaceDir = resolvedWorkspaceDir
-
-		if err := os.MkdirAll(workspaceDir, 0755); err != nil {
-			markAttemptFailed(http.StatusInternalServerError, "failed to create workspace directory")
-			span.SetStatus(codes.Error, err.Error())
-			RuntimeError(w, "Failed to create workspace directory: "+err.Error())
-			return
-		}
-
-		bucket := s.config.StorageBucket
-		if bucket == "" {
-			markAttemptFailed(http.StatusInternalServerError, "storage bucket not configured")
-			span.SetStatus(codes.Error, "storage bucket not configured")
-			RuntimeError(w, "Storage bucket not configured for workspace bootstrap")
-			return
-		}
-
-		if s.config.Debug {
-			s.agentLifecycleLog.Debug("Downloading workspace from GCS", "agent_id", req.ID,
-				"bucket", bucket,
-				"storagePath", req.WorkspaceStoragePath+"/files",
-				"workspaceDir", workspaceDir,
-				"projectSlug", req.ProjectSlug,
-			)
-		}
-
-		if err := gcp.SyncFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); err != nil {
-			markAttemptFailed(http.StatusInternalServerError, "failed to download workspace from GCS")
-			span.SetStatus(codes.Error, err.Error())
-			RuntimeError(w, "Failed to download workspace from GCS: "+err.Error())
-			return
-		}
-
-		opts.Workspace = workspaceDir
-		// Keep opts.ProjectPath so that ProvisionAgent resolves the correct
-		// agent directory. The explicit workspace takes precedence over the
-		// worktree logic in ProvisionAgent, so no worktree will be created.
-
-		// Write a workspace marker so in-container CLI
-		// can discover the project context and use the Hub API.
-		if req.ProjectID != "" && req.ProjectSlug != "" {
-			if writeErr := config.WriteWorkspaceMarker(workspaceDir, req.ProjectID, req.ProjectSlug, req.ProjectSlug); writeErr != nil {
-				s.agentLifecycleLog.Warn("Failed to write workspace marker", "agent_id", req.ID, "project_id", req.ProjectID, "error", writeErr)
-			}
 		}
 	}
 
@@ -1085,6 +1027,20 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// Carry the hub's operational agent_defaults into provisioning. No-op when
 	// the hub sent none, which is every local and file-mode dispatch.
 	ctx = withHubAgentDefaults(ctx, req.Config)
+
+	// Non-blocking create (design t1-async-create-v11.md §3.8.2, §7 P1b-1).
+	// ProvisionOnly and Reprovision always stay synchronous (design §3.2).
+	// With AsyncLaunch absent, or no LaunchID to track the launch by (a
+	// non-conforming caller), behavior is unchanged from here down.
+	if req.AsyncLaunch && !req.ProvisionOnly && !req.Reprovision {
+		if req.LaunchID == "" {
+			s.agentLifecycleLog.Warn("async launch requested with no launchId; falling back to synchronous create",
+				"agent_id", req.ID, "name", req.Name)
+		} else {
+			s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, attempt, markAttemptFailed, span, createStart)
+			return
+		}
+	}
 
 	// Branch based on provision-only flag
 	if req.ProvisionOnly {
@@ -1232,6 +1188,92 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// errInvalidWorkspaceDir marks a downloadWorkspaceFromGCS error caused by a
+// workspace directory that fails scionrt.ValidateWorkspaceSource: a client
+// error (400) on the synchronous path rather than a runtime error.
+var errInvalidWorkspaceDir = errors.New("invalid workspace directory")
+
+// downloadWorkspaceFromGCS performs the non-git GCS workspace bootstrap when
+// req.WorkspaceStoragePath is set. It is a pure extraction of createAgent's
+// original inline admission step (no behavior change), factored out so the
+// async-launch path (runLaunch) can perform exactly the same step in its
+// goroutine (design t1-async-create-v11.md §3.1: "Launch is the GCS
+// workspace download ... plus Manager.Start, in a goroutine").
+//
+// Returns opts unchanged when WorkspaceStoragePath is empty. On error it
+// returns the short status string the synchronous caller records on the
+// dispatch attempt, and an error whose Error() is the exact user-facing
+// message the synchronous caller writes with RuntimeError.
+func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRequest, opts api.StartOptions) (api.StartOptions, string, error) {
+	if req.WorkspaceStoragePath == "" {
+		return opts, "", nil
+	}
+
+	// For hub-managed projects (ProjectSlug set), use the conventional path
+	// ~/.scion/projects/<slug>/ instead of the worktree-based path.
+	var workspaceDir string
+	var workspaceRoot string
+	if req.ProjectSlug != "" {
+		globalDir, err := config.GetGlobalDir()
+		if err != nil {
+			return opts, "failed to resolve global dir", fmt.Errorf("Failed to get global dir: %w", err)
+		}
+		workspaceRoot = filepath.Join(globalDir, "projects")
+		workspaceDir = filepath.Join(workspaceRoot, req.ProjectSlug)
+	} else {
+		workspaceRoot = s.config.WorktreeBase
+		workspaceDir = filepath.Join(workspaceRoot, req.Name, "workspace")
+	}
+
+	// Validate before anything is created or written: req.ProjectSlug
+	// and req.Name are already constrained to a single path element by the
+	// caller, but this still runs independently, the same gate every other
+	// workspace source goes through, before MkdirAll/SyncFromGCS ever touch
+	// the filesystem. Use the resolved, symlink-free path it returns for
+	// everything below, not the original join.
+	resolvedWorkspaceDir, verr := scionrt.ValidateWorkspaceSource(workspaceDir, workspaceRoot)
+	if verr != nil {
+		return opts, "invalid workspace directory", fmt.Errorf("%w: %w", errInvalidWorkspaceDir, verr)
+	}
+	workspaceDir = resolvedWorkspaceDir
+
+	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
+		return opts, "failed to create workspace directory", fmt.Errorf("Failed to create workspace directory: %w", err)
+	}
+
+	bucket := s.config.StorageBucket
+	if bucket == "" {
+		return opts, "storage bucket not configured", errors.New("Storage bucket not configured for workspace bootstrap")
+	}
+
+	if s.config.Debug {
+		s.agentLifecycleLog.Debug("Downloading workspace from GCS", "agent_id", req.ID,
+			"bucket", bucket,
+			"storagePath", req.WorkspaceStoragePath+"/files",
+			"workspaceDir", workspaceDir,
+			"projectSlug", req.ProjectSlug,
+		)
+	}
+
+	if err := gcp.SyncFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); err != nil {
+		return opts, "failed to download workspace from GCS", fmt.Errorf("Failed to download workspace from GCS: %w", err)
+	}
+
+	opts.Workspace = workspaceDir
+	// Keep opts.ProjectPath so that ProvisionAgent resolves the correct
+	// agent directory. The explicit workspace takes precedence over the
+	// worktree logic in ProvisionAgent, so no worktree will be created.
+
+	// Write a workspace marker so in-container CLI
+	// can discover the project context and use the Hub API.
+	if req.ProjectID != "" && req.ProjectSlug != "" {
+		if writeErr := config.WriteWorkspaceMarker(workspaceDir, req.ProjectID, req.ProjectSlug, req.ProjectSlug); writeErr != nil {
+			s.agentLifecycleLog.Warn("Failed to write workspace marker", "agent_id", req.ID, "project_id", req.ProjectID, "error", writeErr)
+		}
+	}
+	return opts, "", nil
 }
 
 // hydrateTemplate resolves a Hub template to a local directory for provisioning.
@@ -1584,6 +1626,12 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	}
 	projectPath := target.projectPath
 	agentProjectID := target.projectID
+
+	// Wake any local launch waiting on this agent (design §3.8.1): purely a
+	// local optimisation (the Hub's answer to the launch's next report is
+	// what actually ends it), so a key that doesn't match an in-flight
+	// launch is a harmless no-op.
+	s.launchRegistry.CancelLocal(launchKey{ProjectID: agentProjectID, Slug: target.name})
 
 	filesToDelete := deleteFiles
 	if deleteFiles && projectPath == "" && projectID != "" {
@@ -2076,6 +2124,10 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		attribute.String("scion.agent.id", id),
 		attribute.String("scion.project.id", projectID),
 	)
+
+	// Wake any local launch waiting on this agent (design §3.8.1); see the
+	// identical comment in deleteAgent.
+	s.launchRegistry.CancelLocal(launchKey{ProjectID: projectID, Slug: id})
 
 	// Resolve the project-scoped container so that same-slug agents in
 	// different projects on this broker don't collide. An empty target means
