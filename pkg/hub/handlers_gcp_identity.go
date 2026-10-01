@@ -1046,6 +1046,9 @@ func (s *Server) resolveAgentGCPAssignment(agentRecord *store.Agent) (*store.GCP
 // it uses when no GCP identity is assigned -- a refusal here discloses nothing
 // beyond what that denial discloses.
 func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID string) bool {
+	if gcpID == nil {
+		return false
+	}
 	sa, err := s.store.GetGCPServiceAccount(ctx, gcpID.ServiceAccountID)
 	if err != nil || sa == nil {
 		return false
