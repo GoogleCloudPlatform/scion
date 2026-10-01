@@ -467,4 +467,44 @@ describe('W3 seed epoch', () => {
 
     expect(sm.getAgent('a1')?.exposedPorts).toEqual([port]);
   });
+
+  describe('a TTL-expired buffered delta is not replayed by a later seed', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('matches live state once the buffer entry it was recorded from has expired', () => {
+      // Exactly the sequence the design calls out: a status delta for an
+      // unknown ID, recorded into both the 30s buffer and this still-open
+      // epoch; more than 30s with nothing else touching the ID, so live
+      // state drops it (the W2 TTL tests in state-coalescing.test.ts);
+      // then "created"; then the seed. Before the fix, the epoch kept its
+      // own copy past the buffer's expiry and replayed it here — a field
+      // ('labels') that only the expired delta ever set would resurface at
+      // seed time even though live state never showed it after "created".
+      const sm = new StateManager();
+      sm.setScope({ type: 'dashboard' });
+
+      const token = sm.beginSeedEpoch();
+      emit(sm, 'agent.a1.status', { phase: 'error', labels: { env: 'stale' } });
+
+      vi.advanceTimersByTime(30_000); // the buffered entry (and now the epoch's copy) expires
+
+      emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+      // Live state already dropped the expired delta (per the W2 TTL tests).
+      expect(sm.getAgent('a1')?.phase).toBe('running');
+      expect(sm.getAgent('a1')?.labels).toBeUndefined();
+
+      sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'running' } as Agent], { token });
+
+      // The seeded state must agree with live state: no resurrected 'error'
+      // phase, no resurrected 'labels' field from the expired delta.
+      expect(sm.getAgent('a1')?.phase).toBe('running');
+      expect(sm.getAgent('a1')?.labels).toBeUndefined();
+    });
+  });
 });

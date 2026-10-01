@@ -1027,6 +1027,15 @@ export class StateManager extends EventTarget {
    * "created" supplies a base, via `applyCompactedDelta` — see that type's
    * doc comment for why folding stays O(1) per ID without losing anything a
    * raw, unbounded list of every delta would have kept.
+   *
+   * The same raw delta is also recorded into every currently open seed
+   * epoch (`recordSeedEpochDelta`, called by `handleAgentEvent` right after
+   * this), so each epoch accumulates its own copy of whatever is buffered
+   * here. The expiry timer below must keep those copies in sync: without
+   * it, a drain whose epoch is still open 30s later would replay, at seed
+   * time, a delta `pendingAgentDeltas` has already dropped — live state and
+   * the seeded state would disagree about an ID that was never resolved by
+   * a "created" or "deleted" event (see the timer callback below).
    */
   private bufferAgentDelta(agentId: string, delta: Partial<Agent>): void {
     const prev = this.pendingAgentDeltas.get(agentId) ?? emptyCompactedDelta();
@@ -1039,6 +1048,16 @@ export class StateManager extends EventTarget {
     const timer = setTimeout(() => {
       this.pendingAgentDeltas.delete(agentId);
       this.pendingAgentDeltaTimers.delete(agentId);
+      // Drop this ID's recorded entry from every still-open seed epoch too
+      // (§7 fix): the buffered delta it was folded from no longer survives
+      // live, so a seed landing after this point must not resurrect it. A
+      // later delta for the same ID (before or after this fires) starts
+      // both `pendingAgentDeltas` and every open epoch's entry fresh, via
+      // `bufferAgentDelta`/`recordSeedEpochDelta`'s normal fold-or-create
+      // path, so there is nothing left to reconcile once this runs.
+      for (const epoch of this.seedEpochs.values()) {
+        epoch.deltas.delete(agentId);
+      }
     }, StateManager.PENDING_DELTA_TTL_MS);
     this.pendingAgentDeltaTimers.set(agentId, timer);
   }
