@@ -30,8 +30,10 @@ Web-only. No Go changes.
   States: normal, 403 (permission message, no switches), malformed (banner +
   confirmed reset-all), and empty. Writes are strictly sequential (every
   switch and the reset button are disabled while one write is in flight, so
-  the next write always carries the previous one's revision). A 409 reverts
-  and shows a message; any other write failure reverts and reloads with GET.
+  the next write always carries the previous one's revision). On any write
+  failure the switch reverts and the tab reloads from the server; a 409
+  shows a concurrent-change message (or the malformed-settings message),
+  and other failures show the server's error.
   "Reset to default" shows only when an override exists. Tab-level
   attribution ("Last changed by … at …") comes from the last write response.
   A one-line note lists any `unknown_overrides` by name.
