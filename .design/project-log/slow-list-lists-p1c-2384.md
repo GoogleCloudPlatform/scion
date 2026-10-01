@@ -232,3 +232,38 @@ guard layer. Probes were not committed.
 Full suite (`npx vitest run --no-file-parallelism`) after the rebase: all
 109 files, 3137 tests passed; the previously-flaky
 `agent-create-projects.test.ts` did not reproduce this run either.
+
+## Round 4 review addendum
+
+Review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1c-rev-4.md`
+(**APPROVE** at `d00261f3`: 0 critical, 0 required, 2 optional (N1''',
+N2'''), 2 nits (N3''', N4''')). All six round-3 findings reconfirmed closed
+with no regression. Fixed in one commit, rebased onto P1a's latest head
+(`44c71d37`); final SHA `e8c8e0747`. Full mapping in the dev report
+addendum: `gs://scion-xproject-exchange/slow-list/reports/lists-p1c-dev.md`.
+
+Summary:
+
+- **N1''':** added `AgentListWindow.invalidateCursors()`, called when a
+  `view-change` trigger's request fails while the window is still `'paged'`
+  — `hasNext`/`hasPrev` now report `false` until the next successful
+  `setPaged()`. Also fixed `next()`/`prev()` to check the public
+  `hasNext`/`hasPrev` getters instead of the private `_hasNext` field/raw
+  `_pageIndex` check, since the latter would have bypassed the new
+  invalidation for a direct `agentWindow.next()` call.
+- **N2''':** the pager's `.loading` binding and `onPagerNav`'s guard now
+  only factor in `agentsLoading` while paged, so a held lifecycle refresh
+  or page-level load no longer disables small-state local pagination
+  (which sends no request and has nothing to race).
+- **N3'''/N4''':** reworded the stale `agent-list-window.ts` module doc
+  comment (still described pre-round-3 `setSmall()` behavior) and the
+  stale `project-detail-agent-window.test.ts` comment claiming `onPagerNav`
+  was removed entirely (it is still the defense-in-depth guard).
+
+Reran all probes from rounds 1-4 (24 tests across 5 probe files) twice —
+pre-rebase and post-rebase onto P1a's `44c71d37` — all passing both times.
+Probes were not committed.
+
+Full suite (`npx vitest run --no-file-parallelism`) after the rebase: all
+110 files, 3146 tests passed; the previously-flaky
+`agent-create-projects.test.ts` passed this run too.
