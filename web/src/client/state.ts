@@ -341,8 +341,8 @@ function applyCompactedDelta(base: Agent, acc: CompactedDelta, agentId: string):
     // resolved `undefined` (an explicit `activity: undefined` delta
     // unlocked to it) must still become an *own key* set to `undefined` —
     // the same shape `{...base, ...delta}` produces live when `delta` has
-    // its own `activity: undefined` — not an absent key: `agentsShallowEqual`
-    // tells those two apart (Gemini #4151811120), so `delete` here would
+    // its own `activity: undefined` — not an absent key: `agentsShallowEqual`'s
+    // hasOwnProperty check tells those two apart, so `delete` here would
     // make an otherwise-identical compacted and live result compare
     // unequal. `Agent` declares `activity?: AgentActivity`, so
     // exactOptionalPropertyTypes forbids a direct `=== undefined`
@@ -497,7 +497,7 @@ export class StateManager extends EventTarget {
    */
   private generation = 0;
 
-  /** Whether a `disconnected` has been seen since the last `connected` in this generation (§7 N4). */
+  /** Whether a `disconnected` has been seen since the last `connected` in this generation (§7). */
   private sawDisconnectThisGeneration = false;
 
   /**
@@ -525,7 +525,7 @@ export class StateManager extends EventTarget {
   private seedEpochs = new Map<SeedEpochToken, { deltas: Map<string, CompactedDelta> }>();
 
   /**
-   * "State holds the complete dashboard-scope membership" (§6.3, R2-B3, R3-B4).
+   * "State holds the complete dashboard-scope membership" (§6.3).
    *
    * `full` also promises full `Agent` objects; `compact` promises only
    * membership (and whatever fields the compact projection carries). A
@@ -562,7 +562,7 @@ export class StateManager extends EventTarget {
       this.state.connected = true;
       this.connectedGeneration = this.generation;
       this.resolveSseConnectWaiters();
-      // agents-resync (§7 N4): one per outage, even though `connected` can
+      // agents-resync (§7): one per outage, even though `connected` can
       // fire twice per connection (onopen, then the server's own event) and
       // even though setScope's own reconnect goes through this same handler.
       // The first connect after setScope never sets sawDisconnectThisGeneration,

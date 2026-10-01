@@ -320,7 +320,7 @@ describe('W3 seed epoch', () => {
     expect(sm.getAgent('a1')).toBeUndefined();
   });
 
-  it('Gemini #4151811140: two epoch deltas with different detail fields, then seedAgents, equal immediate sequential application', () => {
+  it('two epoch deltas with different detail fields, then seedAgents, equal immediate sequential application', () => {
     // Epoch path: both status deltas land for an ID not yet in state.agents
     // (the normal first-drain case — setScope cleared state.agents before
     // this drain's own fetch started), before the REST snapshot seeds it.

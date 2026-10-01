@@ -111,7 +111,7 @@ unchanged.
 ## Round 1 review fixes (slow-list-lists-rev-p1a-1)
 
 Commit `6552bb88c1d18e43f11f75844abee64e871bb79a`, rebased on `origin/main`
-(f06ccbc). Full disposition table is in the updated gs report
+(f06ccbc). Full disposition table is in the updated dev report
 (`lists-p1a-dev.md`); summary:
 
 - **B1** (`sseConnected` resolved at once right after `setScope`, before the
@@ -129,7 +129,7 @@ Commit `6552bb88c1d18e43f11f75844abee64e871bb79a`, rebased on `origin/main`
 - **N1-N5, nits**: all fixed (tombstoned IDs dropped outright; epoch
   finally-rule documented and `seedAgents` self-ends its epoch;
   `disconnect()` rejects waiters; `exposedPorts` compared by value; the
-  report's lint claim corrected to match reality). See the gs report's
+  report's lint claim corrected to match reality). See the dev report's
   disposition table for exact file:function locations.
 - **FYI** (created-after-delete in one flush): fixed — a re-upsert now
   removes the ID from `dirty.deleted`.
@@ -160,7 +160,7 @@ closed by the round-2 reviewer. Round 2 found:
 - **nit-1/nit-2**: fixed (array-hole comparison intent in `exposedPortsEqual`;
   `recordSeedEpochDelta`'s JSDoc now documents both call sites).
 - **FYIs** (`setCurrentUserId` generation gap; ports-for-unknown-ID still
-  droppable by a first-drain seed): no code change, noted in the gs report
+  droppable by a first-drain seed): no code change, noted in the dev report
   for P1c.
 
 ## Round 3 review (APPROVE, with findings to close)
@@ -182,7 +182,7 @@ non-blocking finding and one nit remained:
   left as useful traceability, not cleaned up, since the instruction was
   scoped to `state.ts`).
 - **FYI** (a redundant `deleted` for an already-gone/never-known ID still
-  reports it in `agents-changed.deleted`): noted in the gs report for P1c
+  reports it in `agents-changed.deleted`): noted in the dev report for P1c
   — consumers should treat `deleted` as idempotent/safe-as-superset, not
   assume every entry corresponds to a real transition.
 
@@ -220,8 +220,7 @@ raised two small new items:
 
 ## Upstream Gemini review, GoogleCloudPlatform/scion#2189 (3 comments)
 
-Fixed all three. Full disposition table and commands/results:
-`gs://scion-xproject-exchange/slow-list/reports/lists-p1a-gemini-2189.md`.
+Fixed all three. Full disposition table and commands/results: the dev report.
 
 - **High** (`shallowObjectEqual`): matching key *counts* isn't matching key
   *sets* — `{message: undefined}` and `{currentTurns: undefined}` both have
@@ -265,9 +264,8 @@ Fixed all three. Full disposition table and commands/results:
 
 ## Round 6 review (APPROVE; N1, N2, nit1, nit2 all closed)
 
-Full review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-6.md`.
-New head, addendum and full disposition:
-`gs://scion-xproject-exchange/slow-list/reports/lists-p1a-gemini-2189.md`.
+Full review: the round-6 review. New head, addendum and full
+disposition: the dev report.
 
 - **N1** (the changed fuzz still couldn't catch the bug it was changed for —
   one final-only comparison let a transient divergence get overwritten by a
@@ -303,7 +301,7 @@ New head, addendum and full disposition:
   `bufferAgentDelta`/`recordSeedEpochDelta` (the accumulator built so far, as
   a pseudo-base). Verified against all three historical versions of
   `state.ts` (pre-fix `78c7c9ef`, round-1 fix `043425ef`, and this round) —
-  see the gs report for the exact per-version pass/fail matrix.
+  see the dev report for the exact per-version pass/fail matrix.
 - **nit1**: fixed the misattribution — the comment now credits "the
   promoteDetailFields fix for Gemini #4151811134/#4151811140", not Gemini
   directly (Gemini proposed the deep-merge that was declined).
@@ -320,10 +318,8 @@ not patched.
 
 ## Round 7 review (REQUEST CHANGES; B1, N1, nit1, nit2 all closed)
 
-Full review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-7.md`;
-probe: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-7-probe.test.ts`.
-New head, addendum and full disposition:
-`gs://scion-xproject-exchange/slow-list/reports/lists-p1a-gemini-2189.md`.
+Full review: the round-7 review; probe: the round-7 reviewer's probe.
+New head, addendum and full disposition: the dev report.
 
 - **B1 (required):** the round-6 `applyDeltaStep` pseudo-base accumulator
   only remembers the *last* surviving activity, so the final
@@ -397,15 +393,13 @@ New head, addendum and full disposition:
   tests — all 3 failed with the predicted divergence; restored the fix and
   all 3 (plus the full 64) passed again, byte-identical to the committed
   `state.ts`.
-- Full suite: see the gs report addendum for the exact count at this round's
+- Full suite: see the dev report addendum for the exact count at this round's
   head SHA.
 
 ## Round 8 review (REQUEST CHANGES; B1, B2, N1, nit1-5 all closed)
 
-Full review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-8.md`;
-probe: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-8-probe.test.ts`.
-New head, addendum and full disposition:
-`gs://scion-xproject-exchange/slow-list/reports/lists-p1a-gemini-2189.md`.
+Full review: the round-8 review; probe: the round-8 reviewer's probe.
+New head, addendum and full disposition: the dev report.
 
 - **B1 (required):** the round-7 fix (raw deltas as an ordered list, replayed
   one at a time) made `pendingAgentDeltas` unbounded per ID: a sliding TTL
@@ -492,16 +486,14 @@ New head, addendum and full disposition:
   itself) and was separately confirmed to fail under a targeted mutant
   (swapping the compose order). Restored the fix and all 3 (plus the full
   67) passed again, byte-identical to the committed `state.ts`.
-- Full suite: see the gs report addendum for the exact count at this
+- Full suite: see the dev report addendum for the exact count at this
   round's head SHA.
 
 ## Round 9 review (REQUEST CHANGES; B1, N1, N2, nit1-3 all closed)
 
-Full review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-9.md`;
-repro: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-9-min.test.ts`;
-fuzz: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-9-fuzz.test.ts`.
-New head, addendum and full disposition:
-`gs://scion-xproject-exchange/slow-list/reports/lists-p1a-gemini-2189.md`.
+Full review: the round-9 review; repro: the round-9 reviewer's minimal
+repro; fuzz: the round-9 reviewer's fuzz. New head, addendum and full
+disposition: the dev report.
 
 **Correction (round 9):** round 8's `CompactedDelta` was exact for
 `activity` but not for `detail`/promoted fields — `fields` kept the most
@@ -583,5 +575,73 @@ mismatches. Verified it fails — all 4 tests — against `6519b424`'s
   and the new ports N2 test (5 total) failed with the predicted
   divergence; restored this round's `state.ts` and all 5 (plus the full
   72) passed again, byte-identical to the committed file.
-- Full suite: see the gs report addendum for the exact count at this
+- Full suite: see the dev report addendum for the exact count at this
   round's head SHA.
+
+## Round 10 review (APPROVE; nit1, nit2 closed) + CI-safety timeout hardening
+
+Full review: the round-10 review. First APPROVE verdict of the cycle.
+Addendum and full disposition: the dev report.
+
+- **nit1**: reworded the `CompactedDelta` doc comment's backwards
+  parenthetical to the reviewer's suggested text, split out of a single
+  ~15-line sentence.
+- **nit2**: removed the cited "(B1, round 1 review)" tag, plus a broader
+  sweep of `state.ts` and all four state test files for other round/
+  finding-ID tags (caught three more inline comments and three bare
+  "B2:"/"N4:" test-name prefixes) — this sweep later turned out to be
+  incomplete; see round 11.
+- Mid-round addition: another reviewer found two `state-compaction-fuzz.test.ts`
+  tests exceeding the default 5s vitest timeout under load. Gave every
+  loop-heavy test across all four state test files an explicit 60s
+  timeout, not just the two flagged.
+- Commit `987d2969919243c6932e64d6f83724b0ae1caff1`. Comments and timeouts
+  only, no production logic change. `npm run typecheck` pass, `eslint`
+  clean, `prettier --check` pass, targeted state tests 72/72, full suite
+  106 files / 3044 tests, exit 0.
+
+## Round 11 review (REQUEST CHANGES; R1 — finding-ID sweep completion)
+
+Full review: the round-11 review. Addendum and full disposition: the dev
+report.
+
+Round 10's sweep (and every prior round's own sweep) only grepped for
+tags *that round* introduced, so tags added in earlier rounds (6-9) and
+never revisited survived. Round 11's reviewer grepped the whole file
+history against `origin/main` and found ten remaining, none on `main`:
+
+- `state.ts:528` `(§6.3, R2-B3, R3-B4)` → `(§6.3)`. `R2-B3`/`R3-B4` are
+  the design doc's own *design*-review-round finding IDs — the same
+  class of tag as the code-review "(B1, round 1 review)" tags already
+  removed, just from the design doc's separate review history.
+- `state.ts:500`/`:565` (two `(§7 N4)`) → `(§7)`; the `state-coalescing.test.ts`
+  "W2 resync edges" describe name dropped its matching `(§7 N4, ...)`.
+  `N4` is a design-doc finding ID with five separate occurrences across
+  its own review rounds 1/3/4/5/6 — a bare `N4` names nothing specific.
+- Upstream Gemini comment-ID tokens removed from three comments (one
+  each in `state.ts`, `state-compaction-fuzz.test.ts`,
+  `state-coalescing.test.ts`), reworded to describe the invariant instead
+  of citing the ID. Dropped the `Gemini #...: ` prefix from the three
+  test names that still had it.
+- Kept `R10` (the design doc's "§14 Risks" ID, not a review finding) and
+  every `W2`/`W3` label and bare `§`-section reference (design-doc
+  structure, not a review artifact) — the review's own explicit
+  exceptions.
+
+Verified with the review's own grep,
+`grep -nE 'R[0-9]+-[BN][0-9]+|\bN[0-9]+\b|\bB[0-9]+\b|Gemini|round [0-9]'
+web/src/client/state.ts web/src/client/state*.test.ts`: zero hits.
+
+This round's commit (SHA verified on the remote via `git ls-remote` and
+reported to the EM separately — not repeated here, since this file is
+itself part of that commit) touches comments and test names only;
+`git diff` confirmed by inspection to touch only comment and
+`it`/`describe` string-literal lines. `npm run typecheck` pass, `eslint`
+clean, `prettier --check` pass, `npx vitest run --no-file-parallelism
+src/client/state` 5 files / 78 tests passing. Per the EM's explicit
+instruction, the full suite was not run this round.
+
+Also this round, per the lead's hygiene standard: replaced every bucket
+path in this project log with plain wording (e.g. "the round-10 review",
+"the dev report") — IDs, SHAs and round numbers stay, only the bucket
+paths are gone.

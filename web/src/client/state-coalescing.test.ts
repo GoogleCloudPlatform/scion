@@ -105,10 +105,9 @@ function genEvents(count: number, seed: number): FuzzEvent[] {
       if (rand() < 0.2) {
         // Partial, not always both fields together: a buffered/recorded
         // delta whose `detail` differs in shape from the previous one for
-        // the same ID is exactly what the promoteDetailFields fix for
-        // Gemini #4151811134/#4151811140 (§7) targets — always pairing
-        // message+currentTurns would never exercise a later delta dropping
-        // a field the earlier one set.
+        // the same ID is exactly what `promoteDetailFields` must handle
+        // correctly (§7) — always pairing message+currentTurns would never
+        // exercise a later delta dropping a field the earlier one set.
         const detail: Partial<AgentDetail> = {};
         if (rand() < 0.5) detail.message = `m${i}`;
         if (rand() < 0.5 || Object.keys(detail).length === 0) detail.currentTurns = i % 7;
@@ -660,7 +659,7 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     expect(sm.getAgent('a1')?.detail).toEqual({ toolName: 'python' });
   });
 
-  it('Gemini #4151811120: a detail with a different key set is not a no-op, even when every value involved is undefined', () => {
+  it('a detail with a different key set is not a no-op, even when every value involved is undefined', () => {
     // shallowObjectEqual (used by agentDetailEqual) must compare key SETS,
     // not just key counts: `{message: undefined}` and `{currentTurns:
     // undefined}` both have exactly one own key, and reading the other
@@ -867,7 +866,7 @@ describe('W2 unknown-buffer expiry (§7: 30s TTL)', () => {
     expect(detail.unknown.get('ghost')).toEqual({ phase: 'error' });
   });
 
-  it('Gemini #4151811134: two buffered deltas with different detail fields, then created, equal immediate sequential application', () => {
+  it('two buffered deltas with different detail fields, then created, equal immediate sequential application', () => {
     // Buffered path: both status deltas arrive for an unknown ID, before
     // "created".
     const buffered = new StateManager();
@@ -968,7 +967,7 @@ describe('W2 unknown-buffer expiry (§7: 30s TTL)', () => {
   }, 60_000); // 5000 events with a timer advance each; the default 5s test timeout is too tight under load
 });
 
-describe('W2 resync edges (§7 N4, pinned against sse-client.ts)', () => {
+describe('W2 resync edges (pinned against sse-client.ts)', () => {
   it('the connect after setScope raises no resync', () => {
     const sm = new StateManager();
     const resync = vi.fn();

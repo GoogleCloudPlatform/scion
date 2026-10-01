@@ -95,9 +95,8 @@ function makeGenerators(rand: () => number) {
   // MISSING appears twice to weight "field omitted" roughly as likely as
   // any single concrete value; `null` and an explicit `undefined` are each
   // their own case, distinct from MISSING and from each other —
-  // `agentsShallowEqual`'s hasOwnProperty check (Gemini #4151811120) and
-  // `mergeAgentDelta`'s falsy-capabilities fallback both care about the
-  // difference.
+  // `agentsShallowEqual`'s hasOwnProperty check and `mergeAgentDelta`'s
+  // falsy-capabilities fallback both care about the difference.
   const ACTIVITIES: unknown[] = [
     MISSING,
     MISSING,
