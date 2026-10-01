@@ -103,9 +103,24 @@ test.describe('Experiments tab', () => {
 
       await page.getByRole('tab', { name: 'Experiments' }).click();
 
+      // Assert the real, browser-computed accessible name: sl-switch's
+      // shadow template wraps its default slot and the input in one
+      // <label>, so the name must come from slotted content — an
+      // aria-label attribute on the host is not forwarded into the shadow
+      // root and is not exposed as the control's accessible name. This
+      // queries the accessibility tree directly (role + name), which is
+      // where that forwarding gap actually showed up; checking
+      // `toHaveAccessibleName` on the host element locator does not, since
+      // the host and its shadow <input> are different accessibility nodes.
+      await expect(
+        page.getByRole('switch', { name: /Enable Persistent terminal workspace/ })
+      ).toHaveCount(1);
+
       // Only one experiment is registered as of this phase
       // (web.terminal_workspace, ptone/scion#2217), so the tab has a
-      // single row and a single switch.
+      // single row and a single switch. Click the host custom element, not
+      // the raw shadow <input> (which Shoelace's visual control span
+      // intercepts pointer events for).
       const toggleSwitch = page.locator('scion-admin-experiments sl-switch').first();
 
       const putResponse = page.waitForResponse(

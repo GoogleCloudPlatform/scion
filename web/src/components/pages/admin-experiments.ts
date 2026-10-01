@@ -31,6 +31,7 @@
 import { LitElement, html, css, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
+import { srOnlyStyles } from '../shared/styles.js';
 
 // ---------------------------------------------------------------------------
 // Types — mirror pkg/hub/admin_experiments.go response shapes exactly.
@@ -66,6 +67,16 @@ function issueUrl(issue: string): string | null {
   return m ? `https://github.com/${m[1]}/issues/${m[2]}` : null;
 }
 
+/**
+ * Formats an ISO timestamp for display (e.g. "10/1/2026, 2:36:56 AM"),
+ * falling back to the raw string if it doesn't parse as a date. The full
+ * ISO value is always also shown in a `title` attribute by the caller.
+ */
+function formatAttributionTime(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
+}
+
 @customElement('scion-admin-experiments')
 export class ScionAdminExperiments extends LitElement {
   /** Set by the parent tab panel; the component fetches on the first `true`. */
@@ -89,56 +100,59 @@ export class ScionAdminExperiments extends LitElement {
   @state() private updatedAt: string | null = null;
   @state() private updatedBy: string | null = null;
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
-    .note,
-    .attribution,
-    .empty,
-    .caption {
-      font-size: 0.875rem;
-      color: var(--scion-text-muted, #64748b);
-      margin: 0 0 1rem 0;
-    }
-    sl-alert {
-      margin-bottom: 1rem;
-    }
-    .row {
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-      padding: 1rem;
-      margin-bottom: 0.75rem;
-    }
-    .row-header {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-      margin-bottom: 0.25rem;
-    }
-    .row-header .title {
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-    }
-    .row-header .name {
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-    .description {
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-      margin: 0.25rem 0;
-    }
-    .row-controls {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin-top: 0.5rem;
-      flex-wrap: wrap;
-    }
-  `;
+  static override styles = [
+    srOnlyStyles,
+    css`
+      :host {
+        display: block;
+      }
+      .note,
+      .attribution,
+      .empty,
+      .caption {
+        font-size: 0.875rem;
+        color: var(--scion-text-muted, #64748b);
+        margin: 0 0 1rem 0;
+      }
+      sl-alert {
+        margin-bottom: 1rem;
+      }
+      .row {
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+        padding: 1rem;
+        margin-bottom: 0.75rem;
+      }
+      .row-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin-bottom: 0.25rem;
+      }
+      .row-header .title {
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+      }
+      .row-header .name {
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+      .description {
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+        margin: 0.25rem 0;
+      }
+      .row-controls {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-top: 0.5rem;
+        flex-wrap: wrap;
+      }
+    `,
+  ];
 
   protected override updated(changed: PropertyValues): void {
     if (changed.has('active') && this.active && !this.requested) {
@@ -301,7 +315,10 @@ export class ScionAdminExperiments extends LitElement {
 
   private renderAttribution(): ReturnType<typeof html> | typeof nothing {
     if (!this.updatedAt) return nothing;
-    return html`<p class="attribution">Last changed by ${this.updatedBy} at ${this.updatedAt}</p>`;
+    return html`<p class="attribution">
+      Last changed by ${this.updatedBy} at
+      <span title=${this.updatedAt}>${formatAttributionTime(this.updatedAt)}</span>
+    </p>`;
   }
 
   private renderUnknownOverridesNote(): ReturnType<typeof html> | typeof nothing {
@@ -392,13 +409,14 @@ export class ScionAdminExperiments extends LitElement {
           : nothing}
         <div class="row-controls">
           <sl-switch
-            aria-label=${`Enable ${exp.title}`}
             ?checked=${exp.enabled}
             ?disabled=${this.pending || this.malformed}
             @sl-change=${(): void => {
               void this.setOverride(exp.name, !exp.enabled);
             }}
-          ></sl-switch>
+          >
+            <span class="sr-only">Enable ${exp.title}</span>
+          </sl-switch>
           <span class="caption"
             >Default: ${exp.default ? 'on' : 'off'}${hasOverride ? ' · overridden' : ''}</span
           >

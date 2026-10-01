@@ -173,7 +173,17 @@ describe('scion-admin-experiments', () => {
     expect(link?.getAttribute('href')).toBe('https://github.com/ptone/scion/issues/1662');
     const switchEl = query(element, 'sl-switch');
     expect(switchEl).toBeTruthy();
-    expect(switchEl?.getAttribute('aria-label')).toBe('Enable Persistent terminal workspace');
+    // The accessible name comes from sl-switch's default slot, which its
+    // shadow template wraps in a <label> together with the control — a
+    // plain `aria-label` attribute on the host is not forwarded into the
+    // shadow root and is not exposed as the control's accessible name in a
+    // real browser. jsdom/happy-dom don't compute accessible names across
+    // shadow boundaries, so this only checks the slotted text is present;
+    // `web/e2e/experiments.spec.ts` asserts the real accessible name via
+    // `getByRole('switch', { name })` against the real browser.
+    expect(switchEl?.querySelector('.sr-only')?.textContent).toBe(
+      'Enable Persistent terminal workspace'
+    );
   });
 
   it('shows the empty state when no experiments are registered', async () => {
@@ -198,7 +208,7 @@ describe('scion-admin-experiments', () => {
     expect(query(element, 'sl-switch')).toBeNull();
   });
 
-  it('tab-level attribution: shows "Last changed by" only when updated_at is set', async () => {
+  it('tab-level attribution: shows "Last changed by" with a formatted time and the ISO value in a title', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(() =>
@@ -211,7 +221,30 @@ describe('scion-admin-experiments', () => {
     );
     element = await createElement();
     await activate(element);
-    expect(shadowText(element)).toContain('Last changed by admin@x.com at 2026-09-01T00:00:00Z');
+
+    expect(shadowText(element)).toContain('Last changed by admin@x.com at');
+    const timeSpan = query(element, '.attribution span');
+    expect(timeSpan?.getAttribute('title')).toBe('2026-09-01T00:00:00Z');
+    // Displayed text is a human-formatted date/time, not the raw ISO string
+    // with its nanosecond-precision fractional seconds.
+    expect(timeSpan?.textContent).not.toBe('2026-09-01T00:00:00Z');
+    expect(timeSpan?.textContent?.length).toBeGreaterThan(0);
+  });
+
+  it('falls back to the raw string if updated_at does not parse as a date', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          jsonResponse(makeResponse({ updated_at: 'not-a-date', updated_by: 'admin@x.com' }))
+        )
+      )
+    );
+    element = await createElement();
+    await activate(element);
+
+    const timeSpan = query(element, '.attribution span');
+    expect(timeSpan?.textContent).toBe('not-a-date');
   });
 
   it('does not show attribution when there is no stored row', async () => {
