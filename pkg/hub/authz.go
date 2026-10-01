@@ -1442,6 +1442,16 @@ func principalContextForIdentity(identity Identity) PrincipalContext {
 	if identity == nil {
 		return PrincipalContext{}
 	}
+	if scoped, ok := identity.(*ScopedUserIdentity); ok && scoped == nil {
+		// A typed-nil *ScopedUserIdentity satisfies this type assertion
+		// (ok == true, scoped == nil) even though identity == nil above was
+		// false — the same Go interface/pointer distinction
+		// credentialContextForIdentity below guards against. ID() and
+		// Type() are promoted from the embedded UserIdentity field, so
+		// calling them on a nil receiver would dereference nil. Report a
+		// user principal with no identity rather than calling through.
+		return PrincipalContext{Kind: PrincipalKindUser, Identity: identity}
+	}
 	principal := PrincipalContext{ID: identity.ID(), Identity: identity}
 	switch identity.Type() {
 	case "user":
@@ -1554,13 +1564,22 @@ func auditPermissionID(request AuthzRequest) string {
 // ScopedUserIdentity (produced from a UAT). Returns a deny Decision if the
 // request falls outside the token's allowed project or scopes, nil otherwise.
 //
-// C.1 (ptone/scion#2092) adds a third check after the two pre-existing ones,
-// in this fixed order: project match, then exact scope, then live project
-// access (permissionID is the already-resolved canonical permission Decide
-// computed for this request, so the admission check evaluates the exact
-// permission the kernel will evaluate, not a re-derived one). It runs last
-// so only in-scope requests pay the extra store lookup.
+// This adds a third check (ptone/scion#2092) after the two pre-existing
+// ones, in this fixed order: project match, then the token's permission
+// ceiling, then live project access (permissionID is the already-resolved
+// canonical permission Decide computed for this request, so the admission
+// check evaluates the exact permission the kernel will evaluate, not a
+// re-derived one). It runs last so only in-scope requests pay the extra
+// store lookup.
 func (a *AuthzService) enforceUATConstraints(ctx context.Context, principal PrincipalContext, scoped *ScopedUserIdentity, resource Resource, action Action, permissionID string) *Decision {
+	// A typed-nil *ScopedUserIdentity carries no project, ceiling, or scopes
+	// to evaluate. Deny with the same reason as the live-project-access
+	// check below rather than dereferencing a nil receiver or treating a
+	// missing credential as an unconstrained one.
+	if scoped == nil {
+		return &Decision{Allowed: false, Reason: "token holder lacks active access to the target project"}
+	}
+
 	// Enforce project constraint: the resource must belong to the token's project.
 	projectID := scoped.ScopedProjectID()
 	if resource.Type == "project" {
@@ -1974,9 +1993,8 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 // getProjectScopedPermissions returns only the permissions that the principal
 // holds through project-scoped role bindings for the given project. System-
 // scoped bindings are excluded: hub or system authority must not enlarge a
-// project-scoped token. No longer called from CreateToken, which resolves
-// mint eligibility through CanMintSelector instead; retained and directly
-// tested for its shared binding-resolution behavior with
+// project-scoped token. Not called from production code; retained because
+// authz_boundary_test.go pins its binding-resolution parity with
 // projectScopedPermissionsStrict.
 //
 // The method retains group-expanded principals, activation-window filtering,

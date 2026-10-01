@@ -697,8 +697,8 @@ func TestProjectUAT_SuperAdminNoMembershipCanMintAndAttach(t *testing.T) {
 // fallback for browser clients (pty_handlers.go validatePTYTicket) is an
 // unimplemented stub that always returns nil, so a request bearing only a
 // ticket query parameter -- no Authorization header, no session cookie --
-// has no identity at all and must fail closed with 401. C.1 does not
-// implement ticket storage/redemption; this only pins the current
+// has no identity at all and must fail closed with 401. Ticket
+// storage/redemption is not implemented; this only pins the current
 // fail-closed behavior so a future implementation cannot silently regress
 // to fail-open.
 func TestProjectUAT_PTYTicketPathFailsClosed(t *testing.T) {
@@ -723,7 +723,7 @@ func TestProjectUAT_PTYTicketPathFailsClosed(t *testing.T) {
 // the CURRENT rule for interactive sessions: an owner/ancestor relationship
 // grant does not check current project membership, so a session user whose
 // project binding was removed still passes attach and port-access
-// authorization on their own agent. This behavior is unchanged by C.1 --
+// authorization on their own agent. This behavior is unchanged here --
 // interactive sessions get this characterization test only, no behavior
 // change. Extending active-project-access enforcement to interactive
 // sessions is a separate, pending product decision tracked at
@@ -749,11 +749,11 @@ func TestSessionOwnerAttach_CurrentBehaviourAfterProjectAccessRemoved(t *testing
 
 	rec = doRequestAsUser(t, srv, memberUser, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
 	assertAuthorizedPTY(t, rec,
-		"current rule (unchanged by C.1, ptone/scion#2141 pending): session owner attach survives project access removal: %s", rec.Body.String())
+		"current rule (unchanged; ptone/scion#2141 pending): session owner attach survives project access removal: %s", rec.Body.String())
 
 	rec = doRequestAsUser(t, srv, memberUser, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/7070/proxy/", nil)
 	assertAuthorizedPortProxy(t, rec,
-		"current rule (unchanged by C.1, ptone/scion#2141 pending): session owner port access survives project access removal: %s", rec.Body.String())
+		"current rule (unchanged; ptone/scion#2141 pending): session owner port access survives project access removal: %s", rec.Body.String())
 }
 
 // ---------------------------------------------------------------------------
@@ -786,7 +786,7 @@ func TestProjectUAT_AccessConstraintsRestrictRelationshipAttach(t *testing.T) {
 	// this project to agent.read -- agent.attach and agent.port_access are
 	// excluded. Project MEMBERSHIP is unaffected (ProjectMembershipEvidence
 	// is permission-agnostic), so this exercises the kernel/relationship
-	// restriction path (Decide step 7c), not the C.1 project-access gate.
+	// restriction path (Decide step 7c), not the project-access gate.
 	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
 		Name:                 "uatp-deny-attach",
 		SubjectKind:          store.ConstraintSubjectPrincipal,
@@ -825,7 +825,7 @@ func TestProjectUAT_AccessConstraintsRestrictRelationshipAttach(t *testing.T) {
 
 	t.Run("session identity sees the same restriction (characterization, not UAT coverage)", func(t *testing.T) {
 		// Access-constraint reduction already applies to relationship
-		// grants for every credential kind, independent of C.1's project-
+		// grants for every credential kind, independent of the project-
 		// access gate; this documents that a session identity is
 		// restricted the same way, without standing in for the UAT
 		// real-endpoint coverage above.
@@ -916,8 +916,8 @@ func TestProjectUAT_AttachRecheckedOnEachHandshake(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestProjectRoles_DoNotGrantAttachOrPortAccess locks in the current,
-// correct state (seed.go revision 3) so a future edit to the stock role
-// permission lists cannot silently reintroduce cross-member attach/port_access.
+// correct state so a future edit to the stock role permission lists cannot
+// silently reintroduce cross-member attach/port_access.
 func TestProjectRoles_DoNotGrantAttachOrPortAccess(t *testing.T) {
 	revisions := map[string]int{
 		store.ProjectRoleOwner:  4,

@@ -437,8 +437,8 @@ func TestTemplateResource_ProjectParent(t *testing.T) {
 // This test does not touch enforceUATConstraints; it pins the behaviour the
 // builder fix produces.
 func TestTemplateResource_UATConfinement(t *testing.T) {
-	// C.1 (ptone/scion#2092): enforceUATConstraints now also requires live
-	// project access for project targets (ProjectTargetAdmission), so this
+	// enforceUATConstraints now also requires live project access for
+	// project targets (ProjectTargetAdmission, ptone/scion#2092), so this
 	// test needs a real store-backed AuthzService and a genuine project
 	// membership for its principal, instead of the previous bare
 	// &AuthzService{}/nil-identity fixture. The assertions below are

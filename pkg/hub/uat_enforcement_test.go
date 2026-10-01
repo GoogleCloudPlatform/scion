@@ -577,8 +577,8 @@ func TestUATEnforcement_ExistingScopesRegression(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEnforceUATConstraints_NewResourceTypes(t *testing.T) {
-	// C.1 (ptone/scion#2092): enforceUATConstraints now also requires live
-	// project access (ProjectTargetAdmission), so this needs a real
+	// enforceUATConstraints now also requires live project access
+	// (ProjectTargetAdmission, ptone/scion#2092), so this needs a real
 	// store-backed AuthzService and genuine project membership for its
 	// principal -- previously a bare &AuthzService{} sufficed because the
 	// function never touched the store. The membership binding is
@@ -860,7 +860,7 @@ func TestEnforceUATConstraints_NewResourceTypes(t *testing.T) {
 func TestEnforceUATConstraints_BrokerHubLevel(t *testing.T) {
 	// A bare AuthzService is safe here (no store lookup needed): a broker
 	// resource has no project parent, so the hub-level branch denies before
-	// C.1's live-project-access check (which would need a real store) is
+	// the live-project-access check (which would need a real store) is
 	// ever reached.
 	authz := &AuthzService{}
 	ctx := context.Background()
@@ -874,6 +874,30 @@ func TestEnforceUATConstraints_BrokerHubLevel(t *testing.T) {
 	require.NotNil(t, result, "broker resources are hub-level; UATs should deny them")
 	assert.False(t, result.Allowed)
 	assert.Contains(t, result.Reason, "token not scoped for hub-level resources")
+}
+
+// TestDecide_TypedNilScopedUserIdentityDenied pins that a typed-nil
+// *ScopedUserIdentity reaching Decide (for example from a caller that
+// forwards a *ScopedUserIdentity-typed variable without checking whether
+// ValidateToken returned one) is denied, not a panic. A bare AuthzService is
+// safe here: the deny is reached before any store lookup.
+func TestDecide_TypedNilScopedUserIdentityDenied(t *testing.T) {
+	authz := &AuthzService{}
+	ctx := context.Background()
+
+	var scoped *ScopedUserIdentity
+	req := AuthzRequest{
+		Principal: PrincipalContext{Kind: PrincipalKindUser, ID: "test-nil-identity-user", Identity: scoped},
+		Resource:  Resource{Type: "agent", ID: "a1", ParentType: "project", ParentID: "p1"},
+		Action:    ActionRead,
+	}
+
+	var result Decision
+	require.NotPanics(t, func() {
+		result = authz.Decide(ctx, req)
+	}, "a typed-nil *ScopedUserIdentity must be denied, not cause a nil-pointer panic")
+
+	assert.False(t, result.Allowed, "a typed-nil identity must never be treated as unconstrained")
 }
 
 // TestEnforceUATConstraints_UserHubLevel verifies that user resources

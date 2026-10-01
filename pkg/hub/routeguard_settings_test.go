@@ -395,8 +395,8 @@ func TestM1_UATDeniedForHubLevelResources(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	// C.1 (ptone/scion#2092): enforceUATConstraints now also requires live
-	// project access (ProjectTargetAdmission) for project targets, so the
+	// enforceUATConstraints now also requires live project access
+	// (ProjectTargetAdmission, ptone/scion#2092) for project targets, so the
 	// "_allowed" cases below need a real project and a genuine project-scoped
 	// binding for the UAT's principal -- previously the function never
 	// touched the store. "proj-1" must therefore be a real project row, not
