@@ -45,14 +45,23 @@ type RunConfig struct {
 	Resources          *api.ResourceSpec
 	Kubernetes         *api.KubernetesConfig
 	GitClone           *api.GitCloneConfig
-	// TrustedHubEndpoint is the hub endpoint resolved from broker/operator-
-	// controlled sources only: the caller-provided opts.Env's own
-	// SCION_HUB_ENDPOINT, captured at the top of Start before anything can
-	// override it, or — outside broker mode, when that is empty — the
-	// project settings file. Neither the agent-level Hub config nor an
-	// agent/template config's own SCION_HUB_ENDPOINT env entry ever feeds
-	// this field (pkg/agent/run.go): both are creator-controlled and are
-	// applied only to the final agent env, after this value is captured.
+	// TrustedHubEndpoint is the hub endpoint Substrate's egress allowlist
+	// trusts. In broker mode, this field arrives already resolved by the
+	// runtime broker from operator-controlled tiers only — the request's
+	// HubEndpoint field, the hub connection endpoint, or the broker's own
+	// configured HubEndpoint (see api.StartOptions.TrustedHubEndpoint and
+	// runtimebroker's resolveEffectiveHubEndpoint) — with project settings
+	// and the resolved env excluded from this egress-trust path, even
+	// though either may still supply the agent's own delivered hub
+	// endpoint. Outside broker mode, it is instead the caller-provided
+	// opts.Env's own SCION_HUB_ENDPOINT, captured at the top of Start
+	// before anything can override it, falling back to the project
+	// settings file when that is empty — a legitimate trusted source on
+	// this path, since there is no broker-side operator resolution to
+	// defer to. Neither the agent-level Hub config nor an agent/template
+	// config's own SCION_HUB_ENDPOINT env entry ever feeds this field
+	// (pkg/agent/run.go): both are creator-controlled and are applied only
+	// to the final agent env, after this value is captured or resolved.
 	// Every runtime except Substrate ignores this field; base
 	// env-resolution behaviour for every other runtime is unchanged.
 	// Substrate uses it as the one egress-allowlisted hub host, independent

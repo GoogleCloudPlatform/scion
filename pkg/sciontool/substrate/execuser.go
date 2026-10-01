@@ -86,7 +86,7 @@ func SetExecResolveForTest(resolve func(name string) (string, error)) func() {
 // `/scion/v1/exec` directly) that makes a TLS request loses the gateway CA
 // even though the harness itself trusts it fine.
 //
-// The fix is util-linux `su`'s `-w`/`--whitelist-environment` flag: a
+// The mechanism is util-linux `su`'s `-w`/`--whitelist-environment` flag: a
 // comma-separated list of variable names to copy from the pre-su
 // environment into the post-su one, on top of `su -`'s own minimal login
 // set. `-w <list>` is passed ONLY when at least one of the candidate names

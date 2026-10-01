@@ -39,12 +39,14 @@ rather than by reference to any prior implementation.
 `api.StartOptions` adds `TrustedHubEndpoint`, populated in
 `runtimebroker.buildStartContext` from `resolveEffectiveHubEndpoint`'s own
 trust bit: true only when the resolved hub endpoint came from the request's
-`HubEndpoint` field, the hub connection endpoint, this broker's own
-configured `HubEndpoint`, or project settings — every one of these an
-operator-controlled source. It is false when the endpoint instead came from
-`ResolvedEnv` (the hub-resolved `AppliedConfig.Env`, which a project or
-template creator controls), even though that value is still delivered into
-the agent's own `SCION_HUB_ENDPOINT`/`SCION_HUB_URL` env unchanged.
+`HubEndpoint` field, the hub connection endpoint, or this broker's own
+configured `HubEndpoint` — every one of these an operator-controlled
+source. It is false when the endpoint instead came from `ResolvedEnv` (the
+hub-resolved `AppliedConfig.Env`, which a project or template creator
+controls) or from project settings (itself hub-resolved for a hub-managed
+project, the same tenant-reachable precondition the resolved-env tier is
+excluded for), even though either value is still delivered into the
+agent's own `SCION_HUB_ENDPOINT`/`SCION_HUB_URL` env unchanged.
 `pkg/agent/run.go` reads `opts.TrustedHubEndpoint` for its broker-mode
 egress trust instead of re-reading `opts.Env`, so a creator-controlled
 value can never reach Substrate's egress allowlist even in the degenerate

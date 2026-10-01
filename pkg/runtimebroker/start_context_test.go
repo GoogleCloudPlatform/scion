@@ -2236,9 +2236,9 @@ func TestBuildStartContext_TrustedHubEndpointOperatorTiersOnly(t *testing.T) {
 		}
 	})
 
-	// This is also the fix for a related gap: project settings is itself a
-	// hub-resolved file for a hub-managed project, the same tenant-reachable
-	// precondition the resolved-env tier is already excluded for.
+	// Project settings is itself a hub-resolved file for a hub-managed
+	// project — the same tenant-reachable precondition the resolved-env
+	// tier is excluded for.
 	t.Run("project-settings-only value is delivered but not trusted", func(t *testing.T) {
 		const settingsEndpoint = "https://settings.example.com"
 		projectDir := t.TempDir()

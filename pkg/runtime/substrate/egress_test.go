@@ -725,10 +725,10 @@ func TestValidateEgressAllow_PrivateSuffixPlatformRejectionReason(t *testing.T) 
 // mistaken for anything this validator rejects — hex-alphabet domains,
 // PRIVATE-PSL-suffix platform hostnames with a label beneath the platform's
 // own suffix, wildcard-only ccTLDs, and the length boundary. The three
-// IP/CIDR entries (8.8.8.8, 2001:4860:4860::8888, 1.1.1.0/24) that used to
-// be on this list, back when this validator accepted public IPs, are gone
-// — see TestValidateEgressAllow_IPRejectionNamesTheExactMessage, which
-// asserts they're now rejected.
+// IP/CIDR entries (8.8.8.8, 2001:4860:4860::8888, 1.1.1.0/24) are
+// deliberately absent from this list: this validator rejects bare IPs and
+// CIDRs outright — see TestValidateEgressAllow_IPRejectionNamesTheExactMessage,
+// which asserts the rejection.
 func TestValidateEgressAllow_NoFalsePositives(t *testing.T) {
 	cases := []string{
 		"api.anthropic.com",
