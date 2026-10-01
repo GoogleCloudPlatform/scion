@@ -3191,6 +3191,17 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 			return
 		}
 
+		// --- Task 2.3 (ptone/scion#2197): message-raw bridge ---
+		// Classify raw before authorizeAgentMessage runs (contract §6.1's
+		// branch-point invariant): a raw-selected request is handled here
+		// entirely, through authorizeAgentKeys/ExecuteAgentKeys exclusively,
+		// and never reaches authorizeAgentMessage or handleAgentMessage. A
+		// non-raw request (including an unparseable body) falls through
+		// completely unaffected, with the body restored byte-for-byte.
+		if s.tryAgentKeysMessageBridge(w, r, targetAgent, id, "/api/v1/agents/"+targetAgent.ID+"/keys", false) {
+			return
+		}
+
 		allowed, reason, decision := s.authorizeAgentMessage(r.Context(), identity, targetAgent, isSystemPlane)
 		messaging.RecordStep(r.Context(), "message_authorized")
 		if !allowed {

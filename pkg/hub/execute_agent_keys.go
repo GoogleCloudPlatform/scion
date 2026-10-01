@@ -103,11 +103,11 @@ func (s *Server) handleAgentActionKeysTopLevel(w http.ResponseWriter, r *http.Re
 
 	decision := s.authorizeAgentKeys(r, target)
 	if !decision.Allowed {
-		s.finishAgentKeysDenied(w, r, operationID, target, len(keys), decision)
+		s.finishAgentKeysDenied(w, r, operationID, target, len(keys), decision, agentKeysRouteKeys)
 		return
 	}
 
-	s.admitAndDispatchAgentKeys(w, r, operationID, target, keys)
+	s.admitAndDispatchAgentKeys(w, r, operationID, target, keys, agentKeysRouteKeys)
 }
 
 // handleAgentActionKeysProjectScoped implements the project-scoped route's
@@ -132,7 +132,7 @@ func (s *Server) handleAgentActionKeysProjectScoped(w http.ResponseWriter, r *ht
 	}
 
 	if denial := s.authorizeAgentKeysCrossProject(r, projectID); denial != nil {
-		s.finishAgentKeysDeniedDecision(w, r, operationID, agentKeysAuditTarget{ProjectID: projectID}, len(keys), *denial)
+		s.finishAgentKeysDeniedDecision(w, r, operationID, agentKeysAuditTarget{ProjectID: projectID}, len(keys), *denial, agentKeysRouteKeys)
 		return
 	}
 
@@ -148,11 +148,11 @@ func (s *Server) handleAgentActionKeysProjectScoped(w http.ResponseWriter, r *ht
 
 	decision := s.authorizeAgentKeys(r, target)
 	if !decision.Allowed {
-		s.finishAgentKeysDenied(w, r, operationID, target, len(keys), decision)
+		s.finishAgentKeysDenied(w, r, operationID, target, len(keys), decision, agentKeysRouteKeys)
 		return
 	}
 
-	s.admitAndDispatchAgentKeys(w, r, operationID, target, keys)
+	s.admitAndDispatchAgentKeys(w, r, operationID, target, keys, agentKeysRouteKeys)
 }
 
 // beginAgentKeysRequest implements contract §3 invariant 2 (ValidateBody
@@ -186,7 +186,7 @@ func (s *Server) beginAgentKeysRequest(w http.ResponseWriter, r *http.Request) (
 			outcome = agentkeys.OutcomePayloadTooLarge
 			message = "request body exceeds the size limit"
 		}
-		s.logAgentKeysValidationAudit(r, outcome, 0)
+		s.logAgentKeysValidationAudit(r, outcome, 0, agentKeysRouteKeys)
 		writeAgentKeysValidationError(w, outcome, message)
 		return "", "", false
 	}
@@ -197,7 +197,7 @@ func (s *Server) beginAgentKeysRequest(w http.ResponseWriter, r *http.Request) (
 		if ve, isVE := agentkeys.AsValidationError(verr); isVE {
 			outcome = ve.Outcome
 		}
-		s.logAgentKeysValidationAudit(r, outcome, len(body))
+		s.logAgentKeysValidationAudit(r, outcome, len(body), agentKeysRouteKeys)
 		writeAgentKeysValidationError(w, outcome, verr.Error())
 		return "", "", false
 	}
@@ -230,12 +230,34 @@ const (
 	agentKeysAuditEventOutcome   agentKeysAuditEvent = "outcome"
 )
 
+// agentKeysRoute distinguishes which public surface produced an agent-keys
+// audit record. Contract §5 ("Audit and limits") requires this on every
+// admission and outcome event ("route (keys or transitional raw)"), even
+// though the direct /keys routes and the temporary message-raw bridge (task
+// 2.3) otherwise produce identical auth/quota/dispatch outcomes for
+// identical inputs (contract §6.1's auth-parity requirement, AK-24/AK-25).
+type agentKeysRoute string
+
+const (
+	// agentKeysRouteKeys tags every audit record produced by the direct
+	// POST .../keys routes (handleAgentActionKeysTopLevel/ProjectScoped).
+	agentKeysRouteKeys agentKeysRoute = "keys"
+
+	// agentKeysRouteRawBridge tags every audit record produced by the
+	// temporary legacy-raw message bridge (task 2.3,
+	// agent_keys_message_bridge.go) — #2184's "transitional raw" route.
+	agentKeysRouteRawBridge agentKeysRoute = "message_raw_bridge"
+)
+
 // finishAgentKeysNotFound writes and audits keys' own not_found outcome
 // (contract §3 invariant 3): a keys handler must not inherit another
 // resolver's different 404 code/shape just because it is convenient to call
 // into.
 func (s *Server) finishAgentKeysNotFound(w http.ResponseWriter, r *http.Request, operationID string, audit agentKeysAuditTarget, inputBytes int) {
-	s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, agentkeys.OutcomeNotFound, inputBytes, 0)
+	// Only ever reached by the direct /keys handlers (contract §6.1: "no
+	// bridge-specific not_found case exists" -- the bridge reuses whichever
+	// target the surrounding message-dispatch code already resolved).
+	s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, agentkeys.OutcomeNotFound, inputBytes, 0, agentKeysRouteKeys)
 	writeAgentKeysOutcome(w, agentkeys.OutcomeNotFound, operationID, agentKeysOutcomeMessage(agentkeys.OutcomeNotFound), 0)
 }
 
@@ -280,21 +302,26 @@ func (s *Server) finishAgentKeysInternalError(w http.ResponseWriter, r *http.Req
 // writeAgentKeysAuthzDenial, which never carried one because validation did
 // not exist yet at that point in the seam (contract §3's phase-boundary
 // clarification).
-func (s *Server) finishAgentKeysDenied(w http.ResponseWriter, r *http.Request, operationID string, target *store.Agent, inputBytes int, decision KeysAuthzDecision) {
+func (s *Server) finishAgentKeysDenied(w http.ResponseWriter, r *http.Request, operationID string, target *store.Agent, inputBytes int, decision KeysAuthzDecision, route agentKeysRoute) {
 	audit := agentKeysAuditTarget{}
 	if target != nil {
 		audit.AgentID = target.ID
 		audit.ProjectID = target.ProjectID
 	}
-	s.finishAgentKeysDeniedDecision(w, r, operationID, audit, inputBytes, decision)
+	s.finishAgentKeysDeniedDecision(w, r, operationID, audit, inputBytes, decision, route)
 }
 
 // finishAgentKeysDeniedDecision is finishAgentKeysDenied's variant for a
 // denial reached before any target agent was resolved (the project-scoped
 // route's pre-lookup cross-project refusal, AK-21c), where only the URL
-// project ID is known.
-func (s *Server) finishAgentKeysDeniedDecision(w http.ResponseWriter, r *http.Request, operationID string, audit agentKeysAuditTarget, inputBytes int, decision KeysAuthzDecision) {
-	s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, decision.Outcome, inputBytes, 0)
+// project ID is known. It also serves the message-raw bridge's (task 2.3)
+// own pre-authorization denials (the cross-project and unsupported-
+// combination rejections in agent_keys_message_bridge.go), which likewise
+// have an already-resolved target but reach their outcome before
+// authorizeAgentKeys ever runs -- route distinguishes these in the audit
+// trail (contract §5) even though the HTTP/outcome shape is identical.
+func (s *Server) finishAgentKeysDeniedDecision(w http.ResponseWriter, r *http.Request, operationID string, audit agentKeysAuditTarget, inputBytes int, decision KeysAuthzDecision, route agentKeysRoute) {
+	s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, decision.Outcome, inputBytes, 0, route)
 	writeAgentKeysOutcome(w, decision.Outcome, operationID, agentKeysOutcomeMessage(decision.Outcome), 0)
 }
 
@@ -305,13 +332,13 @@ func (s *Server) finishAgentKeysDeniedDecision(w http.ResponseWriter, r *http.Re
 // audit+response. target is already resolved and authorized; this function
 // does not re-resolve or re-authorize it (contract §4.4 -- the same facts
 // already gathered are passed straight through to the dispatcher).
-func (s *Server) admitAndDispatchAgentKeys(w http.ResponseWriter, r *http.Request, operationID string, target *store.Agent, keys string) {
+func (s *Server) admitAndDispatchAgentKeys(w http.ResponseWriter, r *http.Request, operationID string, target *store.Agent, keys string, route agentKeysRoute) {
 	started := time.Now()
 	audit := agentKeysAuditTarget{AgentID: target.ID, ProjectID: target.ProjectID}
 	inputBytes := len(keys)
 
 	deny := func(outcome agentkeys.Outcome, retryAfter time.Duration) {
-		s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, outcome, inputBytes, time.Since(started))
+		s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, outcome, inputBytes, time.Since(started), route)
 		writeAgentKeysOutcome(w, outcome, operationID, agentKeysOutcomeMessage(outcome), retryAfter)
 	}
 
@@ -416,13 +443,13 @@ func (s *Server) admitAndDispatchAgentKeys(w http.ResponseWriter, r *http.Reques
 	// following, no reconnect resend, no routing fallback (contract §4.3;
 	// task 1.2's adapters are already single-attempt, this call site adds
 	// no retry of its own).
-	s.logAgentKeysAudit(r, agentKeysAuditEventAdmission, operationID, audit, "", inputBytes, 0)
+	s.logAgentKeysAudit(r, agentKeysAuditEventAdmission, operationID, audit, "", inputBytes, 0, route)
 	result, dispatchErr := dispatcher.DispatchAgentKeys(ctx, dispatchTarget, operationID, executeBefore, keys)
 	duration := time.Since(started)
 
 	if dispatchErr != nil {
 		outcome := agentkeys.ClassifyDispatchError(dispatchErr)
-		s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, outcome, inputBytes, duration)
+		s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, outcome, inputBytes, duration, route)
 		writeAgentKeysOutcome(w, outcome, operationID, agentKeysOutcomeMessage(outcome), 0)
 		return
 	}
@@ -448,17 +475,17 @@ func (s *Server) admitAndDispatchAgentKeys(w http.ResponseWriter, r *http.Reques
 	// any other Outcome value paired with a nil error is itself an
 	// ambiguous outcome, not a false "delivered".
 	if result.OperationID != "" && result.OperationID != operationID {
-		s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, agentkeys.OutcomeKeysOutcomeUnknown, inputBytes, duration)
+		s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, agentkeys.OutcomeKeysOutcomeUnknown, inputBytes, duration, route)
 		writeAgentKeysOutcome(w, agentkeys.OutcomeKeysOutcomeUnknown, operationID, agentKeysOutcomeMessage(agentkeys.OutcomeKeysOutcomeUnknown), 0)
 		return
 	}
 	if result.Outcome != agentkeys.OutcomeDispatched {
-		s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, agentkeys.OutcomeKeysOutcomeUnknown, inputBytes, duration)
+		s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, agentkeys.OutcomeKeysOutcomeUnknown, inputBytes, duration, route)
 		writeAgentKeysOutcome(w, agentkeys.OutcomeKeysOutcomeUnknown, operationID, agentKeysOutcomeMessage(agentkeys.OutcomeKeysOutcomeUnknown), 0)
 		return
 	}
 
-	s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, agentkeys.OutcomeDispatched, inputBytes, duration)
+	s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, agentkeys.OutcomeDispatched, inputBytes, duration, route)
 	writeAgentKeysSuccess(w, operationID, target.ID)
 }
 
@@ -541,7 +568,7 @@ func agentKeysAuditActor(ctx context.Context) (actorType, actorID, sourceProject
 // that reason) and logAgentKeysInternalErrorAudit (the decision is not an
 // agentkeys.Outcome value at all, so it is reported under a distinct
 // "error_class" field instead of "decision").
-func (s *Server) logAgentKeysAudit(r *http.Request, event agentKeysAuditEvent, operationID string, target agentKeysAuditTarget, outcome agentkeys.Outcome, inputBytes int, duration time.Duration) {
+func (s *Server) logAgentKeysAudit(r *http.Request, event agentKeysAuditEvent, operationID string, target agentKeysAuditTarget, outcome agentkeys.Outcome, inputBytes int, duration time.Duration, route agentKeysRoute) {
 	ctx := r.Context()
 	actorType, actorID, sourceProjectID, credential := agentKeysAuditActor(ctx)
 
@@ -555,7 +582,7 @@ func (s *Server) logAgentKeysAudit(r *http.Request, event agentKeysAuditEvent, o
 		"target_project_id", target.ProjectID,
 		"credential_kind", string(credential.Kind),
 		"credential_id", credential.ID,
-		"route", "keys",
+		"route", string(route),
 		"input_bytes", inputBytes,
 		"decision", string(outcome),
 		"duration_ms", duration.Milliseconds(),
@@ -570,7 +597,7 @@ func (s *Server) logAgentKeysAudit(r *http.Request, event agentKeysAuditEvent, o
 // reported under "body_bytes" rather than logAgentKeysAudit's "input_bytes",
 // since it measures something different (the whole JSON payload, not the
 // decoded "keys" field).
-func (s *Server) logAgentKeysValidationAudit(r *http.Request, outcome agentkeys.Outcome, bodyBytes int) {
+func (s *Server) logAgentKeysValidationAudit(r *http.Request, outcome agentkeys.Outcome, bodyBytes int, route agentKeysRoute) {
 	ctx := r.Context()
 	actorType, actorID, sourceProjectID, credential := agentKeysAuditActor(ctx)
 
@@ -584,7 +611,7 @@ func (s *Server) logAgentKeysValidationAudit(r *http.Request, outcome agentkeys.
 		"target_project_id", "",
 		"credential_kind", string(credential.Kind),
 		"credential_id", credential.ID,
-		"route", "keys",
+		"route", string(route),
 		"body_bytes", bodyBytes,
 		"decision", string(outcome),
 		"duration_ms", int64(0),
@@ -632,6 +659,8 @@ func agentKeysOutcomeMessage(outcome agentkeys.Outcome) string {
 		return "Insufficient permissions"
 	case agentkeys.OutcomeCrossProjectKeysUnsupported:
 		return "Cross-project keys access is not supported for agent callers"
+	case agentkeys.OutcomeRawCombinationUnsupported:
+		return "This legacy request combination is not supported for keys delivery"
 	case agentkeys.OutcomeNotFound:
 		return "Agent not found"
 	case agentkeys.OutcomeAgentNotRunning:
