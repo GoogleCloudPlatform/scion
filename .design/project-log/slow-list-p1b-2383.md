@@ -435,3 +435,19 @@ Verification: `go vet ./pkg/hub/... ./pkg/store/...` passes; `go test -p 2
 ./pkg/store/...` passes (store/agentsort/entadapter/enttest/storetest all
 ok); `go test -p 2 -run 'Sorted|Cursor|AgentSort' ./pkg/hub/...` passes
 (393s, 0 failures). Pushed before running tests, per convention.
+
+### Rebase onto origin/main 499c07187 (P1a merged upstream)
+
+`origin/main` advanced past this branch's base (`009227cb0` -> `499c0718`,
+six commits: web-chat unread filter, SSE notification coalescing, files
+placeholder test hardening, experiments tab, dev_local initiator
+attribution, runtime-broker project-settings env collision) -- none confined
+to files this branch touches. `git rebase origin/main` replayed cleanly,
+zero conflicts, matching the EM's merge-tree dry run. `git range-diff
+009227c..43504ff 499c071..1697be7` shows all 16 commits `=` (byte-identical
+replay).
+
+New head: `1697be76f6b31da0293e917f777f6f4743bc821b`. `go vet
+./pkg/hub/... ./pkg/store/...` and `go build ./...` both pass. Force-pushed
+with `--force-with-lease`. Long test suites not re-run (no conflicts), per
+instruction; CI covers them.
