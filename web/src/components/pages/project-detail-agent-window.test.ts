@@ -28,6 +28,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import type { Agent, Capabilities, PageData } from '../../shared/types.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 import { stateManager } from '../../client/state.js';
+import { PROJECT_AGENTS_FIT_THRESHOLD } from '../../client/agent-list-window.js';
 
 /** happy-dom has no EventSource; setScope opens one. */
 class FakeEventSource extends EventTarget {
@@ -328,8 +329,10 @@ function createRealisticFetchHandler(opts: {
           );
         }
 
-        const fit = Number(u.searchParams.get('fit') ?? '500');
-        if (sorted.length <= fit) {
+        // The server only reports a complete set when fit was sent; a sorted
+        // request without fit (a paged view-state change) is always a page.
+        const fitParam = u.searchParams.get('fit');
+        if (fitParam !== null && sorted.length <= Number(fitParam)) {
           return Promise.resolve(
             jsonResponse({
               agents: sorted,
@@ -390,7 +393,7 @@ describe('project-detail — agent list window', () => {
     localStorage.clear();
   });
 
-  describe('sorted/paged mode — list view, updated sort, 100 agents', () => {
+  describe('sorted/paged mode — list view, updated sort, at the fit threshold', () => {
     it('page load issues exactly one agents request (the fit request); every client-only interaction issues zero; label commit and lifecycle refresh issue exactly one each', async () => {
       const projectId = 'p-w10-list';
       localStorage.setItem('scion-view-project-agents', 'list');
@@ -398,7 +401,7 @@ describe('project-detail — agent list window', () => {
         `scion-sort-project-agents-${projectId}`,
         JSON.stringify({ field: 'updated', dir: 'desc' })
       );
-      const agents = Array.from({ length: 100 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: PROJECT_AGENTS_FIT_THRESHOLD }, (_, i) => makeAgent(i));
       const requests: AgentsRequest[] = [];
       vi.stubGlobal(
         'fetch',
@@ -410,7 +413,8 @@ describe('project-detail — agent list window', () => {
       const el = await createComponent(projectId);
       expect(requests.length).toBe(1);
       expect(requests[0].url).toContain('sort=updated');
-      expect(requests[0].url).toContain('fit=500');
+      expect(requests[0].url).toContain(`fit=${PROJECT_AGENTS_FIT_THRESHOLD}`);
+      expect(internals(el).agentWindow.state).toBe('small');
 
       const toggle = viewToggle(el)!;
 
@@ -467,6 +471,8 @@ describe('project-detail — agent list window', () => {
     }, 20_000);
 
     it('the same page opened in grid view issues exactly one legacy agents request, and grid -> list issues zero', async () => {
+      // Grid always uses the legacy load, which returns the complete set at
+      // any size up to 500, so this holds above the fit threshold too.
       const projectId = 'p-w10-grid';
       localStorage.setItem('scion-view-project-agents', 'grid');
       const agents = Array.from({ length: 100 }, (_, i) => makeAgent(i));
@@ -486,6 +492,127 @@ describe('project-detail — agent list window', () => {
       toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'list' } }));
       await el.updateComplete;
       expect(requests.length).toBe(1);
+    });
+  });
+
+  describe('above the fit threshold the list view pages from the first request', () => {
+    const mountList = async (projectId: string, count: number, pageSize?: number) => {
+      localStorage.setItem('scion-view-project-agents', 'list');
+      localStorage.setItem(
+        `scion-sort-project-agents-${projectId}`,
+        JSON.stringify({ field: 'updated', dir: 'desc' })
+      );
+      if (pageSize !== undefined) {
+        localStorage.setItem('scion-pagesize-project-agents', String(pageSize));
+      }
+      const agents = Array.from({ length: count }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })
+        )
+      );
+      const el = await createComponent(projectId);
+      return { el, requests };
+    };
+
+    it('one agent above the threshold: the first request carries the threshold as fit and the window is paged', async () => {
+      const { el, requests } = await mountList('p-fit-boundary', PROJECT_AGENTS_FIT_THRESHOLD + 1);
+      expect(requests.length).toBe(1);
+      expect(requests[0].url).toContain(`fit=${PROJECT_AGENTS_FIT_THRESHOLD}`);
+      expect(requests[0].url).toContain('limit=25');
+      expect(internals(el).agentWindow.state).toBe('paged');
+    });
+
+    it('100 agents: one request on load; each paged interaction costs exactly one; list -> grid is one legacy load that completes the set, after which toggles are free', async () => {
+      const { el, requests } = await mountList('p-fit-100', 100);
+      expect(requests.length).toBe(1);
+      expect(requests[0].url).toContain(`fit=${PROJECT_AGENTS_FIT_THRESHOLD}`);
+      expect(internals(el).agentWindow.state).toBe('paged');
+
+      const settle = () => new Promise((r) => setTimeout(r, 10));
+      let n = requests.length;
+      await internals(el).agentWindow.next();
+      expect(requests.length - n).toBe(1);
+      expect(requests[requests.length - 1].url).toContain('cursor=');
+
+      n = requests.length;
+      await internals(el).agentWindow.prev();
+      expect(requests.length - n).toBe(1);
+
+      n = requests.length;
+      internals(el).toggleSort('updated'); // flips dir
+      await settle();
+      expect(requests.length - n).toBe(1);
+      expect(requests[requests.length - 1].url).toContain('dir=asc');
+      expect(internals(el).agentWindow.state).toBe('paged');
+
+      n = requests.length;
+      internals(el).setPhaseFilter('running');
+      await settle();
+      expect(requests.length - n).toBe(1);
+      expect(requests[requests.length - 1].url).toContain('phase=running');
+      internals(el).setPhaseFilter('');
+      await settle();
+
+      // Label typing is free; the commit is one request.
+      const input = labelInput(el)!;
+      n = requests.length;
+      input.value = 'env';
+      input.dispatchEvent(new Event('sl-input'));
+      expect(requests.length - n).toBe(0);
+      input.value = 'env=prod';
+      input.dispatchEvent(new Event('sl-input'));
+      input.dispatchEvent(new Event('sl-change'));
+      await settle();
+      expect(requests.length - n).toBe(1);
+
+      n = requests.length;
+      await internals(el).handleAgentAction('a-1', 'stop');
+      await settle();
+      expect(requests.length - n).toBe(1);
+
+      // Clear the label so the grid load is unfiltered.
+      input.value = '';
+      input.dispatchEvent(new Event('sl-input'));
+      input.dispatchEvent(new Event('sl-change'));
+      await settle();
+
+      const toggle = viewToggle(el)!;
+      n = requests.length;
+      toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'grid' } }));
+      await settle();
+      expect(requests.length - n).toBe(1);
+      expect(requests[requests.length - 1].url).not.toContain('sort=');
+
+      n = requests.length;
+      for (const v of ['list', 'grid', 'list']) {
+        toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: v } }));
+        await settle();
+      }
+      expect(requests.length - n).toBe(0);
+      expect(internals(el).agentWindow.state).toBe('small');
+    }, 20_000);
+
+    it('page size 100: fit is raised to the page size, so 100 agents is small and 101 is paged', async () => {
+      const small = await mountList('p-fit-ps100-small', 100, 100);
+      expect(small.requests.length).toBe(1);
+      expect(small.requests[0].url).toContain('fit=100');
+      expect(small.requests[0].url).toContain('limit=100');
+      expect(internals(small.el).agentWindow.state).toBe('small');
+      small.el.remove();
+      localStorage.clear();
+
+      const paged = await mountList('p-fit-ps100-paged', 101, 100);
+      expect(paged.requests.length).toBe(1);
+      expect(paged.requests[0].url).toContain('fit=100');
+      expect(internals(paged.el).agentWindow.state).toBe('paged');
     });
   });
 
@@ -875,7 +1002,7 @@ describe('project-detail — agent list window', () => {
       const projectId = 'p-b3-toggles';
       localStorage.setItem('scion-view-project-agents', 'list');
       // 30 agents; the sorted endpoint reports complete once asked again
-      // with `fit=500` (the real default), so after one legacy load and one
+      // with the real fit threshold, so after one legacy load and one
       // fit retry the window settles into 'small' and further toggles are free.
       const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
       const requests: AgentsRequest[] = [];
@@ -887,7 +1014,7 @@ describe('project-detail — agent list window', () => {
           const u = new URL(rawUrl, 'http://localhost');
           // Force only the FIRST sorted request (the initial page load) to be
           // paged, by capping `fit` there; subsequent requests use the real
-          // default (500) and come back complete.
+          // threshold and come back complete.
           return createRealisticFetchHandler({
             projectId,
             projectCaps: { actions: ['read'] },
@@ -897,8 +1024,8 @@ describe('project-detail — agent list window', () => {
           })(input, init);
         })
       );
-      // The mount's own first request uses fit=500 by default in the real
-      // code, and 30 <= 500, so it is actually complete — use a dedicated
+      // The mount's own first request uses the real fit threshold, and 30
+      // is below it, so it is actually complete — use a dedicated
       // paged-first-load harness instead: start already paged via a forced
       // page-1 navigation isn't meaningful here, so this test instead
       // begins in list+paged by making the window ineligible at mount
@@ -915,7 +1042,7 @@ describe('project-detail — agent list window', () => {
       await new Promise((r) => setTimeout(r, 10));
       // grid(truncated) -> list(updated sort): one fit request (design §11 interim cost).
       expect(requests.length - n).toBe(1);
-      expect(internals(el).listViewUsesWindow).toBe(true); // 30 <= 500: complete this time
+      expect(internals(el).listViewUsesWindow).toBe(true); // 30 is below the fit threshold: complete this time
 
       n = requests.length;
       for (const v of ['grid', 'list', 'grid', 'list', 'grid']) {
@@ -1093,7 +1220,7 @@ describe('project-detail — agent list window', () => {
       await new Promise((r) => setTimeout(r, 20));
       await el.updateComplete;
 
-      expect(internals(el).agentWindow.state).toBe('small'); // 10 agents <= fit=500
+      expect(internals(el).agentWindow.state).toBe('small'); // 10 agents is below the fit threshold
       expect(internals(el).agentWindow.pageIndex).toBe(0); // reset
       expect(internals(el).agentWindow.items.length).toBe(10); // all 10 env=prod agents visible
     });
@@ -1398,7 +1525,7 @@ describe('project-detail — agent list window', () => {
       );
 
       const el = await createComponent(projectId);
-      expect(internals(el).agentWindow.state).toBe('small'); // 30 agents fits well under the fit=500 threshold
+      expect(internals(el).agentWindow.state).toBe('small'); // 30 agents is below the fit threshold
 
       const requestsBeforeRefresh = requests.length;
       holdNextSorted = true;
@@ -1976,7 +2103,7 @@ describe('project-detail — agent list window', () => {
       );
 
       const el = await createComponent(projectId);
-      expect(internals(el).agentWindow.state).toBe('small'); // P1-eligible, complete (5 <= 500)
+      expect(internals(el).agentWindow.state).toBe('small'); // P1-eligible, complete (5 is below the fit threshold)
       expect(internals(el).committedLabel).toBe('');
 
       // First, a successful commit on the sorted (P1-eligible) path, so the
@@ -2040,7 +2167,7 @@ describe('project-detail — agent list window', () => {
       );
 
       const el = await createComponent(projectId);
-      expect(internals(el).agentWindow.state).toBe('small'); // P1-eligible, complete (5 <= 500)
+      expect(internals(el).agentWindow.state).toBe('small'); // P1-eligible, complete (5 is below the fit threshold)
       const before = (el as unknown as { agents: Agent[] }).agents;
       expect(before.length).toBe(5);
       expect(internals(el).committedLabel).toBe('');

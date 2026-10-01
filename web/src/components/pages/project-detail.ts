@@ -49,7 +49,7 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
-import { AgentListWindow } from '../../client/agent-list-window.js';
+import { AgentListWindow, projectAgentsFitFor } from '../../client/agent-list-window.js';
 import type { PagedPageParams, PagedPageResult } from '../../client/agent-list-window.js';
 import { sortAgents } from '../../shared/agent-sort.js';
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
@@ -1586,7 +1586,7 @@ export class ScionPageProjectDetail extends LitElement {
     params.set('sort', 'updated');
     params.set('dir', this.sortDir);
     params.set('limit', String(this.pagerPageSize));
-    params.set('fit', '500');
+    params.set('fit', String(projectAgentsFitFor(this.pagerPageSize)));
     params.set('stats', '1');
     if (label) params.set('label', label);
     if (this.phaseFilter) params.set('phase', this.phaseFilter);

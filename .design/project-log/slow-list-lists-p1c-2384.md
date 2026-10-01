@@ -352,3 +352,28 @@ reconfirmed closed. Two commits this round, per the EM's instruction:
 Full finding-to-fix-to-test mapping and gate output for commit A in the dev
 report (`lists-p1c-dev.md`). Per the EM's instruction this is the final
 review round.
+
+## 2026-10-01 — fit threshold lowered from 500 to 50 (interim follow-up)
+
+A profile of the live hub showed the project page's first list request
+(fit=500, limit=25) returning all 107 rows with 861 authorization decisions
+in about 3.7 s, while a paged limit=25 request took about 1.3 s. On a seeded
+500-agent bench hub the fit=500 load took about 21 s versus 3.3 s at fit=50.
+The project page now sends fit = max(PROJECT_AGENTS_FIT_THRESHOLD, page size),
+with the threshold at 50 (agent-list-window.ts). The max keeps fit at least
+the limit for the 100-row page size, which the server requires.
+
+Effect: projects of 50 agents or fewer keep the small state unchanged (one
+request on load, client-only interactions free). Larger projects page from
+the first request: Next, Prev, a sort-direction change, a phase change, a
+label commit and a lifecycle refresh cost one request each, and list to grid
+costs one legacy load, which completes the set (up to 500), after which
+toggles are free.
+
+Tests: the zero-request small-state test now runs at the threshold (50
+agents); new tests cover threshold+1 (paged), 100 agents (exact per-action
+counts) and page size 100 (fit raised to 100). The realistic test handler now
+reports complete only when fit is sent, as the server does. Mutation check:
+with the threshold set back to 500, the 100-agent and page-size tests fail.
+vitest: project-detail-agent-window and agent-list-window, 76/76 pass; tsc
+clean; eslint reports no errors on changed lines.
