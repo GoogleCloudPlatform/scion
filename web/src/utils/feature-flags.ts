@@ -72,6 +72,8 @@ const shadowLogged = new Set<string>();
  * values keep beating the server.
  */
 export function setServerFlags(flags: Record<string, boolean>): void {
+  if (typeof window === 'undefined') return;
+  if (!flags || typeof flags !== 'object' || Array.isArray(flags)) return;
   const current = window.__SCION_FEATURES__ ?? {};
   if (pinned === null) pinned = { ...current };
   const next = { ...current };

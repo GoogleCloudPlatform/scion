@@ -258,6 +258,33 @@ describe('setServerFlags: precedence', () => {
     setServerFlags({ 'hub.future_thing': true });
     expect(isFeatureEnabled('hub.future_thing')).toBe(true);
   });
+
+  it('is a no-op (does not throw) when window is undefined, e.g. a non-browser context', () => {
+    vi.stubGlobal('window', undefined);
+    try {
+      expect(() => setServerFlags({ 'test.flag': true })).not.toThrow();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('ignores a null or non-object flags argument', () => {
+    // @ts-expect-error exercising a malformed runtime value
+    expect(() => setServerFlags(null)).not.toThrow();
+    // @ts-expect-error exercising a malformed runtime value
+    expect(() => setServerFlags('not an object')).not.toThrow();
+    // Without the guard, Object.entries() on a string iterates its
+    // characters as numeric-index entries, polluting the bag — check the
+    // bag directly, since `isFeatureEnabled` would hide that either way.
+    expect(window.__SCION_FEATURES__ ?? {}).not.toHaveProperty('0');
+  });
+
+  it('ignores an array flags argument instead of writing its indices into the bag', () => {
+    // typeof [] === 'object', so this needs its own Array.isArray check.
+    // @ts-expect-error exercising a malformed runtime value
+    setServerFlags(['web.terminal_workspace']);
+    expect(window.__SCION_FEATURES__ ?? {}).not.toHaveProperty('0');
+  });
 });
 
 // ---------------------------------------------------------------------------
