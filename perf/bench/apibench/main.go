@@ -65,8 +65,8 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"os/exec"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -74,14 +74,67 @@ import (
 	"github.com/GoogleCloudPlatform/scion/perf/bench/internal/benchout"
 )
 
-// gitHeadSHA returns the harness's own git HEAD commit, or "" if it cannot
-// be determined (e.g. run from outside a git checkout). bench-rev-2 NB4.
-func gitHeadSHA() string {
-	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
-	if err != nil {
-		return ""
+// harnessBuildInfo reports the harness's own build provenance via Go's VCS
+// stamping, i.e. the commit the *running binary* was actually built from.
+//
+// bench-rev-3 RR3: the previous implementation ran `git rev-parse HEAD` in
+// the process's current working directory, which records whatever git
+// checkout the OPERATOR happens to be standing in when invoking the
+// already-built binary, not the commit it was built from. Built from this
+// harness and run from a different repo checkout (demonstrated: an upstream
+// `main` checkout), it silently reported that OTHER checkout's HEAD --
+// exactly the kind of wrong-but-plausible-looking value RR3 called "worse
+// than not having the field".
+//
+// `runtime/debug.ReadBuildInfo()`'s `vcs.revision`/`vcs.modified` settings
+// are populated by `go build`'s default VCS auto-stamping and travel with
+// the binary itself, so this is correct regardless of the caller's cwd. It
+// requires building WITHOUT `-buildvcs=false` -- see perf/bench/README.md.
+func harnessBuildInfo() (commit string, dirty bool, source string) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", false, "unavailable: no build info (not built with cmd/go, or stripped)"
 	}
-	return strings.TrimSpace(string(out))
+	var revision, modified string
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.modified":
+			modified = s.Value
+		}
+	}
+	if revision == "" {
+		return "", false, "unavailable: no vcs.revision in build info (built with -buildvcs=false, or source is not a VCS checkout)"
+	}
+	return revision, modified == "true", "go build VCS stamp"
+}
+
+// hubHealth is the subset of pkg/hub's unauthenticated GET /health response
+// (pkg/hub/handlers_health.go's HealthResponse) this tool records.
+type hubHealth struct {
+	Version      string `json:"version"`
+	ScionVersion string `json:"scionVersion"`
+}
+
+// fetchHubVersion identifies the hub binary under test (bench-rev-3 RR3:
+// NB4's provenance request also covered the hub build, not just the
+// harness's). Best-effort: returns zero values on any error rather than
+// failing the run, since /health is a nice-to-have, not load-bearing.
+func fetchHubVersion(client *http.Client, hubURL string) (version, scionVersion string) {
+	resp, err := client.Get(strings.TrimRight(hubURL, "/") + "/health")
+	if err != nil {
+		return "", ""
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", ""
+	}
+	var h hubHealth
+	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
+		return "", ""
+	}
+	return h.Version, h.ScionVersion
 }
 
 const perfTraceRequestHeader = "X-Scion-Perf-Trace"
@@ -124,13 +177,20 @@ func main() {
 		{"global-agents-list-scoped", fmt.Sprintf("/api/v1/agents?projectId=%s", seed.ProjectID)},
 	}
 
+	harnessCommit, harnessDirty, harnessCommitSource := harnessBuildInfo()
+	hubVersion, hubScionVersion := fetchHubVersion(client, *hubURL)
 	report := benchout.APIBenchReport{
 		GeneratedAt: time.Now().UTC(),
-		// bench-rev-2 NB4: record the harness's own commit, so a report can
-		// be matched back to the exact code that produced it without
-		// relying on wall-clock proximity to a commit timestamp.
-		HarnessCommit: gitHeadSHA(),
-		HubBaseURL:    *hubURL,
+		// bench-rev-2 NB4, bench-rev-3 RR3: record the harness's own build
+		// commit (from the binary's VCS stamp, not the caller's cwd) and the
+		// hub build under test, so a report can be matched back to the
+		// exact code on both sides without relying on wall-clock proximity.
+		HarnessCommit:       harnessCommit,
+		HarnessCommitDirty:  harnessDirty,
+		HarnessCommitSource: harnessCommitSource,
+		HubVersion:          hubVersion,
+		HubScionVersion:     hubScionVersion,
+		HubBaseURL:          *hubURL,
 		EffectiveSettings: benchout.EffectiveSettings{
 			Runs:           *runs,
 			Warmup:         *warmup,

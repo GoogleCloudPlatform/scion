@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/perf/bench/internal/benchout"
@@ -121,5 +124,67 @@ func TestRedactSeedStripsCredentials(t *testing.T) {
 	}
 	if redacted.AgentCount != seed.AgentCount {
 		t.Errorf("redactSeed changed AgentCount: got %d, want %d", redacted.AgentCount, seed.AgentCount)
+	}
+}
+
+// bench-rev-3 RR3: harnessBuildInfo must read the BINARY's own VCS stamp,
+// not `git rev-parse HEAD` in the caller's cwd -- there is no way to assert
+// the exact commit from inside `go test` (it depends on the checkout this
+// suite happens to run from), but RR3's actual, checkable requirement is
+// "record empty with an explicit source rather than guessing": the source
+// string must never be empty, and must never claim a VCS stamp while
+// leaving the commit blank.
+func TestHarnessBuildInfoNeverGuesses(t *testing.T) {
+	commit, dirty, source := harnessBuildInfo()
+	if source == "" {
+		t.Fatal("harnessBuildInfo: source must never be empty")
+	}
+	if source == "go build VCS stamp" && commit == "" {
+		t.Fatal("harnessBuildInfo: source claims a VCS stamp but commit is empty")
+	}
+	if source != "go build VCS stamp" && commit != "" {
+		t.Fatalf("harnessBuildInfo: commit %q set without claiming a VCS-stamp source (got %q)", commit, source)
+	}
+	_ = dirty // only meaningful alongside a non-empty commit; no assertion needed here.
+}
+
+func TestFetchHubVersionParsesHealthResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{
+			"version":      "hub-1.2.3",
+			"scionVersion": "0.9.0",
+			"status":       "ok",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer srv.Close()
+
+	version, scionVersion := fetchHubVersion(srv.Client(), srv.URL)
+	if version != "hub-1.2.3" || scionVersion != "0.9.0" {
+		t.Fatalf("fetchHubVersion = (%q, %q), want (hub-1.2.3, 0.9.0)", version, scionVersion)
+	}
+}
+
+func TestFetchHubVersionReturnsEmptyOnUnreachableHost(t *testing.T) {
+	version, scionVersion := fetchHubVersion(&http.Client{Timeout: 2e9}, "http://127.0.0.1:1")
+	if version != "" || scionVersion != "" {
+		t.Fatalf("fetchHubVersion on unreachable host = (%q, %q), want empty", version, scionVersion)
+	}
+}
+
+func TestFetchHubVersionReturnsEmptyOnNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	version, scionVersion := fetchHubVersion(srv.Client(), srv.URL)
+	if version != "" || scionVersion != "" {
+		t.Fatalf("fetchHubVersion on 404 = (%q, %q), want empty", version, scionVersion)
 	}
 }

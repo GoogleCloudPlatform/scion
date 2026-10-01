@@ -53,11 +53,33 @@ type SeedMetadata struct {
 // trials against a seeded project.
 type APIBenchReport struct {
 	GeneratedAt time.Time `json:"generatedAt"`
-	// HarnessCommit is the harness's own `git rev-parse HEAD` at run time,
-	// or "" if it could not be determined (bench-rev-2 NB4): lets a report
-	// be matched back to the exact code that produced it without relying on
-	// wall-clock proximity to a commit timestamp.
-	HarnessCommit     string            `json:"harnessCommit,omitempty"`
+	// HarnessCommit is the harness's own build-time VCS revision
+	// (bench-rev-2 NB4; bench-rev-3 RR3 fixed the source of this value).
+	// It comes from `runtime/debug.ReadBuildInfo()`'s `vcs.revision` build
+	// setting -- i.e. the commit the *running binary* was built from -- not
+	// from running `git rev-parse HEAD` in the process's current working
+	// directory, which silently records whatever checkout the operator
+	// happens to invoke the binary from (possibly a different one than it
+	// was built in) and is wrong whenever those differ. Empty whenever Go's
+	// VCS stamping could not supply a revision; see HarnessCommitSource for
+	// why.
+	HarnessCommit string `json:"harnessCommit,omitempty"`
+	// HarnessCommitDirty is true when the build-time working tree had
+	// uncommitted changes (`vcs.modified`), i.e. the binary may not exactly
+	// match HarnessCommit's tree.
+	HarnessCommitDirty bool `json:"harnessCommitDirty,omitempty"`
+	// HarnessCommitSource explains how HarnessCommit was obtained, or why it
+	// is empty (bench-rev-3 RR3: "record empty with an explicit source
+	// rather than guessing"). Normally "go build VCS stamp"; see
+	// perf/bench/README.md for why `-buildvcs=false` must NOT be passed when
+	// building these tools.
+	HarnessCommitSource string `json:"harnessCommitSource"`
+	// HubVersion/HubScionVersion identify the hub binary under test, read
+	// from its own unauthenticated GET /health (pkg/hub/handlers_health.go)
+	// -- bench-rev-3 RR3's "NB4 also covered the hub build" follow-up.
+	// Empty if /health could not be reached or parsed.
+	HubVersion        string            `json:"hubVersion,omitempty"`
+	HubScionVersion   string            `json:"hubScionVersion,omitempty"`
 	HubBaseURL        string            `json:"hubBaseUrl"`
 	EffectiveSettings EffectiveSettings `json:"effectiveSettings"`
 	Seed              SeedMetadata      `json:"seed"`

@@ -235,27 +235,58 @@ export function generateTestLoginToken(secret, subject = 'perf-bench') {
 export const BURST_TARGET_ROTATION = ['stopped', 'error', 'stopping'];
 
 /**
+ * displayStatusLabel mirrors web/src/shared/types.ts's getAgentDisplayStatus:
+ * a `running` agent with a non-empty activity displays its activity string
+ * instead of its literal phase. Anything expecting to compare against what
+ * the UI actually renders -- the restore-wait check below, in particular --
+ * must use this, not the raw phase, or it can never match for such agents.
+ *
+ * bench-rev-3 RR1(b): the original restore-wait compared against the literal
+ * pre-burst phase even when that agent's displayed label would be its
+ * activity, so the check could never succeed for those agents -- not a
+ * harness bug in the sense of miscounting, but it burned the full settle
+ * timeout every run waiting on a check that could not pass, and it is the
+ * wrong predicate to gate on.
+ */
+export function displayStatusLabel(phase, activity) {
+  if (phase === 'running' && activity) return activity;
+  return phase;
+}
+
+/**
  * pickBurstTarget chooses a target phase for the agent at position `idx`
  * (0-based, stable across runs for a given database) on burst run number
- * `runIndex` (0-based), guaranteed to differ from `currentPhase`.
+ * `runIndex` (0-based), guaranteed to differ from BOTH `currentPhase` (the
+ * agent's live/pre-burst phase) AND `previousRunTarget` (the phase this same
+ * agent was targeted with on the previous run it took part in, or null on
+ * its first run).
  *
- * bench-rev-2 R2: an earlier version used `idx % N` only, so every run
- * picked the *same* target for a given agent. Combined with not waiting for
- * the inter-run restore to reach the DOM, run i+1's first poll could see
- * run i's stale (not-yet-restored) badge value, which equals run i+1's own
- * target under the same idx-only rotation -- a false "settled" before
- * run i+1's own SSE update could possibly have arrived. Mixing `runIndex`
- * into the rotation offset means consecutive runs targeting the same agent
- * never request the same phase twice in a row, so a stale badge can never
- * match the new target by coincidence. This still does not make waiting
- * for the restore unnecessary -- see waitForBadgeValue in
- * large-project-bench.mjs -- it is a second, independent guard.
+ * bench-rev-2 R2 introduced a `runIndex`-offset rotation, documented as
+ * guaranteeing consecutive runs never request the same phase twice in a
+ * row for the same agent. bench-rev-3 RR1(a) found that guarantee false:
+ * the caller always passes the *pre-burst* phase as `currentPhase` (the
+ * same value on every run, since it is restored between runs), not the
+ * previous run's target, so the single `!== currentPhase` bump does not
+ * prevent `pick(idx, r)` and `pick(idx, r+1)` from coinciding whenever the
+ * pre-burst phase is itself in the rotation (12 of 15 agents in the
+ * 25-agent seed) -- 13 of 60 consecutive-run pairs repeated in practice.
+ * Excluding both `currentPhase` and the actual `previousRunTarget` closes
+ * this: with a 3-entry rotation, excluding at most 2 distinct values always
+ * leaves at least one candidate.
  */
-export function pickBurstTarget(idx, runIndex, currentPhase) {
+export function pickBurstTarget(idx, runIndex, currentPhase, previousRunTarget) {
   const n = BURST_TARGET_ROTATION.length;
-  let phase = BURST_TARGET_ROTATION[(idx + runIndex) % n];
-  if (phase.toLowerCase() === (currentPhase || '').toLowerCase()) {
-    phase = BURST_TARGET_ROTATION[(idx + runIndex + 1) % n];
+  const exclude = new Set(
+    [currentPhase, previousRunTarget].filter(Boolean).map((p) => p.toLowerCase())
+  );
+  for (let i = 0; i < n; i++) {
+    const candidate = BURST_TARGET_ROTATION[(idx + runIndex + i) % n];
+    if (!exclude.has(candidate.toLowerCase())) return candidate;
   }
-  return phase;
+  // Unreachable with a 3-entry rotation and at most 2 excluded values, but
+  // fail loudly rather than silently return a colliding target.
+  throw new Error(
+    `pickBurstTarget: no candidate in [${BURST_TARGET_ROTATION}] excludes ` +
+      `{${[...exclude]}} for idx=${idx} runIndex=${runIndex}`
+  );
 }

@@ -254,6 +254,40 @@ func TestCheckDBNotExists(t *testing.T) {
 	})
 }
 
+// TestValidateDBPathArg covers bench-rev-3 O1: rather than special-case
+// every DSN authority form sqlite's URI parsing might accept (the
+// "file://localhost/<path>" form bypassed checkDBNotExists's normalization,
+// since TrimPrefix(dbPath, "file:") leaves "//localhost/<path>", which
+// os.Stat never finds), reject any "file:"-prefixed or "?"-containing --db
+// value outright. This closes file://localhost/... along with every other
+// such form, not just the one demonstrated.
+func TestValidateDBPathArg(t *testing.T) {
+	valid := []string{
+		"/tmp/hub.db",
+		"hub.db",
+		"./relative/hub.db",
+	}
+	for _, p := range valid {
+		if err := validateDBPathArg(p); err != nil {
+			t.Errorf("validateDBPathArg(%q): want nil, got %v", p, err)
+		}
+	}
+
+	rejected := []string{
+		"file:/tmp/hub.db",
+		"file:/tmp/hub.db?cache=shared",
+		"file://localhost/tmp/hub.db",
+		"file://localhost/tmp/hub.db?cache=shared",
+		"/tmp/hub.db?cache=shared",
+		"/tmp/hub.db?mode=rw",
+	}
+	for _, p := range rejected {
+		if err := validateDBPathArg(p); err == nil {
+			t.Errorf("validateDBPathArg(%q): want error, got nil", p)
+		}
+	}
+}
+
 func TestNormalizeDBPathForStat(t *testing.T) {
 	cases := []struct {
 		in   string

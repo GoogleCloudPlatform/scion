@@ -101,6 +101,11 @@ func main() {
 		os.Exit(2)
 	}
 
+	if err := validateDBPathArg(*dbPath); err != nil {
+		fmt.Fprintln(os.Stderr, "seed:", err)
+		os.Exit(2)
+	}
+
 	if err := checkDBNotExists(*dbPath); err != nil {
 		fmt.Fprintln(os.Stderr, "seed:", err)
 		os.Exit(2)
@@ -132,6 +137,40 @@ func normalizeDBPathForStat(dbPath string) string {
 		p = p[:i]
 	}
 	return p
+}
+
+// validateDBPathArg rejects any --db value this tool did not expect a
+// caller to supply: a "file:" DSN prefix or a "?query" suffix, both of
+// which openSQLiteForBench adds itself.
+//
+// bench-rev-3 O1: normalizeDBPathForStat's bare `TrimPrefix(dbPath,
+// "file:")` correctly handles "file:/abs/path" and
+// "file:/abs/path?cache=shared", but NOT the "file://localhost/<path>" URI
+// form (a valid, if unusual, sqlite3 DSN authority): trimming only the
+// "file:" prefix leaves "//localhost/<path>", which os.Stat never finds on
+// this host, so checkDBNotExists's existence guard silently passed even
+// against an existing, non-empty database -- reproduced: seeding over an
+// existing DB with `--db file://localhost/<path>` ran Migrate and the
+// owner/member bootstrap before failing partway through with the exact
+// "already exists" error checkDBNotExists exists to prevent up front, with
+// no byte-level damage to the existing DB observed but no guarantee of that
+// either. Rather than special-case every DSN authority form sqlite's URI
+// parsing might accept, reject any "file:"-prefixed or "?"-containing --db
+// value outright before it ever reaches checkDBNotExists: this tool adds
+// both itself (see openSQLiteForBench) and never needs the caller to
+// supply either, so there is nothing legitimate this rejects.
+func validateDBPathArg(dbPath string) error {
+	if strings.HasPrefix(dbPath, "file:") {
+		return fmt.Errorf(
+			"--db %q must be a plain filesystem path, not a \"file:\" DSN -- this tool adds the "+
+				"\"file:\" prefix itself (see openSQLiteForBench)", dbPath)
+	}
+	if strings.Contains(dbPath, "?") {
+		return fmt.Errorf(
+			"--db %q must not contain a %q query string -- this tool adds \"?cache=shared\" "+
+				"itself (see openSQLiteForBench)", dbPath, "?")
+	}
+	return nil
 }
 
 // checkDBNotExists refuses an already-existing, non-empty dbPath.

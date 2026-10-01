@@ -71,6 +71,30 @@
  *   distinct from `still-loading` (no response observed at all).
  * - Graph interaction timing (pan/zoom/hover) is now measured for both
  *   graph scenarios, not deferred.
+ *
+ * bench-rev-3 fixes (see gs://scion-xproject-exchange/slow-list/reviews/
+ * bench-rev-3.md) on top of bench-rev-2's:
+ * - RR1: bench-rev-2's R2 fix did not actually close the false-settle hole
+ *   it was meant to close (pickBurstTarget's "never repeats" guarantee was
+ *   false against the real caller, and the restore-wait recorded its
+ *   result but never gated anything). This version (a) excludes BOTH the
+ *   pre-burst phase and the agent's actual previous-run target from
+ *   pickBurstTarget's candidates, (b) reads every target's badge
+ *   immediately before posting and excludes any agent already showing its
+ *   about-to-be-requested target from this run's settle tracking, and (c)
+ *   marks a run invalid, excluded from the scenario's settle statistics,
+ *   whenever the PREVIOUS run's restore was not fully confirmed in the DOM.
+ *   The restore-wait's expected value is now computed the way the UI
+ *   renders it (displayStatusLabel), not the literal pre-burst phase.
+ * - RR3: harnessCommit now comes from the binary's own build-time VCS
+ *   stamp, not `git rev-parse HEAD` in the caller's cwd (which silently
+ *   recorded the WRONG commit whenever the two differ); the report also
+ *   records a dirty-tree flag and the hub's own version/build
+ *   (GET /health).
+ * - RR4: per-agent settle time is now observed by a polling loop dedicated
+ *   to that agent, started the instant THAT agent's own POST resolves --
+ *   not after every agent's POST has resolved (bench-rev-2's NB2 fix still
+ *   had this gap, inflating settle by up to the POST-completion spread).
  */
 
 import { chromium } from '@playwright/test';
@@ -89,6 +113,7 @@ import {
   summarizeScenario,
   generateTestLoginToken,
   pickBurstTarget,
+  displayStatusLabel,
 } from './lib.mjs';
 
 // ---- CLI args --------------------------------------------------------
@@ -130,6 +155,11 @@ const burstCount = parseInt(args['burst-count'] || '15', 10);
 const burstRuns = parseInt(args['burst-runs'] || String(runs), 10);
 const settleTimeoutMs = parseInt(args['settle-timeout-ms'] || '30000', 10);
 const notes = args.notes || '';
+// bench-rev-3: lets a targeted re-measurement (e.g. re-running only the SSE
+// burst after an RR1/RR4-style burst-logic fix) skip the four view
+// scenarios, which can take most of a run's wall-clock time at 500 agents
+// and whose numbers the fix did not change.
+const burstOnly = Boolean(args['burst-only']);
 
 const seed = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
 
@@ -138,11 +168,52 @@ const seed = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
 // relying on wall-clock proximity to a commit (which bench-rev-2 had to ask
 // about directly for the round-1 data).
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+// bench-rev-3 RR3: `stdio: ['ignore', 'pipe', 'ignore']` suppresses git's
+// `fatal: not a git repository` going straight to the console when this is
+// run outside a checkout (RR3's FYI) -- the caller already handles a null
+// return.
 function gitHeadSha() {
   try {
-    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim();
+    return execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
   } catch {
     return null;
+  }
+}
+
+// bench-rev-3 RR3: a dirty working tree means the running script may not
+// exactly match harnessCommit's committed tree -- recorded alongside it
+// rather than silently assumed clean. `repoRoot` is resolved from
+// import.meta.url (this file's own location), not the caller's cwd, so
+// this is correct regardless of where the script is invoked from.
+function gitIsDirty() {
+  try {
+    const out = execFileSync('git', ['status', '--porcelain'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return out.trim().length > 0;
+  } catch {
+    return null;
+  }
+}
+
+// bench-rev-3 RR3: "NB4 also covered the hub build." Identifies the hub
+// binary under test via its own unauthenticated GET /health
+// (pkg/hub/handlers_health.go), mirroring apibench's fetchHubVersion.
+// Best-effort: never throws, returns nulls on any failure.
+async function fetchHubVersion(baseURL) {
+  try {
+    const res = await fetch(`${baseURL.replace(/\/$/, '')}/health`);
+    if (!res.ok) return { version: null, scionVersion: null };
+    const body = await res.json();
+    return { version: body.version ?? null, scionVersion: body.scionVersion ?? null };
+  } catch {
+    return { version: null, scionVersion: null };
   }
 }
 
@@ -583,7 +654,7 @@ async function waitForBadgeValue(page, id, expectedValue, timeoutMs) {
   return { settled: false, atMs: null };
 }
 
-async function runBurstOnce(page, runIndex) {
+async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorRestore) {
   // Over-fetch beyond burstCount so there is room to skip already-suspended
   // agents without running out of candidates.
   const listResp = await fetch(
@@ -605,52 +676,104 @@ async function runBurstOnce(page, runIndex) {
   const preBurst = new Map(
     targets.map((a) => [a.id, { phase: a.phase, activity: a.activity || '' }])
   );
-  // bench-rev-2 R2: offset the rotation by runIndex so consecutive runs
-  // never request the same target phase for the same agent -- see
-  // pickBurstTarget's doc comment in lib.mjs for why that matters.
-  const targetPhase = new Map(
-    targets.map((a, idx) => [a.id, pickBurstTarget(idx, runIndex, preBurst.get(a.id).phase)])
-  );
+  // bench-rev-3 RR1(a): pickBurstTarget must exclude BOTH the agent's
+  // current (pre-burst) phase AND the phase it was targeted with on its
+  // previous run -- the pre-burst phase alone is constant across runs (it
+  // is restored every time), so excluding only it does not stop run r and
+  // run r+1 from requesting the same target. targetHistory persists across
+  // calls for the lifetime of one scenario (one Map per runBurstScenario
+  // call) so "previous run's target" means exactly that, not "previous
+  // idx-only rotation slot".
+  const targetPhase = new Map();
+  targets.forEach((a, idx) => {
+    const previousRunTarget = targetHistory.get(a.id) ?? null;
+    const phase = pickBurstTarget(idx, runIndex, preBurst.get(a.id).phase, previousRunTarget);
+    targetPhase.set(a.id, phase);
+    targetHistory.set(a.id, phase);
+  });
 
-  const postStartedAt = Date.now();
-  const postResults = await Promise.all(
+  // bench-rev-3 RR1: make staleness impossible to miscount, independent of
+  // whether the rotation or the restore-gating below are themselves
+  // correct. Read every target's badge BEFORE posting anything; any agent
+  // whose badge already shows the phase we are about to request cannot
+  // have that match attributed to THIS run's POST (it could be a restore
+  // that silently failed to reach the DOM, or any other stale state), so
+  // it is excluded from this run's settle tracking rather than risking a
+  // false "settled".
+  const preFireLabels = new Map(
+    await Promise.all(targets.map(async (a) => [a.id, await getStatusBadgeLabelDeep(page, a.id)]))
+  );
+  const preStaleIds = new Set(
+    targets
+      .filter((a) => {
+        const label = preFireLabels.get(a.id);
+        return label && label.toLowerCase() === targetPhase.get(a.id).toLowerCase();
+      })
+      .map((a) => a.id)
+  );
+  if (preStaleIds.size > 0) {
+    console.warn(
+      `  warning: run ${runIndex}: ${preStaleIds.size} agent(s) already show their target ` +
+        `phase before posting; excluded from this run's settle count`
+    );
+  }
+
+  // bench-rev-3 RR4: poll each agent's badge independently, starting as
+  // soon as THAT agent's own POST resolves -- not after Promise.all over
+  // every agent's POST, which the earlier (bench-rev-2 NB2) fix still did.
+  // An agent whose POST resolved early was previously only *first checked*
+  // once the slowest of the other 14 POSTs had also returned, inflating
+  // its recorded settle time by up to the spread between POST completions
+  // (0.24-1.40s in the v3 capture -- the same magnitude as the reported
+  // medians). Anchoring AND observing per agent removes that inflation
+  // entirely, rather than merely measuring around it.
+  const burstStartedAt = Date.now();
+  const perAgent = await Promise.all(
     targets.map(async (a) => {
-      const r = await postAgentStatus(a.id, { phase: targetPhase.get(a.id) });
-      return { id: a.id, ...r, postCompletedAtMs: Date.now() - postStartedAt };
+      const id = a.id;
+      const target = targetPhase.get(id);
+      const postRes = await postAgentStatus(id, { phase: target });
+      const postCompletedAt = Date.now();
+      if (!postRes.ok) {
+        return { id, ok: false, status: postRes.status, preStale: preStaleIds.has(id) };
+      }
+      if (preStaleIds.has(id)) {
+        // Accepted server-side, but we cannot distinguish a real update
+        // from the pre-existing stale badge -- do not poll, do not count
+        // toward settled/timed-out either way.
+        return { id, ok: true, status: postRes.status, preStale: true, postCompletedAt };
+      }
+      const deadline = postCompletedAt + settleTimeoutMs;
+      let settledAt = null;
+      for (;;) {
+        const label = await getStatusBadgeLabelDeep(page, id);
+        if (label && label.toLowerCase() === target.toLowerCase()) {
+          settledAt = Date.now();
+          break;
+        }
+        if (Date.now() > deadline) break;
+        await page.waitForTimeout(100);
+      }
+      return {
+        id,
+        ok: true,
+        status: postRes.status,
+        preStale: false,
+        postCompletedAt,
+        settled: settledAt != null,
+        settleMs: settledAt != null ? settledAt - postCompletedAt : null,
+      };
     })
   );
-  const burstSentMs = Date.now() - postStartedAt;
+  const burstSentMs = Date.now() - burstStartedAt;
 
-  const rejected = postResults.filter((r) => !r.ok);
-  const accepted = postResults.filter((r) => r.ok);
-  const postCompletedAt = new Map(accepted.map((r) => [r.id, postStartedAt + r.postCompletedAtMs]));
-
-  // Poll every accepted agent's badge until it shows its target status in
-  // the DOM (ground truth for "the live update reached the DOM"), or until
-  // settleTimeoutMs elapses. bench-rev-2 NB2: record each agent's OWN
-  // settle delta relative to ITS OWN POST completion, not a shared
-  // burst-start timestamp (which folds in POST latency as if it were SSE
-  // latency).
-  const deadline = Date.now() + settleTimeoutMs;
-  const settledAtByAgent = new Map();
-  const acceptedIds = accepted.map((r) => r.id);
-  for (;;) {
-    for (const id of acceptedIds) {
-      if (settledAtByAgent.has(id)) continue;
-      const label = await getStatusBadgeLabelDeep(page, id);
-      if (label && label.toLowerCase() === targetPhase.get(id).toLowerCase()) {
-        settledAtByAgent.set(id, Date.now());
-      }
-    }
-    if (settledAtByAgent.size === acceptedIds.length) break;
-    if (Date.now() > deadline) break;
-    await page.waitForTimeout(100);
-  }
-  const settledCount = settledAtByAgent.size;
-  const perAgentSettleMs = acceptedIds
-    .filter((id) => settledAtByAgent.has(id))
-    .map((id) => settledAtByAgent.get(id) - postCompletedAt.get(id));
+  const rejected = perAgent.filter((r) => !r.ok);
+  const accepted = perAgent.filter((r) => r.ok);
+  const tracked = accepted.filter((r) => !r.preStale);
+  const settled = tracked.filter((r) => r.settled);
+  const perAgentSettleMs = settled.map((r) => r.settleMs);
   const settleMM = minMax(perAgentSettleMs);
+  const acceptedIds = accepted.map((r) => r.id);
 
   // Distinguish "the server never applied the update" from "the UI did not
   // settle": GET each targeted agent's server-side phase independently of
@@ -662,10 +785,13 @@ async function runBurstOnce(page, runIndex) {
   ).filter(Boolean).length;
 
   // Restore every targeted agent to its pre-burst phase AND activity
-  // (bench-rev-2 NB1), then -- bench-rev-2 R2 -- WAIT for the restore to be
-  // confirmed in the DOM before returning, so the *next* run never starts
-  // against a stale, not-yet-restored badge. This doubles as a second,
-  // independent SSE-delivery measurement.
+  // (bench-rev-2 NB1), then -- bench-rev-2 R2, corrected by bench-rev-3
+  // RR1(b) -- WAIT for the restore to be confirmed in the DOM before
+  // returning. The expected label must match what the UI actually renders
+  // (web/src/shared/types.ts's getAgentDisplayStatus): a `running` agent
+  // with a non-empty activity displays its activity, not its literal
+  // phase, so comparing against the literal phase could never succeed for
+  // those agents regardless of how long this waited.
   const restoreStartedAt = Date.now();
   const restoreResults = await Promise.all(
     targets.map(async (a) => ({ id: a.id, ...(await postAgentStatus(a.id, preBurst.get(a.id))) }))
@@ -677,7 +803,8 @@ async function runBurstOnce(page, runIndex) {
   const restoreAcceptedIds = restoreResults.filter((r) => r.ok).map((r) => r.id);
   const restoreSettled = await Promise.all(
     restoreAcceptedIds.map(async (id) => {
-      const expected = preBurst.get(id).phase;
+      const pb = preBurst.get(id);
+      const expected = displayStatusLabel(pb.phase, pb.activity);
       const result = await waitForBadgeValue(page, id, expected, settleTimeoutMs);
       return { id, ...result };
     })
@@ -686,26 +813,42 @@ async function runBurstOnce(page, runIndex) {
   const restoreSettleMs = restoreSettled
     .filter((r) => r.settled)
     .map((r) => r.atMs - restoreStartedAt);
+  const restoreFullyConfirmed = restoreSettledCount === restoreAcceptedIds.length;
 
   return {
+    runIndex,
+    // bench-rev-3 RR1(b): the restore-wait now actually GATES the next
+    // run -- see runBurstScenario, which passes this run's
+    // restoreFullyConfirmed as the next run's invalidateDueToPriorRestore.
+    // A run fired while the previous run's restore was not confirmed in
+    // the DOM cannot be trusted to have started from the expected
+    // pre-burst state, so it is marked invalid rather than silently mixed
+    // into the scenario's settle statistics.
+    invalid: invalidateDueToPriorRestore === true,
+    invalidReason: invalidateDueToPriorRestore
+      ? 'previous run restore was not fully confirmed in the DOM before this run started'
+      : null,
     requestedCount: targets.length,
     acceptedCount: acceptedIds.length,
     rejectedCount: rejected.length,
     rejectedSample: rejected.slice(0, 3),
     burstSentMs,
-    settledCount,
+    preStaleExcludedCount: preStaleIds.size,
+    trackedCount: tracked.length,
+    settledCount: settled.length,
     serverAppliedCount,
-    timedOut: settledCount < acceptedIds.length,
-    // bench-rev-2 NB2: per-agent settle time (this agent's badge update
-    // minus this agent's own POST completion), not a shared burst-start
-    // delta. medianSettleMs/minSettleMs/maxSettleMs below describe THIS
-    // run's distribution across its own settled agents.
+    timedOut: settled.length < tracked.length,
+    // bench-rev-2 NB2, corrected by bench-rev-3 RR4: per-agent settle time
+    // (this agent's own badge update minus this SAME agent's own POST
+    // completion, observed by a polling loop dedicated to that agent, not
+    // started only after every other agent's POST also returned).
     medianSettleMs: median(perAgentSettleMs),
     minSettleMs: settleMM.min,
     maxSettleMs: settleMM.max,
     restoreFailureCount: restoreFailures.length,
     restoreSettledCount,
     restoreTotalCount: restoreAcceptedIds.length,
+    restoreFullyConfirmed,
     medianRestoreSettleMs: median(restoreSettleMs),
   };
 }
@@ -734,32 +877,47 @@ async function runBurstScenario(browser) {
     };
   }
 
+  // bench-rev-3 RR1: targetHistory persists per-agent-id across every run
+  // in this scenario (pickBurstTarget needs the REAL previous target, not
+  // just an idx-derived guess); priorRestoreConfirmed gates the NEXT run.
+  const targetHistory = new Map();
+  let priorRestoreConfirmed = true;
   const results = [];
   for (let i = 0; i < burstRuns; i++) {
-    const r = await runBurstOnce(page, i);
+    const invalidate = !priorRestoreConfirmed;
+    const r = await runBurstOnce(page, i, targetHistory, invalidate);
     results.push(r);
+    priorRestoreConfirmed = r.restoreFullyConfirmed;
     console.log(
-      `  burst run ${i}: ${r.acceptedCount}/${r.requestedCount} accepted, ` +
-        `${r.settledCount}/${r.acceptedCount} settled (median ${r.medianSettleMs}ms), ` +
+      `  burst run ${i}${r.invalid ? ' [INVALID: ' + r.invalidReason + ']' : ''}: ` +
+        `${r.acceptedCount}/${r.requestedCount} accepted ` +
+        `(${r.preStaleExcludedCount} pre-stale excluded), ` +
+        `${r.settledCount}/${r.trackedCount} settled (median ${r.medianSettleMs}ms), ` +
         `${r.serverAppliedCount}/${r.acceptedCount} server-applied, ` +
         `restore ${r.restoreSettledCount}/${r.restoreTotalCount} confirmed (timedOut=${r.timedOut})`
     );
   }
   await context.close();
 
-  const medianSettleValues = results.map((r) => r.medianSettleMs).filter((v) => v != null);
+  // bench-rev-3 RR1(b): a run marked invalid (fired while the previous
+  // run's restore was not yet confirmed) is excluded from the scenario's
+  // settle statistics -- it is reported in `results` for transparency, but
+  // not folded into medianSettleMs/fullySettledRunCount, which describe
+  // only runs known to have started from the expected pre-burst state.
+  const validResults = results.filter((r) => !r.invalid);
+  const medianSettleValues = validResults.map((r) => r.medianSettleMs).filter((v) => v != null);
   const mm = minMax(medianSettleValues);
   return {
     skipped: false,
     runsAttempted: results.length,
+    invalidRunCount: results.length - validResults.length,
     results,
     medianSettleMs: median(medianSettleValues),
     minSettleMs: mm.min,
     maxSettleMs: mm.max,
     stddevSettleMs: stddev(medianSettleValues),
-    fullySettledRunCount: results.filter((r) => !r.timedOut).length,
-    fullyRestoredRunCount: results.filter((r) => r.restoreSettledCount === r.restoreTotalCount)
-      .length,
+    fullySettledRunCount: validResults.filter((r) => !r.timedOut).length,
+    fullyRestoredRunCount: results.filter((r) => r.restoreFullyConfirmed).length,
   };
 }
 
@@ -780,9 +938,13 @@ async function main() {
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   });
 
+  const hubVersionInfo = await fetchHubVersion(hubBase);
   const report = {
     generatedAt: new Date().toISOString(),
     harnessCommit: gitHeadSha(),
+    harnessCommitDirty: gitIsDirty(),
+    hubVersion: hubVersionInfo.version,
+    hubScionVersion: hubVersionInfo.scionVersion,
     hubBaseUrl: hubBase,
     seedProjectId: seed.projectId,
     seedProjectSlug: seed.projectSlug,
@@ -796,17 +958,23 @@ async function main() {
   writeReportSoFar(report);
 
   try {
-    for (const scenario of scenarios) {
-      console.log(`running scenario ${scenario.key} (${runs} runs: 1 cold + ${runs - 1} warm)...`);
-      const results = await runScenario(browser, scenario, seed.agentCount);
-      report.scenarios[scenario.key] = summarizeScenario(scenario, results);
-      const s = report.scenarios[scenario.key];
-      console.log(
-        `  ${s.successCount}/${results.length} populated; outcomes=${JSON.stringify(s.outcomeCounts)}; ` +
-          `median nav->populated: ${s.medianNavToPopulatedMs}ms (cold=${s.medianNavToPopulatedMsCold}ms, warm=${s.medianNavToPopulatedMsWarm}ms); ` +
-          `median DOM count: ${s.medianDomElementCount} [${s.minDomElementCount}, ${s.maxDomElementCount}]`
-      );
-      writeReportSoFar(report);
+    if (burstOnly) {
+      console.log('--burst-only set: skipping the four view scenarios');
+    } else {
+      for (const scenario of scenarios) {
+        console.log(
+          `running scenario ${scenario.key} (${runs} runs: 1 cold + ${runs - 1} warm)...`
+        );
+        const results = await runScenario(browser, scenario, seed.agentCount);
+        report.scenarios[scenario.key] = summarizeScenario(scenario, results);
+        const s = report.scenarios[scenario.key];
+        console.log(
+          `  ${s.successCount}/${results.length} populated; outcomes=${JSON.stringify(s.outcomeCounts)}; ` +
+            `median nav->populated: ${s.medianNavToPopulatedMs}ms (cold=${s.medianNavToPopulatedMsCold}ms, warm=${s.medianNavToPopulatedMsWarm}ms); ` +
+            `median DOM count: ${s.medianDomElementCount} [${s.minDomElementCount}, ${s.maxDomElementCount}]`
+        );
+        writeReportSoFar(report);
+      }
     }
 
     console.log(`running SSE burst-update responsiveness scenario (${burstRuns} runs)...`);
@@ -818,7 +986,8 @@ async function main() {
         `  median settle time: ${report.liveUpdateBurst.medianSettleMs}ms ` +
           `[${report.liveUpdateBurst.minSettleMs}, ${report.liveUpdateBurst.maxSettleMs}]; ` +
           `${report.liveUpdateBurst.fullySettledRunCount}/${report.liveUpdateBurst.runsAttempted} runs fully settled, ` +
-          `${report.liveUpdateBurst.fullyRestoredRunCount}/${report.liveUpdateBurst.runsAttempted} fully restored`
+          `${report.liveUpdateBurst.fullyRestoredRunCount}/${report.liveUpdateBurst.runsAttempted} fully restored, ` +
+          `${report.liveUpdateBurst.invalidRunCount}/${report.liveUpdateBurst.runsAttempted} invalid (prior restore unconfirmed)`
       );
     }
     writeReportSoFar(report);

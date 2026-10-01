@@ -41,9 +41,9 @@ into your real `~/.scion`.
 
 ```sh
 # From the repo root.
-go build -buildvcs=false -o /tmp/scion-bin ./cmd/scion/
-go build -buildvcs=false -o /tmp/seed-bin ./perf/bench/seed/
-go build -buildvcs=false -o /tmp/apibench-bin ./perf/bench/apibench/
+go build -o /tmp/scion-bin ./cmd/scion/
+go build -o /tmp/seed-bin ./perf/bench/seed/
+go build -o /tmp/apibench-bin ./perf/bench/apibench/
 
 cd web
 npm install
@@ -51,6 +51,18 @@ npx playwright install chromium   # add --with-deps only if you have root/sudo
 npm run build                     # produces web/dist/client, used via --web-assets-dir
 cd ..
 ```
+
+**Do not add `-buildvcs=false` to the `apibench`/`seed` build commands**
+(bench-rev-3 RR3). `apibench`'s report records its own build commit via
+`runtime/debug.ReadBuildInfo()`'s `vcs.revision`/`vcs.modified` build
+settings -- `go build`'s default auto-stamping, which requires building
+*without* that flag. If your checkout cannot be VCS-stamped at all (e.g. no
+`.git`, or `go build` prints a VCS-status error), the tool degrades to an
+explicit `harnessCommitSource` explaining why rather than guessing -- it
+does not fall back to reading git state from the caller's current working
+directory, which is the bug RR3 fixed (an earlier version ran
+`git rev-parse HEAD` in the invoking shell's cwd and silently recorded
+whatever OTHER checkout happened to be there).
 
 `scion server start` (the local test-hub subprocess this harness drives) is
 removed from the CLI's command tree in `SCION_CLI_MODE=agent` (see
@@ -131,14 +143,22 @@ against the real instance metadata service.
    `rpc error: code = Unimplemented` lines appear either (those are
    `SCION_TELEMETRY_*` side effects, unrelated to GCP identity, and should
    not be reachable at all once the environment is scrubbed).
-3. While the hub is running, `lsof -p <hub-pid> -i` and confirm it prints
-   **no rows at all** for that PID (a healthy isolated hub holds its own
-   listening socket, visible via plain `lsof -p <hub-pid>` without `-i`, but
-   zero outbound/established network connections). Do not rely on
-   `ss -tnp` for this without root: in a shared network namespace (as in
-   this container) it lists every process's sockets, and without root it
-   cannot attach the `pid=` column to tell them apart -- a connection
-   `ss -tn` shows does not mean the hub holds it.
+3. While the hub is running, `lsof -a -nP -p <hub-pid> -i` and confirm the
+   only rows are the hub's own listening socket on 127.0.0.1 plus any
+   loopback client connections -- **no row with a non-loopback remote
+   address**.
+   **bench-rev-3 RR2: do not drop the `-a`.** `lsof -p <pid> -i` (no `-a`)
+   ORs its selectors instead of ANDing them: it is "every internet socket on
+   the host, **plus** every file descriptor PID holds", not "PID's internet
+   sockets". On a shared host this prints dozens of rows belonging to other
+   processes regardless of what the hub itself holds, so "prints no rows at
+   all" can never be the output of a working check and proves nothing about
+   isolation either way -- confirmed by running it against an idle,
+   socketless shell and getting 32 rows of other processes' sockets. `-a`
+   makes lsof AND its selectors (PID **and** `-i`), which is what this check
+   actually needs. Alternatively, with no `lsof` available: join
+   `/proc/<pid>/fd` socket inodes against `/proc/<pid>/net/tcp` directly (no
+   root required for a process you own).
 
 ## Seed a project
 
@@ -225,19 +245,47 @@ At 500 agents, some fraction of `project-agents-list`/`project-list`/
 (see `measurements.md` for how often, which varies run to run with host
 load -- bench-rev-2's review found the api-side client can occasionally
 still receive a slow-but-complete response past 60s, so this is a real but
-not deterministic cliff; see measurements.md's N9 discussion). Above it,
-the client gets a connection reset with no body, `project-detail.ts`'s
-`loadData()` `Promise.all` rejects, and the page falls to its error/empty
-state -- which renders almost no agent cards. **A naive "did the expected
-element count ever appear" check cannot tell that apart from "still
-rendering a huge DOM"**; `large-project-bench.mjs` watches the actual
-network outcome of the load-bearing API request (`page.on('response'
-/'requestfailed')`) to classify each run as `populated` /
-`load-failed(<reason>)` / `loaded-not-rendered` / `still-loading` instead.
-See `measurements.md`'s baseline section for what this looked like at 500
-agents on unmodified main, and bench-rev-1/bench-rev-2's reviews for how
-this was found (raw evidence at `gs://scion-xproject-exchange/slow-list/
-raw/bench-rev-1/` and `.../raw/bench-rev-2/`).
+not deterministic cliff). Above it, the client gets a connection reset with
+no body, `project-detail.ts`'s `loadData()` `Promise.all` rejects, and the
+page falls to its error/empty state -- which renders almost no agent cards.
+**A naive "did the expected element count ever appear" check cannot tell
+that apart from "still rendering a huge DOM"**; `large-project-bench.mjs`
+watches the actual network outcome of the load-bearing API request
+(`page.on('response'/'requestfailed')`) to classify each run as `populated`
+/ `load-failed(<reason>)` / `loaded-not-rendered` / `still-loading`
+instead, and records exactly when that outcome was observed
+(`networkObservedAtMs`, bench-rev-2 NB5).
+
+**bench-rev-3 RR5: "60 seconds" is the configured server write deadline, not
+the client-observed threshold.** The v3 browser capture's own
+`networkObservedAtMs` data at 500 agents:
+
+| View / run | Outcome | `networkObservedAtMs` |
+| --- | --- | ---: |
+| `project-grid` run 2 | populated (200) | 116,515 |
+| `standalone-graph` run 4 | populated (200) | 119,622 |
+| `project-list` run 4 | `load-failed(network:ERR_EMPTY_RESPONSE)` | 156,190 |
+| `standalone-graph` run 3 | `load-failed(network:ERR_EMPTY_RESPONSE)` | 161,755 |
+
+The empty replies this capture observed arrived at roughly 156-162s from
+navigation, not near 60s; loads whose response arrived at 116-120s
+succeeded. This does not disprove `WriteTimeout` as the mechanism -- under
+Go's HTTP/1.1 semantics the write deadline is armed once request headers
+are read and a timed-out write fails at handler-completion time, which can
+land well after the deadline itself if the handler is still running -- but
+a 120s *success* means the server-side clock (whatever it is actually
+measuring from) started well after this capture's navigation, or something
+else is also in play. **That is the open question `measurements.md`'s N9
+section discusses**; do not describe a specific wall-clock number as "the
+60s cliff" without citing the `networkObservedAtMs` timing that round's
+capture actually recorded, since it has not landed near 60s in any capture
+so far.
+
+See `measurements.md`'s baseline section for the full per-run data at 500
+agents on unmodified main, and bench-rev-1/bench-rev-2/bench-rev-3's
+reviews for how this was found and corrected (raw evidence at
+`gs://scion-xproject-exchange/slow-list/raw/bench-rev-1/`,
+`.../raw/bench-rev-2/`, and `.../raw/bench-rev-3/`).
 
 ## API benchmark
 
@@ -278,11 +326,23 @@ above; how often varies with host load, it is not "regularly" on every run).
 sampled once at the start and again at the end of the run (bench-rev-2 NB9:
 a 500-agent run takes long enough for load to swing within one report) --
 see "Choosing regression budgets" below for why this is recorded, and for
-what it is not sufficient for. The report also records the harness's own
-`git rev-parse HEAD` and the effective `--runs`/`--warmup`/
-`--timeout-seconds`/`--want-perf-trace` settings (bench-rev-2 NB4), so a
-report file is self-describing without having to match it to a commit by
-timestamp.
+what it is not sufficient for. The report also records the effective
+`--runs`/`--warmup`/`--timeout-seconds`/`--want-perf-trace` settings
+(bench-rev-2 NB4); `harnessCommit` (the binary's own build-time VCS
+revision -- bench-rev-2 NB4, bench-rev-3 RR3 fixed how this is obtained,
+see "One-time setup" above), `harnessCommitDirty`, and
+`harnessCommitSource`; and `hubVersion`/`hubScionVersion` (read from the
+hub's own `GET /health`, bench-rev-3 RR3) -- so a report file is
+self-describing on both sides (harness AND hub) without having to match
+either to a commit by timestamp.
+
+**Always pass `--notes`** describing conditions the report fields do not
+capture on their own (bench-rev-3 O7): how many other hub instances were
+co-resident during this run (every capture to date has run 25/100/500
+concurrently -- `MachineInfo.LoadAvg*` reflects the whole host, not this
+hub alone), and the per-size timeout values in effect if they were raised
+above the defaults shown in `EffectiveSettings`. A blank `notes` field in a
+raw report is a gap for whoever reads it later, not a neutral default.
 
 When run against a hub built from the `perf/2392-agent-list-instrumentation`
 branch (not yet merged) with `SCION_HUB_PERF_TRACE=1` set in the hub's
@@ -328,9 +388,13 @@ original investigation's view-toggle table), and `standalone-graph`
 (`/agents/graph?project={id}`) -- each `--runs` times: **run 0 uses a
 fresh ("cold") browser context; runs 1..N-1 share one ("warm") context**
 (bench-rev-2 NB3), reported separately
-(`medianNavToPopulatedMsCold`/`...Warm`) as well as combined, since a cold
-run is measurably slower and averaging it in without saying so is
-misleading.
+(`medianNavToPopulatedMsCold`/`...Warm`, `coldRunCount`/`warmRunCount`) as
+well as combined. **bench-rev-3 O3:** cold is necessarily `n=1` per
+scenario per capture, and the v3 data does not show a consistent cold
+penalty -- at 25 agents both graph views were *faster* cold, and at 500
+agents the grid was faster cold too. Report the split because a reader may
+care about it, not because this harness has established that one is
+reliably slower.
 
 Every run is classified `populated` / `load-failed(<reason>)` /
 `loaded-not-rendered` / `still-loading` (see "A real product finding"
@@ -358,25 +422,68 @@ attributable to it (`graphInteraction`) -- this was previously listed as a
 #2393 acceptance gap "not attempted here for lack of time"; no source
 change was needed, so it is implemented now.
 
+**bench-rev-3 O2: `graphInteraction.interactionMs` is mostly fixed harness
+overhead, not UI latency.** The sequence contains roughly 750ms of fixed
+`waitForTimeout` calls (five 50ms hover pauses, a 100ms post-zoom pause, a
+100ms post-drag-start pause, a 300ms settle pause) plus the wall-clock cost
+of around 30 Playwright round-trips (two 10-step drags and five hovers)
+that scale with Playwright/CDP overhead, not agent count. **Read the
+long-task delta (`graphInteraction.longTasks`), not `interactionMs`,** as
+the measurement of actual UI cost -- it is the field that scales with agent
+count in the v3 data (near-zero at 25 agents, up to ~733ms at 500 for
+`standalone-graph`) and the one `measurements.md` bases its conclusions on.
+
 It then runs the SSE burst-update scenario `--burst-runs` times (default:
-same as `--runs`), all within one browser context. Each run: picks up to
-`--burst-count` (default 15) agents that are **not** currently `suspended`
-(see below), fires real `phase` updates via the REST API as the seeded
-owner while checking every POST's status, polls each *accepted* agent's
-own rendered `<scion-status-badge>` until it shows the new value -- ground
-truth for "the live update reached the DOM" -- then **restores every
-updated agent to its pre-burst phase AND activity** (bench-rev-2 NB1) and
-**waits for the restore to be confirmed in the DOM** before the next run
-starts (bench-rev-2 R2: an earlier version fired the restore and moved on
-without waiting, so a slow-to-render restore from run *i* could be
-miscounted as run *i+1*'s own settle -- see `pickBurstTarget`'s doc comment
-in `lib.mjs` for the full mechanism). Settle time is measured **per agent,
-from that agent's own POST completion** (bench-rev-2 NB2: an earlier
-version measured from a shared burst-start timestamp, which folded
-roughly half of each reported "SSE settle time" into what was actually POST
-latency). Server-side application is confirmed independently via a
-follow-up GET per agent, so "the server never applied this update" and "the
-UI did not settle" are reported as distinct, non-overlapping counts.
+same as `--runs`; pass `--burst-only` to skip the four view scenarios above
+and go straight to the burst, e.g. for a targeted re-measurement after a
+burst-logic-only fix), all within one browser context. Each run: picks up
+to `--burst-count` (default 15) agents that are **not** currently
+`suspended` (see below), computes a target phase per agent via
+`pickBurstTarget`, fires real `phase` updates via the REST API as the
+seeded owner while checking every POST's status, polls each *accepted*
+agent's own rendered `<scion-status-badge>` until it shows the new value --
+ground truth for "the live update reached the DOM" -- then **restores
+every updated agent to its pre-burst phase AND activity** (bench-rev-2
+NB1) and **waits for the restore to be confirmed in the DOM** before the
+next run starts.
+
+Settle time is measured **per agent, independently, starting the instant
+THAT agent's own POST resolves** (bench-rev-3 RR4; bench-rev-2's NB2 fix
+anchored on each agent's own POST completion but still only started
+*observing* after every agent's POST had returned, which could inflate a
+fast agent's recorded settle by the spread between POST completions --
+0.24-1.40s in the v3 capture, the same magnitude as the reported medians).
+Server-side application is confirmed independently via a follow-up GET per
+agent, so "the server never applied this update" and "the UI did not
+settle" are reported as distinct, non-overlapping counts.
+
+**bench-rev-3 RR1: three independent guards against a lost SSE update being
+miscounted as settled**, since bench-rev-2's R2 fix (offsetting
+`pickBurstTarget`'s rotation by run index) turned out not to close this on
+its own -- the function's "never repeats" guarantee did not hold against
+the real caller, which always passes the constant pre-burst phase as
+`currentPhase`, not the previous run's own target (see `pickBurstTarget`'s
+doc comment in `lib.mjs` for the exact mechanism and `lib.test.mjs` for a
+test that holds `currentPhase` fixed, as the real caller does, and is
+confirmed to fail against the old idx-only implementation):
+
+1. `pickBurstTarget` now excludes both the agent's current phase AND the
+   actual phase it was targeted with on its own previous run (tracked per
+   agent-id across the whole scenario), not just the current phase.
+2. Immediately before posting each run's updates, every target's badge is
+   read; any agent already showing the phase about to be requested is
+   excluded from that run's settle tracking (`preStaleExcludedCount`) --
+   this closes the hole regardless of whether (1) or the restore-wait is
+   itself correct.
+3. The restore-wait now actually **gates**: if the previous run's restore
+   was not fully confirmed in the DOM (`restoreFullyConfirmed`), the next
+   run is marked `invalid` and excluded from the scenario's settle
+   statistics (`invalidRunCount`), rather than merely recording the gap
+   and proceeding anyway. The restore-wait's expected value is computed
+   the way the UI actually renders it (`displayStatusLabel` in `lib.mjs`:
+   activity instead of phase for a `running` agent with non-empty
+   activity) -- comparing against the literal phase, as an earlier version
+   did, could never match for those agents no matter how long it waited.
 
 Raise `--populate-timeout-ms`/`--nav-timeout-ms` (default 120000/120000) for
 large agent counts; at 500 agents on unmodified `main`, some views exceed
@@ -433,9 +540,10 @@ else is running. Repeated apibench reruns during review, under otherwise
 identical isolated conditions, varied by more than 2x run to run purely
 from this -- host-load noise, not anything this harness's own changes
 caused (an earlier draft of `measurements.md` incorrectly credited
-environment isolation for a faster recapture; see that file's "What
-changed and why" for the correction). Environment noise on this scale would
-swamp any regression budget chosen from data captured here.
+environment isolation for a faster recapture; see that file's "What changed
+since the v2 capture" section for the correction). Environment noise on
+this scale would swamp any regression budget chosen from data captured
+here.
 
 This data is also heavy-tailed (occasional samples several multiples of the
 typical value), so a budget built from mean + k*stddev over a small number

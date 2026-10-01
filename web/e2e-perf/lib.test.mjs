@@ -25,6 +25,7 @@ import {
   stddev,
   summarizeScenario,
   pickBurstTarget,
+  displayStatusLabel,
   BURST_TARGET_ROTATION,
 } from './lib.mjs';
 
@@ -171,36 +172,100 @@ test('summarizeScenario excludes non-populated runs from median/min/max and spli
   });
 });
 
-// ---- pickBurstTarget (bench-rev-2 R2) ----------------------------------------
+// ---- pickBurstTarget (bench-rev-2 R2, bench-rev-3 RR1) -----------------------
+//
+// bench-rev-3 RR1(c): the real caller (runBurstOnce in large-project-bench.mjs)
+// always passes the agent's PRE-BURST phase as `currentPhase` -- the SAME
+// value on every run, since it is restored between runs -- never the
+// previous run's own target. bench-rev-2's original test fed the previous
+// *target* back in as `currentPhase`, a model the real caller never
+// follows, so reverting pickBurstTarget to the old idx-only rotation still
+// passed it (21/21). The tests below hold `currentPhase` fixed across runs,
+// as the real caller does, and track `previousRunTarget` as its own,
+// separate argument -- the only shape that can actually catch RR1(a).
 
 test('pickBurstTarget never returns the current phase', () => {
   for (let idx = 0; idx < 20; idx++) {
     for (let run = 0; run < 10; run++) {
       for (const current of BURST_TARGET_ROTATION) {
-        const picked = pickBurstTarget(idx, run, current);
+        const picked = pickBurstTarget(idx, run, current, null);
         assert.notEqual(picked.toLowerCase(), current.toLowerCase());
       }
     }
   }
 });
 
-test('pickBurstTarget never repeats the same phase for the same agent on consecutive runs', () => {
-  // Simulate: agent at a fixed idx, restored to whatever the previous run
-  // targeted, then targeted again next run. The R2 bug was exactly this
-  // sequence producing the same phase twice in a row.
-  const idx = 3;
-  let phase = 'running'; // arbitrary pre-burst seed phase
-  for (let run = 0; run < 10; run++) {
-    const next = pickBurstTarget(idx, run, phase);
-    assert.notEqual(next.toLowerCase(), phase.toLowerCase());
-    phase = next; // simulate: this run's target becomes "current" for the next
+test('pickBurstTarget: holding currentPhase fixed (as the real caller does), consecutive runs never repeat the same target for the same agent', () => {
+  for (let idx = 0; idx < 20; idx++) {
+    for (const currentPhase of [...BURST_TARGET_ROTATION, 'running']) {
+      let previousRunTarget = null;
+      for (let run = 0; run < 10; run++) {
+        const picked = pickBurstTarget(idx, run, currentPhase, previousRunTarget);
+        assert.notEqual(picked.toLowerCase(), currentPhase.toLowerCase());
+        if (previousRunTarget !== null) {
+          assert.notEqual(
+            picked.toLowerCase(),
+            previousRunTarget.toLowerCase(),
+            `idx=${idx} run=${run} currentPhase=${currentPhase}: repeated ${picked} from the previous run`
+          );
+        }
+        previousRunTarget = picked;
+      }
+    }
+  }
+});
+
+// bench-rev-3 RR1(c)'s explicit ask: confirm the test above actually catches
+// the bug by running it against the bench-rev-2 (idx-only, no
+// previousRunTarget) implementation and showing it fails.
+test('mutation check: the consecutive-repeat test fails against the bench-rev-2 (idx-only) implementation', () => {
+  function idxOnlyPickBurstTarget(idx, runIndex, currentPhase) {
+    const n = BURST_TARGET_ROTATION.length;
+    let phase = BURST_TARGET_ROTATION[(idx + runIndex) % n];
+    if (phase.toLowerCase() === (currentPhase || '').toLowerCase()) {
+      phase = BURST_TARGET_ROTATION[(idx + runIndex + 1) % n];
+    }
+    return phase;
+  }
+
+  let sawRepeat = false;
+  for (let idx = 0; idx < 20 && !sawRepeat; idx++) {
+    for (const currentPhase of BURST_TARGET_ROTATION) {
+      let previousRunTarget = null;
+      for (let run = 0; run < 10; run++) {
+        const picked = idxOnlyPickBurstTarget(idx, run, currentPhase);
+        if (
+          previousRunTarget !== null &&
+          picked.toLowerCase() === previousRunTarget.toLowerCase()
+        ) {
+          sawRepeat = true;
+          break;
+        }
+        previousRunTarget = picked;
+      }
+      if (sawRepeat) break;
+    }
+  }
+  assert.equal(
+    sawRepeat,
+    true,
+    'expected the bench-rev-2 idx-only implementation to repeat a target at least once (RR1a)'
+  );
+});
+
+test('pickBurstTarget still returns a valid candidate when currentPhase equals previousRunTarget', () => {
+  for (let idx = 0; idx < 10; idx++) {
+    for (let run = 0; run < 10; run++) {
+      const picked = pickBurstTarget(idx, run, 'stopped', 'stopped');
+      assert.ok(BURST_TARGET_ROTATION.map((p) => p.toLowerCase()).includes(picked.toLowerCase()));
+    }
   }
 });
 
 test('pickBurstTarget only ever returns values from BURST_TARGET_ROTATION', () => {
   for (let idx = 0; idx < 5; idx++) {
     for (let run = 0; run < 5; run++) {
-      const picked = pickBurstTarget(idx, run, 'running');
+      const picked = pickBurstTarget(idx, run, 'running', null);
       assert.ok(BURST_TARGET_ROTATION.map((p) => p.toLowerCase()).includes(picked.toLowerCase()));
     }
   }
@@ -210,4 +275,22 @@ test('BURST_TARGET_ROTATION never includes suspended or running', () => {
   const lower = BURST_TARGET_ROTATION.map((p) => p.toLowerCase());
   assert.equal(lower.includes('suspended'), false);
   assert.equal(lower.includes('running'), false);
+});
+
+// ---- displayStatusLabel (bench-rev-3 RR1(b)) ---------------------------------
+// Mirrors web/src/shared/types.ts's getAgentDisplayStatus exactly -- the
+// restore-wait check must use this, not the literal phase, to have any
+// chance of matching a running-with-activity agent's rendered badge.
+
+test('displayStatusLabel returns activity for a running agent with non-empty activity', () => {
+  assert.equal(displayStatusLabel('running', 'compiling'), 'compiling');
+});
+
+test('displayStatusLabel returns phase when running with empty activity', () => {
+  assert.equal(displayStatusLabel('running', ''), 'running');
+});
+
+test('displayStatusLabel returns the literal phase for any non-running phase, regardless of activity', () => {
+  assert.equal(displayStatusLabel('stopped', 'leftover-activity'), 'stopped');
+  assert.equal(displayStatusLabel('error', ''), 'error');
 });
