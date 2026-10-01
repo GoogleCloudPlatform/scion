@@ -396,3 +396,28 @@ func TestAgentSubRoute_HandlerWithoutRouteFailsClosed(t *testing.T) {
 	srv.handleAgentByID(rec, req)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
+
+// TestAgentRouteRoot_MethodNotAllowed_SetsAllowHeader pins that a 405 from
+// the agent root and the project-agent root (an unsupported method such as
+// PUT on /api/v1/agents/{id} or /api/v1/projects/{p}/agents/{id}) carries the
+// Allow header merge-3's resolution kept on the inner method switch
+// (pat-b-b2-rev-5 O2).
+func TestAgentRouteRoot_MethodNotAllowed_SetsAllowHeader(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := tid("agent_route_root_allow_header_project")
+	createTestProject(t, s, projectID)
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{"agent root", "/api/v1/agents/agent-1"},
+		{"project-agent root", "/api/v1/projects/" + projectID + "/agents/agent-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPut, tc.path, nil)
+			assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "body: %s", rec.Body.String())
+			assert.Equal(t, "GET, PATCH, DELETE", rec.Header().Get("Allow"))
+		})
+	}
+}
