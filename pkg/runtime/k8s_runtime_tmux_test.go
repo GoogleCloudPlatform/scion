@@ -30,8 +30,12 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
-// MockHarness for testing command generation
-type MockHarness struct{}
+// MockHarness for testing command generation. Env, when set, is returned
+// verbatim by GetEnv so tests can exercise harness-contributed env vars
+// (e.g. to prove de-duplication against other env sources).
+type MockHarness struct {
+	Env map[string]string
+}
 
 func (m *MockHarness) Name() string { return "mock" }
 func (m *MockHarness) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
@@ -41,7 +45,7 @@ func (m *MockHarness) GetCommand(task string, resume bool, args []string) []stri
 	return []string{"/bin/echo", "hello"}
 }
 func (m *MockHarness) GetEnv(agentName, homeDir, username string) map[string]string {
-	return nil
+	return m.Env
 }
 func (m *MockHarness) DefaultConfigDir() string              { return ".mock" }
 func (m *MockHarness) SkillsDir() string                     { return ".mock/skills" }

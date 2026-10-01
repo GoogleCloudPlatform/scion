@@ -39,7 +39,8 @@ declare global {
 
 /**
  * Feature flags that are ON by default (Phase 5+).
- * These can still be disabled via server injection or localStorage override.
+ * These can still be disabled via the server (the experiments map or
+ * `setFeatureFlag()`) or a localStorage override.
  *
  * Entries stay string literals (not the exported constants below), because a
  * Go-side consistency test extracts this set with a regex that only sees
@@ -150,9 +151,10 @@ function warnIfShadowed(name: string): void {
 /**
  * Override a feature flag from the server-published settings.
  *
- * Writes into the same `window.__SCION_FEATURES__` bag the Go template uses,
- * so the value takes precedence over both the localStorage dev override and
- * the compiled default. Call this at boot, before any routing decision.
+ * Writes into the same `window.__SCION_FEATURES__` bag read by
+ * {@link isFeatureEnabled}, so the value takes precedence over both the
+ * localStorage dev override and the compiled default. Call this at boot,
+ * before any routing decision.
  *
  * @param name - Dot-separated flag name (e.g. "web.native_chat")
  * @param enabled - The server-authoritative value
@@ -165,8 +167,9 @@ export function setFeatureFlag(name: string, enabled: boolean): void {
 /**
  * Wave-2 native chat feature flag.
  * Default ON (W9) — added to DEFAULT_ON_FLAGS for general availability.
- * Disable via server injection or localStorage: scion:feature:web.native_chat_v2=false
- * to fall back to wave-1 UI for rollback.
+ * Disable via localStorage (scion:feature:web.native_chat_v2=false) to fall
+ * back to the wave-1 UI for rollback. The server's nativeChatEnabled=false
+ * (applied via setFeatureFlag) turns native chat off entirely, not just v2.
  */
 export const NATIVE_CHAT_V2_FLAG = 'web.native_chat_v2';
 
