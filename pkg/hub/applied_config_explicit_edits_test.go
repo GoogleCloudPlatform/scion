@@ -430,31 +430,36 @@ func configureUntouchedBody(t *testing.T) map[string]interface{} {
 }
 
 // TestApplyAgentUpdate_UntouchedSaveLeavesHubTelemetryAndEnvAlone is R1-1's
-// hub-side regression test, tightened per review round 2 (R2-2) and round 3
-// (R3-1): a live config with a REALISTIC hub-stamped telemetry config
-// (Cloud.Endpoint set, not just Enabled) and live Env/InlineConfig populated
-// the way create leaves them, PATCHed with configureUntouchedBody (the real
-// buildConfig output for an untouched form, not a hand-written
-// approximation), must leave CreateInputs and live Env untouched, must never
-// record telemetry into CreateInputs (the one thing Option C /
-// recordExplicitEdits controls), AND must leave the LIVE
-// AppliedConfig.InlineConfig.Telemetry itself untouched too.
+// hub-side regression test, tightened per review round 2 (R2-2), round 3
+// (R3-1) and round 4 (R4-1): a live config with a REALISTIC hub-stamped
+// telemetry config (Cloud.Endpoint set, not just Enabled) and live
+// Env/InlineConfig populated the way create leaves them, PATCHed with
+// configureUntouchedBody (the real buildConfig output for an untouched
+// form, not a hand-written approximation), must leave CreateInputs and live
+// Env untouched, must never record telemetry OR env into CreateInputs (the
+// one thing Option C / recordExplicitEdits controls), AND must leave the
+// LIVE AppliedConfig.InlineConfig.Telemetry and .Env themselves untouched
+// too.
 //
-// That last part is R3-1's fix, not recordExplicitEdits: once buildConfig
-// stopped echoing an untouched telemetry control (R1-1), the unconditional
-// wholesale InlineConfig replace in applyAgentUpdate would otherwise wipe
-// live Telemetry -- including an explicit opt-out -- on a plain Start with
-// no Save, since the request never mentions "telemetry" at all. The narrow
-// carve-out in applyAgentUpdate (right before `agent.AppliedConfig.
-// InlineConfig = cfg`) copies the live Telemetry forward whenever
-// "telemetry" was absent from the request and old.InlineConfig had one; this
-// runs AFTER recordExplicitEdits, so CreateInputs still correctly never sees
-// telemetry as explicit. An earlier version of this test asserted the
-// opposite (`assert.Nil(...InlineConfig.Telemetry)`, calling the loss
-// "pre-existing §7.2") -- that was wrong; §7.2 is the general wholesale
-// InlineConfig replace, but telemetry had always survived a configure-page
-// round trip before R1-1 made it (correctly) stop being echoed, so its being
-// wiped is this PR's own regression, not a pre-existing one.
+// That last part is carryForwardAbsentPageOwnedFields' job
+// (applied_config_explicit_edits.go), not recordExplicitEdits: once
+// buildConfig stopped echoing an untouched telemetry control (R1-1) or an
+// untouched env (R2-1), the unconditional wholesale InlineConfig replace in
+// applyAgentUpdate would otherwise wipe both live fields -- including an
+// explicit telemetry opt-out, and (for a legacy agent with no CreateInputs)
+// every explicit env key `scion reincarnate` has no other record of at all
+// (R4-1) -- on a plain Start with no Save, since the request never mentions
+// either key at all. The carve-out (right before `agent.AppliedConfig.
+// InlineConfig = cfg`) copies both forward from the pre-PATCH InlineConfig
+// whenever their key was absent from the request; this runs AFTER
+// recordExplicitEdits, so CreateInputs still correctly never sees either as
+// explicit. Earlier versions of this test asserted the opposite for each
+// field in turn (`assert.Nil(...InlineConfig.Telemetry)` then
+// `assert.Nil(...InlineConfig.Env)`, both calling the loss "pre-existing
+// §7.2") -- that was wrong both times; §7.2 is the general wholesale
+// InlineConfig replace, but both fields had always survived a configure-page
+// round trip before R1-1/R2-1 made them (correctly) stop being echoed, so
+// their being wiped was this PR's own regression, not a pre-existing one.
 //
 // Also covers R2-1 facet (a)'s two-step sequence: this fixture's live env
 // never had a SCION_AUTO_EXPOSE_* key, so after the untouched Save (step 1)
@@ -506,14 +511,18 @@ func TestApplyAgentUpdate_UntouchedSaveLeavesHubTelemetryAndEnvAlone(t *testing.
 	require.NoError(t, err)
 	assert.JSONEq(t, string(beforeEnv), string(afterEnv), "an untouched Save must leave live Env alone")
 	require.NotNil(t, updated.AppliedConfig.InlineConfig)
-	assert.Nil(t, updated.AppliedConfig.InlineConfig.Env,
-		"documents the pre-existing wholesale-InlineConfig-replace side effect (options.md §7.2, not fixed by this PR): "+
-			"InlineConfig.Env does go nil on an untouched save. The web-side R2-1 fix is what keeps populateForm reading "+
-			"the real auto-expose value back from the live AppliedConfig.Env regardless, not this.")
-	// R3-1: unlike Env, live Telemetry must survive -- applyAgentUpdate's
-	// narrow carve-out copies it forward whenever the request never
-	// mentions "telemetry", specifically so a plain Start never silently
-	// undoes an explicit opt-out or a project's TelemetryEnabled stamp.
+	// R4-1: live InlineConfig.Env must survive an untouched Save/Start --
+	// carryForwardAbsentPageOwnedFields copies it forward from the pre-PATCH
+	// InlineConfig whenever the request omits "env", specifically so a
+	// legacy agent (no CreateInputs) doesn't lose every explicit env key the
+	// next time it's reincarnated (legacyCreateInputsFromAppliedConfig reads
+	// exactly this field).
+	require.NotNil(t, updated.AppliedConfig.InlineConfig.Env, "live InlineConfig.Env must survive an untouched Save/Start")
+	assert.Equal(t, "explicit-value", updated.AppliedConfig.InlineConfig.Env["EXPLICIT_KEY"])
+	// R3-1: live Telemetry must survive too -- applyAgentUpdate's narrow
+	// carve-out copies it forward whenever the request never mentions
+	// "telemetry", specifically so a plain Start never silently undoes an
+	// explicit opt-out or a project's TelemetryEnabled stamp.
 	require.NotNil(t, updated.AppliedConfig.InlineConfig.Telemetry, "live hub telemetry must survive an untouched Save/Start")
 	require.NotNil(t, updated.AppliedConfig.InlineConfig.Telemetry.Enabled)
 	assert.True(t, *updated.AppliedConfig.InlineConfig.Telemetry.Enabled)
@@ -521,9 +530,10 @@ func TestApplyAgentUpdate_UntouchedSaveLeavesHubTelemetryAndEnvAlone(t *testing.
 	assert.Equal(t, "https://telemetry.example.com", updated.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint)
 
 	// Step 2: a reload-shaped PATCH (as the FIXED buildConfig would send
-	// after re-loading the now-ic.Env-nil agent and editing the one custom
-	// row) must not synthesize a SCION_AUTO_EXPOSE_* key that was never live
-	// -- R2-1 facet (a).
+	// after re-loading the agent -- whose InlineConfig.Env the R4-1
+	// carve-out kept equal to EXPLICIT_KEY, same as its live AppliedConfig.Env
+	// -- and editing the one custom row) must not synthesize a
+	// SCION_AUTO_EXPOSE_* key that was never live -- R2-1 facet (a).
 	step2 := configureUntouchedBody(t)
 	step2["env"] = map[string]interface{}{"EXPLICIT_KEY": "changed-value"}
 	rec2 := patchAgentConfig(t, srv, agent.ID, step2)
@@ -594,15 +604,66 @@ func TestApplyAgentUpdate_UntouchedSavePreservesExplicitTelemetryOptOut(t *testi
 		"an explicit telemetry opt-out must survive an untouched Save, not silently fall back to broker settings/template")
 }
 
+// TestApplyAgentUpdate_UntouchedSaveThenReincarnateKeepsLegacyAgentExplicitEnv
+// is R4-1's dedicated regression, the exact scenario options.md §5's test
+// plan and the "Legacy agent (no CI): No-op" edge case both depend on: an
+// agent with NO CreateInputs (predates the field, or was created before it
+// existed) relies entirely on legacyCreateInputsFromAppliedConfig
+// (reincarnate_config.go) reading its LIVE InlineConfig.Env back at
+// reincarnate time to recover its explicit env -- there is no CreateInputs
+// record to fall back on. Before the R4-1 carve-out, an untouched Save/Start
+// would wipe InlineConfig.Env via the wholesale replace, and reincarnate
+// would then silently lose every one of this agent's explicit env keys with
+// no warning.
+func TestApplyAgentUpdate_UntouchedSaveThenReincarnateKeepsLegacyAgentExplicitEnv(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Model = "golden-model"
+		a.AppliedConfig.Env = map[string]string{"FOO": "bar"}
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{
+			Model: "golden-model",
+			Env:   map[string]string{"FOO": "bar"},
+		}
+		// The defining condition for this test: no CreateInputs at all.
+		a.AppliedConfig.CreateInputs = nil
+	})
+
+	rec := patchAgentConfig(t, srv, agent.ID, configureUntouchedBody(t))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Nil(t, updated.AppliedConfig.CreateInputs, "an untouched Save must never create CreateInputs for a legacy agent")
+	require.NotNil(t, updated.AppliedConfig.InlineConfig)
+	assert.Equal(t, "bar", updated.AppliedConfig.InlineConfig.Env["FOO"],
+		"live InlineConfig.Env must survive the untouched Save -- it is the ONLY record a legacy agent has of this explicit env key")
+
+	fresh, _, err := srv.buildFreshAppliedConfig(ctx, updated, project, "")
+	require.NoError(t, err)
+	assert.Equal(t, "bar", fresh.Env["FOO"], "reincarnate must still recover the legacy agent's explicit env key after an untouched Save")
+}
+
 // TestApplyAgentUpdate_ReloadAfterUntouchedSavePreservesLiveAutoExposeValue
 // is R2-1 facet (b)'s dedicated regression: an agent whose live env DOES
 // have an explicit auto-expose key (true) must keep it true across an
 // untouched Save (step 1) followed by an unrelated custom-row edit (step 2,
-// sent as the FIXED buildConfig would after re-loading from the now-nil
-// InlineConfig.Env and reading the real value back from AppliedConfig.Env).
-// Before the fix, step 2 would have sent the global default (false) instead
-// of the real live value (true), silently flipping the live setting off and
-// recording the flip into CreateInputs.
+// sent as the FIXED buildConfig would after re-loading and reading the real
+// value back). Before the R2-1 fix, step 2 would have sent the global
+// default (false) instead of the real live value (true), silently flipping
+// the live setting off and recording the flip into CreateInputs.
+//
+// Since R4-1, InlineConfig.Env no longer goes nil after step 1 either (the
+// carryForwardAbsentPageOwnedFields carve-out keeps it equal to the live
+// AppliedConfig.Env), so this scenario is now doubly protected: the hub
+// carve-out keeps InlineConfig.Env correct, and the web-side R2-1 fix
+// (reading ac.env, not ic.env alone) means populateForm would get this
+// right even if some OTHER bug ever reintroduced the ic.env-goes-nil
+// behavior. The sanity check below asserts the (now correct) non-nil state,
+// where an earlier version of this test asserted the opposite.
 func TestApplyAgentUpdate_ReloadAfterUntouchedSavePreservesLiveAutoExposeValue(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -633,11 +694,14 @@ func TestApplyAgentUpdate_ReloadAfterUntouchedSavePreservesLiveAutoExposeValue(t
 	require.NoError(t, err)
 	assert.Equal(t, "true", mid.AppliedConfig.Env["SCION_AUTO_EXPOSE_PORTS"], "step 1 must leave live auto-expose unchanged")
 	require.NotNil(t, mid.AppliedConfig.InlineConfig)
-	assert.Nil(t, mid.AppliedConfig.InlineConfig.Env, "sanity check: InlineConfig.Env does go nil after the untouched save")
+	// R4-1: InlineConfig.Env must now ALSO survive the untouched save,
+	// carried forward by carryForwardAbsentPageOwnedFields.
+	require.NotNil(t, mid.AppliedConfig.InlineConfig.Env, "InlineConfig.Env must survive the untouched save")
+	assert.Equal(t, "true", mid.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"])
 
 	// Step 2: the FIXED page reloads, reads SCION_AUTO_EXPOSE_PORTS=true back
-	// from the live AppliedConfig.Env (not the now-nil InlineConfig.Env), and
-	// re-sends that same value while the user edits the unrelated K row.
+	// from the live env, and re-sends that same value while the user edits
+	// the unrelated K row.
 	rec2 := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
 		"env": map[string]interface{}{"K": "v2", "SCION_AUTO_EXPOSE_PORTS": "true"},
 	})

@@ -16,6 +16,7 @@ package hub
 
 import (
 	"encoding/json"
+	"maps"
 	"reflect"
 	"strings"
 
@@ -310,16 +311,79 @@ func recordOtherInlineFieldEdits(ensureInline func() *api.ScionConfig, oldInline
 	}
 }
 
+// carryForwardAbsentPageOwnedFields is the narrow page-owned carve-out from
+// options.md §7.2 (ptone/scion#2493 R3-1, extended by R4-1): a small,
+// explicit list of ScionConfig fields that the configure page used to send
+// UNCONDITIONALLY at base (e572e72) -- so the wholesale InlineConfig replace
+// in applyAgentUpdate was lossless for them -- but which Option C's
+// present-keys-only fixes (R1-1, R2-1) correctly made conditional, to stop
+// an untouched echo from freezing an unedited value into CreateInputs. That
+// correctness fix had a side effect this function undoes: for exactly these
+// fields, an untouched Save/Start now ALSO wipes the LIVE value via the same
+// wholesale replace, which base never did.
+//
+// It must be called from applyAgentUpdate AFTER recordExplicitEdits (so
+// CreateInputs has already correctly recorded these fields as untouched)
+// and AFTER the field's own live-AppliedConfig write (e.g. `if cfg.Env !=
+// nil { agent.AppliedConfig.Env = cfg.Env }`), but BEFORE the wholesale
+// `agent.AppliedConfig.InlineConfig = cfg` assignment it exists to patch.
+// present is the same lower-cased, raw-JSON-derived presence set
+// recordExplicitEdits uses; old is the pre-PATCH snapshot.
+//
+// Each field's live-write guard already treats "absent" the same way this
+// does (a nil cfg.Env, or a cfg.Telemetry this function has not yet filled
+// in, changes nothing live), so adding an entry here only ever fills in a
+// value the live write itself would otherwise have left untouched -- it
+// never overrides an explicit value or a live write.
+//
+// Covered fields and why each needs it (the sweep review round 4 asked for,
+// confirmed against base e572e72's buildConfig):
+//   - Env: resolveDerivedConfig's auto-expose/hub-default env stamps, and
+//     any create-time explicit env on a LEGACY agent (CreateInputs == nil),
+//     live only in InlineConfig.Env. legacyCreateInputsFromAppliedConfig
+//     (reincarnate_config.go) reads exactly that field to reconstruct a
+//     legacy agent's explicit inputs at reincarnate -- a nil InlineConfig.Env
+//     silently drops every one of its env keys, with no CreateInputs record
+//     to fall back on (R4-1).
+//   - Telemetry: project/hub telemetry defaults and an explicit opt-out live
+//     only in InlineConfig.Telemetry; a nil value lets the broker's
+//     settings/template fallback silently override it (R3-1).
+//
+// Fields checked and found NOT to need this (base buildConfig already sent
+// them conditionally, or MORE is sent at head than at base -- see PR body's
+// wipe-class audit table): model, image, auth_selectedType, task (hub-side
+// "empty means unchanged" fields, excluded from recordExplicitEdits
+// entirely and never wholesale-overwritten with a meaningfully different
+// absent value); thinking_level (sent unconditionally at both base and
+// head); branch, user, agent_instructions, system_prompt, max_turns,
+// max_model_calls, max_duration (truthy-only at base, explicit-empty-always
+// at head -- strictly more is sent now, never less); resources (`if
+// hasResources` at both base and head, unchanged). harness/harness_config/
+// default_harness_config and volumes/skills/mcp_servers/services/secrets/
+// hub/kubernetes were never sent by this page at either revision, so they
+// are §7.2's general wholesale-replace problem, not this narrow carve-out's.
+func carryForwardAbsentPageOwnedFields(cfg *api.ScionConfig, old *store.AgentAppliedConfig, present map[string]bool) {
+	if old.InlineConfig == nil {
+		return
+	}
+	if !present["telemetry"] && old.InlineConfig.Telemetry != nil {
+		cfg.Telemetry = deepCopyTelemetryConfig(old.InlineConfig.Telemetry)
+	}
+	if !present["env"] {
+		cfg.Env = maps.Clone(old.InlineConfig.Env)
+	}
+}
+
 // deepCopyTelemetryConfig returns an independent copy of cfg via a JSON
 // marshal/unmarshal round trip (the same technique deepCopyScionConfig uses,
 // handlers_agent_create_helpers.go). Returns nil for a nil input, and nil
 // (with the error swallowed) if marshaling ever fails.
 //
-// Used by applyAgentUpdate's R3-1 carve-out (ptone/scion#2493) to preserve
-// the live InlineConfig.Telemetry across a PATCH that never mentions
-// "telemetry" -- a copy, not the same pointer, so the caller's subsequent
-// wholesale InlineConfig replace (agent.AppliedConfig.InlineConfig = cfg)
-// never leaves the new InlineConfig aliasing the old one's Telemetry.
+// Used by carryForwardAbsentPageOwnedFields to preserve the live
+// InlineConfig.Telemetry across a PATCH that never mentions "telemetry" --
+// a copy, not the same pointer, so the caller's subsequent wholesale
+// InlineConfig replace (agent.AppliedConfig.InlineConfig = cfg) never leaves
+// the new InlineConfig aliasing the old one's Telemetry.
 func deepCopyTelemetryConfig(cfg *api.TelemetryConfig) *api.TelemetryConfig {
 	if cfg == nil {
 		return nil

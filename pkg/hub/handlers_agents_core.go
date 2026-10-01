@@ -2691,22 +2691,21 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		if cfg.Env != nil {
 			agent.AppliedConfig.Env = cfg.Env
 		}
-		// Narrow carve-out, ptone/scion#2493 R3-1 -- NOT part of
+		// Narrow carve-out, ptone/scion#2493 R3-1/R4-1 -- NOT part of
 		// recordExplicitEdits/invariant E above, which has already run and
-		// correctly left CreateInputs alone since "telemetry" was absent.
-		// This instead protects the LIVE value: the configure page no longer
-		// echoes an untouched telemetry control (R1-1), so without this, the
+		// correctly left CreateInputs alone for whichever of these fields
+		// were absent. This instead protects the LIVE InlineConfig value:
+		// the configure page no longer echoes an untouched telemetry
+		// control or an untouched env (R1-1, R2-1), so without this, the
 		// unconditional wholesale InlineConfig replace just below would wipe
-		// an explicit telemetry opt-out (or a project's TelemetryEnabled
-		// stamp from create, handlers_agent_create_helpers.go) on a plain
-		// Start with no Save -- the broker then falls back to settings or
-		// the template telemetry (pkg/agent/provision.go merges settings
-		// telemetry under a nil inline Telemetry). A present "telemetry" key
-		// (the user actually toggled it) always wins via cfg.Telemetry as
-		// decoded; only an absent key borrows the live value forward.
-		if !presentConfigKeys["telemetry"] && old.InlineConfig != nil && old.InlineConfig.Telemetry != nil {
-			cfg.Telemetry = deepCopyTelemetryConfig(old.InlineConfig.Telemetry)
-		}
+		// them -- an explicit telemetry opt-out, a project's env/telemetry
+		// stamp from create, or (for a legacy agent with no CreateInputs) a
+		// create-time explicit env key that `scion reincarnate` has no other
+		// record of at all. See carryForwardAbsentPageOwnedFields' doc
+		// comment for the field-by-field sweep. A present key (the user
+		// actually touched that field) always wins via cfg as already
+		// decoded; this only fills in a field the request left absent.
+		carryForwardAbsentPageOwnedFields(cfg, &old, presentConfigKeys)
 		agent.AppliedConfig.InlineConfig = cfg
 	}
 
