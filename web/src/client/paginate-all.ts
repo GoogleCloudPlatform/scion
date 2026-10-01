@@ -15,8 +15,7 @@
  */
 
 /**
- * Generic cursor-pagination walker for `nextCursor`-paginated list endpoints
- * (ptone/scion#2367).
+ * Generic cursor-pagination walker for `nextCursor`-paginated list endpoints.
  *
  * Fetches every page of a list endpoint via `apiFetch`, following
  * `nextCursor` until it is empty — not until a page's `items` are empty,
@@ -32,7 +31,6 @@
  */
 
 import { apiFetch } from './api.js';
-import type { ApiFetchOptions } from './api.js';
 
 /** One parsed page: its items, plus the cursor for the next page (absent/empty on the last page). */
 export interface ParsedPage<T> {
@@ -49,8 +47,6 @@ export interface PaginateAllOptions<T> {
   parsePage: (body: unknown) => ParsedPage<T>;
   /** Safety bound on the number of pages followed. Defaults to 500 — well above any realistic hub size. */
   maxPages?: number;
-  /** Forwarded to `apiFetch` so a caller can cancel an in-progress walk. */
-  signal?: AbortSignal;
   /** A human-readable name for this list, used only in thrown error messages. Defaults to `path`. */
   label?: string;
 }
@@ -67,13 +63,13 @@ export class PaginationError extends Error {
 
 /**
  * Fetch every page of `options.path`, following `nextCursor` until it is
- * empty. Throws {@link PaginationError} (or rethrows an `AbortError` as-is
- * when `signal` fired mid-request) on the first page that fails — callers
- * that need to preserve previously loaded data on a failed walk should keep
- * their own copy until this resolves, rather than publishing partial results.
+ * empty. Throws {@link PaginationError} on the first page that fails —
+ * callers that need to preserve previously loaded data on a failed walk
+ * should keep their own copy until this resolves, rather than publishing
+ * partial results.
  */
 export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[]> {
-  const { path, pageSize, parsePage, signal } = options;
+  const { path, pageSize, parsePage } = options;
   const maxPages = options.maxPages ?? DEFAULT_MAX_PAGES;
   const label = options.label ?? path;
 
@@ -87,22 +83,14 @@ export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[
     const url = cursor
       ? `${path}${separator}limit=${pageSize}&cursor=${encodeURIComponent(cursor)}`
       : `${path}${separator}limit=${pageSize}`;
-    const fetchOptions: ApiFetchOptions | undefined = signal ? { signal } : undefined;
-    const res = await apiFetch(url, fetchOptions);
+    const res = await apiFetch(url);
     if (!res.ok) {
       throw new PaginationError(`${label} request failed: ${res.status}`);
     }
     let raw: unknown;
     try {
       raw = await res.json();
-    } catch (err) {
-      // A cancelled walk can abort `signal` out from under an in-flight body
-      // read: `res.json()` then rejects with an AbortError, not because the
-      // body was malformed. Rethrow it as-is so a caller's AbortError
-      // handling sees "cancelled," not "load failure."
-      if (signal?.aborted) {
-        throw err;
-      }
+    } catch {
       throw new PaginationError(`${label} response was not valid JSON`);
     }
     // A JSON body can be any of null, an array, or a primitive (string,

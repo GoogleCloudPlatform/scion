@@ -71,7 +71,7 @@ const loadSpaceRail = () => import('../shared/chat/chat-space-rail.js');
 // Lazy-load the members sidebar only when v2 is active
 const loadChatMembers = () => import('../shared/chat/chat-members.js');
 
-/** Page size for the hub members sidebar's full users/agents walk (ptone/scion#2367). */
+/** Page size for the hub members sidebar's full users/agents walk. */
 const HUB_MEMBERS_PAGE_SIZE = 100;
 
 /** Members panel width bounds, in px. */
@@ -201,7 +201,7 @@ interface RawHubUser {
   status?: string;
 }
 
-/** `paginateAll`'s page extractor for `/api/v1/users` (ptone/scion#2367). */
+/** `paginateAll`'s page extractor for `/api/v1/users`. */
 function parseHubUsersPage(body: unknown): { items: RawHubUser[]; nextCursor?: string } {
   const data = body as { users?: RawHubUser[]; nextCursor?: string };
   return { items: data.users ?? [], ...(data.nextCursor ? { nextCursor: data.nextCursor } : {}) };
@@ -224,7 +224,7 @@ interface RawHubAgent {
   canAttach?: boolean;
 }
 
-/** `paginateAll`'s page extractor for `/api/v1/agents` (ptone/scion#2367). */
+/** `paginateAll`'s page extractor for `/api/v1/agents`. */
 function parseHubAgentsPage(body: unknown): { items: RawHubAgent[]; nextCursor?: string } {
   const data = body as { agents?: RawHubAgent[]; nextCursor?: string };
   return { items: data.agents ?? [], ...(data.nextCursor ? { nextCursor: data.nextCursor } : {}) };
@@ -314,26 +314,42 @@ export class ScionPageChat extends LitElement {
   private _onConversationMarkedUnread = this._handleConversationMarkedUnread.bind(this);
   private _unreadDMRequestId = 0;
   /**
-   * Coalescing gate for {@link loadHubMembers} (ptone/scion#2367). `loadHubMembers`
-   * has at least four call sites (route parse, `initV2`'s no-conversation
-   * branch, a rail-data re-parse, and the fallback poll) that can all fire
-   * within the same synchronous turn on a cold `/chat` mount, plus later,
-   * genuinely independent triggers while a walk is still in flight.
+   * Coalescing gate for {@link loadHubMembers}. `loadHubMembers` has several
+   * call sites — a route parse, `initV2`'s no-conversation branch, a
+   * rail-data re-parse, `handleResetView`, and the fallback poll — that can
+   * all fire within the same synchronous turn on a cold `/chat` mount, plus
+   * later, genuinely independent triggers while a walk is still in flight.
    *
    * `_hubMembersScheduled` batches every call that arrives before the
    * scheduled walk actually starts: those calls are indistinguishable from
    * each other (same turn, nothing could have changed between them), so they
    * collapse into the single `queueMicrotask`-deferred walk with zero extra
-   * requests. `_hubMembersInFlight` is true only once that walk's network
-   * requests are actually in flight; a call arriving then sets
-   * `_hubMembersReloadQueued` instead of starting a second walk, and
-   * `_runHubMembersLoad`'s loop performs exactly one trailing walk once the
-   * current one settles — further calls during that trailing walk set the
-   * same flag again rather than queuing a second one.
+   * requests.
+   *
+   * `_hubMembersInFlight` is true only once that walk's network requests are
+   * actually in flight. A call arriving then is one of two kinds:
+   *
+   * - A "join" call (the default — route/view re-parses, which re-derive the
+   *   same hub-wide view rather than reacting to anything that could have
+   *   changed the data) simply waits for the walk already running; it does
+   *   not queue anything.
+   * - A `{ refresh: true }` call (only the fallback poll, which exists
+   *   precisely because something could have changed since the last load)
+   *   sets `_hubMembersReloadQueued`, and `_runHubMembersLoad`'s loop performs
+   *   exactly one trailing walk once the current one settles. Further calls
+   *   during that trailing walk re-set the same flag (or simply join it, if
+   *   they're join calls) rather than queuing a second one.
    */
   private _hubMembersScheduled = false;
   private _hubMembersInFlight = false;
   private _hubMembersReloadQueued = false;
+  /**
+   * Bumped on `disconnectedCallback`, same pattern as `_unreadDMRequestId`
+   * below. A walk captures this at the start and compares it before looping
+   * again or publishing, so a walk that outlives the element's connection to
+   * the document can't write into a detached page after the fact.
+   */
+  private _hubMembersGeneration = 0;
   private _onDMPromoted = this.handleDMPromoted.bind(this);
   /** Bound keydown handler for Cmd/Ctrl+K quick switcher. */
   private _onKeydown = this._handleGlobalKeydown.bind(this);
@@ -1049,6 +1065,7 @@ export class ScionPageChat extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     ++this._unreadDMRequestId;
+    ++this._hubMembersGeneration;
     this._mobileLayoutQuery?.removeEventListener('change', this._onMobileLayoutChange);
     this._mobileLayoutQuery = null;
     document.removeEventListener('keydown', this._onKeydown);
@@ -1218,7 +1235,11 @@ export class ScionPageChat extends LitElement {
       if (this.v2Conversation?.projectId) {
         void this.loadV2Members(this.v2Conversation.projectId);
       } else {
-        void this.loadHubMembers();
+        // The one caller that exists specifically because the hub member
+        // list might have changed since the last load — unlike the
+        // route/view re-parses elsewhere, which just want whatever walk is
+        // already in flight.
+        void this.loadHubMembers({ refresh: true });
       }
     }, FALLBACK_POLL_INTERVAL_MS);
   }
@@ -2240,10 +2261,18 @@ export class ScionPageChat extends LitElement {
    * doc comment for why this has to batch its many call sites rather than
    * issue one request per call. Synchronous and fire-and-forget so every
    * existing `void this.loadHubMembers();` call site keeps working unchanged.
+   *
+   * `options.refresh` distinguishes the two kinds of caller: route/view
+   * re-parses (the default) just want the current hub-wide view and are
+   * content to join a walk already in flight, since nothing they know of
+   * could have changed since it started. Only the fallback poll — the one
+   * caller that exists specifically because something *might* have changed
+   * since the last load — passes `{ refresh: true }` to queue a trailing
+   * walk when one is already running.
    */
-  private loadHubMembers(): void {
+  private loadHubMembers(options?: { refresh?: boolean }): void {
     if (this._hubMembersInFlight) {
-      this._hubMembersReloadQueued = true;
+      if (options?.refresh) this._hubMembersReloadQueued = true;
       return;
     }
     if (this._hubMembersScheduled) return;
@@ -2254,20 +2283,30 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Runs the actual walk, then — if another call arrived while it was in
-   * flight — runs exactly one more before releasing the gate. A call that
-   * arrives during that trailing walk re-sets the same flag rather than
+   * Runs the actual walk, then — if a refresh was requested while it was in
+   * flight — runs exactly one more before releasing the gate. A refresh
+   * requested during that trailing walk re-sets the same flag rather than
    * queuing a second one, so three triggers during one walk still produce
    * only one trailing reload.
+   *
+   * Stops instead of starting a trailing walk once a specific conversation
+   * (a project or DM) is open, or once the element has been disconnected —
+   * in both cases, the hub-wide view this walk is for is no longer on
+   * screen, so a trailing walk would have nothing valid to publish into.
    */
   private async _runHubMembersLoad(): Promise<void> {
+    const generation = this._hubMembersGeneration;
     this._hubMembersScheduled = false;
     this._hubMembersInFlight = true;
     try {
       do {
         this._hubMembersReloadQueued = false;
         await this._fetchHubMembersOnce();
-      } while (this._hubMembersReloadQueued);
+      } while (
+        this._hubMembersReloadQueued &&
+        generation === this._hubMembersGeneration &&
+        !this.v2Conversation
+      );
     } finally {
       this._hubMembersInFlight = false;
     }
@@ -2282,8 +2321,17 @@ export class ScionPageChat extends LitElement {
    * unexpected failure anywhere in the assignment below (not just a rejected
    * walk) leaves both lists exactly as they were rather than throwing out of
    * this `queueMicrotask`-scheduled call, where nothing would catch it.
+   *
+   * Skips publishing entirely if a specific conversation is open, or the
+   * element has disconnected, by the time the walk (which can take several
+   * page-fetches) finishes — a hub-wide walk that started while the global
+   * `/chat` view was showing must not overwrite a project's or DM's member
+   * list, or the shared `v2Members` roster, with every user and agent in the
+   * hub just because it happened to land after the user navigated away or
+   * left the page.
    */
   private async _fetchHubMembersOnce(): Promise<void> {
+    const generation = this._hubMembersGeneration;
     const [usersResult, agentsResult] = await Promise.allSettled([
       paginateAll({
         path: '/api/v1/users',
@@ -2300,6 +2348,10 @@ export class ScionPageChat extends LitElement {
     ]);
 
     try {
+      // The hub view this walk is for may no longer be on screen by the time
+      // it finishes — see the doc comment above.
+      if (this.v2Conversation || generation !== this._hubMembersGeneration) return;
+
       if (usersResult.status === 'fulfilled') {
         // /api/v1/users carries no presence state. Preserve whatever
         // refreshHubMemberPresence() (or an SSE presence event) already
@@ -2309,7 +2361,17 @@ export class ScionPageChat extends LitElement {
         for (const h of this.v2HumanMembers) {
           if (h.presenceState) currentPresence.set(h.id, h.presenceState);
         }
+        // /api/v1/users paginates by creation-time offset, not a stable
+        // keyset cursor, so a signup or deletion mid-walk can shift page
+        // boundaries and return the same user twice. De-dupe by id (keeping
+        // the first occurrence) so that can't produce duplicate-keyed rows.
+        const seenUserIds = new Set<string>();
         this.v2HumanMembers = usersResult.value
+          .filter((u) => {
+            if (seenUserIds.has(u.id)) return false;
+            seenUserIds.add(u.id);
+            return true;
+          })
           .filter((u) => u.status !== 'disabled')
           .map((u) => ({
             id: u.id,

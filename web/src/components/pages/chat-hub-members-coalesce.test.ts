@@ -15,16 +15,21 @@
  */
 
 /**
- * `loadHubMembers` coalescing and full-pagination coverage (ptone/scion#2367).
+ * `loadHubMembers` coalescing and full-pagination coverage.
  *
- * The chat sidebar's hub-members load has at least four call sites (route
- * parse, `initV2`'s no-conversation branch, a rail-data re-parse, and a
- * fallback poll) and used to fetch only the first page of users/agents with
- * no in-flight coalescing — a cold `/chat` open could issue several
- * overlapping full-list requests. These tests exercise the private
- * `loadHubMembers` method directly (the element is never appended, so
- * `connectedCallback`/`initV2` never runs) to isolate the gate and
- * pagination behaviour from the rest of the page's lifecycle.
+ * The chat sidebar's hub-members load has several call sites (route parse,
+ * `initV2`'s no-conversation branch, a rail-data re-parse, `handleResetView`,
+ * and a fallback poll) and used to fetch only the first page of users/agents
+ * with no in-flight coalescing — a cold `/chat` open could issue several
+ * overlapping full-list requests.
+ *
+ * Most of these tests exercise the private `loadHubMembers` method directly
+ * (the element is never appended, so `connectedCallback`/`initV2` never
+ * runs) to isolate the gate and pagination behaviour from the rest of the
+ * page's lifecycle — that only proves same-turn calls batch correctly, not
+ * that the real call sites actually land in the same turn on a real mount.
+ * The "real cold mount" test below instead appends the element and drives
+ * `connectedCallback` for real, to check that.
  */
 
 // @vitest-environment happy-dom
@@ -43,6 +48,14 @@ vi.mock('../../client/api.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../client/api.js')>();
   return { ...actual, apiFetch: vi.fn() };
 });
+
+// The real cold-mount test drives `connectedCallback`, which awaits these
+// lazy imports before its own route parse / no-conversation `loadHubMembers`
+// call. Their actual implementations are irrelevant to the coalescing gate
+// under test, and importing them for real would pull in unrelated component
+// trees — stub them so the import resolves immediately.
+vi.mock('../shared/chat/chat-space-rail.js', () => ({}));
+vi.mock('../shared/chat/chat-members.js', () => ({}));
 
 let ScionPageChat: any;
 
@@ -102,7 +115,7 @@ afterEach(() => {
 });
 
 describe('loadHubMembers coalescing gate', () => {
-  it('a cold mount that triggers all the call sites issues exactly one users walk and one agents walk', async () => {
+  it('same-turn loadHubMembers calls, all arriving before the walk starts, batch into a single walk', async () => {
     vi.mocked(apiFetch).mockImplementation(
       routeByPath(
         () => usersPage(['u1']),
@@ -111,11 +124,11 @@ describe('loadHubMembers coalescing gate', () => {
     );
     const page = createPage();
 
-    // Simulate the four real call sites firing back-to-back in the same
-    // synchronous turn, exactly as they do during a cold `/chat` mount
-    // (route parse, initV2's no-conversation branch, a rail-data re-parse,
-    // and the fallback poll's first tick all reach this method before any
-    // of them has actually issued a network request).
+    // Four calls back-to-back in the same synchronous turn, before any of
+    // them has actually issued a network request. This only proves the
+    // batching window collapses same-turn calls — see the "real cold mount"
+    // test below for whether the actual call sites land in this window on a
+    // real mount.
     page.loadHubMembers();
     page.loadHubMembers();
     page.loadHubMembers();
@@ -137,7 +150,7 @@ describe('loadHubMembers coalescing gate', () => {
     expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a1']);
   });
 
-  it('a single trigger during an in-flight load causes exactly one trailing reload', async () => {
+  it('a single refresh trigger during an in-flight load causes exactly one trailing reload', async () => {
     let resolveFirstUsers!: (r: Response) => void;
     const firstUsers = new Promise<Response>((resolve) => {
       resolveFirstUsers = resolve;
@@ -159,9 +172,11 @@ describe('loadHubMembers coalescing gate', () => {
     // actually go out — this is the "in flight" window.
     await flush();
 
-    // A genuinely later trigger (e.g. the periodic poll) arrives while the
-    // first walk's users request is still unresolved.
-    page.loadHubMembers();
+    // The periodic poll is the one caller that passes `{ refresh: true }`,
+    // since it exists specifically because the member list might have
+    // changed since the last load. It arrives while the first walk's users
+    // request is still unresolved.
+    page.loadHubMembers({ refresh: true });
 
     resolveFirstUsers(usersPage(['u1']));
     // Flush the first walk's completion and the trailing reload it queues.
@@ -180,7 +195,7 @@ describe('loadHubMembers coalescing gate', () => {
     expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u2']);
   });
 
-  it('three triggers during one in-flight load still cause only one trailing reload', async () => {
+  it('three refresh triggers during one in-flight load still cause only one trailing reload', async () => {
     let resolveFirstUsers!: (r: Response) => void;
     const firstUsers = new Promise<Response>((resolve) => {
       resolveFirstUsers = resolve;
@@ -200,10 +215,11 @@ describe('loadHubMembers coalescing gate', () => {
     page.loadHubMembers();
     await flush();
 
-    // Three independent later triggers while the first walk is in flight.
-    page.loadHubMembers();
-    page.loadHubMembers();
-    page.loadHubMembers();
+    // Three independent later refresh triggers while the first walk is in
+    // flight.
+    page.loadHubMembers({ refresh: true });
+    page.loadHubMembers({ refresh: true });
+    page.loadHubMembers({ refresh: true });
 
     resolveFirstUsers(usersPage(['u1']));
     await flush();
@@ -229,6 +245,168 @@ describe('loadHubMembers coalescing gate', () => {
     const usersCalls = vi
       .mocked(apiFetch)
       .mock.calls.filter((c) => (c[0] as string).startsWith('/api/v1/users'));
+    expect(usersCalls.length).toBe(1);
+  });
+
+  it('join triggers (the default — route/view re-parses) during an in-flight load do not queue a trailing reload', async () => {
+    let resolveFirstUsers!: (r: Response) => void;
+    const firstUsers = new Promise<Response>((resolve) => {
+      resolveFirstUsers = resolve;
+    });
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => firstUsers,
+        () => agentsPage(['a1'])
+      )
+    );
+    const page = createPage();
+
+    page.loadHubMembers();
+    await flush();
+
+    // Three later join triggers — e.g. a route re-parse and initV2's own
+    // no-conversation check — arrive while the walk is in flight. None of
+    // them knows of anything that could have changed, so none should queue a
+    // trailing walk.
+    page.loadHubMembers();
+    page.loadHubMembers();
+    page.loadHubMembers();
+
+    resolveFirstUsers(usersPage(['u1']));
+    await flush();
+
+    const usersCalls = vi
+      .mocked(apiFetch)
+      .mock.calls.filter((c) => (c[0] as string).startsWith('/api/v1/users'));
+    expect(usersCalls.length).toBe(1);
+    expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u1']);
+  });
+
+  it('a real cold mount: connectedCallback, its lazy-import-gated route re-parse, and a rail-loaded re-parse join the same walk', async () => {
+    window.history.pushState({}, '', '/chat');
+
+    let resolveUsers!: (r: Response) => void;
+    const pendingUsers = new Promise<Response>((resolve) => {
+      resolveUsers = resolve;
+    });
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => pendingUsers,
+        () => agentsPage(['a1'])
+      )
+    );
+
+    const page = document.createElement('scion-page-chat') as any;
+    document.body.appendChild(page);
+    // A genuinely later trigger than connectedCallback's own `initV2` call —
+    // the router handing the page its data, exactly as it does on a real
+    // cold mount, before `initV2`'s lazy rail/members imports resolve.
+    page.pageData = { user: { id: 'user-me' } };
+
+    // Let everything that can fire in this window actually fire: updated()'s
+    // pageData branch, initV2's lazy imports and no-conversation branch, all
+    // while the first walk's users request is still unresolved.
+    await flush();
+
+    // A later rail-loaded re-parse (handleRailLoaded's parseV2Route call)
+    // also lands in this window on a real mount.
+    page.dispatchEvent(new CustomEvent('rail-loaded', { detail: { spaceIds: [], spaces: [] } }));
+    await flush();
+
+    resolveUsers(usersPage(['u1']));
+    await flush();
+
+    try {
+      const usersCalls = vi
+        .mocked(apiFetch)
+        .mock.calls.filter((c) => (c[0] as string).startsWith('/api/v1/users'));
+      const agentsCalls = vi
+        .mocked(apiFetch)
+        .mock.calls.filter((c) => (c[0] as string).startsWith('/api/v1/agents'));
+      expect(usersCalls.length).toBe(1);
+      expect(agentsCalls.length).toBe(1);
+      expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u1']);
+      expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a1']);
+    } finally {
+      document.body.removeChild(page);
+    }
+  });
+});
+
+describe('loadHubMembers view-change race', () => {
+  it('a walk in flight when the user opens a project does not overwrite that project members with hub members', async () => {
+    let resolveUsers!: (r: Response) => void;
+    const pendingUsers = new Promise<Response>((resolve) => {
+      resolveUsers = resolve;
+    });
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => pendingUsers,
+        () => agentsPage(['hub-agent'])
+      )
+    );
+    const page = createPage();
+
+    // A hub-wide walk starts while the global /chat view is showing.
+    page.loadHubMembers();
+    await flush();
+
+    // The user opens a project before the hub walk's users request resolves.
+    // loadV2Members sets v2Conversation synchronously, same as every real
+    // call site (handleThreadSelect, etc.), before its own fetch resolves.
+    page.v2Conversation = { projectId: 'p1' };
+    page.v2HumanMembers = [{ id: 'proj-user', kind: 'user', displayName: 'Proj User' }];
+    page.v2AgentMembers = [{ id: 'proj-agent', kind: 'agent', displayName: 'Proj Agent' }];
+    page.v2Members = [{ id: 'proj-user', name: 'Proj User', email: '', kind: 'user' }];
+
+    // The hub-wide walk, still in flight, now lands.
+    resolveUsers(usersPage(['hub-user']));
+    await flush();
+
+    // The project's member list must survive — the hub walk was for a view
+    // that's no longer on screen.
+    expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['proj-user']);
+    expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['proj-agent']);
+    expect(page.v2Members.map((m: any) => m.id)).toEqual(['proj-user']);
+  });
+
+  it('a trailing walk queued before a project opens is skipped rather than overwriting that project on completion', async () => {
+    let resolveFirstUsers!: (r: Response) => void;
+    const firstUsers = new Promise<Response>((resolve) => {
+      resolveFirstUsers = resolve;
+    });
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => firstUsers,
+        () => agentsPage(['hub-agent'])
+      )
+    );
+    const page = createPage();
+
+    page.loadHubMembers();
+    await flush();
+
+    // The fallback poll fires while the first walk is in flight, queuing a
+    // trailing walk.
+    page.loadHubMembers({ refresh: true });
+
+    // Before that first walk settles (and before the trailing walk would
+    // run), the user opens a project.
+    page.v2Conversation = { projectId: 'p1' };
+    page.v2HumanMembers = [{ id: 'proj-user', kind: 'user', displayName: 'Proj User' }];
+
+    resolveFirstUsers(usersPage(['hub-user']));
+    await flush();
+
+    // Neither the settling first walk nor a trailing walk (which should not
+    // even have started once a conversation is open) may publish hub members
+    // over the project's.
+    expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['proj-user']);
+    const usersCalls = vi
+      .mocked(apiFetch)
+      .mock.calls.filter((c) => (c[0] as string).startsWith('/api/v1/users'));
+    // Only the first walk's request — no trailing walk was started once a
+    // conversation was open.
     expect(usersCalls.length).toBe(1);
   });
 });
@@ -273,6 +451,28 @@ describe('loadHubMembers full pagination', () => {
     expect(page.v2AgentMembers.length).toBe(150);
     expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(userIds);
     expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(agentIds);
+  });
+
+  it('de-dupes a user returned on two pages (the offset-pagination boundary-shift case)', async () => {
+    // /api/v1/users paginates by offset, not a keyset cursor, so a signup
+    // between page 1 and page 2 can shift the boundary and return the same
+    // user on both pages.
+    let userCall = 0;
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => {
+          userCall++;
+          return userCall === 1 ? usersPage(['u1', 'u2'], 'u-cursor') : usersPage(['u2', 'u3']);
+        },
+        () => agentsPage(['a1'])
+      )
+    );
+    const page = createPage();
+
+    page.loadHubMembers();
+    await flush();
+
+    expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u1', 'u2', 'u3']);
   });
 });
 

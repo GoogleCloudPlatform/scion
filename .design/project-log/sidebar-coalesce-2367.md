@@ -99,3 +99,49 @@ rejection from the `queueMicrotask`-scheduled call.
   current human/agent lists are after each walk.
 - No change to SSE handling or shared-state semantics beyond what
   `loadHubMembers` already seeded.
+
+## Review round 1 follow-up (2026-10-01)
+
+A connected-element repro showed a real cold `/chat` mount still ran two full
+users/agents walks, not one, and a trailing walk could land after the user had
+already navigated to a project or DM, overwriting that view's member list with
+every user and agent in the hub. Fixes, each with a new test:
+
+- **Join vs. refresh.** `loadHubMembers` now takes an optional
+  `{ refresh?: boolean }`. Route/view re-parses (the route parse, `initV2`'s
+  no-conversation branch, the rail-data re-parse, `handleResetView`) pass
+  nothing and just join a walk already in flight, since none of them know of
+  anything that could have changed since it started. Only the periodic
+  fallback poll passes `{ refresh: true }`, since it exists specifically
+  because the list might have changed — only that caller queues a trailing
+  walk. This is what makes a real cold mount settle on exactly one walk per
+  list instead of two.
+- **View-change race.** A generation counter (`_hubMembersGeneration`, bumped
+  on `disconnectedCallback`, same pattern as the existing
+  `_unreadDMRequestId`) is captured at the start of each walk. Before
+  publishing, and before looping for a trailing walk, the walk checks that
+  counter plus `this.v2Conversation` — if a specific conversation has opened,
+  or the element has disconnected, since the walk started, it skips
+  publishing (and skips starting a trailing walk) rather than overwriting a
+  project's or DM's member list, or the shared `v2Members` roster, with
+  hub-wide data for a view that is no longer on screen.
+- **User de-duplication.** `/api/v1/users` paginates by creation-time offset
+  rather than a keyset cursor, so a signup or deletion mid-walk can shift page
+  boundaries and return the same user on two pages (agents use a keyset
+  cursor and are unaffected). `loadHubMembers` now de-dupes the walked users
+  list by id before publishing.
+- Removed an unused `signal`/abort option from `paginate-all.ts` (no caller
+  passed one) and the fork-tracker issue reference from source comments
+  (`ptone/scion#2367` doesn't resolve once this lands upstream); the tracker
+  reference stays in this log entry and the branch/commit metadata per the
+  project-log convention.
+- Not changed: the quick-switcher palette's own loaders
+  (`fetchAllPaletteAgents`/`fetchAllPaletteUsers` in `chat-palette-data.ts`)
+  still hand-roll their own cursor walk — a reasonable follow-up is to move
+  them onto `paginateAll` for consistency, but that file belongs to a
+  different ownership split and was out of scope here. Also not changed: the
+  sidebar still publishes each list only after its full walk completes, so a
+  very large hub's first paint is `pages x page-time` rather than one page —
+  this is the brief's intended behavior, not a regression, and progressive
+  first-page publication is a possible future follow-up if that latency
+  becomes a problem in practice.
