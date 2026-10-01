@@ -222,7 +222,7 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 					// independently of stage ordering — it does not rely on
 					// stage 2 having already rejected a missing evidence
 					// before this fact ever runs.
-					var factAgent AgentIdentity = agent
+					factAgent := agent
 					noEvidence := false
 					if h, ok := principal.Identity.(*hubDeliveryIdentity); ok {
 						if h == nil || h.evidence == nil {
