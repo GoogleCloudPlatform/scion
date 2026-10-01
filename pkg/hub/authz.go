@@ -160,8 +160,16 @@ type CredentialContext struct {
 	ID        string
 	Type      string
 	ProjectID string
-	Scopes    []string
-	Ceiling   permissions.FrozenPermissionCeiling
+	// Boundary carries the credential-side boundary (project or hub) for a
+	// UAT credential; nil for every other credential kind. ProjectID is
+	// filled from the same boundary for a project-scoped UAT, so a caller
+	// that reads only ProjectID sees a value consistent with Boundary. A
+	// boundary-aware caller should read Boundary directly, never infer
+	// hub-vs-project from an empty ProjectID, which is never a positive
+	// claim of hub scope by itself.
+	Boundary *TokenBoundary
+	Scopes   []string
+	Ceiling  permissions.FrozenPermissionCeiling
 
 	// Descriptive credential metadata. Decoration is additive,
 	// server-derived attribution (token name/boundary/purpose/labels) for
@@ -1868,7 +1876,11 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 	}
 	switch v := identity.(type) {
 	case *ScopedUserIdentity:
-		cc := CredentialContext{Kind: CredentialKindUAT, ID: v.CredentialID(), ProjectID: v.ScopedProjectID(), Scopes: v.ScopedScopes(), Ceiling: v.Ceiling()}
+		// The typed-nil case is handled by the guard above, before this
+		// switch is reached, so v is guaranteed non-nil here and
+		// v.Boundary() cannot dereference a nil receiver.
+		boundary := v.Boundary()
+		cc := CredentialContext{Kind: CredentialKindUAT, ID: v.CredentialID(), ProjectID: v.ScopedProjectID(), Boundary: &boundary, Scopes: v.ScopedScopes(), Ceiling: v.Ceiling()}
 		// Carry the descriptive decoration, if ValidateToken attached one,
 		// through to the credential context. This is the single copy point;
 		// decoration is never otherwise derived here. Decoration() already

@@ -17,11 +17,14 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/google/uuid"
 )
 
 // Agent represents an agent record in the Hub database.
@@ -1689,8 +1692,16 @@ type UserAccessToken struct {
 	KeyHash string `json:"-"`      // SHA-256 hash (never exposed)
 
 	// Scoping
-	ProjectID string   `json:"projectId"` // Required: project this token is scoped to
-	Scopes    []string `json:"scopes"`    // Action scopes (resource:action pairs)
+	//
+	// BoundaryKind is the credential-side boundary this token was issued
+	// under (permissions.BoundaryKind: "project" or "hub"). ProjectID is
+	// set iff BoundaryKind == "project"; it is empty for a hub-boundary
+	// token and must never be interpreted as hub — an empty or missing
+	// ProjectID with a "project" BoundaryKind is invalid, not hub-scoped
+	// (see ValidateBoundary).
+	BoundaryKind string   `json:"boundaryKind"`
+	ProjectID    string   `json:"projectId"` // set iff BoundaryKind == "project"; empty otherwise; never interpreted as hub
+	Scopes       []string `json:"scopes"`    // Action scopes (resource:action pairs)
 
 	// CeilingVersion and CeilingPermissionIDs hold the normalized, frozen
 	// permission ceiling. CeilingVersionUnspecified (zero value) with
@@ -1743,6 +1754,40 @@ func (t *UserAccessToken) NormalizedCeiling() permissions.FrozenPermissionCeilin
 		Version:       t.CeilingVersion,
 		PermissionIDs: t.CeilingPermissionIDs,
 	}
+}
+
+// ErrInvalidUATBoundary is returned when a UserAccessToken's BoundaryKind/
+// ProjectID combination is invalid: an unrecognized kind, a "project"
+// boundary with a missing, malformed or nil-UUID project ID, or a "hub" boundary
+// carrying a project ID. A row that fails this must never authenticate: an
+// empty or malformed ProjectID is never coerced into a hub boundary, and an
+// invalid row is rejected rather than repaired or trusted.
+var ErrInvalidUATBoundary = errors.New("invalid user access token boundary")
+
+// ValidateBoundary reports whether t's BoundaryKind/ProjectID combination is
+// well-formed. It shares its kind/project-id-presence rule with
+// permissions.ValidBoundary — the same rule pkg/hub's TokenBoundary.Valid()
+// calls — so store-layer and authorization-layer validation cannot drift.
+// It additionally requires ProjectID to parse as a non-nil UUID when
+// BoundaryKind is "project", since pkg/store owns the wire representation of
+// that ID. The nil UUID is rejected because no project carries it: a stored
+// empty project_id string scans back as the nil UUID, so accepting it would let a
+// row with no project authenticate as a project token.
+func (t *UserAccessToken) ValidateBoundary() error {
+	kind := permissions.BoundaryKind(t.BoundaryKind)
+	if !permissions.ValidBoundary(kind, t.ProjectID) {
+		return fmt.Errorf("%w: kind=%q project_id_set=%v", ErrInvalidUATBoundary, t.BoundaryKind, t.ProjectID != "")
+	}
+	if kind == permissions.BoundaryKindProject {
+		id, err := uuid.Parse(t.ProjectID)
+		if err != nil {
+			return fmt.Errorf("%w: project id is not a valid UUID", ErrInvalidUATBoundary)
+		}
+		if id == uuid.Nil {
+			return fmt.Errorf("%w: project id is the nil UUID", ErrInvalidUATBoundary)
+		}
+	}
+	return nil
 }
 
 // UATPrefix is the token prefix that distinguishes UATs from other token types.

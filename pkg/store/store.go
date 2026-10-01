@@ -1242,7 +1242,10 @@ type UserAccessTokenStore interface {
 	// CountUserAccessTokens returns the number of active (non-revoked) tokens for a user.
 	CountUserAccessTokens(ctx context.Context, userID string) (int, error)
 
-	// DeleteUserAccessTokensByProject permanently removes all tokens scoped to a project.
+	// DeleteUserAccessTokensByProject permanently removes all "project"-boundary
+	// tokens scoped to projectID. A hub-boundary token belonging to one of the
+	// project's members is never removed by this call, even if that member
+	// loses access to the project as a result of its deletion.
 	// Returns the number of tokens deleted.
 	DeleteUserAccessTokensByProject(ctx context.Context, projectID string) (int, error)
 
