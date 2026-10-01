@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite vet lint vet-integration compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-harness-coverage check-authorization-catalog check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-harness-coverage check-authorization-catalog check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -164,6 +164,26 @@ lint:
 vet-integration:
 	@go vet -tags 'integration volume_test' ./...
 
+## vet-integration-extras: Compile-check integration-tagged code in extras/ modules (fixes ptone/scion#2394)
+# vet-integration only covers the root module's ./... tree; extras/*
+# modules are separate go.mod trees it never reaches. Discovers modules
+# dynamically (grep for the build tag) so new ones are covered without
+# editing this target.
+vet-integration-extras:
+	@echo "Vetting integration-tagged code in extras modules..."
+	@failed=0; \
+	for moddir in $$(find extras -maxdepth 2 -name go.mod -printf '%h\n' | sort); do \
+		if grep -rlq '^//go:build.*\bintegration\b' "$$moddir" --include='*.go' >/dev/null 2>&1; then \
+			echo "  $$moddir"; \
+			(cd "$$moddir" && go vet -tags integration ./...) || { echo "  FAILED: $$moddir"; failed=$$((failed + 1)); }; \
+		fi; \
+	done; \
+	if [ "$$failed" -gt 0 ]; then \
+		echo "$$failed extras module(s) failed integration vet."; \
+		exit 1; \
+	fi; \
+	echo "All extras modules with integration-tagged code vetted."
+
 ## compat-literals: Check legacy grove literals stay in compatibility surfaces
 compat-literals:
 	@./hack/check-project-compat-literals.sh
@@ -295,7 +315,7 @@ ci: fmt-check lint check-custom test-fast build
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-typecheck web-test lint vet-integration check-custom golangci-lint test-fast build
+ci-full: fmt-check web web-typecheck web-test lint vet-integration vet-integration-extras check-custom golangci-lint test-fast build
 	@echo ""
 	@echo "CI (full) passed."
 
