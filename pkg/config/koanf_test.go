@@ -261,6 +261,26 @@ func TestGetSettingsPath(t *testing.T) {
 	}
 }
 
+func TestSettingsHierarchySources_DedupsRelativeAndAbsolutePaths(t *testing.T) {
+	// A relative spelling of a directory and its absolute equivalent must
+	// resolve to the same settings file and collapse to a single entry,
+	// mirroring serverConfigSources' relative/absolute dedup behavior.
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	if err := os.WriteFile(filepath.Join(cwd, "settings.yaml"), []byte("active_profile: test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join(cwd, "settings.yaml")
+	got := settingsHierarchySources(".", cwd)
+	if len(got) != 1 {
+		t.Fatalf("settingsHierarchySources(\".\", %q) = %v, want exactly one entry", cwd, got)
+	}
+	if got[0] != want {
+		t.Errorf("settingsHierarchySources(\".\", %q) = %v, want [%q]", cwd, got, want)
+	}
+}
+
 func TestGetScionAgentConfigPath(t *testing.T) {
 	tmpDir := t.TempDir()
 

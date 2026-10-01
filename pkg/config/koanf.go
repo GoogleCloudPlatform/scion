@@ -286,8 +286,12 @@ func LoadSettingsFromDir(dir string) (*Settings, error) {
 
 // settingsHierarchySources resolves each directory to its settings file path
 // (if any) for the unused-keys warning's dedup key and log message. Empty
-// directories and directories with no settings file are omitted; duplicate
-// resolved paths (e.g. projectPath == effectiveProjectPath) collapse to one.
+// directories and directories with no settings file are omitted; each
+// resolved path is made absolute (like serverConfigSources, and without
+// symlink resolution, for the same reason) before the dedup check so that a
+// relative and absolute spelling of the same directory (e.g. projectPath and
+// effectiveProjectPath) collapse to one entry instead of being warned about
+// twice.
 func settingsHierarchySources(dirs ...string) []string {
 	seen := make(map[string]struct{}, len(dirs))
 	var out []string
@@ -298,6 +302,9 @@ func settingsHierarchySources(dirs ...string) []string {
 		path := GetSettingsPath(dir)
 		if path == "" {
 			continue
+		}
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
 		}
 		if _, ok := seen[path]; ok {
 			continue
