@@ -358,7 +358,13 @@ describe('makeFakeIntersectionObserver (test helper)', () => {
     const unobservedEntry = { isIntersecting: true, target: unobservedTarget };
     fakeIO.fire([observedEntry, unobservedEntry]);
 
-    expect(received).toEqual([observedEntry]);
+    // toEqual compares deeply, and Vitest's deep-equality for DOM nodes
+    // uses isEqualNode — two empty <div>s are equal — so toEqual([observedEntry])
+    // would pass even if fire() delivered unobservedEntry instead: it
+    // checks only how many entries were delivered, not which one. Assert
+    // identity instead.
+    expect(received).toHaveLength(1);
+    expect(received![0]).toBe(observedEntry);
   });
 });
 
