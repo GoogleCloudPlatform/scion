@@ -930,9 +930,9 @@ func TestProjectSettings_DefaultGCPIdentity_AcceptsBlockWithNoProviders(t *testi
 		"a project with no linked broker has no known runtime to reject against; got: %s", rec.Body.String())
 }
 
-// Stored block defaults are not migrated or rewritten (ptone's ruling):
-// reading an existing "block" value must keep working even after the project
-// becomes Kubernetes-bound. Only a NEW write of "block" is refused.
+// Stored block defaults are not migrated or rewritten: reading an existing
+// "block" value must keep working even after the project becomes
+// Kubernetes-bound. Only a NEW write of "block" is refused.
 func TestProjectSettings_DefaultGCPIdentity_ExistingBlockValueReadableAfterProjectBecomesKubernetesBound(t *testing.T) {
 	srv, s := testServer(t)
 	project := createTestProjectForSettings(t, s)
@@ -961,12 +961,10 @@ func TestProjectSettings_DefaultGCPIdentity_ExistingBlockValueReadableAfterProje
 // already stores "block" and has since become Kubernetes-bound. PUT is a full
 // replace and the settings page resends the current value on every save
 // (project-settings.ts), so treating every "block" in the body as new would
-// force a migration of stored values the ruling explicitly rules out
-// ("stored block defaults are NOT migrated or rewritten"). This is the
-// natural companion to
+// force a migration of stored values, which stored block defaults must not
+// undergo. This is the natural companion to
 // TestProjectSettings_DefaultGCPIdentity_ExistingBlockValueReadableAfterProjectBecomesKubernetesBound
-// above, covering the write path instead of the read path (PR 2332 review
-// round 1, finding 1).
+// above, covering the write path instead of the read path.
 func TestProjectSettings_DefaultGCPIdentity_ResavingStoredBlockSucceedsOnKubernetesBoundProject(t *testing.T) {
 	srv, s := testServer(t)
 	project := createTestProjectForSettings(t, s)
@@ -1009,7 +1007,7 @@ func TestProjectSettings_DefaultGCPIdentity_ResavingStoredBlockSucceedsOnKuberne
 
 // A broker linked to the project but reporting no profiles at all has nothing
 // to confirm its runtime type from — brokerIsKubernetesOnly must not treat
-// that as Kubernetes-only (PR 2332 review round 1, finding 5, mutation G2).
+// that as Kubernetes-only.
 func TestProjectSettings_DefaultGCPIdentity_AcceptsBlockForProviderWithNoProfiles(t *testing.T) {
 	srv, s := testServer(t)
 	project := createTestProjectForSettings(t, s)
@@ -1029,7 +1027,7 @@ func TestProjectSettings_DefaultGCPIdentity_AcceptsBlockForProviderWithNoProfile
 // Distinct from mixed PROVIDERS (TestProjectSettings_DefaultGCPIdentity_AcceptsBlockForMixedRuntimeProject,
 // which uses two single-profile brokers): here ONE broker's own profile list
 // mixes kubernetes and docker. The per-profile check must be "every", not
-// "any" (PR 2332 review round 1, finding 5, mutation G2).
+// "any".
 func TestProjectSettings_DefaultGCPIdentity_AcceptsBlockForBrokerWithMixedProfiles(t *testing.T) {
 	srv, s := testServer(t)
 	project := createTestProjectForSettings(t, s)
@@ -1053,7 +1051,7 @@ func TestProjectSettings_DefaultGCPIdentity_AcceptsBlockForBrokerWithMixedProfil
 // Every spelling the runtime factory accepts for the Kubernetes runtime
 // ("kubernetes", "k8s", "remote") must be recognized — a broker profile's
 // Type is the runtime config's map key name, and the factory accepts all
-// three as referring to the same runtime (PR 2332 review round 1, finding 4).
+// three as referring to the same runtime.
 func TestProjectSettings_DefaultGCPIdentity_RejectsBlockForKubernetesAliasSpellings(t *testing.T) {
 	for _, alias := range []string{"kubernetes", "k8s", "remote"} {
 		t.Run(alias, func(t *testing.T) {
@@ -1078,13 +1076,13 @@ func TestProjectSettings_DefaultGCPIdentity_RejectsBlockForKubernetesAliasSpelli
 // gcpIdentityFailingBrokerStore wraps a real store.Store and fails every
 // GetRuntimeBroker call with a generic (non-ErrNotFound) error, to pin that
 // projectIsKubernetesBound propagates a real store error instead of silently
-// treating it as "allow" (PR 2332 review round 1, finding 10).
+// treating it as "allow".
 type gcpIdentityFailingBrokerStore struct {
 	store.Store
 }
 
 func (f *gcpIdentityFailingBrokerStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
-	return nil, fmt.Errorf("injected: runtime broker lookup failure")
+	return nil, fmt.Errorf("simulated: runtime broker lookup failure")
 }
 
 func TestProjectSettings_DefaultGCPIdentity_PropagatesRealBrokerLookupError(t *testing.T) {
@@ -1112,8 +1110,7 @@ func TestProjectSettings_DefaultGCPIdentity_PropagatesRealBrokerLookupError(t *t
 // case specifically, and projectIsKubernetesBound's "do not guess" rule
 // applies — the write is allowed, same as any other unconfirmable broker.
 // This is the ErrNotFound branch that TestProjectSettings_..._PropagatesRealBrokerLookupError
-// does not exercise (that test injects a generic error, not ErrNotFound) — PR
-// 2332 review round 2, finding 5, mutation G4b.
+// does not exercise (that test returns a generic error, not ErrNotFound).
 func TestProjectSettings_DefaultGCPIdentity_AllowsBlockForDanglingProviderLink(t *testing.T) {
 	srv, s := testServer(t)
 	project := createTestProjectForSettings(t, s)

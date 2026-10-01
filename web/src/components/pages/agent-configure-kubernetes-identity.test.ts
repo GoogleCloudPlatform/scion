@@ -23,8 +23,8 @@
  * shared runtime-kind helpers classify it, same as agent-create.ts.
  *
  * Unlike agent-create (a pure create flow), this page edits an EXISTING
- * agent that may already have a real stored identity. PR 2332 review round 2
- * findings 1 and 2 established two rules this file pins:
+ * agent that may already have a real stored identity. This file pins two
+ * rules:
  *  - A stored value (including a stored "block") is never migrated: the
  *    Block option is disabled for a NEW selection, not removed, and a Save
  *    of an untouched stored value must not rewrite it.
@@ -274,10 +274,8 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     expect(option!.hasAttribute('disabled')).toBe(false);
   });
 
-  // PR 2332 review round 2, finding 2: a stored "block" must display exactly
-  // as stored on a known-Kubernetes target — disabled for a NEW selection,
-  // but never auto-corrected away. This replaces the round-1 test that
-  // pinned the opposite (migrating) behavior.
+  // A stored "block" must display exactly as stored on a known-Kubernetes
+  // target — disabled for a NEW selection, but never auto-corrected away.
   it('keeps a stored "block" selected, not auto-corrected, on a known-Kubernetes target', async () => {
     element = await createComponent(
       createFetchHandler({
@@ -331,8 +329,7 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     expect(patchBodies).toHaveLength(0);
   });
 
-  // PR 2332 review round 2, finding 5, mutation A8: only the Save guard was
-  // tested; the identical Start guard was untested and the mutant survived.
+  // The Start guard must reject under the same condition as the Save guard.
   it('rejects Start under the same condition, without sending a PATCH', async () => {
     const { handler, patchBodies } = createFetchHandlerCapturingPatch({
       brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
@@ -349,9 +346,8 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     expect(patchBodies).toHaveLength(0);
   });
 
-  // PR 2332 review round 2, finding 5, mutation C1: the page must use
-  // appliedConfig.profile (not an empty string) to resolve the target on a
-  // broker whose profiles mix runtime types.
+  // The page must use appliedConfig.profile (not an empty string) to resolve
+  // the target on a broker whose profiles mix runtime types.
   it('uses appliedConfig.profile to resolve the target on a mixed-profile broker', async () => {
     element = await createComponent(
       createFetchHandler({
@@ -382,7 +378,6 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     expect(option!.hasAttribute('disabled')).toBe(false);
   });
 
-  // PR 2332 review round 2, finding 1.
   it('omits gcp_identity on Save when nothing is stored and nothing was chosen, for a known-Kubernetes target', async () => {
     const { handler, patchBodies } = createFetchHandlerCapturingPatch({
       brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
@@ -417,12 +412,11 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     expect(patchBodies[0].gcp_identity).toEqual({ metadata_mode: 'passthrough' });
   });
 
-  // PR 2332 review round 3, finding 4: the omit-when-untouched rule is scoped
-  // to a known-Kubernetes target (matching agent-create.ts) — there is no
-  // passthrough-gate or block-migration concern to avoid on a non-Kubernetes
-  // runtime, so this page must keep sending gcp_identity explicitly there,
-  // exactly as it did before gcpIdentityUserSet existed. (The r2 version of
-  // this test was misnamed: it asserted the opposite of what its name said.)
+  // The omit-when-untouched rule is scoped to a known-Kubernetes target
+  // (matching agent-create.ts) — there is no passthrough-gate or
+  // block-migration concern to avoid on a non-Kubernetes runtime, so this
+  // page must keep sending gcp_identity explicitly there, exactly as it did
+  // before gcpIdentityUserSet existed.
   it('still sends gcp_identity for a non-Kubernetes target even when untouched', async () => {
     const { handler, patchBodies } = createFetchHandlerCapturingPatch({
       agent: makeAgent({
@@ -442,12 +436,11 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     expect(patchBodies[0].gcp_identity).toEqual({ metadata_mode: 'passthrough' });
   });
 
-  // PR 2332 review round 3, finding 1 (Major): changing only the service
-  // account was silently dropped on Save — the SA select's own @sl-change
-  // handler never set gcpIdentityUserSet, so buildGCPIdentityPayload treated
-  // the change as untouched and omitted gcp_identity, leaving the agent on
-  // its old service account. This drives the real #gcp-sa picker, the same
-  // way Probe 1 in the review reproduced the regression.
+  // Changing only the service account must not be silently dropped on Save:
+  // the SA select's own @sl-change handler must set gcpIdentityUserSet, or
+  // buildGCPIdentityPayload treats the change as untouched and omits
+  // gcp_identity, leaving the agent on its old service account. This drives
+  // the real #gcp-sa picker rather than setting the internal flag directly.
   it('sends the new service account on Save after changing only the SA picker', async () => {
     const { handler, patchBodies } = createFetchHandlerCapturingPatch({
       agent: makeAgent({
@@ -481,7 +474,6 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     });
   });
 
-  // Mutation W3: the mode select's own @sl-change handler.
   it('sets gcpIdentityUserSet when the mode select actually changes', async () => {
     element = await createComponent(
       createFetchHandler({
@@ -499,8 +491,7 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     expect(page.gcpMetadataMode).toBe('passthrough');
   });
 
-  // Mutation W8: the Start guard dropping `gcpIdentityUserSet &&`. Mirrors
-  // the existing Save resave test, for Start instead.
+  // Mirrors the existing Save resave test, for Start instead.
   it('resaves a stored "block" unchanged via Start too, without sending gcp_identity', async () => {
     const { handler, patchBodies } = createFetchHandlerCapturingPatch({
       agent: makeAgent({
@@ -518,9 +509,9 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     expect(patchBodies[0]).not.toHaveProperty('gcp_identity');
   });
 
-  // PR 2332 review round 3, finding 3a, mutation A2: the untouched hint must
-  // name the real effective identity, not overclaim the broker's own default
-  // applies when a stored value (or nothing at all) is actually in effect.
+  // The untouched hint must name the real effective identity, not overclaim
+  // the broker's own default applies when a stored value (or nothing at all)
+  // is actually in effect.
   describe('untouched hint text names the real effective identity', () => {
     it('names the stored mode when a real identity is stored', async () => {
       element = await createComponent(
@@ -566,10 +557,9 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     });
   });
 
-  // PR 2332 review round 3, finding 2 (configure side): the target broker
-  // loads asynchronously, so a user can pick "Block" while it is still
-  // unknown (Block is enabled until targetRuntimeIsKubernetesOnly is
-  // confirmed). That explicit pick must not survive as an auto-substituted
+  // The target broker loads asynchronously, so a user can pick "Block" while
+  // it is still unknown (Block is enabled until targetRuntimeIsKubernetesOnly
+  // is confirmed). That explicit pick must not survive as an auto-substituted
   // explicit "passthrough" once the broker resolves as Kubernetes-only.
   it('clears gcpIdentityUserSet when the broker resolves as Kubernetes-only after an explicit "block" pick', async () => {
     let resolveBroker: ((value: Response) => void) | null = null;

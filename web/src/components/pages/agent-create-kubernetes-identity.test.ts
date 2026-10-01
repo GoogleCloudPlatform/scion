@@ -125,11 +125,10 @@ function stubFetchCapturingCreateRequests(): { bodies: Array<Record<string, unkn
 /**
  * Routes the initial page-load fetches so a single online kubernetes-only
  * broker is auto-selected, and the project's stored GCP identity default is
- * "block" — reproducing the path in loadGCPServiceAccounts that applies a
- * project default *after* the broker is already known (finding 2, PR 2332
- * review round 1).
+ * `mode` — reproducing the path in loadGCPServiceAccounts that applies a
+ * project default *after* the broker is already known.
  */
-function stubFetchForKubernetesProjectDefaultBlock(): void {
+function stubFetchForKubernetesProjectDefault(mode: string = 'block'): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
@@ -161,7 +160,7 @@ function stubFetchForKubernetesProjectDefaultBlock(): void {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ defaultGCPIdentityMode: 'block' }),
+          json: async () => ({ defaultGCPIdentityMode: mode }),
         } as Response);
       }
       return Promise.resolve({
@@ -412,9 +411,9 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     // Reversed order from the "corrects an existing block selection" test
     // above: here the broker is known FIRST, and something sets the mode to
     // block afterward (this is what loadGCPServiceAccounts does on its own
-    // default and on a project default of block — finding 2, PR 2332 review
-    // round 1). The old updated() hook only watched brokerId/profile/brokers,
-    // so a later mode change alone was never re-checked.
+    // default and on a project default of block). willUpdate must watch the
+    // mode itself, not just brokerId/profile/brokers, so a later mode change
+    // alone is still re-checked.
     const el = await mountAgentCreate();
     const page = internals(el);
     page.brokers = [
@@ -436,7 +435,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
   });
 
   it('does not leave the mode on block when the initial load applies a project default of block for a known-Kubernetes broker', async () => {
-    stubFetchForKubernetesProjectDefaultBlock();
+    stubFetchForKubernetesProjectDefault('block');
     const el = await mountAgentCreate();
     const page = internals(el);
 
@@ -447,15 +446,28 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(select!.querySelector('sl-option[value="block"]')).toBeNull();
   });
 
-  // PR 2332 review round 3, finding 3a: the untouched hint must name the real
-  // effective identity. Omitting gcp_identity falls through to this
-  // project's own default (not Kubernetes' bare default) when one exists.
+  // The untouched hint must name the real effective identity. Omitting
+  // gcp_identity falls through to this project's own default (not
+  // Kubernetes' bare default) when one exists.
   it('names the project default in the untouched hint when the project has one configured', async () => {
-    stubFetchForKubernetesProjectDefaultBlock();
+    stubFetchForKubernetesProjectDefault('passthrough');
     const el = await mountAgentCreate();
 
     expect(gcpIdentityHint(el)).toContain("this project's own default GCP identity applies");
     expect(gcpIdentityHint(el)).not.toContain('hub-wide default');
+  });
+
+  // When the project's own default is itself "block", omitting gcp_identity
+  // resolves to that stored default, which the Kubernetes runtime rejects at
+  // dispatch — the hint must say so plainly instead of the generic "project
+  // default applies" wording, which would read as if Block were safe here.
+  it('says the project default is Block, rejected at dispatch, when the stored project default is block', async () => {
+    stubFetchForKubernetesProjectDefault('block');
+    const el = await mountAgentCreate();
+
+    expect(gcpIdentityHint(el)).toContain(
+      "This project's default GCP identity is Block, which the Kubernetes runtime rejects at dispatch"
+    );
   });
 
   it('says the hub-wide or Kubernetes default applies when this project has no default configured', async () => {
@@ -532,13 +544,13 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(tracker.calls.some((c) => c.includes('/api/v1/agents'))).toBe(false);
   });
 
-  // PR 2332 review round 2, finding 1: on a known-Kubernetes target,
-  // substituting an explicit "passthrough" for an untouched picker routes the
-  // create request through the Hub's passthrough ownership gate (broker
-  // owner/admin + a registered host service account) — which a request that
-  // never asked for passthrough should not have to pass, and which also
-  // bypasses Phase 1's unset-on-Kubernetes fallback. The create request must
-  // omit gcp_identity entirely unless the user actually chose something.
+  // On a known-Kubernetes target, substituting an explicit "passthrough" for
+  // an untouched picker routes the create request through the Hub's
+  // passthrough ownership gate (broker owner/admin + a registered host
+  // service account) — which a request that never asked for passthrough
+  // should not have to pass, and which also skips Phase 1's
+  // unset-on-Kubernetes fallback. The create request must omit gcp_identity
+  // entirely unless the user actually chose something.
   it('omits gcp_identity from the create request on a known-Kubernetes target when nothing was explicitly chosen', async () => {
     const tracker = stubFetchCapturingCreateRequests();
     const el = await mountAgentCreate();
@@ -602,9 +614,9 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
   });
 
   it('still sends gcp_identity for a non-Kubernetes target even when untouched', async () => {
-    // Scope check: the omission in finding 1 is specific to known-Kubernetes
-    // targets. A docker target's existing default behavior (send the
-    // displayed mode explicitly) must be unaffected.
+    // Scope check: the omission is specific to known-Kubernetes targets. A
+    // docker target's existing default behavior (send the displayed mode
+    // explicitly) must be unaffected.
     const tracker = stubFetchCapturingCreateRequests();
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
@@ -634,10 +646,8 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(tracker.bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
   });
 
-  // PR 2332 review round 3, finding 5 (mutation W1): every prior test set
-  // gcpIdentityUserSet directly, so a mutant that dropped the assignment in
-  // the mode select's own @sl-change handler survived. This drives the real
-  // picker instead.
+  // Drives the real picker, rather than setting gcpIdentityUserSet directly,
+  // to pin the mode select's own @sl-change handler.
   it('sets gcpIdentityUserSet when the mode select actually changes', async () => {
     const el = await mountAgentCreate();
     const page = internals(el);
@@ -651,7 +661,6 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(page.gcpMetadataMode).toBe('passthrough');
   });
 
-  // Mutation W2: the SA select's own @sl-change handler.
   it('sets gcpIdentityUserSet when the service account select actually changes', async () => {
     const el = await mountAgentCreate();
     const page = internals(el);
@@ -668,9 +677,8 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(page.gcpServiceAccountId).toBe('sa-b');
   });
 
-  // Mutation W14: the reset in loadGCPServiceAccounts. Simulates a project
-  // switch (which re-runs loadGCPServiceAccounts) after the user already
-  // interacted with the picker for the previous project.
+  // Simulates a project switch (which re-runs loadGCPServiceAccounts) after
+  // the user already interacted with the picker for the previous project.
   it('resets gcpIdentityUserSet when loadGCPServiceAccounts recomputes defaults from scratch', async () => {
     const el = await mountAgentCreate();
     const page = internals(el);
@@ -681,37 +689,9 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(page.gcpIdentityUserSet).toBe(false);
   });
 
-  // Mutation W24: the explicit normalize call at the end of
-  // loadGCPServiceAccounts. Proves it runs synchronously right after the
-  // await resolves, without needing a further Lit update cycle — this is
-  // what the comment at the call site claims and what a test reading
-  // gcpMetadataMode immediately afterward (no further `await el.updateComplete`)
-  // would otherwise see as stale if the call were removed.
-  it('normalizes the mode immediately when loadGCPServiceAccounts resolves, before the next Lit update cycle', async () => {
-    const el = await mountAgentCreate();
-    const page = internals(el);
-    page.brokers = [
-      {
-        id: 'broker-k8s',
-        name: 'k8s-broker',
-        status: 'online',
-        profiles: [{ name: 'default', type: 'kubernetes', available: true }],
-      },
-    ];
-    page.brokerId = 'broker-k8s';
-    await el.updateComplete;
-
-    // loadGCPServiceAccounts resets the mode to its own "block" placeholder
-    // internally before this call's synchronous return.
-    await page.loadGCPServiceAccounts();
-
-    expect(page.gcpMetadataMode).not.toBe('block');
-  });
-
-  // PR 2332 review round 3, finding 2: an explicit "Block" pick on one
-  // broker must not survive as an auto-substituted explicit "passthrough"
-  // once the user switches to a Kubernetes broker — that value was never
-  // chosen for the new target.
+  // An explicit "Block" pick on one broker must not survive as an
+  // auto-substituted explicit "passthrough" once the user switches to a
+  // Kubernetes broker — that value was never chosen for the new target.
   it('clears gcpIdentityUserSet when a broker switch forces the mode away from an explicit "block"', async () => {
     const tracker = stubFetchCapturingCreateRequests();
     const el = await mountAgentCreate();

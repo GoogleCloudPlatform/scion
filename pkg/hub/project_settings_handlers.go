@@ -275,10 +275,10 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 	// It must not fire on a no-op re-save of an already-stored "block": PUT is
 	// a full replace and the settings page resends the current value on every
 	// save (project-settings.ts), so treating every "block" in the body as new
-	// would turn this into a forced migration of stored values, which the
-	// ruling explicitly rules out ("stored block defaults are NOT migrated or
-	// rewritten"). Comparing against the stored annotation is what makes this
-	// a check on the transition, not on the value.
+	// would turn this into a forced migration of stored values — stored block
+	// defaults are not migrated or rewritten. Comparing against the stored
+	// annotation is what makes this a check on the transition, not on the
+	// value.
 	if req.DefaultGCPIdentityMode == store.GCPMetadataModeBlock &&
 		(project.Annotations == nil || project.Annotations[projectSettingDefaultGCPIdentityMode] != store.GCPMetadataModeBlock) {
 		k8sBound, err := s.projectIsKubernetesBound(ctx, project.ID)
@@ -364,7 +364,7 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 // `type: docker` (or any other non-Kubernetes type) is misclassified as
 // Kubernetes here, though it dispatches as that other type. Both gaps need
 // the broker to report its resolved type instead of the profile's runtime
-// key; out of scope for this check (ptone/scion#2332 review round 2, finding 4).
+// key; out of scope for this check.
 func isKubernetesRuntimeType(t string) bool {
 	switch t {
 	case "kubernetes", "k8s", "remote":

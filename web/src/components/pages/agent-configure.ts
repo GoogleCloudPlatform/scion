@@ -142,10 +142,9 @@ export class ScionPageAgentConfigure extends LitElement {
    * Whether gcpMetadataMode came from a real stored decision
    * (appliedConfig.gcpIdentity.metadataMode) rather than this page's own
    * "nothing configured" placeholder default. A stored "block" must display
-   * exactly as stored and must never be auto-corrected away — the ruling that
-   * stored values are not migrated applies here the same as it does to a
-   * project default (ptone/scion#2328 Phase 2; PR 2332 review round 2,
-   * finding 2).
+   * exactly as stored and must never be auto-corrected away — stored values
+   * are not migrated, the same as a project default (ptone/scion#2328
+   * Phase 2).
    */
   @state() private gcpMetadataModeFromStorage = false;
   /**
@@ -155,10 +154,9 @@ export class ScionPageAgentConfigure extends LitElement {
    * omits gcp_identity entirely. For PATCH this is a true no-op — a nil
    * gcp_identity never touches the agent's stored config
    * (handlers_agents_core.go applyAgentUpdate) — which is exactly what must
-   * happen both for a resave of an unrelated field (finding 2) and for a
-   * known-Kubernetes target with nothing explicitly chosen (finding 1, which
-   * would otherwise route an explicit "passthrough" through the Hub's
-   * passthrough ownership gate).
+   * happen both for a resave of an unrelated field and for a known-Kubernetes
+   * target with nothing explicitly chosen (which would otherwise route an
+   * explicit "passthrough" through the Hub's passthrough ownership gate).
    */
   @state() private gcpIdentityUserSet = false;
 
@@ -201,8 +199,7 @@ export class ScionPageAgentConfigure extends LitElement {
    * the `role="combobox"` input inside Shoelace's shadow root, which an
    * attribute on the host cannot reach across the shadow boundary. Shoelace
    * wires its own `help-text` slot to that combobox's `aria-describedby`
-   * internally (PR 2332 review round 2, finding 3; mirrors
-   * project-settings.ts's renderKubernetesBlockHint).
+   * internally (mirrors project-settings.ts's renderKubernetesBlockHint).
    */
   private renderKubernetesBlockHint(): TemplateResult | typeof nothing {
     if (!this.targetRuntimeIsKubernetesOnly) return nothing;
@@ -211,7 +208,7 @@ export class ScionPageAgentConfigure extends LitElement {
     }
     // Untouched: name the actual effective identity rather than overclaiming
     // the broker's own default applies — that is only true when this agent
-    // genuinely has nothing configured (PR 2332 review round 3, finding 3).
+    // genuinely has nothing configured.
     if (this.gcpMetadataModeFromStorage) {
       const modeLabel =
         this.gcpMetadataMode === 'assign'
@@ -495,12 +492,11 @@ export class ScionPageAgentConfigure extends LitElement {
     // populateForm has already read the agent's stored mode) or the mode
     // itself changes. Unlike agent-create.ts, this does NOT correct away a
     // value that came from storage (gcpMetadataModeFromStorage) — a stored
-    // "block" is not migrated, the same ruling as a project default. The
-    // Block option is always rendered here (merely disabled on a known-
-    // Kubernetes target, see render()), so there is no blank-select case to
-    // fix for a stored value; normalisation exists only to stop this page's
-    // own "nothing configured" placeholder default from looking and acting
-    // like an explicit choice (PR 2332 review round 2, finding 2).
+    // "block" is not migrated, same as a project default. The Block option is
+    // always rendered here (merely disabled on a known-Kubernetes target, see
+    // render()), so there is no blank-select case to fix for a stored value;
+    // normalisation exists only to stop this page's own "nothing configured"
+    // placeholder default from looking and acting like an explicit choice.
     if (changedProperties.has('targetBroker') || changedProperties.has('gcpMetadataMode')) {
       this.normalizeGcpModeForTarget();
     }
@@ -527,8 +523,7 @@ export class ScionPageAgentConfigure extends LitElement {
    * confirmed true) and then have the broker resolve as Kubernetes-only out
    * from under that choice. Without clearing the flag, Save/Start would send
    * the auto-substituted "passthrough" as if the user had picked it for this
-   * target, through the Hub's passthrough ownership gate (PR 2332 review
-   * round 3, finding 2).
+   * target, through the Hub's passthrough ownership gate.
    */
   private normalizeGcpModeForTarget(): void {
     if (
@@ -771,17 +766,15 @@ export class ScionPageAgentConfigure extends LitElement {
    * This omission is scoped to a known-Kubernetes target with no explicit
    * user choice — the same scope as agent-create.ts, not every runtime.
    * Sending an explicit "passthrough" there would hit the Hub's passthrough
-   * ownership gate for a request that never asked for passthrough (PR 2332
-   * review round 2, finding 1), and a resave of an untouched stored value
-   * must not rewrite it (finding 2) — Kubernetes is also where the Block
-   * option is disabled for a NEW selection, so an untouched value there is
-   * reliably either "nothing configured" or "stored", never a fresh pick.
-   * On every other runtime this method keeps the pre-existing behavior of
-   * always sending the current mode/service account explicitly (PR 2332
-   * review round 3, finding 4): there is no passthrough-gate or
-   * block-migration concern to avoid there, and changing that request
-   * shape for non-Kubernetes agents was an undisclosed, unintended scope
-   * expansion.
+   * ownership gate for a request that never asked for passthrough, and a
+   * resave of an untouched stored value must not rewrite it — Kubernetes is
+   * also where the Block option is disabled for a NEW selection, so an
+   * untouched value there is reliably either "nothing configured" or
+   * "stored", never a fresh pick. On every other runtime this method keeps
+   * the pre-existing behavior of always sending the current mode/service
+   * account explicitly: there is no passthrough-gate or block-migration
+   * concern to avoid there, and the request shape for non-Kubernetes agents
+   * must not change.
    */
   private buildGCPIdentityPayload(): Record<string, unknown> | null {
     if (this.targetRuntimeIsKubernetesOnly && !this.gcpIdentityUserSet) return null;

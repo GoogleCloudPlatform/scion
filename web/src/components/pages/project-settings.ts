@@ -1393,7 +1393,7 @@ export class ScionPageProjectSettings extends LitElement {
    * the `role="combobox"` input inside Shoelace's shadow root, which an
    * attribute on the host cannot reach across the shadow boundary. Shoelace
    * wires its own `help-text` slot to that combobox's `aria-describedby`
-   * internally (PR 2332 review round 2, finding 3).
+   * internally.
    */
   private renderKubernetesBlockHint(): TemplateResult | typeof nothing {
     if (!this.projectIsKubernetesOnly) return nothing;
@@ -1444,15 +1444,14 @@ export class ScionPageProjectSettings extends LitElement {
         // (hubDefaultPassthroughAllowed + hubDefaultRuntimeAllowed,
         // pkg/hub/default_gcp_identity.go, ptone/scion#2186) — Kubernetes is
         // never in that allowed set, embedded broker or not. When denied,
-        // Phase 1 (ptone/scion#2328, commit 57eb7d46) leaves the identity
-        // unset rather than writing an explicit "block", so the broker
-        // applies its own Kubernetes default (passthrough). For a confirmed
-        // Kubernetes-bound project that denial is unconditional, so this is
-        // informational, not a rejection warning (PR 2332 review round 3,
-        // finding 3b; corrected again post-#2186 before this round's push).
+        // Phase 1 (ptone/scion#2338) leaves the identity unset rather than
+        // writing an explicit "block", so the broker applies its own
+        // Kubernetes default (passthrough). For a confirmed Kubernetes-bound
+        // project that denial is unconditional, so this is informational,
+        // not a rejection warning.
         return html`<span class="field-help"
-          >Inherited from hub: passthrough only reaches a local container runtime (docker/podman)
-          on the hub's own embedded broker — Kubernetes is never eligible, so here no identity is
+          >Inherited from hub: passthrough only reaches a local container runtime (docker/podman) on
+          the hub's own embedded broker — Kubernetes is never eligible, so here no identity is
           explicitly set, and this project's Kubernetes runtime applies its own default
           automatically.</span
         >`;

@@ -257,8 +257,7 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
   it('leaves Block enabled when a single broker mixes runtime types across its own profiles', async () => {
     // Distinct from the "linked brokers mix runtime types" case above: here
     // it's ONE broker with a kubernetes profile AND a docker profile, pinning
-    // that the per-profile check is `every`, not `some` (PR 2332 review round
-    // 1, finding 5, mutation M2).
+    // that the per-profile check is `every`, not `some`.
     element = await createComponent(
       createFetchHandler({
         brokers: [
@@ -276,8 +275,7 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
 
   it('leaves Block enabled for a broker with an empty profiles list', async () => {
     // Distinct from "no linked broker": this broker IS linked, but reports no
-    // profiles at all — nothing to confirm its runtime type from (PR 2332
-    // review round 1, finding 5, mutation M3).
+    // profiles at all — nothing to confirm its runtime type from.
     element = await createComponent(
       createFetchHandler({
         brokers: [makeBroker('b1', [])],
@@ -302,12 +300,11 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     }
   );
 
-  // PR 2332 review round 2, finding 3: aria-describedby on the <sl-select>
-  // HOST has no accessibility effect — the element that receives focus is the
-  // role="combobox" input inside Shoelace's shadow root, which a host
-  // attribute cannot reach across the shadow boundary. The explanation must
-  // be slotted into the select's help-text slot instead, which Shoelace
-  // wires to that combobox internally.
+  // aria-describedby on the <sl-select> HOST has no accessibility effect —
+  // the element that receives focus is the role="combobox" input inside
+  // Shoelace's shadow root, which a host attribute cannot reach across the
+  // shadow boundary. The explanation must be slotted into the select's
+  // help-text slot instead, which Shoelace wires to that combobox internally.
   it('gives the disabled Block option a tooltip and slots the explanation into the select help-text', async () => {
     element = await createComponent(
       createFetchHandler({
@@ -361,8 +358,8 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
   });
 
   it('still shows a stored "block" value as selected and disabled for a Kubernetes-bound project', async () => {
-    // Stored block defaults are not migrated or rewritten (ptone's ruling):
-    // disable-not-remove exists precisely so this keeps displaying correctly.
+    // Stored block defaults are not migrated or rewritten: disable-not-remove
+    // exists precisely so this keeps displaying correctly.
     element = await createComponent(
       createFetchHandler({
         brokers: [makeBroker('b1', [{ name: 'default', type: 'kubernetes', available: true }])],
@@ -376,8 +373,6 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     expect(option!.hasAttribute('disabled')).toBe(true);
   });
 
-  // PR 2332 review round 2, finding 5, mutation P4: the inherited-hub-"block"
-  // hint had no test and the mutant removing it survived.
   it('flags an inherited hub default of block for a Kubernetes-bound project', async () => {
     element = await createComponent(
       createFetchHandler({
@@ -397,11 +392,10 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     expect(fieldHelpText(element)).toContain('Kubernetes');
   });
 
-  // PR 2332 review round 2, finding 6, corrected in round 3, finding 3b: a
-  // hub default of "passthrough" only takes effect on the hub's own embedded
-  // broker; on any other broker (which every broker here is, by definition,
-  // once the project is confirmed Kubernetes-bound), Phase 1 (ptone/scion
-  // #2328, commit 57eb7d46) leaves the identity UNSET rather than writing an
+  // A hub default of "passthrough" only takes effect on the hub's own
+  // embedded broker; on any other broker (which every broker here is, by
+  // definition, once the project is confirmed Kubernetes-bound), Phase 1
+  // (ptone/scion#2338) leaves the identity UNSET rather than writing an
   // explicit "block" — the broker then applies its own Kubernetes default
   // (passthrough). So this is informational, not a rejection warning: the
   // hint must not claim a rejection that Phase 1 does not produce.
@@ -473,10 +467,10 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     expect(text).toContain('rejected at dispatch');
   });
 
-  // PR 2332 review round 3, finding 5, mutation P9: pins the `!saID &&`
-  // condition the other way — with a configured, resolvable service account,
-  // the normal "agents are assigned" hint must show instead of the
-  // no-SA-configured warning, even for a Kubernetes-bound project.
+  // Pins the `!saID &&` condition the other way — with a configured,
+  // resolvable service account, the normal "agents are assigned" hint must
+  // show instead of the no-SA-configured warning, even for a
+  // Kubernetes-bound project.
   it('shows the normal hub-assign hint when a service account IS configured, for a Kubernetes-bound project', async () => {
     element = await createComponent(
       createFetchHandler({

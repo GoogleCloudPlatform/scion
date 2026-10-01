@@ -42,7 +42,7 @@
  * `type: docker` (or any other non-Kubernetes type) is misclassified as
  * Kubernetes here, though it dispatches as that other type. Both need the
  * broker to report its resolved type instead of the profile's runtime key;
- * out of scope here (ptone/scion#2332 review round 2, finding 4).
+ * out of scope here.
  */
 const KUBERNETES_RUNTIME_TYPES = new Set(['kubernetes', 'k8s', 'remote']);
 

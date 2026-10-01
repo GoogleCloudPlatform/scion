@@ -106,14 +106,14 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private gcpServiceAccountId = '';
   /**
    * True once the user has explicitly interacted with the GCP Identity
-   * picker (either select) this session. Reset to false in three cases:
+   * picker (either select) this session. Reset to false in two cases:
    * defaults are recomputed from scratch (loadGCPServiceAccounts, e.g. on a
    * project change); and normalizeGcpModeForTarget rewrites an explicit
    * "block" choice to "passthrough" because the target became known-
    * Kubernetes out from under it (e.g. the user picked Block on a docker
    * broker, then switched brokers) — that rewritten value is not something
    * the user chose for the new target, so it must not be treated as a user
-   * choice either (PR 2332 review round 3, finding 2).
+   * choice either.
    *
    * Gates whether gcp_identity is sent at all on submit: on a known-Kubernetes
    * target with no explicit user choice, the request omits gcp_identity
@@ -122,18 +122,20 @@ export class ScionPageAgentCreate extends LitElement {
    * an explicit "passthrough" there instead would route the request through
    * the Hub's passthrough ownership gate (broker owner/admin + registered
    * host service account), which a request that never asked for passthrough
-   * should not have to pass (PR 2332 review round 2, finding 1).
+   * should not have to pass.
    */
   @state() private gcpIdentityUserSet = false;
   /**
-   * Whether this project has its own default GCP identity configured
-   * (any mode — the specific mode doesn't matter here, only its presence).
-   * Set in loadGCPServiceAccounts. Used only to pick the accurate wording for
-   * the Kubernetes hint when the picker is untouched: with a project default
+   * This project's own default GCP identity mode ('block', 'passthrough',
+   * 'assign'), or '' when the project has none configured. Set in
+   * loadGCPServiceAccounts. Used only to pick the accurate wording for the
+   * Kubernetes hint when the picker is untouched: with a project default
    * present, omitting gcp_identity resolves to *that* default, not to
-   * Kubernetes' own broker-level default (PR 2332 review round 3, finding 3).
+   * Kubernetes' own broker-level default — and when that default is itself
+   * "block", the create request will be rejected at dispatch, so the hint
+   * must say so rather than just naming "the project's own default".
    */
-  @state() private hasProjectGCPIdentityDefault = false;
+  @state() private projectGCPIdentityDefaultMode = '';
 
   // ── Additional Options > Prompts Tab ────────────────────────────────
   @state() private systemPrompt = '';
@@ -197,10 +199,14 @@ export class ScionPageAgentCreate extends LitElement {
    * The Kubernetes-specific portion of the GCP Identity hint, naming the
    * actual effective identity rather than overclaiming the broker's own
    * default applies — that is only true when nothing is configured at any
-   * level (PR 2332 review round 3, finding 3). Three cases:
+   * level. Four cases:
    *  - the user explicitly picked a mode here: just name that Block isn't an
    *    option, no further explanation needed;
-   *  - untouched, but this project has its own default GCP identity
+   *  - untouched, and this project's own default is itself "block": omitting
+   *    gcp_identity resolves to that stored default, which the Kubernetes
+   *    runtime rejects at dispatch — say so plainly, since picking Block here
+   *    would otherwise look like the safe, do-nothing choice;
+   *  - untouched, but this project has some other default GCP identity
    *    configured: omitting gcp_identity resolves to *that* default, not to
    *    Kubernetes' own default — say so;
    *  - untouched, and this project has no default: the create request omits
@@ -212,7 +218,13 @@ export class ScionPageAgentCreate extends LitElement {
     if (this.gcpIdentityUserSet) {
       return 'Block is not available for a Kubernetes runtime target.';
     }
-    if (this.hasProjectGCPIdentityDefault) {
+    if (this.projectGCPIdentityDefaultMode === 'block') {
+      return (
+        "This project's default GCP identity is Block, which the Kubernetes runtime rejects at " +
+        'dispatch; choose Passthrough or Assign Service Account.'
+      );
+    }
+    if (this.projectGCPIdentityDefaultMode) {
       return (
         'Block is not available for a Kubernetes runtime target. No explicit identity has been ' +
         "chosen here, so this project's own default GCP identity applies instead; choosing " +
@@ -485,15 +497,10 @@ export class ScionPageAgentCreate extends LitElement {
     // an explicit identity is actually sent on submit is gated separately by
     // gcpIdentityUserSet; see buildConfig/handleSubmit.)
     //
-    // gcpMetadataMode is in the trigger list above, so this check does
-    // already re-run when loadGCPServiceAccounts assigns it directly (its own
-    // default, or a project default of "block") — the explicit call at the
-    // end of loadGCPServiceAccounts is not covering a gap in this trigger
-    // list. It exists because loadGCPServiceAccounts is async: code right
-    // after `await this.loadGCPServiceAccounts()` that reads
-    // targetRuntimeIsKubernetesOnly or gcpMetadataMode would otherwise run in
-    // the same synchronous turn as the assignment, before Lit's next
-    // willUpdate has had a chance to fire.
+    // gcpMetadataMode is in the trigger list above, so this check re-runs
+    // whenever loadGCPServiceAccounts assigns it directly (its own default,
+    // or a project default of "block") — no separate call is needed for
+    // that path.
     if (
       changedProperties.has('brokerId') ||
       changedProperties.has('profile') ||
@@ -523,8 +530,8 @@ export class ScionPageAgentCreate extends LitElement {
    * mode was silently rewritten to "passthrough" out from under them — submit
    * would then send that auto-substituted passthrough as if the user had
    * chosen it, through the Hub's passthrough ownership gate, for a value they
-   * never picked for this target (PR 2332 review round 3, finding 2). Clearing
-   * the flag puts the target back in the same "no explicit choice" state as
+   * never picked for this target. Clearing the flag puts the target back in
+   * the same "no explicit choice" state as
    * if the user had never touched the picker, so an untouched target still
    * submits with no explicit gcp_identity at all, and the hint reflects that.
    * Idempotent and safe to call from anywhere that just changed the broker,
@@ -837,7 +844,7 @@ export class ScionPageAgentCreate extends LitElement {
     // Recomputing defaults from scratch (initial load, or a project change):
     // whatever this method assigns below is a default, not a user choice.
     this.gcpIdentityUserSet = false;
-    this.hasProjectGCPIdentityDefault = false;
+    this.projectGCPIdentityDefaultMode = '';
 
     if (this.projectId) {
       try {
@@ -855,7 +862,7 @@ export class ScionPageAgentCreate extends LitElement {
       // Apply project default GCP identity if configured
       const settings = await this.fetchProjectSettings(this.projectId);
       if (settings?.defaultGCPIdentityMode) {
-        this.hasProjectGCPIdentityDefault = true;
+        this.projectGCPIdentityDefaultMode = settings.defaultGCPIdentityMode;
         const mode = settings.defaultGCPIdentityMode as 'block' | 'passthrough' | 'assign';
         if (mode === 'assign' && settings.defaultGCPIdentityServiceAccountID) {
           const verified = this.verifiedGCPServiceAccounts;
@@ -871,17 +878,6 @@ export class ScionPageAgentCreate extends LitElement {
         }
       }
     }
-
-    // gcpMetadataMode is in willUpdate's trigger list, so Lit's next update
-    // cycle re-runs this check regardless. This explicit call is not closing
-    // a gap in that trigger list — it exists because loadGCPServiceAccounts
-    // is async: any code that runs synchronously right after
-    // `await this.loadGCPServiceAccounts()` resolves (for example a submit
-    // handler, or a direct read of gcpMetadataMode/targetRuntimeIsKubernetesOnly)
-    // would otherwise observe the stale, un-normalized value from before Lit
-    // has had a chance to process the pending update (ptone/scion#2332
-    // review round 1, finding 2; wording corrected in round 3, finding 7).
-    this.normalizeGcpModeForTarget();
   }
 
   private async fetchProjectSettings(projectId: string): Promise<{
@@ -1126,8 +1122,7 @@ export class ScionPageAgentCreate extends LitElement {
       // registered host service account), which a request that never asked
       // for passthrough should not have to pass. Omitting it lets the Hub's
       // own project/hub-default ladder resolve it — including Phase 1's
-      // unset-on-Kubernetes fallback when nothing is configured anywhere
-      // (PR 2332 review round 2, finding 1).
+      // unset-on-Kubernetes fallback when nothing is configured anywhere.
       if (this.targetRuntimeIsKubernetesOnly && !this.gcpIdentityUserSet) {
         // omit body.gcp_identity
       } else if (this.gcpMetadataMode === 'assign' && this.gcpServiceAccountId) {
