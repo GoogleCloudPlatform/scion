@@ -120,6 +120,20 @@ class ModelResolutionTest(unittest.TestCase):
             model = self._resolved_model(tmp, scion_model="anthropic/claude-sonnet-4-5")
             self.assertEqual(model, "anthropic/claude-sonnet-4-5")
 
+    def test_case_sensitive_concrete_model_id_is_preserved(self) -> None:
+        """R1 of the round-1 review: a concrete model ID's case must survive
+        resolve_model unchanged. SCION_MODEL can arrive un-normalized from an
+        explicit source Go never touches (a template/hub `env:` block, or
+        `--env SCION_MODEL=...`) — Go's run.go::reResolveModelAlias only
+        rewrites tier names, not concrete ones. OpenAI fine-tuned model IDs
+        carry a mixed-case suffix and OpenCode authenticates with
+        OPENAI_API_KEY, so this is a real path, not a hypothetical.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            case_sensitive_id = "openai/ft:gpt-4o-mini-2024-07-18:my-org::AbC12xYz"
+            model = self._resolved_model(tmp, scion_model=case_sensitive_id)
+            self.assertEqual(model, case_sensitive_id)
+
     def test_size_alias_now_resolves_through_model_aliases(self) -> None:
         """Behavior difference from before G3: a bare size alias used to be
         written into .opencode.json verbatim (e.g. "medium") because the

@@ -285,7 +285,7 @@ def _apply_model(
     Returns the concrete model name that was applied.
     """
     raw = os.environ.get("SCION_MODEL", "").strip()
-    model = scion_harness.resolve_model(ctx) if raw else DEFAULT_MODEL
+    model = scion_harness.resolve_model(ctx) or DEFAULT_MODEL
 
     parsed_version = _parse_semver(claude_version)
     if parsed_version is not None and parsed_version < OPUS_5_5_MIN_CLAUDE_VERSION:

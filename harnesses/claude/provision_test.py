@@ -175,6 +175,27 @@ class ModelResolutionTest(unittest.TestCase):
         self.assertEqual(model, "claude-sonnet-4-5")
         self.assertEqual(env["ANTHROPIC_MODEL"], "claude-sonnet-4-5")
 
+    def test_concrete_model_case_is_preserved(self) -> None:
+        """Behavior difference from claude's old private mirror (R1 of the
+        round-1 review): the old `_normalize_model_alias` lower-cased every
+        value, tier or not, so a mixed-case concrete model name supplied via
+        an explicit SCION_MODEL (a template/hub `env:` block — Go's
+        reResolveModelAlias only rewrites tier names, not concrete ones)
+        would have been lower-cased before reaching ANTHROPIC_MODEL. The
+        shared scion_harness.resolve_model only normalizes case to decide
+        whether a value is a known tier; a concrete name passes through with
+        the caller's original spelling. Anthropic model IDs happen to be
+        lowercase already, so this is harmless for claude in practice.
+        """
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp)
+            with env_vars(SCION_MODEL="Claude-Sonnet-4-5", ANTHROPIC_MODEL=None):
+                env: dict[str, str] = {}
+                model = provision._apply_model(ctx, env)
+
+        self.assertEqual(model, "Claude-Sonnet-4-5")
+        self.assertEqual(env["ANTHROPIC_MODEL"], "Claude-Sonnet-4-5")
+
     def test_no_requested_model_falls_back_to_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp)

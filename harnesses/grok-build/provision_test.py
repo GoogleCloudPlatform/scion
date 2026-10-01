@@ -567,14 +567,51 @@ class ModelResolutionTest(unittest.TestCase):
         self.assertEqual(self._resolve("l"), "grok-4.6")
         self.assertEqual(self._resolve("xl"), "grok-4.6")
 
-    def test_concrete_model_pass_through_is_now_lowercased(self) -> None:
-        """Behavior difference from the pre-G3 lookup: that code's fallback
-        was `raw` (original case) rather than `raw.lower()`, so a
-        mixed-case concrete model name passed through unchanged. The shared
-        resolve_model helper lowercases before the known-alias check, same
-        as Go's config.ResolveModelAlias, so this now comes back lowercased.
+    def test_concrete_model_case_is_preserved(self) -> None:
+        """Not a behavior difference: the pre-G3 lookup's fallback was `raw`
+        (original case), and the shared resolve_model helper also returns
+        the caller's original spelling for a concrete (non-tier) name — see
+        R1 in the round-1 review. Only the four canonical tiers are
+        normalized for the alias-table lookup.
         """
-        self.assertEqual(self._resolve("Grok-4-Turbo"), "grok-4-turbo")
+        self.assertEqual(self._resolve("Grok-4-Turbo"), "Grok-4-Turbo")
+
+    def test_provision_writes_resolved_model_to_grok_default_model_env(self) -> None:
+        """N2 of the round-1 review: end-to-end check that the non-vertex-ai
+        path in provision() actually wires scion_harness.resolve_model's
+        result into GROK_DEFAULT_MODEL in env.json, not just that the helper
+        itself resolves correctly in isolation.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            bundle = os.path.join(tmp, "bundle")
+            os.makedirs(home)
+            os.makedirs(os.path.join(bundle, "outputs"))
+            ctx = _make_ctx({
+                "harness_bundle_dir": bundle,
+                "harness_config": {
+                    "no_auth": {"behavior": "drop-to-shell"},
+                    "instructions_file": "AGENTS.md",
+                    "skills_dir": ".grok/skills",
+                    "system_prompt_mode": "prepend_to_instructions",
+                    "model_aliases": {
+                        "small": "grok-3-mini",
+                        "medium": "grok-4.5",
+                        "large": "grok-4.6",
+                        "extra-large": "grok-4.6",
+                    },
+                },
+            })
+            os.environ["SCION_MODEL"] = "m"
+            try:
+                with temporary_home(home):
+                    provision.provision(ctx)
+            finally:
+                os.environ.pop("SCION_MODEL", None)
+
+            with open(os.path.join(bundle, "outputs", "env.json")) as f:
+                env = json.load(f)
+        self.assertEqual(env["GROK_DEFAULT_MODEL"], "grok-4.5")
 
 
 # ---------------------------------------------------------------------------

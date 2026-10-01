@@ -690,14 +690,28 @@ def resolve_model(ctx: "ProvisionContext") -> str:
          as provisioners do today. Empty/unset returns "" so callers can
          apply their own default or pin.
       2. Normalize shorthand spellings (s/m/l/xl and case), matching Go's
-         NormalizeModelAlias.
-      3. If the normalized value is a known size alias (small/medium/large/
-         extra-large), map it through this harness's own config.yaml
-         model_aliases (ctx.harness_config). Otherwise it is already a
-         concrete model name and is returned as-is (normalized).
+         NormalizeModelAlias, to decide whether the value is a known size
+         alias (small/medium/large/extra-large).
+      3. If it is, map the normalized tier through this harness's own
+         config.yaml model_aliases (ctx.harness_config). Otherwise it is
+         already a concrete model name — return the caller's original
+         (stripped) spelling unchanged, case included.
+
+    Unlike Go's config.ResolveModelAlias, this does NOT lower-case concrete
+    model names. Go's normalize-then-lookup only ever sees SCION_MODEL after
+    the hub/broker has already resolved and lower-cased it (the config/
+    --model path), so the lower-casing there is a no-op in practice. But
+    SCION_MODEL can also arrive un-normalized from an explicit source (a
+    template/hub `env:` block, `--env SCION_MODEL=...`) that Go never
+    touches — see run.go's reResolveModelAlias, which only rewrites tier
+    names, not concrete ones. Case-sensitive concrete IDs are real (e.g.
+    OpenAI fine-tuned model suffixes), so lower-casing them here would break
+    them with no upside. A tier alias is still safe to normalize: all five
+    harnesses' model_aliases tables and the default pins are lowercase.
 
     Unknown aliases and aliases missing from this harness's model_aliases
-    table pass through unchanged (normalized), matching Go's behavior.
+    table pass through unchanged (as the normalized tier name), matching
+    Go's behavior.
     """
     raw = os.environ.get("SCION_MODEL", "").strip()
     if not raw:
@@ -705,7 +719,7 @@ def resolve_model(ctx: "ProvisionContext") -> str:
     normalized = raw.lower()
     normalized = _MODEL_ALIAS_SHORTHAND.get(normalized, normalized)
     if normalized not in _KNOWN_MODEL_ALIASES:
-        return normalized
+        return raw  # concrete model name: preserve the caller's spelling
     aliases = ctx.harness_config.get("model_aliases") if ctx.harness_config else None
     if not isinstance(aliases, dict):
         aliases = {}
