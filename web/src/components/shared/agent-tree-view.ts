@@ -51,10 +51,12 @@ import {
   parentIdOf,
   pruneCollapsed,
   rootUserOf,
+  topologySignature,
   transposeLayout,
   userKey,
   NODE_W,
   NODE_H,
+  type ForestLayout,
   type Orientation,
   type PositionedNode,
   type PositionedEdge,
@@ -122,6 +124,13 @@ export class ScionAgentTreeView extends LitElement {
    * The agent list to render — filtering is the parent's responsibility.
    * When this changes the layout is recalculated but pan/zoom state is
    * preserved (so SSE updates don't reset your viewport).
+   *
+   * Treat as immutable: assign a new array to update it. The id→agent memo
+   * (`getAgentById`) and the layout cache (#2388) key off this array's
+   * *identity*, not its contents — mutating elements in place and calling
+   * `requestUpdate()` would render stale objects instead of picking up the
+   * change. Every current host (agents.ts, project-detail.ts, agent-graph.ts)
+   * already assigns a fresh array on every update.
    */
   @property({ attribute: false })
   agents: Agent[] = [];
@@ -165,6 +174,86 @@ export class ScionAgentTreeView extends LitElement {
   private dragPanY = 0;
   /** True once the initial fit-to-view / center-on-focus has fired. */
   private didAutoFit = false;
+
+  /**
+   * Cached forest layout, reused whenever the topology signature (section
+   * #2388) matches: status-only agent updates, pan, zoom and hover never
+   * rebuild the forest or recompute node/edge geometry. Node status and
+   * actions still come from the live `agents` array via `agentById` on every
+   * render — only positions and edge endpoints are cached.
+   */
+  private layoutCache: {
+    signature: string;
+    hiddenCounts: Map<string, number>;
+    layout: ForestLayout;
+  } | null = null;
+
+  /** Memoized id → agent lookup, rebuilt only when the `agents` array identity changes. */
+  private agentByIdCache: { agents: Agent[]; map: Map<string, Agent> } | null = null;
+
+  /** Replaces per-edge/per-node linear `agents.find`/`.some` scans with an O(1) lookup. */
+  private getAgentById(agents: Agent[]): Map<string, Agent> {
+    if (!this.agentByIdCache || this.agentByIdCache.agents !== agents) {
+      this.agentByIdCache = { agents, map: new Map(agents.map((a) => [a.id, a])) };
+    }
+    return this.agentByIdCache.map;
+  }
+
+  /**
+   * Memoizes topologySignature's own inputs by identity, so a render that
+   * changes none of them (pan/zoom/hover, or a status-only agent swap) skips
+   * even the cheap sort-and-stringify work, not just the layout it gates.
+   * Safe because every input is always replaced wholesale rather than
+   * mutated: `agents` per the property doc above, `collapsedIds` in
+   * `toggleCollapse` (always a new Set).
+   */
+  private signatureCache: {
+    agents: Agent[];
+    collapsedIds: ReadonlySet<string>;
+    showUsers: boolean;
+    orientation: Orientation;
+    signature: string;
+  } | null = null;
+
+  private getSignature(
+    agents: Agent[],
+    collapsedIds: ReadonlySet<string>,
+    showUsers: boolean,
+    orientation: Orientation
+  ): string {
+    const cache = this.signatureCache;
+    if (
+      cache &&
+      cache.agents === agents &&
+      cache.collapsedIds === collapsedIds &&
+      cache.showUsers === showUsers &&
+      cache.orientation === orientation
+    ) {
+      return cache.signature;
+    }
+    const signature = topologySignature(agents, collapsedIds, showUsers, orientation);
+    this.signatureCache = { agents, collapsedIds, showUsers, orientation, signature };
+    return signature;
+  }
+
+  /**
+   * The set of distinct project IDs represented in an agent list — the
+   * "scope" the auto-fit heuristic keys on, rather than a single agent.
+   */
+  private static projectIdSet(agents: Agent[]): Set<string> {
+    return new Set(agents.map((a) => a.projectId));
+  }
+
+  /** True when the set of projects represented changed, ignoring reordering. */
+  private static scopeChanged(oldAgents: Agent[], newAgents: Agent[]): boolean {
+    const oldSet = ScionAgentTreeView.projectIdSet(oldAgents);
+    const newSet = ScionAgentTreeView.projectIdSet(newAgents);
+    if (oldSet.size !== newSet.size) return true;
+    for (const id of oldSet) {
+      if (!newSet.has(id)) return true;
+    }
+    return false;
+  }
 
   static override styles = css`
     :host {
@@ -542,13 +631,14 @@ export class ScionAgentTreeView extends LitElement {
     if (changedProperties.has('agents')) {
       const oldAgents = changedProperties.get('agents') as Agent[] | undefined;
       // Re-fit when agents arrive for the first time or when the project
-      // context switches (first agent's projectId changes). SSE status
-      // updates on the same set don't reset the viewport.
+      // scope changes (the set of distinct projectIds represented, not just
+      // the first agent — order and identity churn from SSE status updates
+      // must not reset the viewport).
       if (
         !oldAgents ||
         oldAgents.length === 0 ||
         this.agents.length === 0 ||
-        oldAgents[0]?.projectId !== this.agents[0]?.projectId
+        ScionAgentTreeView.scopeChanged(oldAgents, this.agents)
       ) {
         this.didAutoFit = false;
       }
@@ -736,7 +826,7 @@ export class ScionAgentTreeView extends LitElement {
       return related;
     }
 
-    const byId = new Map(agents.map((a) => [a.id, a]));
+    const byId = this.getAgentById(agents);
     const hovered = byId.get(this.hoverId);
     if (!hovered) return null;
 
@@ -816,17 +906,41 @@ export class ScionAgentTreeView extends LitElement {
       `;
     }
 
-    const forest = buildLineageForest(agents);
-    const hiddenCounts = descendantCounts(forest);
-    pruneCollapsed(forest, this.collapsedIds);
-    let layout = this.showUsers ? layoutForestWithUsers(forest) : layoutForest(forest);
-    if (this.orientation === 'horizontal') {
-      layout = transposeLayout(layout);
+    // Layout cache (#2388): rebuild the forest and recompute geometry only
+    // when the topology signature changes (membership, structure, name,
+    // collapse, showUsers or orientation). Status-only updates, pan, zoom
+    // and hover reuse the cached forest and layout untouched.
+    const signature = this.getSignature(
+      agents,
+      this.collapsedIds,
+      this.showUsers,
+      this.orientation
+    );
+    let hiddenCounts: Map<string, number>;
+    let layout: ForestLayout;
+    if (this.layoutCache && this.layoutCache.signature === signature) {
+      ({ hiddenCounts, layout } = this.layoutCache);
+    } else {
+      const forest = buildLineageForest(agents);
+      // Compute BEFORE pruneCollapsed — pruning removes the very subtrees
+      // being counted.
+      hiddenCounts = descendantCounts(forest);
+      pruneCollapsed(forest, this.collapsedIds);
+      layout = this.showUsers ? layoutForestWithUsers(forest) : layoutForest(forest);
+      if (this.orientation === 'horizontal') {
+        layout = transposeLayout(layout);
+      }
+      this.layoutCache = { signature, hiddenCounts, layout };
     }
     const { nodes, edges, users, width, height } = layout;
     this.contentW = width;
     this.contentH = height;
     const related = this.relatedIds(agents);
+    // Node status/actions always render from the live agents array, even
+    // when the layout above came from cache: a cached PositionedNode may
+    // still reference the Agent object from whenever its geometry was last
+    // computed (e.g. before a status-only SSE update replaced it).
+    const agentById = this.getAgentById(agents);
 
     // First render with content: center on the deep-linked agent if there is
     // one (and it survived filtering), otherwise fit the forest.
@@ -872,10 +986,10 @@ export class ScionAgentTreeView extends LitElement {
           style="transform: translate(${this.panX}px, ${this.panY}px) scale(${this.scale})"
         >
           <svg width=${width} height=${height} aria-hidden="true">
-            ${this.renderEdgeMarkers()} ${edges.map((e) => this.renderEdge(e, related, agents))}
+            ${this.renderEdgeMarkers()} ${edges.map((e) => this.renderEdge(e, related, agentById))}
           </svg>
           ${users.map((u) => this.renderUserNode(u, agents, edges, related))}
-          ${nodes.map((n) => this.renderNode(n, related, hiddenCounts))}
+          ${nodes.map((n) => this.renderNode(n, related, hiddenCounts, agentById))}
         </div>
         <div class="zoom-controls">
           <sl-button size="small" @click=${() => this.zoomButtons(1.25)} title="Zoom in (+)"
@@ -929,13 +1043,19 @@ export class ScionAgentTreeView extends LitElement {
     </defs>`;
   }
 
-  private renderEdge(e: PositionedEdge, related: Set<string> | null, agents: Agent[]) {
+  private renderEdge(
+    e: PositionedEdge,
+    related: Set<string> | null,
+    agentById: Map<string, Agent>
+  ) {
     const lit = related !== null && related.has(e.parentId) && related.has(e.childId);
     const dim = related !== null && !lit;
 
-    // Look up agents for mode-aware edge styling
-    const parentAgent = agents.find((a) => a.id === e.parentId);
-    const childAgent = agents.find((a) => a.id === e.childId);
+    // Look up agents for mode-aware edge styling. A user-node endpoint
+    // (e.g. "user:<id>") is never a key in agentById, so this resolves to
+    // undefined for those edges, same as the old agents.find.
+    const parentAgent = agentById.get(e.parentId);
+    const childAgent = agentById.get(e.childId);
     const edgeStyle =
       parentAgent && childAgent
         ? getEdgeStyle(parentAgent.messageMode, childAgent.messageMode)
@@ -1000,15 +1120,20 @@ export class ScionAgentTreeView extends LitElement {
   private renderNode(
     n: PositionedNode,
     related: Set<string> | null,
-    hiddenCounts: Map<string, number>
+    hiddenCounts: Map<string, number>,
+    agentById: Map<string, Agent>
   ) {
-    const agent = n.agent;
+    // Resolve the live agent object by ID rather than trusting n.agent: when
+    // the layout came from cache (#2388), n.agent may still be the object
+    // from whenever the geometry was last computed. Status, capabilities and
+    // messageability must always reflect the current render.
+    const agent = agentById.get(n.agent.id) ?? n.agent;
     const status = getAgentDisplayStatus(agent);
     const color = VARIANT_COLOR[getStateDisplay(status).variant];
     const modeDisplay = getMessageModeDisplay(agent.messageMode);
     const creator = agent.appliedConfig?.creatorName || agent.createdBy || '';
     const parentId = parentIdOf(agent);
-    const isRoot = !parentId || !this.agents.some((a) => a.id === parentId);
+    const isRoot = !parentId || !agentById.has(parentId);
     const dim = related !== null && !related.has(agent.id);
     const descendants = hiddenCounts.get(agent.id) ?? 0;
     const collapsed = this.collapsedIds.has(agent.id);

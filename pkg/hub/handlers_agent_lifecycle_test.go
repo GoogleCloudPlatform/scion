@@ -17,10 +17,16 @@
 package hub
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestGuardAgentPhaseTransition_ReincarnationInFlightSuppressesStatus is the
@@ -114,4 +120,44 @@ func TestGuardAgentPhaseTransition_SuspendedStillSuppressesStatus(t *testing.T) 
 
 	assert.Equal(t, "", status.Phase)
 	assert.Equal(t, "", status.Activity)
+}
+
+// TestUpdateAgentStatus_ReincarnationInFlight_PostedMessageDiscarded is the
+// end-to-end half of Guard 0b's reincarnation-sticky rule (design Amendment
+// A26.8): a self-reported status update carrying Phase and Activity while a
+// migration is in flight must be entirely discarded by the real HTTP
+// handler, not just by guardAgentPhaseTransition in isolation — the agent
+// row must keep whatever the reincarnation worker itself wrote (e.g.
+// "migrating to generation N"), never whatever a racing status POST tried to
+// write.
+func TestUpdateAgentStatus_ReincarnationInFlight_PostedMessageDiscarded(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = "starting"
+	})
+	// ReincarnationState is not a CreateAgent field (only a real reincarnate
+	// or a direct UpdateAgent sets it), so it is set here the same way
+	// TestReincarnateAgent_BackstopResetsOrphanAgentState does.
+	agent.Message = "migrating to generation 2"
+	agent.ReincarnationState = store.ReincarnationStateProvisioning
+	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+	// Simulate the OLD container's dying-gasp crash report racing the
+	// migration — the exact scenario Guard 0b exists for.
+	body, err := json.Marshal(store.AgentStatusUpdate{
+		Phase: "error", Activity: "crashed", Message: "container exited unexpectedly",
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/status", bytes.NewReader(body))
+	req = req.WithContext(contextWithIdentity(req.Context(), agentIdentityFor(agent.ID, project.ID, ScopeAgentStatusUpdate)))
+	rec := httptest.NewRecorder()
+	srv.updateAgentStatus(rec, req, agent.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "migrating to generation 2", final.Message,
+		"Guard 0b must block the status POST's Message from landing while a reincarnation is in flight")
+	assert.Equal(t, "starting", final.Phase, "Phase must also stay blocked")
 }

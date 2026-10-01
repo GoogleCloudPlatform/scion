@@ -653,6 +653,19 @@ type RuntimeBroker struct {
 	// Profiles available (stored as JSON)
 	Profiles []BrokerProfile `json:"profiles,omitempty"`
 
+	// DefaultProfile is the broker's own active/default profile name,
+	// recorded at registration from the broker's local active_profile
+	// setting (config.Settings.ActiveProfile). It lets the hub resolve an
+	// agent dispatch with no explicit profile against the broker's
+	// registered profiles instead of guessing. This is registration-time
+	// data: the broker's own dispatch-time settings can still resolve the
+	// same profile name differently (project-level or DB-overlay
+	// settings), which is why passthrough grants that depend on this field
+	// also carry a broker-side re-check (RequireLocalRuntime). Empty means
+	// the broker has not reported one (e.g. registered before this field
+	// existed) or the hub has not yet learned it.
+	DefaultProfile string `json:"defaultProfile,omitempty"`
+
 	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -1895,6 +1908,18 @@ type GCPIdentityConfig struct {
 	ServiceAccountID    string `json:"serviceAccountId,omitempty"`    // FK to GCPServiceAccount (required for "assign")
 	ServiceAccountEmail string `json:"serviceAccountEmail,omitempty"` // Denormalized for runtime use
 	ProjectID           string `json:"projectId,omitempty"`           // Denormalized
+
+	// RequireLocalRuntime marks a "passthrough" mode as granted by the
+	// hub-default rung specifically (hubDefaultRuntimeAllowed,
+	// default_gcp_identity.go), never by an explicit request or a
+	// project-level default. The hub resolves the runtime this agent will
+	// dispatch under from the broker's own registration data, which can
+	// differ from what the broker resolves at dispatch time against
+	// project-effective settings. The broker re-checks this flag once it
+	// knows the real resolved runtime, and downgrades to "block" itself if
+	// that runtime turns out not to be a local container runtime — a second
+	// line of defense behind the hub-side gate, not a replacement for it.
+	RequireLocalRuntime bool `json:"requireLocalRuntime,omitempty"`
 }
 
 // GCPVerificationStatus constants describe the outcome of the Hub's last

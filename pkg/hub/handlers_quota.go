@@ -840,6 +840,20 @@ func (s *Server) getMyUsage(w http.ResponseWriter, r *http.Request) {
 
 	entries := make([]myUsageEntry, 0, len(defs))
 	for _, def := range defs {
+		// max_agents_per_broker reservations are held at store.QuotaScopeBroker
+		// (subject = broker ID, not the user) rather than store.QuotaScopeSystem
+		// (ptone/scion#2061 P2.2, broker_quota.go), so the per-user query below
+		// always finds none for it: the row showed "0 used" regardless of real
+		// broker usage. It also isn't a per-user quota at all — it's an
+		// infrastructure ceiling on a broker — so unlike getUsageSummary and
+		// getUsageByLimit (which sum broker reservations for their hub-wide
+		// admin view), the correct fix here is to omit the row from a user's
+		// own usage entirely rather than reporting a broker-wide count under
+		// "my usage". ptone/scion#2313.
+		if def.Name == store.LimitMaxAgentsPerBroker {
+			continue
+		}
+
 		// Resolve effective limit for this user at system scope.
 		effectiveLimit, err := s.quotaService.ResolveEffectiveLimit(
 			r.Context(), def.ID, userID, store.QuotaScopeSystem, "")

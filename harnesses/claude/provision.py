@@ -88,16 +88,6 @@ DEFAULT_MODEL = "opus"
 OPUS_5_5_MIN_CLAUDE_VERSION = (2, 1, 280)
 OPUS_5_5_FALLBACK_MODEL = "claude-opus-4-8"
 
-# Shorthand spellings for model size aliases. Must stay in lockstep with
-# config.NormalizeModelAlias (pkg/config/templates.go): the Go side resolves
-# --model against the same shorthand set, so accepting a spelling here that
-# Go does not recognize would make ANTHROPIC_MODEL disagree with --model.
-MODEL_ALIAS_SHORTHAND = {"s": "small", "m": "medium", "l": "large", "xl": "extra-large"}
-
-# The canonical set of recognized model size aliases. Mirrors
-# config.KnownModelAliases (pkg/config/templates.go).
-KNOWN_MODEL_ALIASES = frozenset({"small", "medium", "large", "extra-large"})
-
 AUTH = scion_harness.AuthSpec(
     harness="claude",
     methods=[
@@ -268,45 +258,6 @@ def _update_project_paths(
     return version
 
 
-def _normalize_model_alias(raw: str) -> str:
-    """Python mirror of config.NormalizeModelAlias (pkg/config/templates.go).
-
-    Lower-cases the input and expands the s/m/l/xl shorthand to their full
-    alias names. Must stay in lockstep with the Go implementation — see the
-    MODEL_ALIAS_SHORTHAND comment above.
-    """
-    lowered = raw.strip().lower()
-    return MODEL_ALIAS_SHORTHAND.get(lowered, lowered)
-
-
-def _resolve_model_alias(ctx: scion_harness.ProvisionContext, raw: str) -> str:
-    """Python mirror of config.ResolveModelAlias (pkg/config/templates.go).
-
-    Resolves a model size alias (e.g. "large") to a concrete model name using
-    this harness's own model_aliases from config.yaml (ctx.harness_config).
-    Unknown aliases and already-concrete model names pass through unchanged,
-    normalized to lowercase/canonical shorthand.
-
-    This is the defense-in-depth layer for resume/restart paths where the Go
-    side (hub or broker) had no alias table to resolve SCION_MODEL against
-    and passed a bare alias straight through — this harness always has its
-    own config.yaml on disk, so it can resolve the alias itself rather than
-    exporting it verbatim, which Claude Code rejects outright.
-    """
-    if not raw:
-        return raw
-    normalized = _normalize_model_alias(raw)
-    if normalized not in KNOWN_MODEL_ALIASES:
-        return normalized
-    # ctx.harness_config is normally always a dict (the property defaults to
-    # {} when the manifest carries none), but guard defensively in case that
-    # ever changes or a future caller passes a stripped-down context.
-    aliases = ctx.harness_config.get("model_aliases") if ctx.harness_config else None
-    if not isinstance(aliases, dict):
-        aliases = {}
-    return aliases.get(normalized, normalized)
-
-
 def _apply_model(
     ctx: scion_harness.ProvisionContext,
     env: dict[str, str],
@@ -322,8 +273,8 @@ def _apply_model(
 
     Defense in depth: if SCION_MODEL still carries a bare size alias (e.g.
     "large") — which has happened on resume/restart paths where the Go side
-    had no alias table to resolve against — _resolve_model_alias maps it
-    using this harness's own config.yaml rather than exporting the alias
+    had no alias table to resolve against — scion_harness.resolve_model maps
+    it using this harness's own config.yaml rather than exporting the alias
     verbatim.
 
     When *claude_version* is older than 2.1.280 and the resolved model is
@@ -334,7 +285,7 @@ def _apply_model(
     Returns the concrete model name that was applied.
     """
     raw = os.environ.get("SCION_MODEL", "").strip()
-    model = _resolve_model_alias(ctx, raw) if raw else DEFAULT_MODEL
+    model = scion_harness.resolve_model(ctx) or DEFAULT_MODEL
 
     parsed_version = _parse_semver(claude_version)
     if parsed_version is not None and parsed_version < OPUS_5_5_MIN_CLAUDE_VERSION:

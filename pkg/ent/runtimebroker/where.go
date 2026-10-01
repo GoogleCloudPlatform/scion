@@ -115,6 +115,11 @@ func Runtimes(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldRuntimes, v))
 }
 
+// DefaultProfile applies equality check predicate on the "default_profile" field. It's identical to DefaultProfileEQ.
+func DefaultProfile(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldDefaultProfile, v))
+}
+
 // Endpoint applies equality check predicate on the "endpoint" field. It's identical to EndpointEQ.
 func Endpoint(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldEndpoint, v))
@@ -953,6 +958,81 @@ func RuntimesEqualFold(v string) predicate.RuntimeBroker {
 // RuntimesContainsFold applies the ContainsFold predicate on the "runtimes" field.
 func RuntimesContainsFold(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldRuntimes, v))
+}
+
+// DefaultProfileEQ applies the EQ predicate on the "default_profile" field.
+func DefaultProfileEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldDefaultProfile, v))
+}
+
+// DefaultProfileNEQ applies the NEQ predicate on the "default_profile" field.
+func DefaultProfileNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldDefaultProfile, v))
+}
+
+// DefaultProfileIn applies the In predicate on the "default_profile" field.
+func DefaultProfileIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldDefaultProfile, vs...))
+}
+
+// DefaultProfileNotIn applies the NotIn predicate on the "default_profile" field.
+func DefaultProfileNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldDefaultProfile, vs...))
+}
+
+// DefaultProfileGT applies the GT predicate on the "default_profile" field.
+func DefaultProfileGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldDefaultProfile, v))
+}
+
+// DefaultProfileGTE applies the GTE predicate on the "default_profile" field.
+func DefaultProfileGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldDefaultProfile, v))
+}
+
+// DefaultProfileLT applies the LT predicate on the "default_profile" field.
+func DefaultProfileLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldDefaultProfile, v))
+}
+
+// DefaultProfileLTE applies the LTE predicate on the "default_profile" field.
+func DefaultProfileLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldDefaultProfile, v))
+}
+
+// DefaultProfileContains applies the Contains predicate on the "default_profile" field.
+func DefaultProfileContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldDefaultProfile, v))
+}
+
+// DefaultProfileHasPrefix applies the HasPrefix predicate on the "default_profile" field.
+func DefaultProfileHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldDefaultProfile, v))
+}
+
+// DefaultProfileHasSuffix applies the HasSuffix predicate on the "default_profile" field.
+func DefaultProfileHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldDefaultProfile, v))
+}
+
+// DefaultProfileIsNil applies the IsNil predicate on the "default_profile" field.
+func DefaultProfileIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldDefaultProfile))
+}
+
+// DefaultProfileNotNil applies the NotNil predicate on the "default_profile" field.
+func DefaultProfileNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldDefaultProfile))
+}
+
+// DefaultProfileEqualFold applies the EqualFold predicate on the "default_profile" field.
+func DefaultProfileEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldDefaultProfile, v))
+}
+
+// DefaultProfileContainsFold applies the ContainsFold predicate on the "default_profile" field.
+func DefaultProfileContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldDefaultProfile, v))
 }
 
 // LabelsIsNil applies the IsNil predicate on the "labels" field.
