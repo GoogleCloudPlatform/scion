@@ -23,7 +23,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:chat-mobile": "playwright test -c e2e/chat-mobile/playwright.config.ts"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.18.0",

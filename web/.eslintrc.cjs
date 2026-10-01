@@ -40,6 +40,10 @@ module.exports = {
             parserOptions: { project: './e2e/terminal-hidden/tsconfig.json' },
         },
         {
+            files: ['e2e/chat-mobile/*.ts'],
+            parserOptions: { project: './e2e/chat-mobile/tsconfig.json' },
+        },
+        {
             files: ['src/client/terminal-*.test.ts'],
             parserOptions: { project: './src/client/tsconfig.terminal-tests.json' },
         },
