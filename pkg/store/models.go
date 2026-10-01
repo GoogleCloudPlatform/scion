@@ -1163,7 +1163,7 @@ type BrokerDispatch struct {
 	// already-authorized operation, not a re-evaluated authoring point.
 	InitiatorPrincipalKind  string `json:"initiatorPrincipalKind,omitempty"`
 	InitiatorPrincipalID    string `json:"initiatorPrincipalId,omitempty"`
-	InitiatorCredentialKind string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|legacy_unknown
+	InitiatorCredentialKind string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|dev_local|legacy_unknown
 	InitiatorCredentialID   string `json:"initiatorCredentialId,omitempty"`
 	// CorrelationID ties this dispatch row back to the originating request's
 	// log/audit trail (the same request ID plumbed through decision/mutation
@@ -2053,7 +2053,7 @@ type ConversationFilter struct {
 type InitiatorAttribution struct {
 	InitiatorPrincipalKind      string `json:"initiatorPrincipalKind,omitempty"`
 	InitiatorPrincipalID        string `json:"initiatorPrincipalId,omitempty"`
-	InitiatorCredentialKind     string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|legacy_unknown
+	InitiatorCredentialKind     string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|dev_local|legacy_unknown
 	InitiatorCredentialID       string `json:"initiatorCredentialId,omitempty"`
 	InitiatorCredentialSnapshot string `json:"initiatorCredentialSnapshot,omitempty"` // bounded JSON: name, boundary, purpose, labels
 	AttributionVersion          int    `json:"attributionVersion,omitempty"`          // 0/absent = legacy_unknown; 1 = written by E.2b
@@ -2069,12 +2069,25 @@ type InitiatorAttribution struct {
 
 // InitiatorCredentialKind* are the values InitiatorAttribution.InitiatorCredentialKind
 // may hold. This is a deliberately smaller, committed domain than
-// hub.CredentialKind: async attribution only ever records one of these four
-// values (rulings "E.2b field names").
+// hub.CredentialKind: async attribution only ever records one of these five
+// values (rulings "E.2b field names"; dev_local added by ptone/scion#2342).
+//
+// InitiatorCredentialKindDevLocal is a narrow, server-attested exception:
+// hub.captureInitiatorAttribution emits it only for the concrete trusted
+// local-dev identity (hub.DevUser, produced solely by hub.NewDevUser /
+// DevAuthMiddleware) and only when that identity's ID matches the
+// well-known hub.DevUserID. It is never derived from an identity's
+// self-reported Type(), from request input, or from any other identity
+// implementation that merely looks like the dev user. Every other
+// unrecognized or absent credential still maps to legacy_unknown. Like
+// every other value in this domain, dev_local is attribution, not
+// authority: it grants nothing by itself, and B.3 owns the fire-time
+// authority decision built on top of it.
 const (
 	InitiatorCredentialKindSession       = "session"
 	InitiatorCredentialKindUAT           = "uat"
 	InitiatorCredentialKindAgent         = "agent"
+	InitiatorCredentialKindDevLocal      = "dev_local"
 	InitiatorCredentialKindLegacyUnknown = "legacy_unknown"
 )
 

@@ -14,7 +14,11 @@
 
 package hub
 
-import "github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+import (
+	"sync"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+)
 
 // Delivery credential gate (ptone/scion#2228).
 //
@@ -63,6 +67,12 @@ import "github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 // state these rules and cite ptone/scion#2228.
 var deliveryCredentialKinds = map[CredentialKind]struct{}{}
 
+// deliveryCredentialKindsMu guards deliveryCredentialKinds: every read of
+// the set (deliveryCredentialAdmitted) takes an RLock, and every write
+// (withDeliveryCredentialKinds in tests) takes the write Lock around the
+// swap, so a concurrent read and write cannot race.
+var deliveryCredentialKindsMu sync.RWMutex
+
 // deliveryGateReason is the deny reason recorded when the gate rejects a
 // request.
 const deliveryGateReason = "deliver permissions require a delivery credential"
@@ -97,6 +107,8 @@ func deliveryCredentialAdmitted(permissionID string, action Action, kind Credent
 	if !isDeliverRequest(permissionID, action) {
 		return true
 	}
+	deliveryCredentialKindsMu.RLock()
+	defer deliveryCredentialKindsMu.RUnlock()
 	_, ok := deliveryCredentialKinds[kind]
 	return ok
 }

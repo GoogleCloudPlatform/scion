@@ -41,7 +41,7 @@ import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
-import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../../utils/feature-flags.js';
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-events.js';
@@ -85,7 +85,6 @@ const DOCS_URL = 'https://googlecloudplatform.github.io/scion/overview/';
 
 /** Feature flag gating the chat mode (and therefore the mode switch). */
 const NATIVE_CHAT_FLAG = 'web.native_chat';
-const TERMINAL_WORKSPACE_FLAG = 'web.terminal_workspace';
 
 // Header instances in the app shell and retained terminal workspace share one
 // document-level mode memory so switching views restores the same last paths.

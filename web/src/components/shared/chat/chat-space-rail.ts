@@ -2412,9 +2412,45 @@ export class ScionChatSpaceRail extends LitElement {
   private getFilteredSpaces(): ChatSpace[] {
     const sorted = this.getSortedSpaces();
     if (this.spaceFilter === 'unread') {
-      return sorted.filter((s) => s.unreadCount > 0 || s.hasUnreadMention);
+      // The space holding the open conversation stays even at zero unread —
+      // otherwise reading the last unread thread in a space (including via
+      // auto-advance) would make the whole space, open thread and all,
+      // vanish out from under the user.
+      const openProjectId = this.findProjectIdForSelectedThread();
+      return sorted.filter(
+        (s) => s.unreadCount > 0 || s.hasUnreadMention || s.projectId === openProjectId
+      );
     }
     return sorted;
+  }
+
+  /** The space containing the currently selected thread, if any. */
+  private findProjectIdForSelectedThread(): string | null {
+    if (!this.selectedKey) return null;
+    for (const [projectId, threads] of this.threadsBySpace) {
+      if (threads.some((t) => t.id === this.selectedKey)) return projectId;
+    }
+    return null;
+  }
+
+  /**
+   * Whether a thread counts as unread for the rail's filter — the same
+   * definition the dots and space rollup use: a muted thread never counts,
+   * mention or not.
+   */
+  private isThreadUnreadForFilter(thread: ChatSpaceThread): boolean {
+    return !thread.muted && (thread.hasUnread || thread.hasUnreadMention);
+  }
+
+  /**
+   * Threads to show within a shown space under the current filter. The
+   * open conversation is always kept, even once read, so the user reading
+   * it (or auto-advance marking it read) does not pull it out from under
+   * them; every other thread is held to the unread definition above.
+   */
+  private getVisibleThreads(threads: ChatSpaceThread[]): ChatSpaceThread[] {
+    if (this.spaceFilter !== 'unread') return threads;
+    return threads.filter((t) => t.id === this.selectedKey || this.isThreadUnreadForFilter(t));
   }
 
   private renderSpaces() {
@@ -2543,21 +2579,24 @@ export class ScionChatSpaceRail extends LitElement {
    * co-mingled in a single ordered list — no separate "THREADS" heading.
    */
   private renderThreadList(threads: ChatSpaceThread[], projectId: string) {
+    const visibleThreads = this.getVisibleThreads(threads);
     const groups = this.getGroups(projectId);
     if (groups.length === 0) {
       // No groups — render flat list, but still show group-name input if active
       return html`
-        ${threads.map((t) => this.renderThread(t, projectId))}
+        ${visibleThreads.map((t) => this.renderThread(t, projectId))}
         ${this.groupNameInput?.projectId === projectId ? this.renderGroupNameInput() : nothing}
       `;
     }
 
-    // Build lookups
-    const threadMap = new Map(threads.map((t) => [t.id, t]));
+    // Build lookups. threadMap is built from the filtered list, so a group
+    // whose threads are all filtered out resolves to zero members below —
+    // that is what lets the unread filter hide it without a separate check.
+    const threadMap = new Map(visibleThreads.map((t) => [t.id, t]));
     const groupedThreadIds = new Set(groups.flatMap((g) => g.threadIds));
 
     // #general threads always come first
-    const generalThreads = threads.filter((t) => t.isGeneral);
+    const generalThreads = visibleThreads.filter((t) => t.isGeneral);
 
     // Build unified item list: ungrouped non-general threads + groups
     type RailItem =
@@ -2565,7 +2604,7 @@ export class ScionChatSpaceRail extends LitElement {
       | { kind: 'group'; id: string; group: ThreadGroup };
 
     const items: RailItem[] = [];
-    for (const t of threads) {
+    for (const t of visibleThreads) {
       if (t.isGeneral || groupedThreadIds.has(t.id)) continue;
       items.push({ kind: 'thread', id: t.id, thread: t });
     }
@@ -2614,6 +2653,12 @@ export class ScionChatSpaceRail extends LitElement {
         const groupThreads = group.threadIds
           .map((id) => threadMap.get(id))
           .filter((t): t is ChatSpaceThread => t !== undefined);
+        // Under the unread filter, a group left with no visible threads
+        // (empty, or every member read) is noise — hide it entirely rather
+        // than showing a bare "(0)" header.
+        if (this.spaceFilter === 'unread' && groupThreads.length === 0) {
+          return nothing;
+        }
         const collapsed =
           this.collapsedGroups.has(group.id) && group.id !== this.autoExpandedGroupId;
         return html`

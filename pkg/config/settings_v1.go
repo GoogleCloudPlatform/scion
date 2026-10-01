@@ -1452,11 +1452,45 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	return settings, nil
 }
 
+// settingsExcludedEnvVars lists SCION_* variables that are never settings
+// overrides: they are consumed directly by another subsystem, and their
+// generic mapped key happens to collide with a struct-typed settings field.
+// Both the versioned and legacy env key mappers drop them via this list so
+// that koanf's Unmarshal never fails just because one of them is present in
+// the process environment.
+var settingsExcludedEnvVars = []string{
+	"SCION_AUTO_EXPOSE_PORTS",
+	"SCION_AUTO_EXPOSE_PORTS_LIST",
+}
+
+// isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
+func isSettingsExcludedEnv(name string) bool {
+	for _, e := range settingsExcludedEnvVars {
+		if e == name {
+			return true
+		}
+	}
+	return false
+}
+
 // versionedEnvKeyMapper maps SCION_* environment variables to versioned settings keys.
 // All keys are snake_case so no camelCase conversion is needed.
 func versionedEnvKeyMapper(s string) string {
 	if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, false); ok {
 		return mapped
+	}
+	if isSettingsExcludedEnv(s) {
+		// SCION_AUTO_EXPOSE_PORTS and SCION_AUTO_EXPOSE_PORTS_LIST are
+		// consumed directly by sciontool's auto-expose scanner
+		// (pkg/sciontool/autoexpose), not read as settings overrides. Left
+		// mapped, the bare key "auto_expose_ports" collides with the
+		// struct-typed AutoExposePorts field and makes koanf's Unmarshal
+		// fail outright whenever the process happens to have that variable
+		// set (e.g. a broker started inside an agent container, which the
+		// hub sets it in). Returning "" makes the env provider drop the
+		// variable entirely, the same idiom used below for a removed
+		// legacy env var and for SCION_OTEL_INSECURE's empty-value case.
+		return ""
 	}
 	if isRemovedLegacyEnv(s) {
 		// SCION_HUB_GROVE_ID is no longer read, not even via the generic
