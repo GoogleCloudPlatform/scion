@@ -210,6 +210,13 @@ const (
 	// same response: discard the cursor and restart pagination from the
 	// first page (an empty cursor).
 	ErrCodeInvalidCursor = "invalid_cursor"
+
+	// ErrCodeSecretScopeRestricted is returned when an agent's secret write
+	// resolves to project scope while the hub admin setting
+	// agent_secrets.user_scope_only is on. Distinct from ErrCodeForbidden
+	// so clients (the web terminal pane) can recognise the rejection
+	// reliably and show a specific message (design ptone/scion#2291 §6).
+	ErrCodeSecretScopeRestricted = "secret_scope_restricted"
 )
 
 // writeError writes a JSON error response.

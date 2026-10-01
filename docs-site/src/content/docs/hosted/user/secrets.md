@@ -220,6 +220,12 @@ From inside an agent container, use the `sciontool secret` command suite:
     ```
     *Note: `--scope` accepts `project` (default) or `user`.*
 
+    *Hub admins can restrict agents to writing user (profile) scope only. If the "Restrict
+    agent-written secrets to profile scope" setting is on (Admin > Server Config), a project-scope
+    write from an agent — including one that omits `--scope` — is rejected with a 403 and a message
+    telling you to retry with `--scope user`. This does not affect writes you make yourself through
+    the web UI or `scion hub secret set --project`.*
+
 #### Using the Hub API Directly
 Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
 
