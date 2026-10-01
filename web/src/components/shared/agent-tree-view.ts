@@ -152,10 +152,10 @@ export class ScionAgentTreeView extends LitElement {
    * Identifies which subset of the host's underlying agent data `agents`
    * currently represents (e.g. a project or phase filter value). Leave at
    * the default `''` if the host does no client-side filtering. Changing it
-   * tells `computeStableLayout` (#2481) that a shrink/growth of `agents` is
-   * the user picking a different view of the same data, not a delete — so it
-   * gets a fresh, re-fit layout (the pre-#2481 compacting behavior) instead
-   * of the stable-but-not-recompacted delete path.
+   * tells `computeStableLayout` that a shrink/growth of `agents` is the user
+   * picking a different view of the same data, not a delete — so it gets a
+   * fresh, re-fit, compacted layout instead of the stable-but-not-recompacted
+   * delete path.
    */
   @property({ type: String })
   filterKey = '';
@@ -192,8 +192,7 @@ export class ScionAgentTreeView extends LitElement {
    * actions still come from the live `agents` array via `agentById` on every
    * render — only positions and edge endpoints are cached. The other fields
    * besides `layout` are the exact inputs it was computed from, which
-   * `computeStableLayout` (#2481, see its doc comment) needs on the next
-   * cache miss.
+   * `computeStableLayout` (see its doc comment) needs on the next cache miss.
    */
   private layoutCache: {
     signature: string;
@@ -267,9 +266,9 @@ export class ScionAgentTreeView extends LitElement {
    * for, since the forest just grew into territory the current viewport may
    * not cover. A project *leaving* the scope (e.g. its last agent was
    * deleted) is deliberately not treated as a scope change: re-fitting then
-   * would reset pan/zoom for a graph that only shrank, which is the resize
-   * surprise #2481 reports when deleting the last agent of a project in a
-   * cross-project graph. Reordering alone never counts either way.
+   * would reset pan/zoom for a graph that only shrank, which is a jarring
+   * resize when deleting the last agent of a project in a cross-project
+   * graph. Reordering alone never counts either way.
    */
   private static scopeExpanded(oldAgents: Agent[], newAgents: Agent[]): boolean {
     const oldSet = ScionAgentTreeView.projectIdSet(oldAgents);
@@ -654,16 +653,16 @@ export class ScionAgentTreeView extends LitElement {
       this.didAutoFit = false;
     }
     // A filter change is the user picking a different view, not a delete —
-    // re-fit, same as pre-#2481.
+    // re-fit for it, the same as a fresh, uncached render would.
     if (changedProperties.has('filterKey') && changedProperties.get('filterKey') !== undefined) {
       this.didAutoFit = false;
     }
     if (changedProperties.has('agents')) {
       const oldAgents = changedProperties.get('agents') as Agent[] | undefined;
       // Re-fit on first arrival or when a project *enters* scope. A project
-      // *leaving* scope does not re-fit (#2481): that's what an agent delete
-      // does to a cross-project graph, and resetting the viewport then is
-      // the same jarring reset this issue is about, for the whole canvas.
+      // *leaving* scope does not re-fit: that's what an agent delete does to
+      // a cross-project graph, and resetting the viewport then would be the
+      // same jarring reset for the whole canvas instead of one node.
       if (
         !oldAgents ||
         oldAgents.length === 0 ||
@@ -961,8 +960,8 @@ export class ScionAgentTreeView extends LitElement {
       // needed to get an accurate collapse-chip count regardless of which
       // path below produces the positions.
       hiddenCounts = descendantCounts(buildLineageForest(agents));
-      // See computeStableLayout's doc comment (#2481) for what it reuses and
-      // when it falls back to a full fresh layout.
+      // See computeStableLayout's doc comment for what it reuses and when it
+      // falls back to a full fresh layout.
       layout = computeStableLayout(
         agents,
         this.collapsedIds,

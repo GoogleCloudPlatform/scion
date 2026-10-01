@@ -159,7 +159,7 @@ function nodePositions(el: ScionAgentTreeView): Record<string, string | null> {
 }
 
 /** Fails with a readable diff if any two node/user rectangles in the
- * component's current cached layout overlap (#2490 review round 1, C1). */
+ * component's current cached layout overlap. */
 function assertNoNodeOverlap(el: ScionAgentTreeView): void {
   const layout = cachedLayout(el) as ForestLayout;
   const rects = [
@@ -415,12 +415,12 @@ describe('scion-agent-tree-view auto-fit scope detection (#2388 review N3)', () 
     expect(didAutoFit()).toBe(false);
   });
 
-  it('does not reset auto-fit when a project drops out of the scope (#2481)', async () => {
+  it('does not reset auto-fit when a project drops out of the scope', async () => {
     // A project leaving scope (e.g. an agent delete emptied it out of a
     // cross-project graph) must not reset the viewport — that is the
-    // cross-project variant of the same jarring reset #2481 reports, just
-    // for the whole canvas instead of one node. Only a project *entering*
-    // scope is worth re-fitting for.
+    // cross-project variant of the same jarring reset a single-node delete
+    // causes, just for the whole canvas instead of one node. Only a project
+    // *entering* scope is worth re-fitting for.
     el.agents = [...el.agents, { ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' } as Agent];
     await el.updateComplete;
     setDidAutoFit(true);
@@ -430,7 +430,7 @@ describe('scion-agent-tree-view auto-fit scope detection (#2388 review N3)', () 
   });
 });
 
-describe('scion-agent-tree-view stable layout & keyed rendering on delete (#2481)', () => {
+describe('scion-agent-tree-view stable layout & keyed rendering on delete', () => {
   let el: ScionAgentTreeView;
 
   function baseAgents(): Agent[] {
@@ -478,7 +478,7 @@ describe('scion-agent-tree-view stable layout & keyed rendering on delete (#2481
     }
   });
 
-  it('removing a parent with children keeps unrelated trees in place and does not overlap (#2490 review round 1, C1)', async () => {
+  it('removing a parent with children keeps unrelated trees in place and does not overlap', async () => {
     // a1 has no children, so delete r1 instead: a1 and a2 both orphan and
     // get re-rooted, but the unrelated r2/b1 tree must not move or collide
     // with the orphans. Named so the surviving root-1 would *not* trivially
@@ -502,7 +502,7 @@ describe('scion-agent-tree-view stable layout & keyed rendering on delete (#2481
   it('a widened, promoted tree that sorts after the anchored one still does not overlap it', async () => {
     // Orphans ("zzz-...") sort *after* the anchored tree ("root-1"/root-2" in
     // baseAgents), the opposite ordering from the test above — covering both
-    // directions of #2490 review round 1, C1.
+    // orderings of the same overlap risk.
     el.agents = [
       agent('anchor-root', 'anchor-root', ['user-1']),
       agent('anchor-child', 'anchor-child', ['user-1', 'anchor-root']),
@@ -581,9 +581,9 @@ describe('scion-agent-tree-view stable layout & keyed rendering on delete (#2481
   });
 
   it('does not reset pan/zoom or auto-fit when a delete empties a second project out of scope', async () => {
-    // A single-project leaf delete never reset auto-fit even before #2481
-    // (scopeChanged/scopeExpanded only look at projectId sets). The case
-    // #2481 actually describes is a *cross-project* graph where deleting the
+    // A single-project leaf delete never reset auto-fit even before this
+    // fix (scopeChanged/scopeExpanded only look at projectId sets). The
+    // actual regression case is a *cross-project* graph where deleting the
     // last agent of one project used to reset the viewport.
     el.agents = [...el.agents, { ...agent('p2-root', 'p2-root', ['user-3']), projectId: 'p2' }];
     await el.updateComplete;
@@ -609,7 +609,7 @@ describe('scion-agent-tree-view stable layout & keyed rendering on delete (#2481
   });
 });
 
-describe('scion-agent-tree-view filterKey distinguishes a filter change from a delete (#2490 review round 1, R1)', () => {
+describe('scion-agent-tree-view filterKey distinguishes a filter change from a delete', () => {
   let el: ScionAgentTreeView;
 
   function baseAgents(): Agent[] {
@@ -653,7 +653,7 @@ describe('scion-agent-tree-view filterKey distinguishes a filter change from a d
     expect(view.didAutoFit).toBe(false);
   });
 
-  it('a filterKey change that hits the layout cache does not leave it stale for the next delete (#2490 review round 2, R3)', async () => {
+  it('a filterKey change that hits the layout cache does not leave it stale for the next delete', async () => {
     // Change filterKey alone (e.g. "All" -> "Running" when every agent is
     // already running): the topology signature is unaffected by filterKey,
     // so with the agents array unchanged this is a cache *hit*, which must

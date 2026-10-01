@@ -589,13 +589,13 @@ function packShiftEdge(
  * Builds the layout for `agents`, reusing `previous`'s pixel positions for
  * every node/user unaffected by what changed since `previous.agents`. This is
  * what keeps unrelated nodes from visibly jumping when an agent is deleted
- * elsewhere in the graph (#2481): `layoutForest`'s tidy-tree algorithm
- * assigns leaf x-slots with a single counter shared across every root in the
- * forest, so removing (or re-rooting) one node can renumber — and therefore
- * reposition — leaves in a completely unrelated tree laid out after it.
+ * elsewhere in the graph: `layoutForest`'s tidy-tree algorithm assigns leaf
+ * x-slots with a single counter shared across every root in the forest, so
+ * removing (or re-rooting) one node can renumber — and therefore reposition —
+ * leaves in a completely unrelated tree laid out after it.
  *
- * Falls back to a full fresh layout (the pre-#2481 behavior) when there is no
- * previous layout, when `collapsedIds`/`showUsers`/`orientation`/`filterKey`
+ * Falls back to a full fresh, re-fit layout when there is no previous
+ * layout, when `collapsedIds`/`showUsers`/`orientation`/`filterKey`
  * differ from what `previous.layout` was built with, or when
  * `detectPureRemoval` reports something other than a pure removal (see its
  * doc comment). `filterKey` lets a host distinguish "the data changed" (a
@@ -704,14 +704,15 @@ export function computeStableLayout(
   // new root an agent ends up under) is what keeps multiple pieces promoted
   // from the same tree together as one placement decision instead of
   // competing for the same old footprint and shoving each other off-screen.
-  const oldTreeOf = oldTreeKeysOf(buildLineageForest(previous.agents));
+  const oldForest = buildLineageForest(previous.agents);
+  const oldTreeOf = oldTreeKeysOf(oldForest);
   const unitOf = currentUnitsOf(buildLineageForest(agents), showUsers, oldTreeOf);
   // Old-side units via the same propagation rule as the current side (not a
   // per-node `rootUserOf` check): an old unit's membership must be read off
   // the old tree the same way a current one is, or the two can disagree for
   // a non-root node whose own ancestry names a different "user" than the
   // tree it's attached to.
-  const oldUnitOf = currentUnitsOf(buildLineageForest(previous.agents), showUsers, oldTreeOf);
+  const oldUnitOf = currentUnitsOf(oldForest, showUsers, oldTreeOf);
 
   // A unit is affected if any of its *current* members descended from an old
   // tree the removal touched — propagated via old-tree membership, not an
@@ -825,12 +826,11 @@ export function computeStableLayout(
       // No old position at all (every member was hidden by collapse before):
       // nothing to anchor to, so append past whatever is placed so far,
       // including frozen content's eventual shift.
+      const placedSoFarSpan = packSpan(orientation, [...placedUnitNodes, ...placedUnitUsers]);
+      const frozenSpan = packSpan(orientation, [...frozenNodes, ...frozenUsers]);
       const frontier = Math.max(
-        -Infinity,
-        ...placedUnitNodes.map((n) => packSpan(orientation, [n])!.max),
-        ...placedUnitUsers.map((u) => packSpan(orientation, [u])!.max),
-        ...frozenNodes.map((n) => packSpan(orientation, [n])!.max + pendingShift),
-        ...frozenUsers.map((u) => packSpan(orientation, [u])!.max + pendingShift)
+        placedSoFarSpan?.max ?? -Infinity,
+        (frozenSpan?.max ?? -Infinity) + pendingShift
       );
       offset = (frontier === -Infinity ? 0 : frontier + gap) - unitSpan.min;
     }

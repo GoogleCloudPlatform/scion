@@ -125,7 +125,7 @@ export class ScionPageAgents extends LitElement {
    * `this.agents` itself (never alongside `agentScope`, which changes
    * synchronously on click while the new list is still in flight). The graph
    * view's filterKey reads this, not `agentScope`, so a scope switch isn't
-   * mistaken for a delete before the new list lands (#2481).
+   * mistaken for a delete before the new list lands.
    */
   @state()
   private loadedScope: 'all' | 'mine' | 'shared' = 'all';

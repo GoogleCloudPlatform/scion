@@ -15,10 +15,10 @@
  */
 
 /**
- * Tests for scion-page-agents' `loadedScope` tracking (#2481, PR #2490
- * review round 2, R2): the graph view's filterKey must reflect the scope the
- * currently-loaded agent list was actually fetched for, not `agentScope`
- * (which changes synchronously on click, before the new list arrives).
+ * Tests for scion-page-agents' `loadedScope` tracking: the graph view's
+ * filterKey must reflect the scope the currently-loaded agent list was
+ * actually fetched for, not `agentScope` (which changes synchronously on
+ * click, before the new list arrives).
  */
 
 // @vitest-environment happy-dom

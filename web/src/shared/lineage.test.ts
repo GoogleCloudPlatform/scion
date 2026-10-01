@@ -666,9 +666,9 @@ describe('computeStableLayout (#2481)', () => {
   /**
    * Fails with a readable diff if any two node/user rectangles in `layout`
    * overlap. computeStableLayout's re-rooting branch isolates and places each
-   * affected tree independently of the full-forest leaf-slot numbering
-   * (#2490 review round 1, C1): this is the property that guarantees it
-   * actually avoids collisions, rather than merely passing on one fixture.
+   * affected unit independently of the full-forest leaf-slot numbering: this
+   * is the property that guarantees it actually avoids collisions, rather
+   * than merely passing on one fixture.
    */
   function assertNoOverlap(layout: ForestLayout): void {
     const rects = [
@@ -695,9 +695,9 @@ describe('computeStableLayout (#2481)', () => {
    * layout of `agents`: unique node/user/edge keys, every edge's pixels
    * matching its own endpoints' actual positions, and the exact same visible
    * node set, user set and (parentId, childId) edge set as a full fresh
-   * layout of the same inputs would produce (#2490 review round 2, R4) — the
-   * stable path may reposition things, but it must never show a different
-   * graph than the normal pipeline would.
+   * layout of the same inputs would produce — the stable path may reposition
+   * things, but it must never show a different graph than the normal
+   * pipeline would.
    */
   function assertStructurallyValid(
     agents: Agent[],
@@ -778,7 +778,7 @@ describe('computeStableLayout (#2481)', () => {
     expect(stable.edges).toHaveLength(beforeLayout.edges.length - 1);
   });
 
-  it('recenters a surviving user over its remaining roots after a leaf removal (R3)', () => {
+  it('recenters a surviving user over its remaining roots after a leaf removal', () => {
     // Three roots under one user; deleting the last one must not leave the
     // user card hanging over the gap where it used to be.
     const before = [
@@ -828,12 +828,11 @@ describe('computeStableLayout (#2481)', () => {
     expect(stable.users.map((u) => u.id)).toEqual(['user-1']);
   });
 
-  describe('re-rooting removal does not overlap anything (#2490 review round 1, C1)', () => {
-    // The reviewer's exact repro: deleting k1 orphans g1, which sorts before
-    // "root-1" and "root-2" by name — the fresh-layout-then-override approach
-    // this replaced put g1 and r1 in the slots the old fresh layout assigned
-    // them (0 and 1), then restored r2 to ITS old slot (1), landing r1 and r2
-    // on top of each other.
+  describe('re-rooting removal does not overlap anything', () => {
+    // Deleting k1 orphans g1, which sorts before "root-1" and "root-2" by
+    // name: a global fresh-layout-then-override approach would put g1 and r1
+    // in whichever slots a full fresh layout assigns them (0 and 1), then
+    // restore r2 to ITS old slot (1), landing r1 and r2 on top of each other.
     function fixture(): Agent[] {
       return [
         agent('r1', 'root-1', ['user-1']),
@@ -862,7 +861,7 @@ describe('computeStableLayout (#2481)', () => {
       // r1's old tree widens from 1 slot to 2 (k1's only child g1 is promoted
       // alongside now-childless r1), so r2/b1 shift right by exactly one slot
       // to make room — with only one neighbour to shift, this matches a
-      // fresh layout of `after` exactly (#2481 review round 4, R1).
+      // fresh layout of `after` exactly.
       const fresh = layoutForest(buildLineageForest(after));
       expect(posById(stable)).toEqual(posById(fresh));
     });
@@ -888,7 +887,7 @@ describe('computeStableLayout (#2481)', () => {
       expect(posById(stable)).toEqual(posById(fresh));
     });
 
-    it('vertical, with users (the alpha/mid repro) (#2490 review round 2, C1)', () => {
+    it('vertical, with users', () => {
       // alpha (root) has two children zz1, zz2; mid is a second, independent
       // root under the same user. Deleting alpha orphans zz1/zz2. mid shares
       // alpha's user, so it is part of the same *unit* and is recomputed
@@ -919,7 +918,7 @@ describe('computeStableLayout (#2481)', () => {
       );
     });
 
-    it('a middle tree that still fits stays in its old footprint (#2490 review round 2, R1)', () => {
+    it('a middle tree that still fits stays in its old footprint', () => {
       // Three independent trees a(->a1->{x,y}), b(->b1), c(->c1). Deleting
       // 'a' leaves a1 (same width as the old a-tree: one leaf each at x,y)
       // sandwiched between the untouched b and c trees — it must land back
@@ -956,87 +955,89 @@ describe('computeStableLayout (#2481)', () => {
       expect(posById(stable).x.px).toBeLessThan(posById(stable).b.px);
     });
 
-    it('deleting the middle of a chain widens in place and shifts only later trees, in order, by exactly the overflow (#2481 review round 4, R1)', () => {
-      // Chain a->b->c (one leaf, c) plus two independent untouched trees s, t.
-      // Deleting the middle agent b turns a (now childless) and c (promoted)
-      // into two separate roots: the tree widens from 1 slot to 2. a must
-      // stay at its old pixel, c sits directly next to it, and s/t — the
-      // only things with room to give — shift right by exactly one slot,
-      // keeping their order and spacing, not appended past the far end.
-      const before = [
-        agent('a', 'a', ['u']),
-        agent('b', 'b', ['u', 'a']),
-        agent('c', 'c', ['u', 'a', 'b']),
-        agent('s', 's', ['v']),
-        agent('t', 't', ['w']),
-      ];
-      const beforeLayout = layoutForest(buildLineageForest(before));
-      const beforePos = posById(beforeLayout);
-      const after = before.filter((a) => a.id !== 'b');
-      const stable = computeStableLayout(
-        after,
-        noCollapse,
-        false,
-        'vertical',
-        '',
-        prev(before, beforeLayout)
-      );
+    it.each([
+      ['vertical', false],
+      ['vertical', true],
+      ['horizontal', false],
+      ['horizontal', true],
+    ] as const)(
+      'deleting the middle of a chain widens in place and shifts only later trees, in order, by exactly the overflow (orientation=%s, showUsers=%s)',
+      (orientation, showUsers) => {
+        // A tree (0L -> 0Lk) to the LEFT of everything else — "0L" sorts
+        // before "a" — plus chain a->b->c (one leaf, c) and two independent
+        // untouched trees s, t to the right. Deleting the middle agent b
+        // turns a (now childless) and c (promoted) into two separate roots:
+        // the tree widens from 1 slot to 2. 0L/0Lk (and, with users shown,
+        // their user card) must stay completely untouched; a must stay at
+        // its old pixel; c sits directly next to it; and s/t — the only
+        // things with room to give — shift by exactly one slot, keeping
+        // their order and spacing, not appended past the far end.
+        const before = [
+          agent('0L', '0L', ['z']),
+          agent('0Lk', '0Lk', ['z', '0L']),
+          agent('a', 'a', ['u']),
+          agent('b', 'b', ['u', 'a']),
+          agent('c', 'c', ['u', 'a', 'b']),
+          agent('s', 's', ['v']),
+          agent('t', 't', ['w']),
+        ];
+        let beforeLayout = showUsers
+          ? layoutForestWithUsers(buildLineageForest(before))
+          : layoutForest(buildLineageForest(before));
+        if (orientation === 'horizontal') beforeLayout = transposeLayout(beforeLayout);
+        const beforePos = posById(beforeLayout);
+        const beforeUserPos = new Map(
+          beforeLayout.users.map((u) => [u.id, { px: u.px, py: u.py }])
+        );
 
-      assertNoOverlap(stable);
-      assertStructurallyValid(after, noCollapse, false, 'vertical', stable);
-      const pos = posById(stable);
-      const slotPitch = NODE_W + GAP_X;
-      // a keeps its exact old pixel; no hole left behind.
-      expect(pos.a).toEqual(beforePos.a);
-      // c sits in the very next slot, directly adjacent to a.
-      expect(pos.c.px).toBe(beforePos.a.px + slotPitch);
-      // s and t each shift right by exactly one slot pitch, keeping both
-      // their relative order and their original spacing from each other.
-      expect(pos.s.px).toBe(beforePos.s.px + slotPitch);
-      expect(pos.t.px).toBe(beforePos.t.px + slotPitch);
-      expect(pos.t.px - pos.s.px).toBe(beforePos.t.px - beforePos.s.px);
-      // Bounded growth: exactly one extra slot, not an unbounded teleport.
-      expect(stable.width).toBe(beforeLayout.width + slotPitch);
-      // Matches what a fresh layout of the same post-delete agents gives,
-      // since there's nothing to the chain's left that could be disturbed.
-      const fresh = layoutForest(buildLineageForest(after));
-      expect(posById(stable)).toEqual(posById(fresh));
-    });
+        const after = before.filter((x) => x.id !== 'b');
+        const stable = computeStableLayout(
+          after,
+          noCollapse,
+          showUsers,
+          orientation,
+          '',
+          prev(before, beforeLayout, { showUsers, orientation })
+        );
 
-    it('the same chain-middle delete, with users shown', () => {
-      const before = [
-        agent('a', 'a', ['u']),
-        agent('b', 'b', ['u', 'a']),
-        agent('c', 'c', ['u', 'a', 'b']),
-        agent('s', 's', ['v']),
-        agent('t', 't', ['w']),
-      ];
-      const beforeLayout = layoutForestWithUsers(buildLineageForest(before));
-      const beforePos = posById(beforeLayout);
-      const after = before.filter((a) => a.id !== 'b');
-      const stable = computeStableLayout(
-        after,
-        noCollapse,
-        true,
-        'vertical',
-        '',
-        prev(before, beforeLayout, { showUsers: true })
-      );
+        assertNoOverlap(stable);
+        assertStructurallyValid(after, noCollapse, showUsers, orientation, stable);
 
-      assertNoOverlap(stable);
-      assertStructurallyValid(after, noCollapse, true, 'vertical', stable);
-      const pos = posById(stable);
-      const slotPitch = NODE_W + GAP_X;
-      // a and c end up under the same "u" user card now (c was promoted to a
-      // root sharing a's user), but a still keeps its exact old pixel.
-      expect(pos.a).toEqual(beforePos.a);
-      expect(pos.c.px).toBe(pos.a.px + slotPitch);
-      expect(pos.s.px).toBe(beforePos.s.px + slotPitch);
-      expect(pos.t.px).toBe(beforePos.t.px + slotPitch);
-      expect(pos.t.px - pos.s.px).toBe(beforePos.t.px - beforePos.s.px);
-    });
+        const pos = posById(stable);
+        const axisOf = (p: { px: number; py: number }): number =>
+          orientation === 'horizontal' ? p.py : p.px;
+        const slotPitch = orientation === 'horizontal' ? NODE_H + H_GAP_Y : NODE_W + GAP_X;
 
-    it('preserves collapse state in the re-rooting branch (#2490 review round 2, C2)', () => {
+        // Content to the left of everything touched is completely untouched.
+        expect(pos['0L']).toEqual(beforePos['0L']);
+        expect(pos['0Lk']).toEqual(beforePos['0Lk']);
+        if (showUsers) {
+          const stableUserPos = new Map(stable.users.map((u) => [u.id, { px: u.px, py: u.py }]));
+          expect(stableUserPos.get('z')).toEqual(beforeUserPos.get('z'));
+        }
+
+        // a keeps its exact old pixel; no hole left behind.
+        expect(pos.a).toEqual(beforePos.a);
+        // c sits in the very next slot, directly adjacent to a.
+        expect(axisOf(pos.c)).toBe(axisOf(pos.a) + slotPitch);
+        // s and t each shift by exactly one slot pitch, keeping both their
+        // relative order and their original spacing from each other.
+        expect(axisOf(pos.s)).toBe(axisOf(beforePos.s) + slotPitch);
+        expect(axisOf(pos.t)).toBe(axisOf(beforePos.t) + slotPitch);
+        expect(axisOf(pos.t) - axisOf(pos.s)).toBe(axisOf(beforePos.t) - axisOf(beforePos.s));
+
+        // Matches what a fresh layout of the same post-delete agents gives,
+        // since there's nothing between the chain and the right-hand trees
+        // that could be disturbed differently.
+        let fresh = showUsers
+          ? layoutForestWithUsers(buildLineageForest(after))
+          : layoutForest(buildLineageForest(after));
+        if (orientation === 'horizontal') fresh = transposeLayout(fresh);
+        expect(posById(stable)).toEqual(posById(fresh));
+      }
+    );
+
+    it('preserves collapse state in the re-rooting branch', () => {
       // r -> k -> {g1, g2}, k collapsed. Deleting r orphans k (still
       // collapsed), so g1/g2 must stay hidden — the isolated per-unit layout
       // has to run pruneCollapsed too, not just the full-forest fresh path.
@@ -1066,7 +1067,7 @@ describe('computeStableLayout (#2481)', () => {
       assertNoOverlap(stable);
     });
 
-    it('does not duplicate a user key when two removed agents affect the same user group (#2490 review round 2, C1)', () => {
+    it('does not duplicate a user key when two removed agents affect the same user group', () => {
       // alpha and beta are both roots under user u, each with one child; both
       // get deleted in the same update, orphaning both children.
       const before = [
@@ -1092,7 +1093,7 @@ describe('computeStableLayout (#2481)', () => {
       assertStructurallyValid(after, noCollapse, true, 'vertical', stable);
     });
 
-    it('a non-root survivor stays with its actual root unit, not a group named after its own ancestry (#2481 fuzz finding)', () => {
+    it('a non-root survivor stays with its actual root unit, not a group named after its own ancestry', () => {
       // p (no ancestry) has two children: q (survives, stays p's ordinary
       // child) and m (removed, orphaning n — n's ancestry names p, so n is
       // legitimately grouped under a fake "user:p" once promoted). q must
@@ -1127,7 +1128,7 @@ describe('computeStableLayout (#2481)', () => {
       expect(stable.edges.some((e) => e.parentId === userKey('p') && e.childId === 'n')).toBe(true);
     });
 
-    it('drops a user whose sole root is removed, even while a separate tree is simultaneously re-rooted (#2481 fuzz finding)', () => {
+    it('drops a user whose sole root is removed, even while a separate tree is simultaneously re-rooted', () => {
       // x is u1's only agent. r (a different tree, under u2) loses its child
       // k's... no, r itself is removed, orphaning k. Both happen in the same
       // update: x's removal has nothing to promote (u1's group vanishes
@@ -1155,7 +1156,7 @@ describe('computeStableLayout (#2481)', () => {
       expect(stable.users.map((u) => u.id)).toContain('u2');
     });
 
-    it('packs both children of a deleted multi-child root together in its old footprint, without growing the canvas (#2490 review round 3, R1)', () => {
+    it('packs both children of a deleted multi-child root together in its old footprint, without growing the canvas', () => {
       // r has two children c1, c2; s and t are untouched, independent trees
       // to the right. Deleting r must not send c2 past s and t — both
       // children belong to the same old tree and must be placed together.
@@ -1190,7 +1191,7 @@ describe('computeStableLayout (#2481)', () => {
       expect(stable.width).toBe(beforeLayout.width);
     });
 
-    it('packs children of a deleted multi-child root with empty ancestry together, with users shown (#2490 review round 3, R1)', () => {
+    it('packs children of a deleted multi-child root with empty ancestry together, with users shown', () => {
       // r has no ancestry (the hub's no-identity convention); its children
       // inherit ancestry [r], making rootUserOf(c1) === rootUserOf(c2) ===
       // 'r' — both land in the same "user:r" unit once r is deleted, so they
@@ -1219,7 +1220,7 @@ describe('computeStableLayout (#2481)', () => {
       expect(stable.users.map((u) => u.id)).toContain('r');
     });
 
-    it('recomputes the orphan-side user group when the deleted parent has empty ancestry, with no dangling edges (#2490 review round 3, R2)', () => {
+    it('recomputes the orphan-side user group when the deleted parent has empty ancestry, with no dangling edges', () => {
       // p has no ancestry; c (its child) inherits [p], so rootUserOf(c) ===
       // 'p' even though p itself was never grouped under any user (p was a
       // plain, ungrouped root). Deleting p must still produce a "p" user
@@ -1254,7 +1255,7 @@ describe('computeStableLayout (#2481)', () => {
     });
   });
 
-  it('rebuilds re-rooting-branch edges with the correct endpoints (#2490 review round 1, C2)', () => {
+  it('rebuilds re-rooting-branch edges with the correct endpoints', () => {
     const before = [
       agent('r1', 'root-1', ['user-1']),
       agent('k1', 'kid-1', ['user-1', 'r1']),
@@ -1281,11 +1282,11 @@ describe('computeStableLayout (#2481)', () => {
       expect(child).toBeTruthy();
       expect(e.x1).toBeCloseTo(parent.px + NODE_W / 2);
       expect(e.y1).toBeCloseTo(parent.py + NODE_H);
-      expect(e.x2).toBeCloseTo(child.px + NODE_W / 2); // the C2 bug: this used to be child.px
+      expect(e.x2).toBeCloseTo(child.px + NODE_W / 2); // not child.px: that would be the top-left corner
       expect(e.y2).toBeCloseTo(child.py);
     }
-    // r2->b1 specifically, since it's the anchored edge the reviewer's repro
-    // found pointing at the wrong x.
+    // r2->b1 specifically, since it's the anchored edge most likely to point
+    // at the wrong x if this regresses.
     const r2b1 = stable.edges.find((e) => e.parentId === 'r2' && e.childId === 'b1')!;
     expect(r2b1.x2).toBeCloseTo(pos.b1.px + NODE_W / 2);
   });
@@ -1331,7 +1332,7 @@ describe('computeStableLayout (#2481)', () => {
     expect(posById(stable)).toEqual(posById(fresh));
   });
 
-  describe('structural invariants over randomized removals (#2490 review round 2, R4; round 3, R3)', () => {
+  describe('structural invariants over randomized removals', () => {
     // Minimal seeded LCG: deterministic (reproducible on failure) without
     // relying on Math.random or a test dependency.
     function makeRng(seed: number): () => number {
@@ -1358,8 +1359,8 @@ describe('computeStableLayout (#2481)', () => {
      * earlier agent. A child's ancestry is the parent's full chain plus the
      * parent's own id (real ancestry semantics), not just `[uid, parentId]`,
      * so multi-level chains are exercised. Roots get empty ancestry about
-     * 30% of the time (the hub's no-identity convention — #2481 review
-     * round 3, R2) and a real user id otherwise.
+     * 30% of the time (the hub's no-identity convention) and a real user id
+     * otherwise.
      */
     function randomForest(rng: () => number, size: number, userCount: number): Agent[] {
       const users = Array.from({ length: userCount }, (_, i) => `u${i}`);
@@ -1392,12 +1393,12 @@ describe('computeStableLayout (#2481)', () => {
      * Every surviving agent whose old root tree, and old user group when
      * `showUsers`, had no removed member is "unaffected" — checked
      * independently of `computeStableLayout`'s own notion of "affected" so a
-     * bug in that notion (round 3's R1, R2) can't hide from this assertion
-     * the way it hid from a no-overlap-only check. Since round 4 (R1), an
-     * unaffected agent is no longer guaranteed to keep its *exact* pixel: a
-     * widened unit to its left can push it along `packAxis` to make room.
-     * What must still hold is the acceptance criterion in substance — this
-     * is a uniform, order-preserving shift, not a reshuffle — so this checks
+     * bug in that notion can't hide from this assertion the way it would
+     * hide from a no-overlap-only check. An unaffected agent is not
+     * guaranteed to keep its *exact* pixel: a widened unit to its left can
+     * push it along `packAxis` to make room. What must still hold is the
+     * acceptance criterion in substance — this is a uniform, order-preserving
+     * shift, not a reshuffle — so this checks
      * that every unaffected agent's `packAxis` position never *decreases*
      * from its old one, and that the relative order of unaffected agents
      * (sorted by their old `packAxis` position) is preserved in the new
@@ -1450,10 +1451,34 @@ describe('computeStableLayout (#2481)', () => {
         .map((a) => ({ id: a.id, oldAxis: axisOf(beforePos.get(a.id)!) }))
         .sort((x, y) => x.oldAxis - y.oldAxis);
 
+      // The strongest, independent check: anything positioned before the
+      // leftmost edge of *any* touched old tree/group can never have
+      // anything to make room for, so it must keep its *exact* previous
+      // pixel — not just "moved forward, in order". The threshold is the
+      // touched tree/group's own old span, not just the removed id's own
+      // position within it: a removed id is not necessarily its tree's
+      // leftmost member.
+      const touchedOldAxes = before
+        .filter((a) => {
+          const uid = showUsers ? rootUserOf(a) : undefined;
+          return (
+            touchedTrees.has(oldTreeOf.get(a.id)!) || (uid !== undefined && touchedUsers.has(uid))
+          );
+        })
+        .map((a) => beforePos.get(a.id))
+        .filter((p): p is { px: number; py: number } => !!p)
+        .map(axisOf);
+      const minTouchedOldAxis = touchedOldAxes.length > 0 ? Math.min(...touchedOldAxes) : Infinity;
+
       let lastNewAxis = -Infinity;
       for (const { id, oldAxis } of unaffectedByOldAxis) {
         const newPos = stablePos.get(id);
         expect(newPos, `unaffected agent ${id} is missing from the stable layout`).toBeTruthy();
+        if (oldAxis < minTouchedOldAxis) {
+          expect(newPos, `agent ${id} left of all touched content moved`).toEqual(
+            beforePos.get(id)
+          );
+        }
         const newAxis = axisOf(newPos!);
         expect(
           newAxis,
