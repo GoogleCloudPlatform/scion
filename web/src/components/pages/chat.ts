@@ -355,6 +355,31 @@ export class ScionPageChat extends LitElement {
    */
   private _paletteGroupInvalidationEpoch: Partial<Record<PaletteGroup, number>> = {};
   /**
+   * The current load's own identity token for a group, keyed by
+   * `PaletteGroup` — present while that group's own loader
+   * (`_loadPaletteAgents`/`_loadPalettePeople`/`_loadPaletteThreads`) has a
+   * fetch in flight, absent otherwise. `_refreshDirtyPaletteGroups` checks
+   * presence before reloading a dirty group — see its own doc comment for
+   * why.
+   *
+   * A token, not a boolean: a loader clears its own entry in `finally` only
+   * if it is still the current token, so a load superseded by a newer one
+   * for the same group (an explicit reopen/retry, or — for People
+   * specifically — a newer load already past the unsignalled
+   * `_resolveSelfUserId` identity step while this one is still in it) cannot
+   * clear bookkeeping that belongs to that newer load. For Agents and
+   * Threads, the data controller's own generation check already turns every
+   * supersede case into an AbortError before the loader's success or catch
+   * branch runs at all, so those two loaders only need the token in
+   * `finally`. People is the exception: its identity-resolution step runs
+   * before the data controller is ever called, so a newer load can already
+   * be in that step — superseding nothing the controller tracks — while an
+   * older one is still resolving or has just failed. People's loader
+   * therefore additionally checks the token on both its success path and its
+   * catch path before publishing a result, not just before clearing it.
+   */
+  private _paletteGroupLoadToken: Partial<Record<PaletteGroup, object>> = {};
+  /**
    * Identifies the current People load across its identity-resolution phase
    * (`_resolveSelfUserId`'s `/auth/me` fetch, which carries no abort signal
    * of its own and so is not covered by `_paletteDataController.cancel()`).
@@ -3151,12 +3176,37 @@ export class ScionPageChat extends LitElement {
     }
   }
 
-  /** Reload every group an SSE event invalidated while the palette is open. A group not currently dirty is left untouched. */
+  /**
+   * Reload every group an SSE event invalidated while the palette is open. A
+   * group not currently dirty is left untouched.
+   *
+   * A dirty group whose own loader is still mid-flight (see
+   * `_paletteGroupLoadToken`'s doc comment) is *not* reloaded here — doing so
+   * would call straight into the data controller's own supersede logic and
+   * abort that still-running fetch, and on a hub where invalidations arrive
+   * more often than one fetch takes to finish, every restart would cancel
+   * the last one's progress before it could ever land, so the group would
+   * never resolve. Instead this reschedules another debounced check: once
+   * the in-flight load finally settles, a later tick here finds it no longer
+   * in flight (still dirty, since that load's own epoch check leaves `dirty`
+   * set) and reloads it then — one coalesced follow-up fetch per burst of
+   * invalidations, just deferred until the fetch already running is done.
+   */
   private _refreshDirtyPaletteGroups(): void {
     if (!this.v2PaletteOpen) return;
-    if (this._paletteGroupDirty.agents) void this._loadPaletteAgents();
-    if (this._paletteGroupDirty.people) void this._loadPalettePeople();
-    if (this._paletteGroupDirty.threads) void this._loadPaletteThreads();
+    let deferred = false;
+    // The three groups with a loader; `documents` is never dirtied.
+    for (const group of ['agents', 'people', 'threads'] as const) {
+      if (!this._paletteGroupDirty[group]) continue;
+      if (this._paletteGroupLoadToken[group] !== undefined) {
+        deferred = true;
+        continue;
+      }
+      if (group === 'agents') void this._loadPaletteAgents();
+      else if (group === 'people') void this._loadPalettePeople();
+      else void this._loadPaletteThreads();
+    }
+    if (deferred) this._schedulePaletteDebouncedRefresh();
   }
 
   /**
@@ -3212,8 +3262,22 @@ export class ScionPageChat extends LitElement {
     this._paletteCloseAnimating = true;
   }
 
-  /** Load the Agents group from the real paginated agents/DM APIs. */
+  /**
+   * Load the Agents group from the real paginated agents/DM APIs.
+   *
+   * `token` identifies this call for {@link _paletteGroupLoadToken}'s
+   * `finally` check, so a load superseded by a newer one for this group
+   * cannot clear bookkeeping that belongs to that newer load. Nothing else
+   * here needs to check it: {@link ChatPaletteDataController}'s own
+   * generation check already turns a superseded call into an AbortError
+   * before `loadAgentsGroup` resolves or rejects, so the `AbortError` branch
+   * below is what actually catches a stale result — see
+   * `_paletteGroupLoadToken`'s doc comment for the one group (People) where
+   * that isn't the whole story.
+   */
   private async _loadPaletteAgents(): Promise<void> {
+    const token = {};
+    this._paletteGroupLoadToken.agents = token;
     this.v2PaletteGroups = {
       ...this.v2PaletteGroups,
       agents: { status: 'loading', candidates: this.v2PaletteGroups.agents?.candidates ?? [] },
@@ -3230,6 +3294,10 @@ export class ScionPageChat extends LitElement {
         ...this.v2PaletteGroups,
         agents: { status: 'error', candidates: [], ...(message ? { error: message } : {}) },
       };
+    } finally {
+      if (this._paletteGroupLoadToken.agents === token) {
+        delete this._paletteGroupLoadToken.agents;
+      }
     }
   }
 
@@ -3297,46 +3365,72 @@ export class ScionPageChat extends LitElement {
    * and never cached.
    */
   private async _loadPalettePeople(): Promise<void> {
+    const token = {};
+    this._paletteGroupLoadToken.people = token;
     this.v2PaletteGroups = {
       ...this.v2PaletteGroups,
       people: { status: 'loading', candidates: this.v2PaletteGroups.people?.candidates ?? [] },
     };
     const epochAtStart = this._beginPaletteGroupLoad('people');
-    const mySeq = ++this._peopleLoadSeq;
-    const selfId = await this._resolveSelfUserId();
-    // The identity fetch above carries no abort signal of its own, so it is
-    // not cancelled by `_closePaletteAndCancelLoad`'s `cancel()` the way the
-    // group loaders' own fetches are. Guard manually with this load's own
-    // sequence token — not `v2PaletteOpen` — since closing and reopening
-    // sets `v2PaletteOpen` back to `true`, which would let a stale load's
-    // identity resolution overwrite a newer, already-`ready` People state.
-    // A newer People load (from a reopen, a refresh, or another call) or a
-    // close in the meantime bumps `_peopleLoadSeq`, superseding this one.
-    if (mySeq !== this._peopleLoadSeq) {
-      return;
-    }
-    if (!selfId) {
-      this.v2PaletteGroups = {
-        ...this.v2PaletteGroups,
-        people: {
-          status: 'error',
-          candidates: [],
-          error: 'Could not resolve your identity yet.',
-        },
-      };
-      return;
-    }
     try {
+      const mySeq = ++this._peopleLoadSeq;
+      const selfId = await this._resolveSelfUserId();
+      // The identity fetch above carries no abort signal of its own, so it is
+      // not cancelled by `_closePaletteAndCancelLoad`'s `cancel()` the way the
+      // group loaders' own fetches are. Guard manually with this load's own
+      // sequence token — not `v2PaletteOpen` — since closing and reopening
+      // sets `v2PaletteOpen` back to `true`, which would let a stale load's
+      // identity resolution overwrite a newer, already-`ready` People state.
+      // A newer People load (from a reopen, a refresh, or another call) or a
+      // close in the meantime bumps `_peopleLoadSeq`, superseding this one.
+      // This return still runs the `finally` below, which is exactly why
+      // that `finally` must check `token` itself rather than clearing
+      // unconditionally — see `_paletteGroupLoadToken`'s doc comment.
+      if (mySeq !== this._peopleLoadSeq) {
+        return;
+      }
+      if (!selfId) {
+        this.v2PaletteGroups = {
+          ...this.v2PaletteGroups,
+          people: {
+            status: 'error',
+            candidates: [],
+            error: 'Could not resolve your identity yet.',
+          },
+        };
+        return;
+      }
+      // Unlike Agents/Threads (see their own loaders' doc comments), this
+      // check is reachable: a newer People load (B) can already be awaiting
+      // its own `_resolveSelfUserId` — a plain fetch with no abort signal —
+      // while this load (A) is still inside `loadPeopleGroup`, which nothing
+      // has superseded from the data controller's point of view. Without
+      // this, A resolving after B has taken over would publish a stale
+      // `ready` list over B's own in-progress (or already-`ready`) state.
       const candidates = await this._paletteDataController.loadPeopleGroup(selfId);
+      if (this._paletteGroupLoadToken.people !== token) return;
       this.v2PaletteGroups = { ...this.v2PaletteGroups, people: { status: 'ready', candidates } };
       this._finishPaletteGroupLoad('people', epochAtStart);
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
+      // Reachable for the same reason as the success-path check above: a
+      // newer People load (B) can already be awaiting its own identity while
+      // this load (A) fails for a real (non-abort) reason inside
+      // `loadPeopleGroup` — nothing the data controller tracks has
+      // superseded A, since B has not called `loadPeopleGroup` yet, so A's
+      // failure is not reclassified as an abort. Without this, A's failure
+      // would publish a stale `error` (wiping candidates) over B's own
+      // in-progress or already-`ready` state.
+      if (this._paletteGroupLoadToken.people !== token) return;
       const message = err instanceof PaletteLoadError || err instanceof Error ? err.message : '';
       this.v2PaletteGroups = {
         ...this.v2PaletteGroups,
         people: { status: 'error', candidates: [], ...(message ? { error: message } : {}) },
       };
+    } finally {
+      if (this._paletteGroupLoadToken.people === token) {
+        delete this._paletteGroupLoadToken.people;
+      }
     }
   }
 
@@ -3345,8 +3439,14 @@ export class ScionPageChat extends LitElement {
    * of) the Threads group. A partial failure keeps the group `'ready'` with
    * its successful rows selectable and `incomplete: true`, rather than
    * hiding them behind an `'error'` state.
+   *
+   * `token` identifies this call for {@link _paletteGroupLoadToken}'s
+   * `finally` check only — see `_loadPaletteAgents`'s doc comment for why
+   * nothing else here needs it.
    */
   private async _loadPaletteThreads(retryOnly = false): Promise<void> {
+    const token = {};
+    this._paletteGroupLoadToken.threads = token;
     const previous = this.v2PaletteGroups.threads;
     this.v2PaletteGroups = {
       ...this.v2PaletteGroups,
@@ -3377,6 +3477,10 @@ export class ScionPageChat extends LitElement {
         ...this.v2PaletteGroups,
         threads: { status: 'error', candidates: [], ...(message ? { error: message } : {}) },
       };
+    } finally {
+      if (this._paletteGroupLoadToken.threads === token) {
+        delete this._paletteGroupLoadToken.threads;
+      }
     }
   }
 
