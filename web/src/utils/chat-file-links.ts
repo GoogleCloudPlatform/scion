@@ -550,6 +550,13 @@ export function pathIdentityKey(projectId: string, target: PathLinkTarget): stri
 /** Largest file fetched for an inline text preview, in bytes (512 KiB). */
 export const TEXT_PREVIEW_MAX_BYTES = 512 * 1024;
 
+/** Human-readable file size, shared by the message attachment chip and the Documents palette row. */
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 const IMAGE_EXTENSIONS = new Set([
   '.png',
   '.jpg',
@@ -576,6 +583,171 @@ export function isImageFileName(name: string): boolean {
 /** True when a file name's extension marks it as Markdown. */
 export function isMarkdownFileName(name: string): boolean {
   return MARKDOWN_EXTENSIONS.has(extensionOf(name));
+}
+
+/**
+ * Extensions (beyond Markdown, checked separately) known to be safe to fetch
+ * and render as plain text/code, not binary data.
+ */
+const KNOWN_TEXT_EXTENSIONS = new Set([
+  '.txt',
+  '.json',
+  '.jsonc',
+  '.xml',
+  '.yaml',
+  '.yml',
+  '.toml',
+  '.ini',
+  '.conf',
+  '.cfg',
+  '.env',
+  '.csv',
+  '.tsv',
+  '.log',
+  '.js',
+  '.mjs',
+  '.cjs',
+  '.ts',
+  '.tsx',
+  '.jsx',
+  '.py',
+  '.go',
+  '.java',
+  '.kt',
+  '.c',
+  '.h',
+  '.cpp',
+  '.hpp',
+  '.rs',
+  '.rb',
+  '.php',
+  '.sh',
+  '.bash',
+  '.zsh',
+  '.sql',
+  '.css',
+  '.scss',
+  '.html',
+  '.htm',
+  '.proto',
+]);
+
+/** `application/*` MIME types (beyond `text/*`, checked separately) known to be plain-text bodies, not binary data. */
+const KNOWN_TEXT_APPLICATION_MIMES = new Set([
+  'application/json',
+  'application/xml',
+  'application/x-yaml',
+  'application/yaml',
+  'application/javascript',
+  'application/typescript',
+  'application/x-sh',
+  'application/toml',
+  'application/x-ndjson',
+]);
+
+/**
+ * True for a file name whose extension (or well-known extensionless name —
+ * Makefile, Dockerfile, README, ...) is known to be safe to fetch and render
+ * as plain text/code — the classification a container-path target uses,
+ * since it never carries a MIME type of its own.
+ */
+export function isLikelyTextFileName(name: string): boolean {
+  if (isMarkdownFileName(name)) return true;
+  if (KNOWN_TEXT_EXTENSIONS.has(extensionOf(name))) return true;
+  const lastSegment = name.split('/').pop() || name;
+  return !lastSegment.includes('.') && EXTENSIONLESS_FILES.has(lastSegment.toLowerCase());
+}
+
+/**
+ * Lowercased MIME type with any `;`-delimited parameters (e.g.
+ * `; charset=utf-8`) stripped, or '' for an empty input. Use this before
+ * comparing a raw MIME string against a specific type, so a parameter or
+ * unexpected case never defeats the comparison.
+ */
+export function baseMimeType(mime: string): string {
+  return mime.toLowerCase().split(';')[0]?.trim() ?? '';
+}
+
+/**
+ * True for a MIME type known to be safe to fetch and render as plain
+ * text/code — the classification an attachment target uses, since it always
+ * carries a MIME type (unlike a container path, which never does). A
+ * structured-syntax suffix (`+json`, `+xml` — e.g. `application/ld+json`,
+ * `image/svg+xml`) is text regardless of its top-level type, per RFC 6839.
+ */
+export function isLikelyTextMime(mime: string): boolean {
+  const lower = baseMimeType(mime);
+  if (lower.startsWith('text/')) return true;
+  if (lower.endsWith('+json') || lower.endsWith('+xml')) return true;
+  return KNOWN_TEXT_APPLICATION_MIMES.has(lower);
+}
+
+/**
+ * Extensions of compressed archives, compiled/executable binaries and office
+ * documents. A container-path target with one of these extensions is shown
+ * as download-only without fetching its body. Any other path is fetched: the
+ * server rejects non-UTF-8 workspace content, which the preview shows as its
+ * error state.
+ */
+const KNOWN_BINARY_EXTENSIONS = new Set([
+  '.zip',
+  '.tar',
+  '.gz',
+  '.tgz',
+  '.bz2',
+  '.xz',
+  '.7z',
+  '.rar',
+  '.exe',
+  '.dll',
+  '.so',
+  '.dylib',
+  '.bin',
+  '.o',
+  '.a',
+  '.class',
+  '.jar',
+  '.war',
+  '.wasm',
+  '.pyc',
+  '.pdf',
+  '.doc',
+  '.docx',
+  '.xls',
+  '.xlsx',
+  '.ppt',
+  '.pptx',
+  '.db',
+  '.sqlite',
+  '.mp3',
+  '.wav',
+  '.ogg',
+  '.m4a',
+  '.flac',
+  '.aac',
+  '.mp4',
+  '.mkv',
+  '.mov',
+  '.webm',
+  '.avi',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.otf',
+  '.eot',
+  '.dmg',
+  '.iso',
+  '.pkg',
+  '.deb',
+  '.rpm',
+]);
+
+/**
+ * True for a file name whose extension is in KNOWN_BINARY_EXTENSIONS. Used
+ * only for container-path targets, which carry no MIME type.
+ */
+export function isLikelyBinaryFileName(name: string): boolean {
+  return KNOWN_BINARY_EXTENSIONS.has(extensionOf(name));
 }
 
 // ---------------------------------------------------------------------------

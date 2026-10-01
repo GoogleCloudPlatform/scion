@@ -1681,18 +1681,18 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 	switch v := identity.(type) {
 	case *ScopedUserIdentity:
 		if v == nil {
-			// A typed-nil *ScopedUserIdentity satisfies this type switch case
-			// (v == nil) even though identity == nil above was false, so this
-			// is reachable only through that Go interface/pointer
-			// distinction, never through a plain nil Identity. Keep Kind ==
-			// CredentialKindUAT rather than falling through to the zero
-			// CredentialContext: callers key the UAT ceiling restriction
-			// (Decide step 7a) on Kind == CredentialKindUAT, and a zero Kind
-			// reads as "no credential restriction," which would authorize
-			// the request exactly as an unrestricted principal. The
-			// zero-value Ceiling denies every permission
-			// (FrozenPermissionCeiling.Allows), so this stays fail-closed
-			// instead.
+			// A typed-nil *ScopedUserIdentity satisfies this type assertion
+			// (ok == true, v == nil) even though identity == nil above was
+			// false, so this is reachable only through that Go
+			// interface/pointer distinction, never through a plain nil
+			// Identity. Keep Kind == CredentialKindUAT rather than falling
+			// through to the zero CredentialContext: callers key the UAT
+			// ceiling restriction (Decide step 7a) on Kind ==
+			// CredentialKindUAT, and a zero Kind reads as "no credential
+			// restriction," which would authorize the request exactly as an
+			// unrestricted principal. The zero-value Ceiling denies every
+			// permission (FrozenPermissionCeiling.Allows), so this stays
+			// fail-closed instead.
 			return CredentialContext{Kind: CredentialKindUAT}
 		}
 		boundary := v.Boundary()

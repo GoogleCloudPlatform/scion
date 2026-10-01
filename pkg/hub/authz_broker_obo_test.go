@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -34,27 +33,8 @@ import (
 // (ptone/scion#2123)
 // =============================================================================
 
-// capturingAuditEmitter records every DecisionAuditRecord it receives, for
-// tests that need to inspect audit content rather than merely count calls.
-type capturingAuditEmitter struct {
-	mu      sync.Mutex
-	records []*store.DecisionAuditRecord
-}
-
-func (e *capturingAuditEmitter) EmitDecisionAudit(_ context.Context, record *store.DecisionAuditRecord) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.records = append(e.records, record)
-}
-
-func (e *capturingAuditEmitter) last() *store.DecisionAuditRecord {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if len(e.records) == 0 {
-		return nil
-	}
-	return e.records[len(e.records)-1]
-}
+// capturingAuditEmitter is defined in decisionaudit_test_helpers_test.go,
+// which carries no no_sqlite build constraint.
 
 // oboMiddlewareVariant names the two broker-auth middleware constructors
 // under test, so every OBO wiring assertion runs against both: both must

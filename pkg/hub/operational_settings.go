@@ -116,6 +116,9 @@ type Layer1Snapshot struct {
 	// Quotas
 	EnforceBrokerQuotas *bool
 
+	// Agent secrets
+	AgentSecretsUserScopeOnly *bool
+
 	// Project defaults
 	DefaultScratchpad *bool
 
@@ -830,6 +833,12 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		snap.EnforceBrokerQuotas = &v
 	}
 
+	// Agent secrets
+	if k.Exists("agent_secrets.user_scope_only") {
+		v := k.Bool("agent_secrets.user_scope_only")
+		snap.AgentSecretsUserScopeOnly = &v
+	}
+
 	// Project defaults
 	if k.Exists("project_defaults.default_scratchpad") {
 		v := k.Bool("project_defaults.default_scratchpad")
@@ -980,6 +989,10 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	// AutoExposePortsEnabled, which is intentionally not populated here).
 	snap.EnforceBrokerQuotas = gc.EnforceBrokerQuotas
 
+	// Agent secrets — read from settings.yaml top-level agent_secrets
+	// section, so a file-mode admin save takes effect without a restart.
+	snap.AgentSecretsUserScopeOnly = gc.AgentSecretsUserScopeOnly
+
 	// Agent defaults — read from settings.yaml top-level keys
 	snap.DefaultHarnessConfig = gc.DefaultHarnessConfig
 	snap.DefaultGCPIdentityMode = gc.DefaultGCPIdentityMode
@@ -1058,6 +1071,18 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	s.config.EnforceBrokerQuotas = snap.EnforceBrokerQuotas
 	if !boolPtrEqual(oldEnforceBrokerQuotas, snap.EnforceBrokerQuotas) {
 		applied = append(applied, "enforce_broker_quotas")
+	}
+
+	// Agent secrets. Like quotas above, nil is a real, meaningful value —
+	// the permissive default (agents may write project scope) — not
+	// "unset, leave the current value alone". So this assigns
+	// unconditionally: a snapshot with AgentSecretsUserScopeOnly==nil
+	// (switch cleared, section deleted, or a PUT of {}) must flip live
+	// enforcement off immediately.
+	oldAgentSecretsUserScopeOnly := s.config.AgentSecretsUserScopeOnly
+	s.config.AgentSecretsUserScopeOnly = snap.AgentSecretsUserScopeOnly
+	if !boolPtrEqual(oldAgentSecretsUserScopeOnly, snap.AgentSecretsUserScopeOnly) {
+		applied = append(applied, "agent_secrets_user_scope_only")
 	}
 
 	// Admin emails — sanitize (TrimSpace + ToLower, drop empties) to match

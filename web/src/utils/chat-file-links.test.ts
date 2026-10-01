@@ -30,6 +30,10 @@ import {
   pathIdentityKey,
   isImageFileName,
   isMarkdownFileName,
+  isLikelyTextFileName,
+  isLikelyTextMime,
+  isLikelyBinaryFileName,
+  baseMimeType,
   extensionOf,
   resolveMessageProjectId,
 } from './chat-file-links.js';
@@ -774,6 +778,147 @@ describe('extensionOf / isImageFileName / isMarkdownFileName', () => {
 
   it('isMarkdownFileName is false for other extensions', () => {
     expect(isMarkdownFileName('a.txt')).toBe(false);
+  });
+});
+
+describe('isLikelyTextFileName / isLikelyTextMime', () => {
+  it('isLikelyTextFileName is true for a known text/code extension', () => {
+    expect(isLikelyTextFileName('main.go')).toBe(true);
+    expect(isLikelyTextFileName('data.json')).toBe(true);
+    expect(isLikelyTextFileName('notes.txt')).toBe(true);
+  });
+
+  it('isLikelyTextFileName is true for Markdown (delegates to isMarkdownFileName)', () => {
+    expect(isLikelyTextFileName('readme.md')).toBe(true);
+  });
+
+  it('isLikelyTextFileName is true for a well-known extensionless name', () => {
+    expect(isLikelyTextFileName('Dockerfile')).toBe(true);
+    expect(isLikelyTextFileName('Makefile')).toBe(true);
+  });
+
+  it('isLikelyTextFileName is false for an unrecognized extension', () => {
+    expect(isLikelyTextFileName('bundle.zip')).toBe(false);
+    expect(isLikelyTextFileName('archive.tar.gz')).toBe(false);
+  });
+
+  it('isLikelyTextFileName is false for an unrecognized extensionless name', () => {
+    expect(isLikelyTextFileName('notes')).toBe(false);
+  });
+
+  it('isLikelyTextFileName is false for a name with an unrecognized extension, even if its basename is a well-known extensionless name', () => {
+    // A name with an extension is never treated as "well-known extensionless"
+    // even if its basename-without-extension happens to collide with one.
+    expect(isLikelyTextFileName('README.bin')).toBe(false);
+    expect(isLikelyTextFileName('a.out')).toBe(false);
+  });
+
+  it('isLikelyTextMime is true for any text/* MIME type', () => {
+    expect(isLikelyTextMime('text/plain')).toBe(true);
+    expect(isLikelyTextMime('text/csv')).toBe(true);
+  });
+
+  it('isLikelyTextMime is true for a known text-like application/* MIME type', () => {
+    expect(isLikelyTextMime('application/json')).toBe(true);
+    expect(isLikelyTextMime('application/xml')).toBe(true);
+  });
+
+  it('isLikelyTextMime is true for a structured-syntax +json or +xml suffix, regardless of top-level type', () => {
+    expect(isLikelyTextMime('application/ld+json')).toBe(true);
+    expect(isLikelyTextMime('image/svg+xml')).toBe(true);
+    expect(isLikelyTextMime('application/atom+xml')).toBe(true);
+  });
+
+  it('isLikelyTextMime is false for a binary MIME type', () => {
+    expect(isLikelyTextMime('application/zip')).toBe(false);
+    expect(isLikelyTextMime('application/octet-stream')).toBe(false);
+    expect(isLikelyTextMime('image/png')).toBe(false);
+  });
+
+  it('isLikelyTextMime is case-insensitive', () => {
+    expect(isLikelyTextMime('APPLICATION/JSON')).toBe(true);
+  });
+
+  it('isLikelyTextMime ignores a trailing charset parameter', () => {
+    expect(isLikelyTextMime('text/plain; charset=utf-8')).toBe(true);
+  });
+});
+
+describe('baseMimeType', () => {
+  it('lowercases the MIME type', () => {
+    expect(baseMimeType('APPLICATION/OCTET-STREAM')).toBe('application/octet-stream');
+  });
+
+  it('strips a trailing parameter', () => {
+    expect(baseMimeType('application/octet-stream; charset=binary')).toBe(
+      'application/octet-stream'
+    );
+  });
+
+  it('trims surrounding whitespace around the base type', () => {
+    expect(baseMimeType('  application/octet-stream  ')).toBe('application/octet-stream');
+  });
+
+  it('is empty for an empty or parameter-only input', () => {
+    expect(baseMimeType('')).toBe('');
+    expect(baseMimeType(';charset=x')).toBe('');
+  });
+});
+
+describe('isLikelyBinaryFileName', () => {
+  it('is true for a known archive extension', () => {
+    expect(isLikelyBinaryFileName('bundle.zip')).toBe(true);
+    expect(isLikelyBinaryFileName('archive.tar.gz')).toBe(true);
+  });
+
+  it('is true for a known executable/compiled extension', () => {
+    expect(isLikelyBinaryFileName('app.exe')).toBe(true);
+    expect(isLikelyBinaryFileName('lib.so')).toBe(true);
+  });
+
+  it.each([
+    '.mp3',
+    '.wav',
+    '.ogg',
+    '.m4a',
+    '.flac',
+    '.aac',
+    '.mp4',
+    '.mkv',
+    '.mov',
+    '.webm',
+    '.avi',
+    '.woff',
+    '.woff2',
+    '.ttf',
+    '.otf',
+    '.eot',
+    '.dmg',
+    '.iso',
+    '.pkg',
+    '.deb',
+    '.rpm',
+  ])('is true for the known audio, video, font or disk-image extension %s', (ext) => {
+    expect(isLikelyBinaryFileName(`file${ext}`)).toBe(true);
+  });
+
+  it('is true for a known audio/video/font/disk-image extension regardless of case', () => {
+    expect(isLikelyBinaryFileName('CLIP.MP3')).toBe(true);
+    expect(isLikelyBinaryFileName('Icon.WOFF2')).toBe(true);
+  });
+
+  it('is false for ordinary text/code files that no allow-list enumerates', () => {
+    expect(isLikelyBinaryFileName('.gitignore')).toBe(false);
+    expect(isLikelyBinaryFileName('go.mod')).toBe(false);
+    expect(isLikelyBinaryFileName('Main.vue')).toBe(false);
+    expect(isLikelyBinaryFileName('main.swift')).toBe(false);
+    expect(isLikelyBinaryFileName('init.lua')).toBe(false);
+    expect(isLikelyBinaryFileName('main.tf')).toBe(false);
+  });
+
+  it('is false for a name with no extension at all', () => {
+    expect(isLikelyBinaryFileName('Makefile')).toBe(false);
+    expect(isLikelyBinaryFileName('README')).toBe(false);
   });
 });
 

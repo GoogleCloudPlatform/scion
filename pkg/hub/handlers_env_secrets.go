@@ -1131,6 +1131,30 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		return
 	}
 
+	// Hub admin policy: when agent_secrets.user_scope_only is on, agents may
+	// not write project-scope secrets at all. This is a blanket rule on
+	// every agent-originated project-scope write (design ptone/scion#2291
+	// §6) — it covers harness auth capture and ad-hoc `sciontool secret set`
+	// alike. It is checked before allowProgeny/base64-decode/type/conflict/
+	// GetMeta, so it cannot be bypassed by `force` and the request never
+	// reaches the backend. (Value/Encoding validation above still runs
+	// first and fails closed on its own terms — an empty value or an
+	// unrecognized encoding gets its own 400/422 either way.)
+	if scope == store.ScopeProject && s.agentSecretsUserScopeOnly() {
+		slog.Info("agent project-scope secret write rejected by policy",
+			"agent_id", agentID, "project_id", projectID, "key", key)
+		writeError(w, http.StatusForbidden, ErrCodeSecretScopeRestricted,
+			"The hub administrator has restricted agent-written secrets to user (profile) scope; "+
+				"project-scope writes are not allowed. Retry with scope \"user\" (sciontool: --scope user).",
+			map[string]interface{}{
+				"field":         "scope",
+				"value":         "project",
+				"allowedScopes": []string{"user"},
+				"setting":       "agent_secrets.user_scope_only",
+			})
+		return
+	}
+
 	// allowProgeny is only valid on user-scoped secrets. Only an explicit
 	// true is rejected; unset on a project-scoped write is fine and simply
 	// resolves to false below.

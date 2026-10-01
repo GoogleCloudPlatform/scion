@@ -173,6 +173,11 @@ type ServerConfig struct {
 	// (max_agents_per_broker) is enforced on create. nil means unset — the
 	// fail-safe default (enforced) applies. See brokerQuotasEnforced.
 	EnforceBrokerQuotas *bool
+	// AgentSecretsUserScopeOnly controls whether agents are restricted to
+	// writing user (profile) scope secrets only. nil means unset — the
+	// permissive default (agents may write project scope) applies. See
+	// agentSecretsUserScopeOnly.
+	AgentSecretsUserScopeOnly *bool
 	// DefaultScratchpad controls whether new projects automatically get a
 	// "scratchpad" shared directory. When nil, the compiled default (true) applies.
 	DefaultScratchpad *bool
@@ -415,6 +420,22 @@ func (s *Server) brokerQuotasEnforced() bool {
 	v := s.config.EnforceBrokerQuotas
 	s.mu.RUnlock()
 	return v == nil || *v
+}
+
+// agentSecretsUserScopeOnly reports whether agents are restricted to
+// writing user (profile) scope secrets only. Permissive default: an absent
+// (nil) switch means agents may write project scope, as they do today
+// (design ptone/scion#2291 §5).
+//
+// Thread-safe: s.config.AgentSecretsUserScopeOnly is written under
+// s.mu.Lock() by ApplySnapshot (on the admin PUT path, and on every replica
+// via the LISTEN/NOTIFY + 60s poll propagation loop in postgres mode), so it
+// must be read under s.mu.RLock() here.
+func (s *Server) agentSecretsUserScopeOnly() bool {
+	s.mu.RLock()
+	v := s.config.AgentSecretsUserScopeOnly
+	s.mu.RUnlock()
+	return v != nil && *v
 }
 
 // AgentDispatcher is the interface for dispatching agent operations to a runtime broker.

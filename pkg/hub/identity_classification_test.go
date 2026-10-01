@@ -833,71 +833,9 @@ func TestDecide_EntryDenyAuditsDerivedClassification(t *testing.T) {
 	}
 }
 
-// TestDecide_AuditRecordsDerivedPrincipalIDWhenRequestOmitsIt proves
-// Decision.PrincipalID and the emitted audit record's PrincipalID are the
-// identity Decide actually evaluated, not AuthzRequest.Principal.ID — which
-// ordinary callers leave empty, since they build a request from only
-// Principal.Identity (as AuthzRequestFromContext and every hand-built
-// AuthzRequest in this file do). This holds on both the allow path and an
-// early-deny path, and a supplied Principal.ID that matches the identity's
-// own ID allows exactly the same way an omitted one does.
-func TestDecide_AuditRecordsDerivedPrincipalIDWhenRequestOmitsIt(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	ownerID := tid("principalid-owner")
-	projectID := tid("principalid-project")
-	rs4Project(t, s, projectID, ownerID)
-	owner := NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "api")
-
-	emitter := &capturingAuditEmitter{}
-	srv.authzService.SetDecisionAuditEmitter(emitter)
-
-	t.Run("allow", func(t *testing.T) {
-		emitter.records = nil
-		req := AuthzRequest{
-			Principal: PrincipalContext{Identity: owner},
-			Resource:  Resource{Type: "project", ID: projectID},
-			Action:    ActionRead,
-		}
-		require.Empty(t, req.Principal.ID)
-		decision := srv.authzService.Decide(ctx, req)
-		require.True(t, decision.Allowed)
-		assert.Equal(t, ownerID, decision.PrincipalID)
-		require.Len(t, emitter.records, 1)
-		assert.Equal(t, ownerID, emitter.records[0].PrincipalID)
-	})
-
-	t.Run("early deny", func(t *testing.T) {
-		emitter.records = nil
-		req := AuthzRequest{
-			Principal: PrincipalContext{Kind: PrincipalKindAgent, Identity: owner},
-			Resource:  Resource{Type: "project", ID: projectID},
-			Action:    ActionRead,
-		}
-		require.Empty(t, req.Principal.ID)
-		decision := srv.authzService.Decide(ctx, req)
-		require.False(t, decision.Allowed)
-		assert.Equal(t, "principal kind does not match identity", decision.Reason)
-		assert.Equal(t, ownerID, decision.PrincipalID)
-		require.Len(t, emitter.records, 1)
-		assert.Equal(t, ownerID, emitter.records[0].PrincipalID)
-	})
-
-	t.Run("allow with a supplied principal ID that matches", func(t *testing.T) {
-		emitter.records = nil
-		req := AuthzRequest{
-			Principal: PrincipalContext{ID: ownerID, Identity: owner},
-			Resource:  Resource{Type: "project", ID: projectID},
-			Action:    ActionRead,
-		}
-		decision := srv.authzService.Decide(ctx, req)
-		require.True(t, decision.Allowed)
-		assert.Equal(t, ownerID, decision.PrincipalID)
-		require.Len(t, emitter.records, 1)
-		assert.Equal(t, ownerID, emitter.records[0].PrincipalID)
-	})
-}
+// TestDecide_AuditRecordsDerivedPrincipalIDWhenRequestOmitsIt moved to
+// identity_classification_sqlite_test.go: it needs a real, store-backed test
+// server, which carries a !no_sqlite constraint this file does not have.
 
 // TestSuppliedCredentialCompatible_PairMatrix is the full compatibility
 // matrix behind Decide's credential-mismatch check: every derived

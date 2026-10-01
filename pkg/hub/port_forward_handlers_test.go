@@ -20,6 +20,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	scionhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	sciontoollog "github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	scionportforward "github.com/GoogleCloudPlatform/scion/pkg/sciontool/portforward"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -313,6 +316,15 @@ func TestAgentPortProxyThroughTunnel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+
+	// ptone/scion#2337: sciontool/log lazily calls Init() on first write, and Init()
+	// permanently replaces slog.Default(). Trip that guard here and restore the globals.
+	prevDefault, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
+	sciontoollog.Init()
+	slog.SetDefault(prevDefault)
+	log.SetOutput(prevWriter)
+	log.SetFlags(prevFlags)
+
 	manager := scionportforward.NewManager(scionhub.NewClientWithConfig(hubHTTP.URL, token, agent.ID))
 	go manager.Run(ctx)
 	require.Eventually(t, func() bool {

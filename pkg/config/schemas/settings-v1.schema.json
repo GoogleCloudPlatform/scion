@@ -274,6 +274,19 @@
         }
       },
       "additionalProperties": false
+    },
+    "agent_secrets": {
+      "type": "object",
+      "description": "Hub-level policy for secrets written by agents. Global-only.",
+      "x-scope": "global",
+      "x-since": "1",
+      "properties": {
+        "user_scope_only": {
+          "type": "boolean",
+          "description": "When true, agents may only write user (profile) scope secrets. The hub rejects agent writes at project scope, including harness auth capture. User-originated writes are unaffected. Default false."
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,
