@@ -1,6 +1,13 @@
-// Command seed populates a fresh (or existing) hub SQLite database with one
-// project, a non-admin project-member principal, and N synthetic agents with
-// a realistic mix of appliedConfig sizes, statuses, and ancestry.
+// Command seed populates a fresh hub SQLite database with one project, a
+// non-admin project-member principal, and N synthetic agents with a
+// realistic mix of appliedConfig sizes, statuses, and ancestry.
+//
+// Refuses to run against an existing, non-empty --db by default
+// (bench-rev-1 B6): re-seeding the same file is not supported (it fails
+// partway through with "already exists" errors after having already
+// mutated hub bootstrap state), so this fails fast up front instead. Pass
+// --force-existing to override for deliberate reuse of an already-seeded
+// file you understand the limits of.
 //
 // It is the first stage of the perf/2393-large-project-bench harness
 // (ptone/scion#2393, #2374, #2367): every other bench tool consumes the
@@ -48,6 +55,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -61,7 +69,9 @@ import (
 // sha256 sum over a fixed format string); duplicating it here avoids
 // exporting a new piece of hub public API purely for a benchmark tool's
 // benefit. If server.go's format ever changes this must change with it --
-// there is a parity check for that in perf/bench/seed/main_test.go.
+// TestDeriveSharedSigningKeyMatchesHub in main_test.go pins the two
+// together by minting a token with this function's output and validating
+// it through hub.NewUserTokenService the same way ensureSigningKey does.
 func deriveSharedSigningKey(secret, keyName string) []byte {
 	sum := sha256.Sum256([]byte("scion-hub-signing-key:" + keyName + ":" + secret))
 	return sum[:]
@@ -75,14 +85,20 @@ func main() {
 	projectName := flag.String("project-name", "Large Project Bench", "project display name")
 	randSeed := flag.Int64("rand-seed", 42, "seed for deterministic synthetic data generation")
 	outPath := flag.String("out", "", "path to write seed metadata JSON (required)")
+	forceExisting := flag.Bool("force-existing", false, "allow seeding into an already-existing, non-empty --db file (unsupported: fails partway through with 'already exists' after mutating hub bootstrap state -- see bench-rev-1 B6)")
 	flag.Parse()
 
 	if *dbPath == "" || *secret == "" || *outPath == "" {
-		fmt.Fprintln(os.Stderr, "usage: seed --db <path> --session-secret <secret> --out <metadata.json> [--agents N] [--project-slug slug] [--project-name name] [--rand-seed N]")
+		fmt.Fprintln(os.Stderr, "usage: seed --db <path> --session-secret <secret> --out <metadata.json> [--agents N] [--project-slug slug] [--project-name name] [--rand-seed N] [--force-existing]")
 		os.Exit(2)
 	}
 	if *agents < 0 {
 		fmt.Fprintln(os.Stderr, "--agents must be >= 0")
+		os.Exit(2)
+	}
+
+	if err := checkDBNotExists(*dbPath, *forceExisting); err != nil {
+		fmt.Fprintln(os.Stderr, "seed:", err)
 		os.Exit(2)
 	}
 
@@ -95,13 +111,36 @@ func main() {
 	}
 }
 
-func run(dbPath string, agentCount int, secret, projectSlug, projectName string, randSeed int64, outPath string) error {
-	ctx := context.Background()
-	rng := rand.New(rand.NewSource(randSeed))
+// checkDBNotExists refuses an already-existing, non-empty dbPath unless
+// force is set. Extracted from main() so it is directly unit-testable
+// (bench-rev-1 B6): re-seeding an existing file is not supported (run()
+// fails partway through, after already mutating hub bootstrap state, with
+// an "already exists" error on the owner/member user), so this fails fast
+// before opening the database at all.
+func checkDBNotExists(dbPath string, force bool) error {
+	if force {
+		return nil
+	}
+	fi, statErr := os.Stat(dbPath)
+	if statErr != nil {
+		return nil // does not exist (or unreadable, which run() will fail on anyway) -- fine
+	}
+	if fi.Size() == 0 {
+		return nil // e.g. a freshly `touch`ed placeholder; nothing to lose
+	}
+	return fmt.Errorf(
+		"--db %s already exists and is non-empty (%d bytes). Re-seeding an existing "+
+			"file is not supported: it will fail partway through (after already mutating "+
+			"hub bootstrap state) with an \"already exists\" error on the owner/member user. "+
+			"Use a fresh path, remove the file first, or pass --force-existing if you "+
+			"understand the risk", dbPath, fi.Size())
+}
 
-	// Matches cmd/server_foreground.go's sqlite DSN construction exactly, so
-	// this tool and the real `scion server start --db <path>` subprocess
-	// agree on how the path is opened.
+// openSQLiteForBench opens dbPath the same way cmd/server_foreground.go's
+// production sqlite DSN construction does, so this tool and the real
+// `scion server start --db <path>` subprocess agree on how the path is
+// opened. Extracted so main_test.go can re-open a seeded file the same way.
+func openSQLiteForBench(dbPath string) (*ent.Client, error) {
 	sqliteDSN := dbPath
 	if !strings.HasPrefix(sqliteDSN, "file:") {
 		sqliteDSN = "file:" + sqliteDSN
@@ -111,8 +150,14 @@ func run(dbPath string, agentCount int, secret, projectSlug, projectName string,
 	} else if !strings.Contains(sqliteDSN, "cache=") {
 		sqliteDSN += "&cache=shared"
 	}
+	return entc.OpenSQLite(sqliteDSN, entc.PoolConfig{MaxOpenConns: 1})
+}
 
-	client, err := entc.OpenSQLite(sqliteDSN, entc.PoolConfig{MaxOpenConns: 1})
+func run(dbPath string, agentCount int, secret, projectSlug, projectName string, randSeed int64, outPath string) error {
+	ctx := context.Background()
+	rng := rand.New(rand.NewSource(randSeed))
+
+	client, err := openSQLiteForBench(dbPath)
 	if err != nil {
 		return fmt.Errorf("open sqlite: %w", err)
 	}
