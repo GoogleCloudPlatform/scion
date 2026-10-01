@@ -221,7 +221,7 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRouteActionReincarnate, form: agentFormByID, segs: []string{"reincarnate"}, ops: postOp(opAgentReincarnate)},
 	{id: AgentRouteActionResetAuth, form: agentFormByID, segs: []string{"reset-auth"}, ops: postOp(opAgentResetAuth)},
 	// AgentRouteActionKeys has no ops entry, like message above: the keys
-	// action is routed and authorized by its own early-branch choke point
+	// action is routed and authorized by its own dedicated branch
 	// (authorizeAgentKeys in handleAgentAction). The keys action has no
 	// catalog operation.
 	{id: AgentRouteActionKeys, form: agentFormByID, segs: []string{"keys"}},
