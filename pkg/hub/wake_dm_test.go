@@ -462,6 +462,13 @@ func (i *wakeDMTestIdentity) OriginUserID() string {
 	}
 	return ""
 }
+
+// localAncestryProvenance opts this fake into AncestryIsHubAttested: the
+// marker is not inherited from Type() == "agent", so test fakes must opt in
+// explicitly.
+func (i *wakeDMTestIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceAgentJWT
+}
 func (i *wakeDMTestIdentity) TokenID() string { return "test-token-id" }
 
 func TestExecuteAgentDM_Wake_Suspended_Delivers(t *testing.T) {

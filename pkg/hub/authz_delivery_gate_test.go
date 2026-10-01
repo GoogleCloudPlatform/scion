@@ -23,6 +23,7 @@ package hub
 import (
 	"context"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -34,13 +35,19 @@ import (
 // duration of a test. Callers must not use t.Parallel.
 func withDeliveryCredentialKinds(t *testing.T, kinds ...CredentialKind) {
 	t.Helper()
-	saved := deliveryCredentialKinds
 	set := map[CredentialKind]struct{}{}
 	for _, k := range kinds {
 		set[k] = struct{}{}
 	}
+	deliveryCredentialKindsMu.Lock()
+	saved := deliveryCredentialKinds
 	deliveryCredentialKinds = set
-	t.Cleanup(func() { deliveryCredentialKinds = saved })
+	deliveryCredentialKindsMu.Unlock()
+	t.Cleanup(func() {
+		deliveryCredentialKindsMu.Lock()
+		deliveryCredentialKinds = saved
+		deliveryCredentialKindsMu.Unlock()
+	})
 }
 
 // deliveryGateKindCases lists every credential kind the gate is evaluated
@@ -72,14 +79,42 @@ func TestDeliveryGate_KindSetMatchesTable(t *testing.T) {
 			want[tc.kind] = struct{}{}
 		}
 	}
-	assert.Equal(t, want, deliveryCredentialKinds)
-	for k := range deliveryCredentialKinds {
+	deliveryCredentialKindsMu.RLock()
+	got := deliveryCredentialKinds
+	deliveryCredentialKindsMu.RUnlock()
+	assert.Equal(t, want, got)
+	for k := range got {
 		found := false
 		for _, tc := range deliveryGateKindCases {
 			found = found || tc.kind == k
 		}
 		assert.True(t, found, "delivery kind %q has no table row", k)
 	}
+}
+
+// TestDeliveryGate_ConcurrentReadAndSwap runs deliveryCredentialAdmitted
+// in a goroutine while withDeliveryCredentialKinds swaps and restores the
+// set; under -race it fails if either side skips deliveryCredentialKindsMu.
+func TestDeliveryGate_ConcurrentReadAndSwap(t *testing.T) {
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = deliveryCredentialAdmitted("", ActionDeliver, CredentialKindUAT)
+			}
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		t.Run("swap", func(t *testing.T) { withDeliveryCredentialKinds(t, CredentialKindUAT) })
+	}
+	close(stop)
+	wg.Wait()
 }
 
 // The gated permission set is every registry row with the deliver action.
@@ -134,6 +169,30 @@ func assertDeliveryGateDenied(t *testing.T, d Decision, msg string) {
 	assert.Empty(t, d.Provenance.Relationships, "%s: the gate precedes relationship evaluation", msg)
 	assert.Equal(t, []string{deliveryGateReason}, d.Provenance.DenyReasons, msg)
 	assert.NotEmpty(t, d.Provenance.Permission, "%s: explain output names the gated permission", msg)
+}
+
+// notAdmittedReasons are the deny reasons a request denied without ever
+// being admitted can carry: the two Decide's entry classification check
+// (ptone/scion#2123) produces for a supplied credential kind — one when the
+// kind does not match the identity's own derived kind, the other when the
+// kind is not recognized at all — plus deliveryGateReason, for a kind that
+// matches the identity but sits outside the delivery set and so denies at
+// the gate itself instead.
+var notAdmittedReasons = []string{
+	"credential kind does not match identity",
+	"unrecognized credential kind",
+	deliveryGateReason,
+}
+
+// assertRequestNotAdmitted asserts the request was denied, and that the
+// reason is one Decide can actually produce for it (notAdmittedReasons),
+// without pinning which of entry classification or the delivery gate denied
+// it. Both leave the request unadmitted, which is the invariant this
+// asserts.
+func assertRequestNotAdmitted(t *testing.T, d Decision, msg string) {
+	t.Helper()
+	assert.False(t, d.Allowed, "%s: reason %q", msg, d.Reason)
+	assert.Contains(t, notAdmittedReasons, d.Reason, "%s: unexpected deny reason %q", msg, d.Reason)
 }
 
 // A super-admin holding a hub-wide role binding is denied every deliver
@@ -246,13 +305,25 @@ func TestDeliveryGate_EveryNonDeliveryKindDenied(t *testing.T) {
 	f := newGoldenFixture(t)
 	admin := NewAuthenticatedUser(f.superAdminID, "superadmin@golden.test", "Super Admin", "admin", "api")
 	secret := Resource{Type: "secret", ID: f.secretID}
+	adminKind := credentialContextForIdentity(admin).Kind
 
 	for _, tc := range deliveryGateKindCases {
 		if tc.delivery {
 			continue
 		}
 		t.Run(string(tc.kind), func(t *testing.T) {
-			assertDeliveryGateDenied(t, f.authz.Decide(context.Background(), deliveryGateRequest(admin, tc.kind, secret, "secret.deliver")), "super-admin")
+			d := f.authz.Decide(context.Background(), deliveryGateRequest(admin, tc.kind, secret, "secret.deliver"))
+			// adminKind (interactive) and the UAT narrowing overlay
+			// suppliedCredentialCompatible admits for a plain local user
+			// both match the admin identity and reach the gate, denying
+			// with its reason. Every other kind mismatches the identity, or
+			// is unrecognized, and denies at the entry classification check
+			// (ptone/scion#2123) instead.
+			if tc.kind == adminKind || tc.kind == CredentialKindUAT {
+				assertDeliveryGateDenied(t, d, "super-admin")
+				return
+			}
+			assertRequestNotAdmitted(t, d, "super-admin "+string(tc.kind))
 		})
 	}
 
@@ -284,27 +355,38 @@ func TestDeliveryGate_DeliveryKindReachesGrantEvaluation(t *testing.T) {
 	f := newGoldenFixture(t)
 	admin := NewAuthenticatedUser(f.superAdminID, "superadmin@golden.test", "Super Admin", "admin", "api")
 	secret := Resource{Type: "secret", ID: f.secretID}
-	const testKind CredentialKind = "test_delivery_kind"
+	adminKind := credentialContextForIdentity(admin).Kind
 
-	assertDeliveryGateDenied(t, f.authz.Decide(context.Background(), deliveryGateRequest(admin, testKind, secret, "secret.deliver")), "kind outside the set")
+	// The admin's own derived kind matches the identity, so it reaches the
+	// gate; with the set still empty, the gate denies it. Subtest scoping
+	// means withDeliveryCredentialKinds below releases its addition when
+	// this subtest returns, ahead of the final check.
+	t.Run("admin", func(t *testing.T) {
+		assertDeliveryGateDenied(t, f.authz.Decide(context.Background(), deliveryGateRequest(admin, adminKind, secret, "secret.deliver")), "kind outside the set")
 
-	withDeliveryCredentialKinds(t, testKind)
-	d := f.authz.Decide(context.Background(), deliveryGateRequest(admin, testKind, secret, "secret.deliver"))
-	assert.NotEqual(t, deliveryGateReason, d.Reason)
-	require.NotNil(t, d.Provenance)
-	assert.NotContains(t, d.Provenance.DenyReasons, deliveryGateReason)
-	assert.NotEmpty(t, d.Provenance.Grants, "role binding evaluation ran after the gate")
+		withDeliveryCredentialKinds(t, adminKind)
+		d := f.authz.Decide(context.Background(), deliveryGateRequest(admin, adminKind, secret, "secret.deliver"))
+		assert.NotEqual(t, deliveryGateReason, d.Reason)
+		require.NotNil(t, d.Provenance)
+		assert.NotContains(t, d.Provenance.DenyReasons, deliveryGateReason)
+		assert.NotEmpty(t, d.Provenance.Grants, "role binding evaluation ran after the gate")
+	})
 
 	// A progeny agent reaches relationship evaluation for the same
-	// permission once its kind is in the set.
+	// permission once its own derived kind is in the set.
 	agent := progenyPairAgent(tid("dg-handoff-agent"), f.projectBeta.ID, []string{f.projectOwnerID}, allRegisteredAgentScopes())
-	withDeliveryCredentialKinds(t, testKind, CredentialKindAgentJWT)
-	d = decidePerm(f.authz, agent, secret, ActionDeliver, "secret.deliver", true)
-	assert.NotEqual(t, deliveryGateReason, d.Reason)
-	r := relationshipResult(t, d, RelationshipRuleProgeny)
-	assert.Equal(t, "secret.deliver", r.Permission)
+	agentKind := credentialContextForIdentity(agent).Kind
+	t.Run("progeny", func(t *testing.T) {
+		withDeliveryCredentialKinds(t, agentKind)
+		d := decidePerm(f.authz, agent, secret, ActionDeliver, "secret.deliver", true)
+		assert.NotEqual(t, deliveryGateReason, d.Reason)
+		r := relationshipResult(t, d, RelationshipRuleProgeny)
+		assert.Equal(t, "secret.deliver", r.Permission)
+	})
 
-	assertDeliveryGateDenied(t, f.authz.Decide(context.Background(), deliveryGateRequest(admin, CredentialKindInteractive, secret, "secret.deliver")), "interactive")
+	// Both subtests above have released their addition to the set on
+	// return, so the admin's own kind denies at the gate again.
+	assertDeliveryGateDenied(t, f.authz.Decide(context.Background(), deliveryGateRequest(admin, adminKind, secret, "secret.deliver")), "interactive")
 }
 
 // The tests below state the ptone/scion#2228 part 2 contract. They are

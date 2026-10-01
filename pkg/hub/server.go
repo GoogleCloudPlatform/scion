@@ -53,6 +53,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -159,6 +160,20 @@ type ServerConfig struct {
 	SoftDeleteRetention time.Duration
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles bool
+	// AsyncAgentLaunch is the non-blocking agent create kill switch. Off by
+	// default; a launch is non-blocking only when this is on AND the request
+	// opts in.
+	AsyncAgentLaunch bool
+	// LaunchTimeout is the whole-launch budget for an opted-in launch
+	// (design §3.10). Default 5 minutes. Below minLaunchTimeout the broker's
+	// fixed 20s abort margin (§3.10) would leave no time for a launch to
+	// actually run, so New() rejects it and falls back to the default.
+	LaunchTimeout time.Duration
+	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds
+	// (design §3.7). Today it only sets the reaper's staleness window (8x
+	// this value); it will also be sent to the broker as
+	// launchKeepaliveSeconds once the async dispatch path lands. Default 15.
+	LaunchKeepaliveSeconds int
 	// AdminMode restricts access to admin users only (maintenance mode).
 	AdminMode bool
 	// MaintenanceMessage is the custom message shown during admin mode.
@@ -173,6 +188,11 @@ type ServerConfig struct {
 	// (max_agents_per_broker) is enforced on create. nil means unset — the
 	// fail-safe default (enforced) applies. See brokerQuotasEnforced.
 	EnforceBrokerQuotas *bool
+	// AgentSecretsUserScopeOnly controls whether agents are restricted to
+	// writing user (profile) scope secrets only. nil means unset — the
+	// permissive default (agents may write project scope) applies. See
+	// agentSecretsUserScopeOnly.
+	AgentSecretsUserScopeOnly *bool
 	// DefaultScratchpad controls whether new projects automatically get a
 	// "scratchpad" shared directory. When nil, the compiled default (true) applies.
 	DefaultScratchpad *bool
@@ -395,9 +415,11 @@ func DefaultServerConfig() ServerConfig {
 			"X-Scion-Broker-ID", "X-Scion-Timestamp", "X-Scion-Nonce",
 			"X-Scion-Signature", "X-Scion-Signed-Headers",
 		},
-		CORSMaxAge:       3600,
-		StalledThreshold: 5 * time.Minute,
-		BrokerAuthConfig: DefaultBrokerAuthConfig(),
+		CORSMaxAge:             3600,
+		StalledThreshold:       5 * time.Minute,
+		BrokerAuthConfig:       DefaultBrokerAuthConfig(),
+		LaunchTimeout:          5 * time.Minute,
+		LaunchKeepaliveSeconds: 15,
 	}
 }
 
@@ -415,6 +437,22 @@ func (s *Server) brokerQuotasEnforced() bool {
 	v := s.config.EnforceBrokerQuotas
 	s.mu.RUnlock()
 	return v == nil || *v
+}
+
+// agentSecretsUserScopeOnly reports whether agents are restricted to
+// writing user (profile) scope secrets only. Permissive default: an absent
+// (nil) switch means agents may write project scope, as they do today
+// (design ptone/scion#2291 §5).
+//
+// Thread-safe: s.config.AgentSecretsUserScopeOnly is written under
+// s.mu.Lock() by ApplySnapshot (on the admin PUT path, and on every replica
+// via the LISTEN/NOTIFY + 60s poll propagation loop in postgres mode), so it
+// must be read under s.mu.RLock() here.
+func (s *Server) agentSecretsUserScopeOnly() bool {
+	s.mu.RLock()
+	v := s.config.AgentSecretsUserScopeOnly
+	s.mu.RUnlock()
+	return v != nil && *v
 }
 
 // AgentDispatcher is the interface for dispatching agent operations to a runtime broker.
@@ -834,6 +872,13 @@ type RemoteGCPIdentityConfig struct {
 	MetadataMode string `json:"metadata_mode"`        // "block", "passthrough", "assign"
 	SAEmail      string `json:"sa_email,omitempty"`   // Service account email
 	ProjectID    string `json:"project_id,omitempty"` // GCP project ID
+
+	// RequireLocalRuntime carries store.GCPIdentityConfig.RequireLocalRuntime
+	// across the wire — see that field's doc comment. The JSON tag must stay
+	// in sync with runtimebroker.GCPIdentityConfig's own field of the same
+	// name; the two types are decoded independently (no shared Go type), so
+	// nothing but the tag keeps them in step.
+	RequireLocalRuntime bool `json:"require_local_runtime,omitempty"`
 }
 
 // RemoteAgentResponse is the response from creating an agent on a remote runtime broker.
@@ -1068,6 +1113,12 @@ type Server struct {
 	// recorder; SetDispatchMetrics wires a real exporter.
 	dispatchMetrics dispatchmetrics.Recorder
 
+	// Launch reaper metrics recorder (design §3.7): tick-outcome counter,
+	// row-error counter, disarmed-time gauge. Nil until SetReaperMetrics is
+	// called; the reaper tick handler nil-checks before recording, matching
+	// dbMetrics/dispatchMetrics.
+	reaperMetrics reapermetrics.Recorder
+
 	// stopPoolSampler stops the DB pool-stats sampling goroutine on shutdown.
 	stopPoolSampler func()
 
@@ -1181,6 +1232,14 @@ type Server struct {
 	// Nil in production and in most tests; always read through the
 	// nil-safe experimentRegistry() accessor, never directly.
 	experiments *experiments.Registry
+
+	// reincarnationRequesterResolveTimeout bounds
+	// buildReincarnationRequesterContext's store calls (design Amendment
+	// A26.14/A26.18). Zero means use defaultReincarnationRequesterResolveTimeout;
+	// always read through the requesterResolveTimeout() accessor, never
+	// directly. Per-Server rather than a package var so a test can shorten
+	// it on its own Server instance without racing other tests' workers.
+	reincarnationRequesterResolveTimeout time.Duration
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -1222,6 +1281,17 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 				"configured", cfg.StalledThreshold, "default", defaults.StalledThreshold)
 		}
 		cfg.StalledThreshold = defaults.StalledThreshold
+	}
+	const minLaunchTimeout = 30 * time.Second
+	if cfg.LaunchTimeout < minLaunchTimeout {
+		if cfg.LaunchTimeout != 0 {
+			slog.Warn("launch_timeout below minimum 30s, using default",
+				"configured", cfg.LaunchTimeout, "default", defaults.LaunchTimeout)
+		}
+		cfg.LaunchTimeout = defaults.LaunchTimeout
+	}
+	if cfg.LaunchKeepaliveSeconds <= 0 {
+		cfg.LaunchKeepaliveSeconds = defaults.LaunchKeepaliveSeconds
 	}
 
 	srvCtx, srvCancel := context.WithCancel(context.Background())
@@ -1510,6 +1580,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize authorization service
 	srv.authzService = NewAuthzService(s, logging.Subsystem("hub.auth"))
+	// ptone/scion#2342 (B.3 R6): the same condition that enables dev-token
+	// acceptance and DevUserID seeding below (cfg.DevAuthToken != "") also
+	// gates whether this server currently admits dev_local authority at
+	// all. See devLocalAuthorityEnabled's doc comment (devauth.go).
+	srv.authzService.setDevLocalAuthorityEnabled(cfg.DevAuthToken != "")
 
 	// Wire decision audit emitter
 	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))
@@ -2854,6 +2929,13 @@ func (s *Server) SetDispatchMetrics(rec dispatchmetrics.Recorder) {
 	s.dispatchMetrics = rec
 }
 
+// SetReaperMetrics wires the launch reaper's metrics recorder (design §3.7).
+func (s *Server) SetReaperMetrics(rec reapermetrics.Recorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reaperMetrics = rec
+}
+
 // SetGCPTokenMetrics wires the GCP token metrics recorder.
 func (s *Server) SetGCPTokenMetrics(m GCPTokenMetricsRecorder) {
 	s.mu.Lock()
@@ -3877,11 +3959,31 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 		case store.GCPMetadataModePassthrough:
 			// Hub-default passthrough is confined to the embedded broker,
 			// exactly as on the create path; see hubDefaultPassthroughAllowed.
+			// Effective profile and pin-back mirror the create path; see
+			// effectiveRuntimeProfileName.
 			mode := store.GCPMetadataModeBlock
-			if s.hubDefaultPassthroughAllowed(ctx, agent.RuntimeBrokerID, agent.ProjectID) {
+			effectiveProfile := effectiveRuntimeProfileName(agent.AppliedConfig.Profile, project)
+			if allowed, resolvedProfile := s.hubDefaultPassthroughAllowed(ctx, agent.RuntimeBrokerID, agent.ProjectID, agent.Name, effectiveProfile); allowed {
 				mode = store.GCPMetadataModePassthrough
+				// Pin the resolved profile onto both AppliedConfig.Profile
+				// and CreateInputs.Profile — the latter is what scion
+				// reincarnate replays (design §3.3 Amendment A1), and
+				// CreateInputs is already built above with no Profile set,
+				// so without this the pin would not survive a reincarnate.
+				if agent.AppliedConfig.Profile == "" {
+					agent.AppliedConfig.Profile = resolvedProfile
+				}
+				if agent.AppliedConfig.CreateInputs != nil && agent.AppliedConfig.CreateInputs.Profile == "" {
+					agent.AppliedConfig.CreateInputs.Profile = resolvedProfile
+				}
 			}
-			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{MetadataMode: mode}
+			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+				MetadataMode: mode,
+				// RequireLocalRuntime: see the create path's twin in
+				// handlers_agents_core.go. Only ever set here, since mode is
+				// passthrough only when hubDefaultPassthroughAllowed granted it.
+				RequireLocalRuntime: mode == store.GCPMetadataModePassthrough,
+			}
 			if mode == store.GCPMetadataModePassthrough && agent.RuntimeBrokerID != "" {
 				if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
 					return fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
@@ -4157,12 +4259,17 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// actor is.
 		//
 		// The recorded initiator's credential is copied onto the audit ONLY
-		// when the initiator is the same principal as the creator: after an
-		// update or resume by a different user, the initiator is not the
-		// creator, and ApplyActor exists specifically to prevent naming
-		// principal A with principal B's credential. When it does match, the
-		// value is mapped back to hub.CredentialKind's vocabulary
-		// (uat/agent_jwt/interactive), since actor_credential_type is a
+		// when the initiator is the same principal as the creator/executor
+		// identity (initiatorMatchesExecutor, scheduled_initiator.go): after
+		// an update or resume by a different user, the initiator is not the
+		// creator, and this check exists specifically to prevent naming
+		// principal A with principal B's credential. dev_local additionally
+		// matches when both sides resolve to the well-known DevUserID —
+		// initiatorMatchesExecutor's doc comment has the exact condition and
+		// why it's needed (scheduledCreatorIdentity never reconstructs the
+		// dev user's Type() as "dev"). When it does match, the value is
+		// mapped back to hub.CredentialKind's vocabulary
+		// (uat/agent_jwt/interactive/dev), since actor_credential_type is a
 		// column every other writer fills from that domain, not
 		// InitiatorAttribution's smaller one.
 		scheduledDispatchAudit := &store.MutationAuditRecord{
@@ -4174,8 +4281,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			CanDelegateResult:  "allow",
 		}
 		initiator := s.scheduledInitiator(evt.InitiatorAttribution)
-		if !initiator.LegacyUnknown &&
-			initiator.PrincipalKind == creatorIdentity.Type() && initiator.PrincipalID == creatorIdentity.ID() {
+		if initiatorMatchesExecutor(initiator, creatorIdentity) {
 			if hubKind := hubCredentialKindForInitiator(initiator.CredentialKind); hubKind != "" {
 				scheduledDispatchAudit.ActorCredentialType = hubKind
 				scheduledDispatchAudit.ActorCredentialID = initiator.CredentialID
@@ -4354,6 +4460,12 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 // scheduler, this eliminates the thundering-herd pattern that was causing
 // 9-54 s API latency spikes.
 func (s *Server) registerSchedulerHandlers() {
+	// Async-create launch reaper (design §3.7): its own dedicated ticker,
+	// registered unconditionally — see
+	// registerLaunchReaper's doc comment for its per-tick cost with the
+	// feature off.
+	s.registerLaunchReaper()
+
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
 	if s.config.SoftDeleteRetention > 0 {
@@ -4472,7 +4584,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// under multi-replica Postgres (see CONNECTION-BUDGET.md).
 	if rec := s.dbMetrics; rec != nil {
 		if dbp, ok := s.store.(interface{ DB() *sql.DB }); ok {
-			s.stopPoolSampler = dbmetrics.StartPoolSampler(ctx, rec, dbp.DB(), 0)
+			stop := dbmetrics.StartPoolSampler(ctx, rec, dbp.DB(), 0)
+			s.mu.Lock()
+			s.stopPoolSampler = stop
+			s.mu.Unlock()
 		}
 	}
 
@@ -4540,83 +4655,63 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
-// Shutdown gracefully shuts down the server.
+// Shutdown gracefully shuts down the server. It is safe to call even when
+// the Server was never started (e.g. New() followed directly by Shutdown()):
+// the background-service teardown below always runs via CleanupResources,
+// and only the final HTTP listener shutdown is skipped when there is no
+// listener to shut down. It is also safe to call more than once, or
+// together with CleanupResources, since CleanupResources is idempotent and
+// http.Server.Shutdown tolerates repeated calls.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.RLock()
 	srv := s.httpServer
-	cc := s.controlChannel
 	s.mu.RUnlock()
+
+	slog.Info("Hub API server shutting down...")
+
+	// Run the shared background-service teardown (control channel, broker
+	// auth, scheduler, dispatchers, preview service, link services, event
+	// publisher, command bus, etc). CleanupResources is sync.Once-guarded,
+	// so this is a no-op if it already ran.
+	_ = s.CleanupResources(ctx)
 
 	if srv == nil {
 		return nil
 	}
 
-	slog.Info("Hub API server shutting down...")
-
-	// Cancel server-lifetime context to stop background goroutines
-	if s.ctxCancel != nil {
-		s.ctxCancel()
-	}
-
-	// Shutdown control channel first
-	if cc != nil {
-		cc.Shutdown()
-	}
-
-	// Stop the nonce cache cleanup goroutine
-	if s.brokerAuthService != nil {
-		s.brokerAuthService.Close()
-	}
-
-	// Stop scheduler
-	if s.scheduler != nil {
-		s.scheduler.Stop()
-	}
-
-	// Stop the DB pool-stats sampler.
-	if s.stopPoolSampler != nil {
-		s.stopPoolSampler()
-	}
-
-	// Stop notification dispatcher before closing event publisher
-	if s.notificationDispatcher != nil {
-		s.notificationDispatcher.Stop()
-	}
-
-	// Stop lifecycle hook evaluator before closing event publisher
-	if s.lifecycleHookEvaluator != nil {
-		s.lifecycleHookEvaluator.Stop()
-	}
-
-	// Stop presence manager before closing event publisher
-	if s.presenceManager != nil {
-		s.presenceManager.Stop()
-	}
-
-	// Close event publisher
-	if s.events != nil {
-		s.events.Close()
-	}
-	if s.commandBus != nil {
-		s.commandBus.Close()
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	return srv.Shutdown(ctx)
+	return srv.Shutdown(shutdownCtx)
 }
 
 // CleanupResources shuts down Hub-owned resources (control channel, broker auth,
 // event publisher) without stopping an HTTP server. Use this in combined mode
 // where the Hub API is mounted on the WebServer and has no listener of its own.
+// It is also called internally by Shutdown, and is safe to call more than
+// once, including after Shutdown: the teardown below runs at most once.
 func (s *Server) CleanupResources(ctx context.Context) error {
 	s.cleanupOnce.Do(func() {
 		s.mu.RLock()
 		cc := s.controlChannel
+		stopPoolSampler := s.stopPoolSampler
 		s.mu.RUnlock()
 
 		slog.Info("Cleaning up Hub resources...")
+
+		// Stop the DB pool-stats sampler. Safe to call more than once: it
+		// wraps either a context.CancelFunc or a no-op from
+		// StartPoolSampler. Lives in the Once body so combined mode (which
+		// only calls CleanupResources, never Shutdown) also stops it.
+		//
+		// Read under s.mu above rather than accessed directly here: in
+		// combined mode, StartBackgroundServices (which writes this field)
+		// runs in one goroutine while the CleanupResources-on-ctx.Done
+		// goroutine started earlier (see cmd/server_foreground.go) can race
+		// it, so the write and this read must share a lock.
+		if stopPoolSampler != nil {
+			stopPoolSampler()
+		}
 
 		// Cancel server-lifetime context to stop background goroutines
 		if s.ctxCancel != nil {
@@ -4650,6 +4745,10 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		}
 		if s.teamsLinkService != nil {
 			s.teamsLinkService.Close()
+		}
+		// Stop the B3 preview engine's nonce cleanup goroutine.
+		if s.previewService != nil {
+			s.previewService.Close()
 		}
 		// Stop presence manager before closing event publisher
 		if s.presenceManager != nil {
@@ -5686,6 +5785,9 @@ func (s *Server) selfHealBrokerProviders(ctx context.Context, snapshot []string)
 		if err == nil {
 			brokerName = broker.Name
 		}
+		// Only reached when at least one row actually healed; a no-op broker
+		// hits the continue above without logging, keeping Info quiet.
+		slog.Info("Scheduler: broker provider self-heal restamped providers online", "brokerID", brokerID, "brokerName", brokerName, "count", len(healedProjectIDs))
 		s.events.PublishBrokerConnected(ctx, brokerID, brokerName, healedProjectIDs)
 	}
 }

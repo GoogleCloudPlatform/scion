@@ -839,8 +839,8 @@ func TestHandleAgentMessage_LogCapture_RawContentRedacted(t *testing.T) {
 // expose its body in captured logs or the error response.
 func TestHandleAgentMessage_LogCapture_RejectedRawSecretNotExposed(t *testing.T) {
 	const secret = "HANDLE-AGENT-MESSAGE-REJECTED-RAW-SECRET-M3Q7"
-	srv, _, _, sender, target, _, _ := deliverySetup(t)
 	buf := captureSlog(t)
+	srv, _, _, sender, target, _, _ := deliverySetup(t)
 
 	sm := baseRawStructuredMessage(sender, target, secret)
 	sm.Attachments = []string{"att-1"} // any unsupported combination rejects before dispatch/log
@@ -857,6 +857,8 @@ func TestHandleAgentMessage_LogCapture_RejectedRawSecretNotExposed(t *testing.T)
 // anything is published — a broadcast is never the "single direct message"
 // shape raw still supports.
 func TestHandleProjectBroadcast_RawRejected(t *testing.T) {
+	const secret = "BROADCAST-RAW-SECRET-9KDX2"
+	buf := captureSlog(t)
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -899,9 +901,6 @@ func TestHandleProjectBroadcast_RawRejected(t *testing.T) {
 	srv.SetDispatcher(dispatcher)
 	spy := &spyEventPublisher{}
 	srv.SetEventPublisher(spy)
-
-	const secret = "BROADCAST-RAW-SECRET-9KDX2"
-	buf := captureSlog(t)
 
 	convCountBefore := countStoreConversations(t, s, ctx)
 	subsBefore, err := s.GetNotificationSubscriptions(ctx, target.ID)

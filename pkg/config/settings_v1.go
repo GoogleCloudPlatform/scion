@@ -322,6 +322,9 @@ type VersionedSettings struct {
 
 	// Quotas controls hub-level quota enforcement toggles.
 	Quotas *QuotaSettings `json:"quotas,omitempty" yaml:"quotas,omitempty" koanf:"quotas"`
+
+	// AgentSecrets controls hub-level policy for secrets written by agents.
+	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty" yaml:"agent_secrets,omitempty" koanf:"agent_secrets"`
 }
 
 // AutoExposePortsSettings holds the auto-expose ports configuration.
@@ -334,6 +337,15 @@ type QuotaSettings struct {
 	// EnforceBrokerQuotas controls whether max_agents_per_broker is enforced
 	// on create. Default true (fail-safe) when absent.
 	EnforceBrokerQuotas *bool `json:"enforce_broker_quotas,omitempty" yaml:"enforce_broker_quotas,omitempty" koanf:"enforce_broker_quotas"`
+}
+
+// AgentSecretsSettings holds the hub-level policy for secrets written by
+// agents in settings.yaml.
+type AgentSecretsSettings struct {
+	// UserScopeOnly, when true, restricts agents to writing user (profile)
+	// scope secrets only. Default false (nil is false): agents may write
+	// project scope as they do today.
+	UserScopeOnly *bool `json:"user_scope_only,omitempty" yaml:"user_scope_only,omitempty" koanf:"user_scope_only"`
 }
 
 // ProjectDefaultsSettings holds project creation defaults in settings.yaml.
@@ -607,6 +619,14 @@ type V1ServerHubConfig struct {
 	StalledThreshold string `json:"stalled_threshold,omitempty" yaml:"stalled_threshold,omitempty" koanf:"stalled_threshold"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
+	// AsyncAgentLaunch is the non-blocking agent create kill switch.
+	AsyncAgentLaunch *bool `json:"async_agent_launch,omitempty" yaml:"async_agent_launch,omitempty" koanf:"async_agent_launch"`
+	// LaunchTimeout is the whole-launch budget for an opted-in launch (e.g., "5m").
+	LaunchTimeout string `json:"launch_timeout,omitempty" yaml:"launch_timeout,omitempty" koanf:"launch_timeout"`
+	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds.
+	// Today it only sets the reaper's staleness window (8x this value); it
+	// will also be sent to the broker once the async dispatch path lands.
+	LaunchKeepaliveSeconds *int `json:"launch_keepalive_seconds,omitempty" yaml:"launch_keepalive_seconds,omitempty" koanf:"launch_keepalive_seconds"`
 }
 
 // V1BrokerConfig holds Runtime Broker configuration.
@@ -1440,11 +1460,45 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	return settings, nil
 }
 
+// settingsExcludedEnvVars lists SCION_* variables that are never settings
+// overrides: they are consumed directly by another subsystem, and their
+// generic mapped key happens to collide with a struct-typed settings field.
+// Both the versioned and legacy env key mappers drop them via this list so
+// that koanf's Unmarshal never fails just because one of them is present in
+// the process environment.
+var settingsExcludedEnvVars = []string{
+	"SCION_AUTO_EXPOSE_PORTS",
+	"SCION_AUTO_EXPOSE_PORTS_LIST",
+}
+
+// isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
+func isSettingsExcludedEnv(name string) bool {
+	for _, e := range settingsExcludedEnvVars {
+		if e == name {
+			return true
+		}
+	}
+	return false
+}
+
 // versionedEnvKeyMapper maps SCION_* environment variables to versioned settings keys.
 // All keys are snake_case so no camelCase conversion is needed.
 func versionedEnvKeyMapper(s string) string {
 	if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, false); ok {
 		return mapped
+	}
+	if isSettingsExcludedEnv(s) {
+		// SCION_AUTO_EXPOSE_PORTS and SCION_AUTO_EXPOSE_PORTS_LIST are
+		// consumed directly by sciontool's auto-expose scanner
+		// (pkg/sciontool/autoexpose), not read as settings overrides. Left
+		// mapped, the bare key "auto_expose_ports" collides with the
+		// struct-typed AutoExposePorts field and makes koanf's Unmarshal
+		// fail outright whenever the process happens to have that variable
+		// set (e.g. a broker started inside an agent container, which the
+		// hub sets it in). Returning "" makes the env provider drop the
+		// variable entirely, the same idiom used below for a removed
+		// legacy env var and for SCION_OTEL_INSECURE's empty-value case.
+		return ""
 	}
 	if isRemovedLegacyEnv(s) {
 		// SCION_HUB_GROVE_ID is no longer read, not even via the generic
@@ -1786,6 +1840,17 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				gc.Hub.StalledThreshold = d
 			}
 		}
+		if v1.Hub.AsyncAgentLaunch != nil {
+			gc.Hub.AsyncAgentLaunch = *v1.Hub.AsyncAgentLaunch
+		}
+		if v1.Hub.LaunchTimeout != "" {
+			if d, err := time.ParseDuration(v1.Hub.LaunchTimeout); err == nil {
+				gc.Hub.LaunchTimeout = d
+			}
+		}
+		if v1.Hub.LaunchKeepaliveSeconds != nil {
+			gc.Hub.LaunchKeepaliveSeconds = *v1.Hub.LaunchKeepaliveSeconds
+		}
 		if v1.Hub.DisableLegacyStorageFallback != nil {
 			gc.Hub.DisableLegacyStorageFallback = *v1.Hub.DisableLegacyStorageFallback
 		}
@@ -2115,6 +2180,17 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.DisableLegacyStorageFallback {
 		disableLegacy := true
 		v1Hub.DisableLegacyStorageFallback = &disableLegacy
+	}
+	if gc.Hub.AsyncAgentLaunch {
+		asyncLaunch := true
+		v1Hub.AsyncAgentLaunch = &asyncLaunch
+	}
+	if gc.Hub.LaunchTimeout > 0 {
+		v1Hub.LaunchTimeout = gc.Hub.LaunchTimeout.String()
+	}
+	if gc.Hub.LaunchKeepaliveSeconds > 0 {
+		keepalive := gc.Hub.LaunchKeepaliveSeconds
+		v1Hub.LaunchKeepaliveSeconds = &keepalive
 	}
 	v1.Hub = v1Hub
 

@@ -39,7 +39,17 @@ This script's job:
   5. Write outputs/env.json (intentionally empty).
 
 The script is stdlib-only; it does manual TOML editing because tomllib (3.11+)
-is read-only and we must avoid third-party dependencies.
+is read-only and we must avoid third-party dependencies. tomllib is still
+used, read-only, as a post-edit validation backstop: _toml_edit_preserves
+parses both the original and the finished config.toml and checks that
+everything outside the keys this script owns (model, model_reasoning_effort,
+otel) is unchanged, plus that those owned keys round-tripped to the values
+just written. So a TOML construct the line-oriented editor doesn't fully
+understand (e.g. a multi-line string whose body gets a key spliced into or
+deleted from it) fails safe — the existing file is left untouched, with a
+warning logged — instead of writing a subtly-altered file. If even a
+telemetry-only edit doesn't preserve the file, the file is left completely
+untouched.
 """
 
 from __future__ import annotations
@@ -47,6 +57,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tomllib
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -234,55 +245,198 @@ def _resolve_reasoning_effort(level: int) -> str:
     return "low"
 
 
-def _is_toml_key_line(line: str, key: str) -> bool:
-    """True if line is a top-level TOML assignment for exactly `key`."""
-    s = line.strip()
-    if not s.startswith(key):
+# The line-oriented TOML string/comment masking, bracket-depth tracking,
+# header detection, top-level key strip/insert, and the tomllib
+# round-trip/preservation backstop all live in scion_harness now (shared
+# with grok-build, which has the same class of TOML-editing needs) — see
+# scion_harness.strip_toml_top_level_key, .insert_toml_top_level_line, and
+# .toml_edit_preserves. This module keeps only the codex-specific parts:
+# the managed-key list and the model/effort value checks layered on top of
+# the shared preservation check.
+
+# Top-level keys this script owns the value of. _toml_edit_preserves ignores
+# these when comparing the original file to an edited one — they're
+# expected to change — and requires everything else to be byte-for-byte
+# identical after a round trip through tomllib. `reasoning_effort` is
+# included even though this script never writes it: _reconcile_codex_toml
+# unconditionally strips it (a legacy key name it replaces with
+# `model_reasoning_effort`), so a file that legitimately had it would
+# otherwise always fail the "everything else is unchanged" comparison.
+_MANAGED_TOP_LEVEL_KEYS = ("model", "model_reasoning_effort", "reasoning_effort", "otel")
+
+
+def _toml_edit_preserves(
+    original: str, content: str, model: str | None, effort: str | None
+) -> bool:
+    """True if `content` is a safe edit of `original`.
+
+    "Safe" means: `content` parses as TOML; the keys this script just wrote
+    (`model`, `model_reasoning_effort`) equal the values it meant to write,
+    when those values were supplied; and every top-level key `content`
+    doesn't own (i.e. not in _MANAGED_TOP_LEVEL_KEYS) is unchanged from
+    `original` (scion_harness.toml_edit_preserves).
+
+    This is the backstop for this module's line-oriented TOML editing,
+    which — despite the string/comment masking and bracket-depth tracking
+    in scion_harness — is still not a full TOML tokenizer. An earlier
+    version of this function only checked "does it parse" and "is the
+    top-level model correct", which passes even when a top-level
+    multi-line string's body gets a `model`/`model_reasoning_effort`-shaped
+    line spliced into or deleted from it: the file is still valid TOML, and
+    when the edit was only inserting `model_reasoning_effort` (no `model`
+    supplied), the 'model' check has nothing to catch it at all
+    (ptone/scion#2365 review round 4). Comparing everything the script
+    doesn't own closes that whole class of edit, not just the one shape a
+    given review happened to try. Rather than trust every edit blindly, the
+    caller verifies the finished content before writing it to disk, and
+    leaves the existing file untouched (logging a warning) when this
+    returns False.
+    """
+    try:
+        after = tomllib.loads(content)
+    except tomllib.TOMLDecodeError:
         return False
-    rest = s[len(key):]
-    return len(rest) > 0 and rest[0] in (" ", "=", "\t")
+    if model and after.get("model") != model:
+        return False
+    if effort and after.get("model_reasoning_effort") != effort:
+        return False
+    return scion_harness.toml_edit_preserves(original, content, _MANAGED_TOP_LEVEL_KEYS)
 
 
-def _strip_toml_top_level_key(content: str, key: str) -> str:
-    """Remove a top-level TOML key = value line from content."""
-    lines = content.split("\n")
-    kept = []
-    in_section = False
-    for line in lines:
-        s = line.strip()
-        if s.startswith("["):
-            in_section = True
-        if not in_section and _is_toml_key_line(line, key):
-            continue
-        kept.append(line)
-    return "\n".join(kept)
+def _warn_if_stale_top_level_model_survives(
+    ctx: scion_harness.ProvisionContext, content: str, model: str | None, reason: str
+) -> None:
+    """Logs an observability warning when SCION_MODEL was empty (no model
+    for this script to write) but `content` — whichever variant is about to
+    be committed to disk — still has a top-level `model` key left over from
+    a prior provision or a hand-edited file.
+
+    `reason` names why, for *this specific call site*, the stale key wasn't
+    removed — the three callers in _reconcile_codex_toml reach this for
+    different causes (a header-shaped line hiding the real strip target on
+    the main path; the whole model/effort edit being rejected on the two
+    fallback paths — see each call site) and a single generic explanation
+    would mislead on at least two of the three (ptone/scion#2365 review
+    round 6, N2).
+    It's purely observational, logging only, with no change to what gets
+    written: rejecting the edit wouldn't help, since every path here keeps
+    whatever `content` already has for keys it doesn't own, and this stale
+    key is exactly such an unowned survivor. Without SCION_MODEL there's no
+    `--model` argv either, so codex will actually run on this stale value —
+    worth surfacing in provision logs even though nothing here can fix it.
+    """
+    if model:
+        return
+    try:
+        parsed = tomllib.loads(content)
+    except tomllib.TOMLDecodeError:
+        return
+    stale = parsed.get("model")
+    if stale:
+        ctx.info(
+            f"config.toml still sets top-level model={stale!r} with no "
+            f"SCION_MODEL to replace it ({reason}); codex will use it, "
+            "since no --model argv is passed either."
+        )
 
 
 def _reconcile_codex_toml(
+    ctx: scion_harness.ProvisionContext,
     telemetry: dict[str, Any] | None,
     env: dict[str, str] | None,
     reasoning_effort: str | None = None,
+    model: str | None = None,
 ) -> None:
     codex_dir = scion_harness.expand_path("~/.codex")
     os.makedirs(codex_dir, exist_ok=True)
     config_path = os.path.join(codex_dir, "config.toml")
-    content = ""
+    original = ""
     if os.path.isfile(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
-            content = f.read()
-    content = _strip_toml_top_level_key(content, "reasoning_effort")
-    content = _strip_toml_top_level_key(content, "model_reasoning_effort")
-    content = scion_harness.strip_toml_sections(content, lambda h: h == "[otel]" or h.startswith("[otel."))
+            original = f.read()
+
+    otel_section = (_build_otel_section(telemetry or {}, env) if _telemetry_enabled(telemetry)
+                     else '[otel]\nexporter = "none"\nmetrics_exporter = "none"\ntrace_exporter = "none"\n')
+
+    def _with_reconciled_otel(base: str) -> str:
+        stripped = scion_harness.strip_toml_sections(base, lambda h: h == "[otel]" or h.startswith("[otel."))
+        stripped = stripped.rstrip("\n\t ") + "\n\n" + otel_section
+        return stripped.strip() + "\n"
+
+    content = scion_harness.strip_toml_top_level_key(original, "reasoning_effort")
+    content = scion_harness.strip_toml_top_level_key(content, "model_reasoning_effort")
+    content = scion_harness.strip_toml_top_level_key(content, "model")
+
+    if model:
+        model_line = f'model = "{scion_harness.toml_escape(model)}"'
+        content = scion_harness.insert_toml_top_level_line(content, model_line)
 
     if reasoning_effort:
         re_line = f'model_reasoning_effort = "{scion_harness.toml_escape(reasoning_effort)}"'
-        content = content.rstrip("\n\t ") + "\n" + re_line + "\n"
+        content = scion_harness.insert_toml_top_level_line(content, re_line)
 
-    section = (_build_otel_section(telemetry or {}, env) if _telemetry_enabled(telemetry)
-               else '[otel]\nexporter = "none"\nmetrics_exporter = "none"\ntrace_exporter = "none"\n')
-    content = content.rstrip("\n\t ") + "\n\n" + section
-    content = content.strip() + "\n"
-    scion_harness.atomic_write_text(config_path, content)
+    content = _with_reconciled_otel(content)
+
+    if _toml_edit_preserves(original, content, model, reasoning_effort):
+        _warn_if_stale_top_level_model_survives(
+            ctx,
+            content,
+            model,
+            "a header-shaped line earlier in the file may be hiding the "
+            "real table header from this script's line-oriented strip, so "
+            "it never found this key",
+        )
+        scion_harness.atomic_write_text(config_path, content)
+        return
+
+    # The full edit (model/model_reasoning_effort strip+insert, plus the
+    # otel swap) altered something it doesn't own — most likely a top-level
+    # multi-line string that a header- or key-shaped line inside its body
+    # got spliced into or stripped out of (see _toml_edit_preserves).
+    # Retrying with *only* the otel swap, untouched by the model/effort
+    # strip-and-insert steps, keeps telemetry reconciliation working even
+    # when model/model_reasoning_effort can't be safely written to this
+    # file: an explicit model still reaches codex via SCION_MODEL/--model
+    # argv (pkg/agent/run.go) regardless of what config.toml says, so this
+    # isn't a full feature loss — just this file not reflecting it.
+    otel_only_content = _with_reconciled_otel(original)
+    if _toml_edit_preserves(original, otel_only_content, None, None):
+        ctx.info(
+            "config.toml edit for model/model_reasoning_effort did not "
+            "preserve existing content (top-level model/effort mismatch, "
+            "or other content changed unexpectedly); applied telemetry "
+            "settings only and left model/model_reasoning_effort "
+            "unwritten in config.toml. codex still receives an explicit "
+            "model via SCION_MODEL/--model argv when one is resolved. "
+            "This can happen with hand-edited TOML this line-oriented "
+            "editor doesn't fully understand, e.g. a multi-line string "
+            "containing a header-shaped or key-shaped line."
+        )
+        _warn_if_stale_top_level_model_survives(
+            ctx,
+            otel_only_content,
+            model,
+            "the model/model_reasoning_effort edit above was rejected, so "
+            "this script never attempted to strip this key from the "
+            "original file",
+        )
+        scion_harness.atomic_write_text(config_path, otel_only_content)
+        return
+
+    ctx.info(
+        "config.toml edit did not round-trip through tomllib safely even "
+        "for the telemetry-only fallback; leaving config.toml completely "
+        "untouched rather than risk corrupting or silently altering "
+        "existing settings."
+    )
+    _warn_if_stale_top_level_model_survives(
+        ctx,
+        original,
+        model,
+        "both the model/model_reasoning_effort edit and the telemetry-only "
+        "fallback above were rejected, so config.toml was left completely "
+        "untouched and this key was never stripped",
+    )
 
 
 # --- MCP server emission ---------------------------------------------------
@@ -321,23 +475,26 @@ def _build_mcp_section(name: str, spec: dict[str, Any]) -> str | None:
     return "\n".join(body) + "\n"
 
 
-def _write_mcp_to_config(servers: dict[str, str]) -> None:
+def _write_mcp_to_config(ctx: scion_harness.ProvisionContext, servers: dict[str, str]) -> None:
     """Write translated MCP server sections into ~/.codex/config.toml."""
     codex_dir = scion_harness.expand_path("~/.codex")
     os.makedirs(codex_dir, exist_ok=True)
     config_path = os.path.join(codex_dir, "config.toml")
-    content = ""
+    original = ""
     if os.path.isfile(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
-            content = f.read()
+            original = f.read()
     content = scion_harness.strip_toml_sections(
-        content, lambda h: h.startswith("[mcp_servers.")
+        original, lambda h: h.startswith("[mcp_servers.")
     )
     sections = list(servers.values())
     appended = "\n".join(sections)
     content = content.rstrip("\n\t ") + "\n\n" + appended
     content = content.strip() + "\n"
-    scion_harness.atomic_write_text(config_path, content)
+    scion_harness.write_toml_if_preserves(
+        ctx, config_path, original, content,
+        managed_keys={"mcp_servers"}, what="MCP server registration",
+    )
 
 
 # --- Entry point -----------------------------------------------------------
@@ -403,10 +560,24 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     env_overlay = telemetry_payload.get("env") if isinstance(telemetry_payload, dict) else None
     if not isinstance(env_overlay, dict):
         env_overlay = None
+
+    # SCION_MODEL arrives already resolved by the Go side (pkg/agent/provision.go
+    # and pkg/hub/handlers_agent_create_helpers.go resolve size aliases before
+    # the container starts). Write it into config.toml so it isn't silently
+    # shadowed by a static `model` baked into the harness home image
+    # (ptone/scion#2365).
+    model = os.environ.get("SCION_MODEL", "").strip()
+    if model:
+        ctx.info(f"model={model}")
+    else:
+        ctx.info("model=<unset>, falling back to codex's own built-in default")
+
     _reconcile_codex_toml(
+        ctx,
         telemetry if isinstance(telemetry, dict) else None,
         env_overlay,
         reasoning_effort=reasoning_effort,
+        model=model or None,
     )
 
     extra: dict[str, Any] | None = None
@@ -416,7 +587,9 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     env.update(_telemetry_output_env(telemetry))
     ctx.write_outputs(resolved, env=env, extra=extra)
 
-    scion_harness.apply_mcp_translated(ctx, _build_mcp_section, _write_mcp_to_config)
+    scion_harness.apply_mcp_translated(
+        ctx, _build_mcp_section, lambda servers: _write_mcp_to_config(ctx, servers)
+    )
 
     ctx.info(f"method={resolved.method}")
 

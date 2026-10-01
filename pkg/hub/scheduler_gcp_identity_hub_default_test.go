@@ -41,6 +41,7 @@ import (
 func TestScheduledDispatch_HubDefaultPassthroughAppliedWhenNoProjectDefault(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
+	markBrokerRuntimeProfile(t, f, "docker")
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
 		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
 	})
@@ -52,6 +53,58 @@ func TestScheduledDispatch_HubDefaultPassthroughAppliedWhenNoProjectDefault(t *t
 	require.NotNil(t, got.AppliedConfig)
 	require.NotNil(t, got.AppliedConfig.GCPIdentity)
 	assert.Equal(t, store.GCPMetadataModePassthrough, got.AppliedConfig.GCPIdentity.MetadataMode)
+}
+
+// TestScheduledDispatch_HubDefaultPassthroughAppliedOnStockEmbeddedBroker is
+// the scheduled-dispatch regression test for the stock single-node VM shape,
+// mirroring TestHubDefaultGCPIdentity_PassthroughAppliedOnStockEmbeddedBroker:
+// the embedded broker reports the real two-profile set (local=docker,
+// remote=kubernetes) with DefaultProfile "local", and the scheduled dispatch
+// (which never names a profile) must still resolve to the broker's own
+// default and get passthrough, with that profile pinned onto
+// AppliedConfig.Profile.
+func TestScheduledDispatch_HubDefaultPassthroughAppliedOnStockEmbeddedBroker(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	markBrokerEmbedded(t, f)
+	markBrokerStockProfiles(t, f, "local")
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
+	})
+
+	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-hub-passthrough-stock"))
+
+	got, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-hub-passthrough-stock")
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	require.NotNil(t, got.AppliedConfig.GCPIdentity)
+	assert.Equal(t, store.GCPMetadataModePassthrough, got.AppliedConfig.GCPIdentity.MetadataMode,
+		"the stock embedded broker's own default profile (docker) must still get the hub default on scheduled dispatch")
+	assert.Equal(t, "local", got.AppliedConfig.Profile,
+		"the resolved profile must be pinned so dispatch cannot use a different one than the gate checked")
+}
+
+// TestScheduledDispatch_HubDefaultPassthroughBlockedOnKubernetesRuntime
+// mirrors TestHubDefaultGCPIdentity_PassthroughBlockedOnKubernetesRuntime: the
+// runtime-aware gate applies identically on the scheduled dispatch path,
+// since both surfaces route through hubDefaultPassthroughAllowed. The
+// embedded broker qualifies, but its resolved runtime profile is
+// kubernetes-type, so the hub default falls to block.
+func TestScheduledDispatch_HubDefaultPassthroughBlockedOnKubernetesRuntime(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	markBrokerEmbedded(t, f)
+	markBrokerRuntimeProfile(t, f, "kubernetes")
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
+	})
+
+	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-hub-passthrough-k8s"))
+
+	got, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-hub-passthrough-k8s")
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	require.NotNil(t, got.AppliedConfig.GCPIdentity)
+	assert.Equal(t, store.GCPMetadataModeBlock, got.AppliedConfig.GCPIdentity.MetadataMode,
+		"hub-default passthrough must not apply on a scheduled dispatch to a kubernetes-type runtime profile")
 }
 
 // TestScheduledDispatch_HubDefaultPassthroughNotAppliedOnNonEmbeddedBroker
@@ -294,4 +347,77 @@ func TestScheduledDispatch_HubDefaultAssignDeniedFailsDispatch(t *testing.T) {
 
 	_, getErr := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-hub-default-denied-sa")
 	assert.ErrorIs(t, getErr, store.ErrNotFound, "denied dispatch must not create the agent record")
+}
+
+// TestScheduledDispatch_HubDefaultPassthroughBlockedByProjectActiveProfile
+// mirrors TestHubDefaultGCPIdentity_PassthroughBlockedByProjectActiveProfileOnStockBroker
+// on the scheduled dispatch path: the project's active-profile setting must
+// be what the gate evaluates there too, not the broker's own default
+// profile, even though a scheduled dispatch never names a profile itself.
+func TestScheduledDispatch_HubDefaultPassthroughBlockedByProjectActiveProfile(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	markBrokerEmbedded(t, f)
+	markBrokerStockProfiles(t, f, "local") // broker default points at docker
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
+	})
+	ctx := context.Background()
+	proj, err := f.store.GetProject(ctx, f.proj.ID)
+	require.NoError(t, err)
+	if proj.Annotations == nil {
+		proj.Annotations = map[string]string{}
+	}
+	proj.Annotations[projectSettingActiveProfile] = "remote"
+	require.NoError(t, f.store.UpdateProject(ctx, proj))
+
+	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-hub-passthrough-project-remote"))
+
+	got, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-hub-passthrough-project-remote")
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	require.NotNil(t, got.AppliedConfig.GCPIdentity)
+	assert.Equal(t, store.GCPMetadataModeBlock, got.AppliedConfig.GCPIdentity.MetadataMode,
+		"the project's active profile (remote/kubernetes) must be what the gate evaluates on scheduled dispatch, not the broker's own default")
+}
+
+// TestScheduledDispatch_PinnedProfileSurvivesReincarnateAfterProjectActiveProfileChanges
+// is the scheduled-dispatch twin of
+// TestHubDefaultGCPIdentity_PinnedProfileSurvivesReincarnateAfterProjectActiveProfileChanges:
+// the pin lands on CreateInputs.Profile on this path too, and survives a
+// project active-profile change made after the grant.
+func TestScheduledDispatch_PinnedProfileSurvivesReincarnateAfterProjectActiveProfileChanges(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	markBrokerEmbedded(t, f)
+	markBrokerStockProfiles(t, f, "local")
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
+	})
+
+	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-hub-passthrough-reincarnate"))
+
+	ctx := context.Background()
+	agent, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "sched-hub-passthrough-reincarnate")
+	require.NoError(t, err)
+	require.NotNil(t, agent.AppliedConfig)
+	require.NotNil(t, agent.AppliedConfig.GCPIdentity)
+	require.Equal(t, store.GCPMetadataModePassthrough, agent.AppliedConfig.GCPIdentity.MetadataMode)
+	require.Equal(t, "local", agent.AppliedConfig.Profile)
+	require.NotNil(t, agent.AppliedConfig.CreateInputs)
+	require.Equal(t, "local", agent.AppliedConfig.CreateInputs.Profile,
+		"the pin must also reach CreateInputs.Profile on the scheduled path, or reincarnate loses it")
+
+	proj, err := f.store.GetProject(ctx, f.proj.ID)
+	require.NoError(t, err)
+	if proj.Annotations == nil {
+		proj.Annotations = map[string]string{}
+	}
+	proj.Annotations[projectSettingActiveProfile] = "remote"
+	require.NoError(t, f.store.UpdateProject(ctx, proj))
+	proj, err = f.store.GetProject(ctx, f.proj.ID)
+	require.NoError(t, err)
+
+	fresh, _, err := f.srv.buildFreshAppliedConfig(ctx, agent, proj, "")
+	require.NoError(t, err)
+	assert.Equal(t, "local", fresh.Profile,
+		"reincarnate must replay the pinned profile from CreateInputs, not re-derive the project's current active profile")
 }

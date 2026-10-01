@@ -145,7 +145,181 @@ describe('scion-chat-file-preview', () => {
     el.target = PATH_TARGET;
     await settle(el);
 
-    expect(dialog(el)?.textContent).toContain('too large to preview inline');
+    expect(dialog(el)?.textContent).toContain("can't be shown here");
+  });
+
+  it('falls back to download-only for a small attachment whose MIME type is not a recognized text type, without ever fetching its body', async () => {
+    const el = await mount();
+    el.target = {
+      kind: 'attachment',
+      id: 'att-zip',
+      name: 'bundle.zip',
+      mime: 'application/zip',
+      size: 2048, // well under the size limit — this must be classified by MIME, not size
+    };
+    await settle(el);
+
+    expect(dialog(el)?.textContent).toContain("can't be shown here");
+    expect(dialog(el)?.querySelector('scion-code-editor')).toBeNull();
+    // The whole point is to never fetch binary bytes as text — a build that
+    // only classified by size would still call apiFetch here.
+    expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+
+  it('falls back to download-only for a small path whose extension is not a recognized text type, without ever fetching its body', async () => {
+    const el = await mount();
+    el.target = {
+      kind: 'path',
+      projectId: 'proj-1',
+      containerPath: '/workspace/archive.tar.gz',
+      location: { kind: 'workspace', filePath: 'archive.tar.gz' },
+      name: 'archive.tar.gz',
+    };
+    await settle(el);
+
+    expect(dialog(el)?.textContent).toContain("can't be shown here");
+    expect(dialog(el)?.querySelector('scion-code-editor')).toBeNull();
+    expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+
+  it('still fetches and renders a small attachment whose MIME is an unrecognized-extension but known text application type', async () => {
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve('{"a":1}'),
+    });
+    const el = await mount();
+    el.target = {
+      kind: 'attachment',
+      id: 'att-json',
+      name: 'data.blob', // an extension this app doesn't otherwise recognize
+      mime: 'application/json',
+      size: 7,
+    };
+    await settle(el);
+
+    const editor = dialog(el)?.querySelector('scion-code-editor');
+    expect((editor as unknown as { content: string })?.content).toBe('{"a":1}');
+  });
+
+  it('renders a path with an ordinary text extension this app does not otherwise enumerate — no client allow-list rejects it', async () => {
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ content: 'module scion.example.com/foo\n', size: 30 }),
+    });
+    const el = await mount();
+    el.target = {
+      kind: 'path',
+      projectId: 'proj-1',
+      containerPath: '/workspace/go.mod',
+      location: { kind: 'workspace', filePath: 'go.mod' },
+      name: 'go.mod',
+    };
+    await settle(el);
+
+    const editor = dialog(el)?.querySelector('scion-code-editor');
+    expect((editor as unknown as { content: string })?.content).toBe(
+      'module scion.example.com/foo\n'
+    );
+  });
+
+  it('renders a path with no extension at all that is not a well-known name — the deny-list has nothing to reject it on', async () => {
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ content: 'node_modules/\n*.log\n', size: 20 }),
+    });
+    const el = await mount();
+    el.target = {
+      kind: 'path',
+      projectId: 'proj-1',
+      containerPath: '/workspace/.gitignore',
+      location: { kind: 'workspace', filePath: '.gitignore' },
+      name: '.gitignore',
+    };
+    await settle(el);
+
+    const editor = dialog(el)?.querySelector('scion-code-editor');
+    expect((editor as unknown as { content: string })?.content).toBe('node_modules/\n*.log\n');
+  });
+
+  it('renders a generic application/octet-stream attachment whose name is a recognized text file — the shape a real agent attachment with an unrecognized extension reports', async () => {
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve('#!/bin/sh\necho hi\n'),
+    });
+    const el = await mount();
+    el.target = {
+      kind: 'attachment',
+      id: 'att-run-sh',
+      name: 'run.sh',
+      mime: 'application/octet-stream',
+      size: 19,
+    };
+    await settle(el);
+
+    const editor = dialog(el)?.querySelector('scion-code-editor');
+    expect((editor as unknown as { content: string })?.content).toBe('#!/bin/sh\necho hi\n');
+  });
+
+  it('renders an application/octet-stream attachment with a MIME parameter (e.g. charset) whose name is a recognized text file', async () => {
+    // The MIME comparison must normalize case and strip `;`-delimited
+    // parameters before comparing to `application/octet-stream` — a real
+    // server or proxy can report either variant.
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve('#!/bin/sh\necho hi\n'),
+    });
+    const el = await mount();
+    el.target = {
+      kind: 'attachment',
+      id: 'att-run-sh-charset',
+      name: 'run.sh',
+      mime: 'Application/Octet-Stream; charset=binary',
+      size: 19,
+    };
+    await settle(el);
+
+    const editor = dialog(el)?.querySelector('scion-code-editor');
+    expect((editor as unknown as { content: string })?.content).toBe('#!/bin/sh\necho hi\n');
+  });
+
+  it('still falls back to download-only for a generic application/octet-stream attachment whose name is not a recognized text file', async () => {
+    const el = await mount();
+    el.target = {
+      kind: 'attachment',
+      id: 'att-bin',
+      name: 'archive.bin',
+      mime: 'application/octet-stream',
+      size: 19,
+    };
+    await settle(el);
+
+    expect(dialog(el)?.textContent).toContain("can't be shown here");
+    expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+
+  it('falls back to download-only for a text-named attachment whose MIME is not application/octet-stream, without ever fetching its body', async () => {
+    // The recognized-text-name fallback only applies to a generic
+    // application/octet-stream MIME (the shape an unmapped-extension agent
+    // attachment reports) — a text-looking name with some other binary MIME
+    // (e.g. a mislabeled or actually-compressed notes.txt) must still be
+    // classified by that MIME, not waved through on name alone.
+    const el = await mount();
+    el.target = {
+      kind: 'attachment',
+      id: 'att-mislabeled',
+      name: 'notes.txt',
+      mime: 'application/zip',
+      size: 19,
+    };
+    await settle(el);
+
+    expect(dialog(el)?.textContent).toContain("can't be shown here");
+    expect(apiFetchMock).not.toHaveBeenCalled();
   });
 
   it('renders a markdown attachment as rendered preview by default, with a source toggle', async () => {
@@ -181,6 +355,21 @@ describe('scion-chat-file-preview', () => {
     );
     const img = dialog(el)?.querySelector('img.file-preview-image');
     expect(img?.getAttribute('src')).toMatch(/^blob:/);
+  });
+
+  it('loads an image whose MIME has different case and a parameter, as an inline image, not the binary placeholder', async () => {
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      blob: () => Promise.resolve(new Blob(['x'], { type: 'image/png' })),
+    });
+    const el = await mount();
+    el.target = { ...IMAGE_ATTACHMENT, id: 'att-img-case', mime: 'Image/PNG; foo=bar' };
+    await settle(el);
+
+    const img = dialog(el)?.querySelector('img.file-preview-image');
+    expect(img?.getAttribute('src')).toMatch(/^blob:/);
+    expect(dialog(el)?.textContent).not.toContain("can't be shown here");
   });
 
   it('revokes the previous object URL when the target changes to a different image', async () => {
@@ -261,6 +450,28 @@ describe('scion-chat-file-preview', () => {
     expect(dialog(el)?.textContent).toContain("This file link can't be opened.");
     expect(dialog(el)?.textContent).not.toContain('unsafe project id');
     expect(dialog(el)?.textContent).not.toContain('buildFileApiUrl');
+  });
+
+  it('shows the same generic link error, not the binary placeholder, for an unsafe project id whose name is not a recognized text type', async () => {
+    // The URL-safety check must run before binary classification: a target
+    // this unsafe can never be fetched or downloaded regardless of what its
+    // name suggests, so it must always land on the "link can't be opened"
+    // error (with its own Retry), never the binary placeholder (which offers
+    // a Download button — and one that couldn't work here anyway).
+    const el = await mount();
+    el.target = {
+      ...PATH_TARGET,
+      projectId: '..',
+      containerPath: '/workspace/archive.tar.gz',
+      location: { kind: 'workspace', filePath: 'archive.tar.gz' },
+      name: 'archive.tar.gz',
+    };
+    await settle(el);
+
+    expect(apiFetchMock).not.toHaveBeenCalled();
+    expect(dialog(el)?.textContent).toContain("This file link can't be opened.");
+    expect(dialog(el)?.textContent).not.toContain("can't be shown here");
+    expect(dialog(el)?.querySelector('.file-preview-placeholder.error')).not.toBeNull();
   });
 
   it('does not publish an error for an intentionally aborted (superseded) load', async () => {

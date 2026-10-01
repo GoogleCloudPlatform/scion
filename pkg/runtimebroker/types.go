@@ -346,6 +346,18 @@ type GCPIdentityConfig struct {
 	MetadataMode string `json:"metadata_mode"`        // "block", "passthrough", "assign"
 	SAEmail      string `json:"sa_email,omitempty"`   // Service account email
 	ProjectID    string `json:"project_id,omitempty"` // GCP project ID
+
+	// RequireLocalRuntime marks a "passthrough" mode granted by the hub's
+	// hub-default identity rung, which resolves the runtime this agent will
+	// use from the broker's own registration data rather than from
+	// project-effective settings at dispatch time. When this is set, the
+	// broker re-checks the resolved runtime once it knows it (after
+	// resolveManagerForOpts) and downgrades passthrough to block itself if
+	// that runtime is not a local container runtime — see buildStartContext.
+	// Explicit and project-level passthrough are never flagged, so their
+	// behavior is unaffected. The JSON tag must match
+	// hub.RemoteGCPIdentityConfig's field of the same name.
+	RequireLocalRuntime bool `json:"require_local_runtime,omitempty"`
 }
 
 // CreateAgentResponse is the response for creating an agent.

@@ -43,6 +43,8 @@ type RuntimeBroker struct {
 	Resources string `json:"resources,omitempty"`
 	// Runtimes holds the value of the "runtimes" field.
 	Runtimes string `json:"runtimes,omitempty"`
+	// DefaultProfile holds the value of the "default_profile" field.
+	DefaultProfile string `json:"default_profile,omitempty"`
 	// Labels holds the value of the "labels" field.
 	Labels map[string]string `json:"labels,omitempty"`
 	// Annotations holds the value of the "annotations" field.
@@ -81,7 +83,7 @@ func (*RuntimeBroker) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case runtimebroker.FieldLockVersion:
 			values[i] = new(sql.NullInt64)
-		case runtimebroker.FieldName, runtimebroker.FieldSlug, runtimebroker.FieldMode, runtimebroker.FieldVersion, runtimebroker.FieldStatus, runtimebroker.FieldConnectionState, runtimebroker.FieldCapabilities, runtimebroker.FieldSupportedHarnesses, runtimebroker.FieldResources, runtimebroker.FieldRuntimes, runtimebroker.FieldEndpoint, runtimebroker.FieldCreatedBy, runtimebroker.FieldGcpHostServiceAccountEmail, runtimebroker.FieldGcpHostProjectID, runtimebroker.FieldConnectedHubID, runtimebroker.FieldConnectedSessionID:
+		case runtimebroker.FieldName, runtimebroker.FieldSlug, runtimebroker.FieldMode, runtimebroker.FieldVersion, runtimebroker.FieldStatus, runtimebroker.FieldConnectionState, runtimebroker.FieldCapabilities, runtimebroker.FieldSupportedHarnesses, runtimebroker.FieldResources, runtimebroker.FieldRuntimes, runtimebroker.FieldDefaultProfile, runtimebroker.FieldEndpoint, runtimebroker.FieldCreatedBy, runtimebroker.FieldGcpHostServiceAccountEmail, runtimebroker.FieldGcpHostProjectID, runtimebroker.FieldConnectedHubID, runtimebroker.FieldConnectedSessionID:
 			values[i] = new(sql.NullString)
 		case runtimebroker.FieldLastHeartbeat, runtimebroker.FieldConnectedAt, runtimebroker.FieldCreated, runtimebroker.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -180,6 +182,12 @@ func (_m *RuntimeBroker) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field runtimes", values[i])
 			} else if value.Valid {
 				_m.Runtimes = value.String
+			}
+		case runtimebroker.FieldDefaultProfile:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field default_profile", values[i])
+			} else if value.Valid {
+				_m.DefaultProfile = value.String
 			}
 		case runtimebroker.FieldLabels:
 			if value, ok := values[i].(*[]byte); !ok {
@@ -335,6 +343,9 @@ func (_m *RuntimeBroker) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("runtimes=")
 	builder.WriteString(_m.Runtimes)
+	builder.WriteString(", ")
+	builder.WriteString("default_profile=")
+	builder.WriteString(_m.DefaultProfile)
 	builder.WriteString(", ")
 	builder.WriteString("labels=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Labels))

@@ -79,6 +79,17 @@ const (
 	ActionDeliver = "deliver"
 	ActionUse     = "use"
 
+	// PermissionGCPServiceAccountUse is the gcp_service_account.use
+	// permission ID. Named so pkg/hub/authz.go's agent-scope handling for
+	// this one permission keys off a constant rather than a literal string.
+	// The Registry row below keeps its ID as the literal string, not this
+	// constant: pkg/hub/authzop/catalog_test.go reads registry.go as text
+	// and takes the first quoted string on each line starting with "{ID:"
+	// as that row's ID, so an identifier there would make it read the
+	// row's Description as the ID. TestMaterialPermissions_Registered pins
+	// the constant against the row.
+	PermissionGCPServiceAccountUse = "gcp_service_account.use"
+
 	UATScopeAgentManage         = "agent:manage"
 	UATScopeSkillManage         = "skill:manage"
 	UATScopeTemplateManage      = "template:manage"
@@ -309,10 +320,11 @@ var Registry = []Permission{
 	// grant required for the selected item.
 	// secret.use governs an agent's own runtime retrieval and is admitted
 	// under an agent JWT via the AgentScopes mapping below. gcp_service_account.use
-	// has no AgentScopes: the GCP token scope is per service account
-	// (project:gcp:token:<sa-id>) and cannot be matched statically, so no
-	// credential satisfies it until the slice that wires the token-mint
-	// check adds that mapping.
+	// keeps AgentScopes nil: the GCP token scope names one service account
+	// instance (project:gcp:token:<sa-id>), so its agent-credential admission
+	// is decided per resource instead of from this permission's static
+	// scope list. See pkg/hub/authz.go's agent-scope restriction and its
+	// request-local synthetic grant, both keyed on PermissionGCPServiceAccountUse.
 	{ID: "secret.deliver", Resource: ResourceSecret, Action: ActionDeliver, Description: "Deliver a secret to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
 	{ID: "env_var.deliver", Resource: ResourceEnvVar, Action: ActionDeliver, Description: "Deliver a stored environment variable to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
 	{ID: "skill_injection.deliver", Resource: ResourceSkillInjection, Action: ActionDeliver, Description: "Deliver a stored skill reference to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},

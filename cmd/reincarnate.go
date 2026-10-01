@@ -28,9 +28,85 @@ import (
 )
 
 var (
-	reincarnateHandoffFile string
-	reincarnateDryRun      bool
+	reincarnateHandoffFile     string
+	reincarnateDryRun          bool
+	reincarnateHandoffTemplate bool
 )
+
+// reincarnateFiveLineContract is the design §3.9 self-migration contract,
+// verbatim, stated both in `--help` (embedded in Long below) and usable
+// wherever the exact wording needs to be pinned (golden tests). It is a
+// plain (not raw) string literal because it contains backtick-quoted
+// commands.
+const reincarnateFiveLineContract = "1. Commit and push your branch.\n" +
+	"2. Write a handoff file.\n" +
+	"3. Run `scion reincarnate --dry-run` to see what changes.\n" +
+	"4. Run `scion reincarnate --handoff-file <f>`.\n" +
+	"5. Do nothing after that call; your container will be stopped.\n"
+
+// reincarnateHandoffTemplateText is the embedded handoff template printed by
+// `scion reincarnate --handoff-template` (design §3.9). Its section order
+// and names follow §3.9's "Handoff template sections" list; the prose under
+// each heading is derived from the prior-art handoff at
+// /scion-volumes/scratchpad/integration-design-handoff.md, generalized away
+// from that document's specific project and role.
+const reincarnateHandoffTemplateText = `# Reincarnation handoff
+
+Prepared by the outgoing generation, for the generation that replaces it.
+
+## Role charter
+
+What this role is for and what it owns. State the charter in your own words
+so the next generation does not have to re-derive it from scattered
+messages.
+
+## Immediate active work (status, next action)
+
+The current status of the work in progress, and the concrete next action to
+take first.
+
+## Canonical files and artifacts
+
+Absolute paths to the design docs, reports, and scratchpad files the next
+generation needs to read before acting. Note which one is authoritative if
+they disagree.
+
+## Authority and ownership (who to ask, who can approve)
+
+Who owns this work, who can approve changes or exceptions, and who to
+escalate to if blocked.
+
+## Live conversations (conv ids) and counterparties
+
+Conversation IDs you are actively part of, and who is on the other end of
+each, so the next generation can pick the threads back up.
+
+## Children agents and their state
+
+Any agents you created or supervise: their names, roles, and current
+status.
+
+## Pending waits and scheduled events
+
+Anything you are waiting on (a reply, another agent, a scheduled event),
+and when to expect it.
+
+## Open questions to humans (already asked and not yet asked)
+
+Questions you have already asked and are waiting on an answer for, and
+questions you have not yet asked but the next generation should raise.
+
+## Operating constraints and lessons learned
+
+Rules, gotchas, and mistakes to avoid that are not obvious from the code or
+the design docs.
+
+## Do not redo
+
+Work that is already done. Redoing it would waste time or cause harm — for
+example, re-sending a message, re-running a destructive operation, or
+re-opening a decision that is already settled.
+`
 
 // reincarnateCmd represents the `scion reincarnate` command (design
 // /scion-volumes/scratchpad/projects/agent-migrate/design.md §3.2): stop an
@@ -52,6 +128,12 @@ Run with no argument inside an agent container to migrate yourself
 one else to describe the work in progress. When migrating another agent, the
 handoff is optional.
 
+Self-migration follows this contract:
+
+` + reincarnateFiveLineContract + `
+Run ` + "`scion reincarnate --handoff-template`" + ` to print the handoff's expected
+sections.
+
 Use --dry-run to see the planned changes (template, image, harness config,
 model, env keys, branch) without migrating anything.`,
 	Args: func(cmd *cobra.Command, args []string) error {
@@ -62,6 +144,16 @@ model, env keys, branch) without migrating anything.`,
 	},
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// --handoff-template is a pure, local, offline operation (design
+		// §3.9: "The template is embedded in the CLI binary, not stored as a
+		// skill file"): it never needs a hub connection or a resolved
+		// target, so it is handled before any of that and short-circuits
+		// the rest of RunE regardless of other flags or arguments.
+		if reincarnateHandoffTemplate {
+			_, err := fmt.Fprint(cmd.OutOrStdout(), reincarnateHandoffTemplateText)
+			return err
+		}
+
 		agentName, isSelf, err := resolveReincarnateTarget(args, os.Getenv("SCION_AGENT_NAME"), reincarnateHandoffFile != "", reincarnateDryRun)
 		if err != nil {
 			return err
@@ -108,7 +200,7 @@ func resolveReincarnateTarget(args []string, selfName string, hasHandoffFile, dr
 	isSelf = selfName != "" && api.Slugify(selfName) == agentName
 
 	if isSelf && !hasHandoffFile && !dryRun {
-		return "", false, fmt.Errorf("self-migration requires --handoff-file: write a handoff describing your work in progress, canonical files, and next action for the new generation, then pass it with --handoff-file")
+		return "", false, fmt.Errorf("self-migration requires --handoff-file: run `scion reincarnate --handoff-template` to see the expected sections, write your handoff, then pass it with --handoff-file")
 	}
 
 	return agentName, isSelf, nil
@@ -201,8 +293,20 @@ func printReincarnationPlan(plan hubclient.ReincarnationPlan) {
 	}
 }
 
+// isReincarnateHandoffTemplateInvocation reports whether cmd is the
+// `reincarnate` command with `--handoff-template` set (design Amendment
+// A26.2 O1). root.go's PersistentPreRunE calls this to exempt the flag from
+// the agent-container-context gate and the requires-project check: the flag
+// is a pure local print (see RunE above) and must work anywhere. Compares by
+// identity (cmd == reincarnateCmd), not by name, so no other command named
+// "reincarnate" in some other subtree could ever match (Amendment A26.3 N3).
+func isReincarnateHandoffTemplateInvocation(cmd *cobra.Command) bool {
+	return cmd == reincarnateCmd && reincarnateHandoffTemplate
+}
+
 func init() {
 	reincarnateCmd.Flags().StringVar(&reincarnateHandoffFile, "handoff-file", "", "File whose content becomes the new generation's first task (required for self-migration)")
 	reincarnateCmd.Flags().BoolVar(&reincarnateDryRun, "dry-run", false, "Print the resolved reincarnation plan without migrating anything")
+	reincarnateCmd.Flags().BoolVar(&reincarnateHandoffTemplate, "handoff-template", false, "Print the handoff template and exit")
 	rootCmd.AddCommand(reincarnateCmd)
 }

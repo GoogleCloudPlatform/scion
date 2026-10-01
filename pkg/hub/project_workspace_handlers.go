@@ -421,7 +421,11 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 	case r.Method == http.MethodDelete && filePath != "":
 		s.handleProjectWorkspaceDelete(w, root, filePath)
 	default:
-		MethodNotAllowed(w)
+		if filePath == "" {
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+		} else {
+			MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
+		}
 	}
 }
 
@@ -734,7 +738,7 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 	ctx := r.Context()
 
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -783,7 +787,7 @@ func (s *Server) handleProjectSharedDirArchive(w http.ResponseWriter, r *http.Re
 	projectID := project.ID
 
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -1047,7 +1051,11 @@ func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, pr
 	case r.Method == http.MethodDelete && filePath != "":
 		s.handleProjectWorkspaceDelete(w, root, filePath)
 	default:
-		MethodNotAllowed(w)
+		if filePath == "" {
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+		} else {
+			MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
+		}
 	}
 }
 
@@ -1394,7 +1402,7 @@ func validateWorkspaceFilePath(path string) error {
 // handleProjectWorkspacePull performs a `git pull --ff-only` on a shared-workspace project.
 func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

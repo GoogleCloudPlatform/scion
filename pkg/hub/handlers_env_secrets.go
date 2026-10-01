@@ -213,7 +213,7 @@ func (s *Server) handleEnvVars(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.listEnvVars(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -276,7 +276,7 @@ func (s *Server) handleEnvVarByKey(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteEnvVar(w, r, key)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -613,7 +613,7 @@ func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.listSecrets(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -671,7 +671,7 @@ func (s *Server) handleSecretByKey(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteSecret(w, r, key)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -1059,7 +1059,7 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		}
 		// Fall through to existing PUT logic below.
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 		return
 	}
 
@@ -1128,6 +1128,30 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 			"value":   scope,
 			"allowed": []string{"project", "user"},
 		})
+		return
+	}
+
+	// Hub admin policy: when agent_secrets.user_scope_only is on, agents may
+	// not write project-scope secrets at all. This is a blanket rule on
+	// every agent-originated project-scope write (design ptone/scion#2291
+	// §6) — it covers harness auth capture and ad-hoc `sciontool secret set`
+	// alike. It is checked before allowProgeny/base64-decode/type/conflict/
+	// GetMeta, so it cannot be bypassed by `force` and the request never
+	// reaches the backend. (Value/Encoding validation above still runs
+	// first and fails closed on its own terms — an empty value or an
+	// unrecognized encoding gets its own 400/422 either way.)
+	if scope == store.ScopeProject && s.agentSecretsUserScopeOnly() {
+		slog.Info("agent project-scope secret write rejected by policy",
+			"agent_id", agentID, "project_id", projectID, "key", key)
+		writeError(w, http.StatusForbidden, ErrCodeSecretScopeRestricted,
+			"The hub administrator has restricted agent-written secrets to user (profile) scope; "+
+				"project-scope writes are not allowed. Retry with scope \"user\" (sciontool: --scope user).",
+			map[string]interface{}{
+				"field":         "scope",
+				"value":         "project",
+				"allowedScopes": []string{"user"},
+				"setting":       "agent_secrets.user_scope_only",
+			})
 		return
 	}
 
@@ -1624,7 +1648,7 @@ func (s *Server) handleProjectEnvVars(w http.ResponseWriter, r *http.Request, pr
 			ScopeID: projectID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -1751,7 +1775,7 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -1872,7 +1896,7 @@ func (s *Server) handleProjectSecrets(w http.ResponseWriter, r *http.Request, pr
 			ScopeID: projectID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -1983,7 +2007,7 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -2128,7 +2152,7 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 		case http.MethodPost:
 			s.addProjectProvider(w, r, projectID)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 		}
 		return
 	}
@@ -2139,7 +2163,7 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 	case http.MethodDelete:
 		s.removeProjectProvider(w, r, projectID, brokerID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 	}
 }
 
@@ -2177,10 +2201,13 @@ type projectProviderView struct {
 	// AgentLimitSource reports which precedence step produced AgentLimit
 	// (ptone/scion#2061 P2, design.md §5.9): "broker" (a per-broker setting,
 	// pkg/hub/brokersettings), "entitlement" (an entitlement binding),
-	// "hub_default" (the limit definition's default value), or "unlimited"
-	// (resolved with no cap). Omitted whenever resolution didn't run or
-	// failed — the same conditions that leave AgentLimit and AgentCount
-	// unset.
+	// "hub_default" (the limit definition's default value), "unlimited"
+	// (resolved with no cap), or "not_enforced" (Amendment A1: the P1b
+	// enforcement switch, GoogleCloudPlatform/scion#2115, is off — AgentLimit
+	// is then informational only: it is still the resolved cap from whichever
+	// step would otherwise apply, but Reserve does not reject agent creates
+	// against it). Omitted whenever resolution didn't run or failed — the
+	// same conditions that leave AgentLimit and AgentCount unset.
 	AgentLimitSource string `json:"agentLimitSource,omitempty"`
 }
 
@@ -2442,7 +2469,7 @@ func (s *Server) handleBrokerEnvVars(w http.ResponseWriter, r *http.Request, bro
 			ScopeID: brokerID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -2550,7 +2577,7 @@ func (s *Server) handleBrokerSecrets(w http.ResponseWriter, r *http.Request, bro
 			ScopeID: brokerID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 

@@ -34,7 +34,7 @@ import (
 // Superseded by handleChatSpaces + handleListThreads in handlers_chat_v2.go.
 func (s *Server) handleChatThreads(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -195,7 +195,7 @@ func (s *Server) handleChatThreadRoutes(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

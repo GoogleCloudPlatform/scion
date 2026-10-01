@@ -1020,13 +1020,32 @@ func (svc *BrokerAuthService) resolveOnBehalfOf(ctx context.Context, r *http.Req
 	return authenticatedUser, 0, nil
 }
 
-// applyOnBehalfOf resolves the delegated requestor identity and returns the
-// updated context plus the resolved UserIdentity (nil when the header is
-// absent). If the X-Scion-On-Behalf-Of header is present and valid, both
-// broker and user identities are set in the context. If absent, the broker
-// is set as the sole identity. On error it writes the HTTP error response
-// and returns (nil, nil, false).
+// applyOnBehalfOf is the single shared helper that installs the authenticated
+// broker/on-behalf-of context for an HMAC-verified request (ptone/scion#2123).
+// Both BrokerAuthMiddleware and AuditableBrokerAuthMiddleware call it instead
+// of each wiring their own copy, so the two configurations always agree on
+// the request's ctx credential.
+//
+// Callers must pass brokerIdent only after ValidateBrokerSignature succeeds:
+// this function does not itself verify the HMAC. On success ctx carries:
+//   - the broker identity (contextWithBrokerIdentity), unconditionally;
+//   - when the X-Scion-On-Behalf-Of header resolves to an active local user,
+//     that user as the request identity, the BrokerOnBehalfOf marker
+//     (contextWithBrokerOnBehalfOf) binding Credential.ID to this broker, and
+//     a broker CredentialContext;
+//   - otherwise, the broker itself as the request identity and a broker
+//     CredentialContext, with no marker set — so a broker acting for itself,
+//     with no on-behalf-of header, is never mistaken for an authorized
+//     narrowing of a local user (it stays broker/broker and is denied by
+//     Decide's unsupported-principal switch).
+//
+// A missing header resolves userIdent == nil, which takes the broker-only
+// branch below and never calls contextWithBrokerOnBehalfOf. An invalid or
+// unresolvable header returns ok=false before either branch runs: neither
+// path installs the marker in that case, and the caller must not proceed.
 func (svc *BrokerAuthService) applyOnBehalfOf(ctx context.Context, w http.ResponseWriter, r *http.Request, brokerIdent BrokerIdentity) (context.Context, UserIdentity, bool) {
+	ctx = contextWithBrokerIdentity(ctx, brokerIdent)
+
 	userIdent, statusCode, oboErr := svc.resolveOnBehalfOf(ctx, r)
 	if oboErr != nil {
 		errCode := ErrCodeForbidden
@@ -1040,9 +1059,11 @@ func (svc *BrokerAuthService) applyOnBehalfOf(ctx context.Context, w http.Respon
 	if userIdent != nil {
 		ctx = context.WithValue(ctx, userContextKey{}, userIdent)
 		ctx = contextWithIdentity(ctx, userIdent)
+		ctx = contextWithBrokerOnBehalfOf(ctx, BrokerOnBehalfOf{Broker: brokerIdent, BrokerID: brokerIdent.ID()})
 	} else {
 		ctx = contextWithIdentity(ctx, brokerIdent)
 	}
+	ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindBroker, ID: brokerIdent.ID(), Type: brokerIdent.Type()})
 	return ctx, userIdent, true
 }
 
@@ -1073,13 +1094,13 @@ func BrokerAuthMiddleware(svc *BrokerAuthService) func(http.Handler) http.Handle
 				return
 			}
 
-			// Set broker-specific identity context and resolve on-behalf-of
-			ctx := contextWithBrokerIdentity(r.Context(), identity)
-			ctx, _, ok := svc.applyOnBehalfOf(ctx, w, r, identity)
+			// Install the authenticated broker/on-behalf-of context: broker
+			// identity, effective user (when OBO resolves), the OBO marker,
+			// and the broker credential — all from the one shared helper.
+			ctx, _, ok := svc.applyOnBehalfOf(r.Context(), w, r, identity)
 			if !ok {
 				return
 			}
-			ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindBroker, ID: identity.ID(), Type: identity.Type()})
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})

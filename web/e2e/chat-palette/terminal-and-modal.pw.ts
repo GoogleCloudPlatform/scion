@@ -15,8 +15,8 @@
 /**
  * Chromium, real xterm: hidden mounted chat plus terminal Ctrl+K yields
  * normal PTY control-K and zero palette state/fetch changes; Meta+K does not
- * open the chat palette. An unrelated open dialog prevents activation.
- * Feature flag off and v1 remain unaffected.
+ * open the chat palette. An unrelated open dialog prevents activation. v1
+ * (native_chat_v2 off) remains unaffected.
  */
 
 import { test, expect, type Page } from '@playwright/test';
@@ -230,33 +230,6 @@ test('removing a born-open dialog restores Ctrl+K for the palette', async ({ pag
   await expect(paletteDialog(page)).toBeVisible();
 });
 
-test('removing a born-open dialog restores Ctrl+K for the flag-off legacy switcher', async ({
-  page,
-}) => {
-  await setupApiMocks(page);
-  await page.goto('/e2e/chat-palette/fixture.html?palette=0', { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => !!document.querySelector('scion-page-chat'));
-
-  await page.evaluate(async () => {
-    await customElements.whenDefined('sl-dialog');
-    const dialog = document.createElement('sl-dialog') as HTMLElement & { open?: boolean };
-    dialog.id = 'born-open-dialog-legacy';
-    dialog.setAttribute('label', 'Born-open dialog');
-    dialog.open = true;
-    document.body.appendChild(dialog);
-  });
-  await page.waitForTimeout(150);
-  await page.keyboard.press('Control+k');
-  await page.waitForTimeout(150);
-  await expect(page.locator('scion-chat-switcher .overlay')).toHaveCount(0); // still blocked
-
-  await page.evaluate(() => document.getElementById('born-open-dialog-legacy')?.remove());
-  await page.waitForTimeout(150);
-
-  await page.keyboard.press('Control+k');
-  await expect(page.locator('scion-chat-switcher .overlay')).toBeVisible();
-});
-
 test('a toast (sl-alert) opening while the palette is open leaves it open', async ({ page }) => {
   await setupApiMocks(page);
   await page.goto('/e2e/chat-palette/fixture.html', { waitUntil: 'domcontentloaded' });
@@ -314,19 +287,6 @@ test('a real modal dialog opening while the palette is open closes it', async ({
           .v2PaletteOpen
     );
   await expect.poll(paletteOpenState, { timeout: 2_000 }).toBe(false);
-});
-
-test('feature flag off: Ctrl+K opens the legacy flat switcher, not the palette', async ({
-  page,
-}) => {
-  await setupApiMocks(page);
-  await page.goto('/e2e/chat-palette/fixture.html?palette=0', { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => !!document.querySelector('scion-page-chat'));
-
-  await page.keyboard.press('Control+k');
-
-  await expect(page.locator('scion-chat-switcher .overlay')).toBeVisible();
-  await expect(paletteDialog(page)).toHaveCount(0);
 });
 
 test('v1 (native_chat_v2 off) remains unaffected: Ctrl+K renders nothing, makes no palette requests, and does not steal the native shortcut', async ({
@@ -518,54 +478,4 @@ test('opening the palette, then a route change hiding chat, closes it without re
     );
   await page.evaluate(() => window.chatPaletteFixture.hideChatShowTerminal());
   await expect.poll(paletteOpenState, { timeout: 2_000 }).toBe(false);
-});
-
-test('flag off — terminal Ctrl+K still reaches the PTY with zero legacy-switcher state change', async ({
-  page,
-}) => {
-  // The route/visibility/terminal guards are shared by both the palette and
-  // the legacy flat switcher (they run before the flag branch in
-  // _handleGlobalKeydown) — this proves that sharing didn't regress the
-  // default (flag-off) experience for the terminal-hidden-chat case.
-  const { requests, terminal, helperTextarea } = await gotoHiddenChatWithTerminal(
-    page,
-    '?palette=0'
-  );
-  const requestCountBefore = requests.length;
-
-  await helperTextarea.press('Control+k');
-  await page.waitForTimeout(150);
-
-  expect(terminal.input().join('')).toContain('\x0b');
-  expect(requests.length).toBe(requestCountBefore);
-  const switcherOpen = await page.evaluate(
-    () =>
-      (document.querySelector('scion-page-chat') as unknown as { v2SwitcherOpen: boolean })
-        .v2SwitcherOpen
-  );
-  expect(switcherOpen).toBe(false);
-});
-
-test('flag off — an unrelated open dialog also blocks the legacy switcher', async ({ page }) => {
-  await setupApiMocks(page);
-  await page.goto('/e2e/chat-palette/fixture.html?palette=0', { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => !!document.querySelector('scion-page-chat'));
-
-  await page.evaluate(async () => {
-    await customElements.whenDefined('sl-dialog');
-    const dialog = document.createElement('sl-dialog') as HTMLElement & {
-      open?: boolean;
-      updateComplete?: Promise<unknown>;
-    };
-    dialog.setAttribute('label', 'Unrelated dialog');
-    document.body.appendChild(dialog);
-    await dialog.updateComplete;
-    dialog.open = true;
-  });
-  await page.waitForTimeout(150);
-
-  await page.keyboard.press('Control+k');
-  await page.waitForTimeout(150);
-
-  await expect(page.locator('scion-chat-switcher .overlay')).toHaveCount(0);
 });

@@ -628,9 +628,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		var remoteGCPIdentity *RemoteGCPIdentityConfig
 		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
 			remoteGCPIdentity = &RemoteGCPIdentityConfig{
-				MetadataMode: gcpID.MetadataMode,
-				SAEmail:      gcpID.ServiceAccountEmail,
-				ProjectID:    gcpID.ProjectID,
+				MetadataMode:        gcpID.MetadataMode,
+				SAEmail:             gcpID.ServiceAccountEmail,
+				ProjectID:           gcpID.ProjectID,
+				RequireLocalRuntime: gcpID.RequireLocalRuntime,
 			}
 		}
 		image := agent.AppliedConfig.Image
@@ -2323,6 +2324,22 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 				resolvedEnv["SCION_METADATA_PROJECT_ID"] = gcpID.ProjectID
 				classifyEnv(&envClassifications, "SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
 			}
+			// RequireLocalRuntime doesn't travel inside CreateAgentConfig on
+			// this path either (see above), so surface it the same way: the
+			// broker re-checks a hub-default-granted passthrough against the
+			// runtime it resolves for this (re)start and downgrades to block
+			// itself if that runtime turns out not to be a local container
+			// runtime. Absent when false, matching this env's own convention
+			// — cleared, not just left unset, so that only this grant, not a
+			// value merged in above from stored env or a secret (both fill
+			// absent keys only; resolvedEnv itself is rebuilt fresh on every
+			// dispatch), can set it.
+			if gcpID.RequireLocalRuntime {
+				resolvedEnv["SCION_METADATA_REQUIRE_LOCAL_RUNTIME"] = "true"
+				classifyEnv(&envClassifications, "SCION_METADATA_REQUIRE_LOCAL_RUNTIME", api.EnvKindPlain)
+			} else {
+				delete(resolvedEnv, "SCION_METADATA_REQUIRE_LOCAL_RUNTIME")
+			}
 		}
 	}
 
@@ -2607,6 +2624,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 				classifyEnv(&envClassifications, "SCION_METADATA_SA_EMAIL", api.EnvKindPlain)
 				resolvedEnv["SCION_METADATA_PROJECT_ID"] = gcpID.ProjectID
 				classifyEnv(&envClassifications, "SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
+			}
+			// See the identical comment and clear in DispatchAgentStart.
+			if gcpID.RequireLocalRuntime {
+				resolvedEnv["SCION_METADATA_REQUIRE_LOCAL_RUNTIME"] = "true"
+				classifyEnv(&envClassifications, "SCION_METADATA_REQUIRE_LOCAL_RUNTIME", api.EnvKindPlain)
+			} else {
+				delete(resolvedEnv, "SCION_METADATA_REQUIRE_LOCAL_RUNTIME")
 			}
 		}
 	}

@@ -206,6 +206,73 @@ func TestResolveModelAliasForAgent_NoHarnessConfigAtAllFallsBackToBuiltinTable(t
 	assert.Equal(t, "claude-opus-5-5", got, "should resolve via the claude harness's built-in model_aliases table")
 }
 
+// TestResolveModelAliasForAgent_UsesSyncedAliasesOverBuiltinTable is the
+// end-to-end regression test for ptone/scion#2365: once a harness-config's
+// config.yaml is synced into the hub (via BootstrapHarnessConfigsFromDir,
+// which routes through resource_store.go's Create/Update -> extractModelConfig),
+// resolveModelAliasForAgent must resolve using the *synced* model_aliases,
+// not the table compiled into the hub binary from harnesses/<name>/config.yaml
+// at build time. Before the fix, the stored record never carried
+// model_aliases at all, so this always fell through to the built-in table.
+func TestResolveModelAliasForAgent_UsesSyncedAliasesOverBuiltinTable(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	dir := makeHarnessConfigDir(t, "codex-custom", map[string]string{
+		"config.yaml": "harness: codex\n" +
+			"model_aliases:\n  small: tiny-model\n  large: totally-custom-large-model\n",
+	})
+	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
+
+	hc, err := s.GetHarnessConfigBySlug(ctx, "codex-custom", store.HarnessConfigScopeGlobal, "")
+	require.NoError(t, err)
+	require.NotNil(t, hc.Config)
+	require.Equal(t, "totally-custom-large-model", hc.Config.ModelAliases["large"], "sync must have persisted the synced aliases")
+
+	agent := seedCreatedAgentForHarnessTest(t, s, "synced-aliases", "codex-custom")
+	agent.AppliedConfig.HarnessConfigID = hc.ID
+	require.NoError(t, s.UpdateAgent(ctx, agent))
+
+	got := srv.resolveModelAliasForAgent(ctx, agent, "large")
+	assert.Equal(t, "totally-custom-large-model", got, "must resolve using the synced model_aliases, not the built-in codex table")
+}
+
+// TestResolveModelAliasForAgent_BackfillsFromStorageWhenRecordPredatesSync
+// covers a harness-config record persisted before model_aliases extraction
+// existed (or otherwise never re-synced since): the DB record's Config has
+// no ModelAliases, but its config.yaml is still present in storage.
+// resolveModelAliasForAgent must re-derive the aliases from that stored
+// config.yaml at read time rather than immediately falling back to the
+// built-in table — this is the "backfill" behavior described in the fix
+// (self-heals without waiting for the next sync/migration).
+func TestResolveModelAliasForAgent_BackfillsFromStorageWhenRecordPredatesSync(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	dir := makeHarnessConfigDir(t, "codex-legacy", map[string]string{
+		"config.yaml": "harness: codex\n" +
+			"model_aliases:\n  small: tiny-model\n  large: stored-large-model\n",
+	})
+	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
+
+	hc, err := s.GetHarnessConfigBySlug(ctx, "codex-legacy", store.HarnessConfigScopeGlobal, "")
+	require.NoError(t, err)
+	require.NotNil(t, hc.Config)
+	require.NotEmpty(t, hc.Config.ModelAliases)
+
+	// Simulate a record that predates this fix: config.yaml is still in
+	// storage (untouched), but the DB record's Config carries no aliases.
+	hc.Config = &store.HarnessConfigData{Harness: "codex"}
+	require.NoError(t, s.UpdateHarnessConfig(ctx, hc))
+
+	agent := seedCreatedAgentForHarnessTest(t, s, "backfill-aliases", "codex-legacy")
+	agent.AppliedConfig.HarnessConfigID = hc.ID
+	require.NoError(t, s.UpdateAgent(ctx, agent))
+
+	got := srv.resolveModelAliasForAgent(ctx, agent, "large")
+	assert.Equal(t, "stored-large-model", got, "must backfill aliases from the record's own stored config.yaml rather than the built-in codex table")
+}
+
 func TestUpdateAgent_AllowsConfigUpdateWhenStoppedAndRejectsWhenRunning(t *testing.T) {
 	t.Run("stopped agent allows config model update", func(t *testing.T) {
 		srv, s := testServer(t)

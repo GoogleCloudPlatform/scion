@@ -81,6 +81,9 @@ func TestMaterialPermissions_Registered(t *testing.T) {
 			t.Errorf("%s: ProjectTargetApplicability = (applies=%v, reviewed=%v), want (true, true)", id, applies, reviewed)
 		}
 	}
+	if _, ok := byID[permissions.PermissionGCPServiceAccountUse]; !ok {
+		t.Errorf("no Registry row has ID %q (permissions.PermissionGCPServiceAccountUse)", permissions.PermissionGCPServiceAccountUse)
+	}
 }
 
 // TestMaterialPermissions_AgentScopeMappingExplicit pins the explicit
@@ -391,7 +394,7 @@ func TestMaterialPermissions_SuperAdminHoldsDeliverButGateDenies(t *testing.T) {
 func TestAgentToken_CannotSatisfyDeliveryPermission(t *testing.T) {
 	agent := newFullAgentIdentity(tid("deliver-scope-agent"), tid("deliver-scope-project"),
 		[]string{tid("deliver-scope-user")}, allRegisteredAgentScopes())
-	restriction := agentScopeRestriction(agent)
+	restriction := agentScopeRestriction(agent, Resource{})
 	for _, id := range []string{"secret.deliver", "env_var.deliver", "skill_injection.deliver"} {
 		if restriction.Check(id) {
 			t.Errorf("agent JWT scope restriction unexpectedly allows %q even with every registered scope present", id)

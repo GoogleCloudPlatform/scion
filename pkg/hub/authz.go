@@ -237,10 +237,20 @@ type Decision struct {
 	MatchedGrant   string // Audit-ready matched grant identifier
 	MatchedPolicy  string // Audit-ready matched policy identifier
 	PrincipalKind  PrincipalKind
+	PrincipalID    string
 	CredentialID   string
 	CredentialType string
 	CredentialKind string
 	ExplainTrace   []DecisionStep `json:"explainTrace,omitempty"`
+
+	// principalDecorated is set by decorateDecision, the single function that
+	// derives PrincipalID from the principal Decide evaluated. It is
+	// unexported and untagged so it carries no wire representation.
+	// BuildDecisionAuditRecord reads it to tell an empty derived PrincipalID
+	// apart from a Decision decorateDecision never touched, instead of
+	// treating an empty string as "derivation ran and found nothing" in both
+	// cases.
+	principalDecorated bool
 
 	// Actor and Purpose echo AuthzRequest.Actor/Purpose on every decision.
 	// Audit-only: they never contribute to Allowed.
@@ -338,6 +348,15 @@ type AuthzService struct {
 	// progenyAdapters holds progeny sharing-source adapters registered
 	// through RegisterProgenyAdapter.
 	progenyAdapters progenyAdapterRegistry
+
+	// devLocalEnabled backs devLocalAuthorityEnabled (devauth.go,
+	// ptone/scion#2342 B.3 R6). Set once at server construction via
+	// setDevLocalAuthorityEnabled, from the same ServerConfig.DevAuthToken
+	// != "" condition that gates dev-token acceptance and DevUserID
+	// seeding. Zero value false: an AuthzService built without going
+	// through that wiring (e.g. a bare &AuthzService{} in a test) fails
+	// closed.
+	devLocalEnabled bool
 }
 
 // NewAuthzService creates a new AuthzService.
@@ -397,22 +416,81 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 // All grants are traced to either a RoleBinding or a named relationship grant.
 // All reductions are traced to a named restriction. No undocumented bypasses.
 func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decision {
+	derivedPrincipal := principalContextForIdentity(request.Principal.Identity)
+	derivedCredential := credentialContextForIdentity(request.Principal.Identity)
+
+	// ── One rejection block: fail closed on unrecognized or mismatched
+	// classification (ptone/scion#2123) ─────────────────────────────────
+	// Evaluated once, after both derivations and before any candidate
+	// gathering, so an unrecognized or misrepresented identity never reaches
+	// step 1 or the kernel below. Every deny here decorates the decision
+	// with the DERIVED principal and credential — never the caller's
+	// rejected claim. Decide's single audit exit records it.
+	//
+	// A nil Principal.Identity denies first, with reason "missing principal";
+	// a typed-nil concrete identity (see isNilIdentity) takes the same path,
+	// since it carries no usable principal either. Every other case below
+	// assumes at least a non-nil identity was supplied, even one of an
+	// unrecognized concrete type.
+	//
+	// A request with an omitted Principal.Kind/Credential.Kind/Principal.ID
+	// derives it from the identity via the adapter below; an omitted value
+	// never reaches the matching check.
+	//
+	// A supplied Principal.ID is checked against the derived principal's own
+	// ID the same way a supplied Principal.Kind is checked against the
+	// derived kind, immediately after it: the caller may name the principal
+	// it means, but never a different one than the identity resolves to.
+	//
+	// A supplied Credential is independent of Principal.Identity in the
+	// directions suppliedCredentialCompatible admits: a narrower
+	// CredentialContext may be layered onto a local user's own
+	// classification (a UAT-shaped Scopes caveat, or an authenticated broker
+	// acting on that user's behalf) to exercise restriction logic that keys
+	// on Credential.Kind/Scopes/ID alone — the kernel's credential_scope
+	// restriction and the UAT/broker on-behalf-of gates work this way. Each
+	// admitted direction only ever adds a restriction or binds an
+	// independently-verified actor; it never grants the caller's chosen
+	// kind on its own say-so. Every other mismatch denies, including a
+	// recognized-looking supplied kind on an identity whose own derived kind
+	// is empty: an unrecognized identity can never be upgraded into a
+	// recognized one by supplied context.
+	var denyReason string
+	switch {
+	case isNilIdentity(request.Principal.Identity):
+		denyReason = "missing principal"
+	case request.Principal.Kind != "" && request.Principal.Kind != derivedPrincipal.Kind:
+		denyReason = "principal kind does not match identity"
+	case request.Principal.ID != "" && request.Principal.ID != derivedPrincipal.ID:
+		denyReason = "principal id does not match identity"
+	case !isRecognizedPrincipalKind(derivedPrincipal.Kind) || !isRecognizedCredentialKind(derivedCredential.Kind):
+		if !isRecognizedPrincipalKind(derivedPrincipal.Kind) {
+			denyReason = "unrecognized principal kind"
+		} else {
+			denyReason = "unrecognized credential kind"
+		}
+	case request.Credential.Kind != "" && !isRecognizedCredentialKind(request.Credential.Kind):
+		denyReason = "unrecognized credential kind"
+	case request.Credential.Kind != "" && !suppliedCredentialCompatible(ctx, derivedPrincipal, derivedCredential, request.Credential):
+		denyReason = "credential kind does not match identity"
+	}
+	if denyReason != "" {
+		return decorateDecision(Decision{Allowed: false, Reason: denyReason}, request, derivedPrincipal, derivedCredential, auditPermissionID(request))
+	}
+
 	principal := request.Principal
-	if principal.Identity == nil {
-		return decorateDecision(Decision{Allowed: false, Reason: "missing principal"}, request, principal, request.Credential, auditPermissionID(request))
-	}
-	derivedPrincipal := principalContextForIdentity(principal.Identity)
-	if principal.Kind != "" && principal.Kind != derivedPrincipal.Kind {
-		return decorateDecision(Decision{Allowed: false, Reason: "principal kind does not match identity"}, request, derivedPrincipal, request.Credential, auditPermissionID(request))
-	}
 	principal.Kind = derivedPrincipal.Kind
 	if principal.ID == "" {
 		principal.ID = derivedPrincipal.ID
 	}
-
+	// credential keeps the caller-supplied value when one was given: both
+	// the narrowing-UAT and the broker-on-behalf-of cases admitted above
+	// carry their own restrictions/effective credential ID forward exactly
+	// as supplied. An omitted kind falls back to the identity's own
+	// derivation.
 	credential := request.Credential
 	if credential.Kind == "" {
-		credential = credentialContextForIdentity(principal.Identity)
+		credential = derivedCredential
 	}
 
 	// Unsupported principal kinds — fail closed.
@@ -623,6 +701,21 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
+	// ── Step 5b3: Request-local gcp_service_account.use grant
+	// (ptone/scion#2129) ────────────────────────────────────────────────
+	// See gcpServiceAccountUseBinding's doc comment. Unlike Step 5b this is
+	// not gated on agent.ProjectID() != "": the decided service account can
+	// be hub-, project- or user-scoped, and the exact per-instance scope
+	// match is what authorizes it, not the agent's own project association.
+	if isAgentPrincipal(principal.Kind) {
+		if agent, ok := principal.Identity.(AgentIdentity); ok {
+			if cb, role := gcpServiceAccountUseBinding(agent, permissionID, request.Resource); cb != nil {
+				candidates = append(candidates, *cb)
+				roleDefs[role.RoleID] = role
+			}
+		}
+	}
+
 	// ── Step 5c/5d/5e: Hub-wide catalog scope containment (ptone/scion#1901,
 	// #1916) ───────────────────────────────────────────────────────────
 	// The curated hub-member/hub-viewer roles carry skill/template/
@@ -657,7 +750,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// 7b. Agent JWT scope restriction.
 	if isAgentPrincipal(principal.Kind) {
 		if agent, ok := principal.Identity.(AgentIdentity); ok {
-			restrictions = append(restrictions, agentScopeRestriction(agent))
+			restrictions = append(restrictions, agentScopeRestriction(agent, request.Resource))
 		}
 	}
 
@@ -1274,8 +1367,14 @@ func ceilingRestriction(ceiling permissions.FrozenPermissionCeiling) Restriction
 // scopes. Only permissions the agent's effective scopes grant are allowed —
 // computed via effectiveAgentScopes + agentScopesToPermissionIDs, the exact
 // pipeline step 5b's synthetic binding uses, so the two always agree on what
-// a legacy pre-split token (ptone/scion#2339) authorizes.
-func agentScopeRestriction(agent AgentIdentity) Restriction {
+// a legacy pre-split token (ptone/scion#2339) authorizes — with one
+// exception: permissions.PermissionGCPServiceAccountUse is decided against
+// the specific resource this restriction was built for
+// (agentGCPServiceAccountUseScopeMatch), never against effectiveAgentScopes's
+// map below -- see gcpServiceAccountUseBinding's doc comment for why a static
+// list cannot express a per-instance token scope. Every other permission is
+// decided by that map alone.
+func agentScopeRestriction(agent AgentIdentity, resource Resource) Restriction {
 	scopes := effectiveAgentScopes(agent)
 	if len(scopes) == 0 {
 		// No scopes: deny everything (fail closed).
@@ -1292,10 +1391,76 @@ func agentScopeRestriction(agent AgentIdentity) Restriction {
 		Kind:        "credential_scope",
 		Description: "agent JWT scope restriction",
 		Check: func(permissionID string) bool {
+			if permissionID == permissions.PermissionGCPServiceAccountUse {
+				return agentGCPServiceAccountUseScopeMatch(agent, permissionID, resource)
+			}
 			_, ok := allowed[permissionID]
 			return ok
 		},
 	}
+}
+
+// agentGCPServiceAccountUseScopeMatch reports whether agent's JWT carries the
+// exact per-instance token scope that the
+// gcp_service_account.use / gcp_service_account pair requires. It is the one
+// place that pair is decided, consulted by both the request-local synthetic
+// grant (gcpServiceAccountUseBinding) and the agent-scope restriction above,
+// so the two cannot drift apart.
+//
+// It denies -- never falls back to a broader test -- when permissionID is not
+// permissions.PermissionGCPServiceAccountUse, when resource.Type is not
+// permissions.ResourceGCPServiceAccount, when resource.ID is empty, or when
+// the JWT lacks the exact scope for that ID. Matching is agent.HasScope
+// (exact string equality) only: a prefix, wildcard or another account's scope
+// does not satisfy it, and the scope string itself is never re-derived --
+// GCPTokenScopeForSA (agenttoken.go) is the single source of that format.
+func agentGCPServiceAccountUseScopeMatch(agent AgentIdentity, permissionID string, resource Resource) bool {
+	if agent == nil || permissionID != permissions.PermissionGCPServiceAccountUse {
+		return false
+	}
+	if resource.Type != permissions.ResourceGCPServiceAccount || resource.ID == "" {
+		return false
+	}
+	return agent.HasScope(GCPTokenScopeForSA(resource.ID))
+}
+
+// gcpServiceAccountUseBinding returns a request-local CandidateBinding and its
+// RolePermissions when agentGCPServiceAccountUseScopeMatch holds for this
+// exact request; otherwise (nil, nil).
+//
+// The binding is scoped ScopeTypeSystem so it applies regardless of whether
+// the decided gcp_service_account row is itself hub-, project- or
+// user-scoped (scopeApplies always admits system scope) -- scope containment
+// here is not the point, the per-request resource-ID match already is.
+//
+// It is built fresh inside decide() on every call: never cached, and never added
+// to the target-agnostic agentScopesToPermissionIDs (Step 5b's project-scoped
+// binding) or to the static AgentScopes set that agentScopeRestriction builds.
+// That static set also drives intersectCredentialCaveats/CanDelegate, which
+// decides what an agent may delegate to something it creates -- a grant scoped to
+// one resource ID must never be read there as general, delegable
+// gcp_service_account.use authority. CanDelegate calls agentScopeRestriction with
+// a zero Resource, so agentGCPServiceAccountUseScopeMatch always denies there and
+// gcp_service_account.use is never in an agent's delegable set.
+func gcpServiceAccountUseBinding(agent AgentIdentity, permissionID string, resource Resource) (*CandidateBinding, *RolePermissions) {
+	if !agentGCPServiceAccountUseScopeMatch(agent, permissionID, resource) {
+		return nil, nil
+	}
+	id := "synthetic:agent-gcp-service-account-use:" + agent.ID() + ":" + resource.ID
+	role := &RolePermissions{
+		RoleID:      id,
+		RoleName:    "agent-jwt-gcp-service-account-use",
+		ScopeType:   ScopeTypeSystem,
+		Permissions: map[string]struct{}{permissions.PermissionGCPServiceAccountUse: {}},
+	}
+	cb := &CandidateBinding{
+		BindingID:        id,
+		RoleDefinitionID: id,
+		PrincipalType:    "agent",
+		PrincipalID:      agent.ID(),
+		ScopeType:        ScopeTypeSystem,
+	}
+	return cb, role
 }
 
 // loadAccessConstraintRestrictions loads active access constraints from the
@@ -1494,74 +1659,218 @@ func isUserPrincipal(kind PrincipalKind) bool {
 	return kind == PrincipalKindUser || kind == PrincipalKindDev || kind == PrincipalKindFederatedUser
 }
 
+// isRecognizedPrincipalKind reports whether kind is one of the classifications
+// principalContextForIdentity can produce for a known identity type. An empty
+// kind (a nil identity, or an identity of an unrecognized concrete type) is
+// not recognized, and neither is any string a caller might supply that isn't
+// one of these constants.
+func isRecognizedPrincipalKind(kind PrincipalKind) bool {
+	switch kind {
+	case PrincipalKindUser, PrincipalKindAgent, PrincipalKindFederatedUser,
+		PrincipalKindFederatedAgent, PrincipalKindFederatedService, PrincipalKindBroker, PrincipalKindDev:
+		return true
+	default:
+		return false
+	}
+}
+
+// isRecognizedCredentialKind reports whether kind is one of the
+// classifications credentialContextForIdentity can produce for a known
+// identity type. An empty kind (a nil identity, or an identity of an
+// unrecognized concrete type) is not recognized.
+func isRecognizedCredentialKind(kind CredentialKind) bool {
+	switch kind {
+	case CredentialKindInteractive, CredentialKindUAT, CredentialKindAgentJWT,
+		CredentialKindFederation, CredentialKindBroker, CredentialKindDev:
+		return true
+	default:
+		return false
+	}
+}
+
+// suppliedCredentialCompatible reports whether a caller-supplied
+// Credential.Kind may stand in for an identity's own derived classification.
+// It is admitted only when:
+//
+//  1. supplied equals derived; or
+//  2. principal.Kind is PrincipalKindUser, derived is CredentialKindInteractive
+//     (a plain local user, not a *ScopedUserIdentity — that derives UAT and so
+//     only ever reaches case 1), and supplied is CredentialKindUAT — a
+//     narrowing overlay used by recorded/reconstructed UAT evaluation. Every
+//     UAT scope, boundary, and live-authority check still applies to the
+//     supplied credential itself; this predicate only admits it past this
+//     gate; or
+//  3. the same principal/derived precondition as case 2, supplied is
+//     CredentialKindBroker, and ctx proves BrokerAuthMiddleware (or its
+//     audited variant) resolved this exact principal on behalf of the
+//     authenticated broker named by supplied — see
+//     brokerOnBehalfOfAuthorizes. The broker credential remains effective for
+//     the rest of Decide, so route/credential restrictions still apply.
+//
+// Nothing else passes: dev is not in the UAT/broker exception (a used UAT or
+// broker-on-behalf-of grant represents its local user owner, not dev's
+// token-issuing power), and an unrecognized derived identity never reaches
+// this predicate — it denies earlier, on the unrecognized-kind check. This
+// consumes ctx provenance for case 3, not just the two kinds, so a caller
+// cannot admit the broker exception by supplying CredentialKindBroker alone.
+func suppliedCredentialCompatible(ctx context.Context, principal PrincipalContext, derived, supplied CredentialContext) bool {
+	if supplied.Kind == derived.Kind {
+		return true
+	}
+	if principal.Kind != PrincipalKindUser || derived.Kind != CredentialKindInteractive {
+		return false
+	}
+	switch supplied.Kind {
+	case CredentialKindUAT:
+		return true
+	case CredentialKindBroker:
+		return brokerOnBehalfOfAuthorizes(ctx, principal, supplied)
+	default:
+		return false
+	}
+}
+
+// brokerOnBehalfOfAuthorizes reports whether ctx proves that the authenticated
+// broker acted on behalf of exactly the principal being evaluated, naming
+// exactly the broker identified by supplied. It requires ALL of:
+//   - the broker identity marker (contextWithBrokerIdentity), installed for
+//     every HMAC-authenticated broker request;
+//   - the dedicated BrokerOnBehalfOf marker, installed only after HMAC
+//     verification and a successful resolveOnBehalfOf — never by a bare or
+//     invalid header;
+//   - supplied.ID equal to both the marker's BrokerID and the ctx broker
+//     identity's own ID;
+//   - the ctx broker identity's Type() equal to the expected broker
+//     credential type ("broker"), and supplied.Type equal to it too;
+//   - the ctx effective identity (GetIdentityFromContext) has the same ID as
+//     principal — the on-behalf-of substitution named exactly this principal,
+//     not merely some local user.
+//
+// A header alone, a fabricated CredentialKindBroker with no marker, or a
+// context authenticated for a different principal never qualifies: this reads
+// ctx provenance the middleware sets, not the supplied kind by itself.
+func brokerOnBehalfOfAuthorizes(ctx context.Context, principal PrincipalContext, supplied CredentialContext) bool {
+	broker := GetBrokerIdentityFromContext(ctx)
+	if broker == nil || broker.Type() != "broker" || supplied.Type != "broker" {
+		return false
+	}
+	obo, ok := BrokerOnBehalfOfFromContext(ctx)
+	if !ok || obo.BrokerID == "" {
+		return false
+	}
+	if obo.BrokerID != broker.ID() || obo.Broker == nil || obo.Broker.ID() != broker.ID() {
+		return false
+	}
+	effective := GetIdentityFromContext(ctx)
+	if effective == nil || principal.ID == "" || effective.ID() != principal.ID {
+		return false
+	}
+	return supplied.ID == broker.ID()
+}
+
+// principalContextForIdentity classifies identity into its PrincipalKind by
+// concrete type — a type assertion switch, never identity.Type(). Type() is
+// informational only (see its doc comment): any concrete type, including one
+// this package has not classified, is free to return "user", "agent", or any
+// other string, and must not thereby be admitted as if it were the classified
+// type that string names. Every known concrete production identity type has
+// an explicit arm. The default arm covers everything else: a nil identity,
+// an unrecognized concrete type, and a package-hub test fake that has not
+// opted into explicitIdentityClassification. It leaves Kind empty, which
+// Decide's fail-closed classification check denies rather than letting it
+// fall through to any implicit default. A typed-nil concrete identity (see
+// isNilIdentity) takes the same empty-context path as a nil interface: this
+// check runs before identity.ID() or the type switch below touch it, since a
+// nil concrete pointer panics on either.
 func principalContextForIdentity(identity Identity) PrincipalContext {
-	if identity == nil {
+	if isNilIdentity(identity) {
 		return PrincipalContext{}
 	}
 	principal := PrincipalContext{ID: identity.ID(), Identity: identity}
-	switch identity.Type() {
-	case "user":
+	switch identity.(type) {
+	case *AuthenticatedUser, *ScopedUserIdentity:
 		principal.Kind = PrincipalKindUser
-	case "agent":
-		principal.Kind = PrincipalKindAgent
-	case "federated_user":
-		principal.Kind = PrincipalKindFederatedUser
-	case "federated_agent":
-		principal.Kind = PrincipalKindFederatedAgent
-	case "federated_service":
-		principal.Kind = PrincipalKindFederatedService
-	case "broker":
-		principal.Kind = PrincipalKindBroker
-	case "dev":
+	case *DevUser:
 		principal.Kind = PrincipalKindDev
+	case *agentIdentityWrapper, *storedAgentIdentity, *peerAgentIdentity, *explainAgentIdentity:
+		principal.Kind = PrincipalKindAgent
+	case *FederatedUserIdentity:
+		principal.Kind = PrincipalKindFederatedUser
+	case *FederatedAgentIdentity:
+		principal.Kind = PrincipalKindFederatedAgent
+	case *FederatedServiceIdentity:
+		principal.Kind = PrincipalKindFederatedService
+	case *brokerIdentityImpl:
+		principal.Kind = PrincipalKindBroker
+	default:
+		if c, ok := identity.(explicitIdentityClassification); ok {
+			principal.Kind, _ = c.authzClassification()
+		}
 	}
 	return principal
 }
 
+// credentialContextForIdentity classifies identity into its CredentialKind by
+// concrete type, for the same reason principalContextForIdentity does: a
+// caller-defined or otherwise unclassified type's Type() string must never
+// stand in for classification. The *ScopedUserIdentity check stays first: any
+// UAT-backed identity is CredentialKindUAT regardless of what its underlying
+// UserIdentity's concrete type is. Every other known concrete identity type
+// has its own explicit arm, including *AuthenticatedUser for a plain
+// interactive session. The default arm covers a nil identity, an
+// unrecognized concrete type, and a package-hub test fake that has not opted
+// into explicitIdentityClassification: it returns an empty Kind rather than
+// CredentialKindInteractive, so Decide's fail-closed classification check
+// denies it instead of treating an unknown identity as an ordinary
+// interactive session. A typed-nil concrete identity (see isNilIdentity)
+// takes this same empty-context path, checked before the type switch below
+// touches it; see the *ScopedUserIdentity case below for the one exception.
 func credentialContextForIdentity(identity Identity) CredentialContext {
-	if identity == nil {
+	// A typed-nil *ScopedUserIdentity returns Kind == CredentialKindUAT with a
+	// zero Ceiling, not the empty context the other typed-nil types get. A
+	// caller may supply this CredentialContext independently of
+	// Principal.Identity, so Decide's missing-principal check does not cover
+	// it; an empty Kind would skip Decide's
+	// suppliedCredentialCompatible/ceiling check, while a UAT Kind with a
+	// zero Ceiling denies every permission (ptone/scion#2143).
+	if v, ok := identity.(*ScopedUserIdentity); ok && v == nil {
+		return CredentialContext{Kind: CredentialKindUAT}
+	}
+	if isNilIdentity(identity) {
 		return CredentialContext{}
 	}
-	if scoped, ok := identity.(*ScopedUserIdentity); ok {
-		if scoped == nil {
-			// A typed-nil *ScopedUserIdentity satisfies this type assertion
-			// (ok == true, scoped == nil) even though identity == nil above
-			// was false, so this is reachable only through that Go
-			// interface/pointer distinction, never through a plain nil
-			// Identity. Keep Kind == CredentialKindUAT rather than falling
-			// through to the zero CredentialContext: callers key the UAT
-			// ceiling restriction (Decide step 7a) on Kind ==
-			// CredentialKindUAT, and a zero Kind reads as "no credential
-			// restriction," which would authorize the request exactly as an
-			// unrestricted principal. The zero-value Ceiling denies every
-			// permission (FrozenPermissionCeiling.Allows), so this stays
-			// fail-closed instead.
-			return CredentialContext{Kind: CredentialKindUAT}
-		}
-		cc := CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes(), Ceiling: scoped.Ceiling()}
+	switch v := identity.(type) {
+	case *ScopedUserIdentity:
+		cc := CredentialContext{Kind: CredentialKindUAT, ID: v.CredentialID(), ProjectID: v.ScopedProjectID(), Scopes: v.ScopedScopes(), Ceiling: v.Ceiling()}
 		// Carry the descriptive decoration, if ValidateToken attached one,
 		// through to the credential context. This is the single copy point;
 		// decoration is never otherwise derived here. Decoration() already
 		// returns a deep copy, so this assignment cannot alias the
 		// identity's stored value.
-		cc.Decoration = scoped.Decoration()
+		cc.Decoration = v.Decoration()
 		return cc
-	}
-	switch identity.Type() {
-	case "agent":
+	case *AuthenticatedUser:
+		return CredentialContext{Kind: CredentialKindInteractive, Type: identity.Type()}
+	case *DevUser:
+		return CredentialContext{Kind: CredentialKindDev}
+	case *agentIdentityWrapper:
 		credential := CredentialContext{Kind: CredentialKindAgentJWT}
-		if agent, ok := identity.(*agentIdentityWrapper); ok && agent.AgentTokenClaims != nil {
-			credential.ID = agent.Claims.ID
+		if v.AgentTokenClaims != nil {
+			credential.ID = v.Claims.ID
 		}
 		return credential
-	case "federated_user", "federated_agent", "federated_service":
+	case *storedAgentIdentity, *peerAgentIdentity, *explainAgentIdentity:
+		return CredentialContext{Kind: CredentialKindAgentJWT}
+	case *FederatedUserIdentity, *FederatedAgentIdentity, *FederatedServiceIdentity:
 		return CredentialContext{Kind: CredentialKindFederation, Type: identity.Type()}
-	case "broker":
+	case *brokerIdentityImpl:
 		return CredentialContext{Kind: CredentialKindBroker}
-	case "dev":
-		return CredentialContext{Kind: CredentialKindDev}
 	default:
-		return CredentialContext{Kind: CredentialKindInteractive, Type: identity.Type()}
+		if c, ok := identity.(explicitIdentityClassification); ok {
+			_, kind := c.authzClassification()
+			return CredentialContext{Kind: kind, Type: identity.Type()}
+		}
+		return CredentialContext{}
 	}
 }
 
@@ -1579,6 +1888,8 @@ func decorateDecision(decision Decision, request AuthzRequest, principal Princip
 		decision.Provenance.Purpose = request.Purpose
 	}
 	decision.PrincipalKind = principal.Kind
+	decision.PrincipalID = principal.ID
+	decision.principalDecorated = true
 	decision.CredentialID = credential.ID
 	decision.CredentialType = credential.Type
 	decision.CredentialKind = string(credential.Kind)

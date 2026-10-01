@@ -112,11 +112,11 @@ type Agent struct {
 	// ever touched this agent.
 	ReincarnationUpdatedAt *time.Time `json:"reincarnationUpdatedAt,omitempty"`
 
-	// --- T1 async agent create (design t1-async-create-v11.md §3.3) ---
+	// --- Async agent create (design §3.3) ---
 	// These are the persisted launch_* columns. They are internal bookkeeping,
 	// not the client-facing shape — untagged (json:"-") so they never leak
-	// directly onto the wire. The client-facing computed view (AgentLaunch /
-	// ComputeAgentLaunch, design §3.2) is P1a-ii scope, not here.
+	// directly onto the wire. See Launch/AgentLaunch below for the
+	// client-facing computed view derived from these columns.
 	//
 	// UpdateAgent (the whole-row CAS writer) never sets any of these from the
 	// caller's struct: they are absent from its Ent builder chain entirely.
@@ -135,12 +135,19 @@ type Agent struct {
 	LaunchSeq          int64     `json:"-"`
 	LaunchStep         string    `json:"-"`
 	LaunchError        string    `json:"-"`
+
+	// Launch is the computed, client-facing view of the launch_* columns
+	// above (design §3.2; see launch_view.go). It is nil unless a
+	// caller populates it (e.g. enrichAgent/enrichAgents in pkg/hub via
+	// ComputeAgentLaunch) — store methods that return an *Agent do not
+	// populate it themselves, so a snapshot always reflects the fields
+	// present at the moment it was computed, not at load time.
+	Launch *AgentLaunch `json:"launch,omitempty"`
 }
 
 // InFlightPhases are the agent phases considered "in flight" for a launch
 // (design §3.3 in-flight predicate). Used by the store-side predicates
-// (IsInFlight, IsIncompleteCreate); the client-facing AgentLaunch view is
-// P1a-ii scope.
+// (IsInFlight, IsIncompleteCreate).
 var InFlightPhases = map[string]bool{
 	"created":      true,
 	"provisioning": true,
@@ -650,6 +657,19 @@ type RuntimeBroker struct {
 	// Profiles available (stored as JSON)
 	Profiles []BrokerProfile `json:"profiles,omitempty"`
 
+	// DefaultProfile is the broker's own active/default profile name,
+	// recorded at registration from the broker's local active_profile
+	// setting (config.Settings.ActiveProfile). It lets the hub resolve an
+	// agent dispatch with no explicit profile against the broker's
+	// registered profiles instead of guessing. This is registration-time
+	// data: the broker's own dispatch-time settings can still resolve the
+	// same profile name differently (project-level or DB-overlay
+	// settings), which is why passthrough grants that depend on this field
+	// also carry a broker-side re-check (RequireLocalRuntime). Empty means
+	// the broker has not reported one (e.g. registered before this field
+	// existed) or the hub has not yet learned it.
+	DefaultProfile string `json:"defaultProfile,omitempty"`
+
 	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -1150,7 +1170,7 @@ type BrokerDispatch struct {
 	// already-authorized operation, not a re-evaluated authoring point.
 	InitiatorPrincipalKind  string `json:"initiatorPrincipalKind,omitempty"`
 	InitiatorPrincipalID    string `json:"initiatorPrincipalId,omitempty"`
-	InitiatorCredentialKind string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|legacy_unknown
+	InitiatorCredentialKind string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|dev_local|legacy_unknown
 	InitiatorCredentialID   string `json:"initiatorCredentialId,omitempty"`
 	// CorrelationID ties this dispatch row back to the originating request's
 	// log/audit trail (the same request ID plumbed through decision/mutation
@@ -1850,6 +1870,18 @@ type GCPIdentityConfig struct {
 	ServiceAccountID    string `json:"serviceAccountId,omitempty"`    // FK to GCPServiceAccount (required for "assign")
 	ServiceAccountEmail string `json:"serviceAccountEmail,omitempty"` // Denormalized for runtime use
 	ProjectID           string `json:"projectId,omitempty"`           // Denormalized
+
+	// RequireLocalRuntime marks a "passthrough" mode as granted by the
+	// hub-default rung specifically (hubDefaultRuntimeAllowed,
+	// default_gcp_identity.go), never by an explicit request or a
+	// project-level default. The hub resolves the runtime this agent will
+	// dispatch under from the broker's own registration data, which can
+	// differ from what the broker resolves at dispatch time against
+	// project-effective settings. The broker re-checks this flag once it
+	// knows the real resolved runtime, and downgrades to "block" itself if
+	// that runtime turns out not to be a local container runtime — a second
+	// line of defense behind the hub-side gate, not a replacement for it.
+	RequireLocalRuntime bool `json:"requireLocalRuntime,omitempty"`
 }
 
 // GCPVerificationStatus constants describe the outcome of the Hub's last
@@ -2028,7 +2060,7 @@ type ConversationFilter struct {
 type InitiatorAttribution struct {
 	InitiatorPrincipalKind      string `json:"initiatorPrincipalKind,omitempty"`
 	InitiatorPrincipalID        string `json:"initiatorPrincipalId,omitempty"`
-	InitiatorCredentialKind     string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|legacy_unknown
+	InitiatorCredentialKind     string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|dev_local|legacy_unknown
 	InitiatorCredentialID       string `json:"initiatorCredentialId,omitempty"`
 	InitiatorCredentialSnapshot string `json:"initiatorCredentialSnapshot,omitempty"` // bounded JSON: name, boundary, purpose, labels
 	AttributionVersion          int    `json:"attributionVersion,omitempty"`          // 0/absent = legacy_unknown; 1 = written by E.2b
@@ -2044,12 +2076,25 @@ type InitiatorAttribution struct {
 
 // InitiatorCredentialKind* are the values InitiatorAttribution.InitiatorCredentialKind
 // may hold. This is a deliberately smaller, committed domain than
-// hub.CredentialKind: async attribution only ever records one of these four
-// values (rulings "E.2b field names").
+// hub.CredentialKind: async attribution only ever records one of these five
+// values (rulings "E.2b field names"; dev_local added by ptone/scion#2342).
+//
+// InitiatorCredentialKindDevLocal is a narrow, server-attested exception:
+// hub.captureInitiatorAttribution emits it only for the concrete trusted
+// local-dev identity (hub.DevUser, produced solely by hub.NewDevUser /
+// DevAuthMiddleware) and only when that identity's ID matches the
+// well-known hub.DevUserID. It is never derived from an identity's
+// self-reported Type(), from request input, or from any other identity
+// implementation that merely looks like the dev user. Every other
+// unrecognized or absent credential still maps to legacy_unknown. Like
+// every other value in this domain, dev_local is attribution, not
+// authority: it grants nothing by itself, and B.3 owns the fire-time
+// authority decision built on top of it.
 const (
 	InitiatorCredentialKindSession       = "session"
 	InitiatorCredentialKindUAT           = "uat"
 	InitiatorCredentialKindAgent         = "agent"
+	InitiatorCredentialKindDevLocal      = "dev_local"
 	InitiatorCredentialKindLegacyUnknown = "legacy_unknown"
 )
 

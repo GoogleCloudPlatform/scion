@@ -684,6 +684,18 @@ func (f *federatedTestIdentity) Email() string       { return f.email }
 func (f *federatedTestIdentity) DisplayName() string { return f.displayName }
 func (f *federatedTestIdentity) Role() string        { return f.role }
 
+// authzClassification opts this fake into principalContextForIdentity /
+// credentialContextForIdentity classification as a federated user: those
+// functions key on concrete type, and this fake is a distinct Go type from
+// the production FederatedUserIdentity. It does not implement
+// FederatedIdentity (no IssuerURL), so it is not caught by
+// AncestryIsHubAttested's federated rejection either way; it is used here
+// only to drive a real, allowed federated-user request end to end, not to
+// test ancestry denial.
+func (f *federatedTestIdentity) authzClassification() (PrincipalKind, CredentialKind) {
+	return PrincipalKindFederatedUser, CredentialKindFederation
+}
+
 func TestScheduledEvent_UnknownIdentityTypeDenied(t *testing.T) {
 	srv, _, projectID := setupScheduledEventTest(t)
 

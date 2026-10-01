@@ -37,7 +37,7 @@ import (
 // processes installation lifecycle events idempotently.
 func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -307,7 +307,7 @@ func (s *Server) handleInstallationRepositoriesWebhook(w http.ResponseWriter, r 
 // GitHub redirects here after a user installs or configures the app.
 func (s *Server) handleGitHubAppSetup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -403,7 +403,7 @@ func (s *Server) handleGitHubAppSetup(w http.ResponseWriter, r *http.Request) {
 // then auto-matches installations to projects.
 func (s *Server) handleGitHubAppDiscover(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

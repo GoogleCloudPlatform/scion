@@ -262,6 +262,13 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		}
 	}
 
+	// Agent secrets
+	if snap.AgentSecretsUserScopeOnly != nil {
+		resp.AgentSecrets = &config.AgentSecretsSettings{
+			UserScopeOnly: snap.AgentSecretsUserScopeOnly,
+		}
+	}
+
 	// Federation — populate from snapshot's FederationConfig.
 	if snap.FederationConfig != nil {
 		gc := &config.GlobalConfig{Federation: *snap.FederationConfig}
@@ -892,6 +899,10 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		keys = append(keys, "quotas.enforce_broker_quotas")
 	}
 
+	if req.AgentSecrets != nil {
+		keys = append(keys, "agent_secrets.user_scope_only")
+	}
+
 	if req.Telemetry != nil {
 		keys = append(keys, "telemetry.enabled")
 	}
@@ -959,6 +970,15 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.CORS != nil {
 				keys = append(keys, "server.hub.cors")
+			}
+			if hub.AsyncAgentLaunch != nil {
+				keys = append(keys, "server.hub.async_agent_launch")
+			}
+			if hub.LaunchTimeout != "" {
+				keys = append(keys, "server.hub.launch_timeout")
+			}
+			if hub.LaunchKeepaliveSeconds != nil {
+				keys = append(keys, "server.hub.launch_keepalive_seconds")
 			}
 		}
 		if srv.Auth != nil {
@@ -1425,6 +1445,13 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			return nil, nil
 		}
 
+	case "agent_secrets":
+		if req.AgentSecrets != nil {
+			doc = req.AgentSecrets
+		} else {
+			return nil, nil
+		}
+
 	case "notifications":
 		d := &opsettings.NotificationsSettings{}
 		if req.Server != nil {
@@ -1615,7 +1642,7 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 // intended for UI form generation and CLI validation. Static metadata — no DB access.
 func (s *Server) handleAdminServerConfigSchema(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

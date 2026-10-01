@@ -16,15 +16,16 @@
 
 /**
  * Shared discriminated target/candidate/group-state types for the native
- * chat quick command palette, covering the Agents/DM, Threads, and People
- * groups.
+ * chat quick command palette, covering the Agents/DM, Threads, People and
+ * Documents groups.
  *
  * Type-only module: importing this file must not eagerly pull in the
- * `<scion-chat-switcher>` component or any API client. A future 'documents'
- * candidate kind can reuse the `PaletteGroup`/`PaletteTarget` shapes already
- * declared below; the shapes are written so that addition is additive, not
- * breaking.
+ * `<scion-chat-switcher>` component or any API client. The `RecentFile` import
+ * below is `import type`-only for the same reason: it must not eagerly pull
+ * in the `chatRecentFiles` singleton module.
  */
+
+import type { RecentFile } from './chat-recent-files.js';
 
 /** The kind of DM peer: an agent or a human user. */
 export type PeerKind = 'agent' | 'user';
@@ -55,11 +56,21 @@ export interface PaletteThreadTarget {
 }
 
 /**
- * The navigable result of a palette selection: `dm` targets (Agents/People
- * groups) or `thread` targets (Threads group). A future `document` target
- * kind can extend this union the same way.
+ * Selecting a Documents row opens the page-level file preview for that
+ * recent file (an attachment or a resolved container path) without changing
+ * conversation context.
  */
-export type PaletteTarget = PaletteDmTarget | PaletteThreadTarget;
+export interface PaletteDocumentTarget {
+  kind: 'document';
+  file: RecentFile;
+}
+
+/**
+ * The navigable result of a palette selection: `dm` targets (Agents/People
+ * groups), `thread` targets (Threads group), or `document` targets
+ * (Documents group).
+ */
+export type PaletteTarget = PaletteDmTarget | PaletteThreadTarget | PaletteDocumentTarget;
 
 /**
  * The four groups the full palette renders (Agents, Threads, People,
@@ -147,4 +158,14 @@ export function dmCandidateId(peerKind: PeerKind, peerId: string): string {
  */
 export function threadCandidateId(projectId: string, threadId: string): string {
   return JSON.stringify(['thread', projectId, threadId]);
+}
+
+/**
+ * Build the stable candidate ID for a Document target: a JSON-encoded tuple,
+ * matching {@link dmCandidateId}/{@link threadCandidateId}'s shape and
+ * stability guarantee. `fileKey` is the recent-file's own identity tuple
+ * (see `chat-recent-files.ts`), already stable across renders on its own.
+ */
+export function documentCandidateId(fileKey: string): string {
+  return JSON.stringify(['document', fileKey]);
 }
