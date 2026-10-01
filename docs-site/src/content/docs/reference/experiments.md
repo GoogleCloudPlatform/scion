@@ -21,13 +21,13 @@ The Experiments tab lists every experiment this hub version knows about: its tit
 1. Open or link a tracking issue.
 2. Add an entry to `pkg/experiments/registry.go` with every field set. `Default: false` unless there is a deliberate decision otherwise. Set `ReviewBy` about 90 days out.
 3. Web gates use `isFeatureEnabled(CONST)`, with the constant exported from `feature-flags.ts`. Server gates use `requireExperiment` or `s.experimentEnabled`.
-4. **The hub decides hub behaviour.** Browser-side values can be edited by the user, so a web gate is presentation only. If the experiment changes what the hub does, register it with `LayerServer` and check it in the hub with `requireExperiment` or `s.experimentEnabled`; the UI gate only mirrors that check. PR reviewers check this, because no test can detect it automatically.
+4. **The hub decides hub behaviour.** Browser-side values can be edited by the user, so a web gate is presentation only. If the experiment changes what the hub does, register it with `LayerServer` and check it in the hub with `requireExperiment` or `s.experimentEnabled`; the UI gate only mirrors that check. PR reviewers check this, because no test can detect it automatically. `GET /api/v1/experiments` carries only experiments with `LayerWeb`, so a UI gate that mirrors a hub check only works if the experiment is registered with **both** `LayerWeb` and `LayerServer`.
 5. Keep both paths working and tested (unit tests for flag on and flag off). E2E tests pin the flag through `window.__SCION_FEATURES__`.
-6. If `Default: true`, add the name to `DEFAULT_ON_FLAGS`. The consistency test enforces this.
+6. If `Default: true` and the experiment has `LayerWeb`, add the name to `DEFAULT_ON_FLAGS` (server-only names must not be listed). The consistency test enforces this.
 
 ## Changing the default
 
-Changing an experiment's default needs a code change to the registry, in a PR that references the tracking issue, and an update to `DEFAULT_ON_FLAGS` to match (add the name when the default becomes true, remove it when it becomes false); the consistency test enforces this. Admin overrides are kept across the change — an admin who already set an explicit value for that experiment is unaffected by a default flip.
+Changing an experiment's default needs a code change to the registry, in a PR that references the tracking issue, and, for an experiment with `LayerWeb`, an update to `DEFAULT_ON_FLAGS` to match (add the name when the default becomes true, remove it when it becomes false); the consistency test enforces this. A server-only (`LayerServer`-only) experiment is never listed in `DEFAULT_ON_FLAGS`. Admin overrides are kept across the change — an admin who already set an explicit value for that experiment is unaffected by a default flip.
 
 ## Retiring an experiment
 
@@ -49,7 +49,7 @@ The web client resolves a flag in this order, highest first:
 | 3 | localStorage `scion:feature:<name>` | Yes, for unregistered names, failed fetches, and signed-out loads (set only through devtools) | Unregistered or in-development flags; fallback when the fetch fails |
 | 4 | Compiled `DEFAULT_ON_FLAGS` | Yes | Fetch failure |
 
-The map is only served to signed-in users, from `GET /api/v1/experiments`, with compiled defaults applying when that request fails. **Devtools localStorage overrides no longer apply to registered experiments** — for example, an existing `web.terminal_workspace` opt-out set through devtools — except on page loads where the experiments request fails. The server value wins so that an admin's hub-wide choice is a dependable control, not something a single browser can silently override.
+The map of web-layer experiments is only served to signed-in users, from `GET /api/v1/experiments`, with compiled defaults applying when that request fails. **Devtools localStorage overrides no longer apply to registered experiments** — for example, an existing `web.terminal_workspace` opt-out set through devtools — except on page loads where the experiments request fails. The server value wins so that an admin's hub-wide choice is a dependable control, not something a single browser can silently override.
 
 ## Review cadence
 
