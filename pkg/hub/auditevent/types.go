@@ -15,7 +15,11 @@
 // Package auditevent defines the versioned security-audit event contract.
 package auditevent
 
-import "time"
+import (
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
+)
 
 const (
 	// EventName is the stable structured-log event name.
@@ -74,15 +78,30 @@ type IdentityRef struct {
 	ID   string       `json:"id"`
 }
 
-// CredentialRef contains descriptive credential metadata only. It must never
-// contain credential material.
-type CredentialRef struct {
-	Kind              string            `json:"kind"`
-	ID                string            `json:"id,omitempty"`
-	Name              string            `json:"name,omitempty"`
-	BoundaryKind      string            `json:"boundary_kind,omitempty"`
-	BoundaryProjectID string            `json:"boundary_project_id,omitempty"`
-	Labels            map[string]string `json:"labels,omitempty"`
+// CredentialRef is immutable, validated descriptive credential metadata.
+// Construct one with NewCredentialRef; arbitrary public refs cannot enter an
+// audit builder.
+type CredentialRef = credentialmeta.Ref
+
+type CredentialRefInput = credentialmeta.RefInput
+type CredentialKind = credentialmeta.Kind
+type CredentialBoundaryKind = credentialmeta.BoundaryKind
+type CredentialValidationError = credentialmeta.ValidationError
+
+const (
+	CredentialInteractive = credentialmeta.KindInteractive
+	CredentialUAT         = credentialmeta.KindUAT
+	CredentialAgentJWT    = credentialmeta.KindAgentJWT
+	CredentialFederation  = credentialmeta.KindFederation
+	CredentialBroker      = credentialmeta.KindBroker
+	CredentialDev         = credentialmeta.KindDev
+
+	CredentialBoundaryProject = credentialmeta.BoundaryProject
+	CredentialBoundaryHub     = credentialmeta.BoundaryHub
+)
+
+func NewCredentialRef(input CredentialRefInput) (CredentialRef, error) {
+	return credentialmeta.NewRef(input)
 }
 
 // RequestRef records bounded, trusted request metadata.

@@ -98,9 +98,14 @@ func TestAccessBoundaryCreateBuildRenderAndCapture(t *testing.T) {
 	ctx := ContextWithOperation(context.Background(), AuditOperationContext{CorrelationID: "request-123"})
 	before := int64(0)
 	after := int64(1)
+	credential := mustCredentialRef(t, CredentialRefInput{
+		Kind: CredentialUAT, ID: "token-1", Name: "deploy",
+		BoundaryKind: CredentialBoundaryProject, BoundaryProjectID: "project-1",
+		Labels: map[string]string{"purpose": "automation"},
+	})
 	event, err := BuildAccessBoundaryCreate(ctx, AccessBoundaryCreateInput{
 		Principal:      IdentityRef{Kind: IdentityUser, ID: "user-1"},
-		Credential:     &CredentialRef{Kind: "user_access_token", ID: "token-1", Name: "deploy", Labels: map[string]string{"purpose": "automation"}},
+		Credential:     &credential,
 		ConstraintID:   "constraint-1",
 		ProjectID:      "project-1",
 		BeforeRevision: &before,
@@ -130,6 +135,11 @@ func TestAccessBoundaryCreateBuildRenderAndCapture(t *testing.T) {
 	assert.NotContains(t, got, "causation_id")
 	assert.NotContains(t, string(rendered), "unknown")
 	assert.Equal(t, map[string]any{"kind": "user", "id": "user-1"}, got["principal"])
+	assert.Equal(t, map[string]any{
+		"kind": "uat", "id": "token-1", "name": "deploy",
+		"boundary_kind": "project", "boundary_project_id": "project-1",
+		"labels": map[string]any{"purpose": "automation"},
+	}, got["credential"])
 	assert.Equal(t, map[string]any{"kind": "access_constraint", "id": "constraint-1", "project_id": "project-1"}, got["resource"])
 	assert.Equal(t, map[string]any{
 		"before_revision": float64(0),
@@ -219,47 +229,66 @@ func TestCredentialValidationRejectsUnsafeMetadataWithoutEchoingValues(t *testin
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		credential CredentialRef
-		canary     string
+		name   string
+		input  CredentialRefInput
+		canary string
 	}{
 		{
-			name:       "secret-shaped name",
-			credential: CredentialRef{Kind: "user_access_token", Name: "scion_pat_name-canary"},
-			canary:     "scion_pat_name-canary",
+			name:   "secret-shaped kind",
+			input:  CredentialRefInput{Kind: CredentialKind("SCION_PAT_kind-canary")},
+			canary: "SCION_PAT_kind-canary",
 		},
 		{
-			name:       "invalid label key",
-			credential: CredentialRef{Kind: "user_access_token", Labels: map[string]string{"InvalidKeyCanary": "safe"}},
-			canary:     "InvalidKeyCanary",
+			name:   "secret-shaped id",
+			input:  CredentialRefInput{Kind: CredentialUAT, ID: "scion_pat_id-canary"},
+			canary: "scion_pat_id-canary",
 		},
 		{
-			name:       "reserved label key",
-			credential: CredentialRef{Kind: "user_access_token", Labels: map[string]string{"principal": "safe"}},
-			canary:     "principal",
+			name:   "secret-shaped name",
+			input:  CredentialRefInput{Kind: CredentialUAT, Name: "scion_pat_name-canary"},
+			canary: "scion_pat_name-canary",
 		},
 		{
-			name:       "secret-shaped label key",
-			credential: CredentialRef{Kind: "user_access_token", Labels: map[string]string{"scion_pat_key-canary": "safe"}},
-			canary:     "scion_pat_key-canary",
+			name:   "secret-shaped boundary kind",
+			input:  CredentialRefInput{Kind: CredentialUAT, BoundaryKind: CredentialBoundaryKind("Bearer boundary-kind-canary")},
+			canary: "Bearer boundary-kind-canary",
 		},
 		{
-			name:       "secret-shaped label value",
-			credential: CredentialRef{Kind: "user_access_token", Labels: map[string]string{"purpose": "Bearer value-canary"}},
-			canary:     "Bearer value-canary",
+			name: "secret-shaped boundary project id",
+			input: CredentialRefInput{Kind: CredentialUAT, BoundaryKind: CredentialBoundaryProject,
+				BoundaryProjectID: "Bearer boundary-project-canary"},
+			canary: "Bearer boundary-project-canary",
 		},
 		{
-			name:       "disallowed label value character",
-			credential: CredentialRef{Kind: "user_access_token", Labels: map[string]string{"purpose": "value$canary"}},
-			canary:     "value$canary",
+			name:   "invalid label key",
+			input:  CredentialRefInput{Kind: CredentialUAT, Labels: map[string]string{"InvalidKeyCanary": "safe"}},
+			canary: "InvalidKeyCanary",
+		},
+		{
+			name:   "reserved label key",
+			input:  CredentialRefInput{Kind: CredentialUAT, Labels: map[string]string{"principal": "safe"}},
+			canary: "principal",
+		},
+		{
+			name:   "secret-shaped label key",
+			input:  CredentialRefInput{Kind: CredentialUAT, Labels: map[string]string{"scion_pat_key-canary": "safe"}},
+			canary: "scion_pat_key-canary",
+		},
+		{
+			name:   "secret-shaped label value",
+			input:  CredentialRefInput{Kind: CredentialUAT, Labels: map[string]string{"purpose": "Bearer value-canary"}},
+			canary: "Bearer value-canary",
+		},
+		{
+			name:   "disallowed label value character",
+			input:  CredentialRefInput{Kind: CredentialUAT, Labels: map[string]string{"purpose": "value$canary"}},
+			canary: "value$canary",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			event := validCreateEvent(t)
-			event.Credential = &tc.credential
-			err := Validate(event)
+			_, err := NewCredentialRef(tc.input)
 			require.Error(t, err)
 			var validationErr *CredentialValidationError
 			assert.ErrorAs(t, err, &validationErr)
@@ -272,24 +301,30 @@ func TestCredentialValidationUsesCanonicalMetadataBounds(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		credential CredentialRef
+		name  string
+		input CredentialRefInput
 	}{
-		{"label count", CredentialRef{Kind: "user_access_token", Labels: map[string]string{
+		{"label count", CredentialRefInput{Kind: CredentialUAT, Labels: map[string]string{
 			"a": "1", "b": "2", "c": "3", "d": "4", "e": "5", "f": "6", "g": "7", "h": "8", "i": "9",
 		}}},
-		{"label key length", CredentialRef{Kind: "user_access_token", Labels: map[string]string{strings.Repeat("a", 33): "safe"}}},
-		{"label value length", CredentialRef{Kind: "user_access_token", Labels: map[string]string{"purpose": strings.Repeat("a", 65)}}},
-		{"name format character", CredentialRef{Kind: "user_access_token", Name: "safe\u200bname"}},
+		{"label key length", CredentialRefInput{Kind: CredentialUAT, Labels: map[string]string{strings.Repeat("a", 33): "safe"}}},
+		{"label value length", CredentialRefInput{Kind: CredentialUAT, Labels: map[string]string{"purpose": strings.Repeat("a", 65)}}},
+		{"name format character", CredentialRefInput{Kind: CredentialUAT, Name: "safe\u200bname"}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			event := validCreateEvent(t)
-			event.Credential = &tc.credential
-			assert.Error(t, Validate(event))
+			_, err := NewCredentialRef(tc.input)
+			assert.Error(t, err)
 		})
 	}
+}
+
+func mustCredentialRef(t *testing.T, input CredentialRefInput) CredentialRef {
+	t.Helper()
+	credential, err := NewCredentialRef(input)
+	require.NoError(t, err)
+	return credential
 }
 
 type testPayloadWithUndeclaredLeaf struct{}

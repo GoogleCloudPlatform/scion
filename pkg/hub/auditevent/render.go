@@ -20,23 +20,32 @@ import (
 )
 
 type serializedEnvelopeV1 struct {
-	SchemaVersion int            `json:"schema_version"`
-	EventID       string         `json:"event_id"`
-	OccurredAt    string         `json:"occurred_at"`
-	Family        string         `json:"family"`
-	Action        string         `json:"action"`
-	Phase         Phase          `json:"phase"`
-	Outcome       Outcome        `json:"outcome,omitempty"`
-	Severity      Severity       `json:"severity"`
-	CorrelationID string         `json:"correlation_id"`
-	CausationID   string         `json:"causation_id,omitempty"`
-	Request       *RequestRef    `json:"request,omitempty"`
-	Initiator     *IdentityRef   `json:"initiator,omitempty"`
-	Principal     *IdentityRef   `json:"principal,omitempty"`
-	Executor      *IdentityRef   `json:"executor,omitempty"`
-	Credential    *CredentialRef `json:"credential,omitempty"`
-	Resource      *ResourceRef   `json:"resource,omitempty"`
-	Payload       map[string]any `json:"payload"`
+	SchemaVersion int                      `json:"schema_version"`
+	EventID       string                   `json:"event_id"`
+	OccurredAt    string                   `json:"occurred_at"`
+	Family        string                   `json:"family"`
+	Action        string                   `json:"action"`
+	Phase         Phase                    `json:"phase"`
+	Outcome       Outcome                  `json:"outcome,omitempty"`
+	Severity      Severity                 `json:"severity"`
+	CorrelationID string                   `json:"correlation_id"`
+	CausationID   string                   `json:"causation_id,omitempty"`
+	Request       *RequestRef              `json:"request,omitempty"`
+	Initiator     *IdentityRef             `json:"initiator,omitempty"`
+	Principal     *IdentityRef             `json:"principal,omitempty"`
+	Executor      *IdentityRef             `json:"executor,omitempty"`
+	Credential    *serializedCredentialRef `json:"credential,omitempty"`
+	Resource      *ResourceRef             `json:"resource,omitempty"`
+	Payload       map[string]any           `json:"payload"`
+}
+
+type serializedCredentialRef struct {
+	Kind              CredentialKind         `json:"kind"`
+	ID                string                 `json:"id,omitempty"`
+	Name              string                 `json:"name,omitempty"`
+	BoundaryKind      CredentialBoundaryKind `json:"boundary_kind,omitempty"`
+	BoundaryProjectID string                 `json:"boundary_project_id,omitempty"`
+	Labels            map[string]string      `json:"labels,omitempty"`
 }
 
 // Render validates and serializes an envelope with stable field names and no
@@ -64,7 +73,7 @@ func Render(event EnvelopeV1) ([]byte, error) {
 		Initiator:     event.Initiator,
 		Principal:     event.Principal,
 		Executor:      event.Executor,
-		Credential:    event.Credential,
+		Credential:    serializeCredential(event.Credential),
 		Resource:      event.Resource,
 		Payload:       payload,
 	})
@@ -72,4 +81,18 @@ func Render(event EnvelopeV1) ([]byte, error) {
 		return nil, fmt.Errorf("marshal audit event: %w", err)
 	}
 	return encoded, nil
+}
+
+func serializeCredential(credential *CredentialRef) *serializedCredentialRef {
+	if credential == nil {
+		return nil
+	}
+	return &serializedCredentialRef{
+		Kind:              credential.Kind(),
+		ID:                credential.ID(),
+		Name:              credential.Name(),
+		BoundaryKind:      credential.BoundaryKind(),
+		BoundaryProjectID: credential.BoundaryProjectID(),
+		Labels:            credential.Labels(),
+	}
 }

@@ -18,20 +18,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
-)
-
-const (
-	credentialMaxNameBytes       = 128
-	credentialMaxLabelCount      = 8
-	credentialMaxLabelKeyBytes   = 32
-	credentialMaxLabelValueBytes = 64
 )
 
 // ValidatePhaseOutcome enforces the common truthful phase/result matrix.
@@ -180,180 +172,11 @@ func validateIdentity(name string, identity *IdentityRef) error {
 	return validateBoundedString(name+".id", identity.ID, 128)
 }
 
-// CredentialValidationError reports a credential metadata rule violation
-// without retaining or echoing the rejected value.
-type CredentialValidationError struct {
-	field string
-	rule  string
-}
-
-func (e *CredentialValidationError) Error() string {
-	return fmt.Sprintf("invalid credential metadata field %s: %s", e.field, e.rule)
-}
-
-func newCredentialValidationError(field, rule string) error {
-	return &CredentialValidationError{field: field, rule: rule}
-}
-
-func validateCredentialString(field, value string, maxBytes int, required, rejectSecret bool) error {
-	if value == "" {
-		if required {
-			return newCredentialValidationError(field, "is required")
-		}
-		return nil
-	}
-	if !utf8.ValidString(value) {
-		return newCredentialValidationError(field, "must be valid UTF-8")
-	}
-	if len(value) > maxBytes {
-		return newCredentialValidationError(field, fmt.Sprintf("must be at most %d bytes", maxBytes))
-	}
-	if hasAuditUnsafeRune(value) {
-		return newCredentialValidationError(field, "must not contain control or formatting characters")
-	}
-	if rejectSecret && credentialMetadataLooksSecret(value) {
-		return newCredentialValidationError(field, "must not resemble a bearer token or credential value")
-	}
-	return nil
-}
-
-func validCredentialLabelKey(value string) bool {
-	if len(value) == 0 || len(value) > credentialMaxLabelKeyBytes {
-		return false
-	}
-	for i, r := range value {
-		if i == 0 {
-			if r >= 'a' && r <= 'z' {
-				continue
-			}
-			return false
-		}
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '.', r == '-':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-func validCredentialLabelValue(value string) bool {
-	for _, r := range value {
-		switch {
-		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-		case strings.ContainsRune(" _.:/@+=,-", r):
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-var reservedCredentialLabelKeys = map[string]struct{}{
-	"agent": {}, "agent_id": {}, "actor": {}, "principal": {},
-	"principal_id": {}, "principal_kind": {}, "user": {}, "user_id": {},
-	"email": {}, "on_behalf_of": {}, "delegate": {}, "delegator": {},
-	"delegation": {}, "ancestry": {}, "creator": {}, "created_by": {},
-	"owner": {}, "project_id": {}, "broker_id": {}, "credential": {},
-	"credential_id": {}, "token": {}, "token_id": {}, "role": {},
-	"scope": {}, "scopes": {}, "permission": {}, "permissions": {},
-	"verified": {}, "system": {}, "executor": {}, "initiator": {},
-	"actor_binding": {}, "actor_agent_id": {}, "authorizing_user_id": {},
-	"source_grant_id": {}, "delegation_edge_id": {}, "parent_grant_id": {},
-	"exchange_agent_credential_id": {}, "actor_kind": {},
-}
-
-var reservedCredentialLabelPrefixes = []string{"scion.", "hub.", "x-"}
-
-func reservedCredentialLabelKey(value string) bool {
-	lower := strings.ToLower(value)
-	for _, prefix := range reservedCredentialLabelPrefixes {
-		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
-	}
-	normalized := strings.ReplaceAll(lower, "-", "_")
-	if _, ok := reservedCredentialLabelKeys[normalized]; ok {
-		return true
-	}
-	for reserved := range reservedCredentialLabelKeys {
-		if strings.HasPrefix(normalized, reserved+".") {
-			return true
-		}
-	}
-	return false
-}
-
-func credentialMetadataLooksSecret(value string) bool {
-	lower := strings.ToLower(value)
-	return strings.Contains(lower, "scion_pat_") || strings.Contains(lower, "bearer ")
-}
-
-func hasAuditUnsafeRune(value string) bool {
-	for _, r := range value {
-		if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
-			return true
-		}
-	}
-	return false
-}
-
 func validateCredential(credential *CredentialRef) error {
 	if credential == nil {
 		return nil
 	}
-	if err := validateCredentialString("kind", credential.Kind, 64, true, false); err != nil {
-		return err
-	}
-	fields := []struct {
-		name         string
-		value        string
-		limit        int
-		rejectSecret bool
-	}{
-		{"id", credential.ID, 128, false},
-		{"name", credential.Name, credentialMaxNameBytes, true},
-		{"boundary_kind", credential.BoundaryKind, 64, false},
-		{"boundary_project_id", credential.BoundaryProjectID, 128, false},
-	}
-	for _, field := range fields {
-		if err := validateCredentialString(field.name, field.value, field.limit, false, field.rejectSecret); err != nil {
-			return err
-		}
-	}
-	if len(credential.Labels) > credentialMaxLabelCount {
-		return newCredentialValidationError("labels", fmt.Sprintf("must contain at most %d entries", credentialMaxLabelCount))
-	}
-	keys := make([]string, 0, len(credential.Labels))
-	for key := range credential.Labels {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		value := credential.Labels[key]
-		if !utf8.ValidString(key) || !utf8.ValidString(value) {
-			return newCredentialValidationError("labels", "label key and value must be valid UTF-8")
-		}
-		if !validCredentialLabelKey(key) {
-			return newCredentialValidationError("labels", fmt.Sprintf("label key must match ^[a-z][a-z0-9_.-]{0,%d}$", credentialMaxLabelKeyBytes-1))
-		}
-		if reservedCredentialLabelKey(key) {
-			return newCredentialValidationError("labels", "label key is reserved")
-		}
-		if len(value) > credentialMaxLabelValueBytes {
-			return newCredentialValidationError("labels", fmt.Sprintf("label value must be at most %d bytes", credentialMaxLabelValueBytes))
-		}
-		if value != strings.TrimSpace(value) {
-			return newCredentialValidationError("labels", "label value must not have leading or trailing whitespace")
-		}
-		if !validCredentialLabelValue(value) {
-			return newCredentialValidationError("labels", "label value contains a disallowed character")
-		}
-		if credentialMetadataLooksSecret(key) || credentialMetadataLooksSecret(value) {
-			return newCredentialValidationError("labels", "must not resemble a bearer token or credential value")
-		}
-	}
-	return nil
+	return credential.Validate()
 }
 
 func validatePayload(entry CatalogEntry, payload map[string]any) error {

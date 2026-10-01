@@ -128,11 +128,5 @@ func cloneCredential(credential *CredentialRef) *CredentialRef {
 		return nil
 	}
 	copy := *credential
-	if credential.Labels != nil {
-		copy.Labels = make(map[string]string, len(credential.Labels))
-		for key, value := range credential.Labels {
-			copy.Labels[key] = value
-		}
-	}
 	return &copy
 }
