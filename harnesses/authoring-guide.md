@@ -184,24 +184,31 @@ model_aliases:
 Templates reference abstract sizes. Provide all four conventional aliases.
 
 Scion delivers the agent's model to the container in the `SCION_MODEL` env
-var — that is the only live channel. (`ctx.model_resolution` reads a manifest
-key that the Go side never writes; see changelog 2026-07-20. Don't build on
-it.) `SCION_MODEL` may still carry a raw tier name, so resolve it in
-`provision.py`:
+var — that is the only live channel. `SCION_MODEL` may still carry a raw tier
+name (e.g. on resume/restart paths where the Go side had no alias table to
+resolve against), so resolve it in `provision.py` with the shared helper:
 
 ```python
-raw = os.environ.get("SCION_MODEL", "").strip()
-aliases = ctx.harness_config.get("model_aliases") or {}
-model = aliases.get(raw.lower(), raw) or "<your default>"
+model = scion_harness.resolve_model(ctx) or "<your default>"
 ```
 
-Mirror `config.NormalizeModelAlias` / `config.ResolveModelAlias`
-(`pkg/config/templates.go`) when you normalize: Scion also passes
-`--model <resolved>` on the CLI command line when the agent has a model
-configured, and a harness-side spelling the Go side does not accept would
-make the two disagree. Then write the result to the tool's native settings
-file or the env overlay. Do **not** pin the tool's model env var in the `env`
-block below — see the precedence note there.
+`scion_harness.resolve_model(ctx)` (`harnesses/scion_harness.py`) is a Python
+port of `config.NormalizeModelAlias` / `config.ResolveModelAlias`
+(`pkg/config/templates.go`): it reads `SCION_MODEL`, normalizes shorthand
+(s/m/l/xl and case) the same way Go does to recognize a size tier, and maps
+a recognized tier through `ctx.harness_config["model_aliases"]`, returning
+`""` when nothing is set. Concrete, non-tier names are returned with their
+original case — unlike Go, which lower-cases them too — because `SCION_MODEL`
+can arrive un-normalized from a path Go never touches (an explicit
+template/hub `env:` entry), and case-sensitive concrete IDs are real (e.g.
+OpenAI fine-tuned model suffixes). Scion also passes `--model <resolved>` on
+the CLI command line when the agent has a model configured, so a harness-side
+spelling the Go side does not accept for a *tier* would make the two
+disagree — that is why tier normalization must stay in lockstep with the Go
+side, which `resolve_model` already does for you. Then write the result to
+the tool's native settings file or the env overlay.
+Do **not** pin the tool's model env var in the `env` block below — see the
+precedence note there.
 
 ### Environment
 
@@ -430,9 +437,10 @@ helpers), never from `os.environ`.
 `agent_name`, `agent_home`, `agent_workspace`, `harness_bundle_dir`,
 `harness_config` (your parsed config.yaml — read `instructions_file`,
 `system_prompt_mode`, etc. from here rather than hardcoding), `inputs` /
-`outputs` paths, and `platform`. (`ProvisionContext.model_resolution` reads a
-`model_resolution` key that `ProvisionManifest` does not emit — it is always
-empty; use `SCION_MODEL` instead.)
+`outputs` paths, and `platform`. For the model, use
+`scion_harness.resolve_model(ctx)`, which reads `SCION_MODEL` and maps it
+through `harness_config["model_aliases"]` — see the Model resolution section
+above.
 
 ### What provision.py must do
 
@@ -507,12 +515,14 @@ Key API surface:
   unknown commands).
 - **`ProvisionContext`** — properties: `bundle_dir`, `inputs_dir`, `home`,
   `workspace`, `harness_config`, `candidates`, `explicit_type`, `env_keys`,
-  `file_paths`, `env_secret_files`, `file_secret_files`, `telemetry`,
-  `model_resolution` (always empty — see above). Methods:
-  `read_secret(name)` / `read_file_secret(name)`
+  `file_paths`, `env_secret_files`, `file_secret_files`, `telemetry`.
+  Methods: `read_secret(name)` / `read_file_secret(name)`
   (staged secret values, trailing newline stripped), `read_input_text(name)`,
   `select_auth(spec)`, `write_outputs(resolved, env=, extra=)`,
   `info()` / `warn()` (stderr).
+- **`resolve_model(ctx)`** — reads `SCION_MODEL`, normalizes shorthand (see
+  the Model resolution section above), and maps the result through
+  `ctx.harness_config["model_aliases"]`; returns `""` when nothing is set.
 - **Auth engine** — `AuthSpec(harness, [methods])` with
   `env_method(name, any_of=/all_of=, hint=, env_fallback=)` and
   `file_method(name, path=, secret_key=, hint=)`. `select_auth` honors an

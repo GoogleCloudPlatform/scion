@@ -1560,13 +1560,109 @@ class TestProvisionContext(unittest.TestCase):
         ctx = _make_ctx(candidates={"files": [{"container_path": "/path/a"}, {"container_path": "/path/b"}]})
         self.assertEqual(ctx.file_paths, ["/path/a", "/path/b"])
 
-    def test_model_resolution(self):
-        manifest = {
-            "harness_bundle_dir": "/tmp",
-            "model_resolution": {"resolved_model": "claude-sonnet"},
-        }
-        ctx = sh.ProvisionContext("test", manifest)
-        self.assertEqual(ctx.model_resolution["resolved_model"], "claude-sonnet")
+
+# ---------------------------------------------------------------------------
+# Model resolution (G3)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveModel(unittest.TestCase):
+    def test_unset_returns_empty(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"medium": "claude-sonnet"}})
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SCION_MODEL", None)
+            self.assertEqual(sh.resolve_model(ctx), "")
+
+    def test_empty_string_returns_empty(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"medium": "claude-sonnet"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "   "}):
+            self.assertEqual(sh.resolve_model(ctx), "")
+
+    def test_tier_full_spelling(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"medium": "claude-sonnet"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "medium"}):
+            self.assertEqual(sh.resolve_model(ctx), "claude-sonnet")
+
+    def test_tier_shorthand_letter(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"medium": "claude-sonnet"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "m"}):
+            self.assertEqual(sh.resolve_model(ctx), "claude-sonnet")
+
+    def test_tier_shorthand_xl(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"extra-large": "claude-opus"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "xl"}):
+            self.assertEqual(sh.resolve_model(ctx), "claude-opus")
+
+    def test_tier_case_insensitive(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"large": "claude-opus"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "LARGE"}):
+            self.assertEqual(sh.resolve_model(ctx), "claude-opus")
+
+    def test_concrete_model_passes_through(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"medium": "claude-sonnet"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "claude-opus-4-8"}):
+            self.assertEqual(sh.resolve_model(ctx), "claude-opus-4-8")
+
+    def test_unknown_alias_passes_through_unchanged(self):
+        """A non-tier value is concrete and must not be re-cased — it is not
+        run through _MODEL_ALIAS_SHORTHAND/lower() for the return value, only
+        for the known-tier check."""
+        ctx = _make_ctx(harness_config={"model_aliases": {"medium": "claude-sonnet"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "Nonexistent-Tier"}):
+            self.assertEqual(sh.resolve_model(ctx), "Nonexistent-Tier")
+
+    def test_missing_alias_table_passes_tier_through(self):
+        ctx = _make_ctx(harness_config={})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "medium"}):
+            self.assertEqual(sh.resolve_model(ctx), "medium")
+
+    def test_tier_not_in_alias_table_passes_through(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"small": "claude-haiku"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "medium"}):
+            self.assertEqual(sh.resolve_model(ctx), "medium")
+
+    def test_unmapped_tier_passes_through_normalized_not_raw(self):
+        """R2 round-2 nit N1: an unmapped tier must fall back to the
+        *normalized* tier name, not the caller's raw spelling — matching Go,
+        which always returns the normalized form for a known tier. Mutation
+        check: `aliases.get(normalized, raw)` instead of
+        `aliases.get(normalized, normalized)` survives every other test here
+        because they all pass an already-normalized tier spelling ("medium").
+        This one uses shorthand plus mixed case ("M") to catch that mutant.
+        """
+        ctx = _make_ctx(harness_config={"model_aliases": {"small": "claude-haiku"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "M"}):
+            self.assertEqual(sh.resolve_model(ctx), "medium")
+
+    def test_concrete_model_case_is_preserved(self):
+        """R1: concrete (non-tier) model names must not be lower-cased.
+
+        SCION_MODEL can arrive un-normalized from an explicit source Go never
+        touches (a template/hub `env:` block, `--env SCION_MODEL=...`) — see
+        run.go's reResolveModelAlias, which only rewrites tier names,  not
+        concrete ones. Case-sensitive concrete IDs are real (e.g. OpenAI
+        fine-tuned model suffixes), so resolve_model must preserve them
+        exactly.
+        """
+        ctx = _make_ctx(harness_config={"model_aliases": {"medium": "claude-sonnet"}})
+        case_sensitive_id = "ft:gpt-4o-mini-2024-07-18:my-org::AbC12xYz"
+        with mock.patch.dict(os.environ, {"SCION_MODEL": case_sensitive_id}):
+            self.assertEqual(sh.resolve_model(ctx), case_sensitive_id)
+
+    def test_non_tier_alias_table_key_is_never_consulted(self):
+        """N1: the known-tier gate must run before any model_aliases lookup.
+
+        A model_aliases table may carry non-canonical keys (template authors
+        occasionally add fast/cheap/etc. aliases of their own). SCION_MODEL
+        matching one of those non-tier keys verbatim must not be rewritten —
+        resolve_model only maps the four canonical tiers, never arbitrary
+        table keys. Mutation check: deleting the
+        `if normalized not in _KNOWN_MODEL_ALIASES` gate makes this fail,
+        since "fast" would then resolve through the table to "x".
+        """
+        ctx = _make_ctx(harness_config={"model_aliases": {"fast": "x"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "fast"}):
+            self.assertEqual(sh.resolve_model(ctx), "fast")
 
 
 # ---------------------------------------------------------------------------

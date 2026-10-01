@@ -838,7 +838,8 @@ class ModelResolutionTest(unittest.TestCase):
         super().tearDown()
 
     def _resolve(self, scion_model: str = "") -> str:
-        """Simulate the model resolution logic from provision()."""
+        """Exercise the shared scion_harness.resolve_model helper, the way
+        provision() now does for the non-vertex-ai path."""
         if scion_model:
             os.environ["SCION_MODEL"] = scion_model
         else:
@@ -855,9 +856,7 @@ class ModelResolutionTest(unittest.TestCase):
                 },
             },
         })
-        raw = os.environ.get("SCION_MODEL", "").strip()
-        aliases = ctx.harness_config.get("model_aliases") or {}
-        return aliases.get(raw.lower(), raw) if raw else ""
+        return scion_harness.resolve_model(ctx)
 
     def test_small_alias_resolves_to_grok_3_mini(self) -> None:
         self.assertEqual(self._resolve("small"), "grok-3-mini")
@@ -880,6 +879,65 @@ class ModelResolutionTest(unittest.TestCase):
     def test_alias_is_case_insensitive(self) -> None:
         self.assertEqual(self._resolve("SMALL"), "grok-3-mini")
         self.assertEqual(self._resolve("Large"), "grok-4.6")
+
+    def test_shorthand_letters_now_expand_to_tiers(self) -> None:
+        """Behavior difference from the pre-G3 lowercase-only lookup: that
+        code did `aliases.get(raw.lower(), raw)` with no shorthand table, so
+        a bare "s"/"m"/"l"/"xl" never matched a model_aliases key and passed
+        straight through as a literal (invalid) model name. The shared
+        resolve_model helper expands shorthand the same way Go's
+        NormalizeModelAlias does, so these now resolve correctly.
+        """
+        self.assertEqual(self._resolve("s"), "grok-3-mini")
+        self.assertEqual(self._resolve("m"), "grok-4.5")
+        self.assertEqual(self._resolve("l"), "grok-4.6")
+        self.assertEqual(self._resolve("xl"), "grok-4.6")
+
+    def test_concrete_model_case_is_preserved(self) -> None:
+        """Not a behavior difference: the pre-G3 lookup's fallback was `raw`
+        (original case), and the shared resolve_model helper also returns
+        the caller's original spelling for a concrete (non-tier) name — see
+        R1 in the round-1 review. Only the four canonical tiers are
+        normalized for the alias-table lookup.
+        """
+        self.assertEqual(self._resolve("Grok-4-Turbo"), "Grok-4-Turbo")
+
+    def test_provision_writes_resolved_model_to_grok_default_model_env(self) -> None:
+        """N2 of the round-1 review: end-to-end check that the non-vertex-ai
+        path in provision() actually wires scion_harness.resolve_model's
+        result into GROK_DEFAULT_MODEL in env.json, not just that the helper
+        itself resolves correctly in isolation.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            bundle = os.path.join(tmp, "bundle")
+            os.makedirs(home)
+            os.makedirs(os.path.join(bundle, "outputs"))
+            ctx = _make_ctx({
+                "harness_bundle_dir": bundle,
+                "harness_config": {
+                    "no_auth": {"behavior": "drop-to-shell"},
+                    "instructions_file": "AGENTS.md",
+                    "skills_dir": ".grok/skills",
+                    "system_prompt_mode": "prepend_to_instructions",
+                    "model_aliases": {
+                        "small": "grok-3-mini",
+                        "medium": "grok-4.5",
+                        "large": "grok-4.6",
+                        "extra-large": "grok-4.6",
+                    },
+                },
+            })
+            os.environ["SCION_MODEL"] = "m"
+            try:
+                with temporary_home(home):
+                    provision.provision(ctx)
+            finally:
+                os.environ.pop("SCION_MODEL", None)
+
+            with open(os.path.join(bundle, "outputs", "env.json")) as f:
+                env = json.load(f)
+        self.assertEqual(env["GROK_DEFAULT_MODEL"], "grok-4.5")
 
 
 # ---------------------------------------------------------------------------

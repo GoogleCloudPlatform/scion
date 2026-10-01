@@ -431,10 +431,6 @@ class ProvisionContext:
                 self._telemetry = {}
         return self._telemetry
 
-    @property
-    def model_resolution(self) -> dict[str, Any]:
-        return self.manifest.get("model_resolution") or {}
-
     def read_secret(self, name: str, *, env_fallback: bool = False) -> str:
         """Read a staged secret file. Policy: rstrip("\\r\\n") only (§4.1)."""
         secret_files = self.env_secret_files
@@ -664,6 +660,71 @@ class ProvisionContext:
 
         env_payload = dict(env) if env else {}
         atomic_write_json(env_path, env_payload)
+
+
+# ---------------------------------------------------------------------------
+# Model resolution (G3)
+# ---------------------------------------------------------------------------
+
+# Shorthand spellings for model size aliases. Must stay in lockstep with
+# config.NormalizeModelAlias (pkg/config/templates.go): the Go side resolves
+# SCION_MODEL against the same shorthand set before it ever reaches a
+# provisioner, so accepting a spelling here that Go does not recognize would
+# make a provisioner's defense-in-depth resolution disagree with the broker.
+_MODEL_ALIAS_SHORTHAND = {"s": "small", "m": "medium", "l": "large", "xl": "extra-large"}
+
+# The canonical set of recognized model size aliases. Mirrors
+# config.KnownModelAliases (pkg/config/templates.go).
+_KNOWN_MODEL_ALIASES = frozenset({"small", "medium", "large", "extra-large"})
+
+
+def resolve_model(ctx: "ProvisionContext") -> str:
+    """Resolve the effective model name for this harness's CLI/config.
+
+    Python port of config.ResolveModelAlias/config.NormalizeModelAlias
+    (pkg/config/templates.go), used as a defense-in-depth layer for
+    resume/restart paths where the Go side (hub or broker) had no alias table
+    to resolve SCION_MODEL against and passed a bare size alias straight
+    through:
+
+      1. Read SCION_MODEL from the environment — the broker-resolved value,
+         as provisioners do today. Empty/unset returns "" so callers can
+         apply their own default or pin.
+      2. Normalize shorthand spellings (s/m/l/xl and case), matching Go's
+         NormalizeModelAlias, to decide whether the value is a known size
+         alias (small/medium/large/extra-large).
+      3. If it is, map the normalized tier through this harness's own
+         config.yaml model_aliases (ctx.harness_config). Otherwise it is
+         already a concrete model name — return the caller's original
+         (stripped) spelling unchanged, case included.
+
+    Unlike Go's config.ResolveModelAlias, this does NOT lower-case concrete
+    model names. Go's normalize-then-lookup only ever sees SCION_MODEL after
+    the hub/broker has already resolved and lower-cased it (the config/
+    --model path), so the lower-casing there is a no-op in practice. But
+    SCION_MODEL can also arrive un-normalized from an explicit source (a
+    template/hub `env:` block, `--env SCION_MODEL=...`) that Go never
+    touches — see run.go's reResolveModelAlias, which only rewrites tier
+    names, not concrete ones. Case-sensitive concrete IDs are real (e.g.
+    OpenAI fine-tuned model suffixes), so lower-casing them here would break
+    them with no upside. A tier alias is still safe to normalize: all five
+    harnesses' model_aliases tables and the default pins are lowercase.
+
+    A known tier missing from this harness's model_aliases passes through
+    as the normalized tier name, matching Go. An unknown or concrete value
+    passes through in its original spelling (see above).
+    """
+    raw = os.environ.get("SCION_MODEL", "").strip()
+    if not raw:
+        return ""
+    normalized = raw.lower()
+    normalized = _MODEL_ALIAS_SHORTHAND.get(normalized, normalized)
+    if normalized not in _KNOWN_MODEL_ALIASES:
+        return raw  # concrete model name: preserve the caller's spelling
+    aliases = ctx.harness_config.get("model_aliases") if isinstance(ctx.harness_config, dict) else None
+    if not isinstance(aliases, dict):
+        aliases = {}
+    return aliases.get(normalized, normalized)
 
 
 # ---------------------------------------------------------------------------

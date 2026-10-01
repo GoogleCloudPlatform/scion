@@ -228,17 +228,18 @@ class MuseCodeProvisionTest(unittest.TestCase):
 
             manifest = _make_bundle(tmp, home)
 
+            messages: list[str] = []
             with temporary_home(home), temporary_env("SCION_MODEL", "small"):
                 ctx = scion_harness.ProvisionContext("muse-code", manifest)
+                ctx.info = messages.append  # type: ignore[method-assign]
                 provision.provision(ctx)
 
             # Model should be muse-spark-1.2 (all aliases map to it).
-            # Verify provision completed without error (model is written
-            # to env overlay or passed via host).
             auth_json = _read_json(
                 os.path.join(tmp, "bundle", "outputs", "resolved-auth.json")
             )
             self.assertEqual(auth_json["method"], "none")
+            self.assertTrue(any("model=muse-spark-1.2" in m for m in messages), messages)
 
     def test_model_passthrough_for_unknown(self) -> None:
         """Unknown model names are passed through as-is."""
@@ -249,8 +250,10 @@ class MuseCodeProvisionTest(unittest.TestCase):
 
             manifest = _make_bundle(tmp, home)
 
+            messages: list[str] = []
             with temporary_home(home), temporary_env("SCION_MODEL", "custom-model-v2"):
                 ctx = scion_harness.ProvisionContext("muse-code", manifest)
+                ctx.info = messages.append  # type: ignore[method-assign]
                 provision.provision(ctx)
 
             # Should succeed without error.
@@ -258,6 +261,30 @@ class MuseCodeProvisionTest(unittest.TestCase):
                 os.path.join(tmp, "bundle", "outputs", "resolved-auth.json")
             )
             self.assertIsNotNone(auth_json)
+            self.assertTrue(any("model=custom-model-v2" in m for m in messages), messages)
+
+    def test_model_shorthand_now_resolves_through_aliases(self) -> None:
+        """Behavior difference from the pre-G3 lowercase-only lookup: that
+        code did `aliases.get(raw.lower(), raw)` with no shorthand table, so
+        a bare "s" never matched a model_aliases key and was logged as the
+        literal (invalid) model name "s". The shared resolve_model helper
+        expands shorthand the same way Go's NormalizeModelAlias does, so
+        this now resolves to the tier's concrete model.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            os.makedirs(home)
+            _write_seed_settings(home)
+
+            manifest = _make_bundle(tmp, home)
+
+            messages: list[str] = []
+            with temporary_home(home), temporary_env("SCION_MODEL", "s"):
+                ctx = scion_harness.ProvisionContext("muse-code", manifest)
+                ctx.info = messages.append  # type: ignore[method-assign]
+                provision.provision(ctx)
+
+            self.assertTrue(any("model=muse-spark-1.2" in m for m in messages), messages)
 
     def test_instruction_projection(self) -> None:
         """Instructions and system prompt are projected into AGENTS.md."""
