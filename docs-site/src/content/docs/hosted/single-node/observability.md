@@ -340,6 +340,30 @@ jsonPayload.recipient = "target-agent"
 jsonPayload.project_id = "my-project-id"
 ```
 
+#### Agent Telemetry Logs
+
+Logs that agents export through the `sciontool` telemetry pipeline go to the `scion-agents` log name, not `scion`. The exporter turns each OpenTelemetry resource attribute into a log label with the same key. Agent identity is carried only in these resource-attribute labels: there are no top-level `agent_id` or `project_id` labels on agent telemetry log entries. The only extra label is `hub`, which is set from `SCION_HUB_NAME` when present.
+
+The identity labels are stamped by the `sciontool` receiver from the agent's authoritative identity (see [Identity Enforcement](/scion/hosted/single-node/metrics/#identity-enforcement)), so filter on these:
+
+- `labels."scion.project.id"` for the agent's project.
+- `labels."scion.agent.id"` for the agent ID.
+- `labels."scion.agent.slug"` for the agent slug.
+
+```
+-- Agent telemetry logs for a project
+logName="projects/YOUR_PROJECT/logs/scion-agents"
+labels."scion.project.id" = "my-project-id"
+
+-- Agent telemetry logs for one agent, by slug
+logName="projects/YOUR_PROJECT/logs/scion-agents"
+labels."scion.agent.slug" = "my-agent-slug"
+
+-- Agent telemetry logs for one agent, by ID
+logName="projects/YOUR_PROJECT/logs/scion-agents"
+labels."scion.agent.id" = "my-agent-id"
+```
+
 #### Auth and Security Auditing
 
 ```
