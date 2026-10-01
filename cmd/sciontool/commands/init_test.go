@@ -1989,7 +1989,7 @@ func TestSetupHostUser_RefusesUint32OverflowAndSentinelIDs(t *testing.T) {
 // privilege drop is optional. The uid-only and gid-only enforced cases pin
 // that either field being 0 trips the refusal on its own — not just the
 // case where both happen to be 0 together, which the "0 == 0" zero value a
-// a buggy comparison (e.g. uid == gid instead of uid == 0) could still pass.
+// buggy comparison (e.g. uid == gid instead of uid == 0) could still pass.
 func TestSetupHostUser_ZeroUIDGIDModeGated(t *testing.T) {
 	tests := []struct {
 		name                 string
