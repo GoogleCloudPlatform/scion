@@ -126,13 +126,31 @@ function stubFetchCapturingCreateRequests(): { bodies: Array<Record<string, unkn
  * Routes the initial page-load fetches so a single online kubernetes-only
  * broker is auto-selected, and the project's stored GCP identity default is
  * `mode` — reproducing the path in loadGCPServiceAccounts that applies a
- * project default *after* the broker is already known.
+ * project default *after* the broker is already known. Also captures the
+ * JSON body of every POST /api/v1/agents request (mocked to a 400 so
+ * handleSubmit's catch block sets `error` and returns without navigating),
+ * so a test can assert whether a create request was sent at all, and what it
+ * carried.
  */
-function stubFetchForKubernetesProjectDefault(mode: string = 'block'): void {
+function stubFetchForKubernetesProjectDefault(
+  mode: string = 'block',
+  serviceAccounts: GCPServiceAccountFixture[] = []
+): { bodies: Array<Record<string, unknown>> } {
+  const bodies: Array<Record<string, unknown>> = [];
   vi.stubGlobal(
     'fetch',
-    vi.fn((input: RequestInfo | URL) => {
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/api/v1/agents') && init?.method === 'POST') {
+        if (typeof init.body === 'string') {
+          bodies.push(JSON.parse(init.body) as Record<string, unknown>);
+        }
+        return Promise.resolve({
+          ok: false,
+          status: 400,
+          json: async () => ({ error: { message: 'stub: not actually created' } }),
+        } as Response);
+      }
       if (url.includes('/api/v1/projects?')) {
         return Promise.resolve({
           ok: true,
@@ -163,6 +181,13 @@ function stubFetchForKubernetesProjectDefault(mode: string = 'block'): void {
           json: async () => ({ defaultGCPIdentityMode: mode }),
         } as Response);
       }
+      if (url.includes('/gcp-service-accounts')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ items: serviceAccounts }),
+        } as Response);
+      }
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -170,6 +195,7 @@ function stubFetchForKubernetesProjectDefault(mode: string = 'block'): void {
       } as Response);
     })
   );
+  return { bodies };
 }
 
 beforeEach(() => {
@@ -329,6 +355,34 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(select!.querySelector('sl-option[value="block"]')).toBeNull();
   });
 
+  it('normalizes the mode when only the profile changes to a known-Kubernetes one on the same broker', async () => {
+    const el = await mountAgentCreate();
+    const page = internals(el);
+    page.brokers = [
+      {
+        id: 'broker-mixed',
+        name: 'mixed-broker',
+        status: 'online',
+        profiles: [
+          { name: 'k8s-profile', type: 'kubernetes', available: true },
+          { name: 'docker-profile', type: 'docker', available: true },
+        ],
+      },
+    ];
+    page.brokerId = 'broker-mixed';
+    page.profile = '';
+    page.gcpMetadataMode = 'block';
+    page.gcpIdentityUserSet = true;
+    await el.updateComplete;
+    expect(page.gcpMetadataMode).toBe('block');
+
+    page.profile = 'k8s-profile';
+    await el.updateComplete;
+
+    expect(page.gcpMetadataMode).toBe('passthrough');
+    expect(page.gcpIdentityUserSet).toBe(false);
+  });
+
   it('corrects an existing "block" selection away when the target becomes known-Kubernetes', async () => {
     const el = await mountAgentCreate();
     const page = internals(el);
@@ -468,6 +522,128 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(gcpIdentityHint(el)).toContain(
       "This project's default GCP identity is Block, which the Kubernetes runtime rejects at dispatch"
     );
+  });
+
+  // There is no identity here that is safe to leave pre-selected: Shoelace
+  // only fires sl-change when the picked value differs from the current one,
+  // so a picker already showing "Passthrough" would silently swallow a user
+  // re-picking that same option. The picker must show no value at all, so
+  // any pick — including Passthrough — is a real change.
+  it('shows no pre-selected identity when the stored project default is block', async () => {
+    stubFetchForKubernetesProjectDefault('block');
+    const el = await mountAgentCreate();
+
+    const select = gcpIdentitySelect(el);
+    expect((select as HTMLElement & { value: string }).value).toBe('');
+    expect(gcpIdentityHint(el)).toContain('No GCP identity is selected yet.');
+  });
+
+  it('mentions Assign Service Account in the Block-default hint only when one is offered', async () => {
+    stubFetchForKubernetesProjectDefault('block');
+    const withoutSA = await mountAgentCreate();
+    expect(gcpIdentityHint(withoutSA)).not.toContain('Assign Service Account');
+
+    document.body.innerHTML = '';
+    stubFetchForKubernetesProjectDefault('block', [makeServiceAccount('sa-a')]);
+    const withSA = await mountAgentCreate();
+    expect(gcpIdentityHint(withSA)).toContain('or Assign Service Account.');
+  });
+
+  it('blocks submit with no request sent when the stored project default is block and nothing was chosen', async () => {
+    const { bodies } = stubFetchForKubernetesProjectDefault('block');
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      error: string | null;
+    };
+    page.name = 'test-agent';
+
+    await page.handleSubmit(new Event('submit'));
+
+    expect(page.error).toContain(
+      "This project's default GCP identity is Block, which the Kubernetes runtime rejects at dispatch"
+    );
+    expect(bodies).toHaveLength(0);
+  });
+
+  // Follows the hint's own remedy through to the actual request: the picker
+  // shows no pre-selected value in this case (see above), so picking
+  // Passthrough is a real sl-change, and the resulting request must carry it
+  // explicitly rather than omit gcp_identity (which would resolve back to
+  // the project's own rejected "block" default).
+  it('sends an explicit passthrough once the user picks it, following the Block-default hint', async () => {
+    const { bodies } = stubFetchForKubernetesProjectDefault('block');
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      error: string | null;
+    };
+    page.name = 'test-agent';
+
+    const select = gcpIdentitySelect(el);
+    expect(select).not.toBeNull();
+    await chooseSelect(el, select!, 'passthrough');
+    expect(page.gcpIdentityUserSet).toBe(true);
+
+    await page.handleSubmit(new Event('submit'));
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'passthrough' });
+  });
+
+  // M10: the Block-default branch must not take precedence over an explicit
+  // user choice — once the user has picked something (here Assign, which
+  // requires a configured service account), the hint must say only that
+  // Block is unavailable, not that the project's rejected default applies.
+  it('yields to an explicit choice instead of the Block-default warning once the user picks one', async () => {
+    stubFetchForKubernetesProjectDefault('block', [makeServiceAccount('sa-a')]);
+    const el = await mountAgentCreate();
+
+    const select = gcpIdentitySelect(el);
+    expect(select).not.toBeNull();
+    await chooseSelect(el, select!, 'assign');
+
+    expect(gcpIdentityHint(el)).toContain('Block is not available for a Kubernetes runtime target.');
+    expect(gcpIdentityHint(el)).not.toContain('rejects at dispatch');
+  });
+
+  // The project default mode is only ever assigned inside the
+  // `if (settings?.defaultGCPIdentityMode)` branch — it must still be reset
+  // to '' at the top of every call, or a stale "Block" default from a
+  // previous project would keep being shown after switching to one with no
+  // default configured at all.
+  it('resets the stale Block-default hint after switching to a project with no default', async () => {
+    stubFetchForKubernetesProjectDefault('block');
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & { projectId: string };
+    expect(gcpIdentityHint(el)).toContain("This project's default GCP identity is Block");
+
+    // Settings are cached per-projectId (fetchProjectSettings), so observing
+    // a reset requires an actual project switch, not a second call for the
+    // same project.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.includes('/api/v1/projects/p2/settings')) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({}) } as Response);
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ items: [] }),
+        } as Response);
+      })
+    );
+    page.projectId = 'p2';
+
+    await page.loadGCPServiceAccounts();
+    await el.updateComplete;
+
+    expect(gcpIdentityHint(el)).not.toContain("This project's default GCP identity is Block");
+    expect(gcpIdentityHint(el)).toContain('this project has no default configured');
   });
 
   it('says the hub-wide or Kubernetes default applies when this project has no default configured', async () => {

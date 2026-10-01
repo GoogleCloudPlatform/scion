@@ -395,8 +395,8 @@ func brokerIsKubernetesOnly(broker *store.RuntimeBroker) bool {
 // runtime broker (project_providers), and every linked broker is
 // Kubernetes-only per brokerIsKubernetesOnly.
 //
-// A project with no linked broker, with a broker whose type cannot be
-// confirmed not to exist (store.ErrNotFound), or with a mix of runtime types
+// A project with no linked broker, with a linked broker whose record no
+// longer exists (store.ErrNotFound), or with a mix of runtime types
 // across its linked brokers, is NOT reliably Kubernetes-bound — this returns
 // false rather than guess in those cases, which is the deliberately
 // permissive side: it only ever blocks a write it can confirm the broker will

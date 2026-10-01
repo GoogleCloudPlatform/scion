@@ -196,16 +196,38 @@ export class ScionPageAgentCreate extends LitElement {
   }
 
   /**
+   * True when omitting gcp_identity would resolve to this project's own
+   * stored default of "block" on a known-Kubernetes target — a request
+   * Phase 1 rejects at dispatch. Unlike the general known-Kubernetes case
+   * (where omitting safely falls through the Hub's ladder), there is no
+   * identity here that is safe to leave unset, so the picker must not show a
+   * pre-selected value: Shoelace only fires `sl-change` when the picked
+   * value differs from the current one, so a picker already showing
+   * "Passthrough" (normalizeGcpModeForTarget's display-only correction)
+   * would silently swallow a user re-picking the same option, leaving
+   * gcpIdentityUserSet false and the dangerous omission in place. Showing no
+   * value means any pick — including Passthrough — is a real change.
+   */
+  private get blockDefaultNeedsExplicitChoice(): boolean {
+    return (
+      this.targetRuntimeIsKubernetesOnly &&
+      this.projectGCPIdentityDefaultMode === 'block' &&
+      !this.gcpIdentityUserSet
+    );
+  }
+
+  /**
    * The Kubernetes-specific portion of the GCP Identity hint, naming the
    * actual effective identity rather than overclaiming the broker's own
    * default applies — that is only true when nothing is configured at any
    * level. Four cases:
    *  - the user explicitly picked a mode here: just name that Block isn't an
    *    option, no further explanation needed;
-   *  - untouched, and this project's own default is itself "block": omitting
-   *    gcp_identity resolves to that stored default, which the Kubernetes
-   *    runtime rejects at dispatch — say so plainly, since picking Block here
-   *    would otherwise look like the safe, do-nothing choice;
+   *  - untouched, and this project's own default is itself "block": there is
+   *    no identity that is safe to leave unset here (see
+   *    blockDefaultNeedsExplicitChoice), so say that creation is blocked
+   *    until an explicit choice is made, and name Assign Service Account
+   *    only when the project actually has a service account to offer;
    *  - untouched, but this project has some other default GCP identity
    *    configured: omitting gcp_identity resolves to *that* default, not to
    *    Kubernetes' own default — say so;
@@ -221,7 +243,8 @@ export class ScionPageAgentCreate extends LitElement {
     if (this.projectGCPIdentityDefaultMode === 'block') {
       return (
         "This project's default GCP identity is Block, which the Kubernetes runtime rejects at " +
-        'dispatch; choose Passthrough or Assign Service Account.'
+        'dispatch; creating this agent is blocked until you explicitly choose Passthrough' +
+        (this.gcpServiceAccounts.length > 0 ? ' or Assign Service Account.' : '.')
       );
     }
     if (this.projectGCPIdentityDefaultMode) {
@@ -1091,6 +1114,19 @@ export class ScionPageAgentCreate extends LitElement {
       return;
     }
 
+    // This project's own default would otherwise apply silently (via the
+    // omitted gcp_identity below) and be rejected at dispatch — there is no
+    // identity that is safe to leave unset here, so an explicit pick is
+    // required before this can proceed.
+    if (this.blockDefaultNeedsExplicitChoice) {
+      this.error =
+        "This project's default GCP identity is Block, which the Kubernetes runtime rejects at " +
+        'dispatch. Choose Passthrough' +
+        (this.gcpServiceAccounts.length > 0 ? ' or Assign Service Account' : '') +
+        ' before creating this agent.';
+      return;
+    }
+
     this.submitting = true;
     this.error = null;
     this.errorLinks = [];
@@ -1824,7 +1860,8 @@ export class ScionPageAgentCreate extends LitElement {
       <div class="form-field">
         <label>GCP Identity</label>
         <sl-select
-          .value=${this.gcpMetadataMode}
+          placeholder="Choose an identity..."
+          .value=${this.blockDefaultNeedsExplicitChoice ? '' : this.gcpMetadataMode}
           @sl-change=${(e: Event) => {
             this.gcpMetadataMode = (e.target as HTMLElement & { value: string }).value as
               | 'block'
@@ -1845,11 +1882,13 @@ export class ScionPageAgentCreate extends LitElement {
           <sl-option value="passthrough">Passthrough</sl-option>
         </sl-select>
         <div class="hint">
-          ${this.gcpMetadataMode === 'block'
-            ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
-            : this.gcpMetadataMode === 'assign'
-              ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-              : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
+          ${this.blockDefaultNeedsExplicitChoice
+            ? 'No GCP identity is selected yet.'
+            : this.gcpMetadataMode === 'block'
+              ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
+              : this.gcpMetadataMode === 'assign'
+                ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
+                : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
           ${this.targetRuntimeIsKubernetesOnly ? ` ${this.kubernetesIdentityHintSuffix}` : ''}
         </div>
       </div>
