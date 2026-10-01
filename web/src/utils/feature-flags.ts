@@ -39,7 +39,8 @@ declare global {
 
 /**
  * Feature flags that are ON by default (Phase 5+).
- * These can still be disabled via server injection or localStorage override.
+ * These can still be disabled via the server (the experiments map or
+ * `setFeatureFlag()`) or a localStorage override.
  *
  * Entries stay string literals (not the exported constants below), because a
  * Go-side consistency test extracts this set with a regex that only sees
@@ -166,8 +167,8 @@ export function setFeatureFlag(name: string, enabled: boolean): void {
 /**
  * Wave-2 native chat feature flag.
  * Default ON (W9) — added to DEFAULT_ON_FLAGS for general availability.
- * Disable via server injection or localStorage: scion:feature:web.native_chat_v2=false
- * to fall back to wave-1 UI for rollback.
+ * Disable via the server (`setFeatureFlag`) or localStorage:
+ * scion:feature:web.native_chat_v2=false to fall back to wave-1 UI for rollback.
  */
 export const NATIVE_CHAT_V2_FLAG = 'web.native_chat_v2';
 
