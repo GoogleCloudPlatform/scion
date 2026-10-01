@@ -307,14 +307,16 @@ describe('agent-configure buildConfig — R1-1: untouched telemetry/auto-expose 
   it('R2-1 facet (b): the auto-expose control loads its real live value from ac.env even when ic.env has none, and re-sends that exact value after an unrelated row edit', async () => {
     const c = await mountAgentConfigureWithLoadedAgent({
       model: 'claude-opus',
-      env: { SCION_AUTO_EXPOSE_PORTS: 'true' },
-      // InlineConfig.Env is nil, as it is after any untouched Save/Start
-      // once buildConfig omits `env` (the PATCH handler still replaces
-      // InlineConfig wholesale -- options.md §7.2, not fixed here). Before
-      // R2-1, populateForm read auto-expose from ic.env ONLY, so this shape
+      // This is the exact shape after any untouched Save/Start: buildConfig
+      // omits `env` entirely in that case, and the PATCH handler still
+      // replaces InlineConfig wholesale (options.md §7.2, not fixed here),
+      // so InlineConfig.Env goes empty while AppliedConfig.Env keeps
+      // everything -- the custom key AND the auto-expose key. Before R2-1,
+      // populateForm read auto-expose from ic.env ONLY, so this shape
       // misread the control as the global default (false) instead of the
       // agent's real, still-live value (true).
-      inlineConfig: { env: { EXPLICIT_KEY: 'explicit-value' } },
+      env: { EXPLICIT_KEY: 'explicit-value', SCION_AUTO_EXPOSE_PORTS: 'true' },
+      inlineConfig: {},
     });
     // The control must reflect the LIVE value, not the global default
     // (stubbed false in stubFetchWithLoadedAgent's settings response).
@@ -323,6 +325,13 @@ describe('agent-configure buildConfig — R1-1: untouched telemetry/auto-expose 
     const withEnvEntries = c as unknown as {
       envEntries: { key: string; value: string }[];
     };
+    // The custom row must have actually loaded from ac.env (not been lost
+    // along with everything else in InlineConfig.Env) before "editing" it
+    // means anything.
+    expect(withEnvEntries.envEntries).toContainEqual({
+      key: 'EXPLICIT_KEY',
+      value: 'explicit-value',
+    });
     withEnvEntries.envEntries = [{ key: 'EXPLICIT_KEY', value: 'changed-value' }];
 
     const config = c.buildConfig();
