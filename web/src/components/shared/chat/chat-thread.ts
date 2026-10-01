@@ -3840,10 +3840,16 @@ export class ScionChatThread extends LitElement {
       return;
     }
 
+    if (!this.projectId) {
+      this.insertLocalSystemMessage('No project context available.');
+      return;
+    }
+
     try {
-      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(agentSlug)}/stop`, {
-        method: 'POST',
-      });
+      const res = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/agents/${encodeURIComponent(agentSlug)}/stop`,
+        { method: 'POST' }
+      );
 
       if (!res.ok) {
         const errMsg = await extractApiError(res, 'Failed to stop agent');

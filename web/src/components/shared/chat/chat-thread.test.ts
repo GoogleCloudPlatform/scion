@@ -5686,12 +5686,15 @@ describe('scion-chat-thread /stop slash command', () => {
 
   /**
    * Regression test for ptone/scion#2482: `/stop <agent>` must stop the
-   * agent, not delete it. It must hit the same stop endpoint the other UI
-   * stop actions use (agent-detail.ts, agents.ts, project-detail.ts), not
-   * DELETE /api/v1/agents/{slug}.
+   * agent, not delete it. It must hit the project-scoped stop endpoint the
+   * hub actually resolves slugs against (handleProjectAgentAction,
+   * pkg/hub/handlers_projects_core.go ~L2477), not the unscoped
+   * `/api/v1/agents/{id}/stop` route, which only resolves UUIDs and always
+   * 404s for a slug.
    */
-  it('sends POST to the stop endpoint, not DELETE', async () => {
+  it('sends POST to the project-scoped stop endpoint, not DELETE', async () => {
     const el = await mount();
+    el.projectId = 'proj-1';
     const internals = el as unknown as {
       handleSlashStop(args: string): Promise<void>;
     };
@@ -5701,12 +5704,54 @@ describe('scion-chat-thread /stop slash command', () => {
     await internals.handleSlashStop('my-agent');
 
     expect(apiFetch).toHaveBeenCalledWith(
-      '/api/v1/agents/my-agent/stop',
+      '/api/v1/projects/proj-1/agents/my-agent/stop',
       expect.objectContaining({ method: 'POST' })
     );
     expect(apiFetch).not.toHaveBeenCalledWith(
       expect.stringMatching(/^\/api\/v1\/agents\/my-agent$/),
       expect.objectContaining({ method: 'DELETE' })
     );
+  });
+
+  it('shows "Failed to stop agent" on a non-2xx response', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    const internals = el as unknown as {
+      handleSlashStop(args: string): Promise<void>;
+    };
+
+    apiFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      json: () =>
+        Promise.resolve({
+          error: { code: 'agent_not_found', message: 'Agent "my-agent" not found in project' },
+        }),
+    });
+
+    await internals.handleSlashStop('my-agent');
+
+    await vi.waitFor(() => {
+      const lines = Array.from(el.shadowRoot?.querySelectorAll('scion-chat-system-line') ?? []);
+      const messages = lines.map((l) => l.getAttribute('message'));
+      expect(messages.some((m) => m?.includes('Failed to stop agent'))).toBe(true);
+    });
+  });
+
+  it('shows a local message and makes no request when there is no project context', async () => {
+    const el = await mount();
+    el.projectId = '';
+    const internals = el as unknown as {
+      handleSlashStop(args: string): Promise<void>;
+    };
+
+    await internals.handleSlashStop('my-agent');
+
+    expect(apiFetch).not.toHaveBeenCalledWith(expect.stringContaining('/stop'), expect.anything());
+    await vi.waitFor(() => {
+      const lines = Array.from(el.shadowRoot?.querySelectorAll('scion-chat-system-line') ?? []);
+      const messages = lines.map((l) => l.getAttribute('message'));
+      expect(messages).toContain('No project context available.');
+    });
   });
 });
