@@ -529,6 +529,31 @@ function isDotFile(path: string): boolean {
   return path.split('/').some((segment) => segment.startsWith('.'));
 }
 
+/**
+ * Shared formatter for the file table's "Modified" column. Constructing an
+ * Intl.DateTimeFormat is comparatively expensive (locale data lookup), and
+ * the locale/options here never change, so build it once at module scope
+ * rather than once per row on every render — CPU samples attributed
+ * roughly 160-174ms to per-row formatter construction on a 1000-row listing.
+ *
+ * Trade-off: this formatter resolves the environment's default IANA time
+ * zone once, at module load, instead of on every prior per-row
+ * construction. If the OS time zone changes while a tab stays open, the
+ * displayed times keep using the zone captured at load until the page is
+ * reloaded. This column has no visible zone/offset indicator either way, so
+ * the displayed text differs only in which zone's wall-clock time it
+ * reflects. Not fixed (e.g. by re-resolving `resolvedOptions().timeZone`
+ * once per render and rebuilding on change) — that adds a construction back
+ * on every render for a live mid-session OS time-zone change, which is rare.
+ */
+const FILE_DATE_FORMATTER = new Intl.DateTimeFormat('en', {
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+});
+
 function formatFileSize(bytes: number): string {
   if (bytes === 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -1186,15 +1211,21 @@ export class ScionFileBrowser extends LitElement {
   }
 
   private formatDate(dateString: string): string {
+    // new Date() never throws, but Intl.DateTimeFormat#format() throws a
+    // RangeError for an invalid date (e.g. an unparseable dateString).
+    // Checking getTime() up front avoids that throw/catch entirely — cheap
+    // per row, and exceptions are comparatively expensive to raise
+    // (GoogleCloudPlatform/scion#2176 review) — while still falling back to
+    // the raw string for an invalid date, same as before.
+    const date = new Date(dateString);
+    if (isNaN(date.getTime())) {
+      return dateString;
+    }
+    // Purely defensive: per ECMA-402, format() only throws RangeError for a
+    // non-finite time value, which the isNaN check above already excludes —
+    // this catch is unreachable, kept in case that invariant ever changes.
     try {
-      const date = new Date(dateString);
-      return new Intl.DateTimeFormat('en', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      }).format(date);
+      return FILE_DATE_FORMATTER.format(date);
     } catch {
       return dateString;
     }
