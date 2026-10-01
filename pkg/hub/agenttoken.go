@@ -115,12 +115,13 @@ const (
 // its Scopes list contains: only a value that came out of ValidateAgentToken
 // can be legacy.
 //
-// legacyScopeSchema's effect may be deleted once no unexpired token can
-// still predate CurrentAgentScopeSchema: the configured agent token
-// lifetime (AgentTokenConfig.TokenDuration) after this change deploys,
-// since ValidateAgentToken rejects every token older than one TokenDuration
-// (the maximum TokenDuration configured at any point since deploy), so no
-// legacy token can still validate after that.
+// legacyScopeSchema's effect may be deleted once no pre-split token can
+// still validate. ValidateAgentToken rejects a token once its exp claim
+// (its mint time plus the AgentTokenConfig.TokenDuration configured at
+// mint) is more than jwt.DefaultLeeway (one minute) in the past, so the
+// window closes one minute plus the TokenDuration in effect when the last
+// pre-split token was minted after the last hub instance running pre-split
+// code stops minting.
 const CurrentAgentScopeSchema = 1
 
 // AgentTokenClaims represents the custom claims in an agent JWT.
