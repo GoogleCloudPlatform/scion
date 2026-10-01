@@ -6,11 +6,12 @@
 - **Registered experiment** (ptone/scion#2217), default ON. See the [Experiments reference](../../../docs-site/src/content/docs/reference/experiments.md) for the general mechanism.
 - **Header constant**: `TERMINAL_WORKSPACE_FLAG` (`web.terminal_workspace`)
 
-## Injection Precedence
+## Flag Precedence
 
-1. **Server value** — `GET /api/v1/experiments`, fetched by the client at boot (signed-in users only). This is the admin override from the Experiments tab, or the registry default if none is set. Takes highest precedence whenever the fetch succeeds.
-2. **localStorage override** — `scion:feature:web.terminal_workspace` (`"true"` / `"false"`). Used for dev/QA. Applies only when the experiments fetch fails, or on a signed-out page load.
-3. **Default** — ON (`web.terminal_workspace` is in `DEFAULT_ON_FLAGS`), used when the experiments fetch fails.
+1. **Pinned** — values in `window.__SCION_FEATURES__` before boot applies server flags, as the `*.pw.ts` init scripts in this directory set (e.g. `ownership.pw.ts`, `toast-lifecycle.pw.ts`, `url-layout.pw.ts`). These beat the server; production never pins this name.
+2. **Server value** — `GET /api/v1/experiments`, fetched by the client at boot (signed-in users only). This is the admin override from the Experiments tab, or the registry default if none is set. Takes the highest of the production sources whenever the fetch succeeds.
+3. **localStorage override** — `scion:feature:web.terminal_workspace` (`"true"` / `"false"`). Used for dev/QA. Applies only when the experiments fetch fails, or on a signed-out page load.
+4. **Default** — ON (`web.terminal_workspace` is in `DEFAULT_ON_FLAGS`), used when the experiments fetch fails.
 
 ## Admin Control (Rollout / Rollback)
 
@@ -30,7 +31,7 @@ Do not remove the flag until a separately evidenced rollout decision confirms pr
 
 ## Native Chat Interaction
 
-- **Chat flag**: `web.native_chat` (header constant `NATIVE_CHAT_FLAG`). This is not a registered experiment; it stays controlled by `server.native_chat.enabled` and is unaffected by this change.
+- **Chat flag**: `web.native_chat` (header constant `NATIVE_CHAT_FLAG`). This is not a registered experiment; it stays controlled by `server.native_chat.enabled` and does not appear in the Experiments tab.
 - Chat availability is independent: the header shows "Chat" when
   `web.native_chat` is ON, and "Terminals" when `web.terminal_workspace` is ON.
   Both modes coexist in the header's mode switch bar.
