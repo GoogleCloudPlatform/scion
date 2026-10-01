@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 var (
@@ -63,6 +64,8 @@ func init() {
 }
 
 func runMigrateStorage(cmd *cobra.Command, _ []string) error {
+	util.PinProcessUTC()
+
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 

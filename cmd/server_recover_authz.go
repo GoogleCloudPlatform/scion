@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
 
@@ -101,6 +102,8 @@ const DisableAllConfirmPhrase = "I understand this disables all access constrain
 var recoverConfirmReader io.Reader = os.Stdin
 
 func runRecoverAuthz(cmd *cobra.Command, _ []string) error {
+	util.PinProcessUTC()
+
 	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
 	defer cancel()
 

@@ -117,9 +117,21 @@ func chdirHomeIfAtFilesystemRoot() {
 	log.Printf("Working directory was %s; changed to home directory %s", wd, home)
 }
 
+// pinProcessUTCFn and initServerLoggingFn are seams over util.PinProcessUTC
+// and initServerLogging respectively, so tests can observe and control the
+// order runServerStart calls them in without starting a real server.
+var (
+	pinProcessUTCFn     = util.PinProcessUTC
+	initServerLoggingFn = initServerLogging
+)
+
 func runServerStart(cmd *cobra.Command, args []string) error {
+	// Pin the process to UTC before anything else runs (log timestamps, cron
+	// parsing, ent's Default(time.Now), etc. all read time.Local).
+	pinProcessUTCFn()
+
 	// 1. Initialize logging
-	logCleanups, requestLogger, messageLogger, err := initServerLogging(cmd)
+	logCleanups, requestLogger, messageLogger, err := initServerLoggingFn(cmd)
 	if err != nil {
 		return err
 	}
