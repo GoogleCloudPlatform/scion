@@ -119,8 +119,14 @@ agents and return a clear error:
 - **`scion attach`** — not supported (there is no tmux session). Use `scion message` and
   `scion look` instead.
 - **`scion suspend`** — not supported; use `scion stop` instead.
-- **`scion message --raw`** — not supported (raw tmux key delivery has no meaning without a
-  container).
+- **`scion keys`** — not supported (literal tmux key delivery has no meaning without a
+  container). Today, since `scion keys` in Hub mode still sends through the compatibility
+  `message`/`raw` transport pending a planned CLI migration, the call fails with the pre-existing `422
+  unsupported_capability` / `raw_managed_backend_unsupported` denial, the same one `scion message
+  --raw` returns for a managed target — not a silent fallback to ordinary messaging
+  either way. The dedicated `/keys` Hub API (already reachable directly, ahead of the CLI
+  migration) answers the same case with `422 keys_unsupported` instead; `scion keys` moves onto
+  that response once the migration lands.
 - **Workspace mounting** — no local workspace or file sync in v1; managed agents target
   repo-less tasks.
 
