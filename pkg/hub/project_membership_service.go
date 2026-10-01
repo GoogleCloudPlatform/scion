@@ -676,17 +676,28 @@ func isProtectedRole(role string) bool {
 // Role kind
 // ---------------------------------------------------------------------------
 
-// projectRoleKind returns "builtin" or "custom" for a project-scoped role
-// name (design.md §3.1's additive roleKind field). N1 (review r1): this was
-// previously inlined at four call sites (list/add/buildProjectMemberGroup in
-// handlers_project_members.go, plus the audit code in
-// project_membership_set.go); extracted here so there is exactly one
-// definition of "builtin" vs "custom" for display and audit purposes.
+// roleKindBuiltIn and roleKindCustom are the only two values projectRoleKind
+// returns. Review r2 R2-6: N1 centralised the derivation in projectRoleKind,
+// but the "builtin"/"custom" string literals it returns were still
+// hand-typed at every comparison and default site; a typo there would
+// compile. These constants are that single spelling.
+const (
+	roleKindBuiltIn = "builtin"
+	roleKindCustom  = "custom"
+)
+
+// projectRoleKind returns roleKindBuiltIn or roleKindCustom for a
+// project-scoped role name (design.md §3.1's additive roleKind field). N1
+// (review r1): this was previously inlined at four call sites
+// (list/add/buildProjectMemberGroup in handlers_project_members.go, plus the
+// audit code in project_membership_set.go); extracted here so there is
+// exactly one definition of "builtin" vs "custom" for display and audit
+// purposes.
 func projectRoleKind(roleName string) string {
 	if store.IsBuiltInProjectMembershipRole(roleName) {
-		return "builtin"
+		return roleKindBuiltIn
 	}
-	return "custom"
+	return roleKindCustom
 }
 
 // ---------------------------------------------------------------------------

@@ -949,12 +949,12 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			if b.ID == builtInOldBindingID {
 				continue
 			}
-			roleName, roleKind := "", "custom"
+			roleName, roleKind := "", roleKindCustom
 			authVia := ""
 			if rd := currentDefs1[b.RoleDefinitionID]; rd != nil {
 				roleName = rd.Name
 				roleKind = projectRoleKind(rd.Name)
-				if roleKind != "builtin" {
+				if roleKind != roleKindBuiltIn {
 					authVia = customAuthTx[PermRoleBindingDelete].Via
 				}
 			}
@@ -989,7 +989,7 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 				TargetType:   "project_membership",
 				TargetID:     req.ProjectID,
 			}
-			if roleKind == "custom" {
+			if roleKind == roleKindCustom {
 				summary["authority"] = customAuthTx[PermRoleBindingCreate].Via
 				record.CanDelegateResult = "allowed"
 				record.CanDelegateReason = canDelegateReasons[d.ID]

@@ -810,11 +810,11 @@ func (s *Server) buildProjectMemberGroup(ctx context.Context, principalType, pri
 		if b == nil {
 			continue
 		}
-		roleName, roleKind := "", "custom"
+		roleName, roleKind := "", roleKindCustom
 		if rd, err := s.store.GetRoleDefinition(ctx, b.RoleDefinitionID); err == nil && rd != nil {
 			roleName = rd.Name
 			roleKind = projectRoleKind(rd.Name)
-			if roleKind == "builtin" {
+			if roleKind == roleKindBuiltIn {
 				group.BuiltInRoleName = rd.Name
 			}
 		}
@@ -830,8 +830,8 @@ func (s *Server) buildProjectMemberGroup(ctx context.Context, principalType, pri
 	}
 
 	sort.Slice(infos, func(i, j int) bool {
-		iBuiltIn := infos[i].RoleKind == "builtin"
-		jBuiltIn := infos[j].RoleKind == "builtin"
+		iBuiltIn := infos[i].RoleKind == roleKindBuiltIn
+		jBuiltIn := infos[j].RoleKind == roleKindBuiltIn
 		if iBuiltIn != jBuiltIn {
 			return iBuiltIn
 		}
