@@ -26,6 +26,23 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
+// Per-attempt timeouts and retry backoff ranges (design §3.8.5, §3.10),
+// named so their values can be asserted directly rather than only through
+// timing-sensitive tests. Each report kind gets its own attempt-timeout
+// constant even though all three are 5s today, so a change to one cannot
+// silently change the others.
+const (
+	claimAttemptTimeout     = 5 * time.Second
+	keepaliveAttemptTimeout = 5 * time.Second
+	terminalAttemptTimeout  = 5 * time.Second
+
+	reportMinBackoff = 1 * time.Second
+	reportMaxBackoff = 10 * time.Second
+
+	keepaliveMinBackoff = 2 * time.Second
+	keepaliveMaxBackoff = 5 * time.Second
+)
+
 // errLaunchReportUnreachable is sendOnce's "retry" bucket: a transport
 // failure, a 5xx, a non-structured 404 (design §5 N-9, handled inside
 // hubclient.ReportAgentLaunch), or no hub connection at all.
@@ -33,8 +50,7 @@ var errLaunchReportUnreachable = errors.New("launch report: no reachable hub con
 
 // keepaliveOutcome is what the keepalive loop records when a report answer
 // classifies to anything other than gateContinue (design §3.8.2's
-// gate-answer table applies to keepalives too, not only claim/checkpoint;
-// review r1 F-5).
+// gate-answer table applies to keepalives too, not only claim/checkpoint).
 type keepaliveOutcome struct {
 	action gateAction
 	result *hubclient.AgentLaunchReportResult
@@ -44,8 +60,7 @@ type keepaliveOutcome struct {
 // launch"). It owns the keepalive goroutine and every report this launch
 // sends. Nothing on launchSender ever touches an *http.Request: it is built
 // from (projectID, slug)-resolved data before the launch goroutine starts,
-// never from the request that accepted the launch (design §7 P1b-1 B-6,
-// asserted with -race).
+// never from the request that accepted the launch (design §7 P1b-1 B-6).
 type launchSender struct {
 	server     *Server
 	agentID    string
@@ -102,8 +117,8 @@ func (s *launchSender) currentSeq() int64 {
 }
 
 // isTerminalStarted reports whether a terminal send has begun -- from then
-// on, "only the terminal's answer decides cleanup" (design §3.8.5, r8-8),
-// and the keepalive loop exits.
+// on, "only the terminal's answer decides cleanup" (design §3.8.5), and the
+// keepalive loop exits.
 func (s *launchSender) isTerminalStarted() bool {
 	return atomic.LoadInt32(&s.terminalStarted) == 1
 }
@@ -148,10 +163,21 @@ func (s *launchSender) recordKeepaliveAbort(action gateAction, result *hubclient
 // classified to an abort action (gateAbortCleanup or gateAbortNoCleanup).
 // runLaunch selects on this alongside Manager.Start's completion so a stale
 // 409, 403 or unknown-launch answer during a long Start acts immediately
-// (design §3.8.2's gate-answer table; review r1 F-5) instead of waiting for
-// Start to return.
+// (design §3.8.2's gate-answer table) instead of waiting for Start to
+// return.
 func (s *launchSender) KeepaliveAborted() <-chan struct{} {
 	return s.abortCh
+}
+
+// IsAborted is a non-blocking check of KeepaliveAborted, for use between
+// synchronous steps that are not otherwise selecting on it.
+func (s *launchSender) IsAborted() bool {
+	select {
+	case <-s.abortCh:
+		return true
+	default:
+		return false
+	}
 }
 
 // LastAbortOutcome returns the outcome recorded by recordKeepaliveAbort, or
@@ -210,8 +236,8 @@ type fanOutAttempt struct {
 }
 
 // sendOnce makes one attempt. With more than one target it fans out
-// concurrently (design §3.8.5 routing rule 4; review r1 F-8): the first 2xx
-// or 409 stale_launch pins OwnerHub and is returned immediately; a 403 is
+// concurrently (design §3.8.5 routing rule 4): the first 2xx or 409
+// stale_launch pins OwnerHub and is returned immediately; a 403 is
 // definitive for that connection (this broker is not the agent's broker
 // there) but does not pin, so other connections are still consulted;
 // agent_launch_unknown from every connection means unknown (returned as a
@@ -238,15 +264,21 @@ func (s *launchSender) sendOnce(ctx context.Context, report *hubclient.AgentLaun
 	}
 
 	var sawUnreachable, sawUnknown bool
-	var last403 *hubclient.AgentLaunchReportResult
+	var lastDefiniteNonPinning *hubclient.AgentLaunchReportResult
 	for i := 0; i < len(targets); i++ {
 		at := <-resultsCh
 		if at.err != nil {
 			sawUnreachable = true
 			continue
 		}
-		if at.result.HTTPStatus == http.StatusForbidden {
-			last403 = at.result
+		if at.result.HTTPStatus == http.StatusForbidden || at.result.HTTPStatus == http.StatusBadRequest || at.result.HTTPStatus == http.StatusUnauthorized {
+			// 403 is definitive for that connection (this broker is not the
+			// agent's broker there) but never pins; 400/401 get the same
+			// treatment so they can never be preferred over a connection
+			// that genuinely owns the launch (design §3.8.2's gate-answer
+			// table does not list 400/401 as a reason to prefer one
+			// connection over another).
+			lastDefiniteNonPinning = at.result
 			continue
 		}
 		if at.result.HTTPStatus == http.StatusNotFound && at.result.Code == hubclient.AgentLaunchReportCodeUnknownLaunch {
@@ -265,8 +297,8 @@ func (s *launchSender) sendOnce(ctx context.Context, report *hubclient.AgentLaun
 	if sawUnknown {
 		return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusNotFound, Code: hubclient.AgentLaunchReportCodeUnknownLaunch}, nil
 	}
-	if last403 != nil {
-		return last403, nil
+	if lastDefiniteNonPinning != nil {
+		return lastDefiniteNonPinning, nil
 	}
 	return nil, errLaunchReportUnreachable
 }
@@ -279,10 +311,23 @@ func jitteredBackoff(min, max time.Duration) time.Duration {
 	return min + time.Duration(rand.Int63n(int64(max-min)))
 }
 
+// errAbortedByKeepalive is sendReportBlocking's signal that a concurrent
+// keepalive answer classified to an abort action while this call was still
+// retrying (design §3.8.2's gate-answer table), so the caller should stop
+// retrying and act on that outcome (launchSender.LastAbortOutcome) instead
+// of whatever this call was waiting for.
+var errAbortedByKeepalive = errors.New("launch report: a keepalive answer ended the launch")
+
 // sendReportBlocking retries sendOnce with a jittered backoff in
-// [minBackoff, maxBackoff) until it gets a definitive answer or ctx is done.
+// [minBackoff, maxBackoff) until it gets a definitive answer, ctx is done, or
+// a keepalive running concurrently already ended the launch.
 func (s *launchSender) sendReportBlocking(ctx context.Context, report *hubclient.AgentLaunchReport, minBackoff, maxBackoff, attemptTimeout time.Duration) (*hubclient.AgentLaunchReportResult, error) {
 	for {
+		select {
+		case <-s.abortCh:
+			return nil, errAbortedByKeepalive
+		default:
+		}
 		result, err := s.sendOnce(ctx, report, attemptTimeout)
 		if err == nil {
 			return result, nil
@@ -296,6 +341,9 @@ func (s *launchSender) sendReportBlocking(ctx context.Context, report *hubclient
 		case <-ctx.Done():
 			timer.Stop()
 			return nil, ctx.Err()
+		case <-s.abortCh:
+			timer.Stop()
+			return nil, errAbortedByKeepalive
 		}
 	}
 }
@@ -311,14 +359,14 @@ func (s *launchSender) SendClaim(ctx context.Context) (*hubclient.AgentLaunchRep
 		State:      hubclient.AgentLaunchReportStateClaim,
 		At:         time.Now(),
 	}
-	return s.sendReportBlocking(ctx, report, time.Second, 10*time.Second, 5*time.Second)
+	return s.sendReportBlocking(ctx, report, reportMinBackoff, reportMaxBackoff, claimAttemptTimeout)
 }
 
 // StartKeepalive starts the per-launch keepalive goroutine (design §3.8.5).
-// Started before the claim even returns (review r1 F-18: B-3 expects the
-// keepalive to keep its cadence "while a claim or checkpoint is blocked on
-// backoff", which requires it running from the start, not only once the
-// claim succeeds). Never blocked by Manager.Start, a blocked claim/
+// Started before the claim even returns: the design's B-3 test case expects
+// the keepalive to keep its cadence "while a claim or checkpoint is blocked
+// on backoff", which requires it running from the start, not only once the
+// claim succeeds. Never blocked by Manager.Start, a blocked claim/
 // checkpoint, or a pending progress post; each attempt times out at 5s; a
 // failed attempt is retried after a 2-5s backoff; the loop exits once a
 // terminal send starts, a keepalive answer aborts, or ctx is done.
@@ -367,8 +415,7 @@ func (s *launchSender) StopKeepalive() {
 // WaitKeepaliveStopped blocks until the keepalive goroutine has exited.
 // Callers stop the loop first (StopKeepalive, markTerminalStarted via
 // SendTerminal, an abort, or ctx being done) and then call this so runLaunch
-// never returns while the keepalive goroutine is still running (review r1
-// F-10).
+// never returns while the keepalive goroutine is still running.
 func (s *launchSender) WaitKeepaliveStopped() {
 	s.keepaliveWG.Wait()
 }
@@ -376,9 +423,9 @@ func (s *launchSender) WaitKeepaliveStopped() {
 // sendKeepaliveOnce sends one keepalive, retrying on an unreachable answer
 // after a 2-5s jittered backoff until it lands, ctx is done, or a terminal
 // send starts. A definitive non-continue answer is classified exactly like a
-// claim/checkpoint answer (design §3.8.2's table applies to keepalives too,
-// review r1 F-5): "completed" is recorded for later terminal handling;an
-// abort action is recorded and wakes KeepaliveAborted.
+// claim/checkpoint answer (design §3.8.2's table applies to keepalives too):
+// "completed" is recorded for later terminal handling; an abort action is
+// recorded and wakes KeepaliveAborted.
 func (s *launchSender) sendKeepaliveOnce(ctx context.Context) {
 	report := &hubclient.AgentLaunchReport{
 		LaunchID:   s.rec.ID,
@@ -391,19 +438,27 @@ func (s *launchSender) sendKeepaliveOnce(ctx context.Context) {
 		if s.isTerminalStarted() {
 			return
 		}
-		result, err := s.sendOnce(ctx, report, 5*time.Second)
+		result, err := s.sendOnce(ctx, report, keepaliveAttemptTimeout)
 		if err == nil {
 			switch action := classifyGateAnswer(result); action {
 			case gateContinue:
 				// nothing to do
 			case gateCompleted:
 				s.recordKeepaliveCompleted()
+			case gateStopNoCleanup:
+				// A 400/401 on a keepalive is not evidence the launch is
+				// over (design §3.8.2's table has no entry for it), so
+				// unlike every other non-continue answer this does not
+				// abort the launch; it is logged and the keepalive carries
+				// on.
+				s.server.agentLifecycleLog.Error("runLaunch: keepalive got a protocol/auth answer; continuing",
+					"agent_id", s.agentID, "launch_id", s.rec.ID, "http_status", result.HTTPStatus)
 			default:
 				s.recordKeepaliveAbort(action, result)
 			}
 			return
 		}
-		timer := time.NewTimer(jitteredBackoff(2*time.Second, 5*time.Second))
+		timer := time.NewTimer(jitteredBackoff(keepaliveMinBackoff, keepaliveMaxBackoff))
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
@@ -421,9 +476,9 @@ func (s *launchSender) sendKeepaliveOnce(ctx context.Context) {
 // terminal's own TTL-bounded context, design §3.8.5: deadline + 10 min, NOT
 // ctx') is done or a definitive answer arrives. It stops the keepalive loop
 // first: "only the terminal's answer decides cleanup" from this point on
-// (design r8-8). step records which generic step (claim/launching) the
+// (design §3.8.5). step records which generic step (claim/launching) the
 // launch was in when it failed (design §3.9's generic claim -> launching ->
-// terminal sequence; review r1 F-11); ignored for a succeeded terminal.
+// terminal sequence); ignored for a succeeded terminal.
 func (s *launchSender) SendTerminal(ctx context.Context, succeeded bool, step, errorCode, message string, agentInfo *hubclient.AgentLaunchReportInfo) (*hubclient.AgentLaunchReportResult, error) {
 	s.markTerminalStarted()
 	state := hubclient.AgentLaunchReportStateFailed
@@ -442,5 +497,5 @@ func (s *launchSender) SendTerminal(ctx context.Context, succeeded bool, step, e
 		Agent:      agentInfo,
 		At:         time.Now(),
 	}
-	return s.sendReportBlocking(ctx, report, time.Second, 10*time.Second, 5*time.Second)
+	return s.sendReportBlocking(ctx, report, reportMinBackoff, reportMaxBackoff, terminalAttemptTimeout)
 }

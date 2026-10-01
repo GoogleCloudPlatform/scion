@@ -1010,10 +1010,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// ProvisionOnly and Reprovision always stay synchronous (design §3.2).
 	// With AsyncLaunch absent, no LaunchID to track the launch by, or a
 	// LaunchTimeoutSeconds too small to leave any budget after the broker's
-	// 20s abort margin (review r1 F-13 — ctx' would already be expired when
-	// the 201 is sent), fall back to the synchronous path rather than accept
-	// a launch that cannot possibly succeed. Behavior is unchanged from here
-	// down for all of these non-conforming cases.
+	// 20s abort margin (ctx' would already be expired when the 201 is sent),
+	// fall back to the synchronous path rather than accept a launch that
+	// cannot possibly succeed. Behavior is unchanged from here down for all
+	// of these non-conforming cases.
 	if req.AsyncLaunch && !req.ProvisionOnly && !req.Reprovision {
 		switch {
 		case req.LaunchID == "":
@@ -1034,8 +1034,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// (design §3.1: "Launch is the GCS workspace download ... plus
 	// Manager.Start, in a goroutine"). This only runs here on paths that fall
 	// through the async gate above (flag absent, ProvisionOnly, Reprovision,
-	// or no LaunchID), so an eligible async create never downloads twice
-	// (review r1 F-3).
+	// no LaunchID, or a too-small LaunchTimeoutSeconds), so an eligible async
+	// create never downloads twice.
 	if req.WorkspaceStoragePath != "" {
 		var attemptMsg, httpMessage string
 		var dlErr error
@@ -1218,8 +1218,8 @@ var errInvalidWorkspaceDir = errors.New("invalid workspace directory")
 // dispatch attempt; httpMessage, the exact user-facing text the synchronous
 // path wrote with RuntimeError before this was extracted (byte-identical,
 // capitalized, no wrapped error — design's "byte-identical to today" for the
-// asyncLaunch-absent path, review r1 F-2); and err, a normal lowercase Go
-// error for the async path's failure report and logging.
+// asyncLaunch-absent path); and err, a normal lowercase Go error for the
+// async path's failure report and logging.
 func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRequest, opts api.StartOptions) (updated api.StartOptions, attemptMsg string, httpMessage string, err error) {
 	if req.WorkspaceStoragePath == "" {
 		return opts, "", "", nil

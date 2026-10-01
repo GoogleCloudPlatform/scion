@@ -426,20 +426,20 @@ func (s *runtimeBrokerService) ReportAgentLaunch(ctx context.Context, brokerID, 
 			return nil, &apiclient.APIError{StatusCode: resp.StatusCode, Code: "no_endpoint", Message: "launch report route not found"}
 		}
 		if resp.StatusCode == http.StatusConflict && body.Code != AgentLaunchReportCodeStaleLaunch {
-			// Review r1 F-19: a 409 the wire contract does not define (its
-			// code is not stale_launch) is not something the sender can
-			// classify by Reason; treat it as retryable rather than guessing.
+			// A 409 the wire contract does not define (its code is not
+			// stale_launch) is not something the sender can classify by
+			// Reason; treat it as retryable rather than guessing.
 			return nil, &apiclient.APIError{StatusCode: resp.StatusCode, Code: "unrecognized_conflict", Message: "409 response had an unrecognized code"}
 		}
 		return &AgentLaunchReportResult{HTTPStatus: resp.StatusCode, Code: body.Code, Reason: body.Reason}, nil
 
 	case http.StatusBadRequest, http.StatusUnauthorized:
-		// Review r1 F-19: these are definitive protocol/auth failures, never
-		// transient like an unreachable Hub or a 5xx -- retrying them would
-		// not help, so the sender must not loop on them like it does for
-		// errLaunchReportUnreachable. Reported as a result (nil error) so
-		// classifyGateAnswer's default case aborts and cleans up instead of
-		// retrying forever.
+		// These are definitive protocol/auth failures, never transient like
+		// an unreachable Hub or a 5xx -- retrying them would not help, so the
+		// sender must not loop on them like it does for
+		// errLaunchReportUnreachable. Reported as a result (nil error), not
+		// an error, so the caller's gate classification sees a definitive
+		// answer rather than treating it as retryable.
 		return &AgentLaunchReportResult{HTTPStatus: resp.StatusCode}, nil
 
 	default:

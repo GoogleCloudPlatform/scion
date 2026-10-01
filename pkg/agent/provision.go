@@ -392,10 +392,17 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	}
 	inlineCfg := opts.InlineConfig
 	if opts.HarnessAuth != "" {
-		if inlineCfg == nil {
-			inlineCfg = &api.ScionConfig{}
+		// Copy rather than mutate opts.InlineConfig in place: it is a
+		// pointer the caller owns (and, for Preflight, goes on to pass
+		// unchanged into Manager.Start), so writing AuthSelectedType
+		// directly into it would leak this function's derived value back
+		// into the caller's config.
+		cfgCopy := api.ScionConfig{}
+		if inlineCfg != nil {
+			cfgCopy = *inlineCfg
 		}
-		inlineCfg.AuthSelectedType = opts.HarnessAuth
+		cfgCopy.AuthSelectedType = opts.HarnessAuth
+		inlineCfg = &cfgCopy
 	}
 	return ctx, inlineCfg
 }

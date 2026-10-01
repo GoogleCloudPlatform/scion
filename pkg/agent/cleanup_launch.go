@@ -36,14 +36,12 @@ type ResourceHandle struct {
 // UIDPreconditionDeleter is an optional capability a runtime.Runtime may
 // implement: delete one named resource only if its current UID still
 // matches the UID recorded when it was created (design §3.8.4), so a delete
-// racing a newer launch's recreate of the same name can never remove the
-// newer launch's resource. P1b-2 adds this to the Kubernetes runtime (for
-// secrets, SecretProviderClasses and pods) and the Docker-family runtimes
-// (by container ID). A runtime that does not implement it falls back to a
-// plain delete-by-name in CleanupLaunch below, which is today's synchronous-
-// create cleanup behavior and therefore safe for this inert phase, where no
-// runtime yet calls OnResourceCreated and handles is always empty in
-// practice.
+// that overlaps a newer launch's recreate of the same name can never remove
+// the newer launch's resource. P1b-2 adds this to the Kubernetes runtime
+// (for secrets, SecretProviderClasses and pods) and the Docker-family
+// runtimes (by container ID). CleanupLaunch skips (and reports an error for)
+// any handle whose runtime does not implement this, rather than deleting it
+// unconditionally by name.
 type UIDPreconditionDeleter interface {
 	DeleteResource(ctx context.Context, handle ResourceHandle) error
 }
@@ -61,13 +59,13 @@ func (m *AgentManager) CleanupLaunch(ctx context.Context, handles []ResourceHand
 	var errs []error
 	for _, h := range handles {
 		if !supportsUIDPrecondition {
-			// Review r1 F-9: a plain Delete(ctx, h.Name) has no UID check,
-			// which is exactly what the precondition exists to prevent (a
-			// stale launch's cleanup deleting a newer launch's same-named
-			// resource), and once a handle can name something other than
-			// the agent itself (a Kubernetes Secret, say), Delete(name)
-			// would wrongly treat that name as an agent/container ID. Skip
-			// the handle instead of guessing.
+			// A plain Delete(ctx, h.Name) has no UID check, which is exactly
+			// what the precondition exists to prevent (a stale launch's
+			// cleanup deleting a newer launch's same-named resource), and
+			// once a handle can name something other than the agent itself
+			// (a Kubernetes Secret, say), Delete(name) would wrongly treat
+			// that name as an agent/container ID. Skip the handle instead of
+			// guessing.
 			slog.Warn("CleanupLaunch: runtime has no UID-precondition delete; skipping handle rather than deleting unconditionally by name",
 				"kind", h.Kind, "namespace", h.Namespace, "name", h.Name)
 			errs = append(errs, fmt.Errorf("cleanup launch resource %s %s/%s: runtime %s does not support UID-precondition delete", h.Kind, h.Namespace, h.Name, m.Runtime.Name()))

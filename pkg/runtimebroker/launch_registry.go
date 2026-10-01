@@ -144,7 +144,7 @@ func (r *launchRegistry) CancelLocal(key launchKey) {
 	if r == nil {
 		// A *Server built directly (e.g. by a test that does not go through
 		// New()) has a nil registry; treat it the same as "no launch held
-		// for this key" rather than panicking (review r1 F-21).
+		// for this key" rather than panicking.
 		return
 	}
 	r.mu.Lock()

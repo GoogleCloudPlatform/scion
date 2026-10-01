@@ -29,31 +29,46 @@ import (
 // share the marker too), but outside agents/, where provisioning and resume
 // probes never look.
 //
+// projectPath is resolved through config.GetResolvedProjectDir first, the
+// same way ProvisionAgent and DeleteAgentFiles resolve their project
+// directory, so the marker lands next to the agents/ directory those
+// functions actually use (the project's .scion dir, or the external
+// project-configs dir for a shared-workspace project) rather than under the
+// unresolved project root.
+//
 // sharedWorkspace mirrors the flag GetAgentDir/SelectAgentsRoot use: for a
 // shared-workspace git project, the agents root (and so the marker root) is
-// the external per-project directory, not a path under projectDir.
-func launchMarkersDir(projectDir string, sharedWorkspace bool) string {
+// the external per-project directory, not a path under the resolved project
+// dir.
+func launchMarkersDir(projectPath string, sharedWorkspace bool) (string, error) {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return "", err
+	}
 	agentsRoot := config.SelectAgentsRoot(projectDir, sharedWorkspace)
-	return filepath.Join(filepath.Dir(agentsRoot), "launch-markers")
+	return filepath.Join(filepath.Dir(agentsRoot), "launch-markers"), nil
 }
 
 // writeLaunchMarker writes launchID as the marker for slug, atomically
 // (write-then-rename, as the broker's dispatch-attempt persistence does in
 // state_store.go), overwriting any previous holder. A newer launch's marker
-// write always wins a race with an older launch that is about to check or
-// delete files, because the check-then-delete window matches the accepted
-// N-7 residual (design §3.8.4).
-func writeLaunchMarker(projectDir string, sharedWorkspace bool, slug, launchID string) error {
-	dir := launchMarkersDir(projectDir, sharedWorkspace)
+// write always wins over an older launch that is about to check or delete
+// files, because the check-then-delete window matches the accepted N-7
+// residual (design §3.8.4).
+func writeLaunchMarker(projectPath string, sharedWorkspace bool, slug, launchID string) error {
+	dir, err := launchMarkersDir(projectPath, sharedWorkspace)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 	path := filepath.Join(dir, slug)
 	// A fixed "<slug>.tmp" name would collide if two brokers (or two
-	// launches racing on the same replica) write the same slug's marker at
-	// once (review r1 F-25); os.CreateTemp gives each writer its own name in
-	// the same directory, so the final os.Rename is still the atomic,
-	// same-filesystem rename the marker's guarantee depends on.
+	// launches writing the same slug's marker on the same replica)
+	// overlapped; os.CreateTemp gives each writer its own name in the same
+	// directory, so the final os.Rename is still the atomic, same-filesystem
+	// rename the marker's guarantee depends on.
 	tmp, err := os.CreateTemp(dir, slug+".*.tmp")
 	if err != nil {
 		return err
@@ -73,10 +88,14 @@ func writeLaunchMarker(projectDir string, sharedWorkspace bool, slug, launchID s
 }
 
 // readLaunchMarker returns the launch ID currently recorded for slug, or ""
-// if there is no marker (e.g. a synchronous create, or one from before T1).
-func readLaunchMarker(projectDir string, sharedWorkspace bool, slug string) string {
-	path := filepath.Join(launchMarkersDir(projectDir, sharedWorkspace), slug)
-	data, err := os.ReadFile(path)
+// if there is no marker (e.g. a synchronous create, one from before T1, or
+// the project path cannot be resolved).
+func readLaunchMarker(projectPath string, sharedWorkspace bool, slug string) string {
+	dir, err := launchMarkersDir(projectPath, sharedWorkspace)
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(dir, slug))
 	if err != nil {
 		return ""
 	}
@@ -88,16 +107,20 @@ func readLaunchMarker(projectDir string, sharedWorkspace bool, slug string) stri
 // is true. A newer launch's marker write, on any replica sharing the
 // storage, makes this false for the older launch, so it keeps the newer
 // launch's files.
-func launchMarkerMatches(projectDir string, sharedWorkspace bool, slug, launchID string) bool {
-	return launchID != "" && readLaunchMarker(projectDir, sharedWorkspace, slug) == launchID
+func launchMarkerMatches(projectPath string, sharedWorkspace bool, slug, launchID string) bool {
+	return launchID != "" && readLaunchMarker(projectPath, sharedWorkspace, slug) == launchID
 }
 
 // removeLaunchMarkerIfMatches deletes slug's marker if it still holds
 // launchID (design §3.8.4: "The launch removes the marker when it ends, if
 // it still holds L"). A newer launch's marker is left untouched.
-func removeLaunchMarkerIfMatches(projectDir string, sharedWorkspace bool, slug, launchID string) {
-	if !launchMarkerMatches(projectDir, sharedWorkspace, slug, launchID) {
+func removeLaunchMarkerIfMatches(projectPath string, sharedWorkspace bool, slug, launchID string) {
+	if !launchMarkerMatches(projectPath, sharedWorkspace, slug, launchID) {
 		return
 	}
-	_ = os.Remove(filepath.Join(launchMarkersDir(projectDir, sharedWorkspace), slug))
+	dir, err := launchMarkersDir(projectPath, sharedWorkspace)
+	if err != nil {
+		return
+	}
+	_ = os.Remove(filepath.Join(dir, slug))
 }

@@ -31,7 +31,7 @@ import (
 // minAsyncLaunchTimeoutSeconds is the smallest LaunchTimeoutSeconds the
 // broker accepts for an async launch: the broker aborts 20s before the
 // deadline (design §3.8.2 step 4), so anything at or below that would leave
-// ctx' already expired before runLaunch's first claim (review r1 F-13).
+// ctx' already expired before runLaunch's first claim.
 const minAsyncLaunchTimeoutSeconds = 20
 
 // beginAsyncLaunch implements design t1-async-create-v11.md §3.8.2 for a
@@ -72,11 +72,12 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 	// own cancellation (the response is about to be written and r's
 	// lifecycle ends), while WithDeadline still bounds the goroutine.
 	//
-	// Derived from ctx (the admission context createAgent built), not
-	// r.Context(): ctx carries the values attachSkillResolver and
+	// Deliberately derived from ctx (the admission context createAgent
+	// built), not r.Context() as design §3.8.2 step 4's text literally
+	// reads: ctx carries the values attachSkillResolver and
 	// withHubAgentDefaults attached after r.Context() was read, which
 	// Manager.Start needs just as much on the async path as on the
-	// synchronous one (review r1 F-4).
+	// synchronous one.
 	deadline := receivedAt.Add(time.Duration(req.LaunchTimeoutSeconds) * time.Second)
 	runCtx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline.Add(-20*time.Second))
 
