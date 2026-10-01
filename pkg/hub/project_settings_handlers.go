@@ -351,10 +351,12 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 //
 // A profile's Type is the settings *runtime key* the profile's `runtime:`
 // field references (cmd/server_broker.go, pkg/runtimebroker/handlers.go build
-// it directly from that map), not a resolved type. This function is exact on
-// a profile named after its runtime (e.g. a profile named "my-cluster" with
-// `runtime: kubernetes` correctly reports Type "kubernetes"). The gap is a
-// custom-named *runtime entry*: `runtimes.gke-prod: {type: kubernetes}`
+// it directly from that map), not a resolved type — but it IS exactly that
+// runtime key, regardless of what the profile itself is named: a profile
+// named "my-cluster" with `runtime: kubernetes` reports Type "kubernetes",
+// correctly, because "kubernetes" is the runtime key, not the profile name
+// (the profile name is never inspected). The gap is a custom-named *runtime
+// entry*: `runtimes.gke-prod: {type: kubernetes}`
 // referenced by `runtime: gke-prod` reports Type "gke-prod" and is missed
 // here (pkg/config/settings_v1.go ResolveRuntime resolves it through
 // V1RuntimeConfig.Type, which this function never sees). The same gap runs in

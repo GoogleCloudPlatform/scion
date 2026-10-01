@@ -55,6 +55,8 @@ interface AgentCreateInternals {
   gcpMetadataMode: string;
   gcpServiceAccountId: string;
   gcpIdentityUserSet: boolean;
+  gcpServiceAccounts: GCPServiceAccountFixture[];
+  loadGCPServiceAccounts: () => Promise<void>;
 }
 
 function stubFetch(): void {
@@ -211,6 +213,51 @@ function gcpIdentityHint(el: MountedEl): string {
     (f) => f.querySelector('label')?.textContent?.trim() === 'GCP Identity'
   );
   return field?.querySelector('.hint')?.textContent?.trim() ?? '';
+}
+
+/** The Service Account <sl-select>, located by its field label (only rendered when mode is "assign"). */
+function gcpServiceAccountSelect(el: MountedEl): Element | null {
+  const fields = Array.from(el.shadowRoot?.querySelectorAll('.form-field') ?? []);
+  const field = fields.find(
+    (f) => f.querySelector('label')?.textContent?.trim() === 'Service Account'
+  );
+  return field?.querySelector('sl-select') ?? null;
+}
+
+interface GCPServiceAccountFixture {
+  id: string;
+  scope: string;
+  scopeId: string;
+  email: string;
+  projectId: string;
+  displayName: string;
+  defaultScopes: string[];
+  verified: boolean;
+  verifiedAt: string | null;
+  createdBy: string;
+}
+
+function makeServiceAccount(id: string): GCPServiceAccountFixture {
+  return {
+    id,
+    scope: 'project',
+    scopeId: 'p1',
+    email: `${id}@example.iam.gserviceaccount.com`,
+    projectId: 'gcp-proj',
+    displayName: '',
+    defaultScopes: [],
+    verified: true,
+    verifiedAt: '2026-01-01T00:00:00Z',
+    createdBy: 'user-1',
+  };
+}
+
+/** Simulates choosing an option in an sl-select (Shoelace is not registered under happy-dom). */
+async function chooseSelect(el: MountedEl, select: Element, value: string): Promise<void> {
+  (select as HTMLElement & { value: string }).value = value;
+  select.dispatchEvent(new Event('sl-change', { bubbles: true, composed: true }));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await el.updateComplete;
 }
 
 describe('Create Agent: block is not offered for a Kubernetes target', () => {
@@ -400,6 +447,59 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(select!.querySelector('sl-option[value="block"]')).toBeNull();
   });
 
+  // PR 2332 review round 3, finding 3a: the untouched hint must name the real
+  // effective identity. Omitting gcp_identity falls through to this
+  // project's own default (not Kubernetes' bare default) when one exists.
+  it('names the project default in the untouched hint when the project has one configured', async () => {
+    stubFetchForKubernetesProjectDefaultBlock();
+    const el = await mountAgentCreate();
+
+    expect(gcpIdentityHint(el)).toContain("this project's own default GCP identity applies");
+    expect(gcpIdentityHint(el)).not.toContain('hub-wide default');
+  });
+
+  it('says the hub-wide or Kubernetes default applies when this project has no default configured', async () => {
+    const el = await mountAgentCreate();
+    const page = internals(el);
+    page.brokers = [
+      {
+        id: 'broker-k8s',
+        name: 'k8s-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-k8s';
+    await el.updateComplete;
+
+    expect(gcpIdentityHint(el)).toContain('hub-wide default');
+    expect(gcpIdentityHint(el)).not.toContain("this project's own default GCP identity applies");
+  });
+
+  it('drops the untouched explanation once the user has made a choice', async () => {
+    const el = await mountAgentCreate();
+    const page = internals(el);
+    page.brokers = [
+      {
+        id: 'broker-k8s',
+        name: 'k8s-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-k8s';
+    await el.updateComplete;
+
+    const select = gcpIdentitySelect(el);
+    await chooseSelect(el, select!, 'passthrough');
+    expect(page.gcpIdentityUserSet).toBe(true);
+
+    const hint = gcpIdentityHint(el);
+    expect(hint).not.toContain('hub-wide default');
+    expect(hint).not.toContain("this project's own default GCP identity applies");
+    expect(hint).toContain('not available for a Kubernetes runtime target');
+  });
+
   it('rejects submit when the mode is block for a known-Kubernetes target, without dispatching a create request', async () => {
     const tracker = stubFetchTrackingCalls();
     const el = await mountAgentCreate();
@@ -532,5 +632,127 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
 
     expect(tracker.bodies).toHaveLength(1);
     expect(tracker.bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
+  });
+
+  // PR 2332 review round 3, finding 5 (mutation W1): every prior test set
+  // gcpIdentityUserSet directly, so a mutant that dropped the assignment in
+  // the mode select's own @sl-change handler survived. This drives the real
+  // picker instead.
+  it('sets gcpIdentityUserSet when the mode select actually changes', async () => {
+    const el = await mountAgentCreate();
+    const page = internals(el);
+    expect(page.gcpIdentityUserSet).toBe(false);
+
+    const select = gcpIdentitySelect(el);
+    expect(select).not.toBeNull();
+    await chooseSelect(el, select!, 'passthrough');
+
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpMetadataMode).toBe('passthrough');
+  });
+
+  // Mutation W2: the SA select's own @sl-change handler.
+  it('sets gcpIdentityUserSet when the service account select actually changes', async () => {
+    const el = await mountAgentCreate();
+    const page = internals(el);
+    page.gcpServiceAccounts = [makeServiceAccount('sa-a'), makeServiceAccount('sa-b')];
+    page.gcpMetadataMode = 'assign';
+    page.gcpIdentityUserSet = false; // the line above is a direct state write in the test, not a user pick
+    await el.updateComplete;
+
+    const saSelect = gcpServiceAccountSelect(el);
+    expect(saSelect).not.toBeNull();
+    await chooseSelect(el, saSelect!, 'sa-b');
+
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpServiceAccountId).toBe('sa-b');
+  });
+
+  // Mutation W14: the reset in loadGCPServiceAccounts. Simulates a project
+  // switch (which re-runs loadGCPServiceAccounts) after the user already
+  // interacted with the picker for the previous project.
+  it('resets gcpIdentityUserSet when loadGCPServiceAccounts recomputes defaults from scratch', async () => {
+    const el = await mountAgentCreate();
+    const page = internals(el);
+    page.gcpIdentityUserSet = true;
+
+    await page.loadGCPServiceAccounts();
+
+    expect(page.gcpIdentityUserSet).toBe(false);
+  });
+
+  // Mutation W24: the explicit normalize call at the end of
+  // loadGCPServiceAccounts. Proves it runs synchronously right after the
+  // await resolves, without needing a further Lit update cycle — this is
+  // what the comment at the call site claims and what a test reading
+  // gcpMetadataMode immediately afterward (no further `await el.updateComplete`)
+  // would otherwise see as stale if the call were removed.
+  it('normalizes the mode immediately when loadGCPServiceAccounts resolves, before the next Lit update cycle', async () => {
+    const el = await mountAgentCreate();
+    const page = internals(el);
+    page.brokers = [
+      {
+        id: 'broker-k8s',
+        name: 'k8s-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-k8s';
+    await el.updateComplete;
+
+    // loadGCPServiceAccounts resets the mode to its own "block" placeholder
+    // internally before this call's synchronous return.
+    await page.loadGCPServiceAccounts();
+
+    expect(page.gcpMetadataMode).not.toBe('block');
+  });
+
+  // PR 2332 review round 3, finding 2: an explicit "Block" pick on one
+  // broker must not survive as an auto-substituted explicit "passthrough"
+  // once the user switches to a Kubernetes broker — that value was never
+  // chosen for the new target.
+  it('clears gcpIdentityUserSet when a broker switch forces the mode away from an explicit "block"', async () => {
+    const tracker = stubFetchCapturingCreateRequests();
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      projectId: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+    page.brokers = [
+      {
+        id: 'broker-docker',
+        name: 'docker-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'docker', available: true }],
+      },
+      {
+        id: 'broker-k8s',
+        name: 'k8s-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-docker';
+    await el.updateComplete;
+
+    const select = gcpIdentitySelect(el);
+    await chooseSelect(el, select!, 'block');
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpMetadataMode).toBe('block');
+
+    // Switch to the Kubernetes broker.
+    page.brokerId = 'broker-k8s';
+    await el.updateComplete;
+
+    expect(page.gcpIdentityUserSet).toBe(false);
+    expect(page.gcpMetadataMode).toBe('passthrough');
+
+    await page.handleSubmit(new Event('submit'));
+    expect(tracker.bodies).toHaveLength(1);
+    expect(tracker.bodies[0]).not.toHaveProperty('gcp_identity');
   });
 });

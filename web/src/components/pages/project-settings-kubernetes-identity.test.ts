@@ -70,6 +70,7 @@ function createFetchHandler(opts?: {
   brokers?: BrokerFixture[];
   settings?: Record<string, unknown>;
   resolvedSettings?: Record<string, unknown>;
+  serviceAccounts?: Array<Record<string, unknown>>;
 }) {
   return (url: string | URL | Request): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
@@ -77,6 +78,15 @@ function createFetchHandler(opts?: {
     if (path.includes('/runtime-brokers')) {
       return Promise.resolve(
         new Response(JSON.stringify({ brokers: opts?.brokers ?? [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    }
+
+    if (path.includes('/gcp-service-accounts')) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ items: opts?.serviceAccounts ?? [] }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         })
@@ -387,14 +397,15 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     expect(fieldHelpText(element)).toContain('Kubernetes');
   });
 
-  // PR 2332 review round 2, finding 6: a hub default of "passthrough" only
-  // takes effect on the hub's own embedded broker; on any other broker
-  // (which every broker here is, by definition, once the project is
-  // confirmed Kubernetes-bound) it falls back to "Block", which the
-  // Kubernetes runtime rejects at dispatch. The existing hint text must warn
-  // about this for a Kubernetes-bound project, not just repeat the generic
-  // "other brokers get Block" note.
-  it('extends the inherited hub-passthrough hint with a Kubernetes rejection warning', async () => {
+  // PR 2332 review round 2, finding 6, corrected in round 3, finding 3b: a
+  // hub default of "passthrough" only takes effect on the hub's own embedded
+  // broker; on any other broker (which every broker here is, by definition,
+  // once the project is confirmed Kubernetes-bound), Phase 1 (ptone/scion
+  // #2328, commit 57eb7d46) leaves the identity UNSET rather than writing an
+  // explicit "block" — the broker then applies its own Kubernetes default
+  // (passthrough). So this is informational, not a rejection warning: the
+  // hint must not claim a rejection that Phase 1 does not produce.
+  it('extends the inherited hub-passthrough hint with the Kubernetes default-applies note', async () => {
     element = await createComponent(
       createFetchHandler({
         brokers: [makeBroker('b1', [{ name: 'default', type: 'kubernetes', available: true }])],
@@ -412,10 +423,11 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     const text = fieldHelpText(element);
     expect(text).toContain('embedded broker');
     expect(text).toContain('Kubernetes');
-    expect(text).toContain('rejects at dispatch');
+    expect(text).toContain('applies its own default automatically');
+    expect(text).not.toContain('rejects');
   });
 
-  it('does not add the Kubernetes warning to the hub-passthrough hint for a non-Kubernetes-bound project', async () => {
+  it('does not add the Kubernetes note to the hub-passthrough hint for a non-Kubernetes-bound project', async () => {
     element = await createComponent(
       createFetchHandler({
         brokers: [makeBroker('b1', [{ name: 'default', type: 'docker', available: true }])],
@@ -430,7 +442,7 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
       })
     );
 
-    expect(fieldHelpText(element)).not.toContain('rejects at dispatch');
+    expect(fieldHelpText(element)).not.toContain('applies its own default automatically');
   });
 
   // A hub default of "assign" with no service account configured falls
@@ -459,5 +471,51 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     const text = fieldHelpText(element);
     expect(text).toContain('no service account is configured');
     expect(text).toContain('rejected at dispatch');
+  });
+
+  // PR 2332 review round 3, finding 5, mutation P9: pins the `!saID &&`
+  // condition the other way — with a configured, resolvable service account,
+  // the normal "agents are assigned" hint must show instead of the
+  // no-SA-configured warning, even for a Kubernetes-bound project.
+  it('shows the normal hub-assign hint when a service account IS configured, for a Kubernetes-bound project', async () => {
+    element = await createComponent(
+      createFetchHandler({
+        brokers: [makeBroker('b1', [{ name: 'default', type: 'kubernetes', available: true }])],
+        serviceAccounts: [
+          {
+            id: 'sa-1',
+            email: 'sa-1@example.iam.gserviceaccount.com',
+            verified: true,
+            scope: 'project',
+            scopeId: 'proj-1',
+            projectId: 'gcp-proj',
+            displayName: '',
+            defaultScopes: [],
+            verifiedAt: '2026-01-01T00:00:00Z',
+            createdBy: 'user-1',
+          },
+        ],
+        resolvedSettings: {
+          'scion.io/default-gcp-identity-mode': {
+            projectSet: false,
+            projectValue: null,
+            hubDefault: 'present',
+            hubValue: 'assign',
+          },
+          'scion.io/default-gcp-identity-service-account-id': {
+            projectSet: false,
+            projectValue: null,
+            hubDefault: 'present',
+            hubValue: 'sa-1',
+          },
+        },
+      })
+    );
+
+    const text = fieldHelpText(element);
+    expect(text).toContain('agents are assigned');
+    expect(text).toContain('sa-1@example.iam.gserviceaccount.com');
+    expect(text).not.toContain('no service account is configured');
+    expect(text).not.toContain('rejected at dispatch');
   });
 });

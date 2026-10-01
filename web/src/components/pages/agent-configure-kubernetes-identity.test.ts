@@ -64,6 +64,7 @@ function makeAgent(overrides: Record<string, unknown> = {}) {
 function createFetchHandler(opts?: {
   agent?: Record<string, unknown>;
   brokerProfiles?: BrokerProfileFixture[];
+  serviceAccounts?: GCPServiceAccountFixture[];
 }) {
   return (url: string | URL | Request): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
@@ -90,7 +91,16 @@ function createFetchHandler(opts?: {
       );
     }
 
-    // Catch-all: settings/public, gcp-service-accounts, etc.
+    if (path.includes('/gcp-service-accounts')) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ items: opts?.serviceAccounts ?? [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    }
+
+    // Catch-all: settings/public, etc.
     return Promise.resolve(
       new Response(JSON.stringify({}), {
         status: 200,
@@ -108,6 +118,7 @@ function createFetchHandler(opts?: {
 function createFetchHandlerCapturingPatch(opts?: {
   agent?: Record<string, unknown>;
   brokerProfiles?: BrokerProfileFixture[];
+  serviceAccounts?: GCPServiceAccountFixture[];
 }): {
   handler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
   patchBodies: Array<Record<string, unknown>>;
@@ -155,21 +166,70 @@ function gcpIdentitySelect(el: HTMLElement): Element | null {
   return el.shadowRoot?.querySelector('#gcp-mode') ?? null;
 }
 
+function gcpServiceAccountSelect(el: HTMLElement): Element | null {
+  return el.shadowRoot?.querySelector('#gcp-sa') ?? null;
+}
+
 function blockOption(el: HTMLElement): Element | null {
   return gcpIdentitySelect(el)?.querySelector('sl-option[value="block"]') ?? null;
 }
 
+/** Whitespace-normalized: Lit template literals preserve literal newlines/indentation verbatim in textContent. */
 function gcpIdentityHelpTextSlot(el: HTMLElement): string {
-  return gcpIdentitySelect(el)?.querySelector('[slot="help-text"]')?.textContent?.trim() ?? '';
+  const raw = gcpIdentitySelect(el)?.querySelector('[slot="help-text"]')?.textContent ?? '';
+  return raw.replace(/\s+/g, ' ').trim();
+}
+
+/** Simulates choosing an option in an sl-select (Shoelace is not registered under happy-dom). */
+async function chooseSelect(
+  el: { updateComplete: Promise<unknown> },
+  select: Element,
+  value: string
+): Promise<void> {
+  (select as HTMLElement & { value: string }).value = value;
+  select.dispatchEvent(new Event('sl-change', { bubbles: true, composed: true }));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await el.updateComplete;
+}
+
+interface GCPServiceAccountFixture {
+  id: string;
+  scope: string;
+  scopeId: string;
+  email: string;
+  projectId: string;
+  displayName: string;
+  defaultScopes: string[];
+  verified: boolean;
+  verifiedAt: string | null;
+  createdBy: string;
+}
+
+function makeServiceAccount(id: string): GCPServiceAccountFixture {
+  return {
+    id,
+    scope: 'project',
+    scopeId: 'proj-1',
+    email: `${id}@example.iam.gserviceaccount.com`,
+    projectId: 'gcp-proj',
+    displayName: '',
+    defaultScopes: [],
+    verified: true,
+    verifiedAt: '2026-01-01T00:00:00Z',
+    createdBy: 'user-1',
+  };
 }
 
 interface AgentConfigureInternals {
   gcpMetadataMode: string;
   gcpServiceAccountId: string;
+  gcpServiceAccounts: GCPServiceAccountFixture[];
   gcpIdentityUserSet: boolean;
+  gcpMetadataModeFromStorage: boolean;
   error: string | null;
   handleSave: () => Promise<void>;
   handleStart: () => Promise<void>;
+  updateComplete: Promise<unknown>;
 }
 
 describe('agent-configure: block is not a NEW choice for a Kubernetes target', () => {
@@ -357,6 +417,12 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     expect(patchBodies[0].gcp_identity).toEqual({ metadata_mode: 'passthrough' });
   });
 
+  // PR 2332 review round 3, finding 4: the omit-when-untouched rule is scoped
+  // to a known-Kubernetes target (matching agent-create.ts) — there is no
+  // passthrough-gate or block-migration concern to avoid on a non-Kubernetes
+  // runtime, so this page must keep sending gcp_identity explicitly there,
+  // exactly as it did before gcpIdentityUserSet existed. (The r2 version of
+  // this test was misnamed: it asserted the opposite of what its name said.)
   it('still sends gcp_identity for a non-Kubernetes target even when untouched', async () => {
     const { handler, patchBodies } = createFetchHandlerCapturingPatch({
       agent: makeAgent({
@@ -371,12 +437,197 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
 
     await page.handleSave();
 
-    // Unchanged from storage, and not a Kubernetes target: gcp_identity is
-    // still omitted (true no-op), which is also correct here — this pins
-    // that the omit-when-untouched rule does not regress a plain resave on a
-    // non-Kubernetes target either.
+    expect(page.error).toBeNull();
+    expect(patchBodies).toHaveLength(1);
+    expect(patchBodies[0].gcp_identity).toEqual({ metadata_mode: 'passthrough' });
+  });
+
+  // PR 2332 review round 3, finding 1 (Major): changing only the service
+  // account was silently dropped on Save — the SA select's own @sl-change
+  // handler never set gcpIdentityUserSet, so buildGCPIdentityPayload treated
+  // the change as untouched and omitted gcp_identity, leaving the agent on
+  // its old service account. This drives the real #gcp-sa picker, the same
+  // way Probe 1 in the review reproduced the regression.
+  it('sends the new service account on Save after changing only the SA picker', async () => {
+    const { handler, patchBodies } = createFetchHandlerCapturingPatch({
+      agent: makeAgent({
+        appliedConfig: {
+          profile: '',
+          gcpIdentity: { metadataMode: 'assign', serviceAccountId: 'sa-a' },
+        },
+      }),
+      brokerProfiles: [{ name: 'default', type: 'docker', available: true }],
+      serviceAccounts: [makeServiceAccount('sa-a'), makeServiceAccount('sa-b')],
+    });
+    element = await createComponent(handler);
+    const page = element as unknown as AgentConfigureInternals;
+
+    expect(page.gcpIdentityUserSet).toBe(false);
+    expect(page.gcpServiceAccountId).toBe('sa-a');
+
+    const saSelect = gcpServiceAccountSelect(element);
+    expect(saSelect).not.toBeNull();
+    await chooseSelect(element as unknown as AgentConfigureInternals, saSelect!, 'sa-b');
+
+    expect(page.gcpIdentityUserSet).toBe(true);
+
+    await page.handleSave();
+
+    expect(page.error).toBeNull();
+    expect(patchBodies).toHaveLength(1);
+    expect(patchBodies[0].gcp_identity).toEqual({
+      metadata_mode: 'assign',
+      service_account_id: 'sa-b',
+    });
+  });
+
+  // Mutation W3: the mode select's own @sl-change handler.
+  it('sets gcpIdentityUserSet when the mode select actually changes', async () => {
+    element = await createComponent(
+      createFetchHandler({
+        brokerProfiles: [{ name: 'default', type: 'docker', available: true }],
+      })
+    );
+    const page = element as unknown as AgentConfigureInternals;
+    expect(page.gcpIdentityUserSet).toBe(false);
+
+    const select = gcpIdentitySelect(element);
+    expect(select).not.toBeNull();
+    await chooseSelect(element as unknown as AgentConfigureInternals, select!, 'passthrough');
+
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpMetadataMode).toBe('passthrough');
+  });
+
+  // Mutation W8: the Start guard dropping `gcpIdentityUserSet &&`. Mirrors
+  // the existing Save resave test, for Start instead.
+  it('resaves a stored "block" unchanged via Start too, without sending gcp_identity', async () => {
+    const { handler, patchBodies } = createFetchHandlerCapturingPatch({
+      agent: makeAgent({
+        appliedConfig: { profile: '', gcpIdentity: { metadataMode: 'block' } },
+      }),
+      brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
+    });
+    element = await createComponent(handler);
+    const page = element as unknown as AgentConfigureInternals;
+
+    await page.handleStart();
+
     expect(page.error).toBeNull();
     expect(patchBodies).toHaveLength(1);
     expect(patchBodies[0]).not.toHaveProperty('gcp_identity');
+  });
+
+  // PR 2332 review round 3, finding 3a, mutation A2: the untouched hint must
+  // name the real effective identity, not overclaim the broker's own default
+  // applies when a stored value (or nothing at all) is actually in effect.
+  describe('untouched hint text names the real effective identity', () => {
+    it('names the stored mode when a real identity is stored', async () => {
+      element = await createComponent(
+        createFetchHandler({
+          agent: makeAgent({
+            appliedConfig: { profile: '', gcpIdentity: { metadataMode: 'passthrough' } },
+          }),
+          brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
+        })
+      );
+
+      const text = gcpIdentityHelpTextSlot(element);
+      expect(text).toContain('current identity is "Passthrough"');
+      expect(text).not.toContain("broker's own Kubernetes default applies automatically");
+    });
+
+    it('says the broker default applies only when nothing is stored at all', async () => {
+      element = await createComponent(
+        createFetchHandler({
+          brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
+        })
+      );
+
+      const text = gcpIdentityHelpTextSlot(element);
+      expect(text).toContain("broker's own Kubernetes default applies automatically");
+      expect(text).not.toContain('current identity is');
+    });
+
+    it('drops the untouched explanation once the user has made a choice', async () => {
+      element = await createComponent(
+        createFetchHandler({
+          brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
+        })
+      );
+      const page = element as unknown as AgentConfigureInternals;
+      const select = gcpIdentitySelect(element);
+      await chooseSelect(element as unknown as AgentConfigureInternals, select!, 'passthrough');
+      expect(page.gcpIdentityUserSet).toBe(true);
+
+      const text = gcpIdentityHelpTextSlot(element);
+      expect(text).not.toContain("broker's own Kubernetes default applies automatically");
+      expect(text).not.toContain('current identity is');
+    });
+  });
+
+  // PR 2332 review round 3, finding 2 (configure side): the target broker
+  // loads asynchronously, so a user can pick "Block" while it is still
+  // unknown (Block is enabled until targetRuntimeIsKubernetesOnly is
+  // confirmed). That explicit pick must not survive as an auto-substituted
+  // explicit "passthrough" once the broker resolves as Kubernetes-only.
+  it('clears gcpIdentityUserSet when the broker resolves as Kubernetes-only after an explicit "block" pick', async () => {
+    let resolveBroker: ((value: Response) => void) | null = null;
+    const brokerPromise = new Promise<Response>((resolve) => {
+      resolveBroker = resolve;
+    });
+    const handler = (url: string | URL | Request): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (path.match(/\/api\/v1\/runtime-brokers\/[^/]+$/)) {
+        return brokerPromise;
+      }
+      return createFetchHandler({ agent: makeAgent() })(url);
+    };
+
+    vi.stubGlobal('fetch', vi.fn(handler));
+    try {
+      Object.defineProperty(window.location, 'pathname', {
+        value: '/agents/agent-1/configure',
+        writable: true,
+        configurable: true,
+      });
+    } catch {
+      Object.defineProperty(window, 'location', {
+        value: { ...window.location, pathname: '/agents/agent-1/configure' },
+        writable: true,
+        configurable: true,
+      });
+    }
+    element = new ScionPageAgentConfigure();
+    document.body.appendChild(element);
+    await (element as unknown as AgentConfigureInternals).updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await (element as unknown as AgentConfigureInternals).updateComplete;
+
+    const page = element as unknown as AgentConfigureInternals;
+    // The broker fetch is still pending: the target is unknown, so Block is
+    // enabled and pickable.
+    const select = gcpIdentitySelect(element);
+    expect(select!.hasAttribute('disabled')).toBe(false);
+    await chooseSelect(page, select!, 'block');
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpMetadataMode).toBe('block');
+
+    // Now the broker resolves as Kubernetes-only.
+    resolveBroker!(
+      new Response(
+        JSON.stringify({
+          id: 'broker-1',
+          name: 'broker-1',
+          profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await page.updateComplete;
+
+    expect(page.gcpIdentityUserSet).toBe(false);
+    expect(page.gcpMetadataMode).toBe('passthrough');
   });
 });

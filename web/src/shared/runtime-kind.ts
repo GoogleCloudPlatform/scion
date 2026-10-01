@@ -30,9 +30,12 @@
  * ptone/scion#2338) classifies by this same string set against the resolved
  * runtime's Name(), so the two cannot drift on which spellings count.
  *
- * This is exact on a profile named after its runtime (e.g. a profile named
- * "my-cluster" with `runtime: kubernetes` correctly reports type
- * "kubernetes"). The gap is a custom-named *runtime entry* —
+ * This matches the profile's runtime type exactly — profile names (e.g.
+ * "my-cluster") are never inspected, only the runtime key the profile's
+ * `runtime:` field references: a profile named "my-cluster" with
+ * `runtime: kubernetes` correctly reports type "kubernetes", because
+ * "kubernetes" is the runtime key, not the profile's own name. The gap is a
+ * custom-named *runtime entry* —
  * `runtimes.gke-prod: {type: kubernetes}` referenced by `runtime: gke-prod`
  * reports type "gke-prod" and is missed here. The same gap runs in reverse: a
  * runtime key spelled "kubernetes"/"k8s"/"remote" with an explicit

@@ -1439,10 +1439,22 @@ export class ScionPageProjectSettings extends LitElement {
     }
     if (mode.hubValue === 'passthrough') {
       if (this.projectIsKubernetesOnly) {
+        // This rung only ever reaches passthrough for a local container
+        // runtime (docker/podman) on the hub's own embedded broker
+        // (hubDefaultPassthroughAllowed + hubDefaultRuntimeAllowed,
+        // pkg/hub/default_gcp_identity.go, ptone/scion#2186) — Kubernetes is
+        // never in that allowed set, embedded broker or not. When denied,
+        // Phase 1 (ptone/scion#2328, commit 57eb7d46) leaves the identity
+        // unset rather than writing an explicit "block", so the broker
+        // applies its own Kubernetes default (passthrough). For a confirmed
+        // Kubernetes-bound project that denial is unconditional, so this is
+        // informational, not a rejection warning (PR 2332 review round 3,
+        // finding 3b; corrected again post-#2186 before this round's push).
         return html`<span class="field-help"
-          >Inherited from hub: passthrough only takes effect on the hub's own embedded broker; on
-          any other broker it falls back to "Block", which this project's Kubernetes runtime rejects
-          at dispatch. Set a project-level default of Passthrough or Assign Service Account.</span
+          >Inherited from hub: passthrough only reaches a local container runtime (docker/podman)
+          on the hub's own embedded broker — Kubernetes is never eligible, so here no identity is
+          explicitly set, and this project's Kubernetes runtime applies its own default
+          automatically.</span
         >`;
       }
       return html`<span class="field-help"

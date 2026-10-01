@@ -106,8 +106,14 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private gcpServiceAccountId = '';
   /**
    * True once the user has explicitly interacted with the GCP Identity
-   * picker (either select) this session. Reset whenever defaults are
-   * recomputed from scratch (loadGCPServiceAccounts, on project change).
+   * picker (either select) this session. Reset to false in three cases:
+   * defaults are recomputed from scratch (loadGCPServiceAccounts, e.g. on a
+   * project change); and normalizeGcpModeForTarget rewrites an explicit
+   * "block" choice to "passthrough" because the target became known-
+   * Kubernetes out from under it (e.g. the user picked Block on a docker
+   * broker, then switched brokers) — that rewritten value is not something
+   * the user chose for the new target, so it must not be treated as a user
+   * choice either (PR 2332 review round 3, finding 2).
    *
    * Gates whether gcp_identity is sent at all on submit: on a known-Kubernetes
    * target with no explicit user choice, the request omits gcp_identity
@@ -118,7 +124,16 @@ export class ScionPageAgentCreate extends LitElement {
    * host service account), which a request that never asked for passthrough
    * should not have to pass (PR 2332 review round 2, finding 1).
    */
-  private gcpIdentityUserSet = false;
+  @state() private gcpIdentityUserSet = false;
+  /**
+   * Whether this project has its own default GCP identity configured
+   * (any mode — the specific mode doesn't matter here, only its presence).
+   * Set in loadGCPServiceAccounts. Used only to pick the accurate wording for
+   * the Kubernetes hint when the picker is untouched: with a project default
+   * present, omitting gcp_identity resolves to *that* default, not to
+   * Kubernetes' own broker-level default (PR 2332 review round 3, finding 3).
+   */
+  @state() private hasProjectGCPIdentityDefault = false;
 
   // ── Additional Options > Prompts Tab ────────────────────────────────
   @state() private systemPrompt = '';
@@ -176,6 +191,40 @@ export class ScionPageAgentCreate extends LitElement {
     if (!this.brokerId) return false;
     const broker = this.brokers.find((b) => b.id === this.brokerId);
     return isTargetKubernetesOnly(broker, this.profile);
+  }
+
+  /**
+   * The Kubernetes-specific portion of the GCP Identity hint, naming the
+   * actual effective identity rather than overclaiming the broker's own
+   * default applies — that is only true when nothing is configured at any
+   * level (PR 2332 review round 3, finding 3). Three cases:
+   *  - the user explicitly picked a mode here: just name that Block isn't an
+   *    option, no further explanation needed;
+   *  - untouched, but this project has its own default GCP identity
+   *    configured: omitting gcp_identity resolves to *that* default, not to
+   *    Kubernetes' own default — say so;
+   *  - untouched, and this project has no default: the create request omits
+   *    gcp_identity, and what resolves depends on the hub-wide default (which
+   *    this page has no visibility into) or, if nothing is configured
+   *    anywhere, Kubernetes' own default (passthrough, Phase 1).
+   */
+  private get kubernetesIdentityHintSuffix(): string {
+    if (this.gcpIdentityUserSet) {
+      return 'Block is not available for a Kubernetes runtime target.';
+    }
+    if (this.hasProjectGCPIdentityDefault) {
+      return (
+        'Block is not available for a Kubernetes runtime target. No explicit identity has been ' +
+        "chosen here, so this project's own default GCP identity applies instead; choosing " +
+        'Passthrough or Assign here sends that choice explicitly instead of the project default.'
+      );
+    }
+    return (
+      'Block is not available for a Kubernetes runtime target. No explicit identity has been ' +
+      'chosen, and this project has no default configured, so the hub-wide default — or, if ' +
+      "none is configured there either, Kubernetes' own default — applies automatically; " +
+      'choosing Passthrough or Assign here sends that choice explicitly instead.'
+    );
   }
 
   /** The currently selected project */
@@ -466,14 +515,25 @@ export class ScionPageAgentCreate extends LitElement {
    * Corrects the *displayed* gcpMetadataMode away from "block" when the
    * current broker/profile target is reliably known to be Kubernetes (see
    * targetRuntimeIsKubernetesOnly) — purely so the select has a matching,
-   * rendered option. It does not mark the choice as user-made
-   * (gcpIdentityUserSet is untouched here), so an untouched target still
-   * submits with no explicit gcp_identity at all. Idempotent and safe to call
-   * from anywhere that just changed the broker, profile, or mode.
+   * rendered option.
+   *
+   * Also clears gcpIdentityUserSet when it rewrites the mode. Without this, a
+   * user who explicitly picked "Block" on a non-Kubernetes broker and then
+   * switched to a Kubernetes one would keep gcpIdentityUserSet true while the
+   * mode was silently rewritten to "passthrough" out from under them — submit
+   * would then send that auto-substituted passthrough as if the user had
+   * chosen it, through the Hub's passthrough ownership gate, for a value they
+   * never picked for this target (PR 2332 review round 3, finding 2). Clearing
+   * the flag puts the target back in the same "no explicit choice" state as
+   * if the user had never touched the picker, so an untouched target still
+   * submits with no explicit gcp_identity at all, and the hint reflects that.
+   * Idempotent and safe to call from anywhere that just changed the broker,
+   * profile, or mode.
    */
   private normalizeGcpModeForTarget(): void {
     if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) {
       this.gcpMetadataMode = 'passthrough';
+      this.gcpIdentityUserSet = false;
     }
   }
 
@@ -777,6 +837,7 @@ export class ScionPageAgentCreate extends LitElement {
     // Recomputing defaults from scratch (initial load, or a project change):
     // whatever this method assigns below is a default, not a user choice.
     this.gcpIdentityUserSet = false;
+    this.hasProjectGCPIdentityDefault = false;
 
     if (this.projectId) {
       try {
@@ -794,6 +855,7 @@ export class ScionPageAgentCreate extends LitElement {
       // Apply project default GCP identity if configured
       const settings = await this.fetchProjectSettings(this.projectId);
       if (settings?.defaultGCPIdentityMode) {
+        this.hasProjectGCPIdentityDefault = true;
         const mode = settings.defaultGCPIdentityMode as 'block' | 'passthrough' | 'assign';
         if (mode === 'assign' && settings.defaultGCPIdentityServiceAccountID) {
           const verified = this.verifiedGCPServiceAccounts;
@@ -810,11 +872,15 @@ export class ScionPageAgentCreate extends LitElement {
       }
     }
 
-    // The assignments above are this method's own default and a project
-    // default read from settings — neither changes brokerId/profile/brokers,
-    // so willUpdate's reactive check would not otherwise re-run before this
-    // value is read elsewhere (submit, or the picker's rendered options).
-    // Call it explicitly (ptone/scion#2332 review round 1, finding 2).
+    // gcpMetadataMode is in willUpdate's trigger list, so Lit's next update
+    // cycle re-runs this check regardless. This explicit call is not closing
+    // a gap in that trigger list — it exists because loadGCPServiceAccounts
+    // is async: any code that runs synchronously right after
+    // `await this.loadGCPServiceAccounts()` resolves (for example a submit
+    // handler, or a direct read of gcpMetadataMode/targetRuntimeIsKubernetesOnly)
+    // would otherwise observe the stale, un-normalized value from before Lit
+    // has had a chance to process the pending update (ptone/scion#2332
+    // review round 1, finding 2; wording corrected in round 3, finding 7).
     this.normalizeGcpModeForTarget();
   }
 
@@ -1789,11 +1855,7 @@ export class ScionPageAgentCreate extends LitElement {
             : this.gcpMetadataMode === 'assign'
               ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
               : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
-          ${this.targetRuntimeIsKubernetesOnly
-            ? this.gcpIdentityUserSet
-              ? ' Block is not available for a Kubernetes runtime target.'
-              : " Block is not available for a Kubernetes runtime target. No explicit identity has been chosen, so the broker's own Kubernetes default applies automatically; choosing Passthrough or Assign here sends that choice explicitly instead."
-            : ''}
+          ${this.targetRuntimeIsKubernetesOnly ? ` ${this.kubernetesIdentityHintSuffix}` : ''}
         </div>
       </div>
 
