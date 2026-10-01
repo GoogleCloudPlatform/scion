@@ -91,16 +91,21 @@ What's left after both carve-outs, and what this change implements:
   those now pass vs. which still hit the agent-store/schedule-store
   thresholds owned by #2470/#2476).
 
-## Follow-ups / declined scope (reported to tz-em, not fixed here)
+## Decided: no change at the other predicate sites (tz-lead ruling, 2026-10-01)
 
-- Several other entadapter stores bind unconverted `time.Time` thresholds
-  into `LT`/`LTE`/`GT`/`GTE` predicates (`brokerdispatch_store.go`,
-  `mutation_audit_store.go`, `decision_audit_store.go`,
-  `notification_store.go`, `credential_store.go`, `composite.go`'s
-  `DeletedAtLT`, `chat_link_store.go`, `github_resolution_store.go`). None
-  of these is named in `impl-issues.md` task #2 or design §2.1.2, and the
-  DSN option already makes their binds canonical on SQLite (verified by
-  the threshold-fixture test above using the same mechanism). Flagging for
-  tz-em/tz-lead in case a later issue should give them the same
-  defense-in-depth `.UTC()` treatment the design gives the two owned
-  stores.
+Several other entadapter stores bind unconverted `time.Time` thresholds
+into `LT`/`LTE`/`GT`/`GTE` predicates (`brokerdispatch_store.go`,
+`mutation_audit_store.go`, `decision_audit_store.go`,
+`notification_store.go`, `credential_store.go`, `composite.go`'s
+`DeletedAtLT`, `chat_link_store.go`, `github_resolution_store.go`). I
+flagged these to tz-em; tz-lead's ruling is that no `.UTC()` is needed at
+these sites: range-predicate binds are correct without it on both
+backends — SQLite canonicalises every bound `time.Time` through the DSN
+`_timezone=UTC` option added by this PR (design §2.1.2; verified by
+`TestOpenSQLite_ThresholdBindMatchesCanonicalCount`), and Postgres
+`timestamptz` compares instants regardless of the bound value's
+`Location`. The predicate `.UTC()` calls in `design.md` are
+defense-in-depth for the two named stores only, not a general
+requirement. This is recorded as a decision (see the PR's "Decided: no
+change" section) so task #5's `make time-literals` gate treats these
+sites as already correct.
