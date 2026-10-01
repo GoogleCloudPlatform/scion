@@ -885,6 +885,103 @@ func TestLoadEffectiveSettings_WarnOnIgnoredSettingsFile(t *testing.T) {
 	})
 }
 
+// TestLoadVersionedSettings_AutoExposePortsEnvDoesNotBreakDecode is the
+// regression test for https://github.com/ptone/scion/issues/2447
+// ("runtimebroker: project runtime settings silently ignored when a
+// colliding SCION_* env var is set"). SCION_AUTO_EXPOSE_PORTS and
+// SCION_AUTO_EXPOSE_PORTS_LIST are variables the hub sets inside agent
+// containers (consumed only by
+// sciontool's auto-expose scanner); they are never settings overrides. Left
+// mapped, they land on the bare key "auto_expose_ports", which collides
+// with the struct-typed AutoExposePorts field and used to make koanf's
+// Unmarshal fail outright for every LoadVersionedSettings/LoadEffectiveSettings
+// caller whose own process happened to have one of them set — not just
+// resolveManagerForOpts. Before the fix, LoadVersionedSettings below returns
+// an error; after it, decoding succeeds and file + real env overrides both
+// still apply.
+func TestLoadVersionedSettings_AutoExposePortsEnvDoesNotBreakDecode(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+	settingsYAML := `schema_version: "1"
+active_profile: file-profile
+`
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	t.Run("colliding vars set, no real override: file value wins", func(t *testing.T) {
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS", "true")
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS_LIST", "8000,8080,3000")
+
+		vs, err := LoadVersionedSettings(projectDir)
+		require.NoError(t, err, "SCION_AUTO_EXPOSE_PORTS/_LIST must never break LoadVersionedSettings decoding")
+		assert.Equal(t, "file-profile", vs.ActiveProfile)
+	})
+
+	t.Run("colliding vars set alongside a real override: override still applies", func(t *testing.T) {
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS", "true")
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS_LIST", "8000,8080,3000")
+		t.Setenv("SCION_ACTIVE_PROFILE", "env-profile")
+
+		vs, err := LoadVersionedSettings(projectDir)
+		require.NoError(t, err)
+		assert.Equal(t, "env-profile", vs.ActiveProfile, "SCION_ACTIVE_PROFILE must still override the file value")
+	})
+}
+
+// TestLoadEffectiveSettings_AutoExposePortsEnvDoesNotBreakDecode exercises
+// the same regression through LoadEffectiveSettings (the caller
+// resolveManagerForOpts actually uses), covering both the versioned and
+// legacy settings-file branches.
+func TestLoadEffectiveSettings_AutoExposePortsEnvDoesNotBreakDecode(t *testing.T) {
+	t.Run("versioned settings file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS", "true")
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS_LIST", "8000,8080,3000")
+
+		projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+		require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+		settingsYAML := `schema_version: "1"
+active_profile: file-profile
+`
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+		vs, _, err := LoadEffectiveSettings(projectDir)
+		require.NoError(t, err, "SCION_AUTO_EXPOSE_PORTS/_LIST must never break LoadEffectiveSettings decoding")
+		assert.Equal(t, "file-profile", vs.ActiveProfile)
+	})
+
+	// "legacy settings file" is a guard, not a regression test: the legacy
+	// Settings struct has no auto_expose_ports field, so this branch never
+	// failed to decode even before the env key mapper excluded these two
+	// variables. It still passes with that exclusion reverted.
+	t.Run("legacy settings file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS", "true")
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS_LIST", "8000,8080,3000")
+
+		projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+		require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+		settingsYAML := `active_profile: legacy-file-profile
+harnesses:
+  gemini:
+    image: example.com/gemini:latest
+    user: scion
+`
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+		vs, _, err := LoadEffectiveSettings(projectDir)
+		require.NoError(t, err, "SCION_AUTO_EXPOSE_PORTS/_LIST must never break the legacy LoadEffectiveSettings branch")
+		assert.Equal(t, "legacy-file-profile", vs.ActiveProfile)
+	})
+}
+
 // --- Default settings compatibility tests ---
 
 func TestGetDefaultSettingsData_ProducesSameEffectiveDefaults(t *testing.T) {
@@ -1039,6 +1136,8 @@ func TestVersionedEnvKeyMapper(t *testing.T) {
 		{"SCION_CLI_INTERACTIVE_DISABLED", "cli.interactive_disabled"},
 		{"SCION_SERVER_ENV", "server.env"},
 		{"SCION_SERVER_LOG_LEVEL", "server.log_level"},
+		{"SCION_AUTO_EXPOSE_PORTS", ""},
+		{"SCION_AUTO_EXPOSE_PORTS_LIST", ""},
 	}
 
 	for _, tt := range tests {

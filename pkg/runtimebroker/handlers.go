@@ -3336,9 +3336,16 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 	}
 
 	// Load settings to check if the profile/active-profile specifies a
-	// different runtime than the broker's auto-detected default.
+	// different runtime than the broker's auto-detected default. Any
+	// decode error is logged instead of being swallowed: resolution falls
+	// back to the broker's default runtime either way, but a malformed
+	// settings file should leave a trace.
 	projectDir, _ := config.GetResolvedProjectDir(opts.ProjectPath)
-	vs, _, _ := config.LoadEffectiveSettings(projectDir)
+	vs, _, err := config.LoadEffectiveSettings(projectDir)
+	if err != nil {
+		s.agentLifecycleLog.Warn("failed to load project settings for runtime resolution; using broker default runtime",
+			"projectDir", projectDir, "error", err)
+	}
 	if vs == nil {
 		return s.manager, s.runtime.Name()
 	}
