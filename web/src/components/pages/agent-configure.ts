@@ -63,6 +63,14 @@ interface ScionConfigPayload {
   telemetry?: { enabled?: boolean };
 }
 
+/** True when both env-keyed maps have exactly the same keys and values. */
+function envMapsEqual(a: Record<string, string>, b: Record<string, string>): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((k) => a[k] === b[k]);
+}
+
 interface AppliedConfig {
   image?: string;
   model?: string;
@@ -107,6 +115,24 @@ export class ScionPageAgentConfigure extends LitElement {
   @state() private autoExposePortsMode = 'allowlist';
   @state() private autoExposePortsList = '';
   @state() private autoExposePortsInterval = '3s';
+
+  // Snapshots of the values above as populateForm last loaded them (from the
+  // live, derived config), so buildConfig can tell "the user changed this
+  // control" from "this is just what was already there". Both telemetryEnabled
+  // and the auto-expose fields are synthesized from global defaults when the
+  // live config doesn't set them (see populateForm), so they are almost never
+  // literally absent -- sending them unconditionally on every Save/Start
+  // would record an edit that never happened (ptone/scion#2493 R1-1).
+  private loadedTelemetryEnabled = false;
+  private loadedAutoExposePortsEnabled = false;
+  private loadedAutoExposePortsMode = 'allowlist';
+  private loadedAutoExposePortsList = '';
+  private loadedAutoExposePortsInterval = '3s';
+  // Snapshot of this.envEntries as populateForm last loaded it (shallow
+  // copies, so later edits to this.envEntries can't retroactively change
+  // what "loaded" means). Lets buildConfig tell whether the user edited the
+  // custom env rows at all -- see the Env section of buildConfig.
+  private loadedEnvEntries: EnvEntry[] = [];
 
   // Form fields — Task & Prompts
   @state() private task = '';
@@ -489,6 +515,15 @@ export class ScionPageAgentConfigure extends LitElement {
     this.autoExposePortsList = ic?.env?.SCION_AUTO_EXPOSE_PORTS_LIST || '';
     this.autoExposePortsInterval = ic?.env?.SCION_AUTO_EXPOSE_INTERVAL || '3s';
 
+    // Snapshot what was just loaded, so buildConfig can later tell an actual
+    // edit to these controls apart from their synthesized starting value
+    // (ptone/scion#2493 R1-1).
+    this.loadedTelemetryEnabled = this.telemetryEnabled;
+    this.loadedAutoExposePortsEnabled = this.autoExposePortsEnabled;
+    this.loadedAutoExposePortsMode = this.autoExposePortsMode;
+    this.loadedAutoExposePortsList = this.autoExposePortsList;
+    this.loadedAutoExposePortsInterval = this.autoExposePortsInterval;
+
     // Task & Prompts
     this.task = ac?.task || ic?.task || '';
     this.systemPrompt = ic?.system_prompt || '';
@@ -515,6 +550,7 @@ export class ScionPageAgentConfigure extends LitElement {
     this.envEntries = Object.entries(env)
       .filter(([key]) => !autoExposeEnvKeys.has(key))
       .map(([key, value]) => ({ key, value }));
+    this.loadedEnvEntries = this.envEntries.map((e) => ({ ...e }));
 
     // Detect required keys that are empty (from env gathering)
     this.requiredEnvKeys = this.envEntries.filter((e) => e.key && !e.value).map((e) => e.key);
@@ -582,30 +618,71 @@ export class ScionPageAgentConfigure extends LitElement {
       if (this.disk) config.resources.disk = this.disk;
     }
 
-    // Env
+    // Env. Built in two parts: the user-editable rows (env), and the
+    // auto-expose controls, which are written as plain env vars (matching
+    // agent-create) but owned by dedicated UI controls rather than the
+    // generic env-row editor.
     const env: Record<string, string> = {};
     for (const entry of this.envEntries) {
       if (entry.key) {
         env[entry.key] = entry.value;
       }
     }
-
-    // Auto-expose ports (written as env vars, matching agent-create)
-    env.SCION_AUTO_EXPOSE_PORTS = this.autoExposePortsEnabled ? 'true' : 'false';
-    if (this.autoExposePortsEnabled) {
-      env.SCION_AUTO_EXPOSE_MODE = this.autoExposePortsMode;
-      if (this.autoExposePortsList) {
-        env.SCION_AUTO_EXPOSE_PORTS_LIST = this.autoExposePortsList;
-      }
-      env.SCION_AUTO_EXPOSE_INTERVAL = this.autoExposePortsInterval || '3s';
+    const loadedEnvMap: Record<string, string> = {};
+    for (const entry of this.loadedEnvEntries) {
+      if (entry.key) loadedEnvMap[entry.key] = entry.value;
     }
+    const customEnvChanged = !envMapsEqual(env, loadedEnvMap);
 
-    if (Object.keys(env).length > 0) {
+    // Both the auto-expose toggle and its sub-fields are synthesized from a
+    // global default whenever the live config doesn't set them explicitly,
+    // so whether to send `config.env` AT ALL is gated on whether the user
+    // changed a custom row OR one of these controls (ptone/scion#2493
+    // R1-1) -- sending it unconditionally would record a change that never
+    // happened: it would both freeze the auto-expose defaults into
+    // CreateInputs as if the user had typed them, and -- because
+    // InlineConfig.Env is replaced wholesale -- reach the live Env too on a
+    // mere Start, without a Save ever happening.
+    //
+    // Once something in env IS going to be sent, though, the auto-expose
+    // keys are always included at their CURRENT value (even when that value
+    // is unchanged from what was loaded): the hub's per-key env diff
+    // (recordExplicitEdits) treats a key present in the live env but absent
+    // from the request as the user having removed it, so omitting an
+    // unchanged auto-expose key here --- while still sending the envelope
+    // because some OTHER key changed --- would wipe it from CreateInputs.
+    // Re-sending it at its already-current value is a no-op for that diff
+    // (same key, same value is neither an addition nor a removal), so this
+    // costs nothing when it truly hasn't changed.
+    const autoExposeChanged =
+      this.autoExposePortsEnabled !== this.loadedAutoExposePortsEnabled ||
+      (this.autoExposePortsEnabled &&
+        (this.autoExposePortsMode !== this.loadedAutoExposePortsMode ||
+          this.autoExposePortsList !== this.loadedAutoExposePortsList ||
+          this.autoExposePortsInterval !== this.loadedAutoExposePortsInterval));
+
+    if (customEnvChanged || autoExposeChanged) {
+      env.SCION_AUTO_EXPOSE_PORTS = this.autoExposePortsEnabled ? 'true' : 'false';
+      if (this.autoExposePortsEnabled) {
+        env.SCION_AUTO_EXPOSE_MODE = this.autoExposePortsMode;
+        if (this.autoExposePortsList) {
+          env.SCION_AUTO_EXPOSE_PORTS_LIST = this.autoExposePortsList;
+        }
+        env.SCION_AUTO_EXPOSE_INTERVAL = this.autoExposePortsInterval || '3s';
+      }
       config.env = env;
     }
 
-    // Telemetry
-    if (!this.isUnsupported(caps?.telemetry.enabled)) {
+    // Telemetry — same reasoning as auto-expose above: telemetryEnabled is
+    // synthesized from a global default when the live config has no
+    // explicit telemetry, so only send it when the user actually toggled
+    // it. Sending {enabled: X} unconditionally would overwrite the live
+    // hub-stamped telemetry config (Cloud/Hub/filters) with a bare
+    // {enabled} object at reincarnate time.
+    if (
+      !this.isUnsupported(caps?.telemetry.enabled) &&
+      this.telemetryEnabled !== this.loadedTelemetryEnabled
+    ) {
       config.telemetry = { enabled: this.telemetryEnabled };
     }
 
