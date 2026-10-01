@@ -178,4 +178,86 @@ describe('W3 seed epoch', () => {
 
     expect(sm.getAgent('a1')?.phase).toBe('running');
   });
+
+  it('B2 (round 1 review): a delta for an ID not yet in state during an epoch survives the seed (the normal first-drain case)', () => {
+    // setScope clears state.agents, so every SSE delta that arrives during
+    // the drain that follows is for an ID not yet known — this is the
+    // common case W3's original "SSE delta during a drain" test did not
+    // actually cover (it emitted "created" first, which made the ID known
+    // before the status delta).
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+
+    const token = sm.beginSeedEpoch();
+    emit(sm, 'agent.a1.status', { phase: 'error' }); // a1 is still unknown to state.agents
+
+    sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'running' } as Agent], { token });
+
+    expect(sm.getAgent('a1')?.phase).toBe('error');
+  });
+
+  it('B2: the pending entry is consumed — a later created event does not re-apply it', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+
+    const token = sm.beginSeedEpoch();
+    emit(sm, 'agent.a1.status', { phase: 'error' });
+    sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'running' } as Agent], { token });
+    expect(sm.getAgent('a1')?.phase).toBe('error'); // applied once, as above
+
+    // If the hub still sends the "created" event after this, it must not
+    // re-apply the same buffered delta on top of whatever the create says.
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    expect(sm.getAgent('a1')?.phase).toBe('running');
+  });
+
+  it('B2: an unknown-ID delta recorded mid-epoch still goes through sticky-activity/detail merge semantics at seed time', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+
+    const token = sm.beginSeedEpoch();
+    // "working" would normally overwrite activity, but is suppressed when
+    // the base it merges against has a sticky activity — exactly the rule
+    // mergeAgentDelta shares with handleAgentEvent's known-agent path.
+    emit(sm, 'agent.a1.status', { activity: 'working' });
+
+    sm.seedAgents(
+      [{ id: 'a1', name: 'A1', phase: 'running', activity: 'waiting_for_input' } as Agent],
+      { token }
+    );
+
+    expect(sm.getAgent('a1')?.activity).toBe('waiting_for_input');
+  });
+
+  it('N2 (round 1 review): seedAgents ends the epoch itself — a second call with the same token is a no-op', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+
+    const token = sm.beginSeedEpoch();
+    sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'running' } as Agent], { token });
+
+    // The epoch is already closed; a second seed with the same token must
+    // not apply (the token no longer names an open epoch).
+    sm.seedAgents([{ id: 'a2', name: 'A2', phase: 'running' } as Agent], { token });
+
+    expect(sm.getAgent('a1')?.phase).toBe('running');
+    expect(sm.getAgent('a2')).toBeUndefined();
+  });
+
+  it('N1 (round 1 review): a status delta for a tombstoned ID is dropped, not buffered — a later seed with that epoch does not see it', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    emit(sm, 'agent.a1.deleted', {});
+
+    const token = sm.beginSeedEpoch();
+    emit(sm, 'agent.a1.status', { phase: 'error' }); // must be dropped outright (N1)
+
+    // Even ignoring the tombstone-skip in seedAgents itself, there must be
+    // no recorded delta to reapply — the ID was never buffered or recorded.
+    sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'running' } as Agent], { token });
+
+    expect(sm.getAgent('a1')).toBeUndefined();
+  });
 });

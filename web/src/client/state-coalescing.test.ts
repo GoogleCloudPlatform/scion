@@ -59,7 +59,7 @@ function mulberry32(seed: number): () => number {
 }
 
 type FuzzEvent =
-  | { kind: 'created'; id: string; phase: string; name: string }
+  | { kind: 'created'; id: string; phase: string; name: string; capabilityActions?: string[] }
   | {
       kind: 'status';
       id: string;
@@ -84,7 +84,11 @@ function genEvents(count: number, seed: number): FuzzEvent[] {
     const id = pick(IDS);
     const roll = rand();
     if (roll < 0.15) {
-      events.push({ kind: 'created', id, phase: pick(PHASES), name: `Agent ${id}` });
+      const ev: FuzzEvent = { kind: 'created', id, phase: pick(PHASES), name: `Agent ${id}` };
+      // B3 (round 1 review): fuzz capability preservation under the
+      // equality skip, not just the two hand-seeded IDs.
+      if (rand() < 0.3) ev.capabilityActions = ['stop', 'restart'];
+      events.push(ev);
     } else if (roll < 0.25) {
       events.push({ kind: 'deleted', id });
     } else if (roll < 0.35) {
@@ -108,7 +112,11 @@ function genEvents(count: number, seed: number): FuzzEvent[] {
 function fuzzEventToDelta(ev: FuzzEvent): Partial<Agent> {
   switch (ev.kind) {
     case 'created':
-      return { phase: ev.phase, name: ev.name } as Partial<Agent>;
+      return {
+        phase: ev.phase,
+        name: ev.name,
+        ...(ev.capabilityActions ? { _capabilities: { actions: ev.capabilityActions } } : {}),
+      } as Partial<Agent>;
     case 'status': {
       const delta: Partial<Agent> = {};
       if (ev.phase !== undefined) delta.phase = ev.phase as Agent['phase'];
@@ -133,11 +141,14 @@ function fuzzEventToDelta(ev: FuzzEvent): Partial<Agent> {
 function referenceApply(events: FuzzEvent[]): Map<string, Agent> {
   const agents = new Map<string, Agent>();
   const pending = new Map<string, Partial<Agent>>();
+  // Mirrors state.deletedAgentIds: never cleared per-ID, only by setScope.
+  const deletedIds = new Set<string>();
 
   for (const ev of events) {
     if (ev.kind === 'deleted') {
       agents.delete(ev.id);
       pending.delete(ev.id);
+      deletedIds.add(ev.id);
       continue;
     }
     if (ev.kind === 'ports') {
@@ -151,6 +162,10 @@ function referenceApply(events: FuzzEvent[]): Map<string, Agent> {
     const existing = agents.get(ev.id);
     const isCreated = ev.kind === 'created';
     if (!existing && !isCreated) {
+      // N1 (round 1 review): a status/ports delta for an ID already known
+      // to be deleted (and not yet recreated) is dropped outright, not
+      // buffered.
+      if (deletedIds.has(ev.id)) continue;
       const delta = fuzzEventToDelta(ev);
       const prev = pending.get(ev.id);
       pending.set(ev.id, prev ? { ...prev, ...delta } : delta);
@@ -215,9 +230,12 @@ afterEach(() => {
 /** Apply a fuzz event to a live StateManager via the SSE update path. */
 function applyEvent(sm: StateManager, ev: FuzzEvent): void {
   switch (ev.kind) {
-    case 'created':
-      emit(sm, `agent.${ev.id}.created`, { phase: ev.phase, name: ev.name });
+    case 'created': {
+      const data: Record<string, unknown> = { phase: ev.phase, name: ev.name };
+      if (ev.capabilityActions) data._capabilities = { actions: ev.capabilityActions };
+      emit(sm, `agent.${ev.id}.created`, data);
       break;
+    }
     case 'deleted':
       emit(sm, `agent.${ev.id}.deleted`, {});
       break;
@@ -265,38 +283,140 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     }
   });
 
-  it('every changed ID appears in upserted, deleted or unknown, and reports at most one notify per flush', () => {
+  it('B3 (round 1 review): 10k-event fuzz with interleaved rAF/timeout flush points, verified at every flush', () => {
+    // The previous version of this test applied all 10,000 events and then
+    // flushed once, which made "at most one notify per flush" trivially
+    // true (there was only one flush) and never exercised the rAF path or
+    // an intermediate flush's coverage. This version flushes many times
+    // during the run, alternately via the captured rAF callback and via the
+    // 100ms fallback, and checks properties (a)-(d) at every flush.
     const events = genEvents(10_000, 1234567);
+    const flushPick = mulberry32(2468);
+    const batchPick = mulberry32(13579);
+
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
 
+    // Seed capability-bearing agents before the fuzzed stream runs, so the
+    // equality skip's capability-preservation path is exercised by fuzzed
+    // status deltas that omit _capabilities, not just by construction.
+    emit(sm, 'agent.cap-1.created', {
+      phase: 'running',
+      name: 'Cap1',
+      _capabilities: { actions: ['stop'] },
+    });
+    emit(sm, 'agent.cap-2.created', {
+      phase: 'running',
+      name: 'Cap2',
+      _capabilities: { actions: ['stop'] },
+    });
+    vi.advanceTimersByTime(100); // flush the seed so it isn't counted below
+    rafCallbacks.length = 0;
+
     const changedSpy = vi.fn<(e: Event) => void>();
+    const updatedSpy = vi.fn();
     sm.addEventListener('agents-changed', changedSpy as EventListener);
+    sm.addEventListener('agents-updated', updatedSpy);
 
-    for (const ev of events) {
-      applyEvent(sm, ev);
+    let prevSnapshot = new Map<string, Agent>(sm.getAgents().map((a) => [a.id, a]));
+    let flushCount = 0;
+
+    const verifyFlush = (): void => {
+      const before = prevSnapshot;
+
+      // Trigger exactly one flush: whichever mechanism is due is already
+      // pending (scheduleFlush always arms both), so either fires it.
+      if (flushPick() < 0.5) {
+        const cb = rafCallbacks.shift();
+        expect(cb).toBeDefined();
+        cb?.(0);
+      } else {
+        vi.advanceTimersByTime(100);
+      }
+      flushCount++;
+
+      // (a) exactly one of each notify for this flush.
+      expect(changedSpy).toHaveBeenCalledTimes(flushCount);
+      expect(updatedSpy).toHaveBeenCalledTimes(flushCount);
+
+      const detail = (
+        changedSpy.mock.calls[flushCount - 1]?.[0] as CustomEvent<{ data: AgentsChangedDetail }>
+      ).detail.data;
+      const reported = new Set([...detail.upserted, ...detail.deleted, ...detail.unknown.keys()]);
+
+      const after = new Map(sm.getAgents().map((a) => [a.id, a]));
+      const allIds = new Set([...before.keys(), ...after.keys()]);
+
+      for (const id of allIds) {
+        const wasPresent = before.has(id);
+        const isPresent = after.has(id);
+        const refChanged = wasPresent && isPresent && before.get(id) !== after.get(id);
+        const wasDeleted = wasPresent && !isPresent;
+        // (b) every ID whose reference changed or that was deleted this
+        // flush window must be reported.
+        if (refChanged || wasDeleted) {
+          expect(reported.has(id)).toBe(true);
+        } else if (!reported.has(id)) {
+          // (c) every ID NOT reported keeps the same reference (or absence).
+          expect(after.get(id)).toBe(before.get(id));
+        }
+      }
+
+      // (d) after this flush, advancing the OTHER mechanism fires nothing
+      // further — no double flush between rAF and the 100ms fallback.
+      vi.advanceTimersByTime(100);
+      const leftoverRaf = rafCallbacks.shift();
+      leftoverRaf?.(0);
+      expect(changedSpy).toHaveBeenCalledTimes(flushCount);
+      expect(updatedSpy).toHaveBeenCalledTimes(flushCount);
+
+      prevSnapshot = after;
+    };
+
+    let i = 0;
+    while (i < events.length) {
+      const batchSize = 1 + Math.floor(batchPick() * 8);
+      for (let b = 0; b < batchSize && i < events.length; b++, i++) {
+        applyEvent(sm, events[i] as FuzzEvent);
+      }
+      // Only flush if something was actually dirtied by this batch — an
+      // all-no-op batch (e.g. every event targeting a just-tombstoned ID)
+      // schedules nothing.
+      if (rafCallbacks.length > 0) {
+        verifyFlush();
+      }
     }
+    // Drain whatever the final batch scheduled.
+    if (rafCallbacks.length > 0) {
+      verifyFlush();
+    }
+
+    expect(flushCount).toBeGreaterThan(50); // sanity: genuinely interleaved, not one giant flush
+  }, 30_000); // thousands of interleaved flush points; the default 5s test timeout is too tight here
+
+  it('B3 (round 1 review): setScope discards a pending dirty set — no stale agents-changed fires in the new generation', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
     vi.advanceTimersByTime(100);
+    rafCallbacks.length = 0; // drop the already-fired seed flush's stale rAF handle
 
-    expect(changedSpy).toHaveBeenCalledTimes(1);
-    const detail = (changedSpy.mock.calls[0]?.[0] as CustomEvent<{ data: AgentsChangedDetail }>)
-      .detail.data;
+    const changedSpy = vi.fn();
+    sm.addEventListener('agents-changed', changedSpy);
 
-    const finalIds = new Set(sm.getAgents().map((a) => a.id));
-    const knownEver = new Set<string>();
-    for (const ev of events) {
-      if (ev.kind === 'created') knownEver.add(ev.id);
-    }
-    const reportedIds = new Set([...detail.upserted, ...detail.deleted, ...detail.unknown.keys()]);
+    emit(sm, 'agent.a1.status', { phase: 'stopped' }); // dirties a1, arms a flush
+    expect(rafCallbacks.length).toBe(1); // a flush is pending
 
-    // Every ID that ended up known, or that was ever created (even if later
-    // deleted), must have been reported by this single flush.
-    for (const id of finalIds) {
-      expect(reportedIds.has(id)).toBe(true);
-    }
-    for (const id of knownEver) {
-      expect(reportedIds.has(id)).toBe(true);
-    }
+    const genBefore = sm.scopeGeneration;
+    sm.setScope({ type: 'brokers-list' }); // actual scope change
+    expect(sm.scopeGeneration).toBe(genBefore + 1);
+
+    // The pending flush must not fire for the old generation's dirty set,
+    // whichever mechanism something still tries to use to trigger it.
+    vi.advanceTimersByTime(1000);
+    const leftover = rafCallbacks.shift();
+    leftover?.(0);
+    expect(changedSpy).not.toHaveBeenCalled();
   });
 
   it('unchanged agents stay === across a flush that does not touch them', () => {
@@ -346,6 +466,121 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     vi.advanceTimersByTime(100);
 
     expect(sm.getAgent('a1')?.detail).toEqual({ toolName: 'python' });
+  });
+
+  it('N4 (round 1 review): a byte-identical ports replay (fresh array, same values) is a true no-op', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    vi.advanceTimersByTime(100);
+
+    const port = { port: 8080, exposedAt: '2026-01-01T00:00:00Z', exposedBy: 'u1' };
+    emit(sm, 'agent.a1.ports', { ports: [port] });
+    vi.advanceTimersByTime(100);
+    const before = sm.getAgent('a1');
+
+    const updatedSpy = vi.fn();
+    sm.addEventListener('agents-updated', updatedSpy);
+    // A fresh array, but every field is identical by value.
+    emit(sm, 'agent.a1.ports', { ports: [{ ...port }] });
+
+    vi.advanceTimersByTime(1000);
+    expect(updatedSpy).not.toHaveBeenCalled();
+    expect(sm.getAgent('a1')).toBe(before);
+  });
+
+  it('N4: a genuine ports change (different value) still dirties and replaces the object', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    vi.advanceTimersByTime(100);
+    emit(sm, 'agent.a1.ports', { ports: [{ port: 8080, exposedAt: 't', exposedBy: 'u1' }] });
+    vi.advanceTimersByTime(100);
+    const before = sm.getAgent('a1');
+
+    emit(sm, 'agent.a1.ports', { ports: [{ port: 9090, exposedAt: 't', exposedBy: 'u1' }] });
+    vi.advanceTimersByTime(100);
+
+    expect(sm.getAgent('a1')).not.toBe(before);
+    expect(sm.getAgent('a1')?.exposedPorts).toEqual([
+      { port: 9090, exposedAt: 't', exposedBy: 'u1' },
+    ]);
+  });
+
+  it('FYI (round 1 review): a created event after a delete in the same flush is upserted, not left in deleted', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    vi.advanceTimersByTime(100);
+
+    const changedSpy = vi.fn<(e: Event) => void>();
+    sm.addEventListener('agents-changed', changedSpy as EventListener);
+
+    emit(sm, 'agent.a1.deleted', {});
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' }); // fresher than the delete
+    vi.advanceTimersByTime(100);
+
+    const detail = (changedSpy.mock.calls[0]?.[0] as CustomEvent<{ data: AgentsChangedDetail }>)
+      .detail.data;
+    expect(detail.upserted).toContain('a1');
+    expect(detail.deleted).not.toContain('a1');
+    expect(sm.getAgent('a1')).toBeDefined();
+  });
+});
+
+describe('W2 N1 (round 1 review): tombstoned IDs are dropped outright, never buffered as unknown', () => {
+  it('a status delta after a delete is dropped: no buffer, no dirty.unknown, no flush', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    vi.advanceTimersByTime(100);
+
+    emit(sm, 'agent.a1.deleted', {});
+    vi.advanceTimersByTime(100); // flush the delete itself before observing the dropped delta
+    rafCallbacks.length = 0; // drop the delete flush's own stale rAF handle
+
+    const updatedSpy = vi.fn();
+    sm.addEventListener('agents-updated', updatedSpy);
+    emit(sm, 'agent.a1.status', { phase: 'error' });
+
+    // No flush was scheduled at all for the dropped delta.
+    expect(rafCallbacks.length).toBe(0);
+    vi.advanceTimersByTime(1000);
+    expect(updatedSpy).not.toHaveBeenCalled();
+    expect(sm.getAgent('a1')).toBeUndefined();
+  });
+
+  it('a status delta after a delete never resurfaces in a later created event (not buffered)', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    vi.advanceTimersByTime(100);
+    emit(sm, 'agent.a1.deleted', {});
+    emit(sm, 'agent.a1.status', { phase: 'error' }); // dropped, not buffered
+
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    vi.advanceTimersByTime(100);
+
+    expect(sm.getAgent('a1')?.phase).toBe('running'); // not 'error'
+  });
+
+  it('a status delta after a delete never reports the ID as both deleted and unknown in one flush', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    vi.advanceTimersByTime(100);
+
+    const changedSpy = vi.fn<(e: Event) => void>();
+    sm.addEventListener('agents-changed', changedSpy as EventListener);
+
+    emit(sm, 'agent.a1.deleted', {});
+    emit(sm, 'agent.a1.status', { phase: 'stopped' });
+    vi.advanceTimersByTime(100);
+
+    const detail = (changedSpy.mock.calls[0]?.[0] as CustomEvent<{ data: AgentsChangedDetail }>)
+      .detail.data;
+    expect(detail.deleted).toContain('a1');
+    expect(detail.unknown.has('a1')).toBe(false);
   });
 });
 
@@ -533,6 +768,42 @@ describe('W2 sseConnected(generation)', () => {
     const promise = sm.sseConnected(gen);
     const assertion = expect(promise).rejects.toThrow();
     sm.setScope({ type: 'brokers-list' });
+    await assertion;
+  });
+
+  it('B1 (round 1 review): does not resolve at once for the new generation right after setScope, even though the previous generation was connected', async () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    sm.sseClientInstance.dispatchEvent(new CustomEvent('connected')); // gen N connects
+
+    sm.setScope({ type: 'project', projectId: 'p1' }); // -> gen N+1; no connected yet
+    const genNPlus1 = sm.scopeGeneration;
+
+    let resolved = false;
+    void sm.sseConnected(genNPlus1).then(() => {
+      resolved = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    // Must still be pending: sse-client.ts's connect() tears the old
+    // connection down without a `disconnected` event, so `state.connected`
+    // alone would wrongly read as "still connected" here.
+    expect(resolved).toBe(false);
+
+    sm.sseClientInstance.dispatchEvent(new CustomEvent('connected')); // gen N+1 connects
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('N3 (round 1 review): disconnect() rejects every pending waiter instead of leaving it hanging', async () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    const gen = sm.scopeGeneration;
+
+    const promise = sm.sseConnected(gen);
+    const assertion = expect(promise).rejects.toThrow();
+    sm.disconnect();
     await assertion;
   });
 });

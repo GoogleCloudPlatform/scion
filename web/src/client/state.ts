@@ -34,8 +34,16 @@ const STICKY_ACTIVITIES = new Set(['waiting_for_input', 'completed', 'limits_exc
 
 /**
  * Two agent objects are shallow-equal iff every field matches by reference,
- * except `detail`, which is freshly reconstructed on every merge and so is
- * compared by value instead (§7).
+ * except `detail` and `exposedPorts`, which are freshly reconstructed on
+ * every merge and so are compared by value instead (§7).
+ *
+ * Every other array/object field (`labels`, `_capabilities`,
+ * `appliedConfig`, `ancestry`, ...) is still reference-compared: a delta
+ * that replaces one of those with a new-but-identical value is a false
+ * negative here (treated as changed when it did not need to be), never a
+ * false positive (a real change is never mistaken for a no-op), since
+ * `state.agents` always stores freshly-built objects, never mutates one in
+ * place.
  */
 function agentsShallowEqual(a: Agent, b: Agent): boolean {
   const aKeys = Object.keys(a);
@@ -49,9 +57,24 @@ function agentsShallowEqual(a: Agent, b: Agent): boolean {
       if (!agentDetailEqual(a.detail, b.detail)) return false;
       continue;
     }
+    if (key === 'exposedPorts') {
+      if (!exposedPortsEqual(a.exposedPorts, b.exposedPorts)) return false;
+      continue;
+    }
     if (ar[key] !== br[key]) {
       return false;
     }
+  }
+  return true;
+}
+
+/** Shallow value comparison for a flat, scalar-only object. */
+function shallowObjectEqual<T extends object>(a: T, b: T): boolean {
+  const aKeys = Object.keys(a) as (keyof T)[];
+  const bKeys = Object.keys(b) as (keyof T)[];
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    if (a[key] !== b[key]) return false;
   }
   return true;
 }
@@ -60,11 +83,24 @@ function agentsShallowEqual(a: Agent, b: Agent): boolean {
 function agentDetailEqual(a: AgentDetail | undefined, b: AgentDetail | undefined): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
-  const aKeys = Object.keys(a) as (keyof AgentDetail)[];
-  const bKeys = Object.keys(b) as (keyof AgentDetail)[];
-  if (aKeys.length !== bKeys.length) return false;
-  for (const key of aKeys) {
-    if (a[key] !== b[key]) return false;
+  return shallowObjectEqual(a, b);
+}
+
+/**
+ * Value comparison for `ExposedPort[]` (round 1 review N4): a ports SSE
+ * event always builds a fresh array (`portsData.ports ?? []`), so comparing
+ * by reference never matched, and every ports event dirtied and replaced
+ * the agent object even when the port list was byte-for-byte identical.
+ */
+function exposedPortsEqual(a: ExposedPort[] | undefined, b: ExposedPort[] | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const ai = a[i];
+    const bi = b[i];
+    if (ai === undefined || bi === undefined) return ai === bi;
+    if (!shallowObjectEqual(ai, bi)) return false;
   }
   return true;
 }
@@ -213,6 +249,17 @@ export class StateManager extends EventTarget {
   /** Whether a `disconnected` has been seen since the last `connected` in this generation (§7 N4). */
   private sawDisconnectThisGeneration = false;
 
+  /**
+   * The scope generation that is actually live, or `null` if none is
+   * (round 1 review B1). `state.connected` alone is not enough: `setScope`
+   * → `SSEClient.connect()` → `disconnect()` (sse-client.ts:326-346) closes
+   * the old connection without dispatching `disconnected`, so
+   * `state.connected` stays `true` from the previous scope's connection
+   * until the new one's `connected` fires. `sseConnected` must not resolve
+   * during that gap.
+   */
+  private connectedGeneration: number | null = null;
+
   private sseConnectWaiters: Array<{
     generation: number;
     resolve: () => void;
@@ -258,6 +305,7 @@ export class StateManager extends EventTarget {
 
     this.sseClient.addEventListener('connected', () => {
       this.state.connected = true;
+      this.connectedGeneration = this.generation;
       this.resolveSseConnectWaiters();
       // agents-resync (§7 N4): one per outage, even though `connected` can
       // fire twice per connection (onopen, then the server's own event) and
@@ -273,6 +321,7 @@ export class StateManager extends EventTarget {
 
     this.sseClient.addEventListener('disconnected', () => {
       this.state.connected = false;
+      this.connectedGeneration = null;
       this.sawDisconnectThisGeneration = true;
       this.notify('disconnected');
     });
@@ -375,6 +424,11 @@ export class StateManager extends EventTarget {
     this.completeFlag = null;
     this.generation++;
     this.sawDisconnectThisGeneration = false;
+    // B1 (round 1 review): the previous connection's `connected` is stale
+    // the instant scope changes — `sseClient.connect()` below tears it down
+    // without a `disconnected` event, so both flags must be reset by hand.
+    this.state.connected = false;
+    this.connectedGeneration = null;
     this.rejectStaleSseConnectWaiters();
 
     const subjects = this.subjectsForScope(scope);
@@ -622,6 +676,16 @@ export class StateManager extends EventTarget {
 
     const existing = this.state.agents.get(agentId);
     if (!existing && eventType !== 'created') {
+      // N1 (round 1 review): a status delta racing a delete for the same ID
+      // (the hub can publish both concurrently) must not resurrect a
+      // tombstoned ID as "unknown". Drop it outright: no buffer, no
+      // dirty.unknown, no flush. Without this, one `agents-changed` could
+      // report the same ID in both `deleted` and `unknown`, and a P1c member
+      // index reading `unknown` as "something new happened off-page" would
+      // count a phantom agent.
+      if (this.state.deletedAgentIds.has(agentId)) {
+        return;
+      }
       // Agent not yet in state. Buffer the delta so it can be applied when
       // the "created" event arrives (a status update, e.g. clone error, can
       // arrive before "created" due to concurrent SSE publishing), and
@@ -629,6 +693,11 @@ export class StateManager extends EventTarget {
       const delta = data as Partial<Agent>;
       this.bufferAgentDelta(agentId, delta);
       this.recordUnknownDirty(agentId, delta);
+      // B2 (round 1 review): also record it into any open seed epoch. A
+      // REST snapshot seeded mid-epoch for this same ID must not clobber
+      // this delta — see seedAgents, which applies it through
+      // mergeAgentDelta once the snapshot gives it a base to merge against.
+      this.recordSeedEpochDelta(agentId, delta);
       this.scheduleFlush();
       return;
     }
@@ -637,14 +706,61 @@ export class StateManager extends EventTarget {
     // For "created" events, apply any buffered deltas that arrived early.
     // The buffered delta is applied AFTER the created snapshot so that
     // status updates (like phase=error) take precedence.
-    let delta = data as Partial<Agent>;
+    let rawDelta = data as Partial<Agent>;
     if (eventType === 'created') {
       const pending = this.pendingAgentDeltas.get(agentId);
       if (pending) {
-        delta = { ...delta, ...pending };
+        rawDelta = { ...rawDelta, ...pending };
       }
       this.clearPendingAgentDelta(agentId);
     }
+
+    const { updated, finalizedDelta } = this.mergeAgentDelta(base, rawDelta, agentId);
+
+    // §7: a merge that changes nothing (by value; `detail`/`exposedPorts`
+    // compared field-by-field) is a no-op — no mutation, no dirty entry, no
+    // flush. A "created" event still signals agent-created below even when
+    // its content happens to match what state already holds.
+    const changed = !existing || !agentsShallowEqual(existing, updated);
+    if (changed) {
+      this.state.agents.set(agentId, updated);
+      this.recordSeedEpochDelta(agentId, finalizedDelta);
+      this.dirty.upserted.add(agentId);
+      this.dirty.unknown.delete(agentId);
+      // FYI (round 1 review): a `created` for an ID whose `deleted` arrived
+      // earlier in the same flush window must not report it as still
+      // deleted — the create is fresher. IDs are UUIDs, so a real reuse is
+      // not reachable in practice; this only matters within one coalescing
+      // window.
+      this.dirty.deleted.delete(agentId);
+    }
+    if (eventType === 'created') {
+      // A legitimate SSE creation for this ID. Signalled separately from
+      // agents-changed so consumers that suppress re-adding a
+      // server-omitted agent (see chat.ts loop guard) know the suppression
+      // no longer applies to this ID.
+      this.pendingCreatedIds.add(agentId);
+    }
+    if (changed || eventType === 'created') {
+      this.scheduleFlush();
+    }
+  }
+
+  /**
+   * Merge a delta into a base `Agent`: sticky-activity preservation, detail
+   * field promotion, and capability preservation when the delta omits them
+   * (§7). Shared by `handleAgentEvent`'s created/known-agent path and by
+   * `seedAgents`' seed-epoch reapplication (B2, round 1 review), so the two
+   * cannot drift out of sync. Returns both the merged `Agent` and the
+   * finalized delta (post sticky/detail processing) so callers can record
+   * the same thing that was actually applied — e.g. into a seed epoch.
+   */
+  private mergeAgentDelta(
+    base: Agent,
+    rawDelta: Partial<Agent>,
+    agentId: string
+  ): { updated: Agent; finalizedDelta: Partial<Agent> } {
+    const delta: Partial<Agent> = { ...rawDelta };
 
     // Preserve sticky activities: if the incoming activity is working/empty
     // but the existing activity is sticky, keep the existing value.
@@ -680,28 +796,7 @@ export class StateManager extends EventTarget {
     if (!delta._capabilities && base._capabilities) {
       updated._capabilities = base._capabilities;
     }
-
-    // §7: a merge that changes nothing (by value; `detail` is compared
-    // field-by-field) is a no-op — no mutation, no dirty entry, no flush.
-    // A "created" event still signals agent-created below even when its
-    // content happens to match what state already holds.
-    const changed = !existing || !agentsShallowEqual(existing, updated);
-    if (changed) {
-      this.state.agents.set(agentId, updated);
-      this.recordSeedEpochDelta(agentId, delta);
-      this.dirty.upserted.add(agentId);
-      this.dirty.unknown.delete(agentId);
-    }
-    if (eventType === 'created') {
-      // A legitimate SSE creation for this ID. Signalled separately from
-      // agents-changed so consumers that suppress re-adding a
-      // server-omitted agent (see chat.ts loop guard) know the suppression
-      // no longer applies to this ID.
-      this.pendingCreatedIds.add(agentId);
-    }
-    if (changed || eventType === 'created') {
-      this.scheduleFlush();
-    }
+    return { updated, finalizedDelta: delta };
   }
 
   /** Buffer a delta for an agent not yet known to state, refreshing its 30s TTL (§7). */
@@ -871,12 +966,30 @@ export class StateManager extends EventTarget {
    * notifications — the calling component already holds the data from its
    * own fetch.
    *
-   * `token`, from `beginSeedEpoch`, re-applies the merged deltas recorded
-   * for each ID while the epoch was open, so a delta that landed after this
-   * REST snapshot was taken is not clobbered by it (§7, §8). A token
-   * invalidated by a scope change (or never opened, or already ended) makes
-   * this call a complete no-op: the snapshot may belong to a scope state no
-   * longer holds.
+   * `token`, from `beginSeedEpoch`, re-applies the deltas recorded for each
+   * ID while the epoch was open, so a delta that landed after this REST
+   * snapshot was taken is not clobbered by it (§7, §8). A recorded delta is
+   * applied through the same `mergeAgentDelta` helper `handleAgentEvent`
+   * uses — sticky activity, detail promotion, capability preservation —
+   * treating this REST snapshot as the base. That covers a delta recorded
+   * while the ID was already known (a straight re-merge, idempotent since
+   * detail promotion just recomputes the same fields and sticky-activity
+   * re-checks the same invariant) **and** a delta recorded while the ID was
+   * still unknown to `state.agents` (B2, round 1 review): that delta never
+   * had a base to merge against before, and this snapshot is the first one
+   * it gets, the same relationship a `created` event has to its own
+   * buffered `pendingAgentDeltas` entry. Once applied, the ID's
+   * `pendingAgentDeltas` entry (if any) is cleared, so a `created` event
+   * that still arrives later does not re-apply the same delta a second
+   * time. A token invalidated by a scope change (or never opened, or
+   * already ended) makes this call a complete no-op: the snapshot may
+   * belong to a scope state no longer holds.
+   *
+   * A token is single-use: this call ends the epoch itself (N2, round 1
+   * review) once every agent is seeded, so a caller's own `endSeedEpoch`
+   * afterward (per the §8 pseudocode) is a harmless no-op. Do not call
+   * `seedAgents` more than once with the same token expecting the epoch to
+   * still be open.
    *
    * `partial: true` merges each object into the existing one instead of
    * replacing it, so a compact-view seed cannot strip full fields a fuller
@@ -904,17 +1017,32 @@ export class StateManager extends EventTarget {
       }
       const recorded = recordedDeltas?.get(agent.id);
       if (recorded) {
-        toStore = { ...toStore, ...recorded, id: agent.id } as Agent;
+        toStore = this.mergeAgentDelta(toStore, recorded, agent.id).updated;
+        // Consumed: a later "created" for this ID must not re-apply the
+        // same buffered delta a second time.
+        this.clearPendingAgentDelta(agent.id);
       }
       this.state.agents.set(agent.id, toStore);
+    }
+
+    if (token !== undefined) {
+      this.endSeedEpoch(token);
     }
   }
 
   /**
-   * Start recording per-ID merged deltas applied while a REST fetch is in
-   * flight, so `seedAgents` can re-apply anything fresher than the response
-   * it is about to seed (§7, §8). Returns a token to pass to `seedAgents`
-   * and `endSeedEpoch`.
+   * Start recording per-ID deltas applied while a REST fetch is in flight,
+   * so `seedAgents` can re-apply anything fresher than the response it is
+   * about to seed (§7, §8). Returns a token to pass to `seedAgents` and
+   * `endSeedEpoch`.
+   *
+   * `seedAgents` ends the epoch itself once called with this token (N2,
+   * round 1 review). But a drain that aborts or fails before calling
+   * `seedAgents` at all (a picker change, a fetch error) never reaches
+   * that — callers MUST call `endSeedEpoch(token)` in a `finally` (or
+   * equivalent) on every path, not only the success path, or the epoch
+   * leaks: every later delta for the rest of the page lifetime keeps
+   * getting recorded into it for nothing.
    */
   beginSeedEpoch(): SeedEpochToken {
     const token: SeedEpochToken = Symbol('seed-epoch');
@@ -924,7 +1052,9 @@ export class StateManager extends EventTarget {
 
   /**
    * Close a seed epoch. Idempotent, and a no-op for a token already
-   * invalidated by a scope change.
+   * invalidated by a scope change or already ended (including by
+   * `seedAgents` itself). Call this in a `finally` around whatever the
+   * epoch guards (see `beginSeedEpoch`).
    */
   endSeedEpoch(token: SeedEpochToken): void {
     this.seedEpochs.delete(token);
@@ -933,6 +1063,11 @@ export class StateManager extends EventTarget {
   /**
    * Mark that state holds the complete dashboard-scope membership. Upgrades
    * `compact` to `full`; never downgrades `full` to `compact` (§6.3).
+   *
+   * `compact` means only membership (and whatever fields the compact
+   * projection carries) is known — not full `Agent` objects. A consumer
+   * that reads full fields from state must check `isAgentSetComplete('full')`
+   * specifically before doing so (R10, nit-2 round 1 review).
    */
   markAgentSetComplete(view: 'full' | 'compact'): void {
     if (view === 'full') {
@@ -945,6 +1080,10 @@ export class StateManager extends EventTarget {
   /**
    * True iff the completeness flag is set and satisfies `need`: `compact` is
    * satisfied by either flag value, `full` only by a `full` flag (§6.3, R10).
+   *
+   * A `true` result for `'compact'` does not promise full `Agent` fields —
+   * a consumer that reads full fields from state must call this with
+   * `'full'` specifically (R10, nit-2 round 1 review).
    */
   isAgentSetComplete(need: 'full' | 'compact'): boolean {
     if (this.completeFlag === null) return false;
@@ -958,16 +1097,24 @@ export class StateManager extends EventTarget {
 
   /**
    * Resolves once the SSE connection is live in scope generation
-   * `generation`: at once if it already is, otherwise on the next
+   * `generation`: at once if it already is (`connectedGeneration ===
+   * generation` — a `connected` has fired for this generation, with no
+   * `disconnected` or `setScope` after it), otherwise on the next
    * `connected` of that generation. Rejects immediately if `generation` is
    * already stale, and rejects if the generation changes while waiting
    * (§7, §8).
+   *
+   * Deliberately does not use `state.connected`/`isConnected`: those answer
+   * "is some connection open", which stays stale-true across the gap
+   * between `setScope` and the new generation's own `connected` (B1, round
+   * 1 review) — `sseClient.connect()` tears the old connection down without
+   * a `disconnected` event.
    */
   sseConnected(generation: number): Promise<void> {
     if (generation !== this.generation) {
       return Promise.reject(new Error('scope generation changed'));
     }
-    if (this.state.connected) {
+    if (this.connectedGeneration === generation) {
       return Promise.resolve();
     }
     return new Promise<void>((resolve, reject) => {
@@ -999,6 +1146,15 @@ export class StateManager extends EventTarget {
     }
   }
 
+  /** Reject every pending waiter outright, regardless of generation (N3, round 1 review). */
+  private rejectAllSseConnectWaiters(reason: string): void {
+    const waiters = this.sseConnectWaiters;
+    this.sseConnectWaiters = [];
+    for (const w of waiters) {
+      w.reject(new Error(reason));
+    }
+  }
+
   /**
    * Remove a stale agent from the shared map, e.g. one an authoritative
    * members fetch no longer returns because the client missed its SSE
@@ -1009,7 +1165,7 @@ export class StateManager extends EventTarget {
    */
   removeAgent(id: string): void {
     this.state.agents.delete(id);
-    this.pendingAgentDeltas.delete(id);
+    this.clearPendingAgentDelta(id);
   }
 
   /**
@@ -1084,6 +1240,11 @@ export class StateManager extends EventTarget {
   disconnect(): void {
     this.sseClient.disconnect();
     this.state.connected = false;
+    this.connectedGeneration = null;
+    // N3 (round 1 review): a hard teardown is not a generation change, so
+    // rejectStaleSseConnectWaiters would never fire for it — any caller
+    // still awaiting sseConnected would otherwise hang forever.
+    this.rejectAllSseConnectWaiters('disconnected');
   }
 
   // --- Getters ---
