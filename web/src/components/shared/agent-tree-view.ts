@@ -826,7 +826,7 @@ export class ScionAgentTreeView extends LitElement {
       return related;
     }
 
-    const byId = new Map(agents.map((a) => [a.id, a]));
+    const byId = this.getAgentById(agents);
     const hovered = byId.get(this.hoverId);
     if (!hovered) return null;
 
