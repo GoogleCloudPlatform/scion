@@ -371,6 +371,129 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 	assert.NoError(t, err, "server start should not require image_registry")
 }
 
+// setupNoProjectPreRun prepares package-level command state for tests that
+// exercise rootCmd.PersistentPreRunE outside any scion project. It saves and
+// restores globalMode, projectPath, noHub, nonInteractive, autoConfirm,
+// outputFormat, profile and autoHelp (mirroring the fields
+// TestServerStartDoesNotRequireImageRegistry resets, so a stale value from
+// another test — outputFormat in particular, which PersistentPreRunE
+// rejects outright unless it's ""/json/plain — can't make these tests fail
+// spuriously); clears SCION_HOST_UID and the leaked
+// SCION_HUB_ENDPOINT/SCION_HUB_URL/SCION_PROJECT_ID env vars that would
+// otherwise let config.IsHubContext() or FindProjectRoot() mask the "not in
+// a scion project" failure these tests guard against; points HOME at a
+// fresh temp dir; and changes into a temp dir with no .scion project
+// anywhere above it (t.Chdir restores the working directory itself).
+func setupNoProjectPreRun(t *testing.T) {
+	t.Helper()
+
+	origGlobalMode := globalMode
+	origProjectPath := projectPath
+	origNoHub := noHub
+	origNonInteractive := nonInteractive
+	origAutoConfirm := autoConfirm
+	origOutputFormat := outputFormat
+	origProfile := profile
+	origAutoHelp := autoHelp
+	t.Cleanup(func() {
+		globalMode = origGlobalMode
+		projectPath = origProjectPath
+		noHub = origNoHub
+		nonInteractive = origNonInteractive
+		autoConfirm = origAutoConfirm
+		outputFormat = origOutputFormat
+		profile = origProfile
+		autoHelp = origAutoHelp
+	})
+
+	t.Setenv("SCION_HOST_UID", "")
+	// Clear leaked SCION_* env vars that make config.IsHubContext() true and
+	// would otherwise let FindProjectRoot() synthesize a project path,
+	// masking the "not in a scion project" failure these tests guard against.
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
+	t.Setenv("SCION_PROJECT_ID", "")
+	t.Setenv("HOME", t.TempDir())
+
+	// A directory with no .scion project anywhere above it.
+	t.Chdir(t.TempDir())
+
+	globalMode = false
+	projectPath = ""
+	noHub = true
+	nonInteractive = true
+	autoConfirm = true
+	outputFormat = ""
+	profile = ""
+	autoHelp = false
+}
+
+// TestHubSecretMigrateNamesAndMigrateDoNotRequireProject is a regression test
+// for ptone/scion#2396: `scion hub secret migrate-names` (and its sibling
+// `scion hub secret migrate`) operate directly against the Hub DB and GCP
+// Secret Manager, never reading or resolving the current directory's scion
+// project, so they must not fail with "not in a scion project" when run
+// outside one — without requiring the --global workaround.
+func TestHubSecretMigrateNamesAndMigrateDoNotRequireProject(t *testing.T) {
+	setupNoProjectPreRun(t)
+
+	for _, cmd := range []*cobra.Command{hubSecretMigrateNamesCmd, hubSecretMigrateCmd} {
+		t.Run(cmd.CommandPath(), func(t *testing.T) {
+			err := rootCmd.PersistentPreRunE(cmd, []string{})
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestOrdinaryCommandStillRequiresProject guards against the migrate-names
+// exemption (ptone/scion#2396) becoming too broad: a command that isn't in
+// any exemption list or subtree must still fail with "not in a scion
+// project" when run outside one and without --global. It also checks three
+// commands chosen to share something with the new exemption case's guard
+// (`parentName == "secret" && commandInSubtree(cmd, "hub")`) without
+// satisfying all of it, so that dropping either half of the guard would
+// make this test fail:
+//   - configMigrateCmd ("scion config migrate") shares the "migrate" name
+//     but its parent is "config", not "secret", and it has no "hub"
+//     ancestor.
+//   - a synthetic "secret -> migrate-names" tree shares both the
+//     "migrate-names" name and a "secret" parent, but (like the real
+//     top-level "scion secret" command) has no "hub" ancestor. Dropping the
+//     "commandInSubtree(cmd, "hub")" half of the guard would wrongly exempt
+//     this tree.
+//   - a synthetic "hub -> other -> migrate" tree has a "hub" ancestor, like
+//     the real exemption target, but its parent is "other", not "secret".
+//     Dropping the "parentName == "secret"" half of the guard would wrongly
+//     exempt this tree.
+func TestOrdinaryCommandStillRequiresProject(t *testing.T) {
+	setupNoProjectPreRun(t)
+
+	ordinaryCmd := &cobra.Command{Use: "other"}
+	err := rootCmd.PersistentPreRunE(ordinaryCmd, []string{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in a scion project")
+
+	err = rootCmd.PersistentPreRunE(configMigrateCmd, []string{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in a scion project")
+
+	secretParent := &cobra.Command{Use: "secret"}
+	migrateNamesChild := &cobra.Command{Use: "migrate-names"}
+	secretParent.AddCommand(migrateNamesChild)
+	err = rootCmd.PersistentPreRunE(migrateNamesChild, []string{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in a scion project")
+
+	hubParent := &cobra.Command{Use: "hub"}
+	otherParent := &cobra.Command{Use: "other"}
+	migrateChild := &cobra.Command{Use: "migrate"}
+	hubParent.AddCommand(otherParent)
+	otherParent.AddCommand(migrateChild)
+	err = rootCmd.PersistentPreRunE(migrateChild, []string{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in a scion project")
+}
+
 func TestDevAuthWarning(t *testing.T) {
 	// Save and restore original flags
 	origNoHub := noHub

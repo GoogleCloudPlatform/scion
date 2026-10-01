@@ -1033,6 +1033,50 @@ server:
 	}
 }
 
+func TestLoadServerFromSettingsFile_AgentSecretsUserScopeOnly(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+server:
+  hub:
+    port: 9810
+agent_secrets:
+  user_scope_only: true
+`), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings.yaml: %v", err)
+	}
+
+	gc, found := loadServerFromSettingsFile(dir)
+	if !found {
+		t.Fatal("expected to find server config in settings.yaml")
+	}
+	if gc.AgentSecretsUserScopeOnly == nil || *gc.AgentSecretsUserScopeOnly != true {
+		t.Errorf("expected AgentSecretsUserScopeOnly=true, got %v", gc.AgentSecretsUserScopeOnly)
+	}
+}
+
+func TestLoadServerFromSettingsFile_AgentSecretsAbsent(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+server:
+  hub:
+    port: 9810
+`), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings.yaml: %v", err)
+	}
+
+	gc, found := loadServerFromSettingsFile(dir)
+	if !found {
+		t.Fatal("expected to find server config in settings.yaml")
+	}
+	if gc.AgentSecretsUserScopeOnly != nil {
+		t.Errorf("expected AgentSecretsUserScopeOnly=nil when absent, got %v", *gc.AgentSecretsUserScopeOnly)
+	}
+}
+
 // TestApplyDatabasePoolDefaults_PostgresOverridesLeakedSqliteDefault is a
 // regression test for the production incident where both hubs served every API
 // request in ~55s. The struct-level default for MaxOpenConns/MaxIdleConns is 1

@@ -106,6 +106,14 @@ return an error instead of blocking.`,
 			if parentName == "hub" {
 				requiresProject = false
 			}
+		case "migrate-names", "migrate":
+			// hub secret migrate-names (GCP SM name migration) and hub secret
+			// migrate (DB -> GCP SM value migration) operate directly against
+			// the Hub DB and GCP Secret Manager; neither reads or resolves
+			// the current directory's scion project (ptone/scion#2396).
+			if parentName == "secret" && commandInSubtree(cmd, "hub") {
+				requiresProject = false
+			}
 		case "scion":
 			// Root command itself doesn't require project
 			requiresProject = false
@@ -120,6 +128,11 @@ return an error instead of blocking.`,
 		}
 		// Project subcommands operate on all projects, not just the current one
 		if parentName == "project" {
+			requiresProject = false
+		}
+		// design Amendment A26.2 O1: same reasoning as checkAgentContainerContext
+		// above — --handoff-template never touches the project or the Hub.
+		if isReincarnateHandoffTemplateInvocation(cmd) {
 			requiresProject = false
 		}
 
@@ -495,6 +508,13 @@ func checkAgentContainerContext(cmd *cobra.Command) error {
 		return nil
 	}
 	if cmd.Parent() != nil && cmd.Parent().Name() == "config" {
+		return nil
+	}
+	// design Amendment A26.2 O1: `scion reincarnate --handoff-template` is a
+	// pure local print (no Hub, no env, no target resolution — see its RunE),
+	// so it must work regardless of container/Hub context, exactly like the
+	// informational commands above.
+	if isReincarnateHandoffTemplateInvocation(cmd) {
 		return nil
 	}
 

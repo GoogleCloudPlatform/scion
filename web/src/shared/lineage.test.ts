@@ -23,6 +23,7 @@ import {
   parentIdOf,
   pruneCollapsed,
   rootUserOf,
+  topologySignature,
   transposeLayout,
   userKey,
   NODE_W,
@@ -319,5 +320,257 @@ describe('transposeLayout', () => {
       expect(e.x1).toBe(u.px + NODE_W);
       expect(e.y1).toBe(u.py + NODE_H / 2);
     }
+  });
+});
+
+describe('topologySignature (#2388 layout cache key)', () => {
+  const root = agent('r1', 'root', ['user-1']);
+  const kid = agent('k1', 'kid', ['user-1', 'r1']);
+  const noCollapse = new Set<string>();
+
+  function sig(
+    agents: Agent[],
+    collapsed: ReadonlySet<string> = noCollapse,
+    showUsers = false,
+    orientation: 'vertical' | 'horizontal' = 'vertical'
+  ): string {
+    return topologySignature(agents, collapsed, showUsers, orientation);
+  }
+
+  it('is stable across agent-array reordering', () => {
+    expect(sig([root, kid])).toBe(sig([kid, root]));
+  });
+
+  it('is unaffected by fields outside id/parentId/name (status-only updates)', () => {
+    const busyRoot = { ...root, phase: 'stopped', activity: 'thinking' } as Agent;
+    const busyKid = {
+      ...kid,
+      _capabilities: { attach: true },
+      _messageability: { canMessage: false, reason: 'x' },
+    } as unknown as Agent;
+    expect(sig([root, kid])).toBe(sig([busyRoot, busyKid]));
+  });
+
+  it('is unaffected by object identity alone', () => {
+    expect(sig([root, kid])).toBe(sig([{ ...root }, { ...kid }]));
+  });
+
+  it('changes when an agent is added', () => {
+    const grandkid = agent('g1', 'grandkid', ['user-1', 'r1', 'k1']);
+    expect(sig([root, kid])).not.toBe(sig([root, kid, grandkid]));
+  });
+
+  it('changes when an agent is removed', () => {
+    expect(sig([root, kid])).not.toBe(sig([root]));
+  });
+
+  it('changes on reparent (ancestry change)', () => {
+    const reparented = agent('k1', 'kid', ['user-1']); // now a root, not root's child
+    expect(sig([root, kid])).not.toBe(sig([root, reparented]));
+  });
+
+  it('changes when the root user changes with the same direct parent (#2388 review B2)', () => {
+    // layoutForestWithUsers groups roots by rootUserOf (ancestry[0]), a
+    // separate input from parentIdOf (ancestry[last]). A signature keyed
+    // only on the direct parent misses this: two lists below share every
+    // child's direct parent ('gone', filtered out so both 'p' and 'c' are
+    // roots) but disagree on which user 'c' is grouped under.
+    const p = agent('p', 'p', ['u1']);
+    const cUnderU1 = agent('c', 'c', ['u1', 'gone']);
+    const cUnderU2 = agent('c', 'c', ['u2', 'gone']);
+    expect(sig([p, cUnderU1], noCollapse, true)).not.toBe(sig([p, cUnderU2], noCollapse, true));
+  });
+
+  it('changes on rename', () => {
+    const renamed = agent('k1', 'renamed-kid', ['user-1', 'r1']);
+    expect(sig([root, kid])).not.toBe(sig([root, renamed]));
+  });
+
+  it('changes on collapse toggle', () => {
+    expect(sig([root, kid])).not.toBe(sig([root, kid], new Set(['r1'])));
+  });
+
+  it('is unaffected by collapsedIds set insertion order', () => {
+    const a = new Set(['r1', 'k1']);
+    const b = new Set(['k1', 'r1']);
+    expect(sig([root, kid], a)).toBe(sig([root, kid], b));
+  });
+
+  it('changes when showUsers toggles', () => {
+    expect(sig([root, kid], noCollapse, false)).not.toBe(sig([root, kid], noCollapse, true));
+  });
+
+  it('changes when orientation toggles', () => {
+    expect(sig([root, kid], noCollapse, false, 'vertical')).not.toBe(
+      sig([root, kid], noCollapse, false, 'horizontal')
+    );
+  });
+});
+
+describe('name-tie ordering (#2388 review N1)', () => {
+  it('breaks equal-name ties by ID, so layout position does not depend on input array order', () => {
+    // topologySignature sorts by ID and is therefore order-independent. For
+    // the cache to be sound, the layout it keys must be order-independent
+    // too — otherwise a cache hit can draw whatever order was in effect at
+    // the last invalidation instead of what a fresh compute would give.
+    const a1 = agent('a1', 'worker', ['user-1']);
+    const a2 = agent('a2', 'worker', ['user-1']);
+
+    const forward = layoutForest(buildLineageForest([a1, a2]));
+    const reversed = layoutForest(buildLineageForest([a2, a1]));
+
+    const idsByX = (nodes: readonly { agent: Agent; px: number }[]) =>
+      [...nodes].sort((x, y) => x.px - y.px).map((n) => n.agent.id);
+
+    expect(idsByX(forward.nodes)).toEqual(idsByX(reversed.nodes));
+    // Pin the actual order too, so this doesn't just prove "some" tie-break.
+    expect(idsByX(forward.nodes)).toEqual(['a1', 'a2']);
+  });
+});
+
+describe('cyclic-ancestry root promotion (#2388 review N-B)', () => {
+  // Malformed cyclic ancestry: a's parent is b and b's parent is a, so
+  // neither reaches a legitimate root. buildLineageForest must still
+  // terminate and promote exactly one of them to a root — and which one
+  // must not depend on the input array's order. topologySignature is
+  // order-independent (sorted by id), so if promotion order depended on
+  // input order, a cache hit could reuse a stale choice of root/layout for
+  // input that produces the same signature.
+  const a = agent('a', 'a', ['u', 'b']);
+  const b = agent('b', 'b', ['u', 'a']);
+
+  it('promotes the same node to root regardless of input array order', () => {
+    const forwardRootIds = buildLineageForest([a, b]).map((n) => n.agent.id);
+    const reversedRootIds = buildLineageForest([b, a]).map((n) => n.agent.id);
+
+    expect(forwardRootIds).toEqual(reversedRootIds);
+    expect(forwardRootIds).toEqual(['a']); // deterministic: lowest id wins
+  });
+
+  it('keeps layout identical for cyclic input regardless of array order (matches the order-independent signature)', () => {
+    const noCollapse = new Set<string>();
+    // The signature was already order-independent before this fix; this
+    // pins that it stays true, so the two layout computations below are a
+    // valid same-signature comparison.
+    expect(topologySignature([a, b], noCollapse, false, 'vertical')).toBe(
+      topologySignature([b, a], noCollapse, false, 'vertical')
+    );
+
+    const forward = layoutForest(buildLineageForest([a, b]));
+    const reversed = layoutForest(buildLineageForest([b, a]));
+    const posById = (layout: typeof forward) =>
+      new Map(layout.nodes.map((n) => [n.agent.id, { px: n.px, py: n.py }]));
+
+    expect(posById(forward)).toEqual(posById(reversed));
+  });
+});
+
+describe('cycle with a non-cycle descendant (#2388 review round-3 F1)', () => {
+  // x and y form a 2-cycle; child is a legitimate descendant of x, not
+  // itself part of the cycle. child's id ('child') sorts before both cycle
+  // members' ids ('x', 'y') — exactly the ordering that, before this fix,
+  // promoted every unvisited node in plain id order rather than only actual
+  // cycle members: child got promoted as its own isolated root first, and
+  // the real x->child edge was silently dropped when x was promoted
+  // afterward and `visit` filtered out the already-visited child.
+  const x = agent('x', 'x', ['u', 'y']);
+  const y = agent('y', 'y', ['u', 'x']);
+  const child = agent('child', 'child', ['u', 'x']);
+
+  function edgesOf(agents: Agent[]): string[] {
+    const layout = layoutForest(buildLineageForest(agents));
+    return layout.edges.map((e) => `${e.parentId}>${e.childId}`).sort();
+  }
+
+  it('keeps the real x->child edge for every input order', () => {
+    const permutations = [
+      [x, y, child],
+      [x, child, y],
+      [y, x, child],
+      [y, child, x],
+      [child, x, y],
+      [child, y, x],
+    ];
+    for (const agents of permutations) {
+      expect(edgesOf(agents)).toContain('x>child');
+
+      const roots = buildLineageForest(agents);
+      expect(roots).toHaveLength(1); // every agent reachable from one root
+      expect(['x', 'y']).toContain(roots[0].agent.id); // never the descendant
+    }
+  });
+
+  it('produces the same forest (root and edges) regardless of input order', () => {
+    // child sorts first: the exact ordering that reproduced the bug pre-fix.
+    const descendantFirst = edgesOf([child, x, y]);
+    const cycleFirst = edgesOf([y, x, child]);
+
+    expect(descendantFirst).toEqual(cycleFirst);
+    expect(descendantFirst).toEqual(['x>child', 'x>y']); // x wins the id tie-break
+  });
+});
+
+describe('order-independence across multiple cycles (#2388 review round-4 T1)', () => {
+  // Two disjoint cycles with tails: b<->c (tail a->b), e<->f (tail d->f).
+  // The unvisitedAscending sort fixes the order the two promoted roots are
+  // appended in, and so their relative position in the layout — not which
+  // member wins within each cycle (F1 already covers that).
+  const a = agent('a', 'a', ['u', 'b']);
+  const b = agent('b', 'b', ['u', 'c']);
+  const c = agent('c', 'c', ['u', 'b']);
+  const d = agent('d', 'd', ['u', 'f']);
+  const e = agent('e', 'e', ['u', 'f']);
+  const f = agent('f', 'f', ['u', 'e']);
+  const all = [a, b, c, d, e, f];
+  // Orders chosen so the tails (a, d) interleave with the cycles in
+  // different relative sequences — in particular so 'd' precedes 'a' in at
+  // least one order, which is what actually exercises the sort.
+  const orders: Agent[][] = [all, [...all].reverse(), [d, e, f, a, b, c], [c, a, f, b, d, e]];
+
+  it('promotes the same two roots — the lowest id in each cycle — for every input order', () => {
+    for (const order of orders) {
+      expect(buildLineageForest(order).map((n) => n.agent.id)).toEqual(['b', 'e']);
+    }
+  });
+
+  it('produces the same layout for every input order (matches the order-independent signature)', () => {
+    const noCollapse = new Set<string>();
+    const signatures = orders.map((order) =>
+      topologySignature(order, noCollapse, false, 'vertical')
+    );
+    expect(new Set(signatures).size).toBe(1); // sanity: still order-independent
+
+    const layouts = orders.map((order) => layoutForest(buildLineageForest(order)));
+    const posById = (layout: (typeof layouts)[number]) =>
+      new Map(layout.nodes.map((n) => [n.agent.id, { px: n.px, py: n.py }]));
+
+    const reference = posById(layouts[0]);
+    for (const layout of layouts.slice(1)) {
+      expect(posById(layout)).toEqual(reference);
+    }
+  });
+});
+
+describe('cycle promotion pins the lowest id, not merely the first member met while walking (#2388 review round-4 optional)', () => {
+  // 3-cycle p->q->r->p with a tail attached to r (the highest, not lowest,
+  // id). The tail's id sorts first, so its walk enters the cycle at r —
+  // the first member *met*, but not the *lowest id*. This distinguishes
+  // "promote the lowest id" from "promote cycle[0]", which the round-3
+  // x/y/c test could not (that walk met the lowest-id member first).
+  const tail = agent('a', 'tail', ['u', 'r']);
+  const p = agent('p', 'p', ['u', 'q']);
+  const q = agent('q', 'q', ['u', 'r']);
+  const r = agent('r', 'r', ['u', 'p']);
+
+  it('promotes p (the lowest id), not r (the cycle member the walk meets first)', () => {
+    const roots = buildLineageForest([tail, p, q, r]).map((n) => n.agent.id);
+    expect(roots).toEqual(['p']);
+  });
+
+  it('keeps every real edge', () => {
+    const layout = layoutForest(buildLineageForest([tail, p, q, r]));
+    const edges = layout.edges.map((e) => `${e.parentId}>${e.childId}`).sort();
+    // tail's agent id is 'a', so its edge reads "r>a".
+    expect(edges).toEqual(['p>r', 'r>a', 'r>q']);
   });
 });

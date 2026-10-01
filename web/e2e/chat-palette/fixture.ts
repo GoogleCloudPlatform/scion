@@ -13,6 +13,11 @@ import type { PageData } from '../../src/shared/types.js';
 import '../../src/components/pages/chat.js';
 import '../../src/components/terminal/terminal-pane.js';
 import { TerminalSessionRegistry } from '../../src/client/terminal-sessions.js';
+import { chatRecentFiles } from '../../src/client/chat-recent-files.js';
+import type { RecentFile } from '../../src/client/chat-recent-files.js';
+import { attachmentIdentityKey, pathIdentityKey } from '../../src/utils/chat-file-links.js';
+import type { PathLinkTarget } from '../../src/utils/chat-file-links.js';
+import { setAnimation } from '@shoelace-style/shoelace/dist/utilities/animation-registry.js';
 // This fixture stubs out client/main.ts entirely (see mock-api.ts:
 // stubMainClientModule) to avoid its real app bootstrap, which also means
 // its bulk Shoelace component registration never runs. Mirror that exact
@@ -48,6 +53,25 @@ import '@shoelace-style/shoelace/dist/components/tab-group/tab-group.js';
 import '@shoelace-style/shoelace/dist/components/tab/tab.js';
 import '@shoelace-style/shoelace/dist/components/tab-panel/tab-panel.js';
 import '@shoelace-style/shoelace/dist/themes/light.css';
+// Imported after light.css: both stylesheets scope their custom properties
+// to `.sl-theme-dark` (dark) vs. `:root`/`.sl-theme-light` (light), which tie
+// on specificity for an element carrying both — source order is what makes
+// dark actually win once a test adds the `.sl-theme-dark` class. The real
+// app's own theme.css (--scion-* tokens, not Shoelace's --sl-* ones) is
+// loaded the same way, so an accessibility check against this fixture is
+// checking real, currently-shipping colors, not CSS-custom-property
+// fallbacks that never render in production.
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '../../src/styles/theme.css';
+
+// theme.css falls back to a `prefers-color-scheme: dark` media query when
+// `data-theme` is unset, so the browser/OS's own color-scheme preference
+// (not under this fixture's control, and not necessarily light in a headless
+// container) would otherwise decide which theme's tokens apply. The real
+// app's header.ts never leaves this unset either — it always resolves and
+// sets `data-theme` before anything else renders. A test that wants dark
+// overrides this explicitly (see accessibility.pw.ts's enableDarkTheme).
+document.documentElement.setAttribute('data-theme', 'light');
 
 // The router never runs in this fixture, so set the URL by hand before the
 // page's connectedCallback reads window.location.pathname for route parsing
@@ -58,14 +82,12 @@ const params = new URLSearchParams(location.search);
 window.history.replaceState({}, '', params.get('route') || '/chat');
 
 // Server-injected feature flags, exactly as main.ts would set them from the
-// Go template. Both default on for this fixture; a test that needs the
-// "flag off" case (the legacy switcher, or v1, remaining unaffected)
-// navigates to fixture.html?v2=0 or ?palette=0 instead — isV2 is captured
+// Go template. Defaults on for this fixture; a test that needs the "flag
+// off" (v1) case navigates to fixture.html?v2=0 instead — isV2 is captured
 // once at construction, so it must be set before the page element is
 // created.
 window.__SCION_FEATURES__ = {
   'web.native_chat_v2': params.get('v2') !== '0',
-  'web.native_chat_palette': params.get('palette') !== '0',
 };
 
 const TEST_USER_ID = 'self-user';
@@ -155,7 +177,116 @@ const fixture = {
   terminalConnection(): string | null {
     return terminalSession?.state.connection ?? null;
   },
+
+  /**
+   * Seed the Documents group's data through the real store: writes a
+   * validly-shaped envelope to the real localStorage key, then calls the
+   * real `chatRecentFiles.setScope`, which hydrates from it exactly as it
+   * would for a real signed-in user. This is a test seam for *which files
+   * exist*, not a bypass of the store's own validation/identity logic — a
+   * malformed fixture record would be silently dropped by `setScope` the
+   * same way a corrupt real record would be.
+   */
+  seedRecentFiles(inputs: FixtureRecentFileInput[]): void {
+    const records = inputs.map(buildRecentFile);
+    const scope = {
+      origin: location.origin,
+      baseUrl: import.meta.env.BASE_URL,
+      userId: TEST_USER_ID,
+    };
+    // Mirrors chat-recent-files.ts's private storageKey() format exactly.
+    const key =
+      'scion.chat.recentFiles.v1:' + JSON.stringify([scope.origin, scope.baseUrl, scope.userId]);
+    localStorage.setItem(key, JSON.stringify({ version: 1, records }));
+    chatRecentFiles.setScope(scope);
+  },
+
+  /**
+   * Override the palette's own dialog hide animation duration, per element
+   * (Shoelace's `setAnimation`, not the shared `setDefaultAnimation`), so a
+   * reopen-race test can control exactly how long the close stays "still
+   * animating out" rather than relying on Shoelace's real 250ms default. The
+   * real gap between a selection and the browser actually starting that
+   * animation (event dispatch, this app's own close-path work) varies with
+   * machine load, so measuring a fixed set of reopen delays from the
+   * *selection* — rather than from the animation's own start — cannot
+   * otherwise guarantee every delay in an unloaded run still lands before a
+   * real 250ms hide has finished. The palette must already be open (so its
+   * dialog element exists) before calling this.
+   */
+  setPaletteDialogHideDuration(ms: number): void {
+    const dialog = document
+      .querySelector('scion-page-chat')
+      ?.shadowRoot?.querySelector('scion-chat-switcher')
+      ?.shadowRoot?.querySelector('sl-dialog.palette-dialog');
+    if (!(dialog instanceof HTMLElement)) {
+      throw new Error(
+        'setPaletteDialogHideDuration: palette dialog not found — open the palette first'
+      );
+    }
+    setAnimation(dialog, 'dialog.hide', {
+      keyframes: [
+        { opacity: 1, scale: 1 },
+        { opacity: 0, scale: 0.8 },
+      ],
+      options: { duration: ms, easing: 'ease' },
+    });
+  },
+
+  /**
+   * Same as {@link setPaletteDialogHideDuration}, for the page-level file
+   * preview's own dialog instead of the palette's. The preview must already
+   * be open (so its dialog element exists) before calling this.
+   */
+  setFilePreviewDialogHideDuration(ms: number): void {
+    const dialog = document
+      .querySelector('scion-page-chat')
+      ?.shadowRoot?.querySelector('scion-chat-file-preview')
+      ?.shadowRoot?.querySelector('sl-dialog.file-preview-dialog');
+    if (!(dialog instanceof HTMLElement)) {
+      throw new Error(
+        'setFilePreviewDialogHideDuration: preview dialog not found — open the preview first'
+      );
+    }
+    setAnimation(dialog, 'dialog.hide', {
+      keyframes: [
+        { opacity: 1, scale: 1 },
+        { opacity: 0, scale: 0.8 },
+      ],
+      options: { duration: ms, easing: 'ease' },
+    });
+  },
 };
+
+/** One fixture-supplied Documents record, before its stable identity key is computed. */
+export interface FixtureRecentFileInput {
+  name: string;
+  sentAt: string;
+  projectId?: string;
+  projectName?: string;
+  target:
+    | { kind: 'attachment'; id: string; mime: string; size: number }
+    | { kind: 'path'; projectId: string; containerPath: string; location: PathLinkTarget };
+}
+
+function buildRecentFile(input: FixtureRecentFileInput, index: number): RecentFile {
+  const key =
+    input.target.kind === 'attachment'
+      ? attachmentIdentityKey(input.target.id)
+      : pathIdentityKey(input.target.projectId, input.target.location);
+  return {
+    key,
+    name: input.name,
+    source: {
+      conversationKey: `topic-fixture-${index}`,
+      messageId: `m-fixture-${index}`,
+      sentAt: input.sentAt,
+      ...(input.projectId ? { projectId: input.projectId } : {}),
+      ...(input.projectName ? { projectName: input.projectName } : {}),
+    },
+    target: input.target,
+  };
+}
 
 declare global {
   interface Window {

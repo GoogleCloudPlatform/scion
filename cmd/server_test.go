@@ -198,6 +198,64 @@ func TestRegisterGlobalProjectAndBroker_LabelsOnDedupByName(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "embedded", broker.Labels["scion.io/broker-role"])
 }
+
+// TestRegisterGlobalProjectAndBroker_RecordsDefaultProfile covers the hub's
+// side of resolving an agent dispatch with no explicit profile: the broker
+// record must carry the same active profile the broker itself would use
+// locally, so it survives create, re-registration (when settings change),
+// and the stock two-profile default settings shape.
+func TestRegisterGlobalProjectAndBroker_RecordsDefaultProfile(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{
+		ActiveProfile: "local",
+		Profiles: map[string]config.ProfileConfig{
+			"local":  {Runtime: "docker"},
+			"remote": {Runtime: "kubernetes"},
+		},
+	}
+
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	require.NoError(t, err)
+
+	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
+	require.NoError(t, err)
+	assert.Equal(t, "local", broker.DefaultProfile,
+		"the broker record must carry the same active profile the broker resolves an empty profile to locally")
+
+	// Re-registration with a different active profile (e.g. settings.yaml
+	// edited and the broker restarted) must update the stored value, not
+	// leave the stale one in place.
+	settings.ActiveProfile = "remote"
+	_, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	require.NoError(t, err)
+
+	broker, err = s.GetRuntimeBroker(ctx, tid("broker-1"))
+	require.NoError(t, err)
+	assert.Equal(t, "remote", broker.DefaultProfile)
+}
+
+// TestRegisterGlobalProjectAndBroker_NoActiveProfileLeavesDefaultProfileEmpty
+// covers the case buildStoreBrokerProfiles itself falls back on: settings
+// with no profiles defined at all produce a single implicit "default"
+// profile, and there is no active-profile setting to record. An empty
+// DefaultProfile is correct here — the hub resolves this broker's single
+// profile without needing it (resolveAgentRuntimeProfileType,
+// pkg/hub/default_gcp_identity.go).
+func TestRegisterGlobalProjectAndBroker_NoActiveProfileLeavesDefaultProfileEmpty(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{}
+
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	require.NoError(t, err)
+
+	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
+	require.NoError(t, err)
+	assert.Empty(t, broker.DefaultProfile)
+	require.Len(t, broker.Profiles, 1, "settings with no profiles defined fall back to a single implicit profile")
+}
+
 func TestBuildStoreBrokerProfiles_CloudRunFiltersLocalRuntimes(t *testing.T) {
 	settings := &config.Settings{
 		Profiles: map[string]config.ProfileConfig{

@@ -249,6 +249,8 @@ interface ServerConfigResponse {
 
   quotas?: { enforce_broker_quotas?: boolean };
 
+  agent_secrets?: { user_scope_only?: boolean };
+
   // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
   settings_tier?: 'db' | 'file';
   env_overrides?: string[];
@@ -371,6 +373,8 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'auto_expose_ports.enabled': 'Auto-Expose Ports Enabled',
   // quotas section
   'quotas.enforce_broker_quotas': 'Enforce Broker Agent Quotas',
+  // agent_secrets section
+  'agent_secrets.user_scope_only': 'Agent Secrets: Profile Scope Only',
   // telemetry section
   'telemetry.enabled': 'Telemetry Enabled',
   'telemetry.cloud.enabled': 'Cloud Export Enabled',
@@ -553,6 +557,9 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // Quotas
   @state() private enforceBrokerQuotas = true;
+
+  // Agent Secrets
+  @state() private agentSecretsUserScopeOnly = false;
 
   // Telemetry
   @state() private telemetryEnabled = false;
@@ -1613,6 +1620,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     const quotas = data.quotas;
     this.enforceBrokerQuotas = quotas?.enforce_broker_quotas ?? true;
 
+    // Agent Secrets — absent means permissive (agents may write project scope).
+    this.agentSecretsUserScopeOnly = data.agent_secrets?.user_scope_only ?? false;
+
     // Runtimes, profiles, harness_configs — deep-copy into editable state
     this.runtimes = data.runtimes ? JSON.parse(JSON.stringify(data.runtimes)) : {};
     this.profiles = data.profiles
@@ -1926,6 +1936,13 @@ export class ScionPageAdminServerConfig extends LitElement {
       };
     }
 
+    // Agent Secrets — Layer-1
+    if (ok('agent_secrets.user_scope_only')) {
+      payload.agent_secrets = {
+        user_scope_only: this.agentSecretsUserScopeOnly,
+      };
+    }
+
     // Runtimes, profiles, harness_configs — always send edited state (including
     // empty objects) so the backend can distinguish "no change" from "cleared".
     if (ok('runtimes')) payload.runtimes = this.runtimes;
@@ -2179,6 +2196,13 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('quotas.enforce_broker_quotas')) {
       payload.quotas = {
         enforce_broker_quotas: this.enforceBrokerQuotas,
+      };
+    }
+
+    // Agent Secrets
+    if (ok('agent_secrets.user_scope_only')) {
+      payload.agent_secrets = {
+        user_scope_only: this.agentSecretsUserScopeOnly,
       };
     }
 
@@ -3511,6 +3535,31 @@ export class ScionPageAdminServerConfig extends LitElement {
               >When off, agents can be started on a broker beyond its max_agents_per_broker cap.
               Usage is still counted. Manage the per-broker cap from
               <a href="/admin/quotas">Admin &gt; Quotas</a>.</span
+            >
+          </div>
+        </div>
+      </div>
+
+      <!-- Card: Agent Secrets -->
+      <div class="section">
+        <h3 class="section-title">Agent Secrets</h3>
+        <div class="form-grid">
+          <div class="form-field full-width">
+            ${this.renderFieldValue(
+              'agent_secrets.user_scope_only',
+              this.agentSecretsUserScopeOnly ? 'Enabled' : 'Disabled',
+              html`${this.renderEnvBadge('agent_secrets.user_scope_only')}<sl-switch
+                  ?checked=${this.agentSecretsUserScopeOnly}
+                  @sl-change=${(e: Event) => {
+                    this.agentSecretsUserScopeOnly = (e.target as HTMLInputElement).checked;
+                  }}
+                  >Restrict agent-written secrets to profile scope</sl-switch
+                >`
+            )}
+            <span class="hint"
+              >When on, agents (including Capture Auth) can only store secrets in the user's
+              profile. Project-scope writes from agents are rejected. Existing project secrets are
+              not removed. Users can still manage project secrets.</span
             >
           </div>
         </div>

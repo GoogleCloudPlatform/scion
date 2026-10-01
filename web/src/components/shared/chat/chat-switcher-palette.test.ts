@@ -15,12 +15,8 @@
  */
 
 /**
- * Tests for <scion-chat-switcher>'s grouped palette presentation
- * (`paletteMode`), added by the native chat quick command palette Phase 1
- * slice. These are additive to chat-switcher.test.ts, which exercises the
- * unchanged legacy flat presentation exclusively — the existing regression
- * suite passes with the rollout flag off, and this file only covers the
- * new, opt-in path.
+ * Tests for <scion-chat-switcher>'s grouped palette rendering: the sl-dialog
+ * presentation, keyboard model, and per-group states.
  *
  * happy-dom does not retarget events across shadow roots, so real
  * composedPath()/focus assertions live in e2e/chat-palette (Chromium)
@@ -65,7 +61,6 @@ function agentsGroup(
 
 async function mountPalette(groups?: Record<'agents', GroupState>): Promise<ScionChatSwitcher> {
   const el = document.createElement('scion-chat-switcher') as ScionChatSwitcher;
-  el.paletteMode = true;
   el.open = true;
   if (groups) el.groups = groups;
   document.body.appendChild(el);
@@ -73,21 +68,7 @@ async function mountPalette(groups?: Record<'agents', GroupState>): Promise<Scio
   return el;
 }
 
-describe('scion-chat-switcher: paletteMode default is off', () => {
-  afterEach(() => {
-    document.body.innerHTML = '';
-  });
-
-  it('renders the legacy overlay, not sl-dialog, when paletteMode is unset', async () => {
-    const el = document.createElement('scion-chat-switcher') as ScionChatSwitcher;
-    document.body.appendChild(el);
-    await el.updateComplete;
-    expect(el.shadowRoot?.querySelector('.overlay')).not.toBeNull();
-    expect(el.shadowRoot?.querySelector('sl-dialog')).toBeNull();
-  });
-});
-
-describe('scion-chat-switcher: paletteMode renders a grouped Agents list', () => {
+describe('scion-chat-switcher: renders a grouped Agents list', () => {
   afterEach(() => {
     document.body.innerHTML = '';
   });

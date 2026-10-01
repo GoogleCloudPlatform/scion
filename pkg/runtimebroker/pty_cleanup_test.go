@@ -1307,11 +1307,14 @@ exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
 // --- Nonce-based container-side cleanup tests ---
 
 // clearSCIONEnv removes all inherited SCION_* environment variables to prevent
-// interference with nonce-based PID identification tests.
+// interference with nonce-based PID identification tests, restoring each on
+// test cleanup. Must not be called from a parallel test or subtest: t.Setenv
+// panics if t.Parallel has been called.
 func clearSCIONEnv(t *testing.T) {
 	t.Helper()
 	for _, env := range os.Environ() {
 		if key, _, ok := strings.Cut(env, "="); ok && strings.HasPrefix(key, "SCION_") {
+			t.Setenv(key, "")
 			_ = os.Unsetenv(key)
 		}
 	}

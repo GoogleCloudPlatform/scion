@@ -879,17 +879,24 @@ env vars from §6.3a, this means **agents created interactively, via the API,
 or dispatched by a schedule all default to inheriting the VM's service
 account and can call Vertex AI with no manual credential setup.**
 
-`passthrough` is only honoured on the hub's own embedded (co-located) broker
-— which a single-node VM always is — so this is safe by construction; an
-agent dispatched to any other broker still gets `block`.
+`passthrough` is only honoured on the hub's own embedded (co-located) broker,
+and only when the agent's resolved runtime profile is a local container
+runtime that shares the broker host's metadata server (docker/podman-style)
+— which is what a single-node VM's default runtime is. A kubernetes-type
+runtime profile on the embedded broker, or any runtime profile the hub
+cannot resolve, falls back to `block`, the same as an agent dispatched to
+any other broker.
 
 **Scheduled dispatches consult the hub default too.** Agents started by a
 scheduled event follow the same fallback ladder as interactive/API creates:
 an explicit project-level default GCP identity mode still wins, but a
 project with no project-level mode set inherits this hub default exactly as
 an interactively created agent would (GoogleCloudPlatform/scion#1927). No
-extra per-project configuration is needed for scheduled agents to get Vertex
-access via this passthrough default.
+extra per-project configuration is needed for scheduled agents on a
+qualifying runtime (see above) to get Vertex access via this passthrough
+default; a schedule dispatching to a kubernetes-type runtime profile needs
+an explicit project-level default GCP identity mode instead, since the hub
+default falls back to `block` for that runtime.
 
 Verify:
 

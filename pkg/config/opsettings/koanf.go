@@ -115,6 +115,9 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"quotas": {
 		"quotas.enforce_broker_quotas": "enforce_broker_quotas",
 	},
+	"agent_secrets": {
+		"agent_secrets.user_scope_only": "user_scope_only",
+	},
 	"project_defaults": {
 		"project_defaults.default_scratchpad": "default_scratchpad",
 	},
@@ -158,6 +161,9 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	},
 	"quotas": {
 		"enforce_broker_quotas": "quotas.enforce_broker_quotas",
+	},
+	"agent_secrets": {
+		"user_scope_only": "agent_secrets.user_scope_only",
 	},
 	"project_defaults": {
 		"default_scratchpad": "project_defaults.default_scratchpad",

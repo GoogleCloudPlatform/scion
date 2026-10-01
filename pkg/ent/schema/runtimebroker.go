@@ -73,6 +73,16 @@ func (RuntimeBroker) Fields() []ent.Field {
 			Optional(),
 		field.String("runtimes").
 			Optional(),
+		// default_profile records the broker's own active/default profile
+		// name at registration time (config.Settings.ActiveProfile on the
+		// broker side — see registerGlobalProjectAndBroker), so the hub can
+		// resolve an agent dispatch with no explicit profile against this
+		// registration data instead of guessing. See
+		// store.RuntimeBroker.DefaultProfile's doc comment: this is
+		// registration-time data, and can differ from what the broker
+		// itself resolves at dispatch time.
+		field.String("default_profile").
+			Optional(),
 		field.JSON("labels", map[string]string{}).
 			Optional(),
 		field.JSON("annotations", map[string]string{}).
