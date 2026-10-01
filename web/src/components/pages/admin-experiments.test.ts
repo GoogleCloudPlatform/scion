@@ -323,8 +323,10 @@ describe('scion-admin-experiments', () => {
     // the mock throws into `apiFetch`, and the component's own `catch` in
     // `setOverride` swallows it (reverts and reloads) instead of failing the
     // test, so this body cannot be inspected safely from inside the mock.
-    const putBodies: Array<{ overrides: Record<string, boolean | null>; expected_revision: number }> =
-      [];
+    const putBodies: Array<{
+      overrides: Record<string, boolean | null>;
+      expected_revision: number;
+    }> = [];
     const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
       if (init?.method === 'PUT') {
         const body = JSON.parse(init.body as string) as {
