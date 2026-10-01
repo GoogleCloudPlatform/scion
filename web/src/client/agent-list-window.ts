@@ -151,12 +151,25 @@ export class AgentListWindow extends EventTarget {
   /**
    * Render from the host's current `this.agents` (small state): a fit
    * `complete: true` response, or a legacy load, truncated or not (design
-   * §4.3; round 1 review B1/B2). `pageIndex` is left untouched — only
-   * `setViewState` resets it. The caller is responsible for having already
-   * assigned the array `getHeldAgents()` will return.
+   * §4.3; round 1 review B1/B2). The caller is responsible for having
+   * already assigned the array `getHeldAgents()` will return.
+   *
+   * `pageIndex` is reset to 0 only when the **previous** state was `'paged'`
+   * (round 3 review B1''): a paged -> small transition always swaps in a
+   * different data set (a label commit whose set now fits, a bare-key
+   * label or 422 falling back to the legacy load, a lifecycle refresh that
+   * drops the candidate count to the fit threshold), so the old paged
+   * `pageIndex` can point past the end of — or into the wrong slice of —
+   * the newly-adopted held set. A small -> small call (e.g. a later
+   * trigger while already small) leaves `pageIndex` alone, exactly as
+   * before; `setViewState` remains the only thing that resets it within an
+   * already-small session.
    */
   setSmall(): void {
     this.generation++;
+    if (this._state === 'paged') {
+      this._pageIndex = 0;
+    }
     this._state = 'small';
     this._updatesAvailable = false;
     this._error = null;
@@ -213,27 +226,41 @@ export class AgentListWindow extends EventTarget {
     return result;
   }
 
+  /** The live-typed label preview filter (design §6.3), shared by the small state's full filter chain and the paged state's items-only preview (round 3 review B3''). */
+  private filterByLabel(list: Agent[]): Agent[] {
+    const label = this.viewState.label.trim();
+    if (!label) return list;
+    const parts = label.split('=');
+    const key = parts[0];
+    const value = parts.slice(1).join('=');
+    return list.filter((a) => {
+      if (!a.labels) return false;
+      return value ? a.labels[key] === value : key in a.labels;
+    });
+  }
+
   private filteredAndSorted(list: Agent[]): Agent[] {
     let out = list;
     if (this.viewState.phaseFilter) {
       out = out.filter((a) => a.phase === this.viewState.phaseFilter);
     }
-    const label = this.viewState.label.trim();
-    if (label) {
-      const parts = label.split('=');
-      const key = parts[0];
-      const value = parts.slice(1).join('=');
-      out = out.filter((a) => {
-        if (!a.labels) return false;
-        return value ? a.labels[key] === value : key in a.labels;
-      });
-    }
+    out = this.filterByLabel(out);
     return sortAgents(out, this.viewState.sortField, this.viewState.sortDir);
   }
 
-  /** The page slice to render: a local slice of `display` (small), or the current server page (paged). */
+  /**
+   * The page slice to render: a local slice of `display` (small), or the
+   * current server page (paged). While paged, the live-typed label is still
+   * applied as a local preview with no request and no `pageIndex` change
+   * (design §6.3's "while typing, the display applies today's client label
+   * filter to what is loaded"; round 3 review B3'' — this previously
+   * returned `pageItems` unfiltered). `total`/`rangeStart` deliberately keep
+   * reporting the server's unfiltered count during this preview window; the
+   * design accepts that the "of N" figure may not match the filtered row
+   * count until the label is committed.
+   */
   get items(): Agent[] {
-    if (this._state === 'paged') return this.pageItems;
+    if (this._state === 'paged') return this.filterByLabel(this.pageItems);
     const display = this.display;
     const start = this._pageIndex * this.viewState.pageSize;
     return display.slice(start, start + this.viewState.pageSize);

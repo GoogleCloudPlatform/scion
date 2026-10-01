@@ -959,14 +959,20 @@ describe('project-detail — agent list window (P1c)', () => {
       internals(el).toggleSort('updated'); // same field: flips dir only
       await new Promise((r) => setTimeout(r, 10));
       expect(requests.length - n).toBe(1);
+      // N3'' (round 3 review): assert the actual dir, not just the count.
+      expect(requests[requests.length - 1].url).toContain('sort=updated');
+      expect(requests[requests.length - 1].url).toContain('dir=asc');
 
       const toggle = viewToggle(el)!;
       const perToggleCosts: number[] = [];
+      const perToggleKinds: Array<'legacy' | 'fit'> = [];
       for (const v of ['grid', 'list', 'grid', 'list', 'grid', 'list']) {
         n = requests.length;
         toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: v } }));
         await new Promise((r) => setTimeout(r, 10));
         perToggleCosts.push(requests.length - n);
+        const issued = requests.slice(n);
+        perToggleKinds.push(issued.every((r) => !r.url.includes('sort=')) ? 'legacy' : 'fit');
       }
       // Every toggle costs exactly one request: ->grid is the legacy load
       // (exiting 'paged'), ->list is the fit request (re-entering 'paged',
@@ -974,14 +980,20 @@ describe('project-detail — agent list window (P1c)', () => {
       // interim-cost bullets, paid on every toggle while the project stays
       // above the fit threshold.
       expect(perToggleCosts).toEqual([1, 1, 1, 1, 1, 1]);
+      // N3'' (round 3 review): assert the actual alternation the title claims.
+      expect(perToggleKinds).toEqual(['legacy', 'fit', 'legacy', 'fit', 'legacy', 'fit']);
     }, 20_000);
   });
 
-  describe("label typing while paged (round 2 review B1')", () => {
-    it('does not reset pageIndex, the rows shown, or issue a request', async () => {
+  describe("label typing while paged (round 2 review B1', round 3 B3'')", () => {
+    it('does not reset pageIndex or issue a request, and DOES apply the live preview filter to the page (design §6.3)', async () => {
       const projectId = 'p-b1-typing';
       localStorage.setItem('scion-view-project-agents', 'list');
-      const agents = Array.from({ length: 60 }, (_, i) => makeAgent(i));
+      // Every 5th agent carries the env=prod label, so the current page has
+      // a predictable, non-trivial filtered subset.
+      const agents = Array.from({ length: 60 }, (_, i) =>
+        makeAgent(i, i % 5 === 0 ? { labels: { env: 'prod' } } : {})
+      );
       const requests: AgentsRequest[] = [];
       vi.stubGlobal(
         'fetch',
@@ -1006,16 +1018,20 @@ describe('project-detail — agent list window (P1c)', () => {
       await internals(el).agentWindow.next();
       await el.updateComplete;
       expect(internals(el).agentWindow.pageIndex).toBe(1);
-      const itemsBefore = internals(el).agentWindow.items.map((a) => a.id);
+      const itemsBefore = internals(el).agentWindow.items;
+      const expectedFiltered = itemsBefore.filter((a) => a.labels?.env === 'prod').map((a) => a.id);
+      expect(expectedFiltered.length).toBeGreaterThan(0);
+      expect(expectedFiltered.length).toBeLessThan(itemsBefore.length);
 
       const before = requests.length;
       const input = labelInput(el)!;
-      input.value = 'en';
+      input.value = 'env';
       input.dispatchEvent(new Event('sl-input'));
       await el.updateComplete;
 
       expect(internals(el).agentWindow.pageIndex).toBe(1); // unchanged (round 2 review B1')
-      expect(internals(el).agentWindow.items.map((a) => a.id)).toEqual(itemsBefore);
+      // B3'' (round 3 review): the preview filter IS applied to the page.
+      expect(internals(el).agentWindow.items.map((a) => a.id)).toEqual(expectedFiltered);
       expect(requests.length).toBe(before); // still zero
       const pagerEl = el.shadowRoot?.querySelector('scion-agent-pager') as unknown as {
         pageIndex: number;
@@ -1023,6 +1039,91 @@ describe('project-detail — agent list window (P1c)', () => {
       } | null;
       expect(pagerEl?.pageIndex).toBe(1);
       expect(pagerEl?.hasPrev).toBe(true);
+    });
+  });
+
+  describe("a paged -> small transition resets pageIndex to 0 (round 3 review B1'' — a regression in the B1' fix)", () => {
+    function fixture60() {
+      return Array.from({ length: 60 }, (_, i) =>
+        makeAgent(i, { labels: i < 10 ? { env: 'prod' } : { env: 'dev' } })
+      );
+    }
+
+    function stubAlwaysPagedUnlessLabelled(
+      projectId: string,
+      agents: Agent[],
+      requests: AgentsRequest[]
+    ) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+            // Only the unlabelled candidate set (60) is forced paged; the
+            // env=prod subset (10) fits and comes back complete.
+            if (!u.searchParams.get('label')) u.searchParams.set('fit', '0');
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(u.toString(), init);
+        })
+      );
+    }
+
+    it('R3-A1: a k=v label commit whose set fits (paged -> small via the fit path) lands on page 0', async () => {
+      const projectId = 'p-r3a1';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = fixture60();
+      const requests: AgentsRequest[] = [];
+      stubAlwaysPagedUnlessLabelled(projectId, agents, requests);
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      await internals(el).agentWindow.next();
+      await internals(el).agentWindow.next();
+      await el.updateComplete;
+      expect(internals(el).agentWindow.pageIndex).toBe(2);
+
+      const input = labelInput(el)!;
+      input.value = 'env=prod';
+      input.dispatchEvent(new Event('sl-input'));
+      input.dispatchEvent(new Event('sl-change'));
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      expect(internals(el).agentWindow.state).toBe('small'); // 10 agents <= fit=500
+      expect(internals(el).agentWindow.pageIndex).toBe(0); // reset (B1'')
+      expect(internals(el).agentWindow.items.length).toBe(10); // all 10 env=prod agents visible
+    });
+
+    it('R3-A2: a bare-key label commit (legacy path, paged -> small) lands on page 0', async () => {
+      const projectId = 'p-r3a2';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = fixture60();
+      const requests: AgentsRequest[] = [];
+      stubAlwaysPagedUnlessLabelled(projectId, agents, requests);
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      await internals(el).agentWindow.next();
+      await internals(el).agentWindow.next();
+      await el.updateComplete;
+      expect(internals(el).agentWindow.pageIndex).toBe(2);
+
+      const input = labelInput(el)!;
+      input.value = 'env'; // bare key: not P1-eligible, goes through the legacy path
+      input.dispatchEvent(new Event('sl-input'));
+      input.dispatchEvent(new Event('sl-change'));
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      expect(internals(el).agentWindow.state).toBe('small'); // legacy load, no nextCursor
+      expect(internals(el).agentWindow.pageIndex).toBe(0); // reset (B1'')
     });
   });
 
@@ -1161,8 +1262,32 @@ describe('project-detail — agent list window (P1c)', () => {
     });
   });
 
-  describe("window navigation supersedes a pending page-level load (round 2 review N1')", () => {
-    it('a Next click while an older lifecycle refresh is still in flight keeps the navigated-to page when the refresh finally lands', async () => {
+  describe("pager navigation is disabled while a page-level load is in flight (round 2 N1', reworked per round 3 review B2'')", () => {
+    /**
+     * Round 2's N1' fix (bumping `agentsLoadGen` on a pager click) let a
+     * Next/Prev/chip click race a page-level view-state request: the
+     * window's own cursor stack still belonged to the *old* phase/dir/label,
+     * so the resulting request bound a stale cursor to new params and the
+     * server legitimately 400'd it (design §4.4) — round 3 review B2''. The
+     * fix going forward is the opposite of round 2's: disable navigation
+     * (and the chip) outright while either the window's own fetch or a
+     * page-level load is in flight, via `.loading=${agentWindow.loading ||
+     * agentsLoading}`, so the race can never start. `onPagerNav`/the
+     * `agentsLoadGen` bump are removed entirely.
+     */
+    function pagerLoading(el: TestEl): boolean {
+      return (el.shadowRoot!.querySelector('scion-agent-pager') as unknown as { loading: boolean })
+        .loading;
+    }
+
+    function clickNext(el: TestEl): void {
+      // Exercises the pager's own real guard (`onNext`'s `this.loading`
+      // check) rather than dispatching the bare 'next' event, which would
+      // bypass that guard the same way round 2's regression did.
+      (el.shadowRoot!.querySelector('scion-agent-pager') as unknown as { onNext(): void }).onNext();
+    }
+
+    it('a Next click while a lifecycle refresh is in flight is a no-op; the refresh then lands on page 0 as intended', async () => {
       const projectId = 'p-n1-prime';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
@@ -1196,22 +1321,23 @@ describe('project-detail — agent list window (P1c)', () => {
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('paged');
+      expect(pagerLoading(el)).toBe(false);
 
       // Start a lifecycle refresh (a page-0 fit request) and hold its response.
       holdNextPageZeroFit = true;
       internals(el).backgroundRefresh('lifecycle-refresh');
       await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+      expect(pagerLoading(el)).toBe(true); // the pager is disabled during the gap
 
-      // While it's still pending, click Next on the real pager element —
-      // onPagerNav must bump agentsLoadGen so the stale refresh below is
-      // discarded instead of resetting the page the user just navigated to.
-      const pagerEl = el.shadowRoot!.querySelector('scion-agent-pager')!;
-      pagerEl.dispatchEvent(new Event('next'));
+      const requestsBeforeClick = requests.length;
+      clickNext(el); // the pager's own guard makes this a no-op
       await new Promise((r) => setTimeout(r, 10));
       await el.updateComplete;
-      expect(internals(el).agentWindow.pageIndex).toBe(1);
+      expect(internals(el).agentWindow.pageIndex).toBe(0); // never navigated
+      expect(requests.length).toBe(requestsBeforeClick); // no mismatched-cursor request (design §4.4)
 
-      // Now let the older refresh finally resolve.
+      // Now let the refresh finally resolve.
       heldResolve!(
         jsonResponse({
           agents: agents.slice(0, 25),
@@ -1228,9 +1354,93 @@ describe('project-detail — agent list window (P1c)', () => {
       await new Promise((r) => setTimeout(r, 20));
       await el.updateComplete;
 
-      // The late refresh must not have reset the navigation back to page 0.
+      expect(internals(el).agentWindow.pageIndex).toBe(0); // lands on page 0, as the refresh intended
+      expect(pagerLoading(el)).toBe(false); // re-enabled
+      // Next now works normally.
+      clickNext(el);
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
       expect(internals(el).agentWindow.pageIndex).toBe(1);
     });
+
+    for (const kind of ['phase', 'dir', 'label', 'pagesize'] as const) {
+      it(`R3-B: a ${kind} change while paged disables Next until its own fit response lands, so no mismatched-cursor request is ever sent`, async () => {
+        const projectId = `p-r3b-${kind}`;
+        localStorage.setItem('scion-view-project-agents', 'list');
+        const agents = Array.from({ length: 60 }, (_, i) =>
+          makeAgent(i, { phase: i % 2 ? 'stopped' : 'running', labels: { env: 'dev' } })
+        );
+        const requests: AgentsRequest[] = [];
+        let holdNextPageZeroFit = false;
+        let heldResolve: ((r: Response) => void) | null = null;
+        vi.stubGlobal(
+          'fetch',
+          vi.fn((input: string | URL | Request, init?: RequestInit) => {
+            const rawUrl =
+              typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+            const u = new URL(rawUrl, 'http://localhost');
+            if (
+              u.pathname === `/api/v1/projects/${projectId}/agents` &&
+              u.searchParams.get('sort')
+            ) {
+              u.searchParams.set('fit', '0'); // always paged
+              if (holdNextPageZeroFit && !u.searchParams.has('cursor')) {
+                holdNextPageZeroFit = false;
+                requests.push({ url: rawUrl });
+                return new Promise<Response>((resolve) => {
+                  heldResolve = resolve;
+                });
+              }
+            }
+            return createRealisticFetchHandler({
+              projectId,
+              projectCaps: { actions: ['read'] },
+              agents,
+              requests,
+            })(u.toString(), init);
+          })
+        );
+
+        const el = await createComponent(projectId);
+        expect(internals(el).agentWindow.state).toBe('paged');
+
+        holdNextPageZeroFit = true;
+        if (kind === 'phase') internals(el).setPhaseFilter('stopped');
+        else if (kind === 'dir') internals(el).toggleSort('updated');
+        else if (kind === 'label') {
+          const input = labelInput(el)!;
+          input.value = 'env=dev';
+          input.dispatchEvent(new Event('sl-input'));
+          input.dispatchEvent(new Event('sl-change'));
+        } else {
+          (el as unknown as { onPagerSizeChange(n: number): void }).onPagerSizeChange(50);
+        }
+        await new Promise((r) => setTimeout(r, 10));
+        await el.updateComplete;
+        expect(pagerLoading(el)).toBe(true);
+
+        const requestsBeforeClick = requests.length;
+        clickNext(el);
+        await new Promise((r) => setTimeout(r, 10));
+        expect(requests.length).toBe(requestsBeforeClick); // no cursor request sent at all
+        expect(internals(el).agentWindow.error).toBeNull(); // in particular, no 400
+
+        heldResolve!(
+          jsonResponse({
+            agents: agents.slice(0, 25),
+            totalCount: 60,
+            complete: false,
+            nextCursor: '25',
+            stats: { total: 60, running: 30, agents: agents.map((a) => [a.id, a.phase]) },
+          })
+        );
+        await new Promise((r) => setTimeout(r, 20));
+        await el.updateComplete;
+
+        expect(internals(el).agentWindow.pageIndex).toBe(0); // the trigger's own page 0 landed
+        expect(internals(el).agentWindow.error).toBeNull();
+      });
+    }
   });
 
   describe("fit-path label 400 restores the previous committedLabel (round 1 review N3, round 2 N3')", () => {
@@ -1340,6 +1550,64 @@ describe('project-detail — agent list window (P1c)', () => {
       await el.updateComplete;
 
       expect(el.shadowRoot?.textContent).not.toContain('Loading agents');
+    });
+
+    it("N2'' (round 3 review): a lifecycle refresh in grid with a phase filter matching nothing shows the filter-empty message, not a loading flicker", async () => {
+      const projectId = 'p-n2-prime';
+      localStorage.setItem('scion-view-project-agents', 'grid'); // not P1-eligible: this.agents is populated via the legacy path
+      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { phase: 'running' }));
+      const requests: AgentsRequest[] = [];
+      let holdNext = false;
+      let heldResolve: ((r: Response) => void) | null = null;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          if (
+            holdNext &&
+            rawUrl.includes(`/api/v1/projects/${projectId}/agents`) &&
+            !rawUrl.includes('sort=')
+          ) {
+            holdNext = false;
+            requests.push({ url: rawUrl });
+            return new Promise<Response>((resolve) => {
+              heldResolve = resolve;
+            });
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(input, init);
+        })
+      );
+
+      const el = await createComponent(projectId);
+      expect((el as unknown as { agents: Agent[] }).agents.length).toBe(5); // this.agents already holds data
+
+      // Filter to a phase nothing matches, then trigger a lifecycle refresh
+      // (held) while that filter is active — this.agents stays non-empty
+      // (the OLD data) throughout the gap.
+      internals(el).setPhaseFilter('stopped');
+      await el.updateComplete;
+      expect(el.shadowRoot?.textContent).toContain('No agents match the current filter');
+
+      holdNext = true;
+      internals(el).backgroundRefresh('lifecycle-refresh');
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+
+      // Round 3 review N2'': must NOT flicker to "Loading agents…" here —
+      // this.agents already has data, it's just phase-filtered to nothing.
+      expect(el.shadowRoot?.textContent).not.toContain('Loading agents');
+      expect(el.shadowRoot?.textContent).toContain('No agents match the current filter');
+
+      heldResolve!(jsonResponse({ agents, _capabilities: { actions: ['read'] } }));
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+      expect(el.shadowRoot?.textContent).toContain('No agents match the current filter');
     });
   });
 });

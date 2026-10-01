@@ -109,6 +109,11 @@ export class ScionAgentPager extends LitElement {
     .chip {
       cursor: pointer;
     }
+    .chip-disabled {
+      cursor: default;
+      opacity: 0.6;
+      pointer-events: none;
+    }
     .error {
       color: var(--sl-color-danger-600, #dc2626);
       font-size: 0.875rem;
@@ -135,6 +140,9 @@ export class ScionAgentPager extends LitElement {
   }
 
   private onChipClick(): void {
+    // Disabled while loading (round 3 review B2'): a refresh click during an
+    // in-flight page-level load would race it the same way Prev/Next would.
+    if (this.loading) return;
     this.dispatchEvent(new Event('chip-click'));
   }
 
@@ -190,7 +198,12 @@ export class ScionAgentPager extends LitElement {
         ${this.loading ? html`<sl-spinner style="font-size: 1rem;"></sl-spinner>` : nothing}
         ${this.error ? html`<span class="error">${this.error}</span>` : nothing}
         ${this.showChip
-          ? html`<sl-tag class="chip" variant="primary" pill @click=${() => this.onChipClick()}>
+          ? html`<sl-tag
+              class="chip ${this.loading ? 'chip-disabled' : ''}"
+              variant="primary"
+              pill
+              @click=${() => this.onChipClick()}
+            >
               <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
               may have changed · Refresh
             </sl-tag>`

@@ -114,15 +114,50 @@ describe('AgentListWindow — small state', () => {
     expect(win.stats).toEqual({ total: 1, running: 0 });
   });
 
-  it('setSmall() never resets pageIndex (only setViewState does, round 1 review B1)', () => {
+  it('setSmall() does not reset pageIndex when already small (only setViewState does, round 1 review B1)', () => {
     const agents = [agent('a'), agent('b'), agent('c'), agent('d'), agent('e')];
     const { win, setHeld } = createWindow({ viewState: makeViewState({ pageSize: 2 }) });
     setHeld(agents);
     void win.next();
     expect(win.pageIndex).toBe(1);
-    win.setSmall(); // a later trigger re-affirms small state
+    win.setSmall(); // a later trigger re-affirms small state (small -> small)
     expect(win.pageIndex).toBe(1); // unchanged
   });
+
+  it("B1'': setSmall() resets pageIndex to 0 when the previous state was paged (round 3 review — a regression in the B1' fix)", async () => {
+    const page0 = [agent('a'), agent('b')];
+    const page1 = [agent('c'), agent('d')];
+    const fetchPage = vi.fn(async (params: { cursor?: string }) =>
+      !params.cursor
+        ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
+        : pagedResult(page1, { totalCount: 4 })
+    );
+    const { win, setHeld } = createWindow({ viewState: makeViewState(), fetchPage });
+    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
+    await win.next();
+    expect(win.state).toBe('paged');
+    expect(win.pageIndex).toBe(1);
+
+    // A label commit (or any trigger) whose response makes the set small —
+    // e.g. it now fits under `fit` — adopts an entirely different data set.
+    setHeld([agent('x'), agent('y')]);
+    expect(win.state).toBe('small');
+    expect(win.pageIndex).toBe(0); // reset: paged -> small always swaps data sets
+    expect(win.items.map((a) => a.id)).toEqual(['x', 'y']);
+  });
+
+  function pagedResult(agents: Agent[], opts: Partial<PagedPageResult> = {}): PagedPageResult {
+    return {
+      agents,
+      totalCount: agents.length,
+      stats: {
+        total: agents.length,
+        running: agents.filter((a) => a.phase === 'running').length,
+        agents: agents.map((a) => [a.id, a.phase]),
+      },
+      ...opts,
+    };
+  }
 
   it('paginates locally with 0 fetches', () => {
     const fetchPage = vi.fn();
@@ -539,7 +574,7 @@ describe('AgentListWindow — round 2 review fixes', () => {
 
   it("B1': setViewState does not reset pageIndex or the current page while paged (a label keystroke must not desync them)", async () => {
     const page0 = [agent('a'), agent('b')];
-    const page1 = [agent('c'), agent('d')];
+    const page1 = [agent('c', { labels: { env: 'prod' } }), agent('d')];
     const fetchPage = vi.fn(async (params: { cursor?: string }) =>
       !params.cursor
         ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
@@ -553,10 +588,13 @@ describe('AgentListWindow — round 2 review fixes', () => {
     expect(win.items.map((a) => a.id)).toEqual(['c', 'd']);
 
     const callsBefore = fetchPage.mock.calls.length;
-    win.setViewState({ label: 'en' }); // sl-input: local preview only
-    expect(win.pageIndex).toBe(1); // unchanged
+    win.setViewState({ label: 'env' }); // sl-input: local preview only
+    expect(win.pageIndex).toBe(1); // unchanged — no re-adoption, no reset
     expect(win.hasPrev).toBe(true); // unchanged
-    expect(win.items.map((a) => a.id)).toEqual(['c', 'd']); // still page 1's rows
+    // B3'' (round 3 review): the live preview filter IS applied to the
+    // loaded page's rows, same as the small state (design §6.3) — only 'c'
+    // (which carries the `env` label) remains.
+    expect(win.items.map((a) => a.id)).toEqual(['c']);
     expect(fetchPage.mock.calls.length).toBe(callsBefore); // no request
   });
 

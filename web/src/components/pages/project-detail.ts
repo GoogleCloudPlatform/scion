@@ -253,13 +253,30 @@ export class ScionPageProjectDetail extends LitElement {
 
   /**
    * Whether a page-level agents load (`loadAgentsForView`/`loadLegacyAgents`)
-   * is in flight. Used only to show a loading indicator instead of "No
-   * agents match the current filter" during the gap between leaving the
-   * paged state and the legacy load landing (round 2 review N5') — not a
-   * correctness mechanism (see `agentsLoadGen`/`isStaleAgentsLoad` for that).
+   * is in flight. Ref-counted (round 3 review N1'', closing the round-2
+   * "an older trigger can clear it early" gap): `beginLoadingIndicator`/
+   * `endLoadingIndicator` increment/decrement `agentsLoadingCount`, so it
+   * stays `true` for as long as *any* page-level load (including a nested
+   * 422-or-truncated-legacy fallback) is in flight, regardless of how many
+   * overlapping triggers are racing. Used for two things: the "Loading
+   * agents…" indicator (round 2 review N5') and, combined with
+   * `agentWindow.loading`, disabling pager navigation and the chip while
+   * either kind of request is in flight (round 3 review B2'').
    */
   @state()
   private agentsLoading = false;
+
+  private agentsLoadingCount = 0;
+
+  private beginLoadingIndicator(): void {
+    this.agentsLoadingCount++;
+    this.agentsLoading = true;
+  }
+
+  private endLoadingIndicator(): void {
+    this.agentsLoadingCount = Math.max(0, this.agentsLoadingCount - 1);
+    this.agentsLoading = this.agentsLoadingCount > 0;
+  }
 
   /**
    * Page size for the list view's window (design Q4), persisted under
@@ -1526,23 +1543,14 @@ export class ScionPageProjectDetail extends LitElement {
    * change that needs a fresh paged request.
    */
   private async loadAgentsForView(trigger: AgentsViewTrigger): Promise<void> {
-    this.agentsLoading = true;
+    this.beginLoadingIndicator();
     try {
       await this.loadAgentsForViewImpl(trigger);
     } finally {
-      this.agentsLoading = false;
+      this.endLoadingIndicator();
     }
   }
 
-  /**
-   * `agentsLoading` is a simple (non-ref-counted) flag, round 2 review N5':
-   * it covers the single-trigger case the review names (a paged -> grid
-   * transition's legacy load), not a precise count across genuinely
-   * overlapping triggers — an older trigger finishing first could clear it
-   * while a newer one (already guarded against overwriting data by
-   * `agentsLoadGen`) is still in flight. Good enough for a loading
-   * indicator; `isStaleAgentsLoad` remains the correctness guard.
-   */
   private async loadAgentsForViewImpl(trigger: AgentsViewTrigger): Promise<void> {
     const label = this.committedLabel.trim();
     if (!this.isP1Eligible() || this.sortedRefusedForLabel === label) {
@@ -1632,11 +1640,11 @@ export class ScionPageProjectDetail extends LitElement {
     trigger: AgentsViewTrigger,
     carried?: { gen: number; signal: AbortSignal }
   ): Promise<void> {
-    this.agentsLoading = true;
+    this.beginLoadingIndicator();
     try {
       await this.loadLegacyAgentsImpl(trigger, carried);
     } finally {
-      this.agentsLoading = false;
+      this.endLoadingIndicator();
     }
   }
 
@@ -2669,7 +2677,13 @@ export class ScionPageProjectDetail extends LitElement {
             ${this.viewMode === 'list' && this.listViewUsesWindow
               ? this.renderAgentWindowList()
               : this.displayAgents.length === 0
-                ? this.agentsLoading
+                ? // "Loading…" only for the paged -> grid/tree gap, where
+                  // `this.agents` itself is still empty (round 3 review
+                  // N2'' — gating on `displayAgents` alone flickered on
+                  // every lifecycle refresh whenever the phase filter
+                  // simply matched nothing, since `this.agents` already had
+                  // data then).
+                  this.agents.length === 0 && this.agentsLoading
                   ? html`<div class="empty-filter-state">Loading agents…</div>`
                   : html`<div class="empty-filter-state">No agents match the current filter.</div>`
                 : this.viewMode === 'graph'
@@ -3001,7 +3015,7 @@ export class ScionPageProjectDetail extends LitElement {
           .pageSize=${this.pagerPageSize}
           .hasNext=${this.agentWindow.hasNext}
           .hasPrev=${this.agentWindow.hasPrev}
-          .loading=${this.agentWindow.loading}
+          .loading=${this.agentWindow.loading || this.agentsLoading}
           .error=${this.agentWindow.error}
           .showChip=${this.agentWindow.updatesAvailable}
           @prev=${() => this.onPagerNav(() => this.agentWindow.prev())}
@@ -3015,16 +3029,19 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   /**
-   * A direct window navigation/refresh (Prev/Next/chip-click) supersedes
-   * whatever page-level load (`loadAgentsForView`/`loadLegacyAgents`) might
-   * still be in flight (round 2 review N1') — bumping `agentsLoadGen` makes
-   * that older response's `isStaleAgentsLoad` check discard it instead of
-   * calling `setSmall`/`setPaged` and resetting the page the user just
-   * navigated to. The window's own navigation is unaffected: it guards
-   * itself with its own generation counter.
+   * A second, defense-in-depth guard for Prev/Next/chip-click (round 3
+   * review B2''), on top of the `.loading=` binding that disables the
+   * pager's own button/chip. This specifically protects against anything
+   * that fires the pager's `prev`/`next`/`chip-click` events without going
+   * through its own guarded `onPrev`/`onNext`/`onChipClick` methods (the
+   * pager's own guard covers a real click; this one covers an event
+   * dispatched directly on the host). Unlike the removed round-2 `onPagerNav`,
+   * this never bumps `agentsLoadGen` — it simply refuses to navigate while
+   * either the window's own fetch or a page-level load is in flight, so the
+   * mismatched-cursor race (design §4.4) can never start in the first place.
    */
   private onPagerNav(action: () => Promise<void>): void {
-    this.agentsLoadGen++;
+    if (this.agentWindow.loading || this.agentsLoading) return;
     void action();
   }
 
