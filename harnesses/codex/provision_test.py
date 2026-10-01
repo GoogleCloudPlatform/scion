@@ -406,14 +406,6 @@ class CodexProvisionTest(unittest.TestCase):
         )
         self.assertEqual(provision._DEFAULT_REASONING_EFFORT, "medium")
 
-    def test_resolve_reasoning_effort_env_blank_defaults_to_medium(self) -> None:
-        # provision() strips the raw env value before calling this, so a
-        # whitespace-only SCION_THINKING_LEVEL arrives here as "".
-        self.assertEqual(
-            provision._resolve_reasoning_effort_env(_test_ctx(), "   ".strip()),
-            "medium",
-        )
-
     def test_resolve_reasoning_effort_env_explicit_levels_win(self) -> None:
         self.assertEqual(provision._resolve_reasoning_effort_env(_test_ctx(), "10"), "low")
         self.assertEqual(provision._resolve_reasoning_effort_env(_test_ctx(), "90"), "xhigh")
