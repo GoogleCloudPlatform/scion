@@ -144,6 +144,53 @@ func TestTerminalContext_ExpiredPastTheTTL(t *testing.T) {
 	}
 }
 
+// TestRunLaunch_TerminalTTLExpiresWithNoAnswer_NoCleanup exercises
+// runLaunch's succeeded-report path end to end (not just terminalContext in
+// isolation) when the Hub never gives a definitive answer before the
+// terminal TTL runs out: design §3.8.2 step 7's "no definitive answer means
+// no cleanup" rule applies here too, the same as a failed report. rec's
+// Deadline is set far enough in the past that terminalContext's TTL
+// (deadline+10min) is already expired, so SendTerminal's retry loop exits
+// on its first attempt instead of the test waiting out a real 10-minute
+// window.
+func TestRunLaunch_TerminalTTLExpiresWithNoAnswer_NoCleanup(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if claimState(req) {
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		}
+		// The terminal (succeeded) report never gets a definitive answer.
+		return nil, errors.New("simulated unreachable")
+	}
+
+	rec := newLaunchRecord("L-ttl", "agent-ttl", store.LaunchKindCreate, "", time.Now().Add(-15*time.Minute), func() {})
+	lc := launchCtx{
+		opts: api.StartOptions{Name: "agent-ttl"},
+		mgr:  mgr,
+		key:  launchKey{Slug: "agent-ttl"},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		srv.runLaunch(context.Background(), rec, lc)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runLaunch did not return; the already-expired terminal TTL should make SendTerminal give up immediately")
+	}
+
+	if n := mgr.StartCallCount(); n != 1 {
+		t.Fatalf("expected Start to be called once, got %d", n)
+	}
+	if n := mgr.CleanupCallCount(); n != 0 {
+		t.Fatalf("expected no cleanup when the terminal TTL expired with no definitive answer, got %d calls", n)
+	}
+}
+
 func TestShouldCleanupAfterSucceededReport(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -237,6 +284,106 @@ func TestCleanupAbortedLaunch_KeepsFilesWhenMarkerMismatched(t *testing.T) {
 
 	if _, err := os.Stat(agentDir); err != nil {
 		t.Fatalf("expected the agent directory to survive a marker mismatch, stat err = %v", err)
+	}
+}
+
+// TestRunLaunch_WaitsForSupersededRecordStillCleaningUp exercises
+// WaitSuperseded through two real runLaunch goroutines for the same key
+// (design §3.8.2 step 5.2, F5), not just the registry's Begin/Finish
+// bookkeeping in isolation: a new launch for a key still held by an older
+// launch that is itself still blocked inside CleanupLaunch must not write
+// its marker or call Start until the older launch's cleanup actually
+// finishes.
+func TestRunLaunch_WaitsForSupersededRecordStillCleaningUp(t *testing.T) {
+	key := launchKey{Slug: "agent-shared"}
+
+	oldMgr := newAsyncManager()
+	oldMgr.setStartErr(errors.New("boom"))
+	cleanupBlock := make(chan struct{})
+	oldMgr.setCleanupBlock(cleanupBlock)
+
+	newMgr := newAsyncManager()
+
+	srv, rtb := newAsyncTestServer(t, oldMgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if claimState(req) {
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		}
+		if req.LaunchID == "L-old" && req.State == hubclient.AgentLaunchReportStateFailed {
+			// 403 is one of the design's listed cleanup reasons, so the old
+			// launch's failure drives it into cleanupAbortedLaunch, which
+			// blocks on cleanupBlock above.
+			return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusForbidden}, nil
+		}
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	oldRec := newLaunchRecord("L-old", "agent-old", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
+	oldSupersededDone := srv.launchRegistry.Begin(key, oldRec)
+	if oldSupersededDone != nil {
+		t.Fatal("expected no superseded record for the first Begin")
+	}
+	oldLc := launchCtx{opts: api.StartOptions{Name: "agent-shared"}, mgr: oldMgr, key: key}
+
+	oldDone := make(chan struct{})
+	go func() {
+		srv.runLaunch(context.Background(), oldRec, oldLc)
+		close(oldDone)
+	}()
+
+	if !waitUntil(t, 2*time.Second, func() bool { return oldMgr.CleanupCallCount() >= 1 }) {
+		t.Fatal("expected the old launch to reach CleanupLaunch (and block there)")
+	}
+
+	// The old launch is now blocked inside CleanupLaunch, so its runLaunch
+	// goroutine has not returned and Finish has not closed its done channel
+	// yet. Begin for the same key must hand the new launch that still-open
+	// channel.
+	newRec := newLaunchRecord("L-new", "agent-new", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
+	newSupersededDone := srv.launchRegistry.Begin(key, newRec)
+	if newSupersededDone == nil {
+		t.Fatal("expected Begin to return the old record's still-open done channel")
+	}
+	newLc := launchCtx{
+		opts:           api.StartOptions{Name: "agent-shared"},
+		mgr:            newMgr,
+		key:            key,
+		supersededDone: newSupersededDone,
+	}
+
+	newDone := make(chan struct{})
+	go func() {
+		srv.runLaunch(context.Background(), newRec, newLc)
+		close(newDone)
+	}()
+
+	// Give the new launch's claim (answered applied, fast) a moment to clear
+	// so it would already be waiting at WaitSuperseded if nothing blocked it,
+	// then confirm it has NOT called Start while the old launch is still
+	// cleaning up.
+	time.Sleep(200 * time.Millisecond)
+	if n := newMgr.StartCallCount(); n != 0 {
+		t.Fatalf("expected the new launch to wait for the superseded record before calling Start, got %d calls", n)
+	}
+
+	// Let the old launch's cleanup finish, which closes its done channel and
+	// unblocks the new launch's WaitSuperseded.
+	close(cleanupBlock)
+
+	select {
+	case <-oldDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the old launch did not finish after its cleanup was unblocked")
+	}
+
+	if !waitUntil(t, 2*time.Second, func() bool { return newMgr.StartCallCount() >= 1 }) {
+		t.Fatal("expected the new launch to call Start once the superseded record finished")
+	}
+
+	select {
+	case <-newDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the new launch did not finish")
 	}
 }
 

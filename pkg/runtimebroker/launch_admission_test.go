@@ -50,6 +50,7 @@ type asyncManager struct {
 	startBlock     chan struct{} // if non-nil, Start waits on it (or ctx) before returning
 	cleanupCalls   int
 	cleanupLast    []agent.ResourceHandle
+	cleanupBlock   chan struct{} // if non-nil, CleanupLaunch waits on it (or ctx) before returning
 	lastStartCtx   context.Context
 }
 
@@ -99,10 +100,25 @@ func (m *asyncManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 func (m *asyncManager) CleanupLaunch(ctx context.Context, handles []agent.ResourceHandle) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.cleanupCalls++
 	m.cleanupLast = handles
+	block := m.cleanupBlock
+	m.mu.Unlock()
+
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return nil
+}
+
+func (m *asyncManager) setCleanupBlock(ch chan struct{}) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cleanupBlock = ch
 }
 
 func (m *asyncManager) StartCallCount() int {
