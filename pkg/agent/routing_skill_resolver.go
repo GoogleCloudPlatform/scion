@@ -60,6 +60,20 @@ func fallbackContext(ctx context.Context) (context.Context, context.CancelFunc) 
 	return context.WithTimeout(context.WithoutCancel(ctx), fallbackTimeout)
 }
 
+// RouteFilter may be implemented by a resolver registered via
+// RegisterFallback to claim specific refs for direct handling, bypassing the
+// primary (Hub) resolver entirely for refs the primary structurally cannot
+// serve — for example a ref whose credential lives only on the broker. The
+// check must be cheap and deterministic: no I/O, in particular no network
+// call. It runs for every ref in a scheme group before the primary is even
+// attempted, so a ref it claims never costs that group a wasted Hub round
+// trip or a Hub-side resolution attempt that can only fail or fall back.
+type RouteFilter interface {
+	// ShouldBypassPrimary reports whether ref must be routed directly to this
+	// resolver instead of being attempted against the primary first.
+	ShouldBypassPrimary(ref api.SkillReference) bool
+}
+
 // RoutingSkillResolver dispatches SkillReferences to scheme-specific resolvers.
 // It groups incoming refs by URI scheme, sends each group to the registered
 // resolver for that scheme, and merges the results.
@@ -166,6 +180,36 @@ func (r *RoutingSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefe
 				})
 			}
 			continue
+		}
+
+		// Let the fallback claim any refs the primary structurally cannot
+		// serve (RouteFilter) before the primary is attempted at all. This
+		// both saves the wasted round trip and keeps the primary from ever
+		// seeing a ref it can only fail or fall back on.
+		if fb != nil {
+			if filter, ok := fb.(RouteFilter); ok {
+				routed := schemeRefs[:0:0] // fresh backing array; schemeRefs must not be mutated in place
+				var bypassed []api.SkillReference
+				for _, ref := range schemeRefs {
+					if filter.ShouldBypassPrimary(ref) {
+						bypassed = append(bypassed, ref)
+					} else {
+						routed = append(routed, ref)
+					}
+				}
+				if len(bypassed) > 0 {
+					br, err := fb.Resolve(ctx, bypassed, opts)
+					if err != nil {
+						return nil, fmt.Errorf("fallback resolver for scheme %q failed: %w", scheme, err)
+					}
+					result.Resolved = append(result.Resolved, br.Resolved...)
+					result.Errors = append(result.Errors, br.Errors...)
+				}
+				schemeRefs = routed
+				if len(schemeRefs) == 0 {
+					continue
+				}
+			}
 		}
 
 		sr, err := resolver.Resolve(ctx, schemeRefs, opts)

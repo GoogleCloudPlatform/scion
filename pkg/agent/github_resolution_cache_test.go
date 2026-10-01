@@ -15,8 +15,12 @@
 package agent
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -239,5 +243,326 @@ func TestGitHubResolutionCache_ExpiredNotLoaded(t *testing.T) {
 	_, ok := cache2.Get("gh://o/r/s@main")
 	if ok {
 		t.Fatal("expected expired entry to not be loaded, got hit")
+	}
+}
+
+// TestGitHubResolutionCache_ResolveWithFetch_Coalesces is the acceptance test
+// for single-flight: N concurrent resolutions of the same ref must make
+// exactly one upstream fetch. Synchronization is via channels (entered,
+// proceed), not sleeps: the test blocks until the fetch has actually started
+// before allowing it to complete, so every goroutine is guaranteed to have
+// called ResolveWithFetch before the single fetch is allowed to finish.
+func TestGitHubResolutionCache_ResolveWithFetch_Coalesces(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	var fetchCount int32
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	proceed := make(chan struct{})
+	fetch := func(ctx context.Context) (ResolvedSkill, error) {
+		atomic.AddInt32(&fetchCount, 1)
+		enterOnce.Do(func() { close(entered) })
+		<-proceed
+		return ResolvedSkill{Name: "coalesced", URI: "gh://o/r/s@main"}, nil
+	}
+
+	const n = 8
+	var wg sync.WaitGroup
+	results := make([]ResolvedSkill, n)
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = cache.ResolveWithFetch(context.Background(),
+				"coalesce-key", "coalesce-flight", "coalesce-cred", false, fetch)
+		}(i)
+	}
+
+	<-entered
+	close(proceed)
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&fetchCount); got != 1 {
+		t.Fatalf("expected exactly 1 upstream fetch for %d concurrent callers, got %d", n, got)
+	}
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			t.Fatalf("caller %d: unexpected error: %v", i, errs[i])
+		}
+		if results[i].Name != "coalesced" {
+			t.Errorf("caller %d: expected name %q, got %q", i, "coalesced", results[i].Name)
+		}
+	}
+}
+
+// TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCap is the
+// acceptance test for the per-credential in-flight cap: it must be enforced
+// across distinct refs (so single-flight cannot coalesce them), not just
+// within one ref.
+func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCap(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	const extra = 3
+	const n = maxInFlightPerCredential + extra
+	entered := make(chan struct{}, n)
+	proceed := make(chan struct{})
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fetch := func(ctx context.Context) (ResolvedSkill, error) {
+				entered <- struct{}{}
+				<-proceed
+				return ResolvedSkill{Name: fmt.Sprintf("skill-%d", i)}, nil
+			}
+			// Distinct refs (cache/flight keys) but the same credential
+			// identity: single-flight cannot coalesce these, so only the
+			// per-credential cap can bound their concurrency.
+			_, _ = cache.ResolveWithFetch(context.Background(),
+				fmt.Sprintf("cap-cache-%d", i), fmt.Sprintf("cap-flight-%d", i), "shared-cred", false, fetch)
+		}()
+	}
+
+	// Exactly maxInFlightPerCredential fetches can be running at once. This is
+	// a correctness invariant, not a timing assumption: the semaphore has no
+	// free slot for any more until one of these finishes, so a blocking
+	// receive loop is guaranteed to collect exactly this many sends.
+	for i := 0; i < maxInFlightPerCredential; i++ {
+		<-entered
+	}
+
+	// No further caller can have reached the fetch body yet — there is no
+	// free slot for it to acquire.
+	select {
+	case <-entered:
+		t.Fatal("more than maxInFlightPerCredential fetches ran concurrently for the same credential")
+	default:
+	}
+
+	close(proceed)
+	wg.Wait()
+
+	// The remaining callers must still have completed (each one eventually
+	// acquired a slot once one freed up).
+	for i := 0; i < extra; i++ {
+		select {
+		case <-entered:
+		default:
+			t.Fatalf("expected %d more fetches to have run after slots freed up", extra)
+		}
+	}
+}
+
+// TestGitHubResolutionCache_ResolveWithFetch_CancelledWaiterDoesNotFailFlight
+// is the acceptance test for "a cancelled waiter does not cancel the shared
+// flight": one of two concurrent callers for the same ref has its own context
+// cancelled while the flight is in progress. Both callers must still get the
+// successful result — whichever of the two happens to be the single-flight
+// leader, the fetch runs on a context detached from either caller's
+// cancellation (see coalesceFetch).
+func TestGitHubResolutionCache_ResolveWithFetch_CancelledWaiterDoesNotFailFlight(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	proceed := make(chan struct{})
+	fetch := func(ctx context.Context) (ResolvedSkill, error) {
+		enterOnce.Do(func() { close(entered) })
+		<-proceed
+		return ResolvedSkill{Name: "ok", URI: "gh://o/r/s@main"}, nil
+	}
+
+	ctxA, cancelA := context.WithCancel(context.Background())
+	ctxB := context.Background()
+
+	var wg sync.WaitGroup
+	var resA, resB ResolvedSkill
+	var errA, errB error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		resA, errA = cache.ResolveWithFetch(ctxA, "cancel-key", "cancel-flight", "cancel-cred", false, fetch)
+	}()
+	go func() {
+		defer wg.Done()
+		resB, errB = cache.ResolveWithFetch(ctxB, "cancel-key", "cancel-flight", "cancel-cred", false, fetch)
+	}()
+
+	<-entered
+	cancelA() // cancel one waiter's own context while the flight is in progress
+	close(proceed)
+	wg.Wait()
+
+	if errA != nil {
+		t.Errorf("a waiter's own cancellation must not fail the shared flight: %v", errA)
+	}
+	if errB != nil {
+		t.Errorf("unexpected error for the uncancelled waiter: %v", errB)
+	}
+	if resA.Name != "ok" {
+		t.Errorf("expected resA.Name = %q, got %q", "ok", resA.Name)
+	}
+	if resB.Name != "ok" {
+		t.Errorf("expected resB.Name = %q, got %q", "ok", resB.Name)
+	}
+}
+
+// TestGitHubResolutionCache_ResolveWithFetch_StaleServesImmediately is the
+// acceptance test for stale-on-expiry: a branch ref past its TTL but within
+// MaxResolutionStaleAge must be served immediately from the stale entry,
+// without waiting on a fetch at all — the fetch here blocks forever on an
+// unclosed channel, so the test would hang if ResolveWithFetch waited on it.
+func TestGitHubResolutionCache_ResolveWithFetch_StaleServesImmediately(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	const key = "gh://o/r/s@main"
+	now := time.Now()
+	cache.mu.Lock()
+	cache.entries[key] = &resolutionCacheEntry{
+		Skill:       ResolvedSkill{Name: "old", URI: key},
+		CachedAt:    now.Add(-time.Hour),        // well within MaxResolutionStaleAge
+		ExpiresAt:   now.Add(-30 * time.Minute), // already past TTL
+		IsBranchRef: true,
+	}
+	cache.mu.Unlock()
+
+	entered := make(chan struct{})
+	block := make(chan struct{}) // never closed — proves ResolveWithFetch did not wait on fetch
+	fetch := func(ctx context.Context) (ResolvedSkill, error) {
+		close(entered)
+		<-block
+		return ResolvedSkill{Name: "new", URI: key}, nil
+	}
+
+	skill, err := cache.ResolveWithFetch(context.Background(), key, "stale-flight", "stale-cred", true, fetch)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if skill.Name != "old" {
+		t.Fatalf("expected the stale value %q, got %q", "old", skill.Name)
+	}
+
+	// The background refresh must still have been triggered.
+	<-entered
+}
+
+// TestGitHubResolutionCache_ResolveWithFetch_StaleRefreshesOnce is the
+// acceptance test for "refreshes once": two concurrent stale hits for the
+// same ref must coalesce into a single background fetch.
+func TestGitHubResolutionCache_ResolveWithFetch_StaleRefreshesOnce(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	const key = "gh://o/r/s@main"
+	now := time.Now()
+	cache.mu.Lock()
+	cache.entries[key] = &resolutionCacheEntry{
+		Skill:       ResolvedSkill{Name: "old", URI: key},
+		CachedAt:    now.Add(-time.Hour),
+		ExpiresAt:   now.Add(-time.Minute),
+		IsBranchRef: true,
+	}
+	cache.mu.Unlock()
+
+	var fetchCount int32
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	proceed := make(chan struct{})
+	fetch := func(ctx context.Context) (ResolvedSkill, error) {
+		atomic.AddInt32(&fetchCount, 1)
+		enterOnce.Do(func() { close(entered) })
+		<-proceed
+		return ResolvedSkill{Name: "new", URI: key}, nil
+	}
+
+	skill1, err1 := cache.ResolveWithFetch(context.Background(), key, "refresh-once-flight", "refresh-once-cred", true, fetch)
+	skill2, err2 := cache.ResolveWithFetch(context.Background(), key, "refresh-once-flight", "refresh-once-cred", true, fetch)
+	if err1 != nil || err2 != nil {
+		t.Fatalf("unexpected errors: %v, %v", err1, err2)
+	}
+	if skill1.Name != "old" || skill2.Name != "old" {
+		t.Fatalf("both concurrent stale hits must get the stale value: got %q, %q", skill1.Name, skill2.Name)
+	}
+
+	<-entered
+	close(proceed)
+
+	// Deterministically wait for the (possibly still in-flight) refresh to
+	// land: calling coalesceFetch directly with the same flight key either
+	// joins the still-running flight or, if it already finished, hits the
+	// fresh-cache re-check — either way it must not invoke fetch again.
+	refreshed, err := cache.coalesceFetch(context.Background(), "refresh-once-flight", "refresh-once-cred", key, true, fetch)
+	if err != nil {
+		t.Fatalf("unexpected error joining the refresh flight: %v", err)
+	}
+	if refreshed.Name != "new" {
+		t.Fatalf("expected the refreshed value %q, got %q", "new", refreshed.Name)
+	}
+
+	if got := atomic.LoadInt32(&fetchCount); got != 1 {
+		t.Fatalf("expected exactly 1 upstream fetch for two concurrent stale hits, got %d", got)
+	}
+}
+
+// TestGitHubResolutionCache_ResolveWithFetch_PastMaxStaleAgeResolvesSynchronously
+// is the acceptance test for the hard staleness bound: an entry older than
+// MaxResolutionStaleAge must not be served stale — it must be re-resolved
+// synchronously instead.
+func TestGitHubResolutionCache_ResolveWithFetch_PastMaxStaleAgeResolvesSynchronously(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	const key = "gh://o/r/s@main"
+	now := time.Now()
+	cache.mu.Lock()
+	cache.entries[key] = &resolutionCacheEntry{
+		Skill:       ResolvedSkill{Name: "ancient", URI: key},
+		CachedAt:    now.Add(-(MaxResolutionStaleAge + time.Hour)), // past the hard cutoff
+		ExpiresAt:   now.Add(-time.Hour),
+		IsBranchRef: true,
+	}
+	cache.mu.Unlock()
+
+	var fetchCount int32
+	fetch := func(ctx context.Context) (ResolvedSkill, error) {
+		atomic.AddInt32(&fetchCount, 1)
+		return ResolvedSkill{Name: "fresh", URI: key}, nil
+	}
+
+	skill, err := cache.ResolveWithFetch(context.Background(), key, "too-old-flight", "too-old-cred", true, fetch)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if skill.Name != "fresh" {
+		t.Fatalf("an entry past MaxResolutionStaleAge must not be served stale: got %q", skill.Name)
+	}
+	if got := atomic.LoadInt32(&fetchCount); got != 1 {
+		t.Fatalf("expected exactly 1 synchronous fetch, got %d", got)
 	}
 }

@@ -1013,3 +1013,121 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 		}
 	})
 }
+
+// routeFilterMock wraps mockSchemeResolver to also implement RouteFilter, for
+// tests of the up-front bypass routing in RoutingSkillResolver.Resolve.
+type routeFilterMock struct {
+	*mockSchemeResolver
+	bypass func(api.SkillReference) bool
+}
+
+func (m *routeFilterMock) ShouldBypassPrimary(ref api.SkillReference) bool {
+	return m.bypass(ref)
+}
+
+// TestRoutingSkillResolver_RouteFilter_BypassesPrimaryEntirely is the
+// acceptance test for routing a hub-unservable ref straight to the fallback:
+// the primary (hub) must receive zero calls for a ref the fallback claims via
+// RouteFilter.
+func TestRoutingSkillResolver_RouteFilter_BypassesPrimaryEntirely(t *testing.T) {
+	hub := &mockSchemeResolver{name: "hub"}
+	fb := &routeFilterMock{
+		mockSchemeResolver: &mockSchemeResolver{
+			name:     "github",
+			resolved: []ResolvedSkill{{Name: "claimed", URI: "gh://o/r/claimed"}},
+		},
+		bypass: func(ref api.SkillReference) bool { return ref.URI == "gh://o/r/claimed" },
+	}
+
+	router := NewRoutingSkillResolver(hub)
+	router.RegisterFallback("gh", fb)
+
+	result, err := router.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://o/r/claimed"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(hub.called) != 0 {
+		t.Errorf("primary (hub) must not be called for a ref the fallback claims via RouteFilter; got %d calls: %+v", len(hub.called), hub.called)
+	}
+	if len(fb.called) != 1 || fb.called[0].URI != "gh://o/r/claimed" {
+		t.Errorf("fallback must receive the claimed ref directly, got %+v", fb.called)
+	}
+	if len(result.Resolved) != 1 || result.Resolved[0].Name != "claimed" {
+		t.Fatalf("expected the claimed skill resolved, got %+v", result.Resolved)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("got %d errors, want 0: %+v", len(result.Errors), result.Errors)
+	}
+}
+
+// TestRoutingSkillResolver_RouteFilter_MixedBatch confirms that within one
+// scheme group, claimed and unclaimed refs are routed independently: the
+// primary sees only the unclaimed ref, and the fallback sees only the claimed
+// one, with no fallback-retry interaction between them.
+func TestRoutingSkillResolver_RouteFilter_MixedBatch(t *testing.T) {
+	hub := &mockSchemeResolver{
+		name:     "hub",
+		resolved: []ResolvedSkill{{Name: "hub-served", URI: "gh://o/r/hub-served"}},
+	}
+	fb := &routeFilterMock{
+		mockSchemeResolver: &mockSchemeResolver{
+			name:     "github",
+			resolved: []ResolvedSkill{{Name: "claimed", URI: "gh://o/r/claimed"}},
+		},
+		bypass: func(ref api.SkillReference) bool { return ref.URI == "gh://o/r/claimed" },
+	}
+
+	router := NewRoutingSkillResolver(hub)
+	router.RegisterFallback("gh", fb)
+
+	result, err := router.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://o/r/hub-served"},
+		{URI: "gh://o/r/claimed"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(hub.called) != 1 || hub.called[0].URI != "gh://o/r/hub-served" {
+		t.Errorf("primary must only see the non-claimed ref, got %+v", hub.called)
+	}
+	if len(fb.called) != 1 || fb.called[0].URI != "gh://o/r/claimed" {
+		t.Errorf("fallback must only see the claimed ref up front, got %+v", fb.called)
+	}
+	if len(result.Resolved) != 2 {
+		t.Fatalf("expected both refs resolved, got %+v", result.Resolved)
+	}
+}
+
+// TestRoutingSkillResolver_RouteFilter_AllBypassedSkipsPrimaryGroup confirms
+// that when every ref in a scheme group is claimed by the fallback, the
+// primary is never invoked for that scheme at all (not even with an empty
+// slice).
+func TestRoutingSkillResolver_RouteFilter_AllBypassedSkipsPrimaryGroup(t *testing.T) {
+	hub := &mockSchemeResolver{name: "hub"}
+	fb := &routeFilterMock{
+		mockSchemeResolver: &mockSchemeResolver{
+			name:     "github",
+			resolved: []ResolvedSkill{{Name: "a", URI: "gh://o/r/a"}, {Name: "b", URI: "gh://o/r/b"}},
+		},
+		bypass: func(api.SkillReference) bool { return true },
+	}
+
+	router := NewRoutingSkillResolver(hub)
+	router.RegisterFallback("gh", fb)
+
+	result, err := router.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://o/r/a"},
+		{URI: "gh://o/r/b"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hub.called != nil {
+		t.Errorf("primary must not be invoked at all when every ref is bypassed, got %+v", hub.called)
+	}
+	if len(result.Resolved) != 2 {
+		t.Fatalf("expected both refs resolved via the fallback, got %+v", result.Resolved)
+	}
+}

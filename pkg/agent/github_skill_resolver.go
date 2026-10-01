@@ -190,6 +190,24 @@ func (r *GitHubSkillResolver) tokenForRef(ref *GitHubSkillRef) (string, error) {
 
 func (r *GitHubSkillResolver) ResolverName() string { return "github" }
 
+// ShouldBypassPrimary implements agent.RouteFilter. It reports whether ref
+// needs a credential the Hub cannot hold — an explicit ?token= secret (which
+// lives only in the broker's ProvisionCredentials) or a GH_{OWNER} /
+// GH_{OWNER}__{REPO} convention credential — so the ref should be routed
+// straight to this resolver instead of making a Hub round trip that can only
+// fail or fall back (the Hub's resolveGitHubSkill rejects ?token= refs
+// outright, and has no access to ProvisionCredentials at all). Parses the URI
+// and checks r.provisionCredentials; no I/O, no GitHub call.
+func (r *GitHubSkillResolver) ShouldBypassPrimary(ref api.SkillReference) bool {
+	ghRef, err := ParseGitHubSkillURI(ref.URI)
+	if err != nil {
+		// Not this resolver's concern to diagnose early — let the primary
+		// report the parse error as it does today.
+		return false
+	}
+	return r.credentialIdentity(ghRef) != "default"
+}
+
 func (r *GitHubSkillResolver) Resolve(ctx context.Context, refs []api.SkillReference, opts ResolveOpts) (*ResolveResult, error) {
 	result := &ResolveResult{}
 
@@ -239,28 +257,62 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 	}
 
 	cacheKey := resolutionCacheKey(ghRef, token)
-	if r.resolutionCache != nil {
-		if cached, ok := r.resolutionCache.Get(cacheKey); ok {
-			// No separate tokenForRef needed here — token already validated above.
-			util.Debugf("github: resolution cache hit for %s", ref.URI)
-			result := cached
-			result.As = ref.As
-			return &result, nil
-		}
+
+	fetch := func(fctx context.Context) (ResolvedSkill, error) {
+		return r.fetchOne(fctx, ghRef, ref, token)
 	}
 
+	var resolved ResolvedSkill
+	if r.resolutionCache != nil {
+		effectiveRef := ghRef.Ref
+		if effectiveRef == "" {
+			effectiveRef = "HEAD"
+		}
+		isBranchRef := !isFullCommitSHA(effectiveRef)
+		credID := r.credentialIdentity(ghRef)
+		// flightKey deliberately omits the token (unlike cacheKey above): see
+		// ResolveWithFetch for why single-flight must key on a stable
+		// credential identity rather than a per-mint token hash.
+		flightKey := fmt.Sprintf("gh://%s/%s/%s@%s|%s", ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, credID)
+
+		skill, err := r.resolutionCache.ResolveWithFetch(ctx, cacheKey, flightKey, credID, isBranchRef, fetch)
+		if err != nil {
+			return nil, err
+		}
+		resolved = skill
+	} else {
+		skill, err := fetch(ctx)
+		if err != nil {
+			return nil, err
+		}
+		resolved = skill
+	}
+
+	// Always carry this call's alias over, matching the pre-cache behavior:
+	// a cache or in-flight hit may have been produced for a different ref
+	// sharing this URI and credential, with a different As.
+	resolved.As = ref.As
+	return &resolved, nil
+}
+
+// fetchOne performs the actual GitHub API work for ghRef — resolving the
+// commit SHA, listing the skill directory, and downloading each file — with
+// no cache or coalescing concerns of its own. It is the fetch callback
+// GitHubResolutionCache.ResolveWithFetch calls on a cache miss or stale
+// refresh (see resolveOne).
+func (r *GitHubSkillResolver) fetchOne(ctx context.Context, ghRef *GitHubSkillRef, ref api.SkillReference, token string) (ResolvedSkill, error) {
 	commitSHA, err := r.resolveCommitSHA(ctx, ghRef, token)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve ref for %s: %w", ghRef.Raw, err)
+		return ResolvedSkill{}, fmt.Errorf("failed to resolve ref for %s: %w", ghRef.Raw, err)
 	}
 
 	contents, err := r.listContents(ctx, ghRef, commitSHA, token)
 	if err != nil {
-		return nil, err
+		return ResolvedSkill{}, err
 	}
 
 	if len(contents) == 0 {
-		return nil, fmt.Errorf("skill %q not found in repo %s/%s (empty directory at %s)",
+		return ResolvedSkill{}, fmt.Errorf("skill %q not found in repo %s/%s (empty directory at %s)",
 			ghRef.SkillName, ghRef.Owner, ghRef.Repo, ghRef.SkillPath)
 	}
 
@@ -278,7 +330,7 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 
 		content, err := r.downloadRawFile(ctx, ghRef, commitSHA, entry.Path, token)
 		if err != nil {
-			return nil, fmt.Errorf("failed to download %s: %w", entry.Path, err)
+			return ResolvedSkill{}, fmt.Errorf("failed to download %s: %w", entry.Path, err)
 		}
 
 		hash := fmt.Sprintf("sha256:%x", sha256.Sum256(content))
@@ -295,13 +347,13 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 	}
 
 	if len(resolvedFiles) == 0 {
-		return nil, fmt.Errorf("skill %q in repo %s/%s contains no files",
+		return ResolvedSkill{}, fmt.Errorf("skill %q in repo %s/%s contains no files",
 			ghRef.SkillName, ghRef.Owner, ghRef.Repo)
 	}
 
 	bundleHash := transfer.ComputeContentHash(fileInfos)
 
-	resolved := &ResolvedSkill{
+	return ResolvedSkill{
 		Name:     ghRef.SkillName,
 		URI:      ghRef.Raw,
 		As:       ref.As,
@@ -310,14 +362,33 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 		Scope:    ref.Scope,
 		Files:    resolvedFiles,
 		Optional: ref.Optional,
-	}
+	}, nil
+}
 
-	// Store in resolution cache under the token-hashed key.
-	if r.resolutionCache != nil {
-		r.resolutionCache.Put(cacheKey, *resolved)
+// credentialIdentity returns a stable label for *which* credential source
+// would supply ghRef's token, without the token's value — mirroring
+// tokenForRef's precedence order exactly, but returning a name instead of a
+// secret. It is used to key single-flight coalescing and the per-credential
+// in-flight cap (GitHubResolutionCache.ResolveWithFetch), neither of which
+// may key on the token itself: a GitHub App installation token is minted
+// fresh for every create (see NewGitHubSkillResolverWithCredentials), so
+// keying on it would give every create its own key and defeat coalescing —
+// the exact failure this identity exists to avoid. Two refs that would
+// resolve to the same token value (e.g. two creates for the same project)
+// share an identity here even though their actual tokens differ.
+func (r *GitHubSkillResolver) credentialIdentity(ghRef *GitHubSkillRef) string {
+	if ghRef.TokenSecretName != "" {
+		return "token:" + ghRef.TokenSecretName
 	}
-
-	return resolved, nil
+	repoKey := deriveGitHubTokenKey(ghRef.Owner, ghRef.Repo)
+	if _, ok := r.provisionCredentials[repoKey]; ok {
+		return "cred:" + repoKey
+	}
+	ownerKey := deriveGitHubOwnerKey(ghRef.Owner)
+	if _, ok := r.provisionCredentials[ownerKey]; ok {
+		return "cred:" + ownerKey
+	}
+	return "default"
 }
 
 // githubContentEntry is the JSON structure returned by the GitHub Contents API.

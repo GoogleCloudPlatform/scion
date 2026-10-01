@@ -1692,3 +1692,86 @@ func (s *stubSkillResolver) ResolverName() string { return "stub" }
 func (s *stubSkillResolver) Resolve(_ context.Context, _ []api.SkillReference, _ ResolveOpts) (*ResolveResult, error) {
 	return s.result, nil
 }
+
+func TestGitHubSkillResolver_ShouldBypassPrimary(t *testing.T) {
+	cases := []struct {
+		name   string
+		uri    string
+		creds  map[string]string
+		bypass bool
+	}{
+		{"explicit ?token= param", "gh://owner/repo/skill?token=MY_TOKEN", nil, true},
+		{"repo convention credential present", "gh://owner/repo/skill", map[string]string{"GH_OWNER__REPO": "x"}, true},
+		{"owner convention credential present", "gh://owner/repo/skill", map[string]string{"GH_OWNER": "x"}, true},
+		{"no credential override, default token", "gh://owner/repo/skill", nil, false},
+		{"unrelated credential present does not bypass", "gh://owner/repo/skill", map[string]string{"GH_OTHER": "x"}, false},
+		{"invalid URI never bypasses", "not-a-gh-uri", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &GitHubSkillResolver{provisionCredentials: tc.creds}
+			got := r.ShouldBypassPrimary(api.SkillReference{URI: tc.uri})
+			if got != tc.bypass {
+				t.Errorf("ShouldBypassPrimary(%q) = %v, want %v", tc.uri, got, tc.bypass)
+			}
+		})
+	}
+}
+
+// failIfCalledResolver fails the test immediately if Resolve is ever called —
+// used to prove a hub-unservable ref never reaches the primary resolver.
+type failIfCalledResolver struct {
+	t *testing.T
+}
+
+func (f *failIfCalledResolver) ResolverName() string { return "hub" }
+func (f *failIfCalledResolver) Resolve(_ context.Context, refs []api.SkillReference, _ ResolveOpts) (*ResolveResult, error) {
+	f.t.Fatalf("primary (hub) resolver must not be called for a hub-unservable ref; got refs: %+v", refs)
+	return nil, nil
+}
+
+// TestGitHubSkillResolver_RouteFilter_CredentialedRefBypassesHubEntirely is
+// the end-to-end acceptance test for R: a ref that needs a credential the Hub
+// cannot hold (here, a GH_OWNER convention credential) must be routed
+// straight to the local GitHub resolver through RoutingSkillResolver, making
+// zero calls to the primary (hub) resolver.
+func TestGitHubSkillResolver_RouteFilter_CredentialedRefBypassesHubEntirely(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("hello"))
+	})
+
+	gh := &GitHubSkillResolver{
+		httpClient: server.Client(),
+		apiBase:    server.URL,
+		rawBase:    server.URL + "/raw",
+		provisionCredentials: map[string]string{
+			"GH_OWNER": "owner-level-secret",
+		},
+	}
+
+	router := NewRoutingSkillResolver(&failIfCalledResolver{t: t})
+	router.RegisterFallback("gh", gh)
+
+	result, err := router.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %+v", result.Errors)
+	}
+	if len(result.Resolved) != 1 {
+		t.Fatalf("expected 1 resolved skill, got %d", len(result.Resolved))
+	}
+}
