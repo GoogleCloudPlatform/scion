@@ -679,6 +679,31 @@ _MODEL_ALIAS_SHORTHAND = {"s": "small", "m": "medium", "l": "large", "xl": "extr
 _KNOWN_MODEL_ALIASES = frozenset({"small", "medium", "large", "extra-large"})
 
 
+def normalize_model_alias(value: str, harness_config: dict[str, Any] | None) -> str:
+    """Normalize *value* through *harness_config*'s model_aliases table.
+
+    Factored out of resolve_model() so callers with a raw value that did not
+    come from the SCION_MODEL environment variable (e.g. a harness's own
+    harness_config.model) can be resolved through the exact same alias
+    lookup, rather than reimplementing it or passed through unresolved. See
+    resolve_model() for the precise normalization rules this applies.
+
+    Empty/unset *value* returns "" so callers can apply their own default or
+    pin.
+    """
+    value = value.strip()
+    if not value:
+        return ""
+    normalized = value.lower()
+    normalized = _MODEL_ALIAS_SHORTHAND.get(normalized, normalized)
+    if normalized not in _KNOWN_MODEL_ALIASES:
+        return value  # concrete model name: preserve the caller's spelling
+    aliases = harness_config.get("model_aliases") if isinstance(harness_config, dict) else None
+    if not isinstance(aliases, dict):
+        aliases = {}
+    return aliases.get(normalized, normalized)
+
+
 def resolve_model(ctx: "ProvisionContext") -> str:
     """Resolve the effective model name for this harness's CLI/config.
 
@@ -718,14 +743,7 @@ def resolve_model(ctx: "ProvisionContext") -> str:
     raw = os.environ.get("SCION_MODEL", "").strip()
     if not raw:
         return ""
-    normalized = raw.lower()
-    normalized = _MODEL_ALIAS_SHORTHAND.get(normalized, normalized)
-    if normalized not in _KNOWN_MODEL_ALIASES:
-        return raw  # concrete model name: preserve the caller's spelling
-    aliases = ctx.harness_config.get("model_aliases") if isinstance(ctx.harness_config, dict) else None
-    if not isinstance(aliases, dict):
-        aliases = {}
-    return aliases.get(normalized, normalized)
+    return normalize_model_alias(raw, ctx.harness_config)
 
 
 # ---------------------------------------------------------------------------
