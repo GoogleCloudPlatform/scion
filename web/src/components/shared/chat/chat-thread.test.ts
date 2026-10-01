@@ -5673,3 +5673,40 @@ describe('scion-chat-thread reply focuses the composer', () => {
     });
   });
 });
+
+describe('scion-chat-thread /stop slash command', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  /**
+   * Regression test for ptone/scion#2482: `/stop <agent>` must stop the
+   * agent, not delete it. It must hit the same stop endpoint the other UI
+   * stop actions use (agent-detail.ts, agents.ts, project-detail.ts), not
+   * DELETE /api/v1/agents/{slug}.
+   */
+  it('sends POST to the stop endpoint, not DELETE', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      handleSlashStop(args: string): Promise<void>;
+    };
+
+    apiFetch.mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({}) });
+
+    await internals.handleSlashStop('my-agent');
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/agents/my-agent/stop',
+      expect.objectContaining({ method: 'POST' })
+    );
+    expect(apiFetch).not.toHaveBeenCalledWith(
+      expect.stringMatching(/^\/api\/v1\/agents\/my-agent$/),
+      expect.objectContaining({ method: 'DELETE' })
+    );
+  });
+});

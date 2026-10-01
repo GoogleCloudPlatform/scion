@@ -3841,8 +3841,8 @@ export class ScionChatThread extends LitElement {
     }
 
     try {
-      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(agentSlug)}`, {
-        method: 'DELETE',
+      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(agentSlug)}/stop`, {
+        method: 'POST',
       });
 
       if (!res.ok) {
