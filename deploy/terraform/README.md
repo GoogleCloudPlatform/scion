@@ -62,7 +62,12 @@ reads it, by naming convention, through the `shared-lookup` module (no
 4. The hub image, built and pushed to the Artifact Registry repo that
    `shared-infra` creates. There is no single-apply bootstrap trick here (the
    two-root split already separates "create the repo" from "use the image"):
-   apply `shared-infra` first, build/push, then apply `hub`.
+   apply `shared-infra` first, build/push, then apply `hub`. **This module
+   version requires a hub image that includes ptone/scion#2152 or later** —
+   on an older image, a fresh hub can't read or create its hub-scope OIDC
+   secret and fails to boot. See
+   [`docs/deploy/agent-runbook-terraform-ha.md`](../../docs/deploy/agent-runbook-terraform-ha.md)
+   for the upgrade note if you're applying this against an existing hub.
 
 ## Bootstrap sequence
 
@@ -582,13 +587,11 @@ prevent (see hub-identity's IAM scope rule comment).
 
 - `shared_overrides` for hand-built (non-shared) infra to plug into the hub
   layer instead of `shared-lookup`'s naming-convention data sources.
-- User- and project-scope secret creation needs a hub image built with
-  ptone/scion#2152 (hub-prefixed secret names). The IAM grant for it already
-  exists (`hub-identity`'s `hub_secretmanager_admin_hub_prefixed`); until a
-  hub runs that image, it has no prefix to create user/project-scope secrets
-  under at all. The modules no longer carry the legacy hub-scope grant or
-  OIDC-signing-key pre-create — see
-  [`docs/deploy/agent-runbook-terraform-ha.md`](../../docs/deploy/agent-runbook-terraform-ha.md)'s
-  upgrade note before applying this version against an existing hub.
+- User- and project-scope secret creation also needs that same #2152+ hub
+  image (hub-prefixed secret names) — see "Prerequisites" above for why a
+  pre-#2152 image can't boot at all, let alone create these. The IAM grant
+  for user/project scope already exists (`hub-identity`'s
+  `hub_secretmanager_admin_hub_prefixed`); until a hub runs that image, it
+  has no prefix to create user/project-scope secrets under at all.
 - Typed `validation` blocks on every remaining variable, and a
   per-module README generated with `terraform-docs`.

@@ -32,6 +32,6 @@ run "hub_prefixed_condition_matches_known_vector" {
   # (or any other) is ever silently reintroduced or dropped.
   assert {
     condition     = length(output.hub_iam_grants) == 7
-    error_message = "hub_iam_grants should bundle exactly 7 IAM grant IDs now that the legacy hub-scope secretmanager.admin grant is gone — got a different count."
+    error_message = "hub_iam_grants should bundle exactly 7 IAM grant IDs now that the legacy hub-scope secretmanager.admin grant is gone — update this count if you intentionally added or removed a grant."
   }
 }

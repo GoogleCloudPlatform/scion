@@ -618,10 +618,24 @@ instead of reading a Terraform-pre-created one.
 "zero pending" result for every hub sharing a GCP project *before* upgrading
 that project's Terraform to a module version without the legacy grant.** Pass
 4 needs the legacy grant to delete the legacy-named secrets; once the grant is
-gone, `migrate-names` can no longer reach them at all. Applying the new
-Terraform first is not destructive — the leftover legacy secrets just become
-permanently un-deletable clutter, not a functional problem — but it
-forecloses cleaning them up later.
+gone, `migrate-names` can no longer reach them at all. Applying this version
+after passes 1-3 but before pass 4 is not destructive: the remaining
+legacy-named secrets just can no longer be deleted by `migrate-names` (which
+runs as the hub SA) and must be removed by hand with `gcloud secrets delete`.
+Applying it before passes 1-3 is not safe: Terraform deletes the legacy OIDC
+secret on apply, and on an unmigrated hub that secret is the only copy, so any
+record whose `SecretRef` still points at the legacy name starts failing with
+`PermissionDenied`.
+
+**Expected plan delta after `--delete-legacy` (pass 4) has already run:** for
+each existing hub, applying this version should show the legacy
+`secretmanager.admin` grant and `tls_private_key.oidc_signing_key` destroyed;
+the OIDC secret and its version dropped from state on refresh (already
+deleted out-of-band by pass 4, so they show as "changed outside of Terraform",
+not as a destroy); the Cloud Run service updated in place (the legacy env var
+removed); and `time_sleep.iam_propagation` replaced. No resources added. If
+the OIDC secret/version show up as a destroy instead, pass 4 has not actually
+deleted them yet — stop and confirm pass 5 first.
 
 ## 8. Break-glass
 

@@ -17,6 +17,15 @@ terraform {
       source  = "hashicorp/kubernetes"
       version = "~> 2.35"
     }
+    # tls is no longer used directly by this config (hub-cloudrun dropped the
+    # OIDC pre-create that needed it), but existing applied state can still
+    # hold module.hub_cloudrun.tls_private_key.oidc_signing_key; the root
+    # must keep declaring the provider so those stacks can plan its destroy.
+    # Drop this once every deployed stack has applied this version.
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
     # random and time are used transitively via hub-cloudrun and
     # cloudsql-database (both pin the same constraints in their own
     # versions.tf); declared explicitly here too so the root's

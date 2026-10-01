@@ -901,14 +901,9 @@ Read this section before touching an existing (not brand-new) deployment.
   [`docs/deploy/migrate-names-cloudrun.md`](migrate-names-cloudrun.md) for
   the migration that preceded their removal.
 - **Upgrading an existing hub to a module version without the legacy
-  grant/pre-create:** run the `migrate-names` runbook
-  ([`docs/deploy/migrate-names-cloudrun.md`](migrate-names-cloudrun.md))
-  through pass 4 (`--delete-legacy`) and confirm pass 5's "zero pending"
-  result **before** applying this version. Pass 4 needs the legacy grant to
-  delete the legacy-named secrets; once this version is applied, the grant
-  is gone and `migrate-names` can no longer reach them. Applying this
-  version first is not destructive — the leftover legacy secrets just
-  become permanently un-deletable clutter, not a functional problem.
+  grant/pre-create:** see
+  [`docs/deploy/migrate-names-cloudrun.md`](migrate-names-cloudrun.md#7-for-terraform-managed-hubs-what-can-be-removed-afterward)
+  §7 for the required run order and what to expect in the plan.
 
 ---
 
