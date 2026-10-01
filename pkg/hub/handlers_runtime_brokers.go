@@ -830,6 +830,26 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						statusUpdate.Activity = agentHB.Activity
 						statusUpdate.Message = agentHB.Message
 					}
+					// A Kubernetes pod disruption (preempted/evicted) is a
+					// graceful deletion: the pod gets SIGTERM, so sciontool
+					// reports a plain clean stop directly to the Hub before
+					// the broker's next heartbeat has a chance to observe
+					// the pod's disruption signal. By the time that
+					// heartbeat arrives the agent is already in a terminal
+					// phase, so without this the more specific reason is
+					// silently dropped and the agent is stuck reading as a
+					// plain stop — the exact symptom in #2528. Back it in
+					// only when nothing more specific is stored yet, and
+					// leave the phase itself untouched.
+					hbExitReason := state.ExitReason(agentHB.ExitReason)
+					isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
+					if isDisruption && agent.ExitReason == "" {
+						statusUpdate.ExitReason = agentHB.ExitReason
+						statusUpdate.ExitCode = agentHB.ExitCode
+						if isGenericStopMessage(agent.Message) {
+							statusUpdate.Message = exitStatusMessage(hbExitReason, agentHB.ExitCode)
+						}
+					}
 				} else {
 					// Structured path: broker sent Phase/Activity directly.
 					// Guard against phase regressions: stale heartbeat data
@@ -865,9 +885,21 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 								agentHB.Phase = string(state.PhaseError)
 								c := code
 								statusUpdate.ExitCode = &c
-								if statusUpdate.Message == "" {
-									statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", code)
-								}
+							}
+							// A structured ExitReason (for example a Kubernetes
+							// disruption, which may carry no meaningful exit code
+							// when the agent container never started) must still
+							// be persisted even when no legacy exit code could be
+							// parsed above — previously it was silently dropped
+							// whenever the ContainerStatus string did not parse to
+							// a non-zero code.
+							if isValidExitReason(agentHB.ExitReason) {
+								statusUpdate.ExitReason = agentHB.ExitReason
+							} else if agentHB.ExitReason != "" {
+								slog.Debug("dropping invalid ExitReason from heartbeat", "exitReason", agentHB.ExitReason, "agent", agentHB.Slug)
+							}
+							if statusUpdate.Message == "" {
+								statusUpdate.Message = exitStatusMessage(state.ExitReason(statusUpdate.ExitReason), statusUpdate.ExitCode)
 							}
 						} else {
 							// PhaseStopped with ExitCode == 0 (clean exit) or
@@ -1212,6 +1244,24 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 // isValidExitReason reports whether reason is a valid ExitReason value.
 func isValidExitReason(reason string) bool {
 	return state.ExitReason(reason).IsValid()
+}
+
+// genericStopMessages holds the stored agent.Message values that carry no
+// information beyond "the agent reported a plain stop": empty (nothing
+// recorded yet), or one of the fixed strings sciontool/the hook handlers
+// send for an ordinary graceful shutdown. A disruption reason learned later
+// from a heartbeat is strictly more informative than any of these and may
+// replace them; any other stored message is assumed to already carry
+// meaningful, possibly user-relevant text and is left alone.
+var genericStopMessages = map[string]bool{
+	"":              true,
+	"Agent stopped": true,
+	"Session ended": true,
+}
+
+// isGenericStopMessage reports whether msg is one of genericStopMessages.
+func isGenericStopMessage(msg string) bool {
+	return genericStopMessages[msg]
 }
 
 // exitStatusMessage returns the default human-readable status Message for a

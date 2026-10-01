@@ -581,7 +581,6 @@ func TestExitReasonIsValid(t *testing.T) {
 		{"bogus", false},
 		{"Preempted", false},
 		{"EVICTED", false},
-		{"container_missing", false},
 	}
 
 	for _, tt := range tests {

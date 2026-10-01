@@ -198,16 +198,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			return &ErrorRuntime{Err: err}
 		}
 		rt := NewKubernetesRuntime(k8sClient)
-		if rtConfig.Namespace != "" {
-			rt.DefaultNamespace = rtConfig.Namespace
-		}
-		rt.GKEMode = rtConfig.GKE
-		if !rt.GKEMode && k8sClient.IsGKE() {
-			rt.GKEAutoDetected = true
-			util.Debugf("GetRuntime: auto-detected GKE cluster, enabling Autopilot scheduling tolerance")
-		}
-		rt.ListAllNamespaces = rtConfig.ListAllNamespaces
-		rt.PriorityClassName = rtConfig.PriorityClassName
+		applyKubernetesRuntimeConfig(rt, rtConfig, k8sClient.IsGKE())
 		return rt
 	case "cloudrun":
 		cfg := rtConfig.CloudRun
@@ -249,6 +240,27 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 
 	// Fallback should not be reached if logic is correct, but default to Docker
 	return NewDockerRuntime()
+}
+
+// applyKubernetesRuntimeConfig applies rtConfig's Kubernetes-specific fields
+// to rt: the namespace override, GKE mode (explicit or auto-detected),
+// cross-namespace listing, and the runtime-level default PriorityClassName
+// (settings runtimes.<name>.priority_class_name; see KubernetesRuntime.PriorityClassName
+// and buildPod for how a template/agent-config value can override it).
+// isGKE is the already-computed auto-detection result from the constructed
+// client, passed as a plain bool so this function has no cluster dependency
+// and can be unit-tested without a real or fake Kubernetes client.
+func applyKubernetesRuntimeConfig(rt *KubernetesRuntime, rtConfig config.V1RuntimeConfig, isGKE bool) {
+	if rtConfig.Namespace != "" {
+		rt.DefaultNamespace = rtConfig.Namespace
+	}
+	rt.GKEMode = rtConfig.GKE
+	if !rt.GKEMode && isGKE {
+		rt.GKEAutoDetected = true
+		util.Debugf("GetRuntime: auto-detected GKE cluster, enabling Autopilot scheduling tolerance")
+	}
+	rt.ListAllNamespaces = rtConfig.ListAllNamespaces
+	rt.PriorityClassName = rtConfig.PriorityClassName
 }
 
 func findPodmanNonStandardPath() string {

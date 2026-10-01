@@ -110,7 +110,7 @@ Runtime Brokers use the same Workload Identity mechanism for OIDC transport toke
 
 By default, agent pods have no `priorityClassName`, which puts them at priority 0 — the first choice when the scheduler needs to evict something to make room for a higher-priority pod (for example a `system-cluster-critical` pod like `kube-dns` being rescheduled during a node scale-down). On GKE Autopilot and Standard this is a real, observed failure mode: an agent pod can be preempted mid-run with no indication beyond a plain stop.
 
-Set a priority class so agent pods are not the default eviction target. Scion does not create the `PriorityClass` object itself — create one on the cluster first:
+Set a priority class so agent pods are not the default eviction target compared to other ordinary (priority-0) workloads. Scion does not create the `PriorityClass` object itself — create one on the cluster first:
 
 ```yaml
 apiVersion: scheduling.k8s.io/v1
@@ -138,6 +138,8 @@ kubernetes:
 ```
 
 The name must be a valid DNS-1123 subdomain and must already exist on the cluster; an unset value (the default) leaves pods at priority 0, today's behaviour.
+
+A user `PriorityClass` like the one above cannot protect agent pods against `system-cluster-critical` or `system-node-critical` pods (priority values around 2×10⁹) — those can still preempt a lower-priority agent pod regardless of this setting. It only changes the outcome among ordinary workloads, making a ready-to-preempt-anything priority-0 pod no longer the first choice. Avoiding the kube-dns case specifically is a matter of cluster capacity headroom (for example Autopilot's balloon pods, or keeping spare node capacity), not pod priority.
 
 #### Preempted and evicted status
 

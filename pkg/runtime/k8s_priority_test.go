@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -133,8 +134,37 @@ func TestBuildPod_PriorityClassName_Invalid(t *testing.T) {
 			_, err := rt.buildPod("default", config)
 			if err == nil {
 				t.Errorf("expected error for invalid priorityClassName %q, got nil", name)
+				return
+			}
+			if !strings.Contains(err.Error(), "kubernetes.priorityClassName") {
+				t.Errorf("expected error to name the template/agent-config source (kubernetes.priorityClassName), got: %v", err)
 			}
 		})
+	}
+}
+
+func TestBuildPod_PriorityClassName_InvalidRuntimeDefault_NamesRuntimeSource(t *testing.T) {
+	// N1: when the bad value came from the runtime-level default rather than
+	// the template/agent config, the error must name that source instead of
+	// always blaming kubernetes.priorityClassName.
+	rt, _, _ := newTestK8sRuntime()
+	rt.PriorityClassName = "Invalid_Runtime_Default"
+
+	config := RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+	}
+
+	_, err := rt.buildPod("default", config)
+	if err == nil {
+		t.Fatal("expected error for invalid runtime-default priorityClassName, got nil")
+	}
+	if !strings.Contains(err.Error(), "runtimes.<name>.priority_class_name") {
+		t.Errorf("expected error to name the runtime-default source (runtimes.<name>.priority_class_name), got: %v", err)
+	}
+	if strings.Contains(err.Error(), "kubernetes.priorityClassName") {
+		t.Errorf("error must not blame the template/agent-config source when the value came from the runtime default, got: %v", err)
 	}
 }
 
@@ -236,7 +266,7 @@ func TestList_ExitReason_DisruptionTargetOnRunningPod_NotYetTerminal(t *testing.
 	// A DisruptionTarget condition can appear while the pod is still running
 	// out its grace period. The pod has not stopped yet, so List must not
 	// report preempted/evicted until the pod actually reaches a terminal
-	// phase (k8s-runtime-lead review point).
+	// phase.
 	pod := newPodForDisruptionTest("agent-still-running", corev1.PodRunning)
 	pod.Status.Conditions = []corev1.PodCondition{
 		{
@@ -295,5 +325,123 @@ func TestList_ExitReason_NormalStopUnaffected(t *testing.T) {
 	}
 	if info.Phase != string(state.PhaseStopped) {
 		t.Errorf("expected Phase %q, got %q", state.PhaseStopped, info.Phase)
+	}
+}
+
+func TestList_ExitReason_GracefulPreemption_ExitZero(t *testing.T) {
+	// Preemption and the eviction API delete the pod gracefully (SIGTERM),
+	// so the agent container usually exits 0 — the pod reaches PodSucceeded,
+	// not PodFailed. List must still report "preempted" here: a guard that
+	// only checked for PhaseError (and not PhaseStopped) would miss this,
+	// the exact symptom in #2528.
+	pod := newPodForDisruptionTest("agent-graceful-preemption", corev1.PodSucceeded)
+	pod.Status.Conditions = []corev1.PodCondition{
+		{
+			Type:   corev1.DisruptionTarget,
+			Status: corev1.ConditionTrue,
+			Reason: "PreemptionByScheduler",
+		},
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{
+			Name: agentContainerName,
+			State: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{
+					ExitCode: 0,
+					Reason:   "Completed",
+				},
+			},
+		},
+	}
+
+	info := listSingleAgent(t, pod)
+	if info.ExitReason != string(state.ExitReasonPreempted) {
+		t.Errorf("expected ExitReason %q, got %q", state.ExitReasonPreempted, info.ExitReason)
+	}
+	if info.Phase != string(state.PhaseStopped) {
+		t.Errorf("expected Phase %q, got %q", state.PhaseStopped, info.Phase)
+	}
+}
+
+func TestList_ExitReason_DisruptionTargetConditionFalse_Ignored(t *testing.T) {
+	// A DisruptionTarget condition with Status=False means the disruption
+	// was considered but is not in effect (e.g. it was later cleared); it
+	// must not be treated as a live disruption signal.
+	pod := newPodForDisruptionTest("agent-disruption-false", corev1.PodFailed)
+	pod.Status.Conditions = []corev1.PodCondition{
+		{
+			Type:   corev1.DisruptionTarget,
+			Status: corev1.ConditionFalse,
+			Reason: "PreemptionByScheduler",
+		},
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{
+			Name: agentContainerName,
+			State: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{
+					ExitCode: 1,
+					Reason:   "Error",
+				},
+			},
+		},
+	}
+
+	info := listSingleAgent(t, pod)
+	if info.ExitReason != string(state.ExitReasonCrashed) {
+		t.Errorf("expected ExitReason %q (DisruptionTarget=False must be ignored), got %q", state.ExitReasonCrashed, info.ExitReason)
+	}
+}
+
+func TestList_ExitReason_OtherConditionType_NotMistakenForDisruption(t *testing.T) {
+	// A terminal pod can carry other conditions unrelated to disruption
+	// (e.g. Ready=False with reason PodCompleted, which every pod that ran
+	// to completion has). Only the DisruptionTarget condition type counts.
+	pod := newPodForDisruptionTest("agent-other-condition", corev1.PodSucceeded)
+	pod.Status.Conditions = []corev1.PodCondition{
+		{
+			Type:   corev1.PodReady,
+			Status: corev1.ConditionFalse,
+			Reason: "PodCompleted",
+		},
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{
+			Name: agentContainerName,
+			State: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{
+					ExitCode: 0,
+					Reason:   "Completed",
+				},
+			},
+		},
+	}
+
+	info := listSingleAgent(t, pod)
+	if info.ExitReason != "" {
+		t.Errorf("expected no ExitReason for an ordinary stop with an unrelated condition, got %q", info.ExitReason)
+	}
+}
+
+func TestList_ExitReason_OOMKilled_IsCrashedNotEvicted(t *testing.T) {
+	// An OOM kill is a node-local kubelet action on the container, not a
+	// disruption of the pod (no DisruptionTarget condition, no pod-level
+	// Evicted reason). It must keep reading as an ordinary crash.
+	pod := newPodForDisruptionTest("agent-oom", corev1.PodFailed)
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{
+			Name: agentContainerName,
+			State: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{
+					ExitCode: 137,
+					Reason:   "OOMKilled",
+				},
+			},
+		},
+	}
+
+	info := listSingleAgent(t, pod)
+	if info.ExitReason != string(state.ExitReasonCrashed) {
+		t.Errorf("expected ExitReason %q for an OOM kill, got %q", state.ExitReasonCrashed, info.ExitReason)
 	}
 }

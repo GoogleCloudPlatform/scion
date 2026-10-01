@@ -295,6 +295,83 @@ func TestHeartbeatExitCode_PreemptedEvictedMessage(t *testing.T) {
 	})
 }
 
+// TestHeartbeatExitCode_GracefulPreemptionAfterPlainStop covers the #2528
+// race H1: preemption and the eviction API delete the pod gracefully
+// (SIGTERM), so sciontool reports a plain clean stop directly to the Hub
+// before the broker's next heartbeat can observe the pod's disruption
+// signal. By the time that heartbeat arrives the agent is already in a
+// terminal phase (the agentInTerminalPhase branch), which previously
+// dropped ExitReason/ExitCode/Message entirely.
+func TestHeartbeatExitCode_GracefulPreemptionAfterPlainStop(t *testing.T) {
+	t.Run("a generic stop message and empty ExitReason are backfilled", func(t *testing.T) {
+		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+		agent := getAgentState(t, s, agentSlug, projectID)
+		agent.Phase = "stopped"
+		agent.Message = "Agent stopped"
+		require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+		ec := 0
+		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+			Slug:       agentSlug,
+			Phase:      "stopped",
+			ExitCode:   &ec,
+			ExitReason: "preempted",
+		})
+		assert.Equal(t, http.StatusOK, code)
+
+		got := getAgentState(t, s, agentSlug, projectID)
+		assert.Equal(t, "stopped", got.Phase, "phase must stay untouched")
+		assert.Equal(t, "preempted", got.ExitReason)
+		assert.Equal(t, "Agent pod was preempted", got.Message)
+	})
+
+	t.Run("a non-generic stored message is preserved while ExitReason still backfills", func(t *testing.T) {
+		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+		agent := getAgentState(t, s, agentSlug, projectID)
+		agent.Phase = "stopped"
+		agent.Message = "custom operator note"
+		require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+		ec := 0
+		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+			Slug:       agentSlug,
+			Phase:      "stopped",
+			ExitCode:   &ec,
+			ExitReason: "evicted",
+		})
+		assert.Equal(t, http.StatusOK, code)
+
+		got := getAgentState(t, s, agentSlug, projectID)
+		assert.Equal(t, "evicted", got.ExitReason, "ExitReason still backfills regardless of the message")
+		assert.Equal(t, "custom operator note", got.Message, "a non-generic message must not be overwritten")
+	})
+
+	t.Run("an already-stored ExitReason is not overwritten", func(t *testing.T) {
+		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+		agent := getAgentState(t, s, agentSlug, projectID)
+		agent.Phase = "error"
+		agent.ExitReason = "crashed"
+		agent.Message = "Agent crashed with exit code 1"
+		require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+		ec := 0
+		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+			Slug:       agentSlug,
+			Phase:      "error",
+			ExitCode:   &ec,
+			ExitReason: "evicted",
+		})
+		assert.Equal(t, http.StatusOK, code)
+
+		got := getAgentState(t, s, agentSlug, projectID)
+		assert.Equal(t, "crashed", got.ExitReason, "a stored reason must win over a later heartbeat's reason")
+		assert.Equal(t, "Agent crashed with exit code 1", got.Message)
+	})
+}
+
 // TestHeartbeatExitCode_LegacyFallback verifies that when ExitCode is nil
 // (old broker), the hub falls back to parsing the ContainerStatus string.
 func TestHeartbeatExitCode_LegacyFallback(t *testing.T) {
@@ -329,6 +406,31 @@ func TestHeartbeatExitCode_LegacyCleanExit(t *testing.T) {
 
 	got := getAgentState(t, s, agentSlug, projectID)
 	assert.Equal(t, "stopped", got.Phase, "legacy clean exit should keep stopped phase")
+}
+
+// TestHeartbeatExitCode_NilExitCodeStillRecordsDisruption covers L1: a
+// terminal pod can carry a disruption signal (preempted/evicted) with no
+// structured ExitCode and no ContainerStatus string that parses to a
+// non-zero code — for example a pod evicted or preempted before its agent
+// container ever started, or one with no container statuses at all. The
+// legacy-fallback branch must still persist ExitReason and set a message,
+// not silently drop both because its ContainerStatus parse found nothing.
+func TestHeartbeatExitCode_NilExitCodeStillRecordsDisruption(t *testing.T) {
+	srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+	code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+		Slug:       agentSlug,
+		Phase:      "stopped",
+		ExitReason: "evicted",
+		// No ExitCode and no parseable ContainerStatus — simulating a pod
+		// that never got a container exit code.
+	})
+	assert.Equal(t, http.StatusOK, code)
+
+	got := getAgentState(t, s, agentSlug, projectID)
+	assert.Equal(t, "stopped", got.Phase, "no non-zero exit code found, so phase stays stopped")
+	assert.Equal(t, "evicted", got.ExitReason, "ExitReason must not be dropped just because no exit code parsed")
+	assert.Equal(t, "Agent pod was evicted", got.Message)
 }
 
 // TestHeartbeatExitCode_InvalidReasonDropped verifies that an invalid

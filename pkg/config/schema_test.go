@@ -599,6 +599,20 @@ kubernetes:
 	assert.NotEmpty(t, errors, "invalid priorityClassName should produce validation error")
 }
 
+func TestValidateAgentConfig_EmptyPriorityClassName(t *testing.T) {
+	// An explicit empty string means "unset" to buildPod and
+	// mergeKubernetesConfig and must not fail schema validation.
+	data := []byte(`
+schema_version: "1"
+harness_config: gemini
+kubernetes:
+  priorityClassName: ""
+`)
+	errors, err := ValidateAgentConfig(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "an empty priorityClassName means unset and must pass validation")
+}
+
 func TestValidateAgentConfig_InvalidMaxTurns(t *testing.T) {
 	data := []byte(`
 schema_version: "1"
@@ -1087,6 +1101,23 @@ runtimes:
 	errors, err := ValidateSettings(data, "1")
 	require.NoError(t, err)
 	assert.NotEmpty(t, errors, "runtime with an invalid priority_class_name should fail validation")
+}
+
+func TestValidateSettings_RuntimeWithEmptyPriorityClassName(t *testing.T) {
+	// An explicit empty string means "unset" to the runtime (buildPod and
+	// mergeKubernetesConfig both treat "" as unset) and must not fail
+	// schema validation the way a real invalid name does — for example
+	// after settings migration or a round-trip that writes the zero value.
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    priority_class_name: ""
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "an empty priority_class_name means unset and must pass validation")
 }
 
 func TestValidateSettings_ServerHubSoftDelete(t *testing.T) {

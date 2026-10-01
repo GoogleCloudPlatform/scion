@@ -1617,6 +1617,26 @@ func TestMapSectionsSchemaValidation(t *testing.T) {
 		t.Errorf("expected valid runtimes doc, got errors: %v", errs)
 	}
 
+	// Valid priority_class_name on a kubernetes runtime entry.
+	errs = Validate("runtimes", json.RawMessage(`{"k8s": {"type": "kubernetes", "priority_class_name": "scion-agent-priority"}}`))
+	if len(errs) > 0 {
+		t.Errorf("expected valid priority_class_name to pass, got errors: %v", errs)
+	}
+
+	// An empty priority_class_name means unset and must also pass — this
+	// route (the admin settings API) has no DNS-1123 check of its own
+	// before buildPod, so the schema is the only gate.
+	errs = Validate("runtimes", json.RawMessage(`{"k8s": {"type": "kubernetes", "priority_class_name": ""}}`))
+	if len(errs) > 0 {
+		t.Errorf("expected empty priority_class_name to pass, got errors: %v", errs)
+	}
+
+	// Invalid priority_class_name must fail.
+	errs = Validate("runtimes", json.RawMessage(`{"k8s": {"type": "kubernetes", "priority_class_name": "Not_A_Valid_Name"}}`))
+	if len(errs) == 0 {
+		t.Error("expected invalid priority_class_name to fail validation")
+	}
+
 	// Valid profiles doc.
 	errs = Validate("profiles", json.RawMessage(`{"default": {"runtime": "cloudrun"}}`))
 	if len(errs) > 0 {

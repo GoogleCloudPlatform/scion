@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 func TestGetRuntime(t *testing.T) {
@@ -324,4 +326,64 @@ func TestGetRuntime_CloudRun_Precedence_Over_Docker(t *testing.T) {
 	if _, ok := r.(*CloudRunRuntime); !ok {
 		t.Errorf("expected *CloudRunRuntime when K_SERVICE is set (even with docker binary available), got %T", r)
 	}
+}
+
+func TestApplyKubernetesRuntimeConfig(t *testing.T) {
+	t.Run("namespace, list-all-namespaces and priority class are copied through", func(t *testing.T) {
+		rt := &KubernetesRuntime{}
+		applyKubernetesRuntimeConfig(rt, config.V1RuntimeConfig{
+			Namespace:         "custom-ns",
+			ListAllNamespaces: true,
+			PriorityClassName: "scion-agent-priority",
+		}, false)
+
+		if rt.DefaultNamespace != "custom-ns" {
+			t.Errorf("expected DefaultNamespace 'custom-ns', got %q", rt.DefaultNamespace)
+		}
+		if !rt.ListAllNamespaces {
+			t.Error("expected ListAllNamespaces true")
+		}
+		if rt.PriorityClassName != "scion-agent-priority" {
+			t.Errorf("expected PriorityClassName 'scion-agent-priority', got %q", rt.PriorityClassName)
+		}
+		if rt.GKEMode || rt.GKEAutoDetected {
+			t.Error("expected no GKE mode when not configured and not auto-detected")
+		}
+	})
+
+	t.Run("empty namespace and priority class leave the runtime's zero values alone", func(t *testing.T) {
+		rt := &KubernetesRuntime{}
+		applyKubernetesRuntimeConfig(rt, config.V1RuntimeConfig{}, false)
+
+		if rt.DefaultNamespace != "" {
+			t.Errorf("expected empty DefaultNamespace, got %q", rt.DefaultNamespace)
+		}
+		if rt.PriorityClassName != "" {
+			t.Errorf("expected empty PriorityClassName, got %q", rt.PriorityClassName)
+		}
+	})
+
+	t.Run("explicit gke true is preserved even when isGKE auto-detection is false", func(t *testing.T) {
+		rt := &KubernetesRuntime{}
+		applyKubernetesRuntimeConfig(rt, config.V1RuntimeConfig{GKE: true}, false)
+
+		if !rt.GKEMode {
+			t.Error("expected GKEMode true from explicit config")
+		}
+		if rt.GKEAutoDetected {
+			t.Error("expected GKEAutoDetected false when GKEMode is already explicitly true")
+		}
+	})
+
+	t.Run("auto-detection sets GKEAutoDetected only when GKE is not already explicit", func(t *testing.T) {
+		rt := &KubernetesRuntime{}
+		applyKubernetesRuntimeConfig(rt, config.V1RuntimeConfig{}, true)
+
+		if rt.GKEMode {
+			t.Error("expected GKEMode to stay false (auto-detection does not set the explicit flag)")
+		}
+		if !rt.GKEAutoDetected {
+			t.Error("expected GKEAutoDetected true when isGKE is true and GKE was not explicitly set")
+		}
+	})
 }

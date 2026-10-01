@@ -153,9 +153,18 @@ const (
 
 // IsValid reports whether r is a recognised ExitReason value.
 // Empty string is valid (no reason given).
+//
+// Each group of related values gets its own case line (rather than one
+// combined case listing every value) so that an unrelated change adding a
+// new ExitReason value can add its own case line without a merge conflict
+// on this one.
 func (r ExitReason) IsValid() bool {
 	switch r {
-	case "", ExitReasonCrashed, ExitReasonLimitsExceeded, ExitReasonPreempted, ExitReasonEvicted:
+	case "":
+		return true
+	case ExitReasonCrashed, ExitReasonLimitsExceeded:
+		return true
+	case ExitReasonPreempted, ExitReasonEvicted:
 		return true
 	}
 	return false

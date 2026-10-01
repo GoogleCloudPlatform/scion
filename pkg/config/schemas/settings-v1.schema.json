@@ -315,8 +315,8 @@
         "priority_class_name": {
           "type": "string",
           "maxLength": 253,
-          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
-          "description": "Kubernetes-runtime-only default PriorityClass name (DNS-1123 subdomain) applied to agent pods using this runtime entry. The PriorityClass must already exist on the cluster; Scion does not create one. An explicit template/agent-config kubernetes.priorityClassName overrides this."
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "description": "Kubernetes-runtime-only default PriorityClass name (DNS-1123 subdomain) applied to agent pods using this runtime entry, or the empty string for unset. The PriorityClass must already exist on the cluster; Scion does not create one. An explicit template/agent-config kubernetes.priorityClassName overrides this."
         }
       },
       "additionalProperties": false

@@ -2063,12 +2063,14 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// pod.Spec.PriorityClassName unset — today's behaviour. Scion does not
 	// create the PriorityClass object; it must already exist on the cluster.
 	effectivePriorityClass := r.PriorityClassName
+	prioritySource := "runtimes.<name>.priority_class_name"
 	if config.Kubernetes != nil && config.Kubernetes.PriorityClassName != "" {
 		effectivePriorityClass = config.Kubernetes.PriorityClassName
+		prioritySource = "kubernetes.priorityClassName"
 	}
 	if effectivePriorityClass != "" {
 		if errs := k8svalidation.IsDNS1123Subdomain(effectivePriorityClass); len(errs) > 0 {
-			return nil, fmt.Errorf("invalid kubernetes.priorityClassName %q: %s", effectivePriorityClass, strings.Join(errs, "; "))
+			return nil, fmt.Errorf("invalid %s %q: %s", prioritySource, effectivePriorityClass, strings.Join(errs, "; "))
 		}
 		pod.Spec.PriorityClassName = effectivePriorityClass
 	}
