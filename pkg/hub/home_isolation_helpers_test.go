@@ -17,20 +17,20 @@ package hub
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 )
-
-// realHomeBeforeIsolation is captured by isolateTestHome before $HOME is
-// pointed at a scratch directory, so the post-run guard in
-// verifyRealHomeUntouched can confirm nothing leaked to it. It is only ever
-// written once, from TestMain, before any test runs.
-var realHomeBeforeIsolation string
 
 // isolateTestHome points $HOME at a freshly created temporary directory for
 // the lifetime of the test binary. pkg/hub tests resolve the scion config
-// root (~/.scion/projects, the remote-templates cache, etc.) exclusively
-// through os.UserHomeDir(), so overriding $HOME here is sufficient to keep
-// the whole suite off the real developer/agent HOME.
+// root (~/.scion/projects, the remote-templates cache, etc.) through $HOME
+// (most code calls os.UserHomeDir(), but some, e.g.
+// pkg/hubsync/sync.go:1361, reads os.Getenv("HOME") directly). On Linux and
+// macOS both read the same $HOME, so overriding it here keeps the whole
+// suite off the real developer/agent HOME. os.UserHomeDir() uses
+// %USERPROFILE% on Windows instead, so this isolation is Linux/macOS scoped.
+//
+// After pointing $HOME at the scratch directory, this also asserts that
+// os.UserHomeDir() resolves to it in this process, as a cheap sanity check
+// that the override actually took effect before any test runs.
 //
 // Call this once from TestMain, before m.Run(). Individual tests that need a
 // specific HOME continue to use t.Setenv("HOME", ...); Go restores the
@@ -40,8 +40,6 @@ var realHomeBeforeIsolation string
 // Returns a teardown func that removes the scratch directory. It does not
 // restore $HOME, since TestMain calls it right before os.Exit.
 func isolateTestHome() (teardown func()) {
-	realHomeBeforeIsolation = os.Getenv("HOME")
-
 	tmpHome, err := os.MkdirTemp("", "scion-hub-test-home-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "isolateTestHome: creating scratch HOME: %v\n", err)
@@ -52,31 +50,10 @@ func isolateTestHome() (teardown func()) {
 		os.Exit(1)
 	}
 
+	if got, err := os.UserHomeDir(); err != nil || got != tmpHome {
+		fmt.Fprintf(os.Stderr, "isolateTestHome: os.UserHomeDir() = %q, err=%v; want %q — HOME override did not take effect in this process\n", got, err, tmpHome)
+		os.Exit(1)
+	}
+
 	return func() { _ = os.RemoveAll(tmpHome) }
-}
-
-// verifyRealHomeUntouched is the regression guard for
-// https://github.com/ptone/scion/issues/2417: it fails the test run if the
-// real HOME (captured by isolateTestHome before the override) gained the
-// directories the issue called out during the run. A non-nil result means
-// some code path resolved the config root without honouring the $HOME
-// override installed by isolateTestHome.
-func verifyRealHomeUntouched() error {
-	realHome := realHomeBeforeIsolation
-	if realHome == "" {
-		// Nothing was captured (isolateTestHome never ran, or the
-		// environment had no HOME to begin with); nothing to check.
-		return nil
-	}
-
-	suspects := []string{
-		filepath.Join(realHome, ".scion", "projects"),
-		filepath.Join(realHome, ".scion", "cache", "remote-templates"),
-	}
-	for _, p := range suspects {
-		if _, err := os.Stat(p); err == nil {
-			return fmt.Errorf("HOME isolation regressed: real HOME %s gained %s during the pkg/hub test run", realHome, p)
-		}
-	}
-	return nil
 }

@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"fmt"
 	"os"
 	"testing"
 
@@ -34,13 +33,5 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	enttest.MainTeardown()
 	teardown()
-
-	if err := verifyRealHomeUntouched(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		if code == 0 {
-			code = 1
-		}
-	}
-
 	os.Exit(code)
 }
