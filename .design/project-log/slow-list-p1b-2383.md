@@ -2,7 +2,7 @@
 
 Branch: `perf/2383-sorted-cursors`, commit 1, based on a fresh `origin/main` (fc30d18,
 "cli: scion list attribute filters and relationship flags (#2153)"). Design:
-gs://scion-xproject-exchange/slow-list/design/lists-graph.md (r8 final).
+the lists-graph design doc (r8 final).
 
 Scope, per the P1b brief: the **project** agents endpoint only —
 `sort=updated` (both directions), `fit` with candidate-count completeness,
@@ -57,7 +57,7 @@ gets a 400 here, before any SQL, per the design's explicit P1b carve-out.
 
 ## Design-bullet to file:function map
 
-See gs://scion-xproject-exchange/slow-list/reports/lists-p1b-dev.md for the
+See the P1b dev report for the
 full per-bullet, per-test mapping and measured decision counts; this log
 entry is the summary for the project log.
 
@@ -214,8 +214,8 @@ ref).
   8 in `pkg/store/agentsort`) all pass; see the dev report for the S-test
   mapping.
 
-Full commands, results, and the S-test/design-bullet mapping:
-gs://scion-xproject-exchange/slow-list/reports/lists-p1b-dev.md.
+Full commands, results, and the S-test/design-bullet mapping: see the P1b
+dev report.
 
 ## B6(b) resolution (round-1 follow-up)
 
@@ -303,7 +303,7 @@ pass; `go test -p 2 -count=1 ./pkg/hub/... -run
 
 New head after this round: `b4dedcc7e487cf2a6ace65d63c0cca88fb4dfa41`
 (fast-forward push, no rebase needed). Full disposition table and test
-output: gs://scion-xproject-exchange/slow-list/reports/lists-p1b-dev.md.
+output: see the P1b dev report.
 
 ## Rebase onto origin/main 224eb0328
 
@@ -370,4 +370,37 @@ Verification: targeted hub (62 subtests) and store (5 subtests) tests, 0
 failures, exit 0 on both, plus the N-1 mutation-test proof above.
 
 New head: `5799d5ff8215e1e560e60b217e7ca9e75d137fd3`. Full disposition table:
-gs://scion-xproject-exchange/slow-list/reports/lists-p1b-dev.md.
+see the P1b dev report.
+
+## Hygiene pass (comment/name/file-name cleanup before going upstream)
+
+The branch was approved for behavior, but still carried internal review-round
+IDs (`B-1`, `N-3`, `nit-2`, `rev-4`, `S6`, `Q-G`, `NB-1`, round numbers,
+erratum/errata references, `review1`, and similar) in code comments, test
+names, subtest names and assertion messages, plus references to the design
+doc and review reports by their storage path. None of that means anything to
+an upstream reviewer who has no access to the internal design doc or review
+history, so this pass:
+
+- Renamed `agent_sorted_project_list_review1_test.go` (`git mv`) and split it
+  by subject into three files: the paged-page-size decision-budget bound
+  (`agent_sorted_project_list_paged_page_size_test.go`), the step-5a
+  race/re-decision and includeDeleted behavior
+  (`agent_sorted_project_list_race_redecision_test.go`), and cursor
+  validation plus the fit/completeness and legacy byte-identical cases
+  (`agent_sorted_project_list_validation_test.go`). No test function bodies
+  changed, only their doc comments, a handful of assertion messages, and in
+  one case a test fixture's display name string.
+- Reworded every internal review/design-process ID found in comments, test
+  names and assertion messages across `pkg/hub`, `pkg/store` and the
+  Makefile into plain descriptions of the invariant or reason, keeping
+  design section numbers (e.g. "design 5.3 step 5a") where they read
+  naturally on their own.
+- Replaced every storage-path reference in this file with plain wording
+  (e.g. "the P1b dev report", "the lists-graph design doc"); IDs are left
+  alone elsewhere in this file, since this log itself is internal-only.
+
+No behavior, logic, identifier (other than test-function renames), or
+assertion value changed. Verification: `go vet ./pkg/hub/... ./pkg/store/...`
+passes; `go test -p 2 ./pkg/store/...` passes; `go test -p 2 -run
+'Sorted|Cursor|AgentSort' ./pkg/hub/...` passes (288s, 0 failures).

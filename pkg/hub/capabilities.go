@@ -239,16 +239,16 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 // ComputeCapabilitiesBatch evaluates capabilities for a list of resources, optimized
 // for batch operation by expanding groups and fetching policies once.
 //
-// PINNED to ComputeCapabilitiesForActions below (r1 P1b review N4): the two
-// evaluation loops (the IsScopedUserIdentity branch and the CheckAccess
-// branch) must stay in lockstep, field for field, with
-// ComputeCapabilitiesForActions's loops over an explicit action list. They
-// are intentionally a duplicated body rather than one delegating to the
-// other, because capabilities.go is shared with #2377's `withAuthzInputMemo`
-// install site and the EM ruled against touching this function's body for
-// P1b. TestListProjectAgentsSorted_CapsDeepEqualLegacy (S6, B6 item a)
-// asserts the two stay byte-identical on real requests; if you change one
-// loop, change the other and re-run that test.
+// PINNED to ComputeCapabilitiesForActions below: the two evaluation loops
+// (the IsScopedUserIdentity branch and the CheckAccess branch) must stay in
+// lockstep, field for field, with ComputeCapabilitiesForActions's loops over
+// an explicit action list. They are intentionally a duplicated body rather
+// than one delegating to the other, because capabilities.go is shared with
+// #2377's `withAuthzInputMemo` install site and the EM ruled against
+// touching this function's body for P1b.
+// TestListProjectAgentsSorted_CapsDeepEqualLegacy asserts the two stay
+// byte-identical on real requests; if you change one loop, change the other
+// and re-run that test.
 func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Identity, resources []Resource, resourceType string) []*Capabilities {
 	actions, ok := ResourceActions[resourceType]
 	if !ok {
@@ -299,9 +299,10 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 // It runs the identical evaluation path ComputeCapabilitiesBatch does —
 // DecideFromContext for a scoped UAT, CheckAccess otherwise — so a caller
 // that passes ResourceActions[resourceType] here gets byte-identical results
-// to ComputeCapabilitiesBatch (S6 asserts this deep-equality for the merged
-// per-item result). Each (resource, action) pair costs exactly one decision
-// and one audit record, same as today.
+// to ComputeCapabilitiesBatch (the decision-count test suite's
+// non-waivable gate asserts this deep-equality for the merged per-item
+// result). Each (resource, action) pair costs exactly one decision and one
+// audit record, same as today.
 func (a *AuthzService) ComputeCapabilitiesForActions(ctx context.Context, identity Identity, resources []Resource, actions []Action) []*Capabilities {
 	if IsScopedUserIdentity(identity) {
 		caps := make([]*Capabilities, len(resources))
@@ -333,8 +334,9 @@ func (a *AuthzService) ComputeCapabilitiesForActions(ctx context.Context, identi
 // remaining actions (evaluated on the full row), preserving the action order
 // ResourceActions[resourceType] defines — the same order
 // ComputeCapabilitiesBatch produces, which is what design lists-graph.md 5.3
-// step 6 requires (S6 deep-equality) and what R8 NB-1's accounting depends
-// on: an item whose read decision came from step 3 and whose remaining
+// step 6 requires (the non-waivable deep-equality gate) and what the
+// decision-count accounting depends on: an item whose read decision came
+// from step 3 and whose remaining
 // actions came from step 6 must look identical to one where every action was
 // decided by a single ComputeCapabilitiesBatch call.
 func mergeCapabilities(order []Action, readCap, restCap *Capabilities) *Capabilities {

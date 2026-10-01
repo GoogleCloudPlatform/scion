@@ -31,10 +31,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// --- B1: resourceEqual must be a true whole-Resource compare -------------
+// --- resourceEqual must be a true whole-Resource compare -------------
 
-// TestResourceEqual_MutationCoversEveryField is r1 review B1's required
-// test: reflection-fill a Resource, mutate each exported field one at a
+// TestResourceEqual_MutationCoversEveryField is the required proof:
+// reflection-fill a Resource, mutate each exported field one at a
 // time, and assert resourceEqual returns false every time. A future
 // Resource field is then covered automatically, because this test iterates
 // reflect.TypeOf(Resource{}).NumField() rather than naming fields by hand --
@@ -90,10 +90,10 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 	require.True(t, resourceEqual(a, b), "nil and empty Labels/Ancestry must still compare equal after switching to reflect.DeepEqual")
 }
 
-// --- B2: the member/full equality gate, reflection-filled, real round trip ---
+// --- the member/full equality gate, reflection-filled, real round trip ---
 
 // reflectFillStoreAgent returns a *store.Agent with every exported field set
-// to a distinguishable non-zero value (design lists-graph.md 9 S6: "the
+// to a distinguishable non-zero value (design lists-graph.md 9: "the
 // fixture full is filled by reflection so that every exported store.Agent
 // field is non-zero"), via generic reflection plus a short list of
 // special-cased fields that must hold a specific shape to round-trip
@@ -106,14 +106,14 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 //     fields (populated by Hub when returning data, not persisted)" per
 //     store.Agent's own field comment (pkg/store/models.go) -- no store
 //     write path can ever make these non-zero after a read-back, and
-//     agentResource never reads them either. (r2 review N-2: HarnessConfig
-//     was missing from this list and from the skip map below, even though
+//     agentResource never reads them either. (HarnessConfig was once
+//     missing from this list and from the skip map below, even though
 //     it sits in the exact same "enriched, not persisted" block as the
 //     other three -- the reflection fill set it, but it reads back zero,
 //     same as its neighbors. assertNonSkippedFieldsNonZero below proves this
 //     skip list is exhaustive rather than trusting the comment.)
-//   - DeletedAt: GetAgentsByIDs (deliberately exercised here, per r1 review
-//     B2's wording) hard-codes agent.DeletedAtIsNil() -- a soft-deleted
+//   - DeletedAt: GetAgentsByIDs (deliberately exercised here) hard-codes
+//     agent.DeletedAtIsNil() -- a soft-deleted
 //     fixture could never be read back through it at all. The dropped-row
 //     behavior for a deleted agent is covered separately by
 //     TestListProjectAgentsSorted_Race_MissingRow.
@@ -126,8 +126,8 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 //     ApplyLaunchReport/RunLaunchReaperTick write them. They are also json:"-"
 //     and never reach agentResource.
 //
-// Every other exported field, including Slug (the field the r1 reviewer's
-// ScopeUserID mutation reads), is filled and persisted through CreateAgent
+// Every other exported field, including Slug (the field a past reviewer's
+// ScopeUserID mutation probe reads), is filled and persisted through CreateAgent
 // followed by one UpdateAgent call (which covers the handful of fields
 // CreateAgent itself does not set, e.g. ExitCode/ExitReason/
 // ReincarnationState/ReincarnationUpdatedAt).
@@ -137,8 +137,8 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 // doc comment for why each one is here). Sharing this map with
 // assertNonSkippedFieldsNonZero (rather than each keeping its own copy)
 // means the skip list cannot drift out of sync with what the fill/verify
-// pair actually checks -- the r2 review N-2 gap (HarnessConfig missing from
-// an independently-stated list) cannot recur silently, because
+// pair actually checks -- a gap like HarnessConfig once missing from an
+// independently-stated list cannot recur silently, because
 // assertNonSkippedFieldsNonZero fails closed on every field not in this map.
 var reflectFillStoreAgentSkipFields = map[string]bool{
 	"Project": true, "RuntimeBrokerName": true, "HarnessConfig": true, "HarnessAuth": true,
@@ -242,13 +242,13 @@ func fillGenericNonZero(t *testing.T, f reflect.Value, name string, seq int) {
 }
 
 // assertNonSkippedFieldsNonZero asserts every exported field of a NOT in
-// reflectFillStoreAgentSkipFields is non-zero (r2 review N-2: "the test
-// compares memberResource against agentResource(re-read row), so any field
-// that does not round-trip is invisible to it ... assert that every
-// non-skipped field of the re-read store.Agent is non-zero. That makes the
-// fixture prove its own coverage."). Without this, a field silently falling
-// out of round-trip (like HarnessConfig did, undetected until this review)
-// would just quietly stop being exercised by the S6 gate rather than
+// reflectFillStoreAgentSkipFields is non-zero ("the test compares
+// memberResource against agentResource(re-read row), so any field that does
+// not round-trip is invisible to it ... assert that every non-skipped field
+// of the re-read store.Agent is non-zero. That makes the fixture prove its
+// own coverage."). Without this, a field silently falling out of round-trip
+// (like HarnessConfig once did, undetected until a review caught it) would
+// just quietly stop being exercised by the decision-count gate rather than
 // failing loudly.
 func assertNonSkippedFieldsNonZero(t *testing.T, a *store.Agent) {
 	t.Helper()
@@ -269,14 +269,14 @@ func assertNonSkippedFieldsNonZero(t *testing.T, a *store.Agent) {
 }
 
 // TestListProjectAgentsSorted_MemberProjectionEquality is the non-waivable
-// S6 gate (r1 review B2): a reflection-filled store.Agent, written through
-// the real store and read back through the real ListAgentMembers and
+// member/full equality gate: a reflection-filled store.Agent, written
+// through the real store and read back through the real ListAgentMembers and
 // GetAgentsByIDs (not a hand-built member struct and not resourceEqual),
 // must satisfy reflect.DeepEqual(memberResource(m), agentResource(full)).
-// This is the test the r1 review's ScopeUserID mutation is checked against
-// in the dev report: adding an agentResource input that AgentMember/ToAgent
-// does not carry must make this test fail, because memberResource(m) can
-// never reflect a field ToAgent() never copies.
+// This is the test a ScopeUserID mutation probe is checked against: adding
+// an agentResource input that AgentMember/ToAgent does not carry must make
+// this test fail, because memberResource(m) can never reflect a field
+// ToAgent() never copies.
 func TestListProjectAgentsSorted_MemberProjectionEquality(t *testing.T) {
 	f := sortedListSetup(t)
 	ctx := context.Background()
@@ -298,8 +298,8 @@ func TestListProjectAgentsSorted_MemberProjectionEquality(t *testing.T) {
 	require.Contains(t, fullRows, full.ID)
 	rereadFull := fullRows[full.ID]
 
-	// r2 review N-2: prove the fixture's own coverage rather than trusting
-	// the skip-list comment -- every field NOT in reflectFillStoreAgentSkipFields
+	// Prove the fixture's own coverage rather than trusting the skip-list
+	// comment -- every field NOT in reflectFillStoreAgentSkipFields
 	// must actually have round-tripped non-zero, or this test's deep-equal
 	// below would be silently blind to it.
 	assertNonSkippedFieldsNonZero(t, rereadFull)
@@ -309,9 +309,9 @@ func TestListProjectAgentsSorted_MemberProjectionEquality(t *testing.T) {
 		memberResource(member), agentResource(rereadFull))
 }
 
-// TestListProjectAgentsSorted_CapsDeepEqualLegacy is S6 item (a) from the
-// review (B6): the sorted-mode page's merged _capabilities must deep-equal
-// what the legacy path computes for the same resource via a direct
+// TestListProjectAgentsSorted_CapsDeepEqualLegacy proves: the sorted-mode
+// page's merged _capabilities must deep-equal what the legacy path computes
+// for the same resource via a direct
 // ComputeCapabilitiesBatch call, including action order -- not just
 // "contains read". The legacy project-list user path
 // (listProjectAgents, handlers_projects_core.go) calls

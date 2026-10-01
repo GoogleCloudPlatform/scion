@@ -137,7 +137,7 @@ func mustDecodeListAgentsResponse(t *testing.T, rec interface{ Bytes() []byte })
 	return resp
 }
 
-// --- S3: cursor and parameter rejection ---------------------------------
+// --- cursor and parameter rejection ---------------------------------
 
 func TestListProjectAgentsSorted_InvalidParams(t *testing.T) {
 	f := sortedListSetup(t)
@@ -224,7 +224,7 @@ func TestListProjectAgentsSorted_CursorPhaseReplayRejected(t *testing.T) {
 }
 
 // TestListProjectAgentsSorted_AgentJWT400BeforeSQL is the P1b agent-JWT gate
-// (design 5.3 "P1b build") and the S9 agent-JWT variant: exactly the stated
+// (design 5.3 "P1b build") and a hard-gate check: exactly the stated
 // message, no decisions beyond what routing itself costs.
 func TestListProjectAgentsSorted_AgentJWT400BeforeSQL(t *testing.T) {
 	f := sortedListSetup(t)
@@ -253,7 +253,7 @@ func TestListProjectAgentsSorted_AgentJWT400BeforeSQL(t *testing.T) {
 	assert.Empty(t, emitter.records, "no decision should be made before the agent-JWT sorted-mode gate")
 }
 
-// --- S9: candidate ceiling (hard gate) -----------------------------------
+// --- candidate ceiling (hard gate) -----------------------------------
 
 // countingAgentStore wraps a real store.Store and lets tests fake
 // CountAgents/ListAgentMembers results, or count calls, without paying for
@@ -308,10 +308,10 @@ func (c *countingAgentStore) GetAgentsByIDs(ctx context.Context, ids []string) (
 
 // ListAgents is overridden so tests can observe loadFullRowsForPage's actual
 // full-row read: how many times it runs per request, and exactly which IDs
-// it asks for (r2 review N-1 -- the old getByIDsCalls assertion in
-// TestListProjectAgentsSorted_CandidateCeiling was vacuous after the B4 fix
-// moved the full-row read from GetAgentsByIDs to ListAgents, so it passed
-// regardless of what the handler actually did).
+// it asks for (the old getByIDsCalls assertion in
+// TestListProjectAgentsSorted_CandidateCeiling was vacuous after the
+// full-row read moved from GetAgentsByIDs to ListAgents to honor
+// includeDeleted, so it passed regardless of what the handler actually did).
 func (c *countingAgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
 	c.mu.Lock()
 	c.listAgentsCalls++
@@ -320,8 +320,9 @@ func (c *countingAgentStore) ListAgents(ctx context.Context, filter store.AgentF
 	return c.Store.ListAgents(ctx, filter, opts)
 }
 
-// TestListProjectAgentsSorted_CandidateCeiling is S9 (hard gate): a candidate
-// pool above authorizedListMaxCandidates gets the 422 refusal, with exactly
+// TestListProjectAgentsSorted_CandidateCeiling is the candidate-ceiling hard
+// gate: a candidate pool above authorizedListMaxCandidates gets the 422
+// refusal, with exactly
 // one decision (the agent.list gate) and zero read-pass/capability
 // decisions; ListAgentMembers is not called with results scanned into the
 // read pass. The candidate pool is faked (via countingAgentStore) here,
@@ -356,9 +357,10 @@ func TestListProjectAgentsSorted_CandidateCeiling(t *testing.T) {
 	assert.Equal(t, 0, counting.listAgentsCalls, "the full-row read (loadFullRowsForPage -> ListAgents) must not run once the ceiling is breached; there is no page to read rows for")
 }
 
-// TestListProjectAgentsSorted_CandidateCeiling_Race is the S9 race
-// sub-case: CountAgents reports under the ceiling, but the ListAgentMembers
-// max=2001 read returns more than the ceiling (the pool grew in between).
+// TestListProjectAgentsSorted_CandidateCeiling_Race is the candidate-ceiling
+// gate's race sub-case: CountAgents reports under the ceiling, but the
+// ListAgentMembers max=2001 read returns more than the ceiling (the pool
+// grew in between).
 // The response is still the 422, with the same single-decision cost.
 func TestListProjectAgentsSorted_CandidateCeiling_Race(t *testing.T) {
 	f := sortedListSetup(t)
@@ -407,11 +409,11 @@ func (r *raceMembersStore) ListAgentMembers(ctx context.Context, filter store.Ag
 }
 
 // TestListProjectAgentsSorted_FullRowRead_ExactlyOncePerRequest_IDsAreThePage
-// is r2 review N-1: a real, successful request must trigger exactly one
+// proves: a real, successful request must trigger exactly one
 // full-row read (loadFullRowsForPage -> ListAgents) per request, and the IDs
 // that read asks for must be exactly the page's IDs -- not the whole
-// candidate set, and not called once per item. This replaces the N-1
-// finding's vacuous getByIDsCalls==0 assertion with one that actually
+// candidate set, and not called once per item. This replaces an earlier,
+// vacuous getByIDsCalls==0 assertion with one that actually
 // guards the "no full-row read outside the page" property.
 func TestListProjectAgentsSorted_FullRowRead_ExactlyOncePerRequest_IDsAreThePage(t *testing.T) {
 	t.Run("paged", func(t *testing.T) {
@@ -461,8 +463,9 @@ func TestListProjectAgentsSorted_FullRowRead_ExactlyOncePerRequest_IDsAreThePage
 }
 
 // TestListProjectAgentsSorted_UnderCeiling_ReturnsExactTotals asserts the
-// non-ceiling side of S9: at or below the ceiling, the request succeeds with
-// exact totals (a small N stand-in for "2,000 agents", which is exercised
+// non-ceiling side of the candidate-ceiling gate: at or below the ceiling,
+// the request succeeds with exact totals (a small N stand-in for "2,000
+// agents", which is exercised
 // above via the fake-size path; here we prove the real code path with real
 // rows at a modest N).
 func TestListProjectAgentsSorted_UnderCeiling_ReturnsExactTotals(t *testing.T) {
@@ -483,7 +486,7 @@ func TestListProjectAgentsSorted_UnderCeiling_ReturnsExactTotals(t *testing.T) {
 	assert.Equal(t, "desc", resp.Dir)
 }
 
-// --- S10: fit / completeness ---------------------------------------------
+// --- fit / completeness ---------------------------------------------
 
 func TestListProjectAgentsSorted_Fit_CompleteWhenAtOrBelow(t *testing.T) {
 	f := sortedListSetup(t)
@@ -516,7 +519,7 @@ func TestListProjectAgentsSorted_Fit_IncompleteAboveFit(t *testing.T) {
 	assert.NotEmpty(t, resp.NextCursor)
 }
 
-// --- S5: stats ------------------------------------------------------------
+// --- stats ------------------------------------------------------------
 
 func TestListProjectAgentsSorted_Stats(t *testing.T) {
 	f := sortedListSetup(t)
@@ -524,7 +527,7 @@ func TestListProjectAgentsSorted_Stats(t *testing.T) {
 	f.createAgent(t, "run-2", string(state.PhaseRunning), nil)
 	f.createAgent(t, "stop-1", string(state.PhaseStopped), nil)
 
-	// stats must ignore the request's own phase filter (R2-B4): a
+	// stats must ignore the request's own phase filter: a
 	// phase=stopped request still reports the true running count.
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath("sort=updated&fit=500&stats=1&phase=stopped"), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -578,7 +581,7 @@ func TestListProjectAgentsSorted_StatsIgnoredInLegacyMode(t *testing.T) {
 	assert.Empty(t, resp.Sort)
 }
 
-// --- S6: decision counts (hard gate) ---------------------------------------
+// --- decision counts (hard gate) ---------------------------------------
 
 // TestListProjectAgentsSorted_DecisionCounts_Complete pins the section 6.4
 // formula for a complete fit response: 5 + n + 7R (gate + one read decision
@@ -643,19 +646,20 @@ func TestListProjectAgentsSorted_DecisionCounts_Paged(t *testing.T) {
 }
 
 // TestListProjectAgentsSorted_MemberProjectionEquality is the hub-side half
-// of the non-waivable S6 gate: for a candidate that does not race,
-// memberResource(m) must equal agentResource(full), and the page's merged
-// capabilities must deep-equal ComputeCapabilitiesBatch's output over the
-// same resource.
+// of the non-waivable decision-count gate: for a candidate that does not
+// race, memberResource(m) must equal agentResource(full), and the page's
+// merged capabilities must deep-equal ComputeCapabilitiesBatch's output over
+// the same resource.
 // TestListProjectAgentsSorted_MemberProjectionEquality (the reflection-filled,
-// real-round-trip version the non-waivable S6 gate requires) lives in
-// agent_sorted_project_list_reflection_test.go, per r1 review B2. The old
+// real-round-trip version the non-waivable gate requires) lives in
+// agent_sorted_project_list_reflection_test.go. The old
 // hand-built-member version that lived here could not fail on a new
 // agentResource input and has been replaced, not merely supplemented.
 
 // TestMergeCapabilities_EquivalentToSingleBatchPass is the pure-logic half
-// of the S6 deep-equality gate: splitting ResourceActions["agent"] into a
-// read-only pass and a remaining-actions pass and merging them with
+// of the decision-count deep-equality gate: splitting
+// ResourceActions["agent"] into a read-only pass and a remaining-actions
+// pass and merging them with
 // mergeCapabilities must produce the same set (order and membership) as
 // deciding every action in one pass would, for every combination of
 // allowed actions.
@@ -702,7 +706,7 @@ func TestMergeCapabilities_EquivalentToSingleBatchPass(t *testing.T) {
 	}
 }
 
-// TestListProjectAgentsSorted_NilVsEmptyLabelsNoRedecision is r8 NB-2 (S6):
+// TestListProjectAgentsSorted_NilVsEmptyLabelsNoRedecision proves:
 // nil vs empty Labels/Ancestry must never trigger a step-5a re-decision.
 func TestListProjectAgentsSorted_NilVsEmptyLabelsNoRedecision(t *testing.T) {
 	a := &Resource{Type: "agent", ID: "x", Labels: nil, Ancestry: nil}
@@ -739,10 +743,11 @@ func (m *mutatingAfterMembersStore) ListAgentMembers(ctx context.Context, filter
 	return members, nil
 }
 
-// TestListProjectAgentsSorted_Race_LabelChange_StillMatchesFilter is the S6
-// race sub-case: a page item's labels change between the two reads but it
-// still matches the request's label filter, so it is kept and re-decided
-// (9 decisions total per r8 NB-1: 1 in step 3, 8 in step 5a, 0 in step 6).
+// TestListProjectAgentsSorted_Race_LabelChange_StillMatchesFilter is the
+// decision-count gate's race sub-case: a page item's labels change between
+// the two reads but it still matches the request's label filter, so it is
+// kept and re-decided (9 decisions total: 1 in step 3, 8 in step 5a, 0 in
+// step 6).
 func TestListProjectAgentsSorted_Race_LabelChange_StillMatchesFilter(t *testing.T) {
 	f := sortedListSetup(t)
 	a := f.createAgent(t, "race-match", string(state.PhaseStopped), map[string]string{"team": "a", "extra": "1"})
@@ -762,8 +767,8 @@ func TestListProjectAgentsSorted_Race_LabelChange_StillMatchesFilter(t *testing.
 	assert.Len(t, emitter.records, 14)
 }
 
-// TestListProjectAgentsSorted_Race_LabelChange_NoLongerMatchesFilter is r8
-// F-1: a page item whose labels change so it no longer matches the
+// TestListProjectAgentsSorted_Race_LabelChange_NoLongerMatchesFilter proves:
+// a page item whose labels change so it no longer matches the
 // request's label filter is dropped, at no extra decision cost.
 func TestListProjectAgentsSorted_Race_LabelChange_NoLongerMatchesFilter(t *testing.T) {
 	f := sortedListSetup(t)
@@ -780,8 +785,8 @@ func TestListProjectAgentsSorted_Race_LabelChange_NoLongerMatchesFilter(t *testi
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	assert.Empty(t, resp.Agents, "the raced item no longer matches label=team=a and must be dropped")
 
-	// n=1 candidate: 5 (gate+caps) + 1 (step3 read) + 0 (F-1 drop, no
-	// additional decision) = 6.
+	// n=1 candidate: 5 (gate+caps) + 1 (step3 read) + 0 (filter-mismatch
+	// drop, no additional decision) = 6.
 	assert.Len(t, emitter.records, 6)
 }
 
@@ -816,16 +821,15 @@ func (d *deletingAfterMembersStore) ListAgentMembers(ctx context.Context, filter
 	return members, nil
 }
 
-// TestListProjectAgentsSorted_Race_ProjectMismatch is r8 NB-3: a full row
+// TestListProjectAgentsSorted_Race_ProjectMismatch proves: a full row
 // whose ProjectID differs from the request project is dropped at no
 // decision cost. UpdateAgent never mutates ProjectID in this codebase
-// (buildAgentUpdate, entadapter/agent_store.go — "Line 20" in the design's
-// r8 changelog), so this race cannot be produced by writing through the
-// normal store API; the test instead fabricates the mismatch at the
-// full-row-load boundary itself (ListAgents, which listProjectAgentsSorted
-// uses to honor IncludeDeleted -- r1 review B4), exercising the handler's
-// explicit ProjectID check directly, regardless of whether today's write
-// paths can reach it.
+// (buildAgentUpdate, entadapter/agent_store.go), so this race cannot be
+// produced by writing through the normal store API; the test instead
+// fabricates the mismatch at the full-row-load boundary itself (ListAgents,
+// which listProjectAgentsSorted uses to honor IncludeDeleted), exercising
+// the handler's explicit ProjectID check directly, regardless of whether
+// today's write paths can reach it.
 func TestListProjectAgentsSorted_Race_ProjectMismatch(t *testing.T) {
 	f := sortedListSetup(t)
 	a := f.createAgent(t, "race-project", string(state.PhaseStopped), nil)

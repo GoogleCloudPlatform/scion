@@ -60,7 +60,7 @@ func EncodeAgentCursor(sort, dir string, k, created time.Time, id, binding strin
 
 // DecodeAgentCursor decodes and validates a v2 sorted-mode cursor against the
 // request's sort, dir and binding, before any store call is made (design
-// lists-graph.md 4.4, N6). Every failure — malformed input, a legacy cursor,
+// lists-graph.md 4.4). Every failure — malformed input, a legacy cursor,
 // a mismatched sort, dir or binding, or an unparseable timestamp or id — is
 // reported by wrapping ErrInvalidInput, so callers can map it to a uniform
 // 400 the same way they already do for store.ErrInvalidInput.

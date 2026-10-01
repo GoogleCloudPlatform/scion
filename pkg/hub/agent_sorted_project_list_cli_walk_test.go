@@ -28,20 +28,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestListProjectAgents_CLIWalk_LegacyBindingSurvivesPagination is design
-// S3's N1 case: a legacy (no "sort") project-agents cursor walk, driven
-// through hubclient.Projects().ListAgents the way cmd/project_health.go's
-// walk does (limit=200, following NextCursor until empty), must return every
-// agent exactly once under the new project cursor binding this change adds
-// to legacy mode (design 4.4, "new in both modes"). Run for a user and for
-// an agent JWT, matching the design's stated coverage.
+// TestListProjectAgents_CLIWalk_LegacyBindingSurvivesPagination is the
+// legacy cursor-walk case from the design's test plan: a legacy (no "sort")
+// project-agents cursor walk, driven through hubclient.Projects().ListAgents
+// the way cmd/project_health.go's walk does (limit=200, following
+// NextCursor until empty), must return every agent exactly once under the
+// new project cursor binding this change adds to legacy mode (design 4.4,
+// "new in both modes"). Run for a user and for an agent JWT, matching the
+// design's stated coverage.
 func TestListProjectAgents_CLIWalk_LegacyBindingSurvivesPagination(t *testing.T) {
 	f := sortedListSetup(t)
 
-	// Matches the design's own N1 plan size: 450 agents at limit=200, as
-	// cmd/project_health.go's walk does (r1 review N3; bulk insert via
-	// store.Store.WithTx makes this cheap, and legacy mode's per-page cost
-	// is independent of total candidate count, unlike sorted mode).
+	// Matches the design's own test-plan size: 450 agents at limit=200, as
+	// cmd/project_health.go's walk does (bulk insert via store.Store.WithTx
+	// makes this cheap, and legacy mode's per-page cost is independent of
+	// total candidate count, unlike sorted mode).
 	const total = 450
 	const pageLimit = 200
 	agents := f.createAgentsBulk(t, total, "walk", string(state.PhaseStopped), nil)

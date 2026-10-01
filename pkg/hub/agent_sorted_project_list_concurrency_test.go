@@ -31,10 +31,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// S4: the design lists-graph.md 4.5 concurrency contract. Every project
-// sorted-mode page request re-reads the full (bounded) member snapshot and
-// positions after the cursor by comparison (pkg/store/agentsort), not by a
-// stored offset, so each row of the 4.5 table falls out of that
+// This file covers the design lists-graph.md 4.5 concurrency contract.
+// Every project sorted-mode page request re-reads the full (bounded) member
+// snapshot and positions after the cursor by comparison
+// (pkg/store/agentsort), not by a stored offset, so each row of the 4.5
+// table falls out of that
 // construction rather than needing bespoke handling per case. These tests
 // exercise the three directions reachable through the real store's forward-
 // only clock (CreateAgent/UpdateAgent(Status) always stamp time.Now(), so a
@@ -198,7 +199,7 @@ func (r *regressingAfterNCallsStore) ListAgentMembers(ctx context.Context, filte
 	return members, nil
 }
 
-// TestListProjectAgentsSorted_Concurrency_KeyRegressionDuplicatesRow is D6:
+// TestListProjectAgentsSorted_Concurrency_KeyRegressionDuplicatesRow proves:
 // a row already shown on an earlier page, whose key then regresses to sort
 // after the cursor, is shown again on a later page of the same walk. This
 // is the design 4.5 contract's stated behavior for that crossing direction

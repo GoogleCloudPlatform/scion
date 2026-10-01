@@ -524,7 +524,7 @@ type AgentFilter struct {
 }
 
 // AgentMember is the narrow projection ListAgentMembers reads for sorted-mode
-// candidate evaluation (design lists-graph.md 5.1, N7). It carries exactly
+// candidate evaluation (design lists-graph.md 5.1). It carries exactly
 // the fields pkg/hub's agentResource(*Agent) reads — ID, OwnerID, ProjectID,
 // Labels, Ancestry — plus Phase, Created, Updated and LastActivityEvent for
 // positioning (pkg/store/agentsort) and stats.
@@ -534,8 +534,8 @@ type AgentFilter struct {
 // construction path a caller must use to build a Resource from a member, so
 // that a future agentResource input agentResource gains but AgentMember lacks
 // is caught by the equality gate described on ToAgent, rather than silently
-// widening what a race can miss (design 5.3 step 5a; the hub-side test S6 is
-// the non-waivable gate that exercises this).
+// widening what a race can miss (design 5.3 step 5a; the hub-side
+// non-waivable member/full equality test is the gate that exercises this).
 type AgentMember struct {
 	ID        string
 	OwnerID   string

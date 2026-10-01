@@ -29,18 +29,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This file runs S6/S9 at the design's own test-plan sizes (n in 25, 100,
-// 500, 501, 1200; real 2000/2001-row ceiling rows), per review finding D3.
-// Fixtures use store.Store.WithTx (one transaction for the whole batch)
+// This file runs the decision-count and candidate-ceiling gates at the
+// design's own test-plan sizes (n in 25, 100, 500, 501, 1200; real
+// 2000/2001-row ceiling rows). Fixtures use store.Store.WithTx (one
+// transaction for the whole batch)
 // rather than one CreateAgent call per row: a 1200-row bulk insert this way
 // takes well under a second in this sandbox, which is what makes these
 // sizes practical to run as unit tests at all — the smaller sizes used
 // elsewhere in this package were a overcautious reaction to this repo's
-// cold-build compile time, not to real per-row insert cost (see the P1b dev
-// report's revision history).
+// cold-build compile time, not to real per-row insert cost.
 
-// TestListProjectAgentsSorted_DecisionCounts_DesignSizes is S6 (hard gate)
-// at the design's own n values, all-readable (R=n). n <= 500 can be a
+// TestListProjectAgentsSorted_DecisionCounts_DesignSizes is the non-waivable
+// decision-count hard gate at the design's own n values, all-readable
+// (R=n). n <= 500 can be a
 // complete fit response (fit's valid range is 1..500, design 4.1); n > 500
 // cannot, so those two sizes exercise the paged formula instead, with
 // limit=25 to match the design's own illustrative P (section 6.4: "n + 180"
@@ -114,8 +115,8 @@ func grantProjectListOnly(t *testing.T, s store.Store, userID, projectID, roleNa
 }
 
 // TestListProjectAgentsSorted_DecisionCounts_PartialRead_Paged is the
-// design's explicit S6 sub-case: n=1200, R=400 (paged), exactly 1380
-// decisions (design 9 S6: "5 + 8n" withdrawn in favor of "n = 1,200 with
+// design's explicit decision-count sub-case: n=1200, R=400 (paged), exactly
+// 1380 decisions (design 9: "5 + 8n" withdrawn in favor of "n = 1,200 with
 // R = 400 (paged, 1,380, not complete)").
 func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Paged(t *testing.T) {
 	f := sortedListSetup(t)
@@ -153,8 +154,8 @@ func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Paged(t *testing.T) 
 }
 
 // TestListProjectAgentsSorted_DecisionCounts_PartialRead_Complete is the
-// design's other explicit S6 sub-case: n=500, R=200 (complete), exactly
-// 5 + 500 + 7*200 = 1905 decisions (design 9 S6).
+// design's other explicit decision-count sub-case: n=500, R=200 (complete),
+// exactly 5 + 500 + 7*200 = 1905 decisions (design 9).
 func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Complete(t *testing.T) {
 	f := sortedListSetup(t)
 
@@ -181,7 +182,7 @@ func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Complete(t *testing.
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	require.NotNil(t, resp.Complete)
-	assert.True(t, *resp.Complete, "completeness is decided on the candidate count n, not R (design Q-G)")
+	assert.True(t, *resp.Complete, "completeness is decided on the candidate count n, not R (design 5.3 step 2)")
 	assert.Len(t, resp.Agents, r, "a complete response's page is the whole readable set")
 	assert.Equal(t, r, resp.TotalCount)
 
@@ -190,9 +191,9 @@ func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Complete(t *testing.
 	assert.Len(t, emitter.records, 1905)
 }
 
-// --- S9: real rows at the ceiling (design hard gate) -----------------------
+// --- candidate ceiling: real rows at the ceiling (design hard gate) --------
 
-// TestListProjectAgentsSorted_CandidateCeiling_RealRows is S9 with a real
+// TestListProjectAgentsSorted_CandidateCeiling_RealRows uses a real
 // 2001-row candidate pool (no store decorator): the ceiling trips on the
 // genuine CountAgents/ListAgentMembers path, costing exactly the agent.list
 // gate decision.
@@ -217,9 +218,9 @@ func TestListProjectAgentsSorted_CandidateCeiling_RealRows(t *testing.T) {
 	assert.Len(t, emitter.records, 1, "exactly the agent.list gate decision")
 }
 
-// TestListProjectAgentsSorted_UnderCeiling_RealRowsAtCeiling is S9's
-// complement with a real, exactly-at-the-ceiling 2000-row pool: the request
-// must succeed with exact totals, never refused.
+// TestListProjectAgentsSorted_UnderCeiling_RealRowsAtCeiling is the
+// candidate-ceiling gate's complement with a real, exactly-at-the-ceiling
+// 2000-row pool: the request must succeed with exact totals, never refused.
 func TestListProjectAgentsSorted_UnderCeiling_RealRowsAtCeiling(t *testing.T) {
 	f := sortedListSetup(t)
 	f.createAgentsBulk(t, authorizedListMaxCandidates, "ceil-ok", string(state.PhaseStopped), nil)
@@ -233,7 +234,7 @@ func TestListProjectAgentsSorted_UnderCeiling_RealRowsAtCeiling(t *testing.T) {
 }
 
 // TestListProjectAgentsSorted_CandidateCeiling_LabelNarrowsBelowCeiling is
-// N1: the direct proof that the ceiling COUNT runs on the label-filtered
+// the direct proof that the ceiling COUNT runs on the label-filtered
 // candidate set, not the raw per-project row count. A project with 2,001
 // agents, only 5 of which match the request's label filter, must succeed.
 func TestListProjectAgentsSorted_CandidateCeiling_LabelNarrowsBelowCeiling(t *testing.T) {
@@ -267,7 +268,7 @@ func TestListProjectAgentsSorted_CandidateCeiling_LabelNarrowsBelowCeiling(t *te
 	assert.True(t, *resp.Complete)
 }
 
-// TestListProjectAgentsSorted_LegacyUnaffectedAbove2001 is N1: a legacy
+// TestListProjectAgentsSorted_LegacyUnaffectedAbove2001 proves that a legacy
 // (no sort) request on a project with more than the sorted-mode ceiling's
 // worth of agents is unaffected -- it just truncates to 500 as it always
 // has, with no 422.

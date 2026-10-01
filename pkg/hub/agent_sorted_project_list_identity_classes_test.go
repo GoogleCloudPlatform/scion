@@ -28,12 +28,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This file closes the P1b round-1 review's B6(b) finding: the S6
-// decision-count and caps-deep-equal tests must exercise more than one
-// identity class. ComputeCapabilitiesForActions is a separate copy of
-// ComputeCapabilitiesBatch's loop (not a shared call, per the EM's N4
-// ruling), so its IsScopedUserIdentity/DecideFromContext branch is only
-// proven correct if a scoped UAT actually exercises it end to end --
+// This file covers the finding that the decision-count and
+// caps-deep-equal tests must exercise more than one identity class.
+// ComputeCapabilitiesForActions is a separate copy of
+// ComputeCapabilitiesBatch's loop (not a shared call, per the EM's ruling),
+// so its IsScopedUserIdentity/DecideFromContext branch is only proven
+// correct if a scoped UAT actually exercises it end to end --
 // owner/member/agent-JWT alone never take that branch.
 //
 // Each test mints the identity class via the real token/role-binding path
@@ -145,8 +145,8 @@ func TestListProjectAgentsSorted_CapsDeepEqual_SuperAdmin(t *testing.T) {
 // agent.list gate, at exactly one decision, the same fail-closed shape as
 // any other non-member (TestListProjectAgentsRequiresAuthorization's
 // "non-member user is denied" case). This is the hub-admin identity class's
-// actual S6-relevant evidence: proving the gate does not special-case
-// "admin-sounding" roles that lack the specific permission.
+// actual evidence for the decision-count gate: proving it does not
+// special-case "admin-sounding" roles that lack the specific permission.
 func TestListProjectAgentsSorted_HubAdminNonMember_DeniedAtGate(t *testing.T) {
 	f := sortedListSetup(t)
 	f.createAgent(t, "ha-1", string(state.PhaseStopped), nil)

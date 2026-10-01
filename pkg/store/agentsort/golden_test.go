@@ -103,9 +103,9 @@ func assertIDOrder(t *testing.T, label string, want, got []string) {
 }
 
 // TestGoldenOrder pins the design lists-graph.md 4.2 total order against the
-// committed golden fixture (r1 review B8), including the sub-second
-// trailing-zero-fraction pair (t1/t2) where true-time order differs from
-// what a naive string (localeCompare) comparison would produce.
+// committed golden fixture, including the sub-second trailing-zero-fraction
+// pair (t1/t2) where true-time order differs from what a naive string
+// (localeCompare) comparison would produce.
 func TestGoldenOrder(t *testing.T) {
 	fx := loadGoldenFixture(t)
 

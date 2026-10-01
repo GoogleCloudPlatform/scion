@@ -873,9 +873,9 @@ func (s *AgentStore) CountAgents(ctx context.Context, filter store.AgentFilter) 
 // reads (ID, OwnerID, ProjectID, Labels, Ancestry), plus Phase, Created,
 // Updated and LastActivityEvent for positioning (pkg/store/agentsort) and
 // stats. This list, not a separately maintained one, is the projection's
-// definition (design lists-graph.md 5.1, N7): widening agentResource's
+// definition (design lists-graph.md 5.1): widening agentResource's
 // inputs without adding the new field here is exactly what the non-waivable
-// S6 equality gate is meant to catch. That gate -- a reflection-filled
+// equality gate is meant to catch. That gate -- a reflection-filled
 // store.Agent written and read back through the real ListAgentMembers and
 // GetAgentsByIDs, compared via reflect.DeepEqual(memberResource(m),
 // agentResource(full)) -- lives in pkg/hub (TestListProjectAgentsSorted_
@@ -884,7 +884,7 @@ func (s *AgentStore) CountAgents(ctx context.Context, filter store.AgentFilter) 
 // from package hub. TestListAgentMembers_ProjectionEqualsFullRow in this
 // package is a narrower, store-only check that the narrow SELECT's columns
 // agree with a full-row read; it is not itself reflection-filled and cannot
-// substitute for the hub-level gate (r1 P1b review B2).
+// substitute for the hub-level gate.
 var agentMemberSelectFields = []string{
 	agent.FieldID,
 	agent.FieldOwnerID,
@@ -942,8 +942,7 @@ func (s *AgentStore) ListAgentMembers(ctx context.Context, filter store.AgentFil
 	// "Unknown values return ErrInvalidInput"), rather than letting
 	// agentsort.KeyFor/Less silently fall back to a default ordering. The
 	// hub handler already validates these before calling in; this is the
-	// store API's own contract, independent of any one caller (r1 P1b
-	// review N5).
+	// store API's own contract, independent of any one caller.
 	if sortKey != agentsort.Created && sortKey != agentsort.Updated {
 		return nil, fmt.Errorf("ListAgentMembers: invalid sort %q: %w", sortKey, store.ErrInvalidInput)
 	}

@@ -105,8 +105,8 @@ func TestLess_PrimaryKeyRespectsDir(t *testing.T) {
 	}
 }
 
-// TestSortRows_TrailingZeroFractionsAtBoundary covers the sub-second RFC3339Nano
-// trailing-zero case the design calls out (4.2, 9 S1 FYI 3): Go's true-time
+// TestSortRows_TrailingZeroFractionsAtBoundary covers the sub-second
+// RFC3339Nano trailing-zero case the design calls out (4.2): Go's true-time
 // ordering must place these correctly even though their string
 // representations would misorder under localeCompare.
 func TestSortRows_TrailingZeroFractionsAtBoundary(t *testing.T) {
@@ -134,8 +134,8 @@ func TestSortRows_TrailingZeroFractionsAtBoundary(t *testing.T) {
 }
 
 // TestSortRows_NonUTC pins that a non-UTC time.Time compares correctly by
-// instant, not by its zone-local clock fields (design 9 S1 "one non-UTC
-// time.Time").
+// instant, not by its zone-local clock fields (design's own test plan: "one
+// non-UTC time.Time").
 func TestSortRows_NonUTC(t *testing.T) {
 	utc := mustParse(t, "2026-01-01T12:00:00Z")
 	// Same instant, expressed in a +02:00 offset: 14:00+02:00 == 12:00Z.

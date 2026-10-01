@@ -31,14 +31,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// B8 (r1 review, A1/S1 gate): an HTTP-level page walk whose concatenated
-// pages must equal the agentsort reference order over the authorized,
-// filtered set, at a scale closer to the design's own S1 plan (1,200
-// agents) than the small fixtures used elsewhere in this package.
+// This file covers the order-parity gate: an HTTP-level page walk whose
+// concatenated pages must equal the agentsort reference order over the
+// authorized, filtered set, at a scale closer to the design's own test-plan
+// (1,200 agents) than the small fixtures used elsewhere in this package.
 //
-// Scope note (documented deviation, see the P1b dev report): design 9 S1
-// asks for page sizes {1, 7, 25, 500} at n=1,200. Sorted mode's per-request
-// cost is 5+n+7P -- every page re-evaluates the read pass over all 1,200
+// Scope note (documented deviation): design 9 asks for page sizes
+// {1, 7, 25, 500} at n=1,200. Sorted mode's per-request cost is 5+n+7P --
+// every page re-evaluates the read pass over all 1,200
 // candidates, so a fine-grained walk (e.g. limit=1, 1,200 requests) at that
 // N costs well over a million decisions and would make this single test the
 // slowest thing in the suite by a wide margin. This test instead: (a) walks
@@ -71,9 +71,9 @@ func walkAllPagesIDs(t *testing.T, f *sortedListFixture, dir string, limit int) 
 	return walkAllPagesIDsAs(t, f, f.owner, dir, limit)
 }
 
-// walkAllPagesIDsAs is walkAllPagesIDs for a caller other than f.owner (r2
-// review E2 erratum's R<n walk needs a caller with a strict readable
-// subset, via grantProjectListOnly).
+// walkAllPagesIDsAs is walkAllPagesIDs for a caller other than f.owner: the
+// R<n walk needs a caller with a strict readable subset, via
+// grantProjectListOnly.
 func walkAllPagesIDsAs(t *testing.T, f *sortedListFixture, user *store.User, dir string, limit int) []string {
 	t.Helper()
 	var ids []string
@@ -133,7 +133,7 @@ func TestListProjectAgentsSorted_OrderParity_PageSizeSweep(t *testing.T) {
 }
 
 // TestListProjectAgentsSorted_OrderParity_PhaseAndLabelFilter covers design
-// 9 S1's "filters (phase, label)" dimension: the walk must still concatenate
+// 9's "filters (phase, label)" dimension: the walk must still concatenate
 // to the reference order when restricted to a phase and a label.
 func TestListProjectAgentsSorted_OrderParity_PhaseAndLabelFilter(t *testing.T) {
 	f := sortedListSetup(t)
@@ -181,7 +181,7 @@ func TestListProjectAgentsSorted_OrderParity_PhaseAndLabelFilter(t *testing.T) {
 }
 
 // TestListProjectAgentsSorted_PagedWalk_NonOwnerPartialRead_IndependentReference
-// is r2 review N-5: the existing order-parity walks all use the owner
+// closes a gap in the existing order-parity walks: they all use the owner
 // identity (R==n), a single phase, no other project in the store, and
 // reference order built from the same ListAgentMembers call the handler
 // itself uses -- "the test checks paging against the same sort it uses as
@@ -205,7 +205,7 @@ func TestListProjectAgentsSorted_PagedWalk_NonOwnerPartialRead_IndependentRefere
 	// because this store only ever had one project in it.
 	for _, suffix := range []string{"other-a", "other-b"} {
 		otherProject := &store.Project{
-			ID: tid("sl-n5-" + suffix), Name: "N5 Other " + suffix, Slug: "sl-n5-" + suffix,
+			ID: tid("sl-n5-" + suffix), Name: "Other " + suffix, Slug: "sl-n5-" + suffix,
 			OwnerID: f.owner.ID, CreatedBy: f.owner.ID, Created: time.Now(), Updated: time.Now(),
 		}
 		require.NoError(t, f.store.CreateProject(ctx, otherProject))
@@ -244,11 +244,11 @@ func TestListProjectAgentsSorted_PagedWalk_NonOwnerPartialRead_IndependentRefere
 			}
 			labels := map[string]string{"team": "a"}
 			if i%3 == 0 {
-				labels = map[string]string{"team": ""} // a label with an empty value (N-5)
+				labels = map[string]string{"team": ""} // a label with an empty value
 			}
 			a := &store.Agent{
 				ID: tid(fmt.Sprintf("sl-n5-agent-%d", i)), Slug: fmt.Sprintf("n5-agent-%d", i), Name: fmt.Sprintf("n5-agent-%d", i),
-				ProjectID: f.project.ID, Phase: phases[i%2], // mixed phases (N-5)
+				ProjectID: f.project.ID, Phase: phases[i%2], // mixed phases
 				CreatedBy: owner, OwnerID: owner, Labels: labels,
 			}
 			if err := tx.CreateAgent(ctx, a); err != nil {
@@ -297,9 +297,9 @@ func TestListProjectAgentsSorted_PagedWalk_NonOwnerPartialRead_IndependentRefere
 		}
 	})
 
-	// r3 review nit-3: the fixture above creates team="" (empty-value label)
-	// rows, but the walk never actually filtered on that label, so the k=""
-	// filter edge case went unexercised on the sorted path. This sub-test
+	// The fixture above creates team="" (empty-value label) rows, but the
+	// walk never actually filtered on that label, so the k="" filter edge
+	// case went unexercised on the sorted path. This sub-test
 	// reuses the exact same fixture (not a fresh one) and adds label=team=,
 	// checked against an independently filtered reference: the same
 	// readable/GetAgentsByIDs/agentsort.SortRows oracle as above, additionally
@@ -307,9 +307,9 @@ func TestListProjectAgentsSorted_PagedWalk_NonOwnerPartialRead_IndependentRefere
 	t.Run("empty_value_label_filter", func(t *testing.T) {
 		var wantFiltered []string
 		for _, row := range rows {
-			// r4 review nit-B: distinguish "key present with an empty
-			// value" from "key absent" (a bare map index would treat both
-			// as "" and silently pass a missing-key row too; it makes no
+			// Distinguish "key present with an empty value" from "key
+			// absent" (a bare map index would treat both as "" and
+			// silently pass a missing-key row too; it makes no
 			// difference for this fixture, since every row sets "team"
 			// explicitly, but the predicate should still say what it means).
 			v, ok := fullRows[row.ID].Labels["team"]
@@ -319,9 +319,9 @@ func TestListProjectAgentsSorted_PagedWalk_NonOwnerPartialRead_IndependentRefere
 		}
 		require.NotEmpty(t, wantFiltered, "the fixture must actually contain readable team=\"\" rows, or this sub-test proves nothing")
 
-		// limit=2 (r4 review nit-B): the 5 readable team="" rows no longer
-		// fit on a single page (limit=7 did, so a cursor carrying an
-		// empty-value label filter was never exercised across pages).
+		// limit=2: the 5 readable team="" rows no longer fit on a single
+		// page (limit=7 did, so a cursor carrying an empty-value label
+		// filter was never exercised across pages).
 		var got []string
 		pages := 0
 		cursor := ""

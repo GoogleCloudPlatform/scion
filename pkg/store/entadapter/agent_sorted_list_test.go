@@ -101,13 +101,13 @@ func createAgentWithTimestamps(t *testing.T, s *AgentStore, projectID, slug stri
 	return entAgentToStore(row)
 }
 
-// TestListAgentMembers_OrderMatchesAgentsortReference is S1 (store layer):
-// pages/positions derived from ListAgentMembers must equal the agentsort
-// package's own total order over the same rows, for both sort keys and both
-// directions, including SQLite trailing-zero-fraction and NULL
-// last_activity_event cases (design 9 S1, FYI 3).
+// TestListAgentMembers_OrderMatchesAgentsortReference is the store-layer
+// order-parity check: pages/positions derived from ListAgentMembers must
+// equal the agentsort package's own total order over the same rows, for
+// both sort keys and both directions, including SQLite trailing-zero-fraction
+// and NULL last_activity_event cases.
 //
-// The non-UTC time.Time case (R1) is deliberately NOT exercised by writing a
+// The non-UTC time.Time case is deliberately NOT exercised by writing a
 // non-UTC time.Time through this store's SQLite backend: doing so hits a
 // pre-existing, unrelated ent/database-sql scan limitation ("unsupported
 // Scan ... storing driver.Value type string into type *time.Time") that
@@ -178,7 +178,7 @@ func assertMembersMatchRowOrder(t *testing.T, sortKey, dir string, got []store.A
 }
 
 // TestListAgentMembers_ProjectionEqualsFullRow is the store-layer half of the
-// non-waivable S6 member/full equality gate: every field ListAgentMembers
+// non-waivable member/full equality gate: every field ListAgentMembers
 // copies into AgentMember must equal the same field on the full row
 // GetAgentsByIDs returns for the same agent.
 func TestListAgentMembers_ProjectionEqualsFullRow(t *testing.T) {
