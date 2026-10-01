@@ -374,6 +374,7 @@ Scion maintains different limits depending on the recipient type:
   `validation_error: message exceeds 2000 character limit`
   * *Tip*: If you have a long message or log to send to a user, split it into multiple messages under 1,800 characters, or write the full content to a shared scratchpad file and send the filepath.
 * **Agent-to-Agent Messages**: **No enforced length cap in code**. You can send larger payloads safely between agents.
+* **Large-DM offload (opt-in)**: A Hub administrator can set `offload_threshold_runes` in the Hub messaging settings (`PUT /api/v1/admin/messaging`). When an agent-recipient DM body is longer than the threshold, the agent's terminal receives a short stub instead: the body size, a preview, and one command to fetch the full body (for example, `scion conversation get-message conv:<conversation-id> <message-id> --body`). The stored message, the Web Dashboard, and other observers always keep the full body. Raw and plain messages are never offloaded. The default threshold is `0` (disabled); leave it there until your agent images include a `scion` CLI with that fetch command.
 
 ### 2. Inbound Message Type Discrimination
 
