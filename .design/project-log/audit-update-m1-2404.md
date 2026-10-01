@@ -28,4 +28,6 @@ The PostgreSQL-specific concurrency regression is intentionally handed to the ii
 
 - `go test -tags integration -count=1 -timeout 10m -v -p 2 -run '^(TestConstraintHistory_ConcurrentCapPostgres)$' ./pkg/store/entadapter`
 
+The ii2 external gate passed against exact code SHA `cc3db9dee634d0d62527035c6ad7144cd28fc820` using Go 1.26.1 and PostgreSQL 16.15. The command above exited 0; `TestConstraintHistory_ConcurrentCapPostgres` passed in 3.59 seconds (package time 4.195 seconds). Both concurrent appends succeeded after seeding 999 equal-timestamp rows. The final timeline contained exactly 1,000 rows: `event-1000` was newest, `event-0001` was oldest, and `event-0000` was evicted. The run had no deadlock or flake, and its harness database, container, volume, scratch data, and password were fully torn down.
+
 Local `make ci` and `make ci-full` were not run because the campaign broker-workload rule prohibits them.
