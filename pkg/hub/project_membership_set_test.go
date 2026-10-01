@@ -241,8 +241,8 @@ func TestSetMemberRoles_PutAddsBuiltInAndCustomAtomically(t *testing.T) {
 
 // TestSetMemberRoles_Audit_RemoveRecordsRoleKindAndAuthority is F4 (review
 // r1): a project_member_remove row for a custom binding must carry
-// roleKind:"custom" and the authority (Via) it was originally granted
-// through, not just the bare role name.
+// roleKind:"custom" and the authority (Via) under which the actor removed
+// it, not just the bare role name.
 func TestSetMemberRoles_Audit_RemoveRecordsRoleKindAndAuthority(t *testing.T) {
 	f := setupMMRFixture(t)
 	mmrEnableRequestLogging(t, f.srv)
@@ -626,7 +626,7 @@ func TestSetMemberRoles_Escalation_CustomOnlyHolderCannotChangeBuiltIn(t *testin
 		[]string{f.adminRD.ID}, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), ErrCodeRoleAssignmentForbidden)
-	assert.Contains(t, rec.Body.String(), "actor has no project role", "proves the request reached reevaluateActorTx's hub-override branch, not an earlier layer with the same code")
+	assert.Contains(t, rec.Body.String(), "actor has no project role", "proves the request reached SetMemberRoles' no-project-role branch (pre-tx), not the HTTP gate")
 
 	// L1: the A2 guard also covers REMOVING a built-in role, not just setting
 	// one. f.member holds only the built-in project-member binding, so
@@ -1232,6 +1232,10 @@ func TestSetMemberRoles_Concurrency_ConflictingPUTs(t *testing.T) {
 		assert.True(t, code == http.StatusOK || code == http.StatusConflict,
 			"expected 200 (serialized winner) or 409 membership_changed, got %d", code)
 	}
+	// R2-8 (review r2): §12 P1 requires that one of the two conflicting
+	// requests succeeds, not merely that neither returns an unexpected code —
+	// the lock must serialize them, not reject both.
+	assert.Contains(t, codes, http.StatusOK, "exactly one of the two conflicting PUTs must succeed (§12 P1), got codes %v", codes)
 
 	// Whatever the final state, the D4 invariant (at most one built-in
 	// binding per principal per project) must hold.
