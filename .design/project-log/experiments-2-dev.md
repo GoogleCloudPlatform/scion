@@ -4,7 +4,7 @@ Branch: `scion/experiments-2`, based on `scion/experiments-1b` (ptone/scion#2436
 
 ## Scope
 
-Docs and convention only. The single code file touched is `web/src/utils/feature-flags.ts`, and only a doc comment.
+Docs and convention only. The two code files touched are `web/src/utils/feature-flags.ts` and `web/e2e/chat-palette/fixture.ts`, each a comment-only edit.
 
 - `docs-site/src/content/docs/reference/experiments.md` (new): what an experiment is; for admins (permissions, next-page-load semantics, unknown-override retention and single-name removal, the failed-request fallback, and the malformed-settings behavior with "Reset all to defaults"); for developers launching an experiment, including the server-decides-hub-behavior enforcement principle; changing a default; retiring (graduate or abandon); the four-row precedence table and the devtools-override behavior change; and the review-date cadence.
 - `AGENTS.md` (root): a short "Experimental features" note pointing new feature work at the registry and the new reference page.
@@ -17,7 +17,7 @@ Docs and convention only. The single code file touched is `web/src/utils/feature
 
 - The nav path is **Admin → Server Config → Experiments**, not "Settings → Server Config → Experiments." Confirmed against `web/src/components/shared/nav.ts` and existing cross-references in `admin-users.ts`. The new docs page and both doc fixes use the real path.
 - `web/src/utils/feature-flags.ts`'s module header comment already described the boot fetch and the four-row precedence, and no longer claimed the Go template sets the flags — this part of the planned fix had already landed in the prior phase. The remaining stray reference was in `setFeatureFlag`'s own doc comment, fixed here.
-- A pre-existing, unrelated comment in `web/e2e/chat-palette/fixture.ts` still describes a native-chat test fixture's flags as "exactly as main.ts would set them from the Go template." This predates this work, concerns `web.native_chat_v2` (not a registered experiment), and is outside this phase's single-file code-change scope, so it was left as-is and is flagged for whoever owns that fixture next.
+- A pre-existing, unrelated comment in `web/e2e/chat-palette/fixture.ts` described a native-chat test fixture's flags as "exactly as main.ts would set them from the Go template." This predates this work and concerns `web.native_chat_v2` (not a registered experiment); it is corrected here (comment-only) alongside the other stale references.
 
 ## Release notes
 
