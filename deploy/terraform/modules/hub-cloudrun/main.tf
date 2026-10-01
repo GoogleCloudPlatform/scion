@@ -384,16 +384,16 @@ resource "time_sleep" "iam_propagation" {
   triggers = {
     condition_prefixed = var.hub_iam_condition_expression_prefixed
     hub_sa             = var.hub_sa_email
-    # On an EXISTING hub (an upgrade, not a fresh create), condition/hub_sa
-    # above are unchanged by adding the DSN secret, so without this trigger
-    # the sleep would not re-arm and the new hub_reads_dsn grant would not be
-    # waited for before the revision carrying SCION_SERVER_DATABASE_URL rolls
-    # out — a first-boot 403 on the DSN secret, the exact IAM-propagation
-    # failure mode this whole resource exists to prevent. .id going from
-    # nonexistent to a real value on the apply that introduces this grant is
-    # itself a triggers change, which is exactly what forces this time_sleep
-    # to replace (destroy + re-create, sleeping again) instead of being
-    # silently skipped.
+    # On an EXISTING hub (an upgrade, not a fresh create),
+    # condition_prefixed/hub_sa above are unchanged by adding the DSN secret,
+    # so without this trigger the sleep would not re-arm and the new
+    # hub_reads_dsn grant would not be waited for before the revision
+    # carrying SCION_SERVER_DATABASE_URL rolls out — a first-boot 403 on the
+    # DSN secret, the exact IAM-propagation failure mode this whole resource
+    # exists to prevent. .id going from nonexistent to a real value on the
+    # apply that introduces this grant is itself a triggers change, which is
+    # exactly what forces this time_sleep to replace (destroy + re-create,
+    # sleeping again) instead of being silently skipped.
     dsn_accessor = google_secret_manager_secret_iam_member.hub_reads_dsn.id
   }
 
