@@ -130,6 +130,7 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 			)
 			hb.auxiliaryManagers = server.getAuxiliaryManagers
 			hb.SetVersion(server.version)
+			hb.SetDefaultRuntime(server.runtime)
 			hc.mu.Lock()
 			hc.Heartbeat = hb
 			hc.mu.Unlock()

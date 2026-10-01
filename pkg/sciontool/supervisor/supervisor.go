@@ -12,11 +12,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
@@ -59,6 +59,18 @@ type Config struct {
 	// change mergeEnvOverlay's precedence rule — it is correct for its own
 	// case. See the override reasoning in the P2d PR description.
 	SecretOverrides map[string]string
+	// RequirePrivilegeDrop is the caller's own
+	// commands.InitRunOptions.RequirePrivilegeDrop. It gates
+	// chownRecursive's hard-link guard: a regular file with more than one
+	// hard link is skipped rather than chowned only when this is true,
+	// since the guard is new, security-motivated behaviour — a legitimately
+	// hard-linked file under an unenforced container's home directory would
+	// otherwise be silently left unowned by the target user and break
+	// writes, with no privilege boundary at stake to justify that when this
+	// is unset. The fd-relative, no-follow walk itself (see chownRecursive's
+	// doc comment) is unconditional — it is behaviour-preserving and has no
+	// legitimate dependent case.
+	RequirePrivilegeDrop bool
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -149,7 +161,7 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	// UID/GID from the credential drop) gets permission denied on its own home.
 	if s.config.UID > 0 && s.config.GID > 0 && s.config.Username != "" {
 		home := "/home/" + s.config.Username
-		err := chownRecursive(home, s.config.UID, s.config.GID)
+		err := chownRecursive(home, s.config.UID, s.config.GID, s.config.RequirePrivilegeDrop)
 		if err != nil {
 			log.Error("Failed to chown home directory %s: %v", home, err)
 		} else {
@@ -428,12 +440,39 @@ func indexByte(s string, c byte) int {
 	return -1
 }
 
-// chownRecursive changes ownership of a directory and all its contents.
-func chownRecursive(root string, uid, gid int) error {
-	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+// chownRecursive changes ownership of a directory and all its contents to
+// uid:gid, unconditionally (every entry, not just root-owned ones — the
+// home directory this is called on belongs entirely to the workload user
+// both before and after the drop, so there is no "leave root-owned entries
+// alone" distinction to make here, unlike chownTreeRootOwned).
+//
+// It walks via dirfd.ChownTreeNoFollow: every entry is resolved to a file
+// descriptor exactly once (openat(O_DIRECTORY|O_NOFOLLOW) for a directory,
+// openat(O_PATH|O_NOFOLLOW) otherwise), and every chown is
+// fchownat(fd, "", uid, gid, AT_EMPTY_PATH) issued against that same fd —
+// never a full-path os.Lchown, which re-resolves every intermediate path
+// component on every call and can be redirected by a symlink a scion-uid
+// process (a sidecar service, or a process a pre-start hook spawned) swaps
+// into one of them between this walk visiting that component and the
+// Lchown call for something beneath it. sup.Run calls this while such
+// processes may already be alive, so that window is real. This part is
+// unconditional on every runtime: it is behaviour-preserving (every entry
+// still ends up chowned exactly as before) and has no legitimate case that
+// depends on the old, re-resolving behaviour.
+//
+// requirePrivilegeDrop gates the walk's hard-link guard only — see
+// Config.RequirePrivilegeDrop's doc comment for why that one part of this
+// is new behaviour that must not change a caller that leaves it unset.
+//
+// Per-entry chown failures and hard-link-guard skips are logged (entry name
+// only) rather than silently discarded.
+func chownRecursive(root string, uid, gid int, requirePrivilegeDrop bool) error {
+	_, _, err := dirfd.ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, requirePrivilegeDrop, func(name string, cerr error) {
+		if errors.Is(cerr, dirfd.ErrHardlinkedRegularFile) {
+			log.Warn("chownRecursive: skipping %s: %v", name, cerr)
+			return
 		}
-		return os.Lchown(path, uid, gid)
+		log.Error("chownRecursive: failed to chown %s: %v", name, cerr)
 	})
+	return err
 }
