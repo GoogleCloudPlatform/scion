@@ -2109,15 +2109,17 @@ func directSetUID(username, newUID, newGID string, requirePrivilegeDrop bool) er
 	return directSetUIDAt(username, newUID, newGID, "/etc/group", "/etc/passwd", fmt.Sprintf("/home/%s", username), requirePrivilegeDrop)
 }
 
-// directSetUIDAtChownAt performs directSetUIDAt's per-entry chown via
-// Fchownat(dirFd, name, uid, gid, flags) — chowning the directory entry
-// itself relative to an already-open, already-verified no-follow directory
-// fd, never a symlink's target (AT_SYMLINK_NOFOLLOW for every real entry;
-// the directory fd itself is chowned via name="." and flags=0 — an
-// ordinary, portable relative-path lookup that resolves back to the same
-// already-open directory, not the Linux-only AT_EMPTY_PATH extension,
-// which golang.org/x/sys/unix does not expose on every platform this
-// binary builds for).
+// directSetUIDAtChownAt performs every real chown directSetUIDAt issues —
+// Fchownat(dirFd, name, uid, gid, flags) — including the home directory fd
+// itself (name="." and flags=0, an ordinary, portable relative-path lookup
+// that resolves back to the same already-open directory, used identically
+// on every platform) and, via chownHomeEntryNoFollow, each entry inside it:
+// on GOOS=linux relative to that entry's own already-open O_PATH fd with
+// name="" and flags=AT_EMPTY_PATH, elsewhere relative to the home
+// directory's fd with the entry's name and flags=AT_SYMLINK_NOFOLLOW (see
+// init_setuid_linux.go and init_setuid_other.go for why they differ — in
+// short, AT_EMPTY_PATH is a Linux-specific kernel feature golang.org/x/sys/
+// unix does not expose on every platform this binary builds for).
 // Indirected through a package var, not called as unix.Fchownat directly, so
 // a test can record whether and how it was called instead of inferring it
 // from a filesystem timestamp: ctime's field name is platform-specific
@@ -2127,6 +2129,17 @@ func directSetUID(username, newUID, newGID string, requirePrivilegeDrop bool) er
 // non-portable and flaky. The default value is unix.Fchownat itself, so
 // production behaviour is a real fd-relative, no-follow chown.
 var directSetUIDAtChownAt = unix.Fchownat
+
+// homeEntryChownTestHook, when non-nil, is invoked by chownHomeEntryNoFollow
+// (on either platform) with an entry's name immediately before it attempts
+// that entry's real chown — not called at all when the entry is skipped
+// (the hardlinked-regular-file guard, or an open/stat failure). This exists
+// because on GOOS=linux the real directSetUIDAtChownAt call for an entry
+// carries an empty name (the per-entry O_PATH fd plus AT_EMPTY_PATH), so a
+// test recording that call's raw arguments cannot otherwise tell which
+// entry a given call was for. Always nil in production; unexported — this
+// package's own tests are the only thing that may set it.
+var homeEntryChownTestHook func(name string)
 
 // directSetUIDAt is directSetUID with its file paths as parameters, so a
 // test can exercise the "no entry to rewrite" detection against a temp file
@@ -2173,9 +2186,12 @@ func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir str
 	// rather than followed, which a path-based os.Chown/os.ReadDir pair
 	// would otherwise do — chowning whatever the symlink points at (e.g.
 	// "/etc") to the workload's own uid before this process has dropped
-	// privilege. Every entry inside is then chowned by NAME relative to
-	// that fd with AT_SYMLINK_NOFOLLOW, so a symlink among the (expected to
-	// be skeleton-only) entries has its own link chowned, never its target.
+	// privilege. Every entry inside is then chowned via
+	// chownHomeEntryNoFollow, so a symlink among the (expected to be
+	// skeleton-only) entries has its own link chowned, never its target —
+	// see that function's doc comment (init_setuid_linux.go /
+	// init_setuid_other.go) for the per-platform mechanism, the
+	// hardlinked-regular-file guard, and why they differ.
 	uid := mustAtoi(newUID)
 	gid := mustAtoi(newGID)
 	homeFd, homeErr := unix.Open(homeDir, unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_RDONLY|unix.O_CLOEXEC, 0)
@@ -2194,33 +2210,7 @@ func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir str
 		names, err := homeDirFile.Readdirnames(-1)
 		if err == nil {
 			for _, name := range names {
-				// AT_SYMLINK_NOFOLLOW on the chown itself defeats a
-				// symlinked entry (it chowns the link, never its target),
-				// but a HARDLINKED entry has no symlink for that flag to
-				// stop at: it names the same inode as whatever else links
-				// to it, possibly a file the workload does not own at all
-				// (hard-linking only needs write access to the directory a
-				// link is created in, not ownership of the target). Under
-				// enforcement, fstat the entry first (AT_SYMLINK_NOFOLLOW,
-				// so a symlink is still classified by its own link count,
-				// never the target's) and skip it — logged, non-fatal, the
-				// same as every other per-entry chown failure here — when
-				// it has more than one link. Unenforced mode keeps the
-				// base behaviour of chowning it unconditionally.
-				if requirePrivilegeDrop {
-					var st unix.Stat_t
-					if serr := unix.Fstatat(int(homeDirFile.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW); serr != nil {
-						log.Debug("Failed to stat %s: %v", filepath.Join(homeDir, name), serr)
-						continue
-					}
-					if st.Nlink != 1 {
-						log.Debug("Skipping chown of %s: hardlinked entry (link count %d)", filepath.Join(homeDir, name), st.Nlink)
-						continue
-					}
-				}
-				if err := directSetUIDAtChownAt(int(homeDirFile.Fd()), name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-					log.Debug("Failed to chown %s: %v", filepath.Join(homeDir, name), err)
-				}
+				chownHomeEntryNoFollow(int(homeDirFile.Fd()), homeDir, name, uid, gid, requirePrivilegeDrop)
 			}
 		}
 	}

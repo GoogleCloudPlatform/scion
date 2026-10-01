@@ -19,8 +19,6 @@ import (
 	"syscall"
 	"testing"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
@@ -573,6 +571,33 @@ func assertHomeChowned(t *testing.T, calls []directSetUIDAtChownCall) {
 	t.Errorf("directSetUIDAtChownAt was never called for the home directory fd itself — the home chown must run even when there's no passwd entry to rewrite (calls: %v)", calls)
 }
 
+// recordHomeEntryChowns overrides homeEntryChownTestHook for the rest of the
+// test and returns the names of every $HOME entry directSetUIDAt actually
+// attempted to chown, in order — unlike recordDirectSetUIDAtChowns, this
+// identifies entries by name on every platform, including GOOS=linux where
+// the real per-entry chown call itself carries an empty name (see
+// homeEntryChownTestHook's own doc comment).
+func recordHomeEntryChowns(t *testing.T) *[]string {
+	t.Helper()
+	orig := homeEntryChownTestHook
+	var names []string
+	homeEntryChownTestHook = func(name string) {
+		names = append(names, name)
+	}
+	t.Cleanup(func() { homeEntryChownTestHook = orig })
+	return &names
+}
+
+// sawName reports whether names contains want.
+func sawName(names []string, want string) bool {
+	for _, n := range names {
+		if n == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestDirectSetUIDAt_SymlinkedHomeDir_EnforcedRefusesUnenforcedSkips proves
 // that when homeDir itself is a symlink (planted ahead of a
 // restart on a persisted home), directSetUIDAt never follows it — under
@@ -666,7 +691,7 @@ func TestDirectSetUIDAt_SymlinkedHomeEntry_ChownsLinkNotTarget(t *testing.T) {
 	if err := os.WriteFile(normalEntry, []byte("skel"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	chowns := recordDirectSetUIDAtChowns(t)
+	names := recordHomeEntryChowns(t)
 
 	self := strconv.Itoa(os.Getuid())
 	selfGID := strconv.Itoa(os.Getgid())
@@ -682,35 +707,69 @@ func TestDirectSetUIDAt_SymlinkedHomeEntry_ChownsLinkNotTarget(t *testing.T) {
 		t.Errorf("victim mode changed: got %v, want %v (symlink target must never be chowned)", gotInfo.Mode(), wantInfo.Mode())
 	}
 
-	var sawLink, sawNormal bool
-	for _, c := range *chowns {
-		if c.name == "x" {
-			sawLink = true
-			if c.flags&unix.AT_SYMLINK_NOFOLLOW == 0 {
-				t.Errorf("symlink entry %q chowned without AT_SYMLINK_NOFOLLOW (flags=%#x)", c.name, c.flags)
-			}
-		}
-		if c.name == "normal" {
-			sawNormal = true
-		}
-	}
-	if !sawLink {
+	if !sawName(*names, "x") {
 		t.Error("the symlinked entry \"x\" was never a chown target")
 	}
-	if !sawNormal {
+	if !sawName(*names, "normal") {
 		t.Error("the normal entry \"normal\" was never a chown target")
 	}
 }
 
-// TestDirectSetUIDAt_EnforcedSkipsHardlinkedEntry proves the base-present
-// hardlink gap this round closes: AT_SYMLINK_NOFOLLOW on the chown itself
-// defeats a symlinked entry, but a HARDLINKED entry has no symlink for that
-// flag to stop at — it names the very same inode as an unrelated (possibly
-// root-owned) file the workload does not own at all, planted by
-// hard-linking into $HOME (which only needs write access to the directory,
-// not ownership of the target). Under enforcement, a planted hardlink entry
-// must never reach the chown call at all, while a normal entry is still
-// chowned as usual, and the victim's own ownership and mode never change.
+// TestDirectSetUIDAt_EnforcedChownsPreexistingSubdirectory asserts that
+// under enforcement, directSetUIDAt still chowns a pre-existing $HOME
+// subdirectory. The hardlink-regular-file skip below is gated on
+// unix.S_IFREG precisely because a directory legitimately has Nlink >= 2
+// (from its own "." entry and every subdirectory's ".."); checking Nlink
+// alone, without the regular-file type guard, would misclassify every such
+// subdirectory as "hardlinked" and leave it un-chowned.
+func TestDirectSetUIDAt_EnforcedChownsPreexistingSubdirectory(t *testing.T) {
+	dir := t.TempDir()
+	groupPath := filepath.Join(dir, "group")
+	passwdPath := filepath.Join(dir, "passwd")
+	if err := os.WriteFile(groupPath, []byte("scion:x:2000:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(passwdPath, []byte("scion:x:2000:2000:Scion:/home/scion:/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	homeDir := filepath.Join(dir, "home")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	subdir := filepath.Join(homeDir, "subdir")
+	if err := os.Mkdir(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Lstat(subdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nlink := st.Sys().(*syscall.Stat_t).Nlink; nlink < 2 {
+		t.Fatalf("subdir link count = %d, want >= 2 (an empty directory's own \".\" entry) for this test to exercise the type guard", nlink)
+	}
+	names := recordHomeEntryChowns(t)
+
+	self := strconv.Itoa(os.Getuid())
+	selfGID := strconv.Itoa(os.Getgid())
+	if err := directSetUIDAt("scion", self, selfGID, groupPath, passwdPath, homeDir, true); err != nil {
+		t.Fatalf("directSetUIDAt() = %v, want nil", err)
+	}
+
+	if !sawName(*names, "subdir") {
+		t.Error("the pre-existing subdirectory \"subdir\" was never a chown target; want it chowned despite its own Nlink >= 2")
+	}
+}
+
+// TestDirectSetUIDAt_EnforcedSkipsHardlinkedEntry asserts that under
+// enforcement, directSetUIDAt skips chowning a hardlinked regular $HOME
+// entry: AT_SYMLINK_NOFOLLOW on the chown itself defeats a symlinked entry,
+// but a HARDLINKED REGULAR FILE has no symlink for that flag to stop at —
+// it names the very same inode as an unrelated (possibly root-owned) file
+// the workload does not own at all, planted by hard-linking into $HOME
+// (which only needs write access to the directory, not ownership of the
+// target). A planted hardlink entry must never reach the chown call at
+// all, while a normal entry is still chowned as usual, and the victim's
+// own ownership and mode never change.
 func TestDirectSetUIDAt_EnforcedSkipsHardlinkedEntry(t *testing.T) {
 	dir := t.TempDir()
 	groupPath := filepath.Join(dir, "group")
@@ -740,7 +799,7 @@ func TestDirectSetUIDAt_EnforcedSkipsHardlinkedEntry(t *testing.T) {
 	if err := os.WriteFile(normalEntry, []byte("skel"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	chowns := recordDirectSetUIDAtChowns(t)
+	names := recordHomeEntryChowns(t)
 
 	self := strconv.Itoa(os.Getuid())
 	selfGID := strconv.Itoa(os.Getgid())
@@ -748,19 +807,10 @@ func TestDirectSetUIDAt_EnforcedSkipsHardlinkedEntry(t *testing.T) {
 		t.Fatalf("directSetUIDAt() = %v, want nil", err)
 	}
 
-	var sawHardlinked, sawNormal bool
-	for _, c := range *chowns {
-		if c.name == "hardlinked" {
-			sawHardlinked = true
-		}
-		if c.name == "normal" {
-			sawNormal = true
-		}
-	}
-	if sawHardlinked {
+	if sawName(*names, "hardlinked") {
 		t.Error("the hardlinked entry was a chown target; want it skipped under enforcement")
 	}
-	if !sawNormal {
+	if !sawName(*names, "normal") {
 		t.Error("the normal entry was never a chown target")
 	}
 
