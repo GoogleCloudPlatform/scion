@@ -42,6 +42,11 @@ type mockRuntimeBrokerService struct {
 	// applied, a checkpoint 409, a terminal "completed", ...). When nil,
 	// ReportAgentLaunch answers "applied" to everything.
 	launchReportFunc func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error)
+	// ctxHook, when set, is called with the ctx ReportAgentLaunch actually
+	// received for every call, so a test can inspect the attempt ctx a
+	// launchSender call site built (e.g. its deadline) without needing the
+	// call to fail or time out.
+	ctxHook func(ctx context.Context)
 }
 
 // mockLaunchReportCall records one ReportAgentLaunch invocation.
@@ -113,7 +118,11 @@ func (m *mockRuntimeBrokerService) ReportAgentLaunch(ctx context.Context, broker
 	m.mu.Lock()
 	m.launchReports = append(m.launchReports, &mockLaunchReportCall{BrokerID: brokerID, AgentID: agentID, Report: req})
 	fn := m.launchReportFunc
+	hook := m.ctxHook
 	m.mu.Unlock()
+	if hook != nil {
+		hook(ctx)
+	}
 	if fn == nil {
 		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
 	}

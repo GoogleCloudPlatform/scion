@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -179,8 +180,8 @@ func TestLaunchSender_KeepaliveRetriesAfterBackoff(t *testing.T) {
 // attempt: claimAttemptTimeout, keepaliveAttemptTimeout and
 // terminalAttemptTimeout are separate constants specifically so a change to
 // one cannot silently change the others, and SendClaim/sendKeepaliveOnce/
-// SendTerminal are confirmed to pass them (not a copied literal) by the
-// TestLaunchSender_AttemptTimesOutAt5s behavioral test below.
+// SendTerminal are confirmed to pass them (not a copied literal) by
+// TestLaunchSender_EachReportKindUsesItsOwnAttemptTimeout below.
 func TestLaunchSender_AttemptTimeoutConstants(t *testing.T) {
 	for name, got := range map[string]time.Duration{
 		"claimAttemptTimeout":     claimAttemptTimeout,
@@ -219,6 +220,96 @@ func TestLaunchSender_AttemptTimesOutAt5s(t *testing.T) {
 	}
 	if elapsed > 15*time.Second {
 		t.Fatalf("single attempt took %v, want roughly claimAttemptTimeout (5s)", elapsed)
+	}
+}
+
+// TestLaunchSender_EachReportKindUsesItsOwnAttemptTimeout covers SendClaim,
+// sendKeepaliveOnce and SendTerminal each actually passing their own named
+// constant (claimAttemptTimeout/keepaliveAttemptTimeout/
+// terminalAttemptTimeout) down to the attempt's own context, rather than a
+// literal that happens to also be 5s today: the mock reads the deadline on
+// the ctx it is actually called with and the test asserts it is close to 5s
+// from "now", which a 60s value at any one call site would fail clearly.
+func TestLaunchSender_EachReportKindUsesItsOwnAttemptTimeout(t *testing.T) {
+	assertFiveSecondDeadline := func(t *testing.T, label string, ctx context.Context) {
+		t.Helper()
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatalf("%s: attempt ctx has no deadline", label)
+		}
+		remaining := time.Until(deadline)
+		if remaining < 3*time.Second || remaining > 7*time.Second {
+			t.Fatalf("%s: attempt ctx deadline is %v out, want roughly 5s (claim/keepalive/terminalAttemptTimeout)", label, remaining)
+		}
+	}
+
+	t.Run("claim", func(t *testing.T) {
+		seen := make(chan context.Context, 1)
+		rtb := &mockRuntimeBrokerService{
+			launchReportFunc: func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+				return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+			},
+		}
+		rtb.ctxHook = func(ctx context.Context) { seen <- ctx }
+		s := newTestLaunchSender(t, rtb, time.Hour)
+		if _, err := s.SendClaim(context.Background()); err != nil {
+			t.Fatalf("SendClaim: %v", err)
+		}
+		assertFiveSecondDeadline(t, "claim", <-seen)
+	})
+
+	t.Run("keepalive", func(t *testing.T) {
+		seen := make(chan context.Context, 1)
+		rtb := &mockRuntimeBrokerService{
+			launchReportFunc: func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+				return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+			},
+		}
+		rtb.ctxHook = func(ctx context.Context) { seen <- ctx }
+		s := newTestLaunchSender(t, rtb, time.Hour)
+		s.sendKeepaliveOnce(context.Background())
+		assertFiveSecondDeadline(t, "keepalive", <-seen)
+	})
+
+	t.Run("terminal", func(t *testing.T) {
+		seen := make(chan context.Context, 1)
+		rtb := &mockRuntimeBrokerService{
+			launchReportFunc: func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+				return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+			},
+		}
+		rtb.ctxHook = func(ctx context.Context) { seen <- ctx }
+		s := newTestLaunchSender(t, rtb, time.Hour)
+		if _, err := s.SendTerminal(context.Background(), true, "", "", "", nil); err != nil {
+			t.Fatalf("SendTerminal: %v", err)
+		}
+		assertFiveSecondDeadline(t, "terminal", <-seen)
+	})
+}
+
+// TestLaunchSender_ClaimNeverAttemptsAfterAbortAlreadyRecorded covers
+// sendReportBlocking's pre-attempt abortCh check: when a keepalive abort is
+// already recorded before SendClaim (the only abortable caller) is ever
+// invoked, SendClaim must return errAbortedByKeepalive immediately, without
+// making even a single attempt -- not rely on discovering the abort only
+// after a wasted round trip.
+func TestLaunchSender_ClaimNeverAttemptsAfterAbortAlreadyRecorded(t *testing.T) {
+	var attempts int32
+	rtb := &mockRuntimeBrokerService{
+		launchReportFunc: func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+			atomic.AddInt32(&attempts, 1)
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		},
+	}
+	s := newTestLaunchSender(t, rtb, time.Hour)
+	s.recordKeepaliveAbort(gateAbortCleanup, &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonDeleted})
+
+	_, err := s.SendClaim(context.Background())
+	if !errors.Is(err, errAbortedByKeepalive) {
+		t.Fatalf("SendClaim error = %v, want errAbortedByKeepalive", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 0 {
+		t.Fatalf("expected no attempts once the abort was already recorded, got %d", got)
 	}
 }
 
@@ -333,6 +424,36 @@ func TestLaunchSender_FanOutAll403(t *testing.T) {
 	}
 }
 
+// TestLaunchSender_FanOutAll401 is TestLaunchSender_FanOutAll403's
+// counterpart for 401: when every connection answers 401, that is still a
+// (non-pinning) definitive result, not errLaunchReportUnreachable.
+func TestLaunchSender_FanOutAll401(t *testing.T) {
+	srv := newTestServer(t)
+	unauthorized := func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusUnauthorized}, nil
+	}
+	hubA := &mockRuntimeBrokerService{launchReportFunc: unauthorized}
+	hubB := &mockRuntimeBrokerService{launchReportFunc: unauthorized}
+	srv.hubMu.Lock()
+	srv.hubConnections["hub-a"] = &HubConnection{Name: "hub-a", BrokerID: "broker-a", HubClient: &stubBrokerHubClient{brokers: hubA}}
+	srv.hubConnections["hub-b"] = &HubConnection{Name: "hub-b", BrokerID: "broker-b", HubClient: &stubBrokerHubClient{brokers: hubB}}
+	srv.hubMu.Unlock()
+
+	rec := newLaunchRecord("L1", "agent-1", "create", "", time.Now().Add(time.Hour), func() {})
+	s := newLaunchSender(srv, rec, "agent-1", "instance-1", time.Hour)
+
+	result, err := s.sendOnce(context.Background(), &hubclient.AgentLaunchReport{LaunchID: "L1"}, time.Second)
+	if err != nil {
+		t.Fatalf("sendOnce: %v (want a definitive 401 when every connection says 401)", err)
+	}
+	if result.HTTPStatus != http.StatusUnauthorized {
+		t.Fatalf("result = %+v, want HTTPStatus=401", result)
+	}
+	if got := rec.OwnerHub(); got != "" {
+		t.Fatalf("OwnerHub = %q, want unset (401 never pins)", got)
+	}
+}
+
 // TestLaunchSender_FanOut401DoesNotPinButOthersStillConsulted covers design
 // §3.8.2's gate-answer table not listing 400/401 as a reason to prefer one
 // connection over another: a 401 from a non-owning connection (e.g. during
@@ -340,12 +461,23 @@ func TestLaunchSender_FanOutAll403(t *testing.T) {
 // owns the launch.
 func TestLaunchSender_FanOut401DoesNotPinButOthersStillConsulted(t *testing.T) {
 	srv := newTestServer(t)
+	hubAAnswered := make(chan struct{})
 	hubA := &mockRuntimeBrokerService{
 		launchReportFunc: func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+			defer close(hubAAnswered)
 			return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusUnauthorized}, nil
 		},
 	}
-	hubB := &mockRuntimeBrokerService{} // default: applied
+	hubB := &mockRuntimeBrokerService{
+		// Answer only after hub-a has: sendOnce's fan-out loop processes
+		// whichever result lands in resultsCh first, so without this
+		// ordering the test would only catch a 401 that is allowed to pin
+		// when hub-a's answer happens to land first, not deterministically.
+		launchReportFunc: func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+			<-hubAAnswered
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		},
+	}
 	srv.hubMu.Lock()
 	srv.hubConnections["hub-a"] = &HubConnection{Name: "hub-a", BrokerID: "broker-a", HubClient: &stubBrokerHubClient{brokers: hubA}}
 	srv.hubConnections["hub-b"] = &HubConnection{Name: "hub-b", BrokerID: "broker-b", HubClient: &stubBrokerHubClient{brokers: hubB}}

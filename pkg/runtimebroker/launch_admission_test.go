@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // asyncManager is a concurrency-safe agent.Manager fake for the async-create
@@ -596,6 +597,182 @@ func TestAsyncCreate_ClaimOtherOwner_AbortsNoStartNoCleanup(t *testing.T) {
 	}
 }
 
+// TestAsyncCreate_AbortRecordedBeforeClaimSucceeds_NoStart covers the
+// IsAborted check right after the claim succeeds. The claim is deliberately
+// held blocked until a keepalive abort has already been recorded (and given
+// time to finish being recorded), so the claim's own gate sees applied/
+// gateContinue and the only thing that can stop the launch from here is this
+// specific check.
+//
+// To make this check's removal observable on its own (not just masked by
+// the identical IsAborted checks later in runLaunch), a predecessor record
+// is pre-registered for the same key and deliberately never released: if
+// this check does its job, the launch returns before ever reaching
+// WaitSuperseded, so the stuck predecessor is irrelevant. If this check is
+// missing, the launch falls through into WaitSuperseded and blocks forever,
+// so cleanup never happens within the wait below -- a distinct,
+// unmistakable failure rather than one a later check could incidentally
+// paper over.
+func TestAsyncCreate_AbortRecordedBeforeClaimSucceeds_NoStart(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+
+	key := launchKey{Slug: "agent-guard-b"}
+	stuckRec := newLaunchRecord("L-stuck-for-guard-b", "agent-stuck-for-guard-b", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
+	srv.launchRegistry.Begin(key, stuckRec) // never released by this test
+
+	releaseClaim := make(chan struct{})
+	abortAnswered := make(chan struct{})
+	var abortAnsweredOnce sync.Once
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if claimState(req) {
+			<-releaseClaim
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		}
+		abortAnsweredOnce.Do(func() { close(abortAnswered) })
+		return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonDeleted}, nil
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-guard-b", "asyncLaunch": true,
+		"launchId":             "L-guard-b",
+		"launchTimeoutSeconds": 300, "launchKeepaliveSeconds": 1,
+		"config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	select {
+	case <-abortAnswered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected the keepalive's abort-triggering answer")
+	}
+	// Let recordKeepaliveAbort finish (it runs just after the call above
+	// returns, in the keepalive's own goroutine) well before the claim is
+	// allowed to proceed.
+	time.Sleep(100 * time.Millisecond)
+	close(releaseClaim)
+
+	if !waitUntil(t, 3*time.Second, func() bool { return mgr.CleanupCallCount() >= 1 }) {
+		t.Fatal("expected the already-recorded abort to trigger cleanup right after the claim succeeds, without ever blocking on WaitSuperseded (the predecessor here is never released)")
+	}
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called when the abort was already recorded before the claim succeeded, got %d calls", n)
+	}
+	for _, r := range rtb.getLaunchReports() {
+		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded || r.Report.State == hubclient.AgentLaunchReportStateFailed {
+			t.Fatalf("an abort recorded before the claim succeeds must send no terminal, got %+v", r.Report)
+		}
+	}
+}
+
+// TestAsyncCreate_AbortRecordedDuringWaitSuperseded_NoMarkerNoStart covers
+// the IsAborted check right after WaitSuperseded/the marker write: a
+// pre-registered record for the same key makes WaitSuperseded actually
+// block, during which a keepalive abort is recorded (and given time to
+// finish); the claim has already succeeded by then (the earlier IsAborted
+// check passed), so only this specific check can be stopping the launch.
+//
+// workspaceStoragePath is set (with no storage bucket configured) so that if
+// this check is missing, the launch falls through into the GCS download
+// step and fails fast with a distinctive "storage bucket not configured"
+// message -- observable independently of the IsAborted check after the
+// download (that one would never even be reached, since a download error
+// fails the launch directly), so this test cannot be satisfied by that
+// later check doing the work instead.
+func TestAsyncCreate_AbortRecordedDuringWaitSuperseded_NoMarkerNoStart(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+
+	key := launchKey{Slug: "agent-guard-c"}
+	oldRec := newLaunchRecord("L-old-for-guard-c", "agent-old-for-guard-c", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
+	srv.launchRegistry.Begin(key, oldRec)
+
+	abortAnswered := make(chan struct{})
+	var abortAnsweredOnce sync.Once
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if claimState(req) {
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		}
+		abortAnsweredOnce.Do(func() { close(abortAnswered) })
+		return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonDeleted}, nil
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-guard-c", "asyncLaunch": true,
+		"launchId":             "L-guard-c",
+		"launchTimeoutSeconds": 300, "launchKeepaliveSeconds": 1,
+		"workspaceStoragePath": "some/path",
+		"config":               map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	select {
+	case <-abortAnswered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected the keepalive's abort-triggering answer")
+	}
+	// The claim already succeeded well before this (it is answered
+	// immediately, with no blocking); the new launch is now parked in
+	// WaitSuperseded, since oldRec is still registered. Let
+	// recordKeepaliveAbort finish, then release the predecessor.
+	time.Sleep(100 * time.Millisecond)
+	srv.launchRegistry.Finish(key, oldRec)
+
+	if !waitUntil(t, 3*time.Second, func() bool { return mgr.CleanupCallCount() >= 1 }) {
+		t.Fatal("expected the already-recorded abort to trigger cleanup once WaitSuperseded returns")
+	}
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called when the abort was already recorded during WaitSuperseded, got %d calls", n)
+	}
+	for _, r := range rtb.getLaunchReports() {
+		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded {
+			t.Fatalf("an abort recorded during WaitSuperseded must send no terminal, got %+v", r.Report)
+		}
+		if r.Report.State == hubclient.AgentLaunchReportStateFailed && strings.Contains(r.Report.Message, "storage bucket not configured") {
+			t.Fatalf("the launch reached the GCS download step despite the abort already being recorded during WaitSuperseded, got %+v", r.Report)
+		}
+	}
+}
+
+// TestAsyncCreate_ClaimStopNoCleanup_401 covers a 401 claim answer
+// classifying to gateStopNoCleanup (design §3.8.2's table has no reason for
+// 400/401): Start must never be called, nothing is cleaned up, and no
+// terminal is sent, the same as the gateAbortNoCleanup cases above.
+func TestAsyncCreate_ClaimStopNoCleanup_401(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusUnauthorized}, nil
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-claim-401", "asyncLaunch": true, "launchId": "L-claim-401",
+		"launchTimeoutSeconds": 300, "config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !waitUntil(t, time.Second, func() bool { return len(rtb.getLaunchReports()) >= 1 }) {
+		t.Fatal("expected a claim report")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called after a 401 claim, got %d calls", n)
+	}
+	if n := mgr.CleanupCallCount(); n != 0 {
+		t.Fatalf("a 401 claim must not clean up, got %d calls", n)
+	}
+	for _, r := range rtb.getLaunchReports() {
+		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded || r.Report.State == hubclient.AgentLaunchReportStateFailed {
+			t.Fatalf("a 401 claim must send no terminal, got %+v", r.Report)
+		}
+	}
+}
+
 // TestAsyncCreate_ClaimSuperseded_AbortsNoStartNoCleanup covers B-2/B-4's
 // superseded case specifically (distinct from other_owner, though both
 // classify to gateAbortNoCleanup).
@@ -701,13 +878,235 @@ func TestAsyncCreate_KeepaliveAbortDuringStart_CancelsAndCleansUp(t *testing.T) 
 	}
 }
 
+// TestAsyncCreate_Keepalive401DoesNotAbortDuringStart covers gateStopNoCleanup
+// specifically on a keepalive (design §3.8.2's table has no entry for
+// 400/401, so unlike every other non-continue answer it must not abort):
+// a 401 landing on a keepalive while Manager.Start is still blocked must
+// leave the launch running, not cancel ctx' or record an abort. Start is
+// then allowed to complete, and the succeeded terminal must still be sent.
+func TestAsyncCreate_Keepalive401DoesNotAbortDuringStart(t *testing.T) {
+	mgr := newAsyncManager()
+	mgr.startBlock = make(chan struct{})
+	srv, rtb := newAsyncTestServer(t, mgr)
+
+	var mu sync.Mutex
+	keepalives := 0
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if claimState(req) {
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		}
+		if req.State == hubclient.AgentLaunchReportStateProgress {
+			mu.Lock()
+			keepalives++
+			mu.Unlock()
+			return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusUnauthorized}, nil
+		}
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-keepalive-401", "asyncLaunch": true, "launchId": "L-keepalive-401",
+		"launchTimeoutSeconds": 300, "launchKeepaliveSeconds": 1,
+		"config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	if !waitUntil(t, 3*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return keepalives >= 1
+	}) {
+		t.Fatal("expected at least one keepalive attempt answered 401")
+	}
+	// Give the sender a moment to (incorrectly, if the guard were missing)
+	// record an abort before Start is released.
+	time.Sleep(100 * time.Millisecond)
+	close(mgr.startBlock)
+
+	if !waitUntil(t, 3*time.Second, func() bool { return mgr.StartCallCount() >= 1 }) {
+		t.Fatal("expected Start to be called and allowed to complete")
+	}
+	if !waitUntil(t, 3*time.Second, func() bool {
+		for _, r := range rtb.getLaunchReports() {
+			if r.Report.State == hubclient.AgentLaunchReportStateSucceeded {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatal("expected a succeeded terminal to be sent despite the 401 keepalive answers")
+	}
+	if n := mgr.CleanupCallCount(); n != 0 {
+		t.Fatalf("a 401 keepalive answer must never trigger cleanup, got %d calls", n)
+	}
+}
+
+// TestAsyncCreate_KeepaliveAnswerAfterTerminalStarts_DoesNotCutOffRetries
+// covers design §3.8.5's "the keepalive stops when the terminal's first
+// attempt starts; from then on only the terminal's answer decides cleanup":
+// an in-flight keepalive attempt that was already dispatched before the
+// terminal started must not be allowed to end the terminal's own retries (or
+// record an outcome nothing then acts on) just because its answer lands
+// after markTerminalStarted. The succeeded terminal's own first attempt is
+// unreachable; its second attempt is what actually decides cleanup.
+func TestAsyncCreate_KeepaliveAnswerAfterTerminalStarts_DoesNotCutOffRetries(t *testing.T) {
+	mgr := newAsyncManager()
+	mgr.startBlock = make(chan struct{}) // held open until the keepalive is confirmed in flight
+	srv, rtb := newAsyncTestServer(t, mgr)
+
+	keepaliveInFlight := make(chan struct{})
+	releaseKeepalive := make(chan struct{})
+	var keepaliveInFlightOnce sync.Once
+	var mu sync.Mutex
+	var terminalAttempts int
+
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		switch req.State {
+		case hubclient.AgentLaunchReportStateClaim:
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		case hubclient.AgentLaunchReportStateProgress:
+			// Signal that this keepalive attempt is now in flight, then
+			// wait until the test says the terminal has started before
+			// answering -- an answer that classifies to an abort action
+			// (409 timed_out is one of the design's listed cleanup
+			// reasons), arriving only once the terminal is already under
+			// way. keepaliveInFlightOnce guards against the mock's own
+			// attempt timeout elapsing before releaseKeepalive closes and
+			// retrying this call a second time.
+			keepaliveInFlightOnce.Do(func() { close(keepaliveInFlight) })
+			<-releaseKeepalive
+			return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonTimedOut}, nil
+		case hubclient.AgentLaunchReportStateSucceeded:
+			mu.Lock()
+			terminalAttempts++
+			n := terminalAttempts
+			mu.Unlock()
+			if n == 1 {
+				// The terminal has now started (markTerminalStarted runs
+				// before this call). Let the in-flight keepalive answer
+				// land while the terminal's own retries are still ahead
+				// of it.
+				close(releaseKeepalive)
+				return nil, errors.New("simulated unreachable")
+			}
+			// The terminal's own second attempt is what decides cleanup,
+			// matching the design's late-success rule (§3.10).
+			return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonTimedOut}, nil
+		default:
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		}
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-keepalive-after-terminal", "asyncLaunch": true,
+		"launchId":             "L-keepalive-after-terminal",
+		"launchTimeoutSeconds": 300, "launchKeepaliveSeconds": 1,
+		"config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	select {
+	case <-keepaliveInFlight:
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected the keepalive's first attempt to be dispatched")
+	}
+	// Now let Start return: the terminal starts only after this, so the
+	// keepalive attempt above is reliably in flight (and will stay blocked
+	// on releaseKeepalive) before markTerminalStarted runs.
+	close(mgr.startBlock)
+
+	if !waitUntil(t, 15*time.Second, func() bool { return mgr.CleanupCallCount() >= 1 }) {
+		mu.Lock()
+		n := terminalAttempts
+		mu.Unlock()
+		t.Fatalf("expected the terminal's own retries to eventually trigger cleanup, got %d terminal attempts and %d cleanup calls", n, mgr.CleanupCallCount())
+	}
+	mu.Lock()
+	n := terminalAttempts
+	mu.Unlock()
+	if n < 2 {
+		t.Fatalf("expected at least 2 terminal attempts (the stale keepalive answer must not cut the terminal's retries short), got %d", n)
+	}
+	if n := mgr.CleanupCallCount(); n != 1 {
+		t.Fatalf("expected exactly 1 cleanup call, got %d", n)
+	}
+}
+
+// TestAsyncCreate_AbortRecordedAsStartReturns_CleansUpConsistently covers the
+// select in runLaunch that chooses between Manager.Start's completion and
+// KeepaliveAborted: when a keepalive answer is fully processed (and so
+// recorded as an abort) well before Start returns, the eventual outcome must
+// still be correct -- cleanup runs exactly once and no terminal is sent --
+// regardless of which of the select's two cases actually wakes the
+// goroutine. (Go's select only picks randomly between cases that are
+// *already* ready at the moment it is evaluated; once the keepalive's
+// answer has fully landed, a parked select wakes on KeepaliveAborted as
+// soon as it closes, well before Start's own completion -- so this test
+// reliably exercises that path deterministically, without depending on
+// which of the two happens to complete first at a microsecond scale.)
+func TestAsyncCreate_AbortRecordedAsStartReturns_CleansUpConsistently(t *testing.T) {
+	mgr := newAsyncManager()
+	mgr.startBlock = make(chan struct{})
+	srv, rtb := newAsyncTestServer(t, mgr)
+
+	abortAnswered := make(chan struct{})
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if claimState(req) {
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		}
+		defer close(abortAnswered)
+		return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonDeleted}, nil
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-abort-as-start-returns", "asyncLaunch": true,
+		"launchId":             "L-abort-as-start-returns",
+		"launchTimeoutSeconds": 300, "launchKeepaliveSeconds": 1,
+		"config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	select {
+	case <-abortAnswered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected the keepalive's abort-triggering answer")
+	}
+	// Give the sender's own goroutine a moment to finish classifying the
+	// answer and recording the abort (recordKeepaliveAbort runs just after
+	// the call above returns, in the same goroutine) -- well before letting
+	// Start return, so the abort is unambiguously recorded first.
+	time.Sleep(100 * time.Millisecond)
+	close(mgr.startBlock)
+
+	if !waitUntil(t, 3*time.Second, func() bool { return mgr.CleanupCallCount() >= 1 }) {
+		t.Fatal("expected the recorded abort to trigger cleanup")
+	}
+	if !waitUntil(t, time.Second, func() bool { return mgr.StartCallCount() >= 1 }) {
+		t.Fatal("expected Start to have been called")
+	}
+	if n := mgr.CleanupCallCount(); n != 1 {
+		t.Fatalf("expected exactly 1 cleanup call, got %d", n)
+	}
+	for _, r := range rtb.getLaunchReports() {
+		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded || r.Report.State == hubclient.AgentLaunchReportStateFailed {
+			t.Fatalf("an abort recorded before Start returns must send no terminal, got %+v", r.Report)
+		}
+	}
+}
+
 // TestAsyncCreate_KeepaliveAbortWhileClaimUnreachable_CleansUpWithoutStart
 // covers a keepalive answer ending the launch while the claim itself is
 // still blocked retrying against an unreachable Hub (the keepalive starts
-// before the claim, design §3.8.5's F-18 fix, so its answers can end the
-// launch before the claim ever gets through): Manager.Start must never run,
-// and the claim's own retry loop must not keep it blocked until ctx'
-// expires and reports a separate failed{hub_unreachable}.
+// before the claim, design §3.8.5, so its answers can end the launch before
+// the claim ever gets through): Manager.Start must never run, and the
+// claim's own retry loop must not keep it blocked until ctx' expires and
+// reports a separate failed{hub_unreachable}.
 func TestAsyncCreate_KeepaliveAbortWhileClaimUnreachable_CleansUpWithoutStart(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, rtb := newAsyncTestServer(t, mgr)

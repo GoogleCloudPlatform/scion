@@ -387,6 +387,117 @@ func TestRunLaunch_WaitsForSupersededRecordStillCleaningUp(t *testing.T) {
 	}
 }
 
+// TestRunLaunch_LocalCancelDuringWaitSuperseded_SendsNoTerminal covers a
+// local stop/delete (launchRegistry.CancelLocal) waking a launch that is
+// still blocked in WaitSuperseded on a predecessor that never finishes: the
+// same rule as a locally cancelled claim applies here too (design's
+// local-cancel case) -- no terminal, and since this happens before the
+// marker would even be written, no marker either.
+func TestRunLaunch_LocalCancelDuringWaitSuperseded_SendsNoTerminal(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	key := launchKey{Slug: "agent-cancel-wait-superseded"}
+	oldRec := newLaunchRecord("L-old-cancel-wait", "agent-old-cancel-wait", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
+	srv.launchRegistry.Begin(key, oldRec) // never released by this test
+
+	projectDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	newRec := newLaunchRecord("L-new-cancel-wait", "agent-new-cancel-wait", store.LaunchKindCreate, "", time.Now().Add(time.Hour), cancel)
+	supersededDone := srv.launchRegistry.Begin(key, newRec)
+	if supersededDone == nil {
+		t.Fatal("expected Begin to return the predecessor's still-open done channel")
+	}
+	lc := launchCtx{
+		opts:           api.StartOptions{Name: "agent-cancel-wait-superseded", ProjectPath: projectDir},
+		mgr:            mgr,
+		key:            key,
+		supersededDone: supersededDone,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		srv.runLaunch(ctx, newRec, lc)
+		close(done)
+	}()
+
+	if !waitUntil(t, 2*time.Second, func() bool { return len(rtb.getLaunchReports()) >= 1 }) {
+		t.Fatal("expected the claim to be sent before WaitSuperseded blocks")
+	}
+	// Give runLaunch a moment to actually reach WaitSuperseded (the
+	// predecessor is never released, so it can only be here or further
+	// back) before cancelling it locally.
+	time.Sleep(100 * time.Millisecond)
+	newRec.CancelLocal()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runLaunch did not return after a local cancel during WaitSuperseded")
+	}
+
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called when locally cancelled during WaitSuperseded, got %d calls", n)
+	}
+	for _, r := range rtb.getLaunchReports() {
+		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded || r.Report.State == hubclient.AgentLaunchReportStateFailed {
+			t.Fatalf("a local cancel during WaitSuperseded must send no terminal, got %+v", r.Report)
+		}
+	}
+	if readLaunchMarker(projectDir, false, "agent-cancel-wait-superseded") != "" {
+		t.Fatal("expected no marker to have been written (cancelled before reaching that step)")
+	}
+}
+
+// TestRunLaunch_LocalCancelDuringStart_SendsNoTerminal covers a local
+// stop/delete waking Start via ctx' cancellation: Manager.Start returns
+// context.Canceled (not a real deadline), which must be treated like the
+// claim's and WaitSuperseded's local-cancel cases -- no terminal sent,
+// distinct from classifyStartError's launch_timeout/runtime_error paths.
+func TestRunLaunch_LocalCancelDuringStart_SendsNoTerminal(t *testing.T) {
+	mgr := newAsyncManager()
+	mgr.startBlock = make(chan struct{}) // Start blocks until ctx' is cancelled
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	rec := newLaunchRecord("L-cancel-during-start", "agent-cancel-during-start", store.LaunchKindCreate, "", time.Now().Add(time.Hour), cancel)
+	lc := launchCtx{
+		opts: api.StartOptions{Name: "agent-cancel-during-start"},
+		mgr:  mgr,
+		key:  launchKey{Slug: "agent-cancel-during-start"},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		srv.runLaunch(ctx, rec, lc)
+		close(done)
+	}()
+
+	if !waitUntil(t, 2*time.Second, func() bool { return mgr.StartCallCount() >= 1 }) {
+		t.Fatal("expected Start to be called (and then blocked)")
+	}
+	rec.CancelLocal()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runLaunch did not return after a local cancel during Start")
+	}
+
+	for _, r := range rtb.getLaunchReports() {
+		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded || r.Report.State == hubclient.AgentLaunchReportStateFailed {
+			t.Fatalf("a local cancel during Start must send no terminal, got %+v", r.Report)
+		}
+	}
+}
+
 // TestLaunchSenderAndLaunchCtx_NoHTTPRequestField is design §6 B-6's
 // type-level assertion: the types the launch goroutine is built from must
 // never carry an *http.Request or http.Request field, so there is no code
