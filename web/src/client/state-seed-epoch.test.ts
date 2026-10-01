@@ -285,4 +285,36 @@ describe('W3 seed epoch', () => {
 
     expect(sm.getAgent('a1')).toBeUndefined();
   });
+
+  it('Gemini #4151811140: two epoch deltas with different detail fields, then seedAgents, equal immediate sequential application', () => {
+    // Epoch path: both status deltas land for an ID not yet in state.agents
+    // (the normal first-drain case — setScope cleared state.agents before
+    // this drain's own fetch started), before the REST snapshot seeds it.
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+
+    const token = sm.beginSeedEpoch();
+    emit(sm, 'agent.a1.status', { detail: { message: 'm1' } });
+    emit(sm, 'agent.a1.status', { detail: { currentTurns: 7 } });
+
+    sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'running' } as Agent], { token });
+
+    // Reference: the REST snapshot seeds first (no epoch involved), then the
+    // same two deltas, in the same order, applied immediately to the now-
+    // known agent — what "immediate sequential application" means once
+    // there is a real base to merge against at every step.
+    const sequential = new StateManager();
+    sequential.setScope({ type: 'dashboard' });
+    sequential.seedAgents([{ id: 'a1', name: 'A1', phase: 'running' } as Agent]);
+    emit(sequential, 'agent.a1.status', { detail: { message: 'm1' } });
+    emit(sequential, 'agent.a1.status', { detail: { currentTurns: 7 } });
+
+    expect(sm.getAgent('a1')).toEqual(sequential.getAgent('a1'));
+    // Spelled out, as in the W2 counterpart: `detail` is replaced wholesale
+    // by the later delta, but the promoted top-level `message` field
+    // survives since the later delta never carried a `message` key.
+    expect(sm.getAgent('a1')?.detail).toEqual({ currentTurns: 7 });
+    expect(sm.getAgent('a1')?.message).toBe('m1');
+    expect(sm.getAgent('a1')?.currentTurns).toBe(7);
+  });
 });

@@ -102,7 +102,17 @@ function genEvents(count: number, seed: number): FuzzEvent[] {
       if (rand() < 0.7) ev.phase = pick(PHASES);
       if (rand() < 0.7) ev.activity = pick(ACTIVITIES);
       if (rand() < 0.3) ev.lastActivityEvent = `evt-${i}`;
-      if (rand() < 0.2) ev.detail = { message: `m${i}`, currentTurns: i % 7 };
+      if (rand() < 0.2) {
+        // Partial, not always both fields together: a buffered/recorded
+        // delta whose `detail` differs in shape from the previous one for
+        // the same ID is exactly what Gemini's promoteDetailFields fix (§7)
+        // targets — always pairing message+currentTurns would never
+        // exercise a later delta dropping a field the earlier one set.
+        const detail: Partial<AgentDetail> = {};
+        if (rand() < 0.5) detail.message = `m${i}`;
+        if (rand() < 0.5 || Object.keys(detail).length === 0) detail.currentTurns = i % 7;
+        ev.detail = detail;
+      }
       events.push(ev);
     }
   }
@@ -128,6 +138,26 @@ function fuzzEventToDelta(ev: FuzzEvent): Partial<Agent> {
     default:
       return {};
   }
+}
+
+/**
+ * Mirrors `promoteDetailFields` in state.ts (not exported, so duplicated
+ * here for this independent reducer — see that function's doc comment for
+ * why promoting before accumulating a buffered/recorded delta matters).
+ */
+function promoteDetailFieldsRef(delta: Partial<Agent>): Partial<Agent> {
+  const detail = delta.detail as AgentDetail | undefined;
+  if (!detail) return delta;
+  const promoted: Partial<Agent> = { ...delta };
+  if (detail.message) (promoted as Record<string, unknown>).message = detail.message;
+  if (detail.currentTurns !== undefined) {
+    (promoted as Record<string, unknown>).currentTurns = detail.currentTurns;
+  }
+  if (detail.currentModelCalls !== undefined) {
+    (promoted as Record<string, unknown>).currentModelCalls = detail.currentModelCalls;
+  }
+  if (detail.startedAt) (promoted as Record<string, unknown>).startedAt = detail.startedAt;
+  return promoted;
 }
 
 /**
@@ -165,7 +195,7 @@ function referenceApply(events: FuzzEvent[]): Map<string, Agent> {
       // A status/ports delta for an ID already known to be deleted (and
       // not yet recreated) is dropped outright, not buffered.
       if (deletedIds.has(ev.id)) continue;
-      const delta = fuzzEventToDelta(ev);
+      const delta = promoteDetailFieldsRef(fuzzEventToDelta(ev));
       const prev = pending.get(ev.id);
       pending.set(ev.id, prev ? { ...prev, ...delta } : delta);
       continue;
@@ -188,17 +218,7 @@ function referenceApply(events: FuzzEvent[]): Map<string, Agent> {
     ) {
       delete delta.activity;
     }
-    const detail = delta.detail;
-    if (detail) {
-      if (detail.message) (delta as Record<string, unknown>).message = detail.message;
-      if (detail.currentTurns !== undefined) {
-        (delta as Record<string, unknown>).currentTurns = detail.currentTurns;
-      }
-      if (detail.currentModelCalls !== undefined) {
-        (delta as Record<string, unknown>).currentModelCalls = detail.currentModelCalls;
-      }
-      if (detail.startedAt) (delta as Record<string, unknown>).startedAt = detail.startedAt;
-    }
+    delta = promoteDetailFieldsRef(delta);
     const updated = { ...base, ...delta, id: ev.id } as Agent;
     if (!delta._capabilities && base._capabilities) {
       updated._capabilities = base._capabilities;
@@ -541,6 +561,37 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     expect(sm.getAgent('a1')?.detail).toEqual({ toolName: 'python' });
   });
 
+  it('Gemini #4151811120: a detail with a different key set is not a no-op, even when every value involved is undefined', () => {
+    // shallowObjectEqual (used by agentDetailEqual) must compare key SETS,
+    // not just key counts: `{message: undefined}` and `{currentTurns:
+    // undefined}` both have exactly one own key, and reading the other
+    // object's missing key returns `undefined` on both sides, so a
+    // count-only check (or a check that indexes `a`'s keys into `b` without
+    // first confirming `b` actually has that key) would wrongly call them
+    // equal.
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.created', {
+      phase: 'running',
+      name: 'A1',
+      detail: { message: undefined },
+    });
+    vi.advanceTimersByTime(100);
+    const before = sm.getAgent('a1');
+    expect(before?.detail).toEqual({ message: undefined });
+
+    const changedSpy = vi.fn();
+    sm.addEventListener('agents-changed', changedSpy);
+    emit(sm, 'agent.a1.status', { detail: { currentTurns: undefined } });
+    vi.advanceTimersByTime(100);
+
+    expect(changedSpy).toHaveBeenCalledTimes(1);
+    const after = sm.getAgent('a1');
+    expect(after).not.toBe(before);
+    expect(after?.detail && 'message' in after.detail).toBe(false);
+    expect(after?.detail && 'currentTurns' in after.detail).toBe(true);
+  });
+
   it('N4 (round 1 review): a byte-identical ports replay (fresh array, same values) is a true no-op', () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
@@ -715,6 +766,42 @@ describe('W2 unknown-buffer expiry (§7: 30s TTL)', () => {
     const detail = (changedSpy.mock.calls[0]?.[0] as CustomEvent<{ data: AgentsChangedDetail }>)
       .detail.data;
     expect(detail.unknown.get('ghost')).toEqual({ phase: 'error' });
+  });
+
+  it('Gemini #4151811134: two buffered deltas with different detail fields, then created, equal immediate sequential application', () => {
+    // Buffered path: both status deltas arrive for an unknown ID, before
+    // "created".
+    const buffered = new StateManager();
+    buffered.setScope({ type: 'dashboard' });
+    emit(buffered, 'agent.a1.status', { detail: { message: 'm1' } });
+    vi.advanceTimersByTime(1_000);
+    emit(buffered, 'agent.a1.status', { detail: { currentTurns: 7 } });
+    vi.advanceTimersByTime(1_000);
+    emit(buffered, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    vi.advanceTimersByTime(100);
+
+    // Reference: the very same two deltas, but applied immediately — i.e.
+    // the agent already exists, so each one goes through `mergeAgentDelta`
+    // on its own as it arrives. This is what "immediate sequential
+    // application" means once there is a real base to merge against.
+    const sequential = new StateManager();
+    sequential.setScope({ type: 'dashboard' });
+    emit(sequential, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    vi.advanceTimersByTime(100);
+    emit(sequential, 'agent.a1.status', { detail: { message: 'm1' } });
+    vi.advanceTimersByTime(100);
+    emit(sequential, 'agent.a1.status', { detail: { currentTurns: 7 } });
+    vi.advanceTimersByTime(100);
+
+    expect(buffered.getAgent('a1')).toEqual(sequential.getAgent('a1'));
+    // Spelled out: `detail` is replaced wholesale by the later delta (the
+    // first delta's `message` field is gone from the nested object), but
+    // the promoted top-level `message` field survives, because the second
+    // delta never carried a `message` key to overwrite it with — the same
+    // asymmetry `mergeAgentDelta` already has for a real base.
+    expect(buffered.getAgent('a1')?.detail).toEqual({ currentTurns: 7 });
+    expect(buffered.getAgent('a1')?.message).toBe('m1');
+    expect(buffered.getAgent('a1')?.currentTurns).toBe(7);
   });
 });
 

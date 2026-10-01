@@ -217,3 +217,48 @@ raised two small new items:
   no-op (consistent with the new equality-skip principle). No buffering was
   added for ports on an unknown ID — that stayed exactly as before, to keep
   the diff to the documented merge semantics.
+
+## Upstream Gemini review, GoogleCloudPlatform/scion#2189 (3 comments)
+
+Fixed all three. Full disposition table and commands/results:
+`gs://scion-xproject-exchange/slow-list/reports/lists-p1a-gemini-2189.md`.
+
+- **High** (`shallowObjectEqual`): matching key *counts* isn't matching key
+  *sets* — `{message: undefined}` and `{currentTurns: undefined}` both have
+  one key, and indexing a missing property reads `undefined` on either side,
+  so the old count-only check called them equal. Added the same
+  `hasOwnProperty` guard `agentsShallowEqual` already uses one level up.
+  Test: `state-coalescing.test.ts` → "Gemini #4151811120: ...".
+- **Medium** (`bufferAgentDelta`) and **Medium** (`recordSeedEpochDelta`):
+  Gemini's suggested fix (deep-merge `detail` itself) was wrong — `detail` is
+  *always* replaced wholesale by whichever delta sets it last, even for a
+  real base going through `mergeAgentDelta` one delta at a time (checked
+  `pkg/hub/events.go:PublishAgentStatus`: every SSE status event carries a
+  full current-state `AgentDetail`, not a partial one, mod `omitempty`
+  dropping zero-value fields — there is nothing to deep-merge within
+  `detail` across events). The *actual* gap: `mergeAgentDelta` promotes
+  `detail` fields (`message`, `currentTurns`, `currentModelCalls`,
+  `startedAt`) onto the agent's own top level, and that promotion runs once
+  per real delta application, so an earlier delta's promoted field survives
+  a later delta that doesn't repeat it (top-level spread leaves an absent
+  key alone). `bufferAgentDelta`/`recordSeedEpochDelta` only ran promotion
+  once, on the final accumulated delta — so a buffered/recorded delta's
+  promoted field could be silently lost if a later delta's own `detail`
+  didn't carry it, which immediate sequential application never does.
+  Fixed by extracting the promotion block from `mergeAgentDelta` into a
+  shared `promoteDetailFields` helper, and running every delta through it
+  *before* folding it into the buffer/epoch accumulator (re-running it at
+  final-merge time is idempotent). Tests: `state-coalescing.test.ts` →
+  "Gemini #4151811134: ..."; `state-seed-epoch.test.ts` → "Gemini
+  #4151811140: ...". Both tests build an independent "immediate sequential
+  application" StateManager (agent created/seeded first, same two deltas
+  applied one at a time) and assert the buffered/epoch path produces an
+  identical agent object; both fail against the pre-fix code (verified by
+  stashing the production fix and re-running them) and pass after it.
+  Extended the W2 10k-event fuzz's `genEvents` to generate partial,
+  differing `detail` shapes (previously every detail-bearing status event
+  set both `message` and `currentTurns` together, so the fuzz could never
+  have caught this) and updated its independent reference reducer
+  (`referenceApply`) to mirror the same promote-before-accumulate fix via a
+  duplicated `promoteDetailFieldsRef` helper (the production helper isn't
+  exported).
