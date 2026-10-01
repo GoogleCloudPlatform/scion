@@ -47,8 +47,8 @@ func captureSlog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// serverConstructionLogLine mirrors the slog.Info call in server.go's New()
-// (see server.go:1509), the construction-time line most positive controls
+// serverConstructionLogLine mirrors the slog.Info call in server.go's New(),
+// the construction-time line most positive controls
 // in this package assert against.
 const serverConstructionLogLine = "Control channel manager initialized"
 
