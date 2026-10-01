@@ -50,8 +50,7 @@ func progenyPairAgent(subject, projectID string, ancestry []string, scopes []Age
 // sourceUserID's live store.User}) so Stage 2b resolves a live, admitted
 // source without a real delegation edge. With no edge recorded, Decide Step
 // 10 (the delegation ceiling) runs on its own pre-backfill allowance and
-// passes every principal through unconditionally (a no-op), exactly as it
-// did before Stage 2b's admission check existed.
+// is a no-op for this principal.
 //
 // A real edge (as seedExecutionAgent creates) carries a role, e.g.
 // AgentRoleFull, through Step 10, which checks the edge's role- or
@@ -78,7 +77,9 @@ func seedProgenyPairAgent(t *testing.T, f *goldenFixture, a *AuthzService, agent
 	}))
 	source, err := f.store.GetUser(ctx, sourceUserID)
 	require.NoError(t, err)
+	prevResolver := a.sourceResolver
 	a.sourceResolver = stubSourceResolver{user: source}
+	t.Cleanup(func() { a.sourceResolver = prevResolver })
 }
 
 // createAlwaysEnvVar stores an opted-in user-scope env var with the always
