@@ -27,8 +27,9 @@
 // depending on the pre-backfill temporary allow -- production state, not a
 // carve-out. The ordinary-creator case, where the delegator is not a system
 // admin and does not itself hold gcp_service_account.use, is pinned as
-// denying by TestGCPServiceAccountUse_DeniesPendingParentAuthority. Deny
-// cases hold in either state and are unaffected by the marker.
+// denying by TestGCPServiceAccountUse_MintSucceedsWhilePermissionDecisionDenies
+// (handlers_gcp_identity_mint_authz_test.go). Deny cases hold in either
+// state and are unaffected by the marker.
 package hub
 
 import (
@@ -446,8 +447,8 @@ func TestGCPServiceAccountUse_OnlyPermissionOnPerInstancePath(t *testing.T) {
 	}
 
 	// 1. Walk the restriction twice: per-SA-only must deny every permission
-	// except gcp_service_account.use (kills M7 -- a second permission taking
-	// the per-instance restriction path); all-scopes must match the static
+	// except gcp_service_account.use (fails if a second permission takes the
+	// per-instance restriction path); all-scopes must match the static
 	// AgentScopes result for every permission except gcp_service_account.use.
 	perSAOnlyAllowedCount := 0
 	var perSAOnlyAllowedID string
@@ -480,9 +481,9 @@ func TestGCPServiceAccountUse_OnlyPermissionOnPerInstancePath(t *testing.T) {
 	}
 
 	// 2. Walk the grant: gcpServiceAccountUseBinding must be nil for every
-	// permission except gcp_service_account.use (kills M8 -- extra
-	// permissions granted by the synthetic role). For that one permission,
-	// the returned role must hold exactly that one permission, system-scoped.
+	// permission except gcp_service_account.use (fails if the synthetic role
+	// grants any other permission). For that one permission, the returned
+	// role must hold exactly that one permission, system-scoped.
 	grantNonNilCount := 0
 	var grantNonNilID string
 	for _, p := range permissions.Registry {
@@ -511,8 +512,7 @@ func TestGCPServiceAccountUse_OnlyPermissionOnPerInstancePath(t *testing.T) {
 
 	// 3. Exactly one permission takes the grant path and exactly one takes
 	// the per-SA-only restriction path, and it is the same permission on
-	// both sides. This replaces the tautological Registry-row count: it
-	// proves which path each permission actually took.
+	// both sides. It proves which path each permission actually took.
 	if perSAOnlyAllowedCount != 1 {
 		t.Fatalf("expected exactly one permission allowed with only the per-SA scope, found %d", perSAOnlyAllowedCount)
 	}

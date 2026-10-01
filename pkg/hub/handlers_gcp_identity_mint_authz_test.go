@@ -365,7 +365,7 @@ func TestAgentGCPToken_NoServiceAccountScopeDenied(t *testing.T) {
 }
 
 // TestGCPServiceAccountUse_MintSucceedsWhilePermissionDecisionDenies is the
-// production-like characterization this slice pins: with the delegation-edge
+// production-like characterization this test pins: with the delegation-edge
 // backfill migration complete (the marker is not deleted, unlike every other
 // test in this file) and a real owner-to-agent delegation edge recorded --
 // the shape every hub-attested agent has post-backfill -- a direct decision
@@ -373,11 +373,11 @@ func TestAgentGCPToken_NoServiceAccountScopeDenied(t *testing.T) {
 // denies, because the delegating owner does not itself hold
 // gcp_service_account.use. The mint endpoints are unaffected by that: they
 // no longer decide this permission, so they still succeed purely on the live
-// record recheck and the exact token-scope compare this change adds. This is
-// the rule enforced: an agent's own credential can name the exact assigned
-// service account, but that is not yet composed with proof that the
-// delegating authority currently holds authority to assign it -- a separate,
-// later change closes that gap.
+// record recheck this change adds and the existing exact token-scope
+// compare. This is the rule enforced: an agent's own credential can name the
+// exact assigned service account, but that is not yet composed with proof
+// that the delegating authority currently holds authority to assign it -- a
+// separate, later change closes that gap.
 func TestGCPServiceAccountUse_MintSucceedsWhilePermissionDecisionDenies(t *testing.T) {
 	f := newGCPMintFixture(t, "parent-authority-pending")
 	setBackfillCompleted(t, f.Store)
@@ -402,6 +402,10 @@ func TestGCPServiceAccountUse_MintSucceedsWhilePermissionDecisionDenies(t *testi
 	})
 	if d.Allowed {
 		t.Fatalf("expected deny: the delegating owner does not hold gcp_service_account.use, so the parent proof is missing, got allowed: %s", d.Reason)
+	}
+	if d.DenyCause != DenyCauseCeilingDelegatorLacksPermission {
+		t.Fatalf("expected the delegation-ceiling deny (delegator lacks %s), got cause=%q reason=%q",
+			permissions.PermissionGCPServiceAccountUse, d.DenyCause, d.Reason)
 	}
 }
 
