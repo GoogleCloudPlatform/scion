@@ -15,7 +15,7 @@
  */
 
 /**
- * W1 (design §9): `agent-sort.ts`'s moved comparator equals today's two
+ * `agent-sort.ts`'s moved comparator equals today's two
  * inline `displayAgents` comparators (project-detail.ts and agents.ts) on
  * randomized data. The two pre-change blocks are snapshotted here, inline,
  * so a future edit to `agent-sort.ts` that silently changes behavior is
@@ -141,7 +141,7 @@ function genAgent(rand: () => number, i: number): Agent {
 const FIELDS: AgentSortField[] = ['name', 'status', 'created', 'updated'];
 const DIRS: SortDir[] = ['asc', 'desc'];
 
-describe('agent-sort — W1: moved comparator matches both pre-change inline blocks', () => {
+describe('agent-sort — moved comparator matches both pre-change inline blocks', () => {
   const rand = mulberry32(42);
   const agents = Array.from({ length: 80 }, (_, i) => genAgent(rand, i));
 
@@ -190,7 +190,7 @@ describe('agent-sort — W1: moved comparator matches both pre-change inline blo
     }
   }
 
-  describe('createdAt/updatedAt legacy fallback (round 1 review N6)', () => {
+  describe('createdAt/updatedAt legacy fallback', () => {
     // project-detail.ts's pre-change comparator fell back to createdAt/
     // updatedAt when created/updated were absent; agents.ts's did not. The
     // main pairwise loop above never sets these fields (matching every real
@@ -295,7 +295,7 @@ describe('agent-sort — serverOrderCompare (design §4.2 total order)', () => {
     expect(serverOrderCompare(a, b, 'asc')).toBeLessThan(0);
   });
 
-  it('is reflexive: the same id (identical key and created) compares equal to itself (round 1 review N5)', () => {
+  it('is reflexive: the same id (identical key and created) compares equal to itself', () => {
     const a = { ...base, id: 'same-id', updated: 'k', created: 'c' } as Agent;
     const b = { ...base, id: 'same-id', updated: 'k', created: 'c' } as Agent;
     expect(serverOrderCompare(a, b, 'desc')).toBe(0);

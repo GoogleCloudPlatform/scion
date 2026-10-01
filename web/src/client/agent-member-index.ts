@@ -22,7 +22,8 @@
  * later phase) home share this shape. The project endpoint is bounded by
  * the 2,000-candidate ceiling (design §5.3 step 0), so `stats.agents` is
  * never omitted there — the global endpoint's count-only mode above 2,000
- * (design §4.6) does not apply to project pages, and is out of P1c's scope.
+ * (design §4.6) does not apply to project pages, and is out of this
+ * module's scope.
  */
 export class AgentMemberIndex {
   private phases = new Map<string, string>();
@@ -49,7 +50,7 @@ export class AgentMemberIndex {
     this.phases.set(id, phase);
   }
 
-  /** Idempotent: deleting an ID that is not present is a no-op (P1a FYI — `deleted` is a safe superset). */
+  /** Idempotent: deleting an ID that is not present is a no-op (`deleted` is a safe superset). */
   delete(id: string): void {
     this.phases.delete(id);
   }

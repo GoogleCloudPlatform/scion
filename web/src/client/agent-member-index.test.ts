@@ -40,7 +40,7 @@ describe('AgentMemberIndex', () => {
     expect(idx.stats).toEqual({ total: 2, running: 2 });
   });
 
-  it('delete() is idempotent — deleting an absent ID is a safe no-op (P1a FYI: deleted is a safe superset)', () => {
+  it('delete() is idempotent — deleting an absent ID is a safe no-op (deleted is a safe superset)', () => {
     const idx = new AgentMemberIndex();
     idx.seed([['a', 'running']]);
     idx.delete('never-seen');

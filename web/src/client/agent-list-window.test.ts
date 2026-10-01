@@ -15,7 +15,7 @@
  */
 
 /**
- * W4 (design §9): the small and paged window states (P1c, design §11).
+ * Covers the small and paged window states (design §9, §11).
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -54,9 +54,9 @@ function makeViewState(partial: Partial<AgentListViewState> = {}): AgentListView
 
 /**
  * Builds a window plus a `setHeld` helper, since the small state reads the
- * held agents through a live callback rather than a copy (round 1 review
- * B1) — `getProjectId` and `getHeldAgents` default to fixed/closed-over
- * values so most tests don't need to care about them.
+ * held agents through a live callback rather than a copy — `getProjectId`
+ * and `getHeldAgents` default to fixed/closed-over values so most tests
+ * don't need to care about them.
  */
 function createWindow(
   options: Partial<AgentListWindowOptions> & { viewState: AgentListViewState }
@@ -98,7 +98,7 @@ describe('AgentListWindow — small state', () => {
     expect(win.items.map((a) => a.id)).toEqual(['b', 'c', 'a']); // Alpha, Bravo, Charlie
   });
 
-  it('re-derives from the held array by reference — no copy, no re-adoption step (round 1 review B1)', () => {
+  it('re-derives from the held array by reference — no copy, no re-adoption step', () => {
     let agents = [agent('a', { phase: 'running' })];
     const { win } = createWindow({
       viewState: makeViewState({ pageSize: 10 }),
@@ -114,7 +114,7 @@ describe('AgentListWindow — small state', () => {
     expect(win.stats).toEqual({ total: 1, running: 0 });
   });
 
-  it('setSmall() does not reset pageIndex when already small (only setViewState does, round 1 review B1)', () => {
+  it('setSmall() does not reset pageIndex when already small (only setViewState does)', () => {
     const agents = [agent('a'), agent('b'), agent('c'), agent('d'), agent('e')];
     const { win, setHeld } = createWindow({ viewState: makeViewState({ pageSize: 2 }) });
     setHeld(agents);
@@ -124,7 +124,7 @@ describe('AgentListWindow — small state', () => {
     expect(win.pageIndex).toBe(1); // unchanged
   });
 
-  it("B1'': setSmall() resets pageIndex to 0 when the previous state was paged (round 3 review — a regression in the B1' fix)", async () => {
+  it('setSmall() resets pageIndex to 0 when the previous state was paged', async () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c'), agent('d')];
     const fetchPage = vi.fn(async (params: { cursor?: string }) =>
@@ -246,7 +246,7 @@ describe('AgentListWindow — paged state', () => {
     expect(win.items.map((a) => a.id)).toEqual(['a', 'b']);
   });
 
-  it('R2-B2: an off-page upsert of an already-known member updates the member index and raises the chip, with no page-row change', () => {
+  it('an off-page upsert of an already-known member updates the member index and raises the chip, with no page-row change', () => {
     const page0 = [agent('a', { phase: 'running' }), agent('b', { phase: 'running' })];
     const fetchPage = vi.fn();
     const known = new Map<string, Agent>([
@@ -289,7 +289,7 @@ describe('AgentListWindow — paged state', () => {
     expect(fetchPage).not.toHaveBeenCalled(); // no request (design §6.2)
   });
 
-  it('N1: an off-page member change affecting counts only (no filter, key stays outside the page range) raises no chip', () => {
+  it('an off-page member change affecting counts only (no filter, key stays outside the page range) raises no chip', () => {
     const page0 = [agent('a', { phase: 'running', updated: '2026-02-01T00:00:00Z' })];
     const known = new Map<string, Agent>([
       ['a', page0[0]],
@@ -304,7 +304,7 @@ describe('AgentListWindow — paged state', () => {
     // 'c' must already be a member (seeded via stats.agents) for this to be
     // an *existing* off-page member's update, not a new admission (every
     // new admission raises the chip unconditionally, matching a `created`
-    // event — see the R2-B2 and B6 tests).
+    // event — see the off-page-upsert and add-rule tests above/below).
     win.setPaged(
       pagedResult(page0, {
         totalCount: 2,
@@ -328,7 +328,7 @@ describe('AgentListWindow — paged state', () => {
     expect(win.updatesAvailable).toBe(false); // counts-only: no chip (design §6.2)
   });
 
-  it('N1: an off-page member that newly passes the active phase filter raises the chip', () => {
+  it('an off-page member that newly passes the active phase filter raises the chip', () => {
     const page0 = [agent('a', { phase: 'running', updated: '2026-02-01T00:00:00Z' })];
     const known = new Map<string, Agent>([
       ['a', page0[0]],
@@ -360,7 +360,7 @@ describe('AgentListWindow — paged state', () => {
     expect(win.updatesAvailable).toBe(true); // newly passes the filter (design §6.2)
   });
 
-  it('B6: an off-page upsert for a non-member is added only if it passes the project + committed-label add rule', () => {
+  it('an off-page upsert for a non-member is added only if it passes the project + committed-label add rule', () => {
     const page0 = [agent('a')];
     const nonMatchingLabel = agent('x', { projectId: 'p-1', labels: { env: 'dev' } });
     const wrongProject = agent('y', { projectId: 'p-2', labels: { env: 'prod' } });
@@ -469,7 +469,7 @@ describe('AgentListWindow — paged state', () => {
       ''
     );
 
-    // No active phase filter: a phase-only change is counts-only (design §6.2 N1).
+    // No active phase filter: a phase-only change is counts-only (design §6.2).
     win.applyChanges({
       upserted: [],
       deleted: [],
@@ -536,7 +536,7 @@ describe('AgentListWindow — paged state', () => {
     expect(win.updatesAvailable).toBe(false);
   });
 
-  it("a sort/phase/page-size change never calls fetchPage by itself (round 1 review B3 — project-detail.ts's syncAgentsForViewState owns that decision)", () => {
+  it("a sort/phase/page-size change never calls fetchPage by itself — project-detail.ts's syncAgentsForViewState owns that decision", () => {
     const fetchPage = vi.fn();
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
     win.setPaged(pagedResult([agent('a')], { totalCount: 1 }), '');
@@ -546,7 +546,7 @@ describe('AgentListWindow — paged state', () => {
     expect(fetchPage).not.toHaveBeenCalled();
   });
 
-  it('applyChanges is a no-op in the small state (design §11 P1c: small uses onAgentsUpdated instead)', () => {
+  it('applyChanges is a no-op in the small state (design §11: small uses onAgentsUpdated instead)', () => {
     const { win, setHeld } = createWindow({
       viewState: makeViewState(),
       getAgent: () => agent('a', { phase: 'stopped' }),
@@ -558,7 +558,7 @@ describe('AgentListWindow — paged state', () => {
   });
 });
 
-describe('AgentListWindow — round 2 review fixes', () => {
+describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rule edge cases', () => {
   function pagedResult(agents: Agent[], opts: Partial<PagedPageResult> = {}): PagedPageResult {
     return {
       agents,
@@ -572,7 +572,7 @@ describe('AgentListWindow — round 2 review fixes', () => {
     };
   }
 
-  it("B1': setViewState does not reset pageIndex or the current page while paged (a label keystroke must not desync them)", async () => {
+  it('setViewState does not reset pageIndex or the current page while paged (a label keystroke must not desync them)', async () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c', { labels: { env: 'prod' } }), agent('d')];
     const fetchPage = vi.fn(async (params: { cursor?: string }) =>
@@ -591,15 +591,15 @@ describe('AgentListWindow — round 2 review fixes', () => {
     win.setViewState({ label: 'env' }); // sl-input: local preview only
     expect(win.pageIndex).toBe(1); // unchanged — no re-adoption, no reset
     expect(win.hasPrev).toBe(true); // unchanged
-    // B3'' (round 3 review): the live preview filter IS applied to the
+    // The live preview filter IS applied to the
     // loaded page's rows, same as the small state (design §6.3) — only 'c'
     // (which carries the `env` label) remains.
     expect(win.items.map((a) => a.id)).toEqual(['c']);
     expect(fetchPage.mock.calls.length).toBe(callsBefore); // no request
   });
 
-  describe("B2'a: on-page page-0 chip predicate is K vs last, not the off-page K vs first test", () => {
-    it('Q1 desc, page 0: a mid-page row changes with its key unchanged raises no chip', () => {
+  describe('on-page page-0 chip predicate is K vs last, not the off-page K vs first test', () => {
+    it('desc, page 0: a mid-page row changes with its key unchanged raises no chip', () => {
       const items = [
         agent('a', { updated: '2026-01-03T00:00:00Z' }),
         agent('b', { updated: '2026-01-02T00:00:00Z' }),
@@ -616,7 +616,7 @@ describe('AgentListWindow — round 2 review fixes', () => {
       expect(win.updatesAvailable).toBe(false);
     });
 
-    it('Q2 asc, page 0: a row whose key moves but stays within [first,last] raises no chip', () => {
+    it('asc, page 0: a row whose key moves but stays within [first,last] raises no chip', () => {
       const items = [
         agent('a', { updated: '2026-01-01T00:00:00Z' }),
         agent('b', { updated: '2026-01-02T00:00:00Z' }),
@@ -634,7 +634,7 @@ describe('AgentListWindow — round 2 review fixes', () => {
       expect(win.items.map((a) => a.id)).toEqual(['b', 'a', 'c']); // re-sorted within the page
     });
 
-    it('Q3 desc, page 0: a row rising to the new top (no longer bounded above) raises no chip', () => {
+    it('desc, page 0: a row rising to the new top (no longer bounded above) raises no chip', () => {
       const items = [
         agent('a', { updated: '2026-01-03T00:00:00Z' }),
         agent('b', { updated: '2026-01-02T00:00:00Z' }),
@@ -690,7 +690,7 @@ describe('AgentListWindow — round 2 review fixes', () => {
     });
   });
 
-  it("Q5 / B2'b: an off-page upsert of a state-known agent that fails the committed label is ignored (no chip, no addition)", () => {
+  it('an off-page upsert of a state-known agent that fails the committed label is ignored (no chip, no addition)', () => {
     const page0 = [agent('a')];
     const nonMember = agent('x', { labels: { env: 'dev' }, updated: '2026-02-01T00:00:00Z' });
     const known = new Map([...page0, nonMember].map((a) => [a.id, a]));
@@ -707,7 +707,7 @@ describe('AgentListWindow — round 2 review fixes', () => {
     expect(win.stats.total).toBe(1);
   });
 
-  it("Q6 / B2'c: a newly created off-page agent raises the chip only if it could land on THIS page (desc: page 0 only)", async () => {
+  it('a newly created off-page agent raises the chip only if it could land on THIS page (desc: page 0 only)', async () => {
     const page0 = [agent('a', { updated: '2026-01-03T00:00:00Z' })];
     const page1 = [agent('d', { updated: '2026-01-02T00:00:00Z' })];
     const known = new Map([...page0, ...page1].map((a) => [a.id, a]));
@@ -740,9 +740,9 @@ describe('AgentListWindow — round 2 review fixes', () => {
     expect(win.updatesAvailable).toBe(true);
   });
 
-  it("N2': rangeStart tracks the real running offset, not pageIndex * pageSize, across a short page", async () => {
+  it('rangeStart tracks the real running offset, not pageIndex * pageSize, across a short page', async () => {
     const page0 = [agent('a'), agent('b'), agent('c')]; // a short page0: 3 rows at pageSize 3 (full)
-    const page1 = [agent('d'), agent('e')]; // page1 is SHORT: only 2 rows (one race-dropped, design E2)
+    const page1 = [agent('d'), agent('e')]; // page1 is SHORT: only 2 rows (one race-dropped)
     const fetchPage = vi.fn(async (params: { cursor?: string }) =>
       !params.cursor
         ? pagedResult(page0, { nextCursor: 'c1', totalCount: 10 })
@@ -758,7 +758,7 @@ describe('AgentListWindow — round 2 review fixes', () => {
     expect(win.rangeStart).toBe(5); // 3 + 2, not 3 + 3
   });
 
-  it("N4': display is memoized on (held identity, view state identity)", () => {
+  it('display is memoized on (held identity, view state identity)', () => {
     let agents = [agent('b'), agent('a')];
     const { win } = createWindow({ viewState: makeViewState(), getHeldAgents: () => agents });
     win.setSmall();
@@ -778,7 +778,7 @@ describe('AgentListWindow — round 2 review fixes', () => {
   });
 });
 
-describe('AgentListWindow — round 4 review fixes', () => {
+describe('AgentListWindow — cursor invalidation after a failed view-change', () => {
   function pagedResult(agents: Agent[], opts: Partial<PagedPageResult> = {}): PagedPageResult {
     return {
       agents,
@@ -792,7 +792,7 @@ describe('AgentListWindow — round 4 review fixes', () => {
     };
   }
 
-  it("N1''': invalidateCursors() clears hasNext/hasPrev while paged, until the next setPaged (probe R4-3)", async () => {
+  it('invalidateCursors() clears hasNext/hasPrev while paged, until the next setPaged', async () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c'), agent('d')];
     const fetchPage = vi.fn(async (params: { cursor?: string }) =>
@@ -827,7 +827,7 @@ describe('AgentListWindow — round 4 review fixes', () => {
     expect(win.hasPrev).toBe(false); // setPaged always re-adopts at page 0
   });
 
-  it("N1''': invalidateCursors() is a no-op in the small state", () => {
+  it('invalidateCursors() is a no-op in the small state', () => {
     const { win, setHeld } = createWindow({ viewState: makeViewState() });
     setHeld([agent('a'), agent('b')]);
     expect(win.state).toBe('small');
@@ -837,7 +837,7 @@ describe('AgentListWindow — round 4 review fixes', () => {
   });
 });
 
-describe('AgentListWindow — round 5 review fixes', () => {
+describe('AgentListWindow — refreshing a stranded page after an invalidation', () => {
   function pagedResult(agents: Agent[], opts: Partial<PagedPageResult> = {}): PagedPageResult {
     return {
       agents,
@@ -851,7 +851,7 @@ describe('AgentListWindow — round 5 review fixes', () => {
     };
   }
 
-  it('nit 1: invalidateCursors() also clears hasPrev on a page other than 0, and prev() makes 0 fetches', async () => {
+  it('invalidateCursors() also clears hasPrev on a page other than 0, and prev() makes 0 fetches', async () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c'), agent('d')];
     const fetchPage = vi.fn(async (params: { cursor?: string }) =>
@@ -877,7 +877,7 @@ describe('AgentListWindow — round 5 review fixes', () => {
     expect(win.pageIndex).toBe(1); // unchanged
   });
 
-  it("N2'''': refresh() while invalidated refetches page 0 instead of the current (stale-cursor) page, and restores navigation (probe R5-2)", async () => {
+  it('refresh() while invalidated refetches page 0 instead of the current (stale-cursor) page, and restores navigation', async () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c'), agent('d')];
     const page0Again = [agent('e', { phase: 'stopped' }), agent('f', { phase: 'stopped' })];
@@ -903,7 +903,7 @@ describe('AgentListWindow — round 5 review fixes', () => {
     expect(win.pageIndex).toBe(1);
 
     // A view-change trigger fails while on page 1 (e.g. a phase change that
-    // 500s): the window invalidates, exactly like the N1''' scenario above.
+    // 500s): the window invalidates, exactly like the scenario above.
     win.invalidateCursors();
     expect(win.hasPrev).toBe(false);
     expect(win.hasNext).toBe(false);

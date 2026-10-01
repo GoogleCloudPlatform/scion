@@ -15,13 +15,12 @@
  */
 
 /**
- * W10 P1 subset (design §9, the P1 gate), plus the W4 items the P1c brief
- * names explicitly: off-page upsert (R2-B2), reconnect chip with no
- * request, label typing/commit, a label 400 keeping previous data,
- * lifecycle refresh issuing exactly one request, and the 422 fallback with
- * its per-label memory. A5 (small-state display identical to pre-change
- * `displayAgents`) is covered via `agent-sort.test.ts`'s W1 parity and the
- * list/grid-identity assertions below.
+ * Covers the small and paged window states (design §9): off-page upsert,
+ * reconnect chip with no request, label typing/commit, a label 400 keeping
+ * previous data, lifecycle refresh issuing exactly one request, and the 422
+ * fallback with its per-label memory. Small-state display being identical
+ * to the pre-change `displayAgents` is covered via `agent-sort.test.ts`'s
+ * parity checks and the list/grid-identity assertions below.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
@@ -230,7 +229,7 @@ function pager(el: TestEl): (HTMLElement & { pageSize: number }) | null {
     | null;
 }
 
-/** A deferred promise, for controlling fetch resolution order explicitly (round 1 review B5). */
+/** A deferred promise, for controlling fetch resolution order explicitly. */
 function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
   let resolve!: (v: T) => void;
   const promise = new Promise<T>((r) => {
@@ -240,8 +239,8 @@ function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
 }
 
 /**
- * A more realistic sorted-mode handler than `createFetchHandler`'s (used by
- * the round 1 review fix tests): `complete` is decided by `agents.length` vs
+ * A more realistic sorted-mode handler than `createFetchHandler`'s:
+ * `complete` is decided by `agents.length` vs
  * `fit`, cursor pages are real continuations of the same sorted list, and
  * `legacyTruncated` simulates a >500-candidate legacy response without
  * needing a 501-agent fixture.
@@ -370,7 +369,7 @@ function createRealisticFetchHandler(opts: {
   };
 }
 
-describe('project-detail — agent list window (P1c)', () => {
+describe('project-detail — agent list window', () => {
   beforeAll(async () => {
     await import('./project-detail.js');
   }, 60_000);
@@ -391,7 +390,7 @@ describe('project-detail — agent list window (P1c)', () => {
     localStorage.clear();
   });
 
-  describe('W10 P1 subset — list view, updated sort, 100 agents', () => {
+  describe('sorted/paged mode — list view, updated sort, 100 agents', () => {
     it('page load issues exactly one agents request (the fit request); every client-only interaction issues zero; label commit and lifecycle refresh issue exactly one each', async () => {
       const projectId = 'p-w10-list';
       localStorage.setItem('scion-view-project-agents', 'list');
@@ -576,7 +575,7 @@ describe('project-detail — agent list window (P1c)', () => {
     });
   });
 
-  describe('paged state: live updates (design §6.2 table, round 1 review N1/N2/B6), and reconnect', () => {
+  describe('paged state: live updates (design §6.2 table), and reconnect', () => {
     /** 30 agents, forced paged (via `legacyTruncated` plus a `fit` below the count — see individual tests), 25/page: page 0 holds the 25 highest `updated`, page 1 holds the rest. */
     function mountForcedPaged(
       projectId: string,
@@ -606,7 +605,7 @@ describe('project-detail — agent list window (P1c)', () => {
       return createComponent(projectId);
     }
 
-    it('R2-B2 + N1: an off-page phase change with no phase filter is counts-only — stats update live, no chip, no request', async () => {
+    it('an off-page phase change with no phase filter is counts-only — stats update live, no chip, no request', async () => {
       const projectId = 'p-paged-counts';
       const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
       const requests: AgentsRequest[] = [];
@@ -630,14 +629,13 @@ describe('project-detail — agent list window (P1c)', () => {
 
       // A pure phase change off-page, with no active phase filter, does not
       // change which agent belongs on which page — it only affects the
-      // live "Running" count, which the design table says shows no chip for
-      // (round 1 review N1).
+      // live "Running" count, which the design table says shows no chip for.
       expect(internals(el).agentStats.running).toBe(29);
       expect(internals(el).agentWindow.updatesAvailable).toBe(false);
       expect(requests.length).toBe(before);
     });
 
-    it('N1: an off-page change that newly passes the active phase filter raises the chip', async () => {
+    it('an off-page change that newly passes the active phase filter raises the chip', async () => {
       const projectId = 'p-paged-newly-passes';
       const agents = Array.from({ length: 30 }, (_, i) =>
         makeAgent(i, { phase: i === 29 ? 'stopped' : 'running' })
@@ -645,7 +643,7 @@ describe('project-detail — agent list window (P1c)', () => {
       const requests: AgentsRequest[] = [];
       const el = await mountForcedPaged(projectId, agents, requests);
       internals(el).setPhaseFilter('running');
-      await new Promise((r) => setTimeout(r, 10)); // the phase change's own one paged refetch (B3)
+      await new Promise((r) => setTimeout(r, 10)); // the phase change's own one paged refetch
       await el.updateComplete;
       expect(internals(el).agentWindow.state).toBe('paged');
 
@@ -667,7 +665,7 @@ describe('project-detail — agent list window (P1c)', () => {
       expect(requests.length).toBe(before); // still zero-cost (design §6.2)
     });
 
-    it("B6 + B2'b: an off-page status change for a non-member under a different committed label never inflates stats.total and never raises the chip", async () => {
+    it('an off-page status change for a non-member under a different committed label never inflates stats.total and never raises the chip', async () => {
       const projectId = 'p-paged-label';
       const members = Array.from({ length: 30 }, (_, i) =>
         makeAgent(i, { labels: { env: 'prod' } })
@@ -720,11 +718,11 @@ describe('project-detail — agent list window (P1c)', () => {
       await el.updateComplete;
 
       expect(internals(el).agentStats.total).toBe(30); // unchanged
-      expect(internals(el).agentWindow.updatesAvailable).toBe(false); // ignored outright: no chip (round 2 review B2'b)
+      expect(internals(el).agentWindow.updatesAvailable).toBe(false); // ignored outright: no chip
       expect(requests.length).toBe(before);
     });
 
-    it('on-page delete and phase-filter-failure still show the chip (backfill, unchanged by the N1 fix)', async () => {
+    it('on-page delete and phase-filter-failure still show the chip (backfill)', async () => {
       const projectId = 'p-paged-backfill';
       const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i));
       const requests: AgentsRequest[] = [];
@@ -745,7 +743,7 @@ describe('project-detail — agent list window (P1c)', () => {
       expect(internals(el).agentWindow.items.find((a) => a.id === agents[0].id)).toBeUndefined();
     });
 
-    it('reconnect (agents-resync) raises the chip with no request (plumbing only — state.ts/P1a owns resync detection itself)', async () => {
+    it('reconnect (agents-resync) raises the chip with no request (plumbing only — state.ts owns resync detection itself)', async () => {
       const projectId = 'p-paged-resync';
       const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i));
       const requests: AgentsRequest[] = [];
@@ -761,7 +759,7 @@ describe('project-detail — agent list window (P1c)', () => {
     });
   });
 
-  describe('small state: live updates (round 1 review B1 — critical)', () => {
+  describe('small state: live updates', () => {
     it('an SSE status delta updates the rendered list row, and an SSE create appears, with no re-adoption and no page reset', async () => {
       const projectId = 'p-small-live';
       localStorage.setItem('scion-view-project-agents', 'list');
@@ -793,7 +791,7 @@ describe('project-detail — agent list window (P1c)', () => {
 
       // The small-state list view must see the same live update grid/tree/
       // stats already saw via `this.agents` — no re-adoption step, and no
-      // extra request (round 1 review B1).
+      // extra request.
       expect((el as unknown as { agents: Agent[] }).agents.find((a) => a.id === 'a-4')?.phase).toBe(
         'stopped'
       );
@@ -825,7 +823,7 @@ describe('project-detail — agent list window (P1c)', () => {
     });
   });
 
-  describe('paged -> legacy transitions issue exactly one request each (round 1 review B2/B3)', () => {
+  describe('paged -> legacy transitions issue exactly one request each', () => {
     it('sort -> name (legacy) and name -> updated (paged again) each issue exactly one request; a phase change while paged issues exactly one', async () => {
       const projectId = 'p-b2b3';
       localStorage.setItem('scion-view-project-agents', 'list');
@@ -856,14 +854,14 @@ describe('project-detail — agent list window (P1c)', () => {
       let n = requests.length;
       internals(el).toggleSort('name');
       await new Promise((r) => setTimeout(r, 10));
-      expect(requests.length - n).toBe(1); // exactly one legacy load, not two (B3)
+      expect(requests.length - n).toBe(1); // exactly one legacy load, not two
       expect(requests[requests.length - 1].url).not.toContain('sort=');
-      expect(internals(el).agentWindow.state).toBe('small'); // out of 'paged' even though truncated (B2)
+      expect(internals(el).agentWindow.state).toBe('small'); // out of 'paged' even though truncated
 
       n = requests.length;
       internals(el).toggleSort('updated');
       await new Promise((r) => setTimeout(r, 10));
-      expect(requests.length - n).toBe(1); // exactly one fit request, not two (B3)
+      expect(requests.length - n).toBe(1); // exactly one fit request, not two
       expect(requests[requests.length - 1].url).toContain('sort=updated');
       expect(internals(el).agentWindow.state).toBe('paged'); // forced paged again (fit=0)
 
@@ -873,7 +871,7 @@ describe('project-detail — agent list window (P1c)', () => {
       expect(requests.length - n).toBe(1); // phase change while paged: exactly one (design row 6)
     });
 
-    it("grid<->list toggles cost exactly the documented interim requests, then zero, once the set is complete and promoted to small (round 1 review B3; not the always-paged case — see B3' below)", async () => {
+    it('grid<->list toggles cost exactly the documented interim requests, then zero, once the set is complete and promoted to small (not the always-paged case — see below)', async () => {
       const projectId = 'p-b3-toggles';
       localStorage.setItem('scion-view-project-agents', 'list');
       // 30 agents; the sorted endpoint reports complete once asked again
@@ -902,10 +900,9 @@ describe('project-detail — agent list window (P1c)', () => {
       // The mount's own first request uses fit=500 by default in the real
       // code, and 30 <= 500, so it is actually complete — use a dedicated
       // paged-first-load harness instead: start already paged via a forced
-      // page-1 navigation isn't meaningful here, so this test instead starts
-      // from the B2/B3 test's end state conceptually: begin in list+paged
-      // by making the window ineligible at mount (grid), matching the
-      // reviewer's probe P3 sequence.
+      // page-1 navigation isn't meaningful here, so this test instead
+      // begins in list+paged by making the window ineligible at mount
+      // (grid).
       localStorage.setItem('scion-view-project-agents', 'grid');
       const el = await createComponent(projectId);
       // Grid load is legacy (not P1-eligible); truncated per legacyTruncated.
@@ -916,7 +913,7 @@ describe('project-detail — agent list window (P1c)', () => {
       let n = requests.length;
       toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'list' } }));
       await new Promise((r) => setTimeout(r, 10));
-      // grid(truncated) -> list(updated sort): one fit request (§11 P1c interim cost).
+      // grid(truncated) -> list(updated sort): one fit request (design §11 interim cost).
       expect(requests.length - n).toBe(1);
       expect(internals(el).listViewUsesWindow).toBe(true); // 30 <= 500: complete this time
 
@@ -928,7 +925,7 @@ describe('project-detail — agent list window (P1c)', () => {
       expect(requests.length - n).toBe(0); // held: this.agents already has the complete set
     }, 20_000);
 
-    it("always-paged (fit=0): a dir flip costs one request, and list<->grid toggles cost exactly one each, alternating legacy and fit (round 2 review B3')", async () => {
+    it('always-paged (fit=0): a dir flip costs one request, and list<->grid toggles cost exactly one each, alternating legacy and fit', async () => {
       const projectId = 'p-b3-always-paged';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
@@ -959,7 +956,7 @@ describe('project-detail — agent list window (P1c)', () => {
       internals(el).toggleSort('updated'); // same field: flips dir only
       await new Promise((r) => setTimeout(r, 10));
       expect(requests.length - n).toBe(1);
-      // N3'' (round 3 review): assert the actual dir, not just the count.
+      // Assert the actual dir, not just the count.
       expect(requests[requests.length - 1].url).toContain('sort=updated');
       expect(requests[requests.length - 1].url).toContain('dir=asc');
 
@@ -980,12 +977,12 @@ describe('project-detail — agent list window (P1c)', () => {
       // interim-cost bullets, paid on every toggle while the project stays
       // above the fit threshold.
       expect(perToggleCosts).toEqual([1, 1, 1, 1, 1, 1]);
-      // N3'' (round 3 review): assert the actual alternation the title claims.
+      // Assert the actual alternation the title claims.
       expect(perToggleKinds).toEqual(['legacy', 'fit', 'legacy', 'fit', 'legacy', 'fit']);
     }, 20_000);
   });
 
-  describe("label typing while paged (round 2 review B1', round 3 B3'')", () => {
+  describe('label typing while paged', () => {
     it('does not reset pageIndex or issue a request, and DOES apply the live preview filter to the page (design §6.3)', async () => {
       const projectId = 'p-b1-typing';
       localStorage.setItem('scion-view-project-agents', 'list');
@@ -1029,8 +1026,8 @@ describe('project-detail — agent list window (P1c)', () => {
       input.dispatchEvent(new Event('sl-input'));
       await el.updateComplete;
 
-      expect(internals(el).agentWindow.pageIndex).toBe(1); // unchanged (round 2 review B1')
-      // B3'' (round 3 review): the preview filter IS applied to the page.
+      expect(internals(el).agentWindow.pageIndex).toBe(1); // unchanged
+      // The preview filter IS applied to the page.
       expect(internals(el).agentWindow.items.map((a) => a.id)).toEqual(expectedFiltered);
       expect(requests.length).toBe(before); // still zero
       const pagerEl = el.shadowRoot?.querySelector('scion-agent-pager') as unknown as {
@@ -1042,7 +1039,7 @@ describe('project-detail — agent list window (P1c)', () => {
     });
   });
 
-  describe("a paged -> small transition resets pageIndex to 0 (round 3 review B1'' — a regression in the B1' fix)", () => {
+  describe('a paged -> small transition resets pageIndex to 0', () => {
     function fixture60() {
       return Array.from({ length: 60 }, (_, i) =>
         makeAgent(i, { labels: i < 10 ? { env: 'prod' } : { env: 'dev' } })
@@ -1075,7 +1072,7 @@ describe('project-detail — agent list window (P1c)', () => {
       );
     }
 
-    it('R3-A1: a k=v label commit whose set fits (paged -> small via the fit path) lands on page 0', async () => {
+    it('a k=v label commit whose set fits (paged -> small via the fit path) lands on page 0', async () => {
       const projectId = 'p-r3a1';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = fixture60();
@@ -1097,11 +1094,11 @@ describe('project-detail — agent list window (P1c)', () => {
       await el.updateComplete;
 
       expect(internals(el).agentWindow.state).toBe('small'); // 10 agents <= fit=500
-      expect(internals(el).agentWindow.pageIndex).toBe(0); // reset (B1'')
+      expect(internals(el).agentWindow.pageIndex).toBe(0); // reset
       expect(internals(el).agentWindow.items.length).toBe(10); // all 10 env=prod agents visible
     });
 
-    it('R3-A2: a bare-key label commit (legacy path, paged -> small) lands on page 0', async () => {
+    it('a bare-key label commit (legacy path, paged -> small) lands on page 0', async () => {
       const projectId = 'p-r3a2';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = fixture60();
@@ -1123,11 +1120,11 @@ describe('project-detail — agent list window (P1c)', () => {
       await el.updateComplete;
 
       expect(internals(el).agentWindow.state).toBe('small'); // legacy load, no nextCursor
-      expect(internals(el).agentWindow.pageIndex).toBe(0); // reset (B1'')
+      expect(internals(el).agentWindow.pageIndex).toBe(0); // reset
     });
   });
 
-  describe('persisted page size (round 1 review B4)', () => {
+  describe('persisted page size', () => {
     it('is read once in connectedCallback, used for the first request, and matches the rendered pager', async () => {
       const projectId = 'p-b4';
       localStorage.setItem('scion-view-project-agents', 'list');
@@ -1177,7 +1174,7 @@ describe('project-detail — agent list window (P1c)', () => {
     });
   });
 
-  describe('stale-response guard (round 1 review B5)', () => {
+  describe('stale-response guard', () => {
     it('an older trigger whose response resolves later never overwrites a newer one', async () => {
       const projectId = 'p-b5';
       localStorage.setItem('scion-view-project-agents', 'list');
@@ -1262,20 +1259,19 @@ describe('project-detail — agent list window (P1c)', () => {
     });
   });
 
-  describe("pager navigation is disabled while a page-level load is in flight (round 2 N1', reworked per round 3 review B2'')", () => {
+  describe('pager navigation is disabled while a page-level load is in flight', () => {
     /**
-     * Round 2's N1' fix (bumping `agentsLoadGen` on a pager click) let a
-     * Next/Prev/chip click race a page-level view-state request: the
-     * window's own cursor stack still belonged to the *old* phase/dir/label,
-     * so the resulting request bound a stale cursor to new params and the
-     * server legitimately 400'd it (design §4.4) — round 3 review B2''. The
-     * fix going forward is the opposite of round 2's: disable navigation
-     * (and the chip) outright while either the window's own fetch or, while
-     * paged, a page-level load is in flight, via `.loading=${agentWindow.loading
-     * || (agentWindow.state === 'paged' && agentsLoading)}` (round 4 review
-     * N2''' narrowed the page-level half to the paged state only, so a held
-     * refresh never blocks small-state local paging). The `agentsLoadGen`
-     * bump is removed; `onPagerNav` only refuses while loading.
+     * A Next/Prev/chip click must not race a page-level view-state request:
+     * if it did, the window's own cursor stack would still belong to the
+     * *old* phase/dir/label, so the resulting request would bind a stale
+     * cursor to new params and the server would legitimately 400 it (design
+     * §4.4). The fix is to disable navigation (and the chip) outright while
+     * either the window's own fetch or, while paged, a page-level load is
+     * in flight, via `.loading=${agentWindow.loading || (agentWindow.state
+     * === 'paged' && agentsLoading)}` — the page-level half only applies in
+     * the paged state, so a held refresh never blocks small-state local
+     * paging. `onPagerNav` is a defense-in-depth guard with the same
+     * condition, for anything that bypasses the pager's own click handler.
      */
     function pagerLoading(el: TestEl): boolean {
       return (el.shadowRoot!.querySelector('scion-agent-pager') as unknown as { loading: boolean })
@@ -1285,7 +1281,7 @@ describe('project-detail — agent list window (P1c)', () => {
     function clickNext(el: TestEl): void {
       // Exercises the pager's own real guard (`onNext`'s `this.loading`
       // check) rather than dispatching the bare 'next' event, which would
-      // bypass that guard the same way round 2's regression did.
+      // bypass that guard entirely.
       (el.shadowRoot!.querySelector('scion-agent-pager') as unknown as { onNext(): void }).onNext();
     }
 
@@ -1365,12 +1361,12 @@ describe('project-detail — agent list window (P1c)', () => {
       expect(internals(el).agentWindow.pageIndex).toBe(1);
     });
 
-    it("N2''': small-state local Next/Prev stay enabled, and work, during a held lifecycle refresh (probe R4-5)", async () => {
+    it('small-state local Next/Prev stay enabled, and work, during a held lifecycle refresh', async () => {
       // Small-state pagination is a pure local slice of `display` (design
       // §6.3) and sends no request, so it has nothing to race with a
-      // page-level load — round 4 review N2''' narrowed the `.loading` gate
-      // (and `onPagerNav`'s guard) to the paged state only, so this no
-      // longer gets disabled for the duration of every agent action.
+      // page-level load — the `.loading` gate (and `onPagerNav`'s guard)
+      // only apply the page-level half in the paged state, so this isn't
+      // disabled for the duration of every agent action.
       const projectId = 'p-n2-prime-small';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
@@ -1435,7 +1431,7 @@ describe('project-detail — agent list window (P1c)', () => {
 
       expect(internals(el).agentWindow.state).toBe('small');
       expect(pagerLoading(el)).toBe(false);
-      expect(internals(el).agentWindow.pageIndex).toBe(1); // small -> small: unaffected by the refresh (B1'')
+      expect(internals(el).agentWindow.pageIndex).toBe(1); // small -> small: unaffected by the refresh
       // Paging continues to work normally once the refresh has landed.
       const pg = el.shadowRoot!.querySelector('scion-agent-pager') as unknown as {
         onPrev(): void;
@@ -1451,7 +1447,7 @@ describe('project-detail — agent list window (P1c)', () => {
     });
 
     for (const kind of ['phase', 'dir', 'label', 'pagesize'] as const) {
-      it(`R3-B: a ${kind} change while paged disables Next until its own fit response lands, so no mismatched-cursor request is ever sent`, async () => {
+      it(`a ${kind} change while paged disables Next until its own fit response lands, so no mismatched-cursor request is ever sent`, async () => {
         const projectId = `p-r3b-${kind}`;
         localStorage.setItem('scion-view-project-agents', 'list');
         const agents = Array.from({ length: 60 }, (_, i) =>
@@ -1530,7 +1526,7 @@ describe('project-detail — agent list window (P1c)', () => {
     }
   });
 
-  describe("a failed view-change request while paged invalidates cursors, so Next can't replay a stale one (round 4 review N1''', probe R4-3)", () => {
+  describe("a failed view-change request while paged invalidates cursors, so Next can't replay a stale one", () => {
     it('a phase change that 500s leaves the window paged with no error; Next then no-ops instead of sending a mismatched cursor', async () => {
       const projectId = 'p-n1-triple-prime';
       localStorage.setItem('scion-view-project-agents', 'list');
@@ -1571,12 +1567,12 @@ describe('project-detail — agent list window (P1c)', () => {
       await new Promise((r) => setTimeout(r, 20));
       await el.updateComplete;
 
-      // The failed view-change request keeps the previous page (design §6.3
-      // N2) but must no longer claim Next is possible: the stored cursor was
+      // The failed view-change request keeps the previous page (design §6.3)
+      // but must no longer claim Next is possible: the stored cursor was
       // minted under the old (unfiltered) phase, and a Next now would bind
       // it to `phase=stopped` and get a 400 (design §4.4).
       expect(internals(el).agentWindow.error).toBeNull(); // the failure itself is silent (previous data kept)
-      expect(internals(el).agentWindow.hasNext).toBe(false); // N1''': invalidated
+      expect(internals(el).agentWindow.hasNext).toBe(false); // invalidated
 
       const pg = el.shadowRoot!.querySelector('scion-agent-pager') as unknown as {
         onNext(): void;
@@ -1590,10 +1586,10 @@ describe('project-detail — agent list window (P1c)', () => {
       expect(internals(el).agentWindow.error).toBeNull(); // in particular, no 400
       expect(internals(el).agentWindow.pageIndex).toBe(0);
 
-      // A subsequent successful view-change restores navigation via setPaged
-      // (round 5 review nit 2: this is a *different* phase, not a retry of
-      // 'stopped' — any successful view-change restores it, not just a
-      // retry of the one that failed).
+      // A subsequent successful view-change restores navigation via
+      // setPaged — this is a *different* phase, not a retry of 'stopped',
+      // because any successful view-change restores it, not just a retry
+      // of the one that failed.
       internals(el).setPhaseFilter('running');
       await new Promise((r) => setTimeout(r, 20));
       await el.updateComplete;
@@ -1601,7 +1597,7 @@ describe('project-detail — agent list window (P1c)', () => {
       expect(internals(el).agentWindow.hasNext).toBe(true);
     });
 
-    it("N1'''': a phase change that fails with a NETWORK error also invalidates cursors (round 5 review, probe R5-1)", async () => {
+    it('a phase change that fails with a NETWORK error also invalidates cursors', async () => {
       const projectId = 'p-n1-quad-prime-net';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 60 }, (_, i) =>
@@ -1642,9 +1638,8 @@ describe('project-detail — agent list window (P1c)', () => {
       await el.updateComplete;
 
       // The rejected fetch (not a non-OK response) must still invalidate:
-      // the old gap (round 5 review N1'''') was that only the `!response.ok`
-      // branch called `invalidateCursors()`, so a thrown network error fell
-      // through the catch and left the stale cursor armed.
+      // a thrown network error must not fall through the catch and leave
+      // the stale cursor armed.
       expect(internals(el).agentWindow.error).toBeNull();
       expect(internals(el).agentWindow.hasNext).toBe(false);
 
@@ -1660,7 +1655,7 @@ describe('project-detail — agent list window (P1c)', () => {
       expect(internals(el).agentWindow.error).toBeNull();
     });
 
-    it("N1'''': a view-change that 422s, whose legacy fallback also fails, invalidates cursors (round 5 review, probe gap: 422-then-legacy-failure)", async () => {
+    it('a view-change that 422s, whose legacy fallback also fails, invalidates cursors', async () => {
       const projectId = 'p-n1-quad-prime-legacy';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 60 }, (_, i) =>
@@ -1873,7 +1868,7 @@ describe('project-detail — agent list window (P1c)', () => {
     });
   });
 
-  describe("fit-path label 400 restores the previous committedLabel (round 1 review N3, round 2 N3')", () => {
+  describe('fit-path label 400 restores the previous committedLabel', () => {
     it('a 400 on the sorted (fit) path keeps the previous data and reverts committedLabel', async () => {
       const projectId = 'p-n3-fit-400';
       localStorage.setItem('scion-view-project-agents', 'list');
@@ -1922,12 +1917,12 @@ describe('project-detail — agent list window (P1c)', () => {
         true
       );
       const after = (el as unknown as { agents: Agent[] }).agents;
-      expect(after.length).toBe(5); // previous data kept (design §6.3 N2)
-      expect(internals(el).committedLabel).toBe(''); // reverted, not left at the rejected label (N3)
+      expect(after.length).toBe(5); // previous data kept (design §6.3)
+      expect(internals(el).committedLabel).toBe(''); // reverted, not left at the rejected label
     });
   });
 
-  describe("a loading indicator replaces the empty-filter message during the paged -> grid gap (round 2 review N5')", () => {
+  describe('a loading indicator replaces the empty-filter message during the paged -> grid gap', () => {
     it('shows "Loading agents…" while the legacy fallback is in flight, then the grid once it lands', async () => {
       const projectId = 'p-n5-loading';
       localStorage.setItem('scion-view-project-agents', 'list');
@@ -1982,7 +1977,7 @@ describe('project-detail — agent list window (P1c)', () => {
       expect(el.shadowRoot?.textContent).not.toContain('Loading agents');
     });
 
-    it("N2'' (round 3 review): a lifecycle refresh in grid with a phase filter matching nothing shows the filter-empty message, not a loading flicker", async () => {
+    it('a lifecycle refresh in grid with a phase filter matching nothing shows the filter-empty message, not a loading flicker', async () => {
       const projectId = 'p-n2-prime';
       localStorage.setItem('scion-view-project-agents', 'grid'); // not P1-eligible: this.agents is populated via the legacy path
       const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { phase: 'running' }));
@@ -2029,8 +2024,8 @@ describe('project-detail — agent list window (P1c)', () => {
       await new Promise((r) => setTimeout(r, 10));
       await el.updateComplete;
 
-      // Round 3 review N2'': must NOT flicker to "Loading agents…" here —
-      // this.agents already has data, it's just phase-filtered to nothing.
+      // Must NOT flicker to "Loading agents…" here — this.agents already
+      // has data, it's just phase-filtered to nothing.
       expect(el.shadowRoot?.textContent).not.toContain('Loading agents');
       expect(el.shadowRoot?.textContent).toContain('No agents match the current filter');
 

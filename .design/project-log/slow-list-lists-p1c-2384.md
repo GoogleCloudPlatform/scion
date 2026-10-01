@@ -124,12 +124,12 @@ new file (pass), `npx vitest run` (full suite, pass).
 
 ## Round 1 review addendum
 
-Review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1c-rev-1.md`
+Review: the round-1 review document (`lists-p1c-rev-1.md`)
 (REQUEST CHANGES: 1 critical, 5 required, 7 non-blocking). All 13 findings
 (B1-B6, N1-N6; N7 no change) fixed in one commit, rebased twice since (P1a
 moved to `043425ef` then `7c6140b0`); final SHA `a055b9f4`. Full mapping of
-each finding to its fix, file and test is in the dev report addendum:
-`gs://scion-xproject-exchange/slow-list/reports/lists-p1c-dev.md`.
+each finding to its fix, file and test is in the dev report
+(`lists-p1c-dev.md`).
 
 Summary of the fixes:
 - **B1 (critical):** the small-state window read a copied agent array, so
@@ -165,11 +165,11 @@ unrelated to this branch (confirmed in the original report).
 
 ## Round 2 review addendum
 
-Review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1c-rev-2.md`
+Review: the round-2 review document (`lists-p1c-rev-2.md`)
 (REQUEST CHANGES: 0 critical, 3 required (B1', B2', B3'), 5 non-blocking
 (N1'-N5')). All 8 findings fixed in one commit, rebased onto P1a's latest
 head (`4cdb0b54`); final SHA `11b6db22`. Full finding-to-fix-to-test mapping
-in the dev report addendum: `gs://scion-xproject-exchange/slow-list/reports/lists-p1c-dev.md`.
+in the dev report addendum (`lists-p1c-dev.md`).
 
 Summary:
 - **B1':** `setViewState` resets `pageIndex` only in the small state, so a
@@ -196,15 +196,14 @@ reproduce this run.
 
 ## Round 3 review addendum
 
-Review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1c-rev-3.md`
+Review: the round-3 review document (`lists-p1c-rev-3.md`)
 (REQUEST CHANGES: 0 critical, 3 required (B1'', B2'', B3''), 3 non-blocking
 (N1''-N3'')). Two were regressions from the round-2 fixes themselves
 (B1''/B2'', from B1'/N1'); B3'' was a pre-existing design §6.3 deviation
 the first two rounds' tests didn't catch. All 8 round-2 findings and the
 two reopened round-1 items (B3, N1) were reconfirmed closed. Fixed in one
 commit, rebased onto P1a's latest head (`6519b424`); final SHA `dca93bc4`.
-Full mapping in the dev report addendum:
-`gs://scion-xproject-exchange/slow-list/reports/lists-p1c-dev.md`.
+Full mapping in the dev report (`lists-p1c-dev.md`).
 
 Summary:
 - **B1'':** `setSmall()` now resets `pageIndex` to 0 when the previous
@@ -235,12 +234,12 @@ Full suite (`npx vitest run --no-file-parallelism`) after the rebase: all
 
 ## Round 4 review addendum
 
-Review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1c-rev-4.md`
+Review: the round-4 review document (`lists-p1c-rev-4.md`)
 (**APPROVE** at `d00261f3`: 0 critical, 0 required, 2 optional (N1''',
 N2'''), 2 nits (N3''', N4''')). All six round-3 findings reconfirmed closed
 with no regression. Fixed in one commit, rebased onto P1a's latest head
 (`44c71d37`); final SHA `e8c8e0747`. Full mapping in the dev report
-addendum: `gs://scion-xproject-exchange/slow-list/reports/lists-p1c-dev.md`.
+addendum (`lists-p1c-dev.md`).
 
 Summary:
 
@@ -270,14 +269,14 @@ Full suite (`npx vitest run --no-file-parallelism`) after the rebase: all
 
 ## Round 5 review addendum
 
-Review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1c-rev-5.md`
+Review: the round-5 review document (`lists-p1c-rev-5.md`)
 (**APPROVE** at `facf6486`: 0 critical, 0 required, 2 optional (N1'''',
 N2''''), 2 nits). Range-diff confirmed a pure rebase (all 7 round-4
 commits patch-identical). N2'''/N3'''/N4''' reconfirmed closed; N1''' was
 closed for the non-OK-response path as filed, but two adjacent failure
 paths could still replay a stale cursor. Fixed in one commit, rebased onto
 P1a's latest head (`987d2969`); final SHA `243bb5bbb`. Full mapping in the
-dev report addendum: `gs://scion-xproject-exchange/slow-list/reports/lists-p1c-dev.md`.
+dev report addendum (`lists-p1c-dev.md`).
 
 Summary:
 
@@ -304,3 +303,52 @@ Full suite (`npx vitest run --no-file-parallelism`) after the rebase: all
 the pre-existing `agent-create-projects.test.ts` flake.
 
 Round 6 is the last review round allowed per the EM's instruction.
+
+## Round 6 review addendum
+
+Review: the round-6 (final) review document (`lists-p1c-rev-6.md`)
+(**APPROVE** at `4ff62895`: 0 critical, 0 required, 1 optional (N1), 2 nits,
+plus an FYI gap on a sibling trigger). Range-diff confirmed the round-5
+rebase was pure. All 4 round-5 items (N1''''/N2'''' optional, nit 1/nit 2)
+reconfirmed closed. Two commits this round, per the EM's instruction:
+
+- **Commit A (code + tests)**, SHA `49c491fc5`:
+  - **N1:** `invalidateCursors()` now bumps `generation` and clears the
+    loading flag before notifying, the same way `setPaged`/`setSmall` do.
+    Closes a race the round-5 fix introduced: a window fetch already in
+    flight when a view-change fails could land afterward and, if it
+    happened to be an index-0 fetch, re-validate the cursor stack using a
+    cursor minted under the now-stale params. Unit test (deferred
+    `fetchPage`, invalidate mid-flight, resolve, assert `hasNext` stays
+    false) fails without the fix.
+  - **nit 1:** the index-0-revalidation test now gives the refetched page a
+    `nextCursor` and asserts `hasNext` becomes `true` and that the next
+    navigation uses that fresh cursor, instead of only checking a `false`
+    value that held regardless of whether revalidation ran at all.
+  - **nit 2:** added a legacy-fallback-rejects-with-a-network-error variant
+    of the 422-then-legacy-failure test, covering the one failure branch
+    that previously had no test.
+  - **FYI (label-commit revert on network error):** hoisted the
+    `committedLabel` revert into the same shared failure helper used for
+    cursor invalidation (renamed `onViewChangeFailed` to
+    `onAgentsLoadFailed`), so a label commit that fails with a network
+    error reverts the label the same way a non-OK response already did.
+    Component test added that fails without it.
+  - Reran all probes from rounds 1-6 (35 tests across 7 probe files)
+    against this fix; all pass, including the two R6 cases that
+    reproduced the N1 race and the FYI gap before the fix.
+- **Commit B (comment-only hygiene)**, the commit immediately on top of A
+  (see `git log` on this branch for its SHA): stripped internal
+  review/design IDs (round numbers, B/N/R/W/Q/E/D/T
+  finding IDs, nit numbers, "P1a FYI", phase labels like P1c/P1a/P5, and
+  `gs://` paths) from source comments, test names and assertion messages
+  across all 9 touched `web/` files, describing the invariant in plain
+  language instead and keeping `§N` design-section references where they
+  read naturally. `gs://` paths in this project log were replaced with
+  plain file-name references; round/finding IDs were left as-is here,
+  since this log is the one place they are still useful shorthand. No
+  logic changed in this commit.
+
+Full finding-to-fix-to-test mapping and gate output for commit A in the dev
+report (`lists-p1c-dev.md`). Per the EM's instruction this is the final
+review round.

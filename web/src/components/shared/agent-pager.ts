@@ -15,14 +15,14 @@
  */
 
 /**
- * Agent list pager (design §6.1, §6.2, Q4).
+ * Agent list pager (design §6.1, §6.2).
  *
  * "a-b of N", Prev/Next, a page size of 25/50/100 (default 25, persisted),
  * loading and error states, the paged-state "may have changed - Refresh"
  * chip, and the capped-drain banner. Used by the project page's list view
- * in the paged window state (design §11 P1c); the capped banner and
- * count-only wording are plumbed through for later phases (P5/P6) but are
- * never reached while P1c only implements the small and paged states.
+ * in the paged window state (design §11); the capped banner and
+ * count-only wording are plumbed through for a later capped-drain phase
+ * but are never reached while only the small and paged states exist.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -30,7 +30,7 @@ import { customElement, property } from 'lit/decorators.js';
 
 export type AgentPagerTotal = number | { loaded: number; capped: true };
 
-/** Exported so the host (the single owner of the persisted value, round 1 review B4) can validate a stored size against the same source of truth. */
+/** Exported so the host (the single owner of the persisted value) can validate a stored size against the same source of truth. */
 export const AGENT_PAGER_PAGE_SIZES = [25, 50, 100] as const;
 export type AgentPagerPageSize = (typeof AGENT_PAGER_PAGE_SIZES)[number];
 
@@ -43,8 +43,7 @@ export class ScionAgentPager extends LitElement {
   /**
    * Rows before this page, i.e. `a - 1` in "a-b of N" (design §6.1). Not
    * assumed to be `pageIndex * pageSize` — a page can be short (design §5.3
-   * step 5a, E2), so the host tracks the real running offset (round 2
-   * review N2').
+   * step 5a), so the host tracks the real running offset.
    */
   @property({ type: Number })
   rangeStart = 0;
@@ -78,8 +77,8 @@ export class ScionAgentPager extends LitElement {
 
   /**
    * localStorage key to persist a page-size change to; empty disables
-   * persistence. This component is otherwise fully controlled (round 1
-   * review B4): it never reads storage itself on connect, so the host is
+   * persistence. This component is otherwise fully controlled: it never
+   * reads storage itself on connect, so the host is
    * the single source of truth for `pageSize` — including the value used
    * for the first request's `limit`, which only the host can know about
    * before this component even exists.
@@ -140,7 +139,7 @@ export class ScionAgentPager extends LitElement {
   }
 
   private onChipClick(): void {
-    // Disabled while loading (round 3 review B2'): a refresh click during an
+    // Disabled while loading: a refresh click during an
     // in-flight page-level load would race it the same way Prev/Next would.
     if (this.loading) return;
     this.dispatchEvent(new Event('chip-click'));

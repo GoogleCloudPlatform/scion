@@ -78,7 +78,7 @@ import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
 
-/** A request/refresh trigger, per design §4.3; `loadData`/`fetchAndMergeAgents` both funnel into `loadAgentsForView` (design §11 P1c). */
+/** A request/refresh trigger, per design §4.3; `loadData`/`fetchAndMergeAgents` both funnel into `loadAgentsForView` (design §11). */
 type AgentsViewTrigger = 'page-load' | 'label-commit' | 'lifecycle-refresh' | 'view-change';
 
 /** The project endpoint's sorted-mode response shape (design §4.6). */
@@ -230,8 +230,9 @@ export class ScionPageProjectDetail extends LitElement {
   /**
    * The label filter as of the last commit (`sl-change`/`sl-clear`), as
    * opposed to `labelFilter`, which also tracks every keystroke for local
-   * preview (design §6.3). Used to decide P1 eligibility and request
-   * parameters, and to key the per-label 422 refusal memory below.
+   * preview (design §6.3). Used to decide eligibility for the sorted/paged
+   * request path and request parameters, and to key the per-label 422
+   * refusal memory below.
    */
   private committedLabel = '';
 
@@ -242,26 +243,26 @@ export class ScionPageProjectDetail extends LitElement {
    */
   private sortedRefusedForLabel: string | null = null;
 
-  /** `committedLabel`'s value just before a label commit, so a non-OK response can restore it (round 1 review N3) instead of leaving every later request re-sending a rejected label. */
+  /** `committedLabel`'s value just before a label commit, so a failed request can restore it instead of leaving every later request re-sending a rejected label. */
   private labelBeforeCommit = '';
 
-  /** Bumped at the start of every page-level agents load; checked after each `await` so an older trigger's response can never overwrite a newer one (round 1 review B5). */
+  /** Bumped at the start of every page-level agents load; checked after each `await` so an older trigger's response can never overwrite a newer one. */
   private agentsLoadGen = 0;
 
-  /** Aborts whatever page-level agents request (not the window's own page fetches) was still in flight when a new trigger starts (round 1 review B5). */
+  /** Aborts whatever page-level agents request (not the window's own page fetches) was still in flight when a new trigger starts. */
   private agentsAbortController: AbortController | null = null;
 
   /**
    * Whether a page-level agents load (`loadAgentsForView`/`loadLegacyAgents`)
-   * is in flight. Ref-counted (round 3 review N1'', closing the round-2
-   * "an older trigger can clear it early" gap): `beginLoadingIndicator`/
-   * `endLoadingIndicator` increment/decrement `agentsLoadingCount`, so it
-   * stays `true` for as long as *any* page-level load (including a nested
-   * 422-or-truncated-legacy fallback) is in flight, regardless of how many
-   * overlapping triggers are racing. Used for two things: the "Loading
-   * agents…" indicator (round 2 review N5') and, combined with
-   * `agentWindow.loading`, disabling pager navigation and the chip while
-   * either kind of request is in flight (round 3 review B2'').
+   * is in flight. Ref-counted, so a single plain boolean cannot be cleared
+   * early by an older trigger while a newer one is still in flight:
+   * `beginLoadingIndicator`/`endLoadingIndicator` increment/decrement
+   * `agentsLoadingCount`, so it stays `true` for as long as *any*
+   * page-level load (including a nested 422-or-truncated-legacy fallback)
+   * is in flight, regardless of how many overlapping triggers are racing.
+   * Used for two things: the "Loading agents…" indicator, and, combined
+   * with `agentWindow.loading`, disabling pager navigation and the chip
+   * while either kind of request is in flight.
    */
   @state()
   private agentsLoading = false;
@@ -279,9 +280,9 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   /**
-   * Page size for the list view's window (design Q4), persisted under
-   * `scion-pagesize-project-agents`. Read once in `connectedCallback`
-   * (round 1 review B4) — `<scion-agent-pager>` is a controlled component
+   * Page size for the list view's window, persisted under
+   * `scion-pagesize-project-agents`. Read once in `connectedCallback` —
+   * `<scion-agent-pager>` is a controlled component
    * and does not read storage itself, so this is the single source of
    * truth both for the first request's `limit` and for the pager's
    * rendered value.
@@ -293,7 +294,7 @@ export class ScionPageProjectDetail extends LitElement {
    * Whether the list view currently has valid window data (small or paged)
    * for the current view state, and so should render from `agentWindow`
    * with a pager instead of the legacy unsliced `displayAgents` (design
-   * §11 P1c). False right after a legacy load that was truncated
+   * §11). False right after a legacy load that was truncated
    * (`nextCursor` present, > 500 candidates) — see `loadLegacyAgents`.
    */
   @state()
@@ -304,12 +305,11 @@ export class ScionPageProjectDetail extends LitElement {
   private windowTick = 0;
 
   /**
-   * The list view's window (design §4.3, §6.1). P1c implements only the
-   * small and paged states (design §11); held and capped land in P5 with
-   * `agent-drain.ts`. The small state reads `this.agents` live through
-   * `getHeldAgents` rather than a copy (round 1 review B1), so an SSE
-   * update applied by `onAgentsUpdated` is visible immediately with no
-   * re-adoption step.
+   * The list view's window (design §4.3, §6.1). Only the small and paged
+   * states exist today (design §11); held and capped land once
+   * `agent-drain.ts` exists. The small state reads `this.agents` live
+   * through `getHeldAgents` rather than a copy, so an SSE update applied by
+   * `onAgentsUpdated` is visible immediately with no re-adoption step.
    */
   private agentWindow = new AgentListWindow({
     viewState: {
@@ -341,9 +341,9 @@ export class ScionPageProjectDetail extends LitElement {
 
   /**
    * "Agents"/"Running" stats and Stop-all visibility: the member index
-   * while genuinely paged, or `this.agents` otherwise (design §6.2, §11
-   * P1c). Gated on `state !== 'paged'`, not on any particular non-paged
-   * value (round 1 review B2) — `this.agents` is correct for `'small'`
+   * while genuinely paged, or `this.agents` otherwise (design §6.2, §11).
+   * Gated on `state !== 'paged'`, not on any particular non-paged
+   * value — `this.agents` is correct for `'small'`
    * whether it holds a complete fit/legacy set or a truncated legacy one,
    * exactly as grid/tree already render it.
    */
@@ -357,7 +357,7 @@ export class ScionPageProjectDetail extends LitElement {
     };
   }
 
-  /** P1-eligible view state (design §11 P1c): list view, `updated` sort, and a label that is empty or contains `=`. */
+  /** P1-eligible view state (design §11): list view, `updated` sort, and a label that is empty or contains `=`. */
   private isP1Eligible(): boolean {
     if (this.viewMode !== 'list') return false;
     if (this.sortField !== 'updated') return false;
@@ -1138,7 +1138,7 @@ export class ScionPageProjectDetail extends LitElement {
       }
     }
 
-    // Read the persisted page size (round 1 review B4) before the window's
+    // Read the persisted page size before the window's
     // view state is synced and the first request is sent, so both the
     // request's `limit` and the pager's rendered size start out correct —
     // `<scion-agent-pager>` is a controlled component and no longer reads
@@ -1346,7 +1346,7 @@ export class ScionPageProjectDetail extends LitElement {
     // The small state's `this.agents` rebuild is skipped while the window is
     // paged: `this.agents` is intentionally empty then, and live updates for
     // the list view instead go through `agentWindow.applyChanges` (design
-    // §11 P1c, §6.2).
+    // §11, §6.2).
     if (this.agentWindow.state === 'paged') return;
     const updatedAgents = stateManager.getAgents();
     // Merge SSE agent deltas into local agent list
@@ -1403,7 +1403,7 @@ export class ScionPageProjectDetail extends LitElement {
 
     try {
       // Load the project and the agents window's one first request in
-      // parallel (design §11 P1c: `loadData` and `fetchAndMergeAgents` both
+      // parallel (design §11: `loadData` and `fetchAndMergeAgents` both
       // funnel into `loadAgentsForView`).
       const [projectResponse] = await Promise.all([
         apiFetch(`/api/v1/projects/${this.projectId}`),
@@ -1507,7 +1507,7 @@ export class ScionPageProjectDetail extends LitElement {
     });
   }
 
-  /** Label commit and lifecycle/stop-all refresh both land here, same as `loadData` (design §11 P1c). */
+  /** Label commit and lifecycle/stop-all refresh both land here, same as `loadData` (design §11). */
   private async fetchAndMergeAgents(
     trigger: AgentsViewTrigger = 'lifecycle-refresh'
   ): Promise<void> {
@@ -1516,7 +1516,7 @@ export class ScionPageProjectDetail extends LitElement {
 
   /**
    * Starts a new page-level agents load: bumps the stale-response guard
-   * (round 1 review B5 — two overlapping triggers, e.g. a label commit
+   * (two overlapping triggers, e.g. a label commit
    * racing a lifecycle refresh, must not let the older response win) and
    * aborts whatever page-level request was still in flight. Returns the
    * generation to check after every `await` and the signal to pass to
@@ -1560,7 +1560,7 @@ export class ScionPageProjectDetail extends LitElement {
 
   /**
    * The project page's single request-choosing function (design §4.3,
-   * §11 P1c). Called exactly once per trigger by `loadData` and
+   * §11). Called exactly once per trigger by `loadData` and
    * `fetchAndMergeAgents`, and by `syncAgentsForViewState` for a view-state
    * change that needs a fresh paged request.
    */
@@ -1607,7 +1607,7 @@ export class ScionPageProjectDetail extends LitElement {
     if (response.status === 422) {
       // Candidate ceiling (design §4.3, §5.3 step 0): remember the refusal
       // for this committed label and fall back to a drain (today's legacy
-      // load, until agent-drain.ts lands in P5).
+      // load, until agent-drain.ts exists).
       this.sortedRefusedForLabel = label;
       await this.loadLegacyAgents(trigger, { gen, signal });
       return;
@@ -1620,7 +1620,7 @@ export class ScionPageProjectDetail extends LitElement {
         this.listViewUsesWindow = false;
       }
       this.onAgentsLoadFailed(trigger);
-      // Other triggers keep the previous data (design §6.3 N2).
+      // Other triggers keep the previous data (design §6.3).
       return;
     }
 
@@ -1640,7 +1640,7 @@ export class ScionPageProjectDetail extends LitElement {
       this.listViewUsesWindow = true;
     } else {
       // Paged: `this.agents` stays empty, and grid/tree/stats/Stop-all read
-      // the member index through `agentStats` instead (design §11 P1c).
+      // the member index through `agentStats` instead (design §11).
       this.agents = [];
       stateManager.seedAgents(data.agents, { partial: true });
       this.agentWindow.setPaged(
@@ -1709,7 +1709,7 @@ export class ScionPageProjectDetail extends LitElement {
       }
       this.onAgentsLoadFailed(trigger);
       // Other triggers keep the previous data, with today's client label
-      // filter applied to it (design §6.3 N2).
+      // filter applied to it (design §6.3).
       return;
     }
 
@@ -1733,9 +1733,9 @@ export class ScionPageProjectDetail extends LitElement {
 
     stateManager.seedAgents(this.agents);
 
-    // Exit the window out of `'paged'` unconditionally (round 1 review B2):
-    // a truncated legacy set is still rendered through `this.agents`
-    // directly (grid/tree, exactly as before P1c), and leaving the window
+    // Exit the window out of `'paged'` unconditionally: a truncated legacy
+    // set is still rendered through `this.agents` directly (grid/tree,
+    // exactly as before the window existed), and leaving the window
     // `'paged'` here is what caused `onAgentsUpdated` to keep skipping and
     // `agentStats` to keep reading a member index seeded for a now-stale
     // request. `listViewUsesWindow` alone still gates whether the *list
@@ -1744,7 +1744,7 @@ export class ScionPageProjectDetail extends LitElement {
     this.listViewUsesWindow = !nextCursor;
   }
 
-  /** `true` iff `err` is the `AbortError` from an intentionally superseded request (round 1 review B5). */
+  /** `true` iff `err` is the `AbortError` from an intentionally superseded request. */
   private isAbortError(err: unknown): boolean {
     return err instanceof Error && err.name === 'AbortError';
   }
@@ -1776,8 +1776,8 @@ export class ScionPageProjectDetail extends LitElement {
 
   /**
    * The single place that decides whether a phase, sort, page-size or view
-   * change needs a request (round 1 review B3 — the window's own
-   * `setViewState` never fetches). Covers both directions of the §11 P1c
+   * change needs a request (the window's own
+   * `setViewState` never fetches). Covers both directions of the §11
    * interim-cost transitions: becoming P1-eligible with no adopted data
    * yet, or a paged view state whose server-side sort/phase just changed
    * (one fresh request either way); and leaving P1-eligible while the
@@ -1927,7 +1927,7 @@ export class ScionPageProjectDetail extends LitElement {
     }
 
     if (action === 'delete') {
-      // `this.agents` is empty while paged (round 1 review N4): fall back to
+      // `this.agents` is empty while paged: fall back to
       // the window's current page, then to state (an off-page agent, e.g.
       // acted on right after a chip click elsewhere).
       const agentName =
@@ -2123,7 +2123,7 @@ export class ScionPageProjectDetail extends LitElement {
           @sl-input=${(e: Event) => {
             this.labelFilter = (e.target as HTMLElement & { value: string }).value;
             // Live preview only — no request per keystroke (design §4.3, §6.4
-            // row 8). `setViewState` never fetches (round 1 review B3), so
+            // row 8). `setViewState` never fetches, so
             // this is always free regardless of window state.
             this.agentWindow.setViewState({ label: this.labelFilter });
           }}
@@ -2698,11 +2698,10 @@ export class ScionPageProjectDetail extends LitElement {
               ? this.renderAgentWindowList()
               : this.displayAgents.length === 0
                 ? // "Loading…" only for the paged -> grid/tree gap, where
-                  // `this.agents` itself is still empty (round 3 review
-                  // N2'' — gating on `displayAgents` alone flickered on
-                  // every lifecycle refresh whenever the phase filter
-                  // simply matched nothing, since `this.agents` already had
-                  // data then).
+                  // `this.agents` itself is still empty — gating on
+                  // `displayAgents` alone flickered on every lifecycle
+                  // refresh whenever the phase filter simply matched
+                  // nothing, since `this.agents` already had data then.
                   this.agents.length === 0 && this.agentsLoading
                   ? html`<div class="empty-filter-state">Loading agents…</div>`
                   : html`<div class="empty-filter-state">No agents match the current filter.</div>`
@@ -3007,7 +3006,7 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   /**
-   * The list view's windowed rendering (design §4.3, §6.1, §11 P1c): the
+   * The list view's windowed rendering (design §4.3, §6.1, §11): the
    * server page (paged) or a local slice of today's `displayAgents` (small),
    * plus the pager. Used whenever `listViewUsesWindow` is true, in both the
    * small and paged states.
@@ -3050,18 +3049,17 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   /**
-   * A second, defense-in-depth guard for Prev/Next/chip-click (round 3
-   * review B2''), on top of the `.loading=` binding that disables the
-   * pager's own button/chip. This specifically protects against anything
-   * that fires the pager's `prev`/`next`/`chip-click` events without going
-   * through its own guarded `onPrev`/`onNext`/`onChipClick` methods (the
-   * pager's own guard covers a real click; this one covers an event
-   * dispatched directly on the host). Unlike the removed round-2 `onPagerNav`,
-   * this never bumps `agentsLoadGen` — it simply refuses to navigate while
-   * either the window's own fetch or, while paged, a page-level load is in
-   * flight, so the mismatched-cursor race (design §4.4) can never start in
-   * the first place. A page-level load alone never gates small-state
-   * navigation (round 4 review N2'''): small-state Prev/Next is a purely
+   * A second, defense-in-depth guard for Prev/Next/chip-click, on top of
+   * the `.loading=` binding that disables the pager's own button/chip. This
+   * specifically protects against anything that fires the pager's
+   * `prev`/`next`/`chip-click` events without going through its own
+   * guarded `onPrev`/`onNext`/`onChipClick` methods (the pager's own guard
+   * covers a real click; this one covers an event dispatched directly on
+   * the host). This never bumps `agentsLoadGen` — it simply refuses to
+   * navigate while either the window's own fetch or, while paged, a
+   * page-level load is in flight, so the mismatched-cursor race (design
+   * §4.4) can never start in the first place. A page-level load alone
+   * never gates small-state navigation: small-state Prev/Next is a purely
    * local slice of `display` and sends no request, so a held refresh or
    * lifecycle load has nothing to race.
    */
