@@ -2990,7 +2990,16 @@ runtimes:
 // New() (e.g. a test literal, or some future construction path) — but
 // resolveManagerForOpts falls back to that exact same function rather than
 // a stand-in, so the fallback resolves identically to production.
+//
+// Isolated from ambient SCION_* env and HOME: without that isolation, an
+// ambient SCION_AUTO_EXPOSE_PORTS collides with the struct-typed
+// auto_expose_ports settings key, LoadEffectiveSettings fails to decode,
+// and resolveManagerForOpts returns the default manager before ever
+// reaching the nil-resolver fallback this test is meant to exercise.
 func TestResolveManagerForOpts_NilRuntimeResolverFallsBack(t *testing.T) {
+	clearSCIONEnv(t)
+	t.Setenv("HOME", t.TempDir())
+
 	tmpDir := t.TempDir()
 	projectPath := filepath.Join(tmpDir, ".scion")
 	if err := os.MkdirAll(projectPath, 0755); err != nil {
