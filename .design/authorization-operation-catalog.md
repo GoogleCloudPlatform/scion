@@ -3567,8 +3567,6 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/chat/prefs` |
 | http_route | PUT | `/api/v1/chat/prefs` |
-| http_route | GET | `/api/v1/chat/threads` |
-| http_route | POST | `/api/v1/chat/threads/{id}/read` |
 | http_route | GET | `/api/v1/chat/spaces` |
 | http_route | GET | `/api/v1/chat/spaces/{id}/threads` |
 | http_route | GET | `/api/v1/chat/conversations/{id}/messages` |

@@ -917,9 +917,8 @@ var Catalog = []OperationSpec{
 		Description: "Send a message to an agent",
 		EntryPoints: []EntryPoint{
 			// "/api/v1/chat/threads/{id}/messages" was never a registered
-			// route (handleChatThreadRoutes, handlers_chat.go, only accepts
-			// POST .../{agentId}/read); there is no live HTTP entry point
-			// for this operation today, only the broker-call path below.
+			// route; there is no live HTTP entry point for this operation
+			// today, only the broker-call path below.
 			{Kind: EntryPointBrokerCall, Pattern: "broker.inbound"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalBroker},
@@ -2488,12 +2487,6 @@ var Catalog = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/prefs", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/prefs", Method: "PUT"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/threads", Method: "GET"},
-			// "/chat/threads/{id}" (bare) was never a registered route;
-			// handleChatThreadRoutes (deprecated wave-1) only accepts POST
-			// .../{agentId}/read, on the same project.read permission
-			// (route_metadata.go: chat.threads.byId).
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/threads/{id}/read", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/spaces", Method: "GET"},
 			// handleChatSpaceRoutes requires a sub-action after the space
 			// ID; there is no bare GET "/chat/spaces/{id}".

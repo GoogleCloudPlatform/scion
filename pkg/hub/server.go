@@ -5124,10 +5124,6 @@ func (s *Server) registerRoutes() {
 		// Chat thread prefs (Phase 3 — visibility mode persistence)
 		s.mux.HandleFunc("/api/v1/chat/prefs", s.guarded("/api/v1/chat/prefs", s.handleChatPrefs))
 
-		// Chat thread endpoints (Phase 5 — thread rail, legacy)
-		s.mux.HandleFunc("/api/v1/chat/threads", s.guarded("/api/v1/chat/threads", s.handleChatThreads))
-		s.mux.HandleFunc("/api/v1/chat/threads/", s.guarded("/api/v1/chat/threads/", s.handleChatThreadRoutes))
-
 		// Wave-2 chat endpoints (conversation REST API)
 		s.mux.HandleFunc("/api/v1/chat/spaces", s.guarded("/api/v1/chat/spaces", s.handleChatSpaces))
 		s.mux.HandleFunc("/api/v1/chat/spaces/", s.guarded("/api/v1/chat/spaces/", s.handleChatSpaceRoutes))

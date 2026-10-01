@@ -141,8 +141,6 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/messages/":                              "authenticated:messages",
 	"/api/v1/message-channels":                       "authenticated:messages",
 	"/api/v1/chat/prefs":                             "policy:chat",
-	"/api/v1/chat/threads":                           "policy:chat",
-	"/api/v1/chat/threads/":                          "policy:chat",
 	"/api/v1/chat/spaces":                            "policy:chat",
 	"/api/v1/chat/spaces/":                           "policy:chat",
 	"/api/v1/chat/conversations/":                    "policy:chat",
