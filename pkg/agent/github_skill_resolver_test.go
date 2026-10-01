@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1693,26 +1694,27 @@ func (s *stubSkillResolver) Resolve(_ context.Context, _ []api.SkillReference, _
 	return s.result, nil
 }
 
-func TestGitHubSkillResolver_ShouldBypassPrimary(t *testing.T) {
+func TestGitHubSkillResolver_PreferFallback(t *testing.T) {
 	cases := []struct {
-		name   string
-		uri    string
-		creds  map[string]string
-		bypass bool
+		name    string
+		uri     string
+		creds   map[string]string
+		prefers bool
 	}{
 		{"explicit ?token= param", "gh://owner/repo/skill?token=MY_TOKEN", nil, true},
 		{"repo convention credential present", "gh://owner/repo/skill", map[string]string{"GH_OWNER__REPO": "x"}, true},
 		{"owner convention credential present", "gh://owner/repo/skill", map[string]string{"GH_OWNER": "x"}, true},
 		{"no credential override, default token", "gh://owner/repo/skill", nil, false},
-		{"unrelated credential present does not bypass", "gh://owner/repo/skill", map[string]string{"GH_OTHER": "x"}, false},
-		{"invalid URI never bypasses", "not-a-gh-uri", nil, false},
+		{"unrelated credential present routes through the primary", "gh://owner/repo/skill", map[string]string{"GH_OTHER": "x"}, false},
+		{"empty-value credential routes through the primary", "gh://owner/repo/skill", map[string]string{"GH_OWNER": ""}, false},
+		{"invalid URI routes through the primary", "not-a-gh-uri", nil, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &GitHubSkillResolver{provisionCredentials: tc.creds}
-			got := r.ShouldBypassPrimary(api.SkillReference{URI: tc.uri})
-			if got != tc.bypass {
-				t.Errorf("ShouldBypassPrimary(%q) = %v, want %v", tc.uri, got, tc.bypass)
+			got := r.PreferFallback(api.SkillReference{URI: tc.uri})
+			if got != tc.prefers {
+				t.Errorf("PreferFallback(%q) = %v, want %v", tc.uri, got, tc.prefers)
 			}
 		})
 	}
@@ -1730,12 +1732,12 @@ func (f *failIfCalledResolver) Resolve(_ context.Context, refs []api.SkillRefere
 	return nil, nil
 }
 
-// TestGitHubSkillResolver_RouteFilter_CredentialedRefBypassesHubEntirely is
-// the end-to-end acceptance test for R: a ref that needs a credential the Hub
-// cannot hold (here, a GH_OWNER convention credential) must be routed
-// straight to the local GitHub resolver through RoutingSkillResolver, making
+// TestGitHubSkillResolver_RouteFilter_CredentialedRefRoutesDirectlyToFallback
+// is the end-to-end acceptance test for R: a ref that needs a credential the
+// Hub cannot hold (here, a GH_OWNER convention credential) must be routed
+// directly to the local GitHub resolver through RoutingSkillResolver, making
 // zero calls to the primary (hub) resolver.
-func TestGitHubSkillResolver_RouteFilter_CredentialedRefBypassesHubEntirely(t *testing.T) {
+func TestGitHubSkillResolver_RouteFilter_CredentialedRefRoutesDirectlyToFallback(t *testing.T) {
 	server, mux := newTestGitHubServer(t)
 
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
@@ -1773,5 +1775,118 @@ func TestGitHubSkillResolver_RouteFilter_CredentialedRefBypassesHubEntirely(t *t
 	}
 	if len(result.Resolved) != 1 {
 		t.Fatalf("expected 1 resolved skill, got %d", len(result.Resolved))
+	}
+}
+
+// TestGitHubSkillResolver_CrossProjectCredentialIsolation is the permanent
+// regression test for the cross-project flight-merge defect: two projects
+// that both define a same-named convention credential (GH_ACME), with
+// different values and different repo access, must never share a
+// single-flight result. Project B must never receive content fetched with
+// project A's credential.
+//
+// Before cache-key (flight identity) scoping was fixed to include
+// ResolveOpts.ProjectID, both projects' resolvers computed the identical,
+// unscoped flight identity "default" for this ref, so project B's resolve
+// joined project A's in-flight fetch and was served project A's result
+// (including file Content) — regardless of B's own credential having no
+// access to the repo.
+func TestGitHubSkillResolver_CrossProjectCredentialIsolation(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	proceed := make(chan struct{})
+
+	// Only secret-A (project A's credential) is accepted; secret-B (project
+	// B's) gets a 404, exactly as it would against the real GitHub API for a
+	// repo it has no access to.
+	authOK := func(r *http.Request) bool { return r.Header.Get("Authorization") == "Bearer secret-A" }
+	mux.HandleFunc("/repos/acme/private/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		if !authOK(r) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		enterOnce.Do(func() { close(entered) })
+		<-proceed
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/acme/private/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+		if !authOK(r) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
+		})
+	})
+	mux.HandleFunc("/raw/acme/private/"+testCommitSHA+"/skills/s/SKILL.md", func(w http.ResponseWriter, r *http.Request) {
+		if !authOK(r) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte("SECRET"))
+	})
+
+	// A single shared cache, exactly as the broker wires it (one
+	// GitHubResolutionCache singleton serving every project).
+	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	mk := func(tok string) *GitHubSkillResolver {
+		r := newTestGitHubResolver(server)
+		r.token = ""
+		r.provisionCredentials = map[string]string{"GH_ACME": tok}
+		r.resolutionCache = cache
+		return r
+	}
+	resolverA, resolverB := mk("secret-A"), mk("secret-B")
+	ref := api.SkillReference{URI: "gh://acme/private/s@main"}
+
+	var wg sync.WaitGroup
+	var resultA *ResolveResult
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		resultA, _ = resolverA.Resolve(context.Background(), []api.SkillReference{ref}, ResolveOpts{ProjectID: "project-A"})
+	}()
+
+	<-entered // project A's fetch has started and is blocked on proceed
+
+	var resultB *ResolveResult
+	doneB := make(chan struct{})
+	go func() {
+		resultB, _ = resolverB.Resolve(context.Background(), []api.SkillReference{ref}, ResolveOpts{ProjectID: "project-B"})
+		close(doneB)
+	}()
+
+	// With project scoping, B's flight is independent of A's: its commits
+	// call fails authOK immediately (404), with no need to wait on proceed at
+	// all. If B were instead coalesced into A's flight (the defect), this
+	// would hang until proceed is closed below — the select gives that
+	// failure mode a clean, bounded failure instead of a test-binary hang.
+	select {
+	case <-doneB:
+	case <-time.After(5 * time.Second):
+		t.Fatal("project B's resolve did not return independently of project A's in-flight fetch — it may have been incorrectly coalesced")
+	}
+
+	close(proceed)
+	wg.Wait()
+
+	if len(resultB.Resolved) != 0 {
+		t.Fatalf("project B must never receive content resolved with project A's credential, got: %+v", resultB.Resolved[0])
+	}
+	if len(resultB.Errors) != 1 {
+		t.Fatalf("expected project B to get its own resolve error, got %d errors and %d resolved", len(resultB.Errors), len(resultB.Resolved))
+	}
+
+	if len(resultA.Resolved) != 1 {
+		t.Fatalf("expected project A to resolve successfully, got errors: %+v", resultA.Errors)
+	}
+	if got := string(resultA.Resolved[0].Files[0].Content); got != "SECRET" {
+		t.Errorf("expected project A's content %q, got %q", "SECRET", got)
 	}
 }

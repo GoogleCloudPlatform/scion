@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -250,8 +251,12 @@ func TestGitHubResolutionCache_ExpiredNotLoaded(t *testing.T) {
 // for single-flight: N concurrent resolutions of the same ref must make
 // exactly one upstream fetch. Synchronization is via channels (entered,
 // proceed), not sleeps: the test blocks until the fetch has actually started
-// before allowing it to complete, so every goroutine is guaranteed to have
-// called ResolveWithFetch before the single fetch is allowed to finish.
+// — proving at least one real concurrent caller reached it — before allowing
+// it to complete. A goroutine that is still scheduled-but-not-run when
+// proceed closes does not invalidate the assertion either: it would pass
+// through ResolveWithFetch's own re-check of the now-populated cache instead
+// of calling fetch again, so fetchCount == 1 holds regardless of exactly how
+// many of the n goroutines had started before the release.
 func TestGitHubResolutionCache_ResolveWithFetch_Coalesces(t *testing.T) {
 	dir := t.TempDir()
 	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
@@ -365,14 +370,74 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCap(t *testing.T) {
 	}
 }
 
-// TestGitHubResolutionCache_ResolveWithFetch_CancelledWaiterDoesNotFailFlight
+// TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCapIsolatedAcrossProjects
+// is the acceptance test that two different credential identities (as
+// distinct projects now produce, see flightIdentity in
+// github_skill_resolver.go) do not share one slot pool: saturating one
+// identity's cap must not block a fetch under a different identity.
+func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCapIsolatedAcrossProjects(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	// Saturate project A's cap.
+	enteredA := make(chan struct{}, maxInFlightPerCredential)
+	proceedA := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < maxInFlightPerCredential; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fetch := func(ctx context.Context) (ResolvedSkill, error) {
+				enteredA <- struct{}{}
+				<-proceedA
+				return ResolvedSkill{Name: fmt.Sprintf("a-%d", i)}, nil
+			}
+			_, _ = cache.ResolveWithFetch(context.Background(),
+				fmt.Sprintf("projA-cache-%d", i), fmt.Sprintf("projA-flight-%d", i), "project-A|default", false, fetch)
+		}()
+	}
+	for i := 0; i < maxInFlightPerCredential; i++ {
+		<-enteredA
+	}
+
+	// A different project's identity must be able to run its own fetch
+	// immediately, even though project A's cap is fully saturated.
+	enteredB := make(chan struct{})
+	doneB := make(chan struct{})
+	go func() {
+		fetch := func(ctx context.Context) (ResolvedSkill, error) {
+			close(enteredB)
+			return ResolvedSkill{Name: "b"}, nil
+		}
+		_, _ = cache.ResolveWithFetch(context.Background(), "projB-cache", "projB-flight", "project-B|default", false, fetch)
+		close(doneB)
+	}()
+
+	select {
+	case <-enteredB:
+	case <-time.After(5 * time.Second):
+		t.Fatal("project B's fetch never started — it appears to share project A's saturated credential cap")
+	}
+	<-doneB
+
+	close(proceedA)
+	wg.Wait()
+}
+
+// TestGitHubResolutionCache_ResolveWithFetch_CancelledWaiterReturnsPromptly
 // is the acceptance test for "a cancelled waiter does not cancel the shared
-// flight": one of two concurrent callers for the same ref has its own context
-// cancelled while the flight is in progress. Both callers must still get the
-// successful result — whichever of the two happens to be the single-flight
-// leader, the fetch runs on a context detached from either caller's
-// cancellation (see coalesceFetch).
-func TestGitHubResolutionCache_ResolveWithFetch_CancelledWaiterDoesNotFailFlight(t *testing.T) {
+// flight", with both halves of that claim checked: one of two concurrent
+// callers for the same ref has its own context cancelled while the flight is
+// in progress.
+//   - The cancelled caller (A) must return ctx.Err() promptly — before the
+//     flight itself finishes — rather than blocking for the whole flight.
+//   - The flight must keep running for the other caller (B), which must
+//     still get the successful result once it completes.
+func TestGitHubResolutionCache_ResolveWithFetch_CancelledWaiterReturnsPromptly(t *testing.T) {
 	dir := t.TempDir()
 	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
 	if err != nil {
@@ -391,32 +456,41 @@ func TestGitHubResolutionCache_ResolveWithFetch_CancelledWaiterDoesNotFailFlight
 	ctxA, cancelA := context.WithCancel(context.Background())
 	ctxB := context.Background()
 
-	var wg sync.WaitGroup
 	var resA, resB ResolvedSkill
 	var errA, errB error
-	wg.Add(2)
+	doneA := make(chan struct{})
 	go func() {
-		defer wg.Done()
 		resA, errA = cache.ResolveWithFetch(ctxA, "cancel-key", "cancel-flight", "cancel-cred", false, fetch)
+		close(doneA)
 	}()
+	doneB := make(chan struct{})
 	go func() {
-		defer wg.Done()
 		resB, errB = cache.ResolveWithFetch(ctxB, "cancel-key", "cancel-flight", "cancel-cred", false, fetch)
+		close(doneB)
 	}()
 
 	<-entered
-	cancelA() // cancel one waiter's own context while the flight is in progress
-	close(proceed)
-	wg.Wait()
+	cancelA() // cancel one waiter's own context while the flight is still in progress
 
-	if errA != nil {
-		t.Errorf("a waiter's own cancellation must not fail the shared flight: %v", errA)
+	<-doneA // must return promptly: the flight is still blocked on proceed below
+	if !errors.Is(errA, context.Canceled) {
+		t.Fatalf("expected context.Canceled for the cancelled waiter, got %v", errA)
 	}
+	if resA.Name != "" {
+		t.Errorf("expected a zero-value result for the cancelled waiter, got %+v", resA)
+	}
+
+	select {
+	case <-doneB:
+		t.Fatal("the uncancelled waiter returned before the flight was released — it should still be blocked on proceed")
+	default:
+	}
+
+	close(proceed) // let the still-running flight finish for B
+	<-doneB
+
 	if errB != nil {
 		t.Errorf("unexpected error for the uncancelled waiter: %v", errB)
-	}
-	if resA.Name != "ok" {
-		t.Errorf("expected resA.Name = %q, got %q", "ok", resA.Name)
 	}
 	if resB.Name != "ok" {
 		t.Errorf("expected resB.Name = %q, got %q", "ok", resB.Name)
@@ -447,7 +521,8 @@ func TestGitHubResolutionCache_ResolveWithFetch_StaleServesImmediately(t *testin
 	cache.mu.Unlock()
 
 	entered := make(chan struct{})
-	block := make(chan struct{}) // never closed — proves ResolveWithFetch did not wait on fetch
+	block := make(chan struct{}) // proves ResolveWithFetch did not wait on fetch; released in cleanup
+	t.Cleanup(func() { close(block) })
 	fetch := func(ctx context.Context) (ResolvedSkill, error) {
 		close(entered)
 		<-block

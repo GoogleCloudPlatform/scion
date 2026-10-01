@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,6 +64,13 @@ const (
 	// unresponsive.
 	githubFlightTimeout = 5 * time.Minute
 
+	// refreshFailureBackoff bounds how often a background stale-refresh is
+	// retried for the same flight key after it fails. Without this, a
+	// persistently failing ref (rate limit, outage) would start a brand new
+	// refresh attempt — and its retry/backoff cost — on every single stale
+	// hit, while silently continuing to serve the stale value regardless.
+	refreshFailureBackoff = 1 * time.Minute
+
 	resolutionCacheFileName = "github-resolution-cache.json"
 )
 
@@ -83,6 +91,12 @@ type GitHubResolutionCache struct {
 
 	credMu    sync.Mutex
 	credSlots map[string]chan struct{}
+
+	// refreshMu guards lastRefreshFailure, which records the last time a
+	// background stale-refresh failed for a given flight key (see
+	// refreshFailureBackoff).
+	refreshMu          sync.Mutex
+	lastRefreshFailure map[string]time.Time
 }
 
 type resolutionCacheEntry struct {
@@ -296,25 +310,83 @@ func (c *GitHubResolutionCache) acquireCredentialSlot(ctx context.Context, crede
 	}
 }
 
+// boundedFlightTimeout returns the timeout to use for a detached flight
+// derived from ctx: the caller's own remaining deadline when it has one and
+// it is shorter than ceiling, otherwise ceiling. A flight must be detached
+// from its leader's cancellation (see coalesceFetch), but discarding the
+// leader's deadline entirely would hand a tight create-deadline caller an
+// unbounded ceiling instead — undoing the fail-fast behavior the caller
+// relies on. A leader with no deadline, or a generous one, still gets a sane
+// upper bound.
+func boundedFlightTimeout(ctx context.Context, ceiling time.Duration) time.Duration {
+	if dl, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(dl); remaining > 0 && remaining < ceiling {
+			return remaining
+		}
+	}
+	return ceiling
+}
+
+// recentRefreshFailure reports whether a background refresh for flightKey
+// failed within the last refreshFailureBackoff.
+func (c *GitHubResolutionCache) recentRefreshFailure(flightKey string) bool {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	t, ok := c.lastRefreshFailure[flightKey]
+	return ok && time.Since(t) < refreshFailureBackoff
+}
+
+func (c *GitHubResolutionCache) recordRefreshFailure(flightKey string) {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	if c.lastRefreshFailure == nil {
+		c.lastRefreshFailure = make(map[string]time.Time)
+	}
+	c.lastRefreshFailure[flightKey] = time.Now()
+}
+
+func (c *GitHubResolutionCache) clearRefreshFailure(flightKey string) {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	delete(c.lastRefreshFailure, flightKey)
+}
+
 // coalesceFetch runs fetch for cacheKey, using flightKey to coalesce
 // concurrent calls for the same ref into a single upstream fetch, and
 // credentialID to bound how many such fetches may run concurrently for a
 // shared credential (acquireCredentialSlot).
 //
-// The work (semaphore wait plus fetch) runs on a context detached from ctx's
-// cancellation — but still derived from it, so values such as request-scoped
-// logging fields survive — and bounded by githubFlightTimeout. This mirrors
-// cachingGoogleCredentialValidator.validate (google_credential_cache.go): the
-// flight is shared by every caller waiting on flightKey, so whichever one
-// happens to be the single-flight leader cancelling its own request must not
-// fail every other caller's request too.
+// Every caller — leader and followers alike — waits via DoChan and a select
+// on its own ctx, so a caller whose own context is done returns ctx.Err()
+// immediately instead of blocking for the whole flight. The flight itself
+// keeps running for whoever is still waiting on it: it is detached from any
+// one caller's cancellation (so the leader's own context ending does not
+// fail the others) but bounded by boundedFlightTimeout, derived from the
+// leader's own remaining deadline where it has one. This mirrors
+// cachingGoogleCredentialValidator.validate (google_credential_cache.go) for
+// the detach-but-bound shape, and adds the per-waiter DoChan/select on top so
+// an individual caller's own cancellation is still honored promptly.
 func (c *GitHubResolutionCache) coalesceFetch(
 	ctx context.Context,
 	flightKey, credentialID, cacheKey string,
 	isBranchRef bool,
 	fetch func(context.Context) (ResolvedSkill, error),
 ) (ResolvedSkill, error) {
-	v, err, _ := c.flight.Do(flightKey, func() (interface{}, error) {
+	resultCh := c.flight.DoChan(flightKey, func() (result interface{}, ferr error) {
+		// DoChan always runs this function in a goroutine it spawns itself
+		// (see golang.org/x/sync/singleflight), never the calling goroutine —
+		// unlike Do, there is no caller stack frame to recover a panic in. A
+		// panic here otherwise crashes the process outright (singleflight
+		// deliberately makes it unrecoverable once there is a channel
+		// waiter). Recovering here, inside the function singleflight runs,
+		// converts it into a normal error instead, delivered to every waiter
+		// through resultCh like any other failure.
+		defer func() {
+			if r := recover(); r != nil {
+				ferr = fmt.Errorf("panic during GitHub skill resolution for %s: %v", flightKey, r)
+			}
+		}()
+
 		// Re-check: another caller may have already populated cacheKey while
 		// this call waited to become the flight leader — either a concurrent
 		// flight for this exact key, or (since flightKey intentionally
@@ -324,7 +396,8 @@ func (c *GitHubResolutionCache) coalesceFetch(
 			return skill, nil
 		}
 
-		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), githubFlightTimeout)
+		timeout := boundedFlightTimeout(ctx, githubFlightTimeout)
+		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 		defer cancel()
 
 		release, aerr := c.acquireCredentialSlot(flightCtx, credentialID)
@@ -340,10 +413,16 @@ func (c *GitHubResolutionCache) coalesceFetch(
 		c.putEntry(cacheKey, skill, isBranchRef)
 		return skill, nil
 	})
-	if err != nil {
-		return ResolvedSkill{}, err
+
+	select {
+	case res := <-resultCh:
+		if res.Err != nil {
+			return ResolvedSkill{}, res.Err
+		}
+		return res.Val.(ResolvedSkill), nil
+	case <-ctx.Done():
+		return ResolvedSkill{}, ctx.Err()
 	}
-	return v.(ResolvedSkill), nil
 }
 
 // ResolveWithFetch is the single entry point for obtaining a resolved skill
@@ -353,7 +432,9 @@ func (c *GitHubResolutionCache) coalesceFetch(
 //   - For a branch ref with a stale (TTL-expired but within
 //     MaxResolutionStaleAge) entry, the stale value is returned immediately
 //     and a refresh is started in the background, coalesced with any other
-//     refresh already in flight for flightKey.
+//     refresh already in flight for flightKey — unless a refresh for this key
+//     failed within the last refreshFailureBackoff, in which case the stale
+//     value is served without starting another one.
 //   - Otherwise, fetch runs synchronously, coalesced via flightKey and capped
 //     per credentialID (see coalesceFetch).
 //
@@ -364,7 +445,9 @@ func (c *GitHubResolutionCache) coalesceFetch(
 // per-credential cap exist specifically to coalesce concurrent resolutions
 // that share a ref and credential *class* even though each one mints its own
 // token, so keying on the token would defeat them — every caller would get a
-// distinct flightKey and never coalesce.
+// distinct flightKey and never coalesce. They must also be scoped so that two
+// distinct credentials (e.g. two projects' same-named secret) never share a
+// flightKey or credentialID — see flightIdentity in github_skill_resolver.go.
 func (c *GitHubResolutionCache) ResolveWithFetch(
 	ctx context.Context,
 	cacheKey, flightKey, credentialID string,
@@ -377,9 +460,21 @@ func (c *GitHubResolutionCache) ResolveWithFetch(
 
 	if isBranchRef {
 		if skill, ok := c.getStale(cacheKey); ok {
-			go func() {
-				_, _ = c.coalesceFetch(context.Background(), flightKey, credentialID, cacheKey, isBranchRef, fetch)
-			}()
+			if c.recentRefreshFailure(flightKey) {
+				fmt.Fprintf(os.Stderr, "github: WARNING: serving stale entry for %s; skipping refresh after a recent failure\n", flightKey)
+			} else {
+				// A panic in fetch is recovered inside coalesceFetch's DoChan
+				// closure (see its comment), so this goroutine itself cannot
+				// panic from that; no recover needed at this level.
+				go func() {
+					_, ferr := c.coalesceFetch(context.Background(), flightKey, credentialID, cacheKey, isBranchRef, fetch)
+					if ferr != nil {
+						c.recordRefreshFailure(flightKey)
+					} else {
+						c.clearRefreshFailure(flightKey)
+					}
+				}()
+			}
 			return skill, nil
 		}
 	}
