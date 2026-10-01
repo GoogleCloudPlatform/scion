@@ -281,6 +281,18 @@ export async function setupApiMocks(
     if (path === '/api/v1/users') {
       return route.fulfill({ json: { users: overrides.users ?? [] } });
     }
+    if (path === '/api/v1/messages') {
+      // scion-inbox-tray, mounted by the real header in the `?shell=1`
+      // fixture — expects `{ items: [...] }`.
+      return route.fulfill({ json: { items: [] } });
+    }
+    if (path === '/api/v1/notifications') {
+      // scion-notification-tray, mounted by the real header in the
+      // `?shell=1` fixture — expects a bare array, not an envelope object;
+      // the generic unnamed-endpoint fallback below returns `{}`, which the
+      // tray's own `.map()` over the response would throw on.
+      return route.fulfill({ json: [] });
+    }
     const threadsMatch = path.match(/^\/api\/v1\/chat\/spaces\/([^/]+)\/threads$/);
     if (threadsMatch) {
       const projectId = decodeURIComponent(threadsMatch[1]);

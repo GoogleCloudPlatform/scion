@@ -39,6 +39,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -53,6 +54,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -159,6 +161,20 @@ type ServerConfig struct {
 	SoftDeleteRetention time.Duration
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles bool
+	// AsyncAgentLaunch is the non-blocking agent create kill switch. Off by
+	// default; a launch is non-blocking only when this is on AND the request
+	// opts in.
+	AsyncAgentLaunch bool
+	// LaunchTimeout is the whole-launch budget for an opted-in launch
+	// (design §3.10). Default 5 minutes. Below minLaunchTimeout the broker's
+	// fixed 20s abort margin (§3.10) would leave no time for a launch to
+	// actually run, so New() rejects it and falls back to the default.
+	LaunchTimeout time.Duration
+	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds
+	// (design §3.7). Today it only sets the reaper's staleness window (8x
+	// this value); it will also be sent to the broker as
+	// launchKeepaliveSeconds once the async dispatch path lands. Default 15.
+	LaunchKeepaliveSeconds int
 	// AdminMode restricts access to admin users only (maintenance mode).
 	AdminMode bool
 	// MaintenanceMessage is the custom message shown during admin mode.
@@ -400,9 +416,11 @@ func DefaultServerConfig() ServerConfig {
 			"X-Scion-Broker-ID", "X-Scion-Timestamp", "X-Scion-Nonce",
 			"X-Scion-Signature", "X-Scion-Signed-Headers",
 		},
-		CORSMaxAge:       3600,
-		StalledThreshold: 5 * time.Minute,
-		BrokerAuthConfig: DefaultBrokerAuthConfig(),
+		CORSMaxAge:             3600,
+		StalledThreshold:       5 * time.Minute,
+		BrokerAuthConfig:       DefaultBrokerAuthConfig(),
+		LaunchTimeout:          5 * time.Minute,
+		LaunchKeepaliveSeconds: 15,
 	}
 }
 
@@ -1030,6 +1048,20 @@ type Server struct {
 	// protection. Set once in New and read without the lock; nil-safe.
 	mentionPairLimiter *mentionPairLimiter
 
+	// Independent token-bucket limiters for the agent-keys operation
+	// (task 2.2, .design/agent-keys-contract.md "Concrete defaults"):
+	// keysPrincipalLimiter is keyed per authenticated principal+project,
+	// keysTargetLimiter is keyed per target agent. Both must allow a
+	// request; they are separate from chatSendLimiter's aggregate DM
+	// allowance (keys must not charge or evade it) and are shared by the
+	// /keys routes and the temporary raw bridge (task 2.3) alike. Set once
+	// in New and read without the lock; nil-safe. In-memory and per-Hub
+	// instance, not a distributed quota service (contract §5): N Hub
+	// replicas behind a load balancer allow N times the configured rate in
+	// aggregate, and a Hub restart resets both buckets to full.
+	keysPrincipalLimiter *keysRateLimiter
+	keysTargetLimiter    *keysRateLimiter
+
 	// In-memory idempotency cache for chat message sends (#1055).
 	// Keyed by senderID:idempotencyKey with a 5-minute TTL.
 	chatIdempotency *ChatIdempotencyCache
@@ -1095,6 +1127,12 @@ type Server struct {
 	// Broker dispatch metrics recorder (B5-2). Defaults to a disabled no-op
 	// recorder; SetDispatchMetrics wires a real exporter.
 	dispatchMetrics dispatchmetrics.Recorder
+
+	// Launch reaper metrics recorder (design §3.7): tick-outcome counter,
+	// row-error counter, disarmed-time gauge. Nil until SetReaperMetrics is
+	// called; the reaper tick handler nil-checks before recording, matching
+	// dbMetrics/dispatchMetrics.
+	reaperMetrics reapermetrics.Recorder
 
 	// stopPoolSampler stops the DB pool-stats sampling goroutine on shutdown.
 	stopPoolSampler func()
@@ -1259,6 +1297,17 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		}
 		cfg.StalledThreshold = defaults.StalledThreshold
 	}
+	const minLaunchTimeout = 30 * time.Second
+	if cfg.LaunchTimeout < minLaunchTimeout {
+		if cfg.LaunchTimeout != 0 {
+			slog.Warn("launch_timeout below minimum 30s, using default",
+				"configured", cfg.LaunchTimeout, "default", defaults.LaunchTimeout)
+		}
+		cfg.LaunchTimeout = defaults.LaunchTimeout
+	}
+	if cfg.LaunchKeepaliveSeconds <= 0 {
+		cfg.LaunchKeepaliveSeconds = defaults.LaunchKeepaliveSeconds
+	}
 
 	srvCtx, srvCancel := context.WithCancel(context.Background())
 
@@ -1347,6 +1396,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Per-pair agent mention loop/storm protection.
 	srv.mentionPairLimiter = newMentionPairLimiter()
+
+	// Agent-keys admission rate limiters (task 2.2, contract "Concrete
+	// defaults"): 5 req/s burst 10 per principal+project, 10 req/s burst 20
+	// per target.
+	srv.keysPrincipalLimiter = newKeysRateLimiter(agentkeys.PrincipalProjectRateLimit, agentkeys.PrincipalProjectBurst)
+	srv.keysTargetLimiter = newKeysRateLimiter(agentkeys.TargetRateLimit, agentkeys.TargetBurst)
 
 	ctx := context.Background()
 
@@ -1546,6 +1601,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize authorization service
 	srv.authzService = NewAuthzService(s, logging.Subsystem("hub.auth"))
+	// ptone/scion#2342 (B.3 R6): the same condition that enables dev-token
+	// acceptance and DevUserID seeding below (cfg.DevAuthToken != "") also
+	// gates whether this server currently admits dev_local authority at
+	// all. See devLocalAuthorityEnabled's doc comment (devauth.go).
+	srv.authzService.setDevLocalAuthorityEnabled(cfg.DevAuthToken != "")
 
 	// Wire decision audit emitter
 	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))
@@ -2890,6 +2950,13 @@ func (s *Server) SetDispatchMetrics(rec dispatchmetrics.Recorder) {
 	s.dispatchMetrics = rec
 }
 
+// SetReaperMetrics wires the launch reaper's metrics recorder (design §3.7).
+func (s *Server) SetReaperMetrics(rec reapermetrics.Recorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reaperMetrics = rec
+}
+
 // SetGCPTokenMetrics wires the GCP token metrics recorder.
 func (s *Server) SetGCPTokenMetrics(m GCPTokenMetricsRecorder) {
 	s.mu.Lock()
@@ -3708,8 +3775,14 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 	}
 
 	if creator, err := s.store.GetAgent(ctx, evt.CreatedBy); err == nil {
-		if creator.ProjectID != evt.ProjectID {
+		if !creator.DeletedAt.IsZero() {
+			return false, fmt.Errorf("scheduled dispatch creator agent %q is deleted; cannot authorize", evt.CreatedBy)
+		}
+		if creator.ProjectID == "" || creator.ProjectID != evt.ProjectID {
 			return false, fmt.Errorf("scheduled dispatch creator agent %q is not in project %q", evt.CreatedBy, evt.ProjectID)
+		}
+		if s.authzService == nil {
+			return false, fmt.Errorf("scheduled dispatch cannot authorize agent creation without authz service")
 		}
 		role, additionalScopes := agentRoleAndScopes(creator)
 		scopes := append(ScopesForRole(role), additionalScopes...)
@@ -3724,35 +3797,41 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 			return false, fmt.Errorf("scheduled dispatch creator agent %q missing required scope: %s", evt.CreatedBy, ScopeAgentCreate)
 		}
 
+		agentIdentity := &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: creator.ID},
+			ProjectID: creator.ProjectID,
+			Scopes:    scopes,
+		}}
+
+		// The creator agent needs agent.create in the project through
+		// Decide, including the delegation ceiling of every live ancestor.
+		if decision := s.agentCreateDecision(ctx, agentIdentity, evt.ProjectID); !decision.Allowed {
+			return false, fmt.Errorf("scheduled dispatch creator agent %q is not authorized to create agents in project %q: %s",
+				evt.CreatedBy, evt.ProjectID, decision.Reason)
+		}
+
 		// CanDelegate check (Phase 1F): at fire time, verify the creator
 		// agent still holds the scopes it would delegate to the new agent.
-		if s.authzService != nil {
-			agentIdentity := &agentIdentityWrapper{&AgentTokenClaims{
-				Claims:    jwt.Claims{Subject: creator.ID},
-				ProjectID: creator.ProjectID,
-				Scopes:    scopes,
-			}}
-			grantDesc := GrantDescriptor{
-				Type:      GrantTypeAgentDelegation,
-				AgentRole: string(role),
-				ProjectID: evt.ProjectID,
-				ScopeType: store.RoleScopeProject,
-				ScopeID:   evt.ProjectID,
-			}
-			delegateDecision := s.authzService.CanDelegate(ctx, agentIdentity, grantDesc)
-			if !delegateDecision.Allowed {
-				s.emitMutationAudit(ctx, &store.MutationAuditRecord{
-					MutationType:       "agent_delegation",
-					ActorPrincipalKind: "agent",
-					ActorPrincipalID:   creator.ID,
-					TargetType:         "scheduled_dispatch",
-					TargetID:           evt.ID,
-					CanDelegateResult:  "deny",
-					CanDelegateReason:  delegateDecision.Reason,
-				})
-				return false, fmt.Errorf("scheduled dispatch creator agent %q failed CanDelegate: %s",
-					evt.CreatedBy, delegateDecision.Reason)
-			}
+		grantDesc := GrantDescriptor{
+			Type:      GrantTypeAgentDelegation,
+			AgentRole: string(role),
+			ProjectID: evt.ProjectID,
+			ScopeType: store.RoleScopeProject,
+			ScopeID:   evt.ProjectID,
+		}
+		delegateDecision := s.authzService.CanDelegate(ctx, agentIdentity, grantDesc)
+		if !delegateDecision.Allowed {
+			s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+				MutationType:       "agent_delegation",
+				ActorPrincipalKind: "agent",
+				ActorPrincipalID:   creator.ID,
+				TargetType:         "scheduled_dispatch",
+				TargetID:           evt.ID,
+				CanDelegateResult:  "deny",
+				CanDelegateReason:  delegateDecision.Reason,
+			})
+			return false, fmt.Errorf("scheduled dispatch creator agent %q failed CanDelegate: %s",
+				evt.CreatedBy, delegateDecision.Reason)
 		}
 
 		return true, nil
@@ -3775,11 +3854,7 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 		return false, fmt.Errorf("scheduled dispatch cannot authorize agent creation without authz service")
 	}
 	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "scheduler")
-	decision := s.authzService.CheckAccess(ctx, identity, Resource{
-		Type:       "agent",
-		ParentType: "project",
-		ParentID:   evt.ProjectID,
-	}, ActionCreate)
+	decision := s.agentCreateDecision(ctx, identity, evt.ProjectID)
 	if !decision.Allowed {
 		return false, fmt.Errorf("scheduled dispatch creator user %q is not authorized to create agents in project %q: %s",
 			evt.CreatedBy, evt.ProjectID, decision.Reason)
@@ -4213,12 +4288,17 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// actor is.
 		//
 		// The recorded initiator's credential is copied onto the audit ONLY
-		// when the initiator is the same principal as the creator: after an
-		// update or resume by a different user, the initiator is not the
-		// creator, and ApplyActor exists specifically to prevent naming
-		// principal A with principal B's credential. When it does match, the
-		// value is mapped back to hub.CredentialKind's vocabulary
-		// (uat/agent_jwt/interactive), since actor_credential_type is a
+		// when the initiator is the same principal as the creator/executor
+		// identity (initiatorMatchesExecutor, scheduled_initiator.go): after
+		// an update or resume by a different user, the initiator is not the
+		// creator, and this check exists specifically to prevent naming
+		// principal A with principal B's credential. dev_local additionally
+		// matches when both sides resolve to the well-known DevUserID —
+		// initiatorMatchesExecutor's doc comment has the exact condition and
+		// why it's needed (scheduledCreatorIdentity never reconstructs the
+		// dev user's Type() as "dev"). When it does match, the value is
+		// mapped back to hub.CredentialKind's vocabulary
+		// (uat/agent_jwt/interactive/dev), since actor_credential_type is a
 		// column every other writer fills from that domain, not
 		// InitiatorAttribution's smaller one.
 		scheduledDispatchAudit := &store.MutationAuditRecord{
@@ -4230,8 +4310,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			CanDelegateResult:  "allow",
 		}
 		initiator := s.scheduledInitiator(evt.InitiatorAttribution)
-		if !initiator.LegacyUnknown &&
-			initiator.PrincipalKind == creatorIdentity.Type() && initiator.PrincipalID == creatorIdentity.ID() {
+		if initiatorMatchesExecutor(initiator, creatorIdentity) {
 			if hubKind := hubCredentialKindForInitiator(initiator.CredentialKind); hubKind != "" {
 				scheduledDispatchAudit.ActorCredentialType = hubKind
 				scheduledDispatchAudit.ActorCredentialID = initiator.CredentialID
@@ -4410,6 +4489,12 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 // scheduler, this eliminates the thundering-herd pattern that was causing
 // 9-54 s API latency spikes.
 func (s *Server) registerSchedulerHandlers() {
+	// Async-create launch reaper (design §3.7): its own dedicated ticker,
+	// registered unconditionally — see
+	// registerLaunchReaper's doc comment for its per-tick cost with the
+	// feature off.
+	s.registerLaunchReaper()
+
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
 	if s.config.SoftDeleteRetention > 0 {
@@ -4528,7 +4613,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// under multi-replica Postgres (see CONNECTION-BUDGET.md).
 	if rec := s.dbMetrics; rec != nil {
 		if dbp, ok := s.store.(interface{ DB() *sql.DB }); ok {
-			s.stopPoolSampler = dbmetrics.StartPoolSampler(ctx, rec, dbp.DB(), 0)
+			stop := dbmetrics.StartPoolSampler(ctx, rec, dbp.DB(), 0)
+			s.mu.Lock()
+			s.stopPoolSampler = stop
+			s.mu.Unlock()
 		}
 	}
 
@@ -4596,83 +4684,63 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
-// Shutdown gracefully shuts down the server.
+// Shutdown gracefully shuts down the server. It is safe to call even when
+// the Server was never started (e.g. New() followed directly by Shutdown()):
+// the background-service teardown below always runs via CleanupResources,
+// and only the final HTTP listener shutdown is skipped when there is no
+// listener to shut down. It is also safe to call more than once, or
+// together with CleanupResources, since CleanupResources is idempotent and
+// http.Server.Shutdown tolerates repeated calls.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.RLock()
 	srv := s.httpServer
-	cc := s.controlChannel
 	s.mu.RUnlock()
+
+	slog.Info("Hub API server shutting down...")
+
+	// Run the shared background-service teardown (control channel, broker
+	// auth, scheduler, dispatchers, preview service, link services, event
+	// publisher, command bus, etc). CleanupResources is sync.Once-guarded,
+	// so this is a no-op if it already ran.
+	_ = s.CleanupResources(ctx)
 
 	if srv == nil {
 		return nil
 	}
 
-	slog.Info("Hub API server shutting down...")
-
-	// Cancel server-lifetime context to stop background goroutines
-	if s.ctxCancel != nil {
-		s.ctxCancel()
-	}
-
-	// Shutdown control channel first
-	if cc != nil {
-		cc.Shutdown()
-	}
-
-	// Stop the nonce cache cleanup goroutine
-	if s.brokerAuthService != nil {
-		s.brokerAuthService.Close()
-	}
-
-	// Stop scheduler
-	if s.scheduler != nil {
-		s.scheduler.Stop()
-	}
-
-	// Stop the DB pool-stats sampler.
-	if s.stopPoolSampler != nil {
-		s.stopPoolSampler()
-	}
-
-	// Stop notification dispatcher before closing event publisher
-	if s.notificationDispatcher != nil {
-		s.notificationDispatcher.Stop()
-	}
-
-	// Stop lifecycle hook evaluator before closing event publisher
-	if s.lifecycleHookEvaluator != nil {
-		s.lifecycleHookEvaluator.Stop()
-	}
-
-	// Stop presence manager before closing event publisher
-	if s.presenceManager != nil {
-		s.presenceManager.Stop()
-	}
-
-	// Close event publisher
-	if s.events != nil {
-		s.events.Close()
-	}
-	if s.commandBus != nil {
-		s.commandBus.Close()
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	return srv.Shutdown(ctx)
+	return srv.Shutdown(shutdownCtx)
 }
 
 // CleanupResources shuts down Hub-owned resources (control channel, broker auth,
 // event publisher) without stopping an HTTP server. Use this in combined mode
 // where the Hub API is mounted on the WebServer and has no listener of its own.
+// It is also called internally by Shutdown, and is safe to call more than
+// once, including after Shutdown: the teardown below runs at most once.
 func (s *Server) CleanupResources(ctx context.Context) error {
 	s.cleanupOnce.Do(func() {
 		s.mu.RLock()
 		cc := s.controlChannel
+		stopPoolSampler := s.stopPoolSampler
 		s.mu.RUnlock()
 
 		slog.Info("Cleaning up Hub resources...")
+
+		// Stop the DB pool-stats sampler. Safe to call more than once: it
+		// wraps either a context.CancelFunc or a no-op from
+		// StartPoolSampler. Lives in the Once body so combined mode (which
+		// only calls CleanupResources, never Shutdown) also stops it.
+		//
+		// Read under s.mu above rather than accessed directly here: in
+		// combined mode, StartBackgroundServices (which writes this field)
+		// runs in one goroutine while the CleanupResources-on-ctx.Done
+		// goroutine started earlier (see cmd/server_foreground.go) can race
+		// it, so the write and this read must share a lock.
+		if stopPoolSampler != nil {
+			stopPoolSampler()
+		}
 
 		// Cancel server-lifetime context to stop background goroutines
 		if s.ctxCancel != nil {
@@ -4706,6 +4774,10 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		}
 		if s.teamsLinkService != nil {
 			s.teamsLinkService.Close()
+		}
+		// Stop the B3 preview engine's nonce cleanup goroutine.
+		if s.previewService != nil {
+			s.previewService.Close()
 		}
 		// Stop presence manager before closing event publisher
 		if s.presenceManager != nil {
@@ -5080,10 +5152,6 @@ func (s *Server) registerRoutes() {
 	if s.nativeChatEnabled() {
 		// Chat thread prefs (Phase 3 — visibility mode persistence)
 		s.mux.HandleFunc("/api/v1/chat/prefs", s.guarded("/api/v1/chat/prefs", s.handleChatPrefs))
-
-		// Chat thread endpoints (Phase 5 — thread rail, legacy)
-		s.mux.HandleFunc("/api/v1/chat/threads", s.guarded("/api/v1/chat/threads", s.handleChatThreads))
-		s.mux.HandleFunc("/api/v1/chat/threads/", s.guarded("/api/v1/chat/threads/", s.handleChatThreadRoutes))
 
 		// Wave-2 chat endpoints (conversation REST API)
 		s.mux.HandleFunc("/api/v1/chat/spaces", s.guarded("/api/v1/chat/spaces", s.handleChatSpaces))

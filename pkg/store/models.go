@@ -17,11 +17,14 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/google/uuid"
 )
 
 // Agent represents an agent record in the Hub database.
@@ -112,11 +115,11 @@ type Agent struct {
 	// ever touched this agent.
 	ReincarnationUpdatedAt *time.Time `json:"reincarnationUpdatedAt,omitempty"`
 
-	// --- T1 async agent create (design t1-async-create-v11.md §3.3) ---
+	// --- Async agent create (design §3.3) ---
 	// These are the persisted launch_* columns. They are internal bookkeeping,
 	// not the client-facing shape — untagged (json:"-") so they never leak
-	// directly onto the wire. The client-facing computed view (AgentLaunch /
-	// ComputeAgentLaunch, design §3.2) is P1a-ii scope, not here.
+	// directly onto the wire. See Launch/AgentLaunch below for the
+	// client-facing computed view derived from these columns.
 	//
 	// UpdateAgent (the whole-row CAS writer) never sets any of these from the
 	// caller's struct: they are absent from its Ent builder chain entirely.
@@ -135,12 +138,19 @@ type Agent struct {
 	LaunchSeq          int64     `json:"-"`
 	LaunchStep         string    `json:"-"`
 	LaunchError        string    `json:"-"`
+
+	// Launch is the computed, client-facing view of the launch_* columns
+	// above (design §3.2; see launch_view.go). It is nil unless a
+	// caller populates it (e.g. enrichAgent/enrichAgents in pkg/hub via
+	// ComputeAgentLaunch) — store methods that return an *Agent do not
+	// populate it themselves, so a snapshot always reflects the fields
+	// present at the moment it was computed, not at load time.
+	Launch *AgentLaunch `json:"launch,omitempty"`
 }
 
 // InFlightPhases are the agent phases considered "in flight" for a launch
 // (design §3.3 in-flight predicate). Used by the store-side predicates
-// (IsInFlight, IsIncompleteCreate); the client-facing AgentLaunch view is
-// P1a-ii scope.
+// (IsInFlight, IsIncompleteCreate).
 var InFlightPhases = map[string]bool{
 	"created":      true,
 	"provisioning": true,
@@ -1163,7 +1173,7 @@ type BrokerDispatch struct {
 	// already-authorized operation, not a re-evaluated authoring point.
 	InitiatorPrincipalKind  string `json:"initiatorPrincipalKind,omitempty"`
 	InitiatorPrincipalID    string `json:"initiatorPrincipalId,omitempty"`
-	InitiatorCredentialKind string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|legacy_unknown
+	InitiatorCredentialKind string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|dev_local|legacy_unknown
 	InitiatorCredentialID   string `json:"initiatorCredentialId,omitempty"`
 	// CorrelationID ties this dispatch row back to the originating request's
 	// log/audit trail (the same request ID plumbed through decision/mutation
@@ -1682,8 +1692,16 @@ type UserAccessToken struct {
 	KeyHash string `json:"-"`      // SHA-256 hash (never exposed)
 
 	// Scoping
-	ProjectID string   `json:"projectId"` // Required: project this token is scoped to
-	Scopes    []string `json:"scopes"`    // Action scopes (resource:action pairs)
+	//
+	// BoundaryKind is the credential-side boundary this token was issued
+	// under (permissions.BoundaryKind: "project" or "hub"). ProjectID is
+	// set iff BoundaryKind == "project"; it is empty for a hub-boundary
+	// token and must never be interpreted as hub — an empty or missing
+	// ProjectID with a "project" BoundaryKind is invalid, not hub-scoped
+	// (see ValidateBoundary).
+	BoundaryKind string   `json:"boundaryKind"`
+	ProjectID    string   `json:"projectId"` // set iff BoundaryKind == "project"; empty otherwise; never interpreted as hub
+	Scopes       []string `json:"scopes"`    // Action scopes (resource:action pairs)
 
 	// CeilingVersion and CeilingPermissionIDs hold the normalized, frozen
 	// permission ceiling. CeilingVersionUnspecified (zero value) with
@@ -1736,6 +1754,40 @@ func (t *UserAccessToken) NormalizedCeiling() permissions.FrozenPermissionCeilin
 		Version:       t.CeilingVersion,
 		PermissionIDs: t.CeilingPermissionIDs,
 	}
+}
+
+// ErrInvalidUATBoundary is returned when a UserAccessToken's BoundaryKind/
+// ProjectID combination is invalid: an unrecognized kind, a "project"
+// boundary with a missing, malformed or nil-UUID project ID, or a "hub" boundary
+// carrying a project ID. A row that fails this must never authenticate: an
+// empty or malformed ProjectID is never coerced into a hub boundary, and an
+// invalid row is rejected rather than repaired or trusted.
+var ErrInvalidUATBoundary = errors.New("invalid user access token boundary")
+
+// ValidateBoundary reports whether t's BoundaryKind/ProjectID combination is
+// well-formed. It shares its kind/project-id-presence rule with
+// permissions.ValidBoundary — the same rule pkg/hub's TokenBoundary.Valid()
+// calls — so store-layer and authorization-layer validation cannot drift.
+// It additionally requires ProjectID to parse as a non-nil UUID when
+// BoundaryKind is "project", since pkg/store owns the wire representation of
+// that ID. The nil UUID is rejected because no project carries it: a stored
+// empty project_id string scans back as the nil UUID, so accepting it would let a
+// row with no project authenticate as a project token.
+func (t *UserAccessToken) ValidateBoundary() error {
+	kind := permissions.BoundaryKind(t.BoundaryKind)
+	if !permissions.ValidBoundary(kind, t.ProjectID) {
+		return fmt.Errorf("%w: kind=%q project_id_set=%v", ErrInvalidUATBoundary, t.BoundaryKind, t.ProjectID != "")
+	}
+	if kind == permissions.BoundaryKindProject {
+		id, err := uuid.Parse(t.ProjectID)
+		if err != nil {
+			return fmt.Errorf("%w: project id is not a valid UUID", ErrInvalidUATBoundary)
+		}
+		if id == uuid.Nil {
+			return fmt.Errorf("%w: project id is the nil UUID", ErrInvalidUATBoundary)
+		}
+	}
+	return nil
 }
 
 // UATPrefix is the token prefix that distinguishes UATs from other token types.
@@ -2053,7 +2105,7 @@ type ConversationFilter struct {
 type InitiatorAttribution struct {
 	InitiatorPrincipalKind      string `json:"initiatorPrincipalKind,omitempty"`
 	InitiatorPrincipalID        string `json:"initiatorPrincipalId,omitempty"`
-	InitiatorCredentialKind     string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|legacy_unknown
+	InitiatorCredentialKind     string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|dev_local|legacy_unknown
 	InitiatorCredentialID       string `json:"initiatorCredentialId,omitempty"`
 	InitiatorCredentialSnapshot string `json:"initiatorCredentialSnapshot,omitempty"` // bounded JSON: name, boundary, purpose, labels
 	AttributionVersion          int    `json:"attributionVersion,omitempty"`          // 0/absent = legacy_unknown; 1 = written by E.2b
@@ -2069,12 +2121,25 @@ type InitiatorAttribution struct {
 
 // InitiatorCredentialKind* are the values InitiatorAttribution.InitiatorCredentialKind
 // may hold. This is a deliberately smaller, committed domain than
-// hub.CredentialKind: async attribution only ever records one of these four
-// values (rulings "E.2b field names").
+// hub.CredentialKind: async attribution only ever records one of these five
+// values (rulings "E.2b field names"; dev_local added by ptone/scion#2342).
+//
+// InitiatorCredentialKindDevLocal is a narrow, server-attested exception:
+// hub.captureInitiatorAttribution emits it only for the concrete trusted
+// local-dev identity (hub.DevUser, produced solely by hub.NewDevUser /
+// DevAuthMiddleware) and only when that identity's ID matches the
+// well-known hub.DevUserID. It is never derived from an identity's
+// self-reported Type(), from request input, or from any other identity
+// implementation that merely looks like the dev user. Every other
+// unrecognized or absent credential still maps to legacy_unknown. Like
+// every other value in this domain, dev_local is attribution, not
+// authority: it grants nothing by itself, and B.3 owns the fire-time
+// authority decision built on top of it.
 const (
 	InitiatorCredentialKindSession       = "session"
 	InitiatorCredentialKindUAT           = "uat"
 	InitiatorCredentialKindAgent         = "agent"
+	InitiatorCredentialKindDevLocal      = "dev_local"
 	InitiatorCredentialKindLegacyUnknown = "legacy_unknown"
 )
 
@@ -2851,13 +2916,11 @@ type DecisionAuditRecord struct {
 	// are the ones that set it.
 	ExecutorKind string
 	ExecutorID   string
-	// DeniedBy is B.1/B.2's typed denial-source string, recorded verbatim
-	// when the deciding code sets it on the Decision (ruling: "Decision.DeniedBy
-	// is a typed string ... recorded verbatim in a denied_by column"). The
-	// aggregated list-filter record (G) leaves it empty by agreement. This
-	// column is additive and unpopulated as of E.2a: Decision.DeniedBy does
-	// not exist on this branch's Decision type yet (B.1 has not merged) — see
-	// the E.2a handoff note's follow-up.
+	// DeniedBy is the Decision's typed denial-source string (hub.DeniedBy),
+	// recorded verbatim by Decide's single audit exit through
+	// BuildDecisionAuditRecord, for example "delegation_ceiling". It is empty
+	// on allow and on a deny not attributed to a named stage. The aggregated
+	// list-filter record (G) leaves it empty by agreement.
 	DeniedBy string
 }
 

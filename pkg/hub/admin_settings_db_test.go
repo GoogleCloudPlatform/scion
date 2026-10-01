@@ -1993,6 +1993,81 @@ func TestPutServerConfigDB_ServerEnv_422(t *testing.T) {
 	}
 }
 
+func TestExtractKoanfKeys_AsyncAgentLaunchSettings_AreLayer0(t *testing.T) {
+	// The three async-launch settings are documented as Layer 0 (restart
+	// required, not writable via the admin API) in server-config.md's
+	// Layer-0 table. They must be extracted so ClassifyKeys sees them.
+	asyncLaunch := true
+	keepalive := 20
+	req := &ServerConfigUpdateRequest{
+		Server: &config.V1ServerConfig{
+			Hub: &config.V1ServerHubConfig{
+				AsyncAgentLaunch:       &asyncLaunch,
+				LaunchTimeout:          "10m",
+				LaunchKeepaliveSeconds: &keepalive,
+			},
+		},
+	}
+
+	keys := extractKoanfKeysFromRequest(req)
+	keySet := make(map[string]bool)
+	for _, k := range keys {
+		keySet[k] = true
+	}
+	for _, want := range []string{
+		"server.hub.async_agent_launch",
+		"server.hub.launch_timeout",
+		"server.hub.launch_keepalive_seconds",
+	} {
+		if !keySet[want] {
+			t.Errorf("%s not extracted", want)
+		}
+	}
+}
+
+func TestPutServerConfigDB_AsyncAgentLaunchSettings_422(t *testing.T) {
+	// A PUT carrying any of the three async-launch settings must be rejected
+	// with 422 layer0_rejected, matching server-config.md's Layer-0 table,
+	// rather than silently dropping them.
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "async_agent_launch",
+			body: `{"server": {"hub": {"async_agent_launch": true}}}`,
+		},
+		{
+			name: "launch_timeout",
+			body: `{"server": {"hub": {"launch_timeout": "10m"}}}`,
+		},
+		{
+			name: "launch_keepalive_seconds",
+			body: `{"server": {"hub": {"launch_keepalive_seconds": 20}}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _, ops := newTestDBServer(t)
+
+			req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", tt.body)
+			rr := httptest.NewRecorder()
+			srv.handlePutServerConfigDB(rr, req, ops)
+
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422 for %s, got %d: %s", tt.name, rr.Code, rr.Body.String())
+			}
+			var resp map[string]interface{}
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to unmarshal response: %v", err)
+			}
+			if resp["error"] != "layer0_rejected" {
+				t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
+			}
+		})
+	}
+}
+
 // ---- N6: Presence-aware field clearing tests ----
 
 func TestPutServerConfigDB_ExplicitEmptyAdminEmails_ClearsField(t *testing.T) {

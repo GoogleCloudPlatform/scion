@@ -5973,3 +5973,129 @@ func TestHTTPAgentDispatcher_DispatchAgentDelete_ForwardsLinkedProjectPath(t *te
 		t.Errorf("projectPath query = %q, want %q", mockClient.lastDeleteProjectPathQuery, want)
 	}
 }
+
+// TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv is
+// the P2a-0 golden comparison test (tz task #14): DispatchAgentStart and
+// DispatchAgentRestart now both call the shared buildStartEnv, so for the
+// same agent they must resolve to byte-identical env maps. The fixture
+// agent covers config env, storage env at project and user scope (with an
+// as_needed storage var that must NOT be injected on either path, since
+// buildStartEnv only merges InjectionModeAlways vars), and a type-aware
+// environment secret (plus a non-environment secret that must not leak into
+// the env map on either path).
+func TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	project := &store.Project{
+		ID:   tid("project-golden"),
+		Name: "golden-project",
+		Slug: "golden-project",
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-golden"),
+		Name:     "golden-broker",
+		Slug:     "golden-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	// Project-scope storage var, always injected.
+	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
+		ID:            tid("ev-golden-project"),
+		Key:           "PROJECT_VAR",
+		Value:         "project-value",
+		Scope:         "project",
+		ScopeID:       tid("project-golden"),
+		InjectionMode: store.InjectionModeAlways,
+	}); err != nil {
+		t.Fatalf("failed to set project env var: %v", err)
+	}
+
+	// User-scope storage var, always injected.
+	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
+		ID:            tid("ev-golden-user"),
+		Key:           "USER_VAR",
+		Value:         "user-value",
+		Scope:         "user",
+		ScopeID:       "golden-owner",
+		InjectionMode: store.InjectionModeAlways,
+	}); err != nil {
+		t.Fatalf("failed to set user env var: %v", err)
+	}
+
+	// Project-scope storage var marked as_needed: must not be injected by
+	// buildStartEnv on either path (it is only resolved via env-gather).
+	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
+		ID:            tid("ev-golden-asneeded"),
+		Key:           "AS_NEEDED_VAR",
+		Value:         "should-not-appear",
+		Scope:         "project",
+		ScopeID:       tid("project-golden"),
+		InjectionMode: store.InjectionModeAsNeeded,
+	}); err != nil {
+		t.Fatalf("failed to set as_needed env var: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetSecretBackend(&mockSecretBackend{
+		secrets: []secret.SecretWithValue{
+			{SecretMeta: secret.SecretMeta{Name: "CLAUDE_AUTH", SecretType: "file", Target: "~/.claude/.credentials.json"}, Value: "file-secret-data"},
+			{SecretMeta: secret.SecretMeta{Name: "SECRET_API_KEY", SecretType: "environment", Target: "SECRET_API_KEY"}, Value: "secret-value"},
+		},
+	})
+
+	agent := &store.Agent{
+		ID:              tid("agent-golden"),
+		Name:            "golden-agent",
+		Slug:            "golden-agent",
+		ProjectID:       tid("project-golden"),
+		OwnerID:         "golden-owner",
+		RuntimeBrokerID: tid("broker-golden"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			Env:           map[string]string{"CONFIG_VAR": "config-value"},
+		},
+	}
+
+	if err := dispatcher.DispatchAgentStart(ctx, agent, "", false); err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+	if !mockClient.startCalled {
+		t.Fatal("expected StartAgent to be called")
+	}
+	startEnv := mockClient.lastResolvedEnv
+
+	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
+		t.Fatalf("DispatchAgentRestart failed: %v", err)
+	}
+	if !mockClient.restartCalled {
+		t.Fatal("expected RestartAgent to be called")
+	}
+	restartEnv := mockClient.lastRestartResolvedEnv
+
+	// Sanity: the fixture actually exercises config, storage, secret and
+	// as_needed vars, on both paths.
+	for _, env := range []map[string]string{startEnv, restartEnv} {
+		assert.Equal(t, "config-value", env["CONFIG_VAR"])
+		assert.Equal(t, "project-value", env["PROJECT_VAR"])
+		assert.Equal(t, "user-value", env["USER_VAR"])
+		assert.Equal(t, "secret-value", env["SECRET_API_KEY"])
+		_, hasAsNeeded := env["AS_NEEDED_VAR"]
+		assert.False(t, hasAsNeeded, "as_needed var must not be injected")
+		_, hasFileSecret := env["CLAUDE_AUTH"]
+		assert.False(t, hasFileSecret, "non-environment secret must not be injected into env")
+	}
+
+	// The golden assertion: start and restart assemble byte-identical env,
+	// because both now go through the single shared buildStartEnv.
+	assert.Equal(t, startEnv, restartEnv, "DispatchAgentStart and DispatchAgentRestart must resolve identical env for the same agent")
+}

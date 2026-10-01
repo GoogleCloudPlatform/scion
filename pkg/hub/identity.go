@@ -105,7 +105,7 @@ func (u *AuthenticatedUser) ClientType() string { return u.clientType }
 // It is produced when authenticating with a User Access Token (UAT).
 type ScopedUserIdentity struct {
 	UserIdentity
-	projectID    string
+	boundary     TokenBoundary
 	scopes       []string
 	credentialID string
 	ceiling      permissions.FrozenPermissionCeiling
@@ -117,22 +117,40 @@ type ScopedUserIdentity struct {
 	decoration *CredentialDecoration
 }
 
-// NewScopedUserIdentity creates a ScopedUserIdentity. The ceiling is derived
-// from scopes via the frozen legacy normalization (permissions.
-// NormalizeLegacyUATScopes) — the same interpretation a real
-// CeilingVersionUnspecified token gets — so callers that construct an
-// identity directly from raw scope strings (most test fixtures) exercise
-// the same permission-ID-based restriction that production applies. A
-// caller minting a real token should use NewScopedUserIdentityWithCeiling
-// with the token's actual store.UserAccessToken.NormalizedCeiling() instead,
+// newScopedUserIdentity is the single constructor body every
+// NewScopedUserIdentity* variant below funnels through, so the field set
+// cannot drift between them.
+func newScopedUserIdentity(user UserIdentity, boundary TokenBoundary, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling, decoration *CredentialDecoration) *ScopedUserIdentity {
+	return &ScopedUserIdentity{
+		UserIdentity: user,
+		boundary:     boundary,
+		scopes:       scopes,
+		credentialID: credentialID,
+		ceiling:      ceiling,
+		decoration:   decoration,
+	}
+}
+
+// NewScopedUserIdentity creates a ScopedUserIdentity confined to a project
+// boundary. The ceiling is derived from scopes via the frozen legacy
+// normalization (permissions.NormalizeLegacyUATScopes) — the same
+// interpretation a real CeilingVersionUnspecified token gets — so callers
+// that construct an identity directly from raw scope strings (most test
+// fixtures) exercise the same permission-ID-based restriction that
+// production applies. An empty projectID yields an invalid boundary (see
+// TokenBoundary.Valid()), which every consumer of Boundary() must treat as
+// fail-closed. A caller minting a real token should use
+// NewScopedUserIdentityWithBoundaryAndDecoration with the token's actual
+// persisted boundary and store.UserAccessToken.NormalizedCeiling() instead,
 // so a CeilingVersionV1+ ceiling is not silently reinterpreted as legacy.
 func NewScopedUserIdentity(user UserIdentity, projectID string, scopes []string) *ScopedUserIdentity {
 	return NewScopedUserIdentityWithCredentialID(user, projectID, scopes, "")
 }
 
-// NewScopedUserIdentityWithCredentialID creates a UAT-backed identity with
-// its persisted credential ID available for authorization audit context.
-// See NewScopedUserIdentity for how the ceiling is derived.
+// NewScopedUserIdentityWithCredentialID creates a project-boundary,
+// UAT-backed identity with its persisted credential ID available for
+// authorization audit context. See NewScopedUserIdentity for how the
+// ceiling is derived and how projectID becomes a boundary.
 func NewScopedUserIdentityWithCredentialID(user UserIdentity, projectID string, scopes []string, credentialID string) *ScopedUserIdentity {
 	return NewScopedUserIdentityWithCeiling(user, projectID, scopes, credentialID, permissions.FrozenPermissionCeiling{
 		Version:       permissions.CeilingVersionUnspecified,
@@ -140,28 +158,20 @@ func NewScopedUserIdentityWithCredentialID(user UserIdentity, projectID string, 
 	})
 }
 
-// NewScopedUserIdentityWithCeiling creates a UAT-backed identity carrying an
-// explicit, already-normalized FrozenPermissionCeiling — the production
-// path (UserAccessTokenService.ValidateToken) uses this so a stored token's
-// real ceiling (legacy-normalized or CeilingVersionV1+, per
-// store.UserAccessToken.NormalizedCeiling) drives authorization, not a
-// re-derivation from raw scopes.
+// NewScopedUserIdentityWithCeiling creates a project-boundary, UAT-backed
+// identity carrying an explicit, already-normalized FrozenPermissionCeiling.
+// Prefer NewScopedUserIdentityWithBoundaryAndDecoration for a token whose
+// persisted boundary may be hub, not project.
 func NewScopedUserIdentityWithCeiling(user UserIdentity, projectID string, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling) *ScopedUserIdentity {
-	return &ScopedUserIdentity{
-		UserIdentity: user,
-		projectID:    projectID,
-		scopes:       scopes,
-		credentialID: credentialID,
-		ceiling:      ceiling,
-	}
+	return newScopedUserIdentity(user, TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, scopes, credentialID, ceiling, nil)
 }
 
-// NewScopedUserIdentityWithDecoration creates a UAT-backed identity carrying
-// descriptive credential decoration alongside its credential ID. The
-// ceiling is derived from scopes the same way
+// NewScopedUserIdentityWithDecoration creates a project-boundary, UAT-backed
+// identity carrying descriptive credential decoration alongside its
+// credential ID. The ceiling is derived from scopes the same way
 // NewScopedUserIdentityWithCredentialID derives it; see
-// NewScopedUserIdentityWithCeilingAndDecoration for a constructor that takes
-// an explicit, already-normalized ceiling instead.
+// NewScopedUserIdentityWithBoundaryAndDecoration for the canonical
+// constructor that also takes an explicit boundary.
 func NewScopedUserIdentityWithDecoration(user UserIdentity, projectID string, scopes []string, credentialID string, decoration *CredentialDecoration) *ScopedUserIdentity {
 	return NewScopedUserIdentityWithCeilingAndDecoration(user, projectID, scopes, credentialID, permissions.FrozenPermissionCeiling{
 		Version:       permissions.CeilingVersionUnspecified,
@@ -169,21 +179,25 @@ func NewScopedUserIdentityWithDecoration(user UserIdentity, projectID string, sc
 	}, decoration)
 }
 
-// NewScopedUserIdentityWithCeilingAndDecoration creates a UAT-backed identity
-// carrying both an explicit, already-normalized FrozenPermissionCeiling and
-// descriptive credential decoration. UserAccessTokenService.ValidateToken —
-// the single point that has the server-validated token row in hand — uses
-// this to attach both pieces of derived state in one call, so a
-// CeilingVersionV1+ ceiling is not silently reinterpreted as legacy.
+// NewScopedUserIdentityWithCeilingAndDecoration creates a project-boundary,
+// UAT-backed identity carrying both an explicit, already-normalized
+// FrozenPermissionCeiling and descriptive credential decoration. Prefer
+// NewScopedUserIdentityWithBoundaryAndDecoration for a token whose persisted
+// boundary may be hub, not project.
 func NewScopedUserIdentityWithCeilingAndDecoration(user UserIdentity, projectID string, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling, decoration *CredentialDecoration) *ScopedUserIdentity {
-	return &ScopedUserIdentity{
-		UserIdentity: user,
-		projectID:    projectID,
-		scopes:       scopes,
-		credentialID: credentialID,
-		ceiling:      ceiling,
-		decoration:   decoration,
-	}
+	return newScopedUserIdentity(user, TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, scopes, credentialID, ceiling, decoration)
+}
+
+// NewScopedUserIdentityWithBoundaryAndDecoration creates a UAT-backed
+// identity carrying an explicit TokenBoundary (project or hub), an explicit,
+// already-normalized FrozenPermissionCeiling, and descriptive credential
+// decoration. UserAccessTokenService.ValidateToken — the single point that
+// has the server-validated token row, including its persisted boundary, in
+// hand — uses this constructor, so a hub-boundary token is never
+// misrepresented as project-scoped and a CeilingVersionV1+ ceiling is never
+// silently reinterpreted as legacy.
+func NewScopedUserIdentityWithBoundaryAndDecoration(user UserIdentity, boundary TokenBoundary, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling, decoration *CredentialDecoration) *ScopedUserIdentity {
+	return newScopedUserIdentity(user, boundary, scopes, credentialID, ceiling, decoration)
 }
 
 // Decoration returns a deep copy of the descriptive credential metadata
@@ -198,8 +212,16 @@ func (s *ScopedUserIdentity) Decoration() *CredentialDecoration {
 	return &d
 }
 
-// ScopedProjectID returns the project this identity is restricted to.
-func (s *ScopedUserIdentity) ScopedProjectID() string { return s.projectID }
+// Boundary returns the credential-side boundary (project or hub) this
+// identity's UAT was issued under.
+func (s *ScopedUserIdentity) Boundary() TokenBoundary { return s.boundary }
+
+// ScopedProjectID returns the project this identity is restricted to, or ""
+// for a hub-boundary identity. An empty value is never a positive claim of
+// hub access by itself: every consumer must treat it as no project, not as
+// unscoped. It is derived from the boundary field. A caller that needs to
+// distinguish hub from project must use Boundary().
+func (s *ScopedUserIdentity) ScopedProjectID() string { return s.boundary.ProjectID }
 
 // ScopedScopes returns the action scopes this identity is limited to.
 func (s *ScopedUserIdentity) ScopedScopes() []string { return s.scopes }
@@ -255,7 +277,10 @@ func IsScopedUserIdentity(identity Identity) bool {
 // being demoted. For contexts that need an explicit role-binding check, use
 // AuthzService.IsSystemAdmin instead.
 func IsUnscopedLocalPlatformAdmin(user UserIdentity) bool {
-	if user == nil || user.Role() != "admin" || IsScopedUserIdentity(user) {
+	// isNilIdentity treats a typed-nil UserIdentity (for example
+	// (*AuthenticatedUser)(nil)) as missing, denying here rather than
+	// reaching user.Role() below.
+	if isNilIdentity(user) || user.Role() != "admin" || IsScopedUserIdentity(user) {
 		return false
 	}
 	_, federated := user.(FederatedIdentity)
@@ -293,6 +318,17 @@ type localAncestryProvenanceIdentity interface {
 	localAncestryProvenance() ancestryProvenance
 }
 
+// isNilIdentity (scheduled_initiator.go) reports whether identity is nil at
+// the interface level, or is a non-nil Identity interface value holding a
+// nil concrete pointer — for example an Identity holding
+// (*ScopedUserIdentity)(nil), which is never == nil even though a type
+// assertion or type switch against it succeeds with a nil concrete value and
+// a method call or field read on that value then dereferences a nil
+// pointer. Every classifier in this package (principalContextForIdentity,
+// credentialContextForIdentity, AncestryIsHubAttested) and decide's entry
+// check treats that case identically to a nil interface, before doing
+// anything else with identity.
+
 // AncestryIsHubAttested returns true when the identity's ancestry chain has
 // recognized local provenance: signed by this hub (agent JWT) or persisted
 // by this hub (store-derived wrappers), or is itself the root of the chain
@@ -309,9 +345,11 @@ type localAncestryProvenanceIdentity interface {
 // cannot accidentally pass an unrelated type. Nil, unknown, and unrecognized
 // identity types all return false (fail closed): an identity is attested
 // only if it implements localAncestryProvenanceIdentity, which — unlike
-// Type() — cannot be satisfied by an arbitrary or future type string.
+// Type() — cannot be satisfied by an arbitrary or future type string. A
+// typed-nil concrete identity is treated the same as a nil interface: see
+// isNilIdentity.
 func AncestryIsHubAttested(identity Identity) bool {
-	if identity == nil {
+	if isNilIdentity(identity) {
 		return false
 	}
 	// All FederatedIdentity types (FederatedAgentIdentity,
@@ -425,6 +463,12 @@ type credentialContextKey struct{}
 func GetIdentityFromContext(ctx context.Context) Identity {
 	// First check for identity set by unified auth middleware
 	if identity, ok := ctx.Value(identityContextKey{}).(Identity); ok {
+		// A typed-nil identity (for example an Identity holding
+		// (*ScopedUserIdentity)(nil)) is treated as missing, the same as a
+		// nil interface; see isNilIdentity.
+		if isNilIdentity(identity) {
+			return nil
+		}
 		return identity
 	}
 	// Fall back to checking individual context keys for backwards compatibility
@@ -440,7 +484,10 @@ func GetIdentityFromContext(ctx context.Context) Identity {
 // GetUserIdentityFromContext returns the user identity if present.
 func GetUserIdentityFromContext(ctx context.Context) UserIdentity {
 	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
+	// isNilIdentity, not a plain interface comparison: a typed-nil identity
+	// (see isNilIdentity) is treated as missing here too, before the type
+	// assertion below hands a nil concrete value to the caller.
+	if isNilIdentity(identity) {
 		return nil
 	}
 	if user, ok := identity.(UserIdentity); ok {
@@ -452,7 +499,10 @@ func GetUserIdentityFromContext(ctx context.Context) UserIdentity {
 // GetAgentIdentityFromContext returns the agent identity if present.
 func GetAgentIdentityFromContext(ctx context.Context) AgentIdentity {
 	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
+	// isNilIdentity, not a plain interface comparison: a typed-nil identity
+	// (see isNilIdentity) is treated as missing here too, before the type
+	// assertion below hands a nil concrete value to the caller.
+	if isNilIdentity(identity) {
 		return nil
 	}
 	if agent, ok := identity.(AgentIdentity); ok {
@@ -594,7 +644,9 @@ func contextWithAuthType(ctx context.Context, authType string) context.Context {
 // credential established on ctx. See contextWithAuthType.
 func requestAuthAttrs(ctx context.Context) []slog.Attr {
 	var attrs []slog.Attr
-	if identity := GetIdentityFromContext(ctx); identity != nil {
+	// isNilIdentity, not a plain interface comparison: a typed-nil identity
+	// (see isNilIdentity) must not reach identity.ID() below.
+	if identity := GetIdentityFromContext(ctx); !isNilIdentity(identity) {
 		attrs = append(attrs, slog.String(logging.AttrUserID, identity.ID()))
 		if pc := principalContextForIdentity(identity); pc.Kind != "" {
 			attrs = append(attrs, slog.String("principal_kind", string(pc.Kind)))

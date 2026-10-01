@@ -149,7 +149,7 @@ Sends a message to a running agent or user.
     - `--plain`: *(Deprecated — will be removed.)*  Mark for plain-text delivery.
     - `--channel <channel>`: *(Deprecated — use conversation addressing instead.)* Target a specific message channel (e.g., `telegram`, `gchat`, `teams`, `web`).
     - `--thread-id <id>`: *(Deprecated — use conversation addressing instead.)* Target a specific thread ID within the channel.
-    - `--raw`: *(Deprecated — use `scion keys` instead.)* Send literal bytes via tmux send-keys with no trailing Enter.
+    - `--raw`: *(Deprecated — use `scion keys` instead.)* Send literal bytes via tmux send-keys with no trailing Enter. Only a plain message to a single agent in the same project is accepted; combining `--raw` with `--plain`, broadcast, groups, attachments, `--interrupt`, `--wake`, or conversation addressing is rejected (see [Raw Message Restrictions](/scion/reference/messaging-authorization/#raw-message-restrictions)).
     - `--in <duration>`: *(Deprecated — use `scion schedule create --in` instead.)* Schedule message delivery after a duration.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
 
@@ -281,6 +281,8 @@ Lists all agents and their status.
 
 **Usage:** `scion list [flags]`
 
+`scion list` takes no positional arguments; passing one is an error. To name a reference agent for `--descendants`, `--ancestors`, or `--lineage`, use `=` (for example, `--descendants=foo`, not `--descendants foo`).
+
 - **Flags:**
     - `-a, --all`: Show all agents (including stopped ones).
     - `-r, --running`: Filter for active (running) agents.
@@ -340,7 +342,13 @@ instead. The new generation's preamble tells it to catch up with `scion conversa
 
 Run it with no argument inside an agent container to migrate the agent itself (self-migration).
 Self-migration requires `--handoff-file`, because there is no one else to describe the work in
-progress. When migrating another agent, the handoff is optional.
+progress. When migrating another agent, the handoff is optional. Run
+`scion reincarnate --handoff-template` to print the expected handoff sections (role charter,
+active work, canonical files, live conversations, child agents, pending waits, and so on); this
+flag is local and offline, so it works without a Hub connection and from inside an agent container.
+
+The new generation's preamble names who requested the migration. While a migration is in progress,
+the agent's status message reads "migrating to generation N".
 
 Reincarnation works for agents in clone-per-agent, shared-workspace (shared-plain), and
 Hub-managed workspaces. For a shared-workspace agent, the agent record, identity, and shared
@@ -353,10 +361,11 @@ as stop, start, and restart); an agent can always reincarnate itself.
 
 - **Flags:**
     - `--handoff-file <path>`: File whose content becomes the new generation's first task. Required for self-migration.
+    - `--handoff-template`: Print the handoff template and exit. Ignores other flags and arguments, and does not contact the Hub.
     - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch) without migrating anything.
 
 :::note[Phase 1]
-This release supports only `--handoff-file` and `--dry-run`. Overrides such as a different image,
+This release supports only `--handoff-file`, `--handoff-template`, and `--dry-run`. Overrides such as a different image,
 model, or harness config are not yet available.
 :::
 
@@ -448,6 +457,21 @@ View and modify configuration settings.
 - `validate`: Validate settings files against the schema.
 - `migrate`: Migrate configuration to the latest versioned format.
 - `dir`: Print the path to the active configuration directory.
+
+`config get` supports the top-level settings keys (`active_profile`, `default_template`,
+`default_harness_config`, `workspace_path`, `image_registry`, `project_id`, `cli.autohelp`,
+`hub.enabled`, `hub.linked`, `hub.endpoint`, `hub.local_only`, `hub.brokerId`,
+`hub.brokerToken`, `hub.brokerNickname` — note that `hub.brokerToken` prints its value,
+as it always has), plus dotted paths into a named entry of the `profiles` or `runtimes`
+maps: `profiles.<name>.<field>` and `runtimes.<name>.<field>`, where `<field>` is one of
+that entry's scalar settings named by its `settings.yaml` key (e.g.
+`profiles.local.runtime`, `runtimes.kubernetes.namespace`). Within a profiles/runtimes
+entry, structured fields (maps, lists, nested objects — e.g. `env`, `volumes`,
+`secrets`, `harness_overrides`) and credential-like field names are not supported and
+return an error rather than a partial, reformatted, or unmasked value.
+`harness_configs.<name>.<field>` is not supported: harness configs are normally
+resolved from on-disk harness-config directories, not merged into `settings.yaml`;
+use `scion harness-config` to inspect them instead.
 
 ### `scion cd-config`
 
@@ -579,14 +603,16 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 - `scion hub link`: Link the current local project to the Hub.
 - `scion hub unlink`: Unlink the current project from the Hub locally.
 - `scion hub projects`: List all projects registered on the Hub.
-    - `info [project-name]`: Show details for a project, including its providers. Each provider shows its broker's capacity as `(agents: count/limit)`, or `(agents: count)` when the broker has no limit.
+    - `info [project-name]`: Show details for a project, including its providers. Each provider shows its Runtime Broker's capacity as `(agents: count/limit)`, or `(agents: count)` when that Runtime Broker has no limit. `(not enforced)` is appended when the hub-wide switch for Runtime Broker quota enforcement is off.
 - `scion hub brokers`: List all runtime brokers registered on the Hub.
 - `scion hub secret`: Manage write-only secrets on the Hub.
     - `set <key> <value>`: Set a secret (supports `--allow-progeny` for user-scoped secrets).
     - `get [key]`: Get secret metadata.
     - `clear <key>`: Remove a secret.
     - `migrate`: Move existing secrets from the Hub database to GCP Secret Manager.
-        - Flags: `--gcp-project <id>` (required, the GCP project ID), `--credentials <path>` (GCP credentials JSON), `--dry-run`, `--force` (re-migrate secrets that already reference Secret Manager), `--hub-id <id>` (Hub instance ID used to namespace secrets).
+        - Flags: `--gcp-project <id>` (required, the GCP project ID), `--credentials <path>` (GCP credentials JSON), `--dry-run`, `--force` (re-migrate secrets that already reference Secret Manager), `--hub-id <id>` (Hub instance ID used to namespace secrets). Works from any directory; no project is required.
+    - `migrate-names`: Rename legacy (pre hub-prefix) GCP Secret Manager secrets to the hub-prefixed `scion-<12-hex hub hash>-…` scheme. Idempotent; run a plain pass (or `--dry-run`) first, then a separate `--delete-legacy` pass. Does not require a project directory. See [Secrets](/scion/hosted/user/secrets/) for the IAM and rollout ordering.
+        - Flags: `--gcp-project <id>` (required), `--credentials <path>`, `--dry-run`, `--delete-legacy` (delete each legacy secret after verifying its hub-prefixed copy), `--hub-id <id>` (defaults to the resolved server hub ID), `--timeout <duration>` (default `5m`), `-c, --config <path>` (server config file; must match the running hub's so hub ID resolution agrees).
 - `scion hub env`: Manage environment variables on the Hub.
     - `set <key>=<value>`: Set a variable.
     - `get [key]`: Get variable values.

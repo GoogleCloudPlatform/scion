@@ -32,7 +32,9 @@ type noopWebChatStore struct{ WebChatStore }
 func (noopWebChatStore) GetThreads(context.Context, string, string, int) ([]WebChatThread, error) {
 	return nil, nil
 }
-func (noopWebChatStore) MarkThreadRead(context.Context, string, string, string) error { return nil }
+func (noopWebChatStore) GetUserPrefs(context.Context, string) (*WebChatUserPrefs, error) {
+	return nil, nil
+}
 func (noopWebChatStore) GetLastChannel(context.Context, string, string, string) (string, error) {
 	return "", nil
 }
@@ -91,19 +93,19 @@ func TestWebChatStoreRace(t *testing.T) {
 		}()
 	}
 
-	// Reader goroutines: call handleChatThreads concurrently.
-	// The handler reads s.webChatStore twice — once for the nil guard and
-	// once for GetThreads — so a concurrent write must trigger the race
-	// detector when the snapshot-under-lock fix is absent.
+	// Reader goroutines: call handleChatSpaces concurrently.
+	// The handler reads s.webChatStore once under lock — for the nil guard,
+	// reused for the later GetUserPrefs call — so a concurrent write must
+	// trigger the race detector when the snapshot-under-lock fix is absent.
 	for i := 0; i < goroutines/2; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
 				req, _ := http.NewRequestWithContext(userCtx, http.MethodGet,
-					"/api/v1/chat/threads?projectId=nonexistent", nil)
+					"/api/v1/chat/spaces", nil)
 				w := httptest.NewRecorder()
-				srv.handleChatThreads(w, req)
+				srv.handleChatSpaces(w, req)
 			}
 		}()
 	}

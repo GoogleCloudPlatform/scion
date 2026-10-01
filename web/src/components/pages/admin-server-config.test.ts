@@ -1009,4 +1009,82 @@ describe('scion-page-admin-server-config', () => {
       expect(agentSecretsSwitch(element)).toBeUndefined();
     });
   });
+
+  // ── Experiments tab (ptone/scion#2217) ──
+
+  describe('Experiments tab', () => {
+    function showTab(el: HTMLElement, name: string): void {
+      const tabGroup = query(el, 'sl-tab-group');
+      tabGroup?.dispatchEvent(new CustomEvent('sl-tab-show', { detail: { name } }));
+    }
+
+    // The top-level Save & Reload / Reset bar is a direct child of the
+    // shadow root; the GitHub App tab has its own unrelated ".actions" div
+    // nested inside its (always-rendered, visibility-toggled) panel, so a
+    // plain `.actions` query would match both.
+    function topLevelActions(el: HTMLElement): Element | null {
+      const candidates = el.shadowRoot?.querySelectorAll('.actions') ?? [];
+      return Array.from(candidates).find((c) => c.parentNode === el.shadowRoot) ?? null;
+    }
+
+    it('appears last in the tab nav', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+      // Scope to the outer tab group's direct children — the Runtimes &
+      // Profiles panel nests its own sl-tab-group for agent-defaults, whose
+      // tabs also carry slot="nav" but belong to a different tab group.
+      const outerTabGroup = query(element, 'sl-tab-group');
+      const tabs = Array.from(outerTabGroup?.querySelectorAll(':scope > sl-tab[slot="nav"]') ?? []);
+      expect(tabs[tabs.length - 1].getAttribute('panel')).toBe('experiments');
+    });
+
+    it('renders <scion-admin-experiments> in its panel', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+      expect(
+        query(element, 'sl-tab-panel[name="experiments"] scion-admin-experiments')
+      ).not.toBeNull();
+    });
+
+    it('hides the actions bar and the harness-config error message while the Experiments tab is active', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      // Force the harness-config error message's condition on, as if the
+      // Runtimes & Profiles tab had an invalid JSON entry, so we can prove
+      // it is specifically hidden on the Experiments tab, not just absent.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (element as any).harnessConfigErrors = { profileA: 'invalid json' };
+      element.requestUpdate();
+      await element.updateComplete;
+
+      expect(topLevelActions(element)).not.toBeNull();
+      expect(shadowText(element)).toContain('Cannot save');
+
+      showTab(element, 'experiments');
+      await element.updateComplete;
+
+      expect(topLevelActions(element)).toBeNull();
+      expect(shadowText(element)).not.toContain('Cannot save');
+
+      showTab(element, 'general');
+      await element.updateComplete;
+
+      expect(topLevelActions(element)).not.toBeNull();
+      expect(shadowText(element)).toContain('Cannot save');
+    });
+
+    it('sets .active on <scion-admin-experiments> only while its tab is shown', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+      const experimentsEl = query(element, 'scion-admin-experiments') as HTMLElement & {
+        active: boolean;
+      };
+      expect(experimentsEl.active).toBe(false);
+
+      showTab(element, 'experiments');
+      await element.updateComplete;
+      expect(experimentsEl.active).toBe(true);
+
+      showTab(element, 'general');
+      await element.updateComplete;
+      expect(experimentsEl.active).toBe(false);
+    });
+  });
 });

@@ -34,6 +34,7 @@
  */
 
 import { LitElement, html, css, svg, nothing } from 'lit';
+import { repeat } from 'lit/directives/repeat.js';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import type { Agent } from '../../shared/types.js';
 import {
@@ -45,14 +46,11 @@ import {
 import { getStateDisplay, type StatusVariant } from '../../shared/agent-state-display.js';
 import {
   buildLineageForest,
+  computeStableLayout,
   descendantCounts,
-  layoutForest,
-  layoutForestWithUsers,
   parentIdOf,
-  pruneCollapsed,
   rootUserOf,
   topologySignature,
-  transposeLayout,
   userKey,
   NODE_W,
   NODE_H,
@@ -150,6 +148,18 @@ export class ScionAgentTreeView extends LitElement {
   @property({ type: String })
   orientation: Orientation = 'vertical';
 
+  /**
+   * Identifies which subset of the host's underlying agent data `agents`
+   * currently represents (e.g. a project or phase filter value). Leave at
+   * the default `''` if the host does no client-side filtering. Changing it
+   * tells `computeStableLayout` that a shrink/growth of `agents` is the user
+   * picking a different view of the same data, not a delete — so it gets a
+   * fresh, re-fit, compacted layout instead of the stable-but-not-recompacted
+   * delete path.
+   */
+  @property({ type: String })
+  filterKey = '';
+
   @state() private showUsers = false;
   @state() private hoverId: string | null = null;
   @state() private collapsedIds: ReadonlySet<string> = new Set();
@@ -180,10 +190,17 @@ export class ScionAgentTreeView extends LitElement {
    * #2388) matches: status-only agent updates, pan, zoom and hover never
    * rebuild the forest or recompute node/edge geometry. Node status and
    * actions still come from the live `agents` array via `agentById` on every
-   * render — only positions and edge endpoints are cached.
+   * render — only positions and edge endpoints are cached. The other fields
+   * besides `layout` are the exact inputs it was computed from, which
+   * `computeStableLayout` (see its doc comment) needs on the next cache miss.
    */
   private layoutCache: {
     signature: string;
+    agents: Agent[];
+    collapsedIds: ReadonlySet<string>;
+    showUsers: boolean;
+    orientation: Orientation;
+    filterKey: string;
     hiddenCounts: Map<string, number>;
     layout: ForestLayout;
   } | null = null;
@@ -244,13 +261,20 @@ export class ScionAgentTreeView extends LitElement {
     return new Set(agents.map((a) => a.projectId));
   }
 
-  /** True when the set of projects represented changed, ignoring reordering. */
-  private static scopeChanged(oldAgents: Agent[], newAgents: Agent[]): boolean {
+  /**
+   * True when a project newly enters the represented scope — worth re-fitting
+   * for, since the forest just grew into territory the current viewport may
+   * not cover. A project *leaving* the scope (e.g. its last agent was
+   * deleted) is deliberately not treated as a scope change: re-fitting then
+   * would reset pan/zoom for a graph that only shrank, which is a jarring
+   * resize when deleting the last agent of a project in a cross-project
+   * graph. Reordering alone never counts either way.
+   */
+  private static scopeExpanded(oldAgents: Agent[], newAgents: Agent[]): boolean {
     const oldSet = ScionAgentTreeView.projectIdSet(oldAgents);
     const newSet = ScionAgentTreeView.projectIdSet(newAgents);
-    if (oldSet.size !== newSet.size) return true;
-    for (const id of oldSet) {
-      if (!newSet.has(id)) return true;
+    for (const id of newSet) {
+      if (!oldSet.has(id)) return true;
     }
     return false;
   }
@@ -628,17 +652,22 @@ export class ScionAgentTreeView extends LitElement {
     ) {
       this.didAutoFit = false;
     }
+    // A filter change is the user picking a different view, not a delete —
+    // re-fit for it, the same as a fresh, uncached render would.
+    if (changedProperties.has('filterKey') && changedProperties.get('filterKey') !== undefined) {
+      this.didAutoFit = false;
+    }
     if (changedProperties.has('agents')) {
       const oldAgents = changedProperties.get('agents') as Agent[] | undefined;
-      // Re-fit when agents arrive for the first time or when the project
-      // scope changes (the set of distinct projectIds represented, not just
-      // the first agent — order and identity churn from SSE status updates
-      // must not reset the viewport).
+      // Re-fit on first arrival or when a project *enters* scope. A project
+      // *leaving* scope does not re-fit: that's what an agent delete does to
+      // a cross-project graph, and resetting the viewport then would be the
+      // same jarring reset for the whole canvas instead of one node.
       if (
         !oldAgents ||
         oldAgents.length === 0 ||
         this.agents.length === 0 ||
-        ScionAgentTreeView.scopeChanged(oldAgents, this.agents)
+        ScionAgentTreeView.scopeExpanded(oldAgents, this.agents)
       ) {
         this.didAutoFit = false;
       }
@@ -920,17 +949,46 @@ export class ScionAgentTreeView extends LitElement {
     let layout: ForestLayout;
     if (this.layoutCache && this.layoutCache.signature === signature) {
       ({ hiddenCounts, layout } = this.layoutCache);
+      // filterKey isn't part of the topology signature: it can change with no
+      // effect on this render's own topology (e.g. a status filter that
+      // happens to match the same agents), which would otherwise leave the
+      // cache holding a stale filterKey for the next comparison and make a
+      // later real delete take the fresh-layout path instead of staying put.
+      this.layoutCache.filterKey = this.filterKey;
     } else {
-      const forest = buildLineageForest(agents);
-      // Compute BEFORE pruneCollapsed — pruning removes the very subtrees
-      // being counted.
-      hiddenCounts = descendantCounts(forest);
-      pruneCollapsed(forest, this.collapsedIds);
-      layout = this.showUsers ? layoutForestWithUsers(forest) : layoutForest(forest);
-      if (this.orientation === 'horizontal') {
-        layout = transposeLayout(layout);
-      }
-      this.layoutCache = { signature, hiddenCounts, layout };
+      // Descendant counts always come from a fresh forest build — cheap, and
+      // needed to get an accurate collapse-chip count regardless of which
+      // path below produces the positions.
+      hiddenCounts = descendantCounts(buildLineageForest(agents));
+      // See computeStableLayout's doc comment for what it reuses and when it
+      // falls back to a full fresh layout.
+      layout = computeStableLayout(
+        agents,
+        this.collapsedIds,
+        this.showUsers,
+        this.orientation,
+        this.filterKey,
+        this.layoutCache
+          ? {
+              agents: this.layoutCache.agents,
+              collapsedIds: this.layoutCache.collapsedIds,
+              showUsers: this.layoutCache.showUsers,
+              orientation: this.layoutCache.orientation,
+              filterKey: this.layoutCache.filterKey,
+              layout: this.layoutCache.layout,
+            }
+          : null
+      );
+      this.layoutCache = {
+        signature,
+        agents,
+        collapsedIds: this.collapsedIds,
+        showUsers: this.showUsers,
+        orientation: this.orientation,
+        filterKey: this.filterKey,
+        hiddenCounts,
+        layout,
+      };
     }
     const { nodes, edges, users, width, height } = layout;
     this.contentW = width;
@@ -986,10 +1044,23 @@ export class ScionAgentTreeView extends LitElement {
           style="transform: translate(${this.panX}px, ${this.panY}px) scale(${this.scale})"
         >
           <svg width=${width} height=${height} aria-hidden="true">
-            ${this.renderEdgeMarkers()} ${edges.map((e) => this.renderEdge(e, related, agentById))}
+            ${this.renderEdgeMarkers()}
+            ${repeat(
+              edges,
+              (e) => e.childId,
+              (e) => this.renderEdge(e, related, agentById)
+            )}
           </svg>
-          ${users.map((u) => this.renderUserNode(u, agents, edges, related))}
-          ${nodes.map((n) => this.renderNode(n, related, hiddenCounts, agentById))}
+          ${repeat(
+            users,
+            (u) => u.id,
+            (u) => this.renderUserNode(u, agents, edges, related)
+          )}
+          ${repeat(
+            nodes,
+            (n) => n.agent.id,
+            (n) => this.renderNode(n, related, hiddenCounts, agentById)
+          )}
         </div>
         <div class="zoom-controls">
           <sl-button size="small" @click=${() => this.zoomButtons(1.25)} title="Zoom in (+)"

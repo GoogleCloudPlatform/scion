@@ -502,6 +502,25 @@ func isSingleCleanPathElement(name string) bool {
 	return filepath.Clean(name) == name
 }
 
+// writeStartContextError writes the HTTP response for an error from
+// buildStartContext (or anything constructing the same *startContextError
+// shape, such as createAgent's own preflight template hydration): a
+// Hub-connectivity error maps to 503 hub_unreachable (retryable), any other
+// hub-side error maps to 500 template_error, and anything else falls back to
+// a generic runtime error. Shared so the real dispatch path and the
+// env-gather preflight report a hydration failure identically.
+func writeStartContextError(w http.ResponseWriter, err error) {
+	if sce, ok := err.(*startContextError); ok && sce.IsHubError {
+		if templatecache.IsHubConnectivityError(sce.OriginalErr) {
+			HubUnreachableError(w, sce.OriginalErr.Error())
+			return
+		}
+		TemplateError(w, err.Error())
+		return
+	}
+	RuntimeError(w, err.Error())
+}
+
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	createStart := time.Now()
@@ -634,17 +653,51 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// Env-gather: if GatherEnv is true, evaluate env completeness before building full context.
 	// This needs the resolved project path and merged env to determine which keys are missing.
 	if req.GatherEnv && !req.NoAuth {
-		// Build a preliminary merged env for env-gather evaluation
-		env := make(map[string]string)
-		for k, v := range req.ResolvedEnv {
-			env[k] = v
-		}
-		if req.Config != nil {
-			for _, e := range req.Config.Env {
-				parts := strings.SplitN(e, "=", 2)
-				if len(parts) == 2 {
-					env[parts[0]] = parts[1]
+		// Build a preliminary merged env for env-gather evaluation. Shared
+		// with extractRequiredEnvKeys's own requestEnv so both checks start
+		// from the identical presence-aware base (see buildRequestEnv).
+		env := buildRequestEnv(req)
+
+		// Hydrate a Hub-managed template before extracting required keys.
+		// launch's own dispatch path (start_context.go) does the same
+		// hydration and replaces opts.Template with the result before
+		// ProvisionAgent resolves the harness-config template chain from
+		// it — so scoring the on-disk slug here instead could score a
+		// stale local template of the same name that launch will never
+		// use. Unlike the harness-config hydration below, a failure here
+		// is NOT a fall-back case: launch returns the same startContextError
+		// mapping (hub_unreachable 503 / template_error 500, see
+		// writeStartContextError) on a hydration error, so the preflight
+		// must not be more lenient than launch by silently scoring a slug
+		// launch would never actually reach. No timeout is applied here,
+		// for the same reason: launch hydrates with the request context and
+		// no cap (start_context.go), and a fixed cap shorter than a cold
+		// download (DefaultHydratorConfig's DownloadTimeout is 5 minutes)
+		// would fail creates here that launch would have completed.
+		//
+		// This hydration runs ahead of the global-project 409, the
+		// harness-config policy refusal, and the NFS check below, so a
+		// request those would otherwise reject can pay for a hub round trip
+		// first. Kept in this order to sit next to the harness-config
+		// hydration it mirrors; revisit if that ordering cost matters.
+		var hydratedTemplatePath string
+		if req.Config != nil && (req.Config.TemplateID != "" || req.Config.TemplateHash != "") {
+			hubConn := s.resolveHubConnection(r)
+			if hubConn != nil {
+				tplPath, err := s.hydrateTemplate(ctx, req.Config, hubConn)
+				if err != nil {
+					sce := &startContextError{
+						Status:      http.StatusInternalServerError,
+						Message:     "Failed to hydrate template: " + err.Error(),
+						IsHubError:  true,
+						OriginalErr: err,
+					}
+					markAttemptFailed(http.StatusInternalServerError, sce.Message)
+					span.SetStatus(codes.Error, sce.Message)
+					writeStartContextError(w, sce)
+					return
 				}
+				hydratedTemplatePath = tplPath
 			}
 		}
 
@@ -670,7 +723,18 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		required, secretInfo, alternatives := s.extractRequiredEnvKeys(req, hydratedHCPath)
+		required, secretInfo, alternatives, settingsEnv := s.extractRequiredEnvKeys(req, hydratedTemplatePath, hydratedHCPath)
+		// Fold in the settings/harness-config-directory env
+		// extractRequiredEnvKeys resolved (its withDir, minus whatever
+		// requestEnv already decided — see settingsEnvSatisfied there), but
+		// only to fill genuine gaps: env above is requestEnv, which already
+		// reflects what outranks settings/dir for the pod, so an existing
+		// entry — even an empty one — must not be overwritten here.
+		for k, v := range settingsEnv {
+			if _, exists := env[k]; !exists {
+				env[k] = v
+			}
+		}
 		if s.config.Debug {
 			s.envSecretLog.Debug("Env-gather: evaluating env completeness",
 				"gatherEnv", req.GatherEnv,
@@ -865,15 +929,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		markAttemptFailed(http.StatusInternalServerError, err.Error())
 		span.SetStatus(codes.Error, err.Error())
-		if sce, ok := err.(*startContextError); ok && sce.IsHubError {
-			if templatecache.IsHubConnectivityError(sce.OriginalErr) {
-				HubUnreachableError(w, sce.OriginalErr.Error())
-				return
-			}
-			TemplateError(w, err.Error())
-			return
-		}
-		RuntimeError(w, err.Error())
+		writeStartContextError(w, err)
 		return
 	}
 	opts := sc.Opts
@@ -2817,9 +2873,15 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, pr
 // config directory that supplements the on-disk search. This allows env-gather
 // to see auth metadata from hub-managed harness-configs that haven't been
 // downloaded to the standard on-disk locations yet.
-func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessConfigPath ...string) ([]string, map[string]api.SecretKeyInfo, map[string][]string) {
+func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplatePath string, hydratedHarnessConfigPath ...string) ([]string, map[string]api.SecretKeyInfo, map[string][]string, map[string]string) {
 	required := make(map[string]struct{})
 	alternatives := make(map[string][]string)
+	// settingsEnvSatisfied holds the non-empty env values that settings
+	// (harness_configs/harness_overrides) and the harness-config directory
+	// contribute to the pod. Populated below when harnessConfigName resolves;
+	// returned so callers can fold it into their own "is this key satisfied"
+	// checks (see the outer env-gather check in CreateAgent).
+	settingsEnvSatisfied := make(map[string]string)
 
 	var settings *config.VersionedSettings
 	settingsPath := req.ProjectPath
@@ -2882,6 +2944,10 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 		// path is used; otherwise the broker falls back to the legacy compiled
 		// per-harness tables in pkg/harness/auth.go.
 		var authMeta *config.HarnessAuthMetadata
+		// hcDirEnv is the resolved harness-config directory's own `env:`
+		// block (hydrated or on-disk), captured alongside harnessType so it
+		// can feed the launch-mirroring env merge below.
+		var hcDirEnv map[string]string
 
 		// Try on-disk harness-config directory first (check projectPath,
 		// then fall back to global dir for hub-dispatched agents without a local project)
@@ -2889,27 +2955,110 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 		if harnessConfigSearchPath == "" {
 			harnessConfigSearchPath = settingsPath
 		}
+		// A template-bundled harness-config of the same name outranks the
+		// project/global one: FindHarnessConfigDir checks template paths
+		// first (pkg/config/harness_config.go), and launch resolves the
+		// same template chain via resolveHarnessConfigDir
+		// (pkg/agent/provision.go). Resolve it here too so the preflight
+		// doesn't score a project/global `env:` block launch will not use.
+		//
+		// For a hub-dispatched agent, launch resolves the chain from the
+		// hydrated template's local path, not the slug (start_context.go
+		// replaces opts.Template with it before ProvisionAgent builds the
+		// chain) — a hub-managed template of the same name as a stale local
+		// one would otherwise be invisible here. hydratedTemplatePath is
+		// that same path, hydrated by the caller (createAgent) alongside
+		// the harness-config hydration below; it replaces the slug
+		// whenever the caller supplied one, and GetTemplateChainInProject
+		// resolves an absolute path directly (FindTemplateInProjectPath),
+		// so this does not depend on the slug matching anything on disk.
+		templateForChain := hydratedTemplatePath
+		if templateForChain == "" && req.Config != nil {
+			templateForChain = req.Config.Template
+		}
+		var harnessConfigTemplatePaths []string
+		if templateForChain != "" && harnessConfigSearchPath != "" {
+			if chain, err := config.GetTemplateChainInProject(templateForChain, harnessConfigSearchPath); err == nil {
+				for _, tpl := range chain {
+					harnessConfigTemplatePaths = append(harnessConfigTemplatePaths, tpl.Path)
+				}
+			}
+		}
 		if harnessConfigSearchPath != "" {
-			if hcDir, err := config.FindHarnessConfigDir(harnessConfigName, harnessConfigSearchPath); err == nil {
+			if hcDir, err := config.FindHarnessConfigDir(harnessConfigName, harnessConfigSearchPath, harnessConfigTemplatePaths...); err == nil {
 				harnessType = hcDir.Config.Harness
 				authType = hcDir.Config.AuthSelectedType
 				if hcDir.Config.Auth != nil {
 					authMeta = hcDir.Config.Auth
 				}
+				hcDirEnv = hcDir.Config.Env
 			}
 		}
 
-		// Fall back to hydrated hub-managed harness-config when on-disk
-		// search didn't find the config (or didn't populate auth metadata).
-		if harnessType == "" && len(hydratedHarnessConfigPath) > 0 && hydratedHarnessConfigPath[0] != "" {
+		// The hydrated hub-managed harness-config, when supplied, is what
+		// launch actually reads: resolveHarnessConfigDir
+		// (pkg/agent/provision.go) prefers the dispatch-context hydrated
+		// copy unconditionally over an on-disk one of the same name — it
+		// never merges the two. Harness/auth metadata still only falls back
+		// to the hydrated copy when the on-disk search found nothing
+		// (existing cascade), but hcDirEnv always takes the hydrated copy's
+		// value (even absent) once a hydrated copy loads, so the preflight
+		// never scores an on-disk `env:` block that launch will not use.
+		if len(hydratedHarnessConfigPath) > 0 && hydratedHarnessConfigPath[0] != "" {
 			if hcDir, err := config.LoadHarnessConfigDir(hydratedHarnessConfigPath[0]); err == nil && hcDir != nil {
-				harnessType = hcDir.Config.Harness
-				authType = hcDir.Config.AuthSelectedType
-				if hcDir.Config.Auth != nil {
-					authMeta = hcDir.Config.Auth
+				if harnessType == "" {
+					harnessType = hcDir.Config.Harness
+					authType = hcDir.Config.AuthSelectedType
+					if hcDir.Config.Auth != nil {
+						authMeta = hcDir.Config.Auth
+					}
 				}
+				hcDirEnv = hcDir.Config.Env
 			}
 		}
+
+		// Build the same layered env launch produces, so the preflight can
+		// check satisfaction against exactly what the pod will receive:
+		//  1. requestEnv: req.ResolvedEnv, then req.Config.Env overriding it
+		//     — the same "opts.Env" launch starts from. Presence is kept
+		//     even for an empty value, because resolveAuthEnvOverlay
+		//     (pkg/agent/run.go) only fills a key that is entirely ABSENT
+		//     from opts.Env; an explicit empty value here blocks
+		//     resolveAuthEnvOverlay's fill of opts.Env. For an
+		//     auth-candidate key the preflight treats this as blocking
+		//     conservatively rather than as a launch-exact mirror — see
+		//     authCandidateKeyValue.
+		//  2. withSettings: requestEnv, with the resolved harness-config env
+		//     (harness_configs.<h>.env plus
+		//     profiles.<p>.harness_overrides.<h>.env, merged by
+		//     ResolveHarnessConfig) filling only keys absent from requestEnv
+		//     — mirroring resolveAuthEnvOverlay exactly.
+		//  3. withDir: withSettings, with the harness-config directory's own
+		//     env (pre-expanded once into expandedDirEnv, the way
+		//     buildAgentEnv, pkg/agent/run.go, expands it: ${VAR}
+		//     references, empty-after-expansion falls back to a host-env
+		//     passthrough) filling only keys still absent — since the
+		//     directory's env is the lowest-ranked source and only reaches
+		//     the container via finalScionCfg.Env when nothing
+		//     higher-ranked set the key.
+		//
+		// This "an empty entry blocks every lower layer" rule is correct for
+		// an ordinary key, but NOT for a GCP-shared or harness-auth
+		// "auth-candidate" key: run.go's Start deletes an empty auth-candidate
+		// entry from opts.Env after auth resolves (its resolved.EnvVars only
+		// ever carries non-empty values), clearing the way for
+		// finalScionCfg.Env to supply the value instead. The auth-key-group
+		// check below uses authCandidateKeySatisfied for that reason, rather
+		// than withDir, for every key it evaluates.
+		requestEnv := buildRequestEnv(req)
+		rawSettingsEnv := rawSettingsHarnessEnv(settings, profileName, harnessConfigName)
+		withSettings := fillAbsentEnv(requestEnv, rawSettingsEnv)
+		// expandedDirEnv is built once so fillAbsentDirEnv and
+		// authCandidateKeyValue consult the identical expanded view,
+		// so both index the directory by the expanded key, as
+		// buildAgentEnv does.
+		expandedDirEnv := expandDirEnv(hcDirEnv)
+		withDir := fillAbsentDirEnv(withSettings, expandedDirEnv)
 
 		// Settings harness_configs entry can provide/override
 		if settings != nil {
@@ -2973,8 +3122,15 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 					fileSecretNames[sec.Name] = struct{}{}
 				}
 			}
+			// withSettings (requestEnv layered with the resolved settings
+			// env) is the right view here, not withDir: launch's own
+			// auto-detect (autoDetectAuthSelectedType, pkg/agent/run.go)
+			// runs after resolveAuthEnvOverlay has filled opts.Env from
+			// settings, but the harness-config directory's env never
+			// reaches opts.Env — it only reaches finalScionCfg.Env, which
+			// auto-detect does not see.
 			resolvedEnvKeys := make(map[string]struct{})
-			for k, v := range req.ResolvedEnv {
+			for k, v := range withSettings {
 				if v != "" {
 					resolvedEnvKeys[k] = struct{}{}
 				}
@@ -3010,13 +3166,13 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 		// Resolve auth key groups and check satisfaction
 		keyGroups := harness.RequiredAuthEnvKeysFromConfig(authMeta, authType)
 		if len(keyGroups) > 0 {
-			// Build lookup of already-satisfied keys
-			envKeys := make(map[string]struct{})
-			for k, v := range req.ResolvedEnv {
-				if v != "" {
-					envKeys[k] = struct{}{}
-				}
-			}
+			// Every key here is, by construction, an auth-candidate key (a
+			// GCP shared name, or one of this harness's own required_env
+			// names), so authCandidateKeySatisfied's launch-mirroring
+			// fall-through (see its doc comment) applies to all of them —
+			// unlike withDir, which is correct for an ordinary key but not
+			// for these.
+			secretEnvKeys := make(map[string]struct{})
 			for _, sec := range req.ResolvedSecrets {
 				if sec.Type == "environment" || sec.Type == "" {
 					target := sec.Target
@@ -3024,7 +3180,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 						target = sec.Name
 					}
 					if target != "" {
-						envKeys[target] = struct{}{}
+						secretEnvKeys[target] = struct{}{}
 					}
 				}
 			}
@@ -3032,7 +3188,11 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 			for _, group := range keyGroups {
 				satisfied := false
 				for _, key := range group {
-					if _, ok := envKeys[key]; ok {
+					if _, ok := secretEnvKeys[key]; ok {
+						satisfied = true
+						break
+					}
+					if authCandidateKeySatisfied(key, requestEnv, rawSettingsEnv, expandedDirEnv) {
 						satisfied = true
 						break
 					}
@@ -3048,6 +3208,36 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 						alternatives[canonicalKey] = group[1:]
 					}
 				}
+			}
+		}
+
+		// settingsEnvSatisfied is what the outer needs/hubHas check
+		// (createAgent) folds into its own requestEnv-based env, to fill
+		// keys requestEnv did not already decide (and only those — an empty
+		// ResolvedEnv/Config.Env entry is never overwritten there). Built
+		// per-key rather than uniformly from withDir, because an
+		// auth-candidate key (GOOGLE_CLOUD_PROJECT and friends, or one of
+		// this harness's own required_env names — see
+		// authCandidateKeySatisfied) needs the same launch-mirroring
+		// fall-through the auth-key-group check above uses: a Phase 2/3
+		// requirement can name an auth-candidate key too (e.g. a settings
+		// harness_configs entry other than the selected one declaring
+		// GOOGLE_CLOUD_PROJECT empty), and that requirement is checked by
+		// the outer code, not by the keyGroups loop above.
+		authKeys := authCandidateEnvKeys(authMeta)
+		settingsEnvSatisfied = make(map[string]string)
+		for k := range withDir {
+			if _, existed := requestEnv[k]; existed {
+				continue
+			}
+			if _, isAuthKey := authKeys[k]; isAuthKey {
+				if v, satisfied := authCandidateKeyValue(k, requestEnv, rawSettingsEnv, expandedDirEnv); satisfied {
+					settingsEnvSatisfied[k] = v
+				}
+				continue
+			}
+			if v := withDir[k]; v != "" {
+				settingsEnvSatisfied[k] = v
 			}
 		}
 
@@ -3190,7 +3380,224 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 	for k := range required {
 		keys = append(keys, k)
 	}
-	return keys, secretInfo, alternatives
+	return keys, secretInfo, alternatives, settingsEnvSatisfied
+}
+
+// buildRequestEnv returns req.ResolvedEnv overridden per-key by req.Config.Env
+// ("KEY=VALUE" entries) — the same starting point launch uses for opts.Env
+// before resolveAuthEnvOverlay (pkg/agent/run.go) runs. Presence is kept even
+// for an empty value: an explicit empty entry here blocks
+// resolveAuthEnvOverlay's fill of opts.Env. For an auth-candidate key the
+// preflight treats this as blocking conservatively rather than as a
+// launch-exact mirror — see authCandidateKeyValue.
+func buildRequestEnv(req CreateAgentRequest) map[string]string {
+	env := make(map[string]string, len(req.ResolvedEnv))
+	for k, v := range req.ResolvedEnv {
+		env[k] = v
+	}
+	if req.Config != nil {
+		for _, e := range req.Config.Env {
+			parts := strings.SplitN(e, "=", 2)
+			if len(parts) == 2 {
+				env[parts[0]] = parts[1]
+			}
+		}
+	}
+	return env
+}
+
+// rawSettingsHarnessEnv returns the resolved harness-config env
+// (harness_configs.<h>.env plus profiles.<p>.harness_overrides.<h>.env,
+// merged by settings.ResolveHarnessConfig) unfiltered — including any
+// explicitly empty values, which matter to fillAbsentEnv's presence check.
+func rawSettingsHarnessEnv(settings *config.VersionedSettings, profileName, harnessConfigName string) map[string]string {
+	if settings == nil || harnessConfigName == "" {
+		return nil
+	}
+	hcEntry, err := settings.ResolveHarnessConfig(profileName, harnessConfigName)
+	if err != nil {
+		return nil
+	}
+	return hcEntry.Env
+}
+
+// fillAbsentEnv returns base with each key from fill added, but only when
+// base does not already contain that key — even an empty value in base
+// counts as present and blocks the fill. This mirrors resolveAuthEnvOverlay
+// (pkg/agent/run.go), which writes a settings-resolved env value into
+// opts.Env only when the key is not already there.
+func fillAbsentEnv(base, fill map[string]string) map[string]string {
+	merged := make(map[string]string, len(base)+len(fill))
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, v := range fill {
+		if _, exists := merged[k]; !exists {
+			merged[k] = v
+		}
+	}
+	return merged
+}
+
+// fillAbsentDirEnv is fillAbsentEnv for the harness-config directory's own
+// env. expandedDirEnv must already be expanded (expandDirEnv) — callers
+// share one expanded view between this function and authCandidateKeyValue
+// rather than each re-deriving it, so both agree on what a dir key expands
+// to.
+func fillAbsentDirEnv(base, expandedDirEnv map[string]string) map[string]string {
+	merged := make(map[string]string, len(base)+len(expandedDirEnv))
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, v := range expandedDirEnv {
+		if _, exists := merged[k]; !exists {
+			merged[k] = v
+		}
+	}
+	return merged
+}
+
+// expandDirEnv expands every harness-config-directory env entry once, the
+// way buildAgentEnv expands them (expandDirEnvEntry), so callers that need
+// more than one view of the directory's env (fillAbsentDirEnv,
+// authCandidateKeyValue) consult the identical result instead of each
+// re-deriving it per key. An entry expandDirEnvEntry drops (an empty
+// expanded key, or an unresolved variable reference) is simply absent here.
+func expandDirEnv(dirEnv map[string]string) map[string]string {
+	expanded := make(map[string]string, len(dirEnv))
+	for k, v := range dirEnv {
+		expandedKey, expandedValue, ok := expandDirEnvEntry(k, v)
+		if !ok {
+			continue
+		}
+		expanded[expandedKey] = expandedValue
+	}
+	return expanded
+}
+
+// expandDirEnvEntry mirrors buildAgentEnv's treatment of a single
+// harness-config-directory env entry (pkg/agent/run.go): the key and value
+// may reference ${VAR}; a value left empty after expansion is an implicit
+// host-env passthrough. ok is false when the entry should be dropped
+// entirely — an empty expanded key, or an unresolved variable reference that
+// buildAgentEnv would also warn about and skip.
+func expandDirEnvEntry(key, value string) (expandedKey, expandedValue string, ok bool) {
+	expandedKey, _ = quietExpandEnv(key)
+	if expandedKey == "" {
+		return "", "", false
+	}
+	var warned bool
+	expandedValue, warned = quietExpandEnv(value)
+	if expandedValue == "" {
+		if warned {
+			return "", "", false
+		}
+		if hostVal, hasHost := os.LookupEnv(expandedKey); hasHost && hostVal != "" {
+			expandedValue = hostVal
+		}
+	}
+	return expandedKey, expandedValue, true
+}
+
+// quietExpandEnv mirrors util.ExpandEnv (pkg/util/env.go: os.Expand with an
+// os.LookupEnv closure) without its side-effecting stderr warning. The
+// preflight may evaluate the same ${VAR} dir-env reference on every
+// gather-env request, including ones that end in 202 and are retried, and
+// launch prints the same warning again when it expands the value for real —
+// so the preflight's own copy would be pure duplicate noise on the broker's
+// stderr, not new information.
+func quietExpandEnv(s string) (expanded string, warned bool) {
+	expanded = os.Expand(s, func(key string) string {
+		val, ok := os.LookupEnv(key)
+		if !ok {
+			warned = true
+			return ""
+		}
+		return val
+	})
+	return expanded, warned
+}
+
+// authCandidateKeyValue returns the value key — a GCP-shared name or one of
+// the harness's own auth required_env names — would have in the container,
+// resolved the way launch actually resolves it, which differs from an
+// ordinary key's requestEnv/settings/dir layering (withDir,
+// fillAbsentDirEnv). satisfied reports whether that value is non-empty.
+// expandedDirEnv must already be expanded (expandDirEnv), the same map
+// fillAbsentDirEnv consults, so both agree on what a dir key expands to.
+//
+// After auth resolves, run.go's Start deletes any such key from opts.Env
+// whenever its value did not make it into the resolved auth's EnvVars —
+// which only ever carries non-empty values (pkg/agent/run.go, the
+// isAuthEnvKey / configAuthEnvKeySet deletion loop; copied here rather than
+// imported to avoid depending on that package's unexported details — keep
+// in sync if that list changes). So an empty settings value for one of
+// these keys does not block the directory the way it would for an ordinary
+// key: deleting it from opts.Env clears the way for finalScionCfg.Env — the
+// directory, or, when the directory has no entry, the settings value
+// itself, both expanded the way buildAgentEnv expands them — to supply the
+// container's value.
+//
+// An empty requestEnv (ResolvedEnv/Config.Env) entry is still treated as
+// blocking, conservatively, rather than as a launch-exact mirror: at launch
+// the same deletion applies to an empty opts.Env entry regardless of where
+// it came from, so the pod may still receive the settings or directory
+// value — or the broker process's own value, via host passthrough — even
+// when requestEnv itself is empty. In a real Hub dispatch, though, such an
+// entry usually also comes from template or inline config env, which also
+// outranks the directory and settings inside finalScionCfg, so the
+// container would usually end up empty anyway — and the preflight has no
+// way to tell that case apart from one where it would not. Getting this
+// wrong can only produce a false-missing report (the preflight asks for a
+// value the pod would have had), never a false-satisfied one.
+func authCandidateKeyValue(key string, requestEnv, rawSettingsEnv, expandedDirEnv map[string]string) (value string, satisfied bool) {
+	if v, ok := requestEnv[key]; ok {
+		return v, v != ""
+	}
+	if v, ok := rawSettingsEnv[key]; ok && v != "" {
+		return v, true
+	}
+	if v, ok := expandedDirEnv[key]; ok {
+		return v, v != ""
+	}
+	if v, ok := rawSettingsEnv[key]; ok {
+		_, expanded, ok := expandDirEnvEntry(key, v)
+		return expanded, ok && expanded != ""
+	}
+	return "", false
+}
+
+// authCandidateKeySatisfied is authCandidateKeyValue's satisfaction check,
+// for callers that only need the bool.
+func authCandidateKeySatisfied(key string, requestEnv, rawSettingsEnv, expandedDirEnv map[string]string) bool {
+	_, satisfied := authCandidateKeyValue(key, requestEnv, rawSettingsEnv, expandedDirEnv)
+	return satisfied
+}
+
+// authCandidateEnvKeys returns the set of env keys run.go's Start treats as
+// "auth-candidate" for the empty-value deletion authCandidateKeyValue
+// describes: the GCP shared names, plus every required_env name declared
+// across the harness's auth metadata (mirrors pkg/agent's
+// configAuthEnvKeySet, copied for the same reason as authCandidateKeyValue).
+func authCandidateEnvKeys(authMeta *config.HarnessAuthMetadata) map[string]struct{} {
+	keys := map[string]struct{}{
+		"GOOGLE_CLOUD_PROJECT":        {},
+		"GCP_PROJECT":                 {},
+		"ANTHROPIC_VERTEX_PROJECT_ID": {},
+		"GOOGLE_CLOUD_REGION":         {},
+		"CLOUD_ML_REGION":             {},
+		"GOOGLE_CLOUD_LOCATION":       {},
+	}
+	if authMeta != nil {
+		for _, authType := range authMeta.Types {
+			for _, req := range authType.RequiredEnv {
+				for _, k := range req.AnyOf {
+					keys[k] = struct{}{}
+				}
+			}
+		}
+	}
+	return keys
 }
 
 // resolveHarnessConfigForEnvGather determines the harness-config name for the
@@ -3336,9 +3743,16 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 	}
 
 	// Load settings to check if the profile/active-profile specifies a
-	// different runtime than the broker's auto-detected default.
+	// different runtime than the broker's auto-detected default. Any
+	// decode error is logged instead of being swallowed: resolution falls
+	// back to the broker's default runtime either way, but a malformed
+	// settings file should leave a trace.
 	projectDir, _ := config.GetResolvedProjectDir(opts.ProjectPath)
-	vs, _, _ := config.LoadEffectiveSettings(projectDir)
+	vs, _, err := config.LoadEffectiveSettings(projectDir)
+	if err != nil {
+		s.agentLifecycleLog.Warn("failed to load project settings for runtime resolution; using broker default runtime",
+			"projectDir", projectDir, "error", err)
+	}
 	if vs == nil {
 		return s.manager, s.runtime.Name()
 	}

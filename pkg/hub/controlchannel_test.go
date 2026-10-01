@@ -108,3 +108,16 @@ func TestControlChannelManager_OnDisconnectCallback_NilSafe(t *testing.T) {
 
 	require.False(t, mgr.IsConnected(tid("broker-2")))
 }
+
+// TestBrokerConnection_Close_ZeroValueNoPanic proves that Close() on a
+// BrokerConnection built from a bare struct literal (nil cancel, nil conn,
+// nil maps) does not panic. Test fixtures across pkg/hub (e.g.
+// broker_provider_selfheal_test.go) inject such literals directly into
+// ControlChannelManager.connections without going through
+// addConnection/AddTestConnection, so Close() must tolerate them whenever a
+// server-owned cleanup path reaches these connections (ptone/scion#2433).
+func TestBrokerConnection_Close_ZeroValueNoPanic(t *testing.T) {
+	hc := &BrokerConnection{brokerID: tid("broker-zero"), sessionID: "sess-zero"}
+
+	require.NotPanics(t, hc.Close)
+}

@@ -2216,7 +2216,8 @@ var (
 		{Name: "name", Type: field.TypeString},
 		{Name: "prefix", Type: field.TypeString},
 		{Name: "key_hash", Type: field.TypeString, Unique: true},
-		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "boundary_kind", Type: field.TypeString, Default: "project"},
 		{Name: "scopes", Type: field.TypeString},
 		{Name: "ceiling_version", Type: field.TypeInt32, Default: 0},
 		{Name: "ceiling_permission_ids", Type: field.TypeString, Nullable: true},
@@ -2478,6 +2479,9 @@ func init() {
 	UsageReservationsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	UserAccessTokensTable.Annotation = &entsql.Annotation{
 		Table: "user_access_tokens",
+	}
+	UserAccessTokensTable.Annotation.Checks = map[string]string{
+		"user_access_tokens_boundary_kind_check": "((boundary_kind = 'project' AND project_id IS NOT NULL) OR (boundary_kind = 'hub' AND project_id IS NULL))",
 	}
 	GroupChildGroupsTable.ForeignKeys[0].RefTable = GroupsTable
 	GroupChildGroupsTable.ForeignKeys[1].RefTable = GroupsTable

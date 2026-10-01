@@ -304,17 +304,17 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	// DEF-128b: check manage first, then read. Manage implies read and lets
-	// us skip participant scoping for users who have it — mirroring the
-	// hub-store path in handleAgentMessages (handlers_messages.go:231-239).
+	// DEF-128b: full logs require agent.attach on this agent; agent.read
+	// alone gives participant-scoped logs, as on the hub-store message path
+	// (handleAgentMessages).
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
 		return
 	}
 	res := agentResource(agent)
-	canManage := s.authzService.CheckAccess(ctx, identity, res, ActionManage)
-	if !canManage.Allowed {
+	fullHistory := s.agentFullHistoryDecision(ctx, identity, agent)
+	if !fullHistory.Allowed {
 		decision := s.authzService.CheckAccess(ctx, identity, res, ActionRead)
 		if !decision.Allowed {
 			logAuthzDenial(r, identity, res, ActionRead, decision.Reason)
@@ -337,18 +337,18 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 		LogID:     logging.MessageLogID,
 	}
 
-	// DEF-128b: non-manage callers see only their own messages, matching the
+	// DEF-128b: callers without agent.attach see only their own messages, matching the
 	// hub-store path's filter.ParticipantID = user.ID() constraint.
 	//
-	// Fail closed: if the caller is not-manage and we cannot resolve a user
+	// Fail closed: if the caller lacks agent.attach and we cannot resolve a user
 	// identity, deny rather than return an unscoped query. An absent identity
 	// must produce less access, not more. Any future identity kind that is
 	// not a user must be explicitly handled here — silent pass-through is
 	// an over-grant.
-	if !canManage.Allowed {
+	if !fullHistory.Allowed {
 		user := GetUserIdentityFromContext(ctx)
 		if user == nil {
-			// No user identity and not a manager — deny.
+			// No user identity and no full-history permission — deny.
 			Forbidden(w)
 			return
 		}

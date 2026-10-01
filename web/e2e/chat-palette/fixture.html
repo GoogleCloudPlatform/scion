@@ -2,6 +2,12 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- Matches the real app's index.html: without this, Chromium's mobile
+         emulation (isMobile: true) ignores Playwright's requested viewport
+         size and falls back to a ~980px desktop-site layout viewport, which
+         silently breaks any narrow-width assertion made under touch
+         emulation. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Chat quick command palette fixture</title>
     <style>
       html,
@@ -34,6 +40,10 @@
       }
       scion-page-chat {
         width: 100%;
+      }
+      scion-chat-shell {
+        width: 100%;
+        min-height: 0;
       }
       scion-terminal-pane {
         width: 100%;

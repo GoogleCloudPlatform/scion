@@ -673,6 +673,74 @@ func (r *KubernetesRuntime) createSecretProviderClass(ctx context.Context, names
 func boolPtr(b bool) *bool    { return &b }
 func int64Ptr(v int64) *int64 { return &v }
 
+// dedupeEnvVars removes duplicate env var names from vars, keeping only each
+// name's LAST occurrence (dropping earlier ones entirely, Value or
+// ValueFrom alike) and leaving that survivor at its original position
+// rather than hoisting it to the first occurrence's slot. This mirrors
+// Kubernetes' own resolution of duplicate container env names (the last
+// entry in the list wins), so the effective value of each name is
+// unchanged: every $(VAR) reference in a retained entry resolves to the
+// same value as before de-duplication.
+//
+// Exception: kubelet also expands a literal "$(NAME)" appearing in an
+// entry's Value against whatever value NAME held earlier in the list —
+// including NAME referencing itself (e.g. NODE_OPTIONS=$(NODE_OPTIONS)
+// --foo) and other entries between NAME's occurrences referencing it
+// (e.g. X=a, Y=$(X), X=b). Dropping an earlier occurrence in either case
+// would change that expansion, since every occurrence before it would
+// already be gone and kubelet does not fall back to a later occurrence —
+// an in-between "$(NAME)" is left as the literal text once its preceding
+// occurrences are removed (kubelet falls back only to service-link
+// variables). To keep behavior exactly unchanged, this function keeps
+// *all* occurrences of a name if any entry from its first through its
+// last occurrence (inclusive) has a Value containing the substring
+// "$(NAME)" (a plain substring match, so an escaped $$(NAME), which
+// kubelet leaves literal, also counts; that only keeps duplicates and
+// never changes expansion); only names without such a reference are
+// collapsed to their last occurrence. SCION_AGENT_NAME,
+// GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_REGION carry plain values today,
+// so they are collapsed to one entry each unless another entry between
+// their occurrences references them (e.g. a caller-supplied config.Env
+// entry BUCKET=$(GOOGLE_CLOUD_PROJECT)-data), in which case their
+// occurrences are kept to preserve that entry's expansion.
+func dedupeEnvVars(vars []corev1.EnvVar) []corev1.EnvVar {
+	if len(vars) == 0 {
+		return vars
+	}
+
+	firstIndex := make(map[string]int, len(vars))
+	lastIndex := make(map[string]int, len(vars))
+	for i, v := range vars {
+		if _, ok := firstIndex[v.Name]; !ok {
+			firstIndex[v.Name] = i
+		}
+		lastIndex[v.Name] = i
+	}
+
+	keepAllOccurrences := make(map[string]bool)
+	for name, first := range firstIndex {
+		last := lastIndex[name]
+		if first == last {
+			continue // not duplicated
+		}
+		ref := "$(" + name + ")"
+		for i := first; i <= last; i++ {
+			if strings.Contains(vars[i].Value, ref) {
+				keepAllOccurrences[name] = true
+				break
+			}
+		}
+	}
+
+	result := make([]corev1.EnvVar, 0, len(vars))
+	for i, v := range vars {
+		if keepAllOccurrences[v.Name] || lastIndex[v.Name] == i {
+			result = append(result, v)
+		}
+	}
+	return result
+}
+
 // toStringInterfaceMap converts map[string]string to map[string]interface{} for unstructured objects.
 func toStringInterfaceMap(m map[string]string) map[string]interface{} {
 	result := make(map[string]interface{}, len(m))
@@ -1165,6 +1233,15 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		corev1.EnvVar{Name: "USER", Value: config.UnixUsername},
 		corev1.EnvVar{Name: "LOGNAME", Value: config.UnixUsername},
 	)
+
+	// Env vars are assembled above from several sources (harness env, config.Env,
+	// resolved auth, resolved secrets) that can legitimately overlap in name
+	// (e.g. SCION_AGENT_NAME, GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION).
+	// De-duplicate, collapsing each name to its last occurrence in place
+	// (except the $(NAME) case described in dedupeEnvVars), so every
+	// $(VAR) reference in a retained entry resolves to the same value as
+	// before de-duplication.
+	envVars = dedupeEnvVars(envVars)
 
 	// Security context: run agent pods as the image's non-root scion user.
 	// FSGroup is branched by workspace backend (N2-4):
