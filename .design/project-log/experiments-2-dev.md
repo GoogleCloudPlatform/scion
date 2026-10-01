@@ -13,10 +13,10 @@ Docs and convention only. The two code files touched are `web/src/utils/feature-
 - `docs-site/src/content/docs/reference/web-config.md`: the Feature Flags section now describes the boot-time fetch and the current precedence order, distinguishes a registered experiment from an unregistered flag, and links to the new reference page.
 - `web/e2e/terminal-workspace/ROLLOUT.md`: rewritten to document admin control through the Experiments tab and to drop the stale "not in `DEFAULT_ON_FLAGS`" and Go-template statements.
 
-## Findings versus the design text
+## Notes
 
-- The nav path is **Admin → Server Config → Experiments**, not "Settings → Server Config → Experiments." Confirmed against `web/src/components/shared/nav.ts` and existing cross-references in `admin-users.ts`. The new docs page and both doc fixes use the real path.
-- `web/src/utils/feature-flags.ts`'s module header comment already described the boot fetch and the four-row precedence, and no longer claimed the Go template sets the flags — this part of the planned fix had already landed in the prior phase. The remaining stray reference was in `setFeatureFlag`'s own doc comment, fixed here.
+- The nav path is **Admin → Server Config → Experiments**. Confirmed against `web/src/components/shared/nav.ts` and existing cross-references in `admin-users.ts`. The new docs page and both doc fixes use this path.
+- `web/src/utils/feature-flags.ts`'s module header comment already described the boot fetch and the four-row precedence, and no longer claimed a Go template sets the flags — that comment was already corrected in ptone/scion#2436. The remaining stray reference was in `setFeatureFlag`'s own doc comment, fixed here.
 - A pre-existing, unrelated comment in `web/e2e/chat-palette/fixture.ts` described a native-chat test fixture's flags as "exactly as main.ts would set them from the Go template." This predates this work and concerns `web.native_chat_v2` (not a registered experiment); it is corrected here (comment-only) alongside the other stale references.
 
 ## Release notes
