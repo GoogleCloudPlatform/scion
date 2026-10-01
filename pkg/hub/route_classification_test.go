@@ -93,6 +93,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/users/me/injected-skills/":              "authenticated:injected-skills",
 	"/api/v1/users/me/templates":                     "authenticated:user-templates",
 	"/api/v1/users/me/templates/":                    "authenticated:user-templates",
+	"/api/v1/users/me/terminal-workspace":            "authenticated:user-terminal-workspace",
 	"/api/v1/hub/settings/injected-skills":           "authenticated:injected-skills",
 	"/api/v1/brokers":                                "broker-hmac:registration",
 	"/api/v1/brokers/join":                           "broker-hmac:registration",

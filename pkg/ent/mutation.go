@@ -77,6 +77,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -153,6 +154,7 @@ const (
 	TypeUsageReservation         = "UsageReservation"
 	TypeUser                     = "User"
 	TypeUserAccessToken          = "UserAccessToken"
+	TypeUserTerminalWorkspace    = "UserTerminalWorkspace"
 )
 
 // AccessConstraintMutation represents an operation that mutates the AccessConstraint nodes in the graph.
@@ -64136,6 +64138,8 @@ type UserMutation struct {
 	external_identities        map[uuid.UUID]struct{}
 	removedexternal_identities map[uuid.UUID]struct{}
 	clearedexternal_identities bool
+	terminal_workspace         *uuid.UUID
+	clearedterminal_workspace  bool
 	done                       bool
 	oldValue                   func(context.Context) (*User, error)
 	predicates                 []predicate.User
@@ -64991,6 +64995,45 @@ func (m *UserMutation) ResetExternalIdentities() {
 	m.removedexternal_identities = nil
 }
 
+// SetTerminalWorkspaceID sets the "terminal_workspace" edge to the UserTerminalWorkspace entity by id.
+func (m *UserMutation) SetTerminalWorkspaceID(id uuid.UUID) {
+	m.terminal_workspace = &id
+}
+
+// ClearTerminalWorkspace clears the "terminal_workspace" edge to the UserTerminalWorkspace entity.
+func (m *UserMutation) ClearTerminalWorkspace() {
+	m.clearedterminal_workspace = true
+}
+
+// TerminalWorkspaceCleared reports if the "terminal_workspace" edge to the UserTerminalWorkspace entity was cleared.
+func (m *UserMutation) TerminalWorkspaceCleared() bool {
+	return m.clearedterminal_workspace
+}
+
+// TerminalWorkspaceID returns the "terminal_workspace" edge ID in the mutation.
+func (m *UserMutation) TerminalWorkspaceID() (id uuid.UUID, exists bool) {
+	if m.terminal_workspace != nil {
+		return *m.terminal_workspace, true
+	}
+	return
+}
+
+// TerminalWorkspaceIDs returns the "terminal_workspace" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// TerminalWorkspaceID instead. It exists only for internal usage by the builders.
+func (m *UserMutation) TerminalWorkspaceIDs() (ids []uuid.UUID) {
+	if id := m.terminal_workspace; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetTerminalWorkspace resets all changes to the "terminal_workspace" edge.
+func (m *UserMutation) ResetTerminalWorkspace() {
+	m.terminal_workspace = nil
+	m.clearedterminal_workspace = false
+}
+
 // Where appends a list predicates to the UserMutation builder.
 func (m *UserMutation) Where(ps ...predicate.User) {
 	m.predicates = append(m.predicates, ps...)
@@ -65365,7 +65408,7 @@ func (m *UserMutation) ResetField(name string) error {
 
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *UserMutation) AddedEdges() []string {
-	edges := make([]string, 0, 4)
+	edges := make([]string, 0, 5)
 	if m.owned_groups != nil {
 		edges = append(edges, user.EdgeOwnedGroups)
 	}
@@ -65377,6 +65420,9 @@ func (m *UserMutation) AddedEdges() []string {
 	}
 	if m.external_identities != nil {
 		edges = append(edges, user.EdgeExternalIdentities)
+	}
+	if m.terminal_workspace != nil {
+		edges = append(edges, user.EdgeTerminalWorkspace)
 	}
 	return edges
 }
@@ -65409,13 +65455,17 @@ func (m *UserMutation) AddedIDs(name string) []ent.Value {
 			ids = append(ids, id)
 		}
 		return ids
+	case user.EdgeTerminalWorkspace:
+		if id := m.terminal_workspace; id != nil {
+			return []ent.Value{*id}
+		}
 	}
 	return nil
 }
 
 // RemovedEdges returns all edge names that were removed in this mutation.
 func (m *UserMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 4)
+	edges := make([]string, 0, 5)
 	if m.removedowned_groups != nil {
 		edges = append(edges, user.EdgeOwnedGroups)
 	}
@@ -65465,7 +65515,7 @@ func (m *UserMutation) RemovedIDs(name string) []ent.Value {
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *UserMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 4)
+	edges := make([]string, 0, 5)
 	if m.clearedowned_groups {
 		edges = append(edges, user.EdgeOwnedGroups)
 	}
@@ -65477,6 +65527,9 @@ func (m *UserMutation) ClearedEdges() []string {
 	}
 	if m.clearedexternal_identities {
 		edges = append(edges, user.EdgeExternalIdentities)
+	}
+	if m.clearedterminal_workspace {
+		edges = append(edges, user.EdgeTerminalWorkspace)
 	}
 	return edges
 }
@@ -65493,6 +65546,8 @@ func (m *UserMutation) EdgeCleared(name string) bool {
 		return m.clearedpolicy_bindings
 	case user.EdgeExternalIdentities:
 		return m.clearedexternal_identities
+	case user.EdgeTerminalWorkspace:
+		return m.clearedterminal_workspace
 	}
 	return false
 }
@@ -65501,6 +65556,9 @@ func (m *UserMutation) EdgeCleared(name string) bool {
 // if that edge is not defined in the schema.
 func (m *UserMutation) ClearEdge(name string) error {
 	switch name {
+	case user.EdgeTerminalWorkspace:
+		m.ClearTerminalWorkspace()
+		return nil
 	}
 	return fmt.Errorf("unknown User unique edge %s", name)
 }
@@ -65520,6 +65578,9 @@ func (m *UserMutation) ResetEdge(name string) error {
 		return nil
 	case user.EdgeExternalIdentities:
 		m.ResetExternalIdentities()
+		return nil
+	case user.EdgeTerminalWorkspace:
+		m.ResetTerminalWorkspace()
 		return nil
 	}
 	return fmt.Errorf("unknown User edge %s", name)
@@ -66764,4 +66825,767 @@ func (m *UserAccessTokenMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *UserAccessTokenMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown UserAccessToken edge %s", name)
+}
+
+// UserTerminalWorkspaceMutation represents an operation that mutates the UserTerminalWorkspace nodes in the graph.
+type UserTerminalWorkspaceMutation struct {
+	config
+	op                 Op
+	typ                string
+	id                 *uuid.UUID
+	agent_ids          *[]string
+	appendagent_ids    []string
+	frontmost_agent_id *string
+	schema_version     *int
+	addschema_version  *int
+	revision           *int64
+	addrevision        *int64
+	update_time        *time.Time
+	clearedFields      map[string]struct{}
+	user               *uuid.UUID
+	cleareduser        bool
+	done               bool
+	oldValue           func(context.Context) (*UserTerminalWorkspace, error)
+	predicates         []predicate.UserTerminalWorkspace
+}
+
+var _ ent.Mutation = (*UserTerminalWorkspaceMutation)(nil)
+
+// userterminalworkspaceOption allows management of the mutation configuration using functional options.
+type userterminalworkspaceOption func(*UserTerminalWorkspaceMutation)
+
+// newUserTerminalWorkspaceMutation creates new mutation for the UserTerminalWorkspace entity.
+func newUserTerminalWorkspaceMutation(c config, op Op, opts ...userterminalworkspaceOption) *UserTerminalWorkspaceMutation {
+	m := &UserTerminalWorkspaceMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeUserTerminalWorkspace,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withUserTerminalWorkspaceID sets the ID field of the mutation.
+func withUserTerminalWorkspaceID(id uuid.UUID) userterminalworkspaceOption {
+	return func(m *UserTerminalWorkspaceMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *UserTerminalWorkspace
+		)
+		m.oldValue = func(ctx context.Context) (*UserTerminalWorkspace, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().UserTerminalWorkspace.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withUserTerminalWorkspace sets the old UserTerminalWorkspace of the mutation.
+func withUserTerminalWorkspace(node *UserTerminalWorkspace) userterminalworkspaceOption {
+	return func(m *UserTerminalWorkspaceMutation) {
+		m.oldValue = func(context.Context) (*UserTerminalWorkspace, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m UserTerminalWorkspaceMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m UserTerminalWorkspaceMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of UserTerminalWorkspace entities.
+func (m *UserTerminalWorkspaceMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *UserTerminalWorkspaceMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *UserTerminalWorkspaceMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().UserTerminalWorkspace.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetUserID sets the "user_id" field.
+func (m *UserTerminalWorkspaceMutation) SetUserID(u uuid.UUID) {
+	m.user = &u
+}
+
+// UserID returns the value of the "user_id" field in the mutation.
+func (m *UserTerminalWorkspaceMutation) UserID() (r uuid.UUID, exists bool) {
+	v := m.user
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUserID returns the old "user_id" field's value of the UserTerminalWorkspace entity.
+// If the UserTerminalWorkspace object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserTerminalWorkspaceMutation) OldUserID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUserID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUserID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUserID: %w", err)
+	}
+	return oldValue.UserID, nil
+}
+
+// ResetUserID resets all changes to the "user_id" field.
+func (m *UserTerminalWorkspaceMutation) ResetUserID() {
+	m.user = nil
+}
+
+// SetAgentIds sets the "agent_ids" field.
+func (m *UserTerminalWorkspaceMutation) SetAgentIds(s []string) {
+	m.agent_ids = &s
+	m.appendagent_ids = nil
+}
+
+// AgentIds returns the value of the "agent_ids" field in the mutation.
+func (m *UserTerminalWorkspaceMutation) AgentIds() (r []string, exists bool) {
+	v := m.agent_ids
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentIds returns the old "agent_ids" field's value of the UserTerminalWorkspace entity.
+// If the UserTerminalWorkspace object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserTerminalWorkspaceMutation) OldAgentIds(ctx context.Context) (v []string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentIds is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentIds requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentIds: %w", err)
+	}
+	return oldValue.AgentIds, nil
+}
+
+// AppendAgentIds adds s to the "agent_ids" field.
+func (m *UserTerminalWorkspaceMutation) AppendAgentIds(s []string) {
+	m.appendagent_ids = append(m.appendagent_ids, s...)
+}
+
+// AppendedAgentIds returns the list of values that were appended to the "agent_ids" field in this mutation.
+func (m *UserTerminalWorkspaceMutation) AppendedAgentIds() ([]string, bool) {
+	if len(m.appendagent_ids) == 0 {
+		return nil, false
+	}
+	return m.appendagent_ids, true
+}
+
+// ResetAgentIds resets all changes to the "agent_ids" field.
+func (m *UserTerminalWorkspaceMutation) ResetAgentIds() {
+	m.agent_ids = nil
+	m.appendagent_ids = nil
+}
+
+// SetFrontmostAgentID sets the "frontmost_agent_id" field.
+func (m *UserTerminalWorkspaceMutation) SetFrontmostAgentID(s string) {
+	m.frontmost_agent_id = &s
+}
+
+// FrontmostAgentID returns the value of the "frontmost_agent_id" field in the mutation.
+func (m *UserTerminalWorkspaceMutation) FrontmostAgentID() (r string, exists bool) {
+	v := m.frontmost_agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFrontmostAgentID returns the old "frontmost_agent_id" field's value of the UserTerminalWorkspace entity.
+// If the UserTerminalWorkspace object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserTerminalWorkspaceMutation) OldFrontmostAgentID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFrontmostAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFrontmostAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFrontmostAgentID: %w", err)
+	}
+	return oldValue.FrontmostAgentID, nil
+}
+
+// ClearFrontmostAgentID clears the value of the "frontmost_agent_id" field.
+func (m *UserTerminalWorkspaceMutation) ClearFrontmostAgentID() {
+	m.frontmost_agent_id = nil
+	m.clearedFields[userterminalworkspace.FieldFrontmostAgentID] = struct{}{}
+}
+
+// FrontmostAgentIDCleared returns if the "frontmost_agent_id" field was cleared in this mutation.
+func (m *UserTerminalWorkspaceMutation) FrontmostAgentIDCleared() bool {
+	_, ok := m.clearedFields[userterminalworkspace.FieldFrontmostAgentID]
+	return ok
+}
+
+// ResetFrontmostAgentID resets all changes to the "frontmost_agent_id" field.
+func (m *UserTerminalWorkspaceMutation) ResetFrontmostAgentID() {
+	m.frontmost_agent_id = nil
+	delete(m.clearedFields, userterminalworkspace.FieldFrontmostAgentID)
+}
+
+// SetSchemaVersion sets the "schema_version" field.
+func (m *UserTerminalWorkspaceMutation) SetSchemaVersion(i int) {
+	m.schema_version = &i
+	m.addschema_version = nil
+}
+
+// SchemaVersion returns the value of the "schema_version" field in the mutation.
+func (m *UserTerminalWorkspaceMutation) SchemaVersion() (r int, exists bool) {
+	v := m.schema_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSchemaVersion returns the old "schema_version" field's value of the UserTerminalWorkspace entity.
+// If the UserTerminalWorkspace object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserTerminalWorkspaceMutation) OldSchemaVersion(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSchemaVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSchemaVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSchemaVersion: %w", err)
+	}
+	return oldValue.SchemaVersion, nil
+}
+
+// AddSchemaVersion adds i to the "schema_version" field.
+func (m *UserTerminalWorkspaceMutation) AddSchemaVersion(i int) {
+	if m.addschema_version != nil {
+		*m.addschema_version += i
+	} else {
+		m.addschema_version = &i
+	}
+}
+
+// AddedSchemaVersion returns the value that was added to the "schema_version" field in this mutation.
+func (m *UserTerminalWorkspaceMutation) AddedSchemaVersion() (r int, exists bool) {
+	v := m.addschema_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetSchemaVersion resets all changes to the "schema_version" field.
+func (m *UserTerminalWorkspaceMutation) ResetSchemaVersion() {
+	m.schema_version = nil
+	m.addschema_version = nil
+}
+
+// SetRevision sets the "revision" field.
+func (m *UserTerminalWorkspaceMutation) SetRevision(i int64) {
+	m.revision = &i
+	m.addrevision = nil
+}
+
+// Revision returns the value of the "revision" field in the mutation.
+func (m *UserTerminalWorkspaceMutation) Revision() (r int64, exists bool) {
+	v := m.revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRevision returns the old "revision" field's value of the UserTerminalWorkspace entity.
+// If the UserTerminalWorkspace object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserTerminalWorkspaceMutation) OldRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRevision: %w", err)
+	}
+	return oldValue.Revision, nil
+}
+
+// AddRevision adds i to the "revision" field.
+func (m *UserTerminalWorkspaceMutation) AddRevision(i int64) {
+	if m.addrevision != nil {
+		*m.addrevision += i
+	} else {
+		m.addrevision = &i
+	}
+}
+
+// AddedRevision returns the value that was added to the "revision" field in this mutation.
+func (m *UserTerminalWorkspaceMutation) AddedRevision() (r int64, exists bool) {
+	v := m.addrevision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRevision resets all changes to the "revision" field.
+func (m *UserTerminalWorkspaceMutation) ResetRevision() {
+	m.revision = nil
+	m.addrevision = nil
+}
+
+// SetUpdateTime sets the "update_time" field.
+func (m *UserTerminalWorkspaceMutation) SetUpdateTime(t time.Time) {
+	m.update_time = &t
+}
+
+// UpdateTime returns the value of the "update_time" field in the mutation.
+func (m *UserTerminalWorkspaceMutation) UpdateTime() (r time.Time, exists bool) {
+	v := m.update_time
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdateTime returns the old "update_time" field's value of the UserTerminalWorkspace entity.
+// If the UserTerminalWorkspace object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserTerminalWorkspaceMutation) OldUpdateTime(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdateTime is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdateTime requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdateTime: %w", err)
+	}
+	return oldValue.UpdateTime, nil
+}
+
+// ResetUpdateTime resets all changes to the "update_time" field.
+func (m *UserTerminalWorkspaceMutation) ResetUpdateTime() {
+	m.update_time = nil
+}
+
+// ClearUser clears the "user" edge to the User entity.
+func (m *UserTerminalWorkspaceMutation) ClearUser() {
+	m.cleareduser = true
+	m.clearedFields[userterminalworkspace.FieldUserID] = struct{}{}
+}
+
+// UserCleared reports if the "user" edge to the User entity was cleared.
+func (m *UserTerminalWorkspaceMutation) UserCleared() bool {
+	return m.cleareduser
+}
+
+// UserIDs returns the "user" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// UserID instead. It exists only for internal usage by the builders.
+func (m *UserTerminalWorkspaceMutation) UserIDs() (ids []uuid.UUID) {
+	if id := m.user; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetUser resets all changes to the "user" edge.
+func (m *UserTerminalWorkspaceMutation) ResetUser() {
+	m.user = nil
+	m.cleareduser = false
+}
+
+// Where appends a list predicates to the UserTerminalWorkspaceMutation builder.
+func (m *UserTerminalWorkspaceMutation) Where(ps ...predicate.UserTerminalWorkspace) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the UserTerminalWorkspaceMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *UserTerminalWorkspaceMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.UserTerminalWorkspace, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *UserTerminalWorkspaceMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *UserTerminalWorkspaceMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (UserTerminalWorkspace).
+func (m *UserTerminalWorkspaceMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *UserTerminalWorkspaceMutation) Fields() []string {
+	fields := make([]string, 0, 6)
+	if m.user != nil {
+		fields = append(fields, userterminalworkspace.FieldUserID)
+	}
+	if m.agent_ids != nil {
+		fields = append(fields, userterminalworkspace.FieldAgentIds)
+	}
+	if m.frontmost_agent_id != nil {
+		fields = append(fields, userterminalworkspace.FieldFrontmostAgentID)
+	}
+	if m.schema_version != nil {
+		fields = append(fields, userterminalworkspace.FieldSchemaVersion)
+	}
+	if m.revision != nil {
+		fields = append(fields, userterminalworkspace.FieldRevision)
+	}
+	if m.update_time != nil {
+		fields = append(fields, userterminalworkspace.FieldUpdateTime)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *UserTerminalWorkspaceMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case userterminalworkspace.FieldUserID:
+		return m.UserID()
+	case userterminalworkspace.FieldAgentIds:
+		return m.AgentIds()
+	case userterminalworkspace.FieldFrontmostAgentID:
+		return m.FrontmostAgentID()
+	case userterminalworkspace.FieldSchemaVersion:
+		return m.SchemaVersion()
+	case userterminalworkspace.FieldRevision:
+		return m.Revision()
+	case userterminalworkspace.FieldUpdateTime:
+		return m.UpdateTime()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *UserTerminalWorkspaceMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case userterminalworkspace.FieldUserID:
+		return m.OldUserID(ctx)
+	case userterminalworkspace.FieldAgentIds:
+		return m.OldAgentIds(ctx)
+	case userterminalworkspace.FieldFrontmostAgentID:
+		return m.OldFrontmostAgentID(ctx)
+	case userterminalworkspace.FieldSchemaVersion:
+		return m.OldSchemaVersion(ctx)
+	case userterminalworkspace.FieldRevision:
+		return m.OldRevision(ctx)
+	case userterminalworkspace.FieldUpdateTime:
+		return m.OldUpdateTime(ctx)
+	}
+	return nil, fmt.Errorf("unknown UserTerminalWorkspace field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UserTerminalWorkspaceMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case userterminalworkspace.FieldUserID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUserID(v)
+		return nil
+	case userterminalworkspace.FieldAgentIds:
+		v, ok := value.([]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentIds(v)
+		return nil
+	case userterminalworkspace.FieldFrontmostAgentID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFrontmostAgentID(v)
+		return nil
+	case userterminalworkspace.FieldSchemaVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSchemaVersion(v)
+		return nil
+	case userterminalworkspace.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRevision(v)
+		return nil
+	case userterminalworkspace.FieldUpdateTime:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdateTime(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UserTerminalWorkspace field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *UserTerminalWorkspaceMutation) AddedFields() []string {
+	var fields []string
+	if m.addschema_version != nil {
+		fields = append(fields, userterminalworkspace.FieldSchemaVersion)
+	}
+	if m.addrevision != nil {
+		fields = append(fields, userterminalworkspace.FieldRevision)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *UserTerminalWorkspaceMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case userterminalworkspace.FieldSchemaVersion:
+		return m.AddedSchemaVersion()
+	case userterminalworkspace.FieldRevision:
+		return m.AddedRevision()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UserTerminalWorkspaceMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case userterminalworkspace.FieldSchemaVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSchemaVersion(v)
+		return nil
+	case userterminalworkspace.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRevision(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UserTerminalWorkspace numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *UserTerminalWorkspaceMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(userterminalworkspace.FieldFrontmostAgentID) {
+		fields = append(fields, userterminalworkspace.FieldFrontmostAgentID)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *UserTerminalWorkspaceMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *UserTerminalWorkspaceMutation) ClearField(name string) error {
+	switch name {
+	case userterminalworkspace.FieldFrontmostAgentID:
+		m.ClearFrontmostAgentID()
+		return nil
+	}
+	return fmt.Errorf("unknown UserTerminalWorkspace nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *UserTerminalWorkspaceMutation) ResetField(name string) error {
+	switch name {
+	case userterminalworkspace.FieldUserID:
+		m.ResetUserID()
+		return nil
+	case userterminalworkspace.FieldAgentIds:
+		m.ResetAgentIds()
+		return nil
+	case userterminalworkspace.FieldFrontmostAgentID:
+		m.ResetFrontmostAgentID()
+		return nil
+	case userterminalworkspace.FieldSchemaVersion:
+		m.ResetSchemaVersion()
+		return nil
+	case userterminalworkspace.FieldRevision:
+		m.ResetRevision()
+		return nil
+	case userterminalworkspace.FieldUpdateTime:
+		m.ResetUpdateTime()
+		return nil
+	}
+	return fmt.Errorf("unknown UserTerminalWorkspace field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *UserTerminalWorkspaceMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.user != nil {
+		edges = append(edges, userterminalworkspace.EdgeUser)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *UserTerminalWorkspaceMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case userterminalworkspace.EdgeUser:
+		if id := m.user; id != nil {
+			return []ent.Value{*id}
+		}
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *UserTerminalWorkspaceMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *UserTerminalWorkspaceMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *UserTerminalWorkspaceMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.cleareduser {
+		edges = append(edges, userterminalworkspace.EdgeUser)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *UserTerminalWorkspaceMutation) EdgeCleared(name string) bool {
+	switch name {
+	case userterminalworkspace.EdgeUser:
+		return m.cleareduser
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *UserTerminalWorkspaceMutation) ClearEdge(name string) error {
+	switch name {
+	case userterminalworkspace.EdgeUser:
+		m.ClearUser()
+		return nil
+	}
+	return fmt.Errorf("unknown UserTerminalWorkspace unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *UserTerminalWorkspaceMutation) ResetEdge(name string) error {
+	switch name {
+	case userterminalworkspace.EdgeUser:
+		m.ResetUser()
+		return nil
+	}
+	return fmt.Errorf("unknown UserTerminalWorkspace edge %s", name)
 }

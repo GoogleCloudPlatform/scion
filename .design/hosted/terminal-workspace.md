@@ -276,10 +276,16 @@ window. Per-pane popouts and explicit ownership handoff are later enhancements.
 Audit router click interception for modified clicks/targets as part of this work.
 
 Register titles and production icons. The Terminals mode must remain available
-when native chat is disabled. Session IDs and layout live in memory in v1;
-reload starts a new workspace, except for a directly addressed agent route.
-Optional later `sessionStorage` can restore a list/layout, but cannot restore live
-sockets; reconnecting restored entries should be explicit.
+when native chat is disabled. The ordered list of open terminal agents, and
+which one was frontmost, is saved per user on the Hub and restored
+automatically whenever the viewer opens, on any browser or device
+(ptone/scion#2278). Restoring the list does not restore live sockets: the
+saved frontmost (or the URL-named agent, when the entry URL names one)
+reconnects; every other restored entry stays idle, in the rail, until
+selected — so reload never bulk-reconnects agents you were not looking at.
+Only the owner tab restores and writes, on the existing single-owner rule
+above; the list itself does not carry layout preset or slot assignments,
+which still live in the URL only (`#1715`) and are not persisted.
 
 ### Layout state and deliberate placement
 
@@ -495,10 +501,11 @@ Accepted in the design discussion:
 7. Rail-to-pane drag/drop and pane-header Open in graph / Open in chat actions are
    included in the initial tiling phase.
 
-Remaining implementation defaults: explicit reconnect in v1, in-memory layout
-retention for the document lifetime, and Chat opening the agent DM. Reload
-restoration and ownership handoff can be added later without changing the rules
-above. They are not prerequisites for the initial implementation.
+Remaining implementation defaults: explicit reconnect in v1, per-user Hub
+persistence of the open terminal list across reloads and devices
+(ptone/scion#2278), and Chat opening the agent DM. Ownership handoff can be
+added later without changing the rules above. It is not a prerequisite for
+the initial implementation.
 
 ## Remaining design choices and multiplexer extensions
 
@@ -507,7 +514,7 @@ full grid, and layout presets are resolved above. Remaining optional extensions:
 
 | Choice | Recommendation | Scope implication |
 | --- | --- | --- |
-| What survives reload/owner closure? | Save membership, names, and layout; offer Restore/Reconnect | Restores organization but creates new attaches; terminal transcripts need separate storage design |
+| What survives reload/owner closure? | **Implemented (ptone/scion#2278):** the Hub saves the ordered agent list and the frontmost agent per user; the viewer restores it automatically, reconnecting only the frontmost (or the URL-named agent) | Restores rail organization with one new attach, not a bulk reconnect; layout presets/slots and terminal transcripts are out of scope and still need separate design if pursued |
 | Detach individual panes to another monitor? | Defer to a later phase; specify move versus mirror first | Shared transport with another renderer needs explicit input/resize ownership; reconnecting is simpler but breaks seamless retention |
 | More layout freedom? | Consider saved named arrangements and adjustable split ratios after fixed presets | Arbitrary split trees are a separate layout model, not a prerequisite for persistence |
 

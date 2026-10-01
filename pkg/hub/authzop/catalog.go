@@ -2710,6 +2710,7 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/users/me/injected-skills/", Kind: ExemptionAuthenticationOnly, Reason: "Manage own injected skill by ID, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/users/me/templates", Kind: ExemptionAuthenticationOnly, Reason: "Manage own templates, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/users/me/templates/", Kind: ExemptionAuthenticationOnly, Reason: "Manage own template by ID, self-service", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/users/me/terminal-workspace", Kind: ExemptionAuthenticationOnly, Reason: "Read/write own terminal viewer list, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/notifications", Kind: ExemptionAuthenticationOnly, Reason: "List own notifications, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/notifications/", Kind: ExemptionAuthenticationOnly, Reason: "Manage own notification by ID, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/messages", Kind: ExemptionAuthenticationOnly, Reason: "List own messages, self-service", Owner: "route_metadata.go"},
@@ -3158,6 +3159,8 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/store/storetest/domains_user.go", Function: "UserDomain", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user domain setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_user.go", Function: "UserDomain", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user domain teardown", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_user.go", Function: "UserDomain", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user domain update", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user.go", Function: "UserTerminalWorkspaceConformance", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: terminal-workspace conformance user setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user.go", Function: "UserTerminalWorkspaceConformance", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: terminal-workspace conformance cascade-delete teardown", Scope: "pkg/store/storetest"}},
 }
 
 // CatalogOperationIDs returns the set of all operation IDs in the catalog.
