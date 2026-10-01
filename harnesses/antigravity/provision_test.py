@@ -224,10 +224,14 @@ class ModelResolutionTest(unittest.TestCase):
     # --- Precedence ordering (review round 1, R1) -----------------------
     # Each test below pins one step of the precedence chain by setting both
     # the winning source and the next lower one, so a mutant that swaps two
-    # steps' check order fails here (verified by hand: swapping the
-    # SCION_MODEL/harness_config.model checks in _resolve_model breaks
-    # test_scion_model_wins_over_harness_config_model and
-    # test_harness_config_model_wins_over_agy_model below).
+    # steps' check order fails here. Verified by hand, each swap kills
+    # exactly the one test that sets both of the swapped sources: swapping
+    # the SCION_MODEL/harness_config.model checks in _resolve_model breaks
+    # only test_scion_model_wins_over_harness_config_model (review round 3,
+    # N1 — test_harness_config_model_wins_over_agy_model leaves SCION_MODEL
+    # unset, so that swap doesn't affect it); separately, swapping the
+    # harness_config.model/AGY_MODEL checks breaks only
+    # test_harness_config_model_wins_over_agy_model.
 
     def test_scion_model_wins_over_harness_config_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
@@ -373,6 +377,35 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
 
         self.assertEqual(settings["model"], "new-model")
         self.assertNotIn("modelProvider", settings)
+
+    def test_non_utf8_existing_settings_falls_back_to_fresh_defaults(self) -> None:
+        # Review round 3, O1: load_json's open() raises UnicodeDecodeError
+        # (a ValueError, not a json.JSONDecodeError) on a non-UTF-8 file.
+        # This read now runs in every auth mode (not just api-key, as
+        # before this PR), so a non-UTF-8 settings.json must fall back to
+        # the fresh defaults instead of crashing provisioning.
+        with tempfile.TemporaryDirectory() as tmp:
+            cli_dir = os.path.join(tmp, ".gemini", "antigravity-cli")
+            os.makedirs(cli_dir, exist_ok=True)
+            settings_path = os.path.join(cli_dir, "settings.json")
+            with open(settings_path, "wb") as f:
+                f.write(b"\xff\xfe{")
+
+            workspace = os.path.join(tmp, "workspace")
+            provision._prestage_onboarding(
+                tmp,
+                workspace=workspace,
+                model="new-model",
+                auth_method="vertex-ai",
+            )
+
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+
+        self.assertEqual(settings["model"], "new-model")
+        self.assertNotIn("modelProvider", settings)
+        self.assertIs(settings["onboardingComplete"], True)
+        self.assertEqual(settings["trustedWorkspaces"], [workspace])
 
     def test_malformed_existing_settings_falls_back_to_fresh_defaults(self) -> None:
         # Review round 1, R2: a malformed (or unexpectedly non-dict) existing

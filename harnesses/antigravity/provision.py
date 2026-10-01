@@ -610,7 +610,13 @@ def _prestage_onboarding(
     if os.path.isfile(settings_path):
         try:
             loaded = scion_harness.load_json(settings_path)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
+            # ValueError covers both json.JSONDecodeError and the
+            # UnicodeDecodeError a non-UTF-8 file raises when load_json's
+            # open() tries to decode it — this path now runs in every auth
+            # mode (not just api-key, as before this PR), so a malformed or
+            # non-UTF-8 file must fall back to the fresh defaults above
+            # rather than crash provisioning.
             loaded = None
         if isinstance(loaded, dict):
             # Use the existing file as the base so every other key (and any
