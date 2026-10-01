@@ -314,7 +314,7 @@ describe('makeFakeIntersectionObserver (test helper)', () => {
     expect(callCount).toBe(2);
   });
 
-  it('fire() does not deliver entries for a target that was never observed, or was since unobserved', () => {
+  it('fire() does not deliver entries for a target that was never observed, was since unobserved, or after disconnect()', () => {
     const fakeIO = makeFakeIntersectionObserver();
     const observedTarget = document.createElement('div');
     const neverObservedTarget = document.createElement('div');
@@ -330,6 +330,35 @@ describe('makeFakeIntersectionObserver (test helper)', () => {
     observer.unobserve(observedTarget);
     fakeIO.fire([{ isIntersecting: true, target: observedTarget }]);
     expect(callCount).toBe(0);
+
+    // Round-2 review, Nit 1: disconnect() was documented ("unobserved or
+    // disconnected") but not self-tested.
+    observer.observe(observedTarget);
+    observer.disconnect();
+    fakeIO.fire([{ isIntersecting: true, target: observedTarget }]);
+    expect(callCount).toBe(0);
+  });
+
+  it('fire() delivers only the currently-observed entries, not the full input list, when the two differ', () => {
+    // Round-2 review, Nit 2: the two existing self-tests above only ever
+    // fire a single entry, so they can't tell "passes the filtered list"
+    // apart from "passes the original entries" (both behave the same when
+    // at least one target is observed). Fire a mix of one observed and one
+    // unobserved target and pin exactly what the callback receives.
+    const fakeIO = makeFakeIntersectionObserver();
+    const observedTarget = document.createElement('div');
+    const unobservedTarget = document.createElement('div');
+    let received: IntersectionObserverEntry[] | null = null;
+    const observer = new fakeIO.Ctor((entries) => {
+      received = entries;
+    });
+    observer.observe(observedTarget);
+
+    const observedEntry = { isIntersecting: true, target: observedTarget };
+    const unobservedEntry = { isIntersecting: true, target: unobservedTarget };
+    fakeIO.fire([observedEntry, unobservedEntry]);
+
+    expect(received).toEqual([observedEntry]);
   });
 });
 
