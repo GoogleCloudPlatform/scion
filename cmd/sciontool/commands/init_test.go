@@ -2498,8 +2498,7 @@ func TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit(t *testing.T) {
 var startProcreapReaperOnce sync.Once
 
 // TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD is the
-// regression test, updated for the 40589a69 redesign, for the property
-// first established by the 79efae4b0 reconciliation: configureSharedWorkspaceGit's
+// regression test for the property that configureSharedWorkspaceGit's
 // internal runGitConfig closure must invoke git through procreap's managed
 // exec API, not a raw cmd.CombinedOutput(), because sciontool init's real
 // PID-1 reaper (procreap.StartReaper) is active for the whole lifetime of
@@ -2520,8 +2519,7 @@ var startProcreapReaperOnce sync.Once
 // fail under `go test -race -count=5 -run
 // TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD
 // ./cmd/sciontool/commands/`; with procreap.CombinedOutputManaged in place
-// it passes reliably. See preflight/pr1-rebase-conflicts.md's 40589a69
-// entry for the before/after run log this was verified against.
+// it passes reliably.
 func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testing.T) {
 	startProcreapReaperOnce.Do(procreap.StartReaper)
 

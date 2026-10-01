@@ -160,7 +160,8 @@ func (m *mockManager) List(ctx context.Context, filter map[string]string) ([]api
 // is inside Start() always sees a consistent value instead of racing it.
 // Methods, not exported fields, so they're promoted the same way onto
 // filteringMockManager/scopedThenFailManager/countingListManager (which all
-// embed mockManager) without those types needing their own locking.
+// embed mockManager). An embedding type that overrides List, or adds its
+// own mutable counters, must lock mu itself.
 
 func (m *mockManager) StartCalls() int {
 	m.mu.Lock()

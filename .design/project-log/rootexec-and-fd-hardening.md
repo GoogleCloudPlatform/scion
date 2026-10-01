@@ -67,7 +67,8 @@ broker logic without hardcoding a single runtime's assumptions.
   `AgentLookupUnavailable`; any other real lookup error (e.g. an ambiguous
   multi-container match) gets a fixed 500, with the underlying error logged
   server-side only, never echoed into the response body; a genuine
-  not-found or empty target gets a 404. Broker-reported per-profile attach
+  not-found gets a 404 from exec and reset-auth, an idempotent 202 from
+  stop, and a fresh start from restart. Broker-reported per-profile attach
   capability now gates `scion attach`/`start -a`/`resume -a` before the PTY
   dial, and a runtime's declined-logs response passes through the hub with
   a fixed, generic message rather than whatever text the broker supplied.
