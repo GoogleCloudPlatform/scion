@@ -139,15 +139,28 @@ func TestHarnessBuildInfoNeverGuesses(t *testing.T) {
 	if source == "" {
 		t.Fatal("harnessBuildInfo: source must never be empty")
 	}
-	if source == "go build VCS stamp" && commit == "" {
-		t.Fatal("harnessBuildInfo: source claims a VCS stamp but commit is empty")
+	if source == "go build VCS stamp" {
+		if commit == "" {
+			t.Fatal("harnessBuildInfo: source claims a VCS stamp but commit is empty")
+		}
+		if dirty == nil {
+			t.Fatal("harnessBuildInfo: source claims a VCS stamp but dirty is nil")
+		}
+	} else {
+		if commit != "" {
+			t.Fatalf("harnessBuildInfo: commit %q set without claiming a VCS-stamp source (got %q)", commit, source)
+		}
+		// bench-rev-4 N9: dirty must be nil (unknown), not false, when the
+		// commit itself is unknown -- a bare `false` would be indistinguishable
+		// from "known clean".
+		if dirty != nil {
+			t.Fatalf("harnessBuildInfo: dirty = %v, want nil when commit is unknown (source %q)", *dirty, source)
+		}
 	}
-	if source != "go build VCS stamp" && commit != "" {
-		t.Fatalf("harnessBuildInfo: commit %q set without claiming a VCS-stamp source (got %q)", commit, source)
-	}
-	_ = dirty // only meaningful alongside a non-empty commit; no assertion needed here.
 }
 
+// bench-rev-4 R3: fetchHubVersion no longer returns the hub's hard-coded
+// `/health.version` placeholder -- see its doc comment and hubHealth.Version's.
 func TestFetchHubVersionParsesHealthResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/health" {
@@ -164,16 +177,16 @@ func TestFetchHubVersionParsesHealthResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	version, scionVersion := fetchHubVersion(srv.Client(), srv.URL)
-	if version != "hub-1.2.3" || scionVersion != "0.9.0" {
-		t.Fatalf("fetchHubVersion = (%q, %q), want (hub-1.2.3, 0.9.0)", version, scionVersion)
+	scionVersion := fetchHubVersion(srv.Client(), srv.URL)
+	if scionVersion != "0.9.0" {
+		t.Fatalf("fetchHubVersion = %q, want 0.9.0", scionVersion)
 	}
 }
 
 func TestFetchHubVersionReturnsEmptyOnUnreachableHost(t *testing.T) {
-	version, scionVersion := fetchHubVersion(&http.Client{Timeout: 2e9}, "http://127.0.0.1:1")
-	if version != "" || scionVersion != "" {
-		t.Fatalf("fetchHubVersion on unreachable host = (%q, %q), want empty", version, scionVersion)
+	scionVersion := fetchHubVersion(&http.Client{Timeout: 2e9}, "http://127.0.0.1:1")
+	if scionVersion != "" {
+		t.Fatalf("fetchHubVersion on unreachable host = %q, want empty", scionVersion)
 	}
 }
 
@@ -183,8 +196,8 @@ func TestFetchHubVersionReturnsEmptyOnNon200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	version, scionVersion := fetchHubVersion(srv.Client(), srv.URL)
-	if version != "" || scionVersion != "" {
-		t.Fatalf("fetchHubVersion on 404 = (%q, %q), want empty", version, scionVersion)
+	scionVersion := fetchHubVersion(srv.Client(), srv.URL)
+	if scionVersion != "" {
+		t.Fatalf("fetchHubVersion on 404 = %q, want empty", scionVersion)
 	}
 }

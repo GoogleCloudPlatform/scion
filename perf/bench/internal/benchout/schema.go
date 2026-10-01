@@ -64,21 +64,38 @@ type APIBenchReport struct {
 	// VCS stamping could not supply a revision; see HarnessCommitSource for
 	// why.
 	HarnessCommit string `json:"harnessCommit,omitempty"`
-	// HarnessCommitDirty is true when the build-time working tree had
-	// uncommitted changes (`vcs.modified`), i.e. the binary may not exactly
-	// match HarnessCommit's tree.
-	HarnessCommitDirty bool `json:"harnessCommitDirty,omitempty"`
+	// HarnessCommitDirty is nil when HarnessCommit itself is unknown (no
+	// VCS stamp at all -- see HarnessCommitSource), and otherwise points to
+	// whether the build-time working tree had uncommitted changes
+	// (`vcs.modified`). bench-rev-4 N9: this was a bare `omitempty bool`,
+	// which made "the tree was clean" and "dirty state is unknown" both
+	// serialize as a missing field -- indistinguishable to a reader. A
+	// pointer makes "known clean" (`false`), "known dirty" (`true`), and
+	// "unknown" (absent) three different, correctly distinguishable states.
+	HarnessCommitDirty *bool `json:"harnessCommitDirty,omitempty"`
 	// HarnessCommitSource explains how HarnessCommit was obtained, or why it
 	// is empty (bench-rev-3 RR3: "record empty with an explicit source
 	// rather than guessing"). Normally "go build VCS stamp"; see
-	// perf/bench/README.md for why `-buildvcs=false` must NOT be passed when
-	// building these tools.
+	// perf/bench/README.md for why `-buildvcs=false` must NOT be passed, and
+	// why the tools must be built from a regular clone rather than a `git
+	// worktree` checkout (bench-rev-4 R3/N2: Go does not VCS-stamp
+	// worktrees at all).
 	HarnessCommitSource string `json:"harnessCommitSource"`
-	// HubVersion/HubScionVersion identify the hub binary under test, read
-	// from its own unauthenticated GET /health (pkg/hub/handlers_health.go)
-	// -- bench-rev-3 RR3's "NB4 also covered the hub build" follow-up.
-	// Empty if /health could not be reached or parsed.
-	HubVersion        string            `json:"hubVersion,omitempty"`
+	// HubScionVersion identifies the hub binary under test, read from its
+	// own unauthenticated GET /health (pkg/hub/handlers_health.go's
+	// `scionVersion` field, `pkg/version.Short()`) -- bench-rev-3 RR3's "NB4
+	// also covered the hub build" follow-up. Empty if /health could not be
+	// reached or parsed, and "unknown" if the hub binary itself was not
+	// built with version info or a VCS stamp (see perf/bench/README.md).
+	//
+	// bench-rev-4 R3: there is deliberately no HubVersion field. An earlier
+	// version recorded /health's `version` field under that name, which
+	// looks like real provenance but is actually pkg/hub's hard-coded
+	// `"0.1.0"` placeholder (`handlers_health.go:86`, marked
+	// `// TODO: Get from build info`) -- constant regardless of which hub
+	// commit is actually running. A field that always reads the same value
+	// no matter what is measured is worse than no field, the same lesson
+	// RR3 already applied to the harness's own commit field.
 	HubScionVersion   string            `json:"hubScionVersion,omitempty"`
 	HubBaseURL        string            `json:"hubBaseUrl"`
 	EffectiveSettings EffectiveSettings `json:"effectiveSettings"`

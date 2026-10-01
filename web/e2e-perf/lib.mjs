@@ -290,3 +290,82 @@ export function pickBurstTarget(idx, runIndex, currentPhase, previousRunTarget) 
       `{${[...exclude]}} for idx=${idx} runIndex=${runIndex}`
   );
 }
+
+/**
+ * computePreStaleIds returns the set of agent ids, among `ids`, whose badge
+ * label (from `preFireLabels`, read immediately before posting) already
+ * equals the phase about to be requested (from `targetPhase`). Such agents
+ * cannot have a later matching poll result attributed to THIS run's own
+ * POST -- it could be a stale badge left over from a restore that silently
+ * failed to reach the DOM -- so the caller excludes them from that run's
+ * settle tracking entirely (bench-rev-3 RR1, extracted as a pure function
+ * for bench-rev-4 N12: this guard previously only existed inline in
+ * large-project-bench.mjs and had no unit test of its own).
+ *
+ * Case-insensitive, matching the comparison large-project-bench.mjs's badge
+ * reads and `pickBurstTarget`'s rotation both use.
+ */
+export function computePreStaleIds(ids, preFireLabels, targetPhase) {
+  const preStaleIds = new Set();
+  for (const id of ids) {
+    const label = preFireLabels.get(id);
+    const target = targetPhase.get(id);
+    if (label && target && label.toLowerCase() === target.toLowerCase()) {
+      preStaleIds.add(id);
+    }
+  }
+  return preStaleIds;
+}
+
+/**
+ * summarizeBurstScenario reduces one scenario's per-run burst results
+ * (`runBurstOnce`'s return values, one per run) into the scenario-level
+ * statistics large-project-bench.mjs's report publishes. Extracted as a
+ * pure function (bench-rev-4 N12: the invalid-run exclusion previously only
+ * existed inline in `runBurstScenario` and had no unit test of its own) so
+ * it is directly testable with synthetic run objects, no fake hub or DOM
+ * required.
+ *
+ * bench-rev-3 RR1(b): a run marked `invalid` (fired while the previous
+ * run's restore was not yet confirmed in the DOM) is excluded from every
+ * statistic below except `invalidRunCount` itself and `results` -- it is
+ * reported for transparency, but describing it as "settled" or folding its
+ * median into the scenario's would describe a run known not to have started
+ * from the expected pre-burst state.
+ *
+ * bench-rev-4 R4: `medianSettleMs` is the median OF THE PER-RUN MEDIANS
+ * (one sample per valid run -- `n` of them, given by `validRunCount` below),
+ * NOT a median over every individual agent's settle time; it is a median of
+ * medians, a coarser but more outlier-resistant statistic. `minSettleMs`/
+ * `maxSettleMs` are the TRUE per-agent range across all valid runs -- the
+ * min of each run's own min and the max of each run's own max -- NOT the
+ * range of the per-run medians, which an earlier version conflated with it
+ * (e.g. reporting "51-227ms" for a column a reader would take as the settle
+ * spread, when the true per-agent range for that data was 11-373ms).
+ */
+export function summarizeBurstScenario(results) {
+  const validResults = results.filter((r) => !r.invalid);
+  const medianSettleValues = validResults.map((r) => r.medianSettleMs).filter((v) => v != null);
+  const perRunMins = validResults.map((r) => r.minSettleMs).filter((v) => v != null);
+  const perRunMaxes = validResults.map((r) => r.maxSettleMs).filter((v) => v != null);
+  // bench-rev-4 N5: surfaced so a reader (and the console summary) can see
+  // "fully settled, but N agents pre-stale-excluded" rather than only a
+  // trackedCount < requestedCount buried inside each run's own object.
+  const preStaleExcludedTotal = results.reduce((sum, r) => sum + (r.preStaleExcludedCount || 0), 0);
+
+  return {
+    runsAttempted: results.length,
+    validRunCount: validResults.length,
+    invalidRunCount: results.length - validResults.length,
+    results,
+    preStaleExcludedTotal,
+    // n for medianSettleMs/stddevSettleMs: one sample per valid run.
+    medianOfRunMediansN: medianSettleValues.length,
+    medianSettleMs: median(medianSettleValues),
+    minSettleMs: perRunMins.length ? Math.min(...perRunMins) : null,
+    maxSettleMs: perRunMaxes.length ? Math.max(...perRunMaxes) : null,
+    stddevSettleMs: stddev(medianSettleValues),
+    fullySettledRunCount: validResults.filter((r) => !r.timedOut).length,
+    fullyRestoredRunCount: results.filter((r) => r.restoreFullyConfirmed).length,
+  };
+}

@@ -100,6 +100,7 @@
 import { chromium } from '@playwright/test';
 import * as fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -108,12 +109,13 @@ import {
   classifyOutcome,
   median,
   minMax,
-  stddev,
   summarizeLongTasks,
   summarizeScenario,
   generateTestLoginToken,
   pickBurstTarget,
   displayStatusLabel,
+  computePreStaleIds,
+  summarizeBurstScenario,
 } from './lib.mjs';
 
 // ---- CLI args --------------------------------------------------------
@@ -205,15 +207,26 @@ function gitIsDirty() {
 // bench-rev-3 RR3: "NB4 also covered the hub build." Identifies the hub
 // binary under test via its own unauthenticated GET /health
 // (pkg/hub/handlers_health.go), mirroring apibench's fetchHubVersion.
-// Best-effort: never throws, returns nulls on any failure.
-async function fetchHubVersion(baseURL) {
+// Best-effort: never throws, returns null on any failure.
+//
+// bench-rev-4 R3: returns ONLY scionVersion. /health's `version` field is a
+// hard-coded `"0.1.0"` literal in hub source
+// (pkg/hub/handlers_health.go:86, marked `// TODO: Get from build info`),
+// constant regardless of which hub commit is actually running -- recording
+// it under a name like `hubVersion` looks like real provenance but carries
+// none, the same lesson RR3 already applied to the harness's own commit
+// field. `scionVersion` (`pkg/version.Short()`) is real provenance when the
+// hub binary is built correctly (a regular clone, not a `git worktree`; see
+// README) and "unknown" otherwise -- never a placeholder presented as if it
+// were real.
+async function fetchHubScionVersion(baseURL) {
   try {
     const res = await fetch(`${baseURL.replace(/\/$/, '')}/health`);
-    if (!res.ok) return { version: null, scionVersion: null };
+    if (!res.ok) return null;
     const body = await res.json();
-    return { version: body.version ?? null, scionVersion: body.scionVersion ?? null };
+    return body.scionVersion ?? null;
   } catch {
-    return { version: null, scionVersion: null };
+    return null;
   }
 }
 
@@ -703,13 +716,10 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
   const preFireLabels = new Map(
     await Promise.all(targets.map(async (a) => [a.id, await getStatusBadgeLabelDeep(page, a.id)]))
   );
-  const preStaleIds = new Set(
-    targets
-      .filter((a) => {
-        const label = preFireLabels.get(a.id);
-        return label && label.toLowerCase() === targetPhase.get(a.id).toLowerCase();
-      })
-      .map((a) => a.id)
+  const preStaleIds = computePreStaleIds(
+    targets.map((a) => a.id),
+    preFireLabels,
+    targetPhase
   );
   if (preStaleIds.size > 0) {
     console.warn(
@@ -727,6 +737,14 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
   // (0.24-1.40s in the v3 capture -- the same magnitude as the reported
   // medians). Anchoring AND observing per agent removes that inflation
   // entirely, rather than merely measuring around it.
+  //
+  // bench-rev-4 R4: this loop's own observation resolution has a floor --
+  // `page.waitForTimeout(100)` plus a deep shadow-DOM badge read, which
+  // bench-rev-4's probe measured at ~14ms with one poller but ~68ms median
+  // (p90 98ms) with `--burst-count` (default 15) concurrent pollers sharing
+  // one page. A reported settle time below roughly 170-200ms is at or near
+  // this floor and cannot distinguish hub-side speed differences; see
+  // measurements.md section 3 for this caveat applied to actual numbers.
   const burstStartedAt = Date.now();
   const perAgent = await Promise.all(
     targets.map(async (a) => {
@@ -765,7 +783,19 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
       };
     })
   );
-  const burstSentMs = Date.now() - burstStartedAt;
+  // bench-rev-4 N8: `burstSentMs` used to mean "time to POST every agent's
+  // update" (the fan-out only); since bench-rev-3 RR4 moved polling inside
+  // the same per-agent `Promise.all`, that single number silently started
+  // covering the whole per-agent POST-plus-poll sequence instead (883-1330ms
+  // at 25 agents in the v3/v4 data, not the few-hundred-ms POST fan-out the
+  // name implied). Recorded as two separate, correctly-named fields instead:
+  // `postFanOutMs` (POST-only spread, comparable across captures) and
+  // `burstWallClockMs` (the whole run including polling, for context only).
+  const postCompletedAts = perAgent.map((r) => r.postCompletedAt).filter((v) => v != null);
+  const postFanOutMs = postCompletedAts.length
+    ? Math.max(...postCompletedAts) - burstStartedAt
+    : null;
+  const burstWallClockMs = Date.now() - burstStartedAt;
 
   const rejected = perAgent.filter((r) => !r.ok);
   const accepted = perAgent.filter((r) => r.ok);
@@ -832,7 +862,8 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
     acceptedCount: acceptedIds.length,
     rejectedCount: rejected.length,
     rejectedSample: rejected.slice(0, 3),
-    burstSentMs,
+    postFanOutMs,
+    burstWallClockMs,
     preStaleExcludedCount: preStaleIds.size,
     trackedCount: tracked.length,
     settledCount: settled.length,
@@ -899,26 +930,7 @@ async function runBurstScenario(browser) {
   }
   await context.close();
 
-  // bench-rev-3 RR1(b): a run marked invalid (fired while the previous
-  // run's restore was not yet confirmed) is excluded from the scenario's
-  // settle statistics -- it is reported in `results` for transparency, but
-  // not folded into medianSettleMs/fullySettledRunCount, which describe
-  // only runs known to have started from the expected pre-burst state.
-  const validResults = results.filter((r) => !r.invalid);
-  const medianSettleValues = validResults.map((r) => r.medianSettleMs).filter((v) => v != null);
-  const mm = minMax(medianSettleValues);
-  return {
-    skipped: false,
-    runsAttempted: results.length,
-    invalidRunCount: results.length - validResults.length,
-    results,
-    medianSettleMs: median(medianSettleValues),
-    minSettleMs: mm.min,
-    maxSettleMs: mm.max,
-    stddevSettleMs: stddev(medianSettleValues),
-    fullySettledRunCount: validResults.filter((r) => !r.timedOut).length,
-    fullyRestoredRunCount: results.filter((r) => r.restoreFullyConfirmed).length,
-  };
+  return { skipped: false, ...summarizeBurstScenario(results) };
 }
 
 // ---- main -----------------------------------------------------------------
@@ -938,13 +950,19 @@ async function main() {
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   });
 
-  const hubVersionInfo = await fetchHubVersion(hubBase);
+  const hubScionVersion = await fetchHubScionVersion(hubBase);
+  // bench-rev-4 N11: record load average at start/end, matching apibench's
+  // convention (bench-rev-1 N8, bench-rev-2 NB9) -- R4 found this capture's
+  // settle numbers are environment-sensitive (bench-rev-4's own lower-load
+  // single-hub run measured roughly 4x lower settle times at the same agent
+  // counts), and a report with no load figure gives a reader no way to tell
+  // environment noise from a real difference.
+  const [loadAvg1, loadAvg5, loadAvg15] = os.loadavg();
   const report = {
     generatedAt: new Date().toISOString(),
     harnessCommit: gitHeadSha(),
     harnessCommitDirty: gitIsDirty(),
-    hubVersion: hubVersionInfo.version,
-    hubScionVersion: hubVersionInfo.scionVersion,
+    hubScionVersion,
     hubBaseUrl: hubBase,
     seedProjectId: seed.projectId,
     seedProjectSlug: seed.projectSlug,
@@ -953,6 +971,7 @@ async function main() {
     burstRuns,
     effectiveTimeouts: { navTimeoutMs, populateTimeoutMs, settleTimeoutMs, burstCount },
     notes,
+    machine: { loadAvg1, loadAvg5, loadAvg15 },
     scenarios: {},
   };
   writeReportSoFar(report);
@@ -982,14 +1001,26 @@ async function main() {
     if (report.liveUpdateBurst.skipped) {
       console.log(`  skipped: ${report.liveUpdateBurst.skipReason}`);
     } else {
+      // bench-rev-4 N5: fullySettledRunCount/fullyRestoredRunCount are
+      // counted over valid runs only (see summarizeBurstScenario), so they
+      // are reported against validRunCount, not runsAttempted -- dividing
+      // by runsAttempted made any invalid run read like a settle failure
+      // even when every valid run settled 15/15. Invalid and pre-stale
+      // counts are both surfaced explicitly rather than only affecting the
+      // denominator silently.
+      const b = report.liveUpdateBurst;
       console.log(
-        `  median settle time: ${report.liveUpdateBurst.medianSettleMs}ms ` +
-          `[${report.liveUpdateBurst.minSettleMs}, ${report.liveUpdateBurst.maxSettleMs}]; ` +
-          `${report.liveUpdateBurst.fullySettledRunCount}/${report.liveUpdateBurst.runsAttempted} runs fully settled, ` +
-          `${report.liveUpdateBurst.fullyRestoredRunCount}/${report.liveUpdateBurst.runsAttempted} fully restored, ` +
-          `${report.liveUpdateBurst.invalidRunCount}/${report.liveUpdateBurst.runsAttempted} invalid (prior restore unconfirmed)`
+        `  median settle time: ${b.medianSettleMs}ms [${b.minSettleMs}, ${b.maxSettleMs}] ` +
+          `(median of ${b.medianOfRunMediansN} per-run medians; min/max is the true per-agent ` +
+          `range across all valid runs); ` +
+          `${b.fullySettledRunCount}/${b.validRunCount} valid runs fully settled, ` +
+          `${b.fullyRestoredRunCount}/${b.runsAttempted} fully restored, ` +
+          `${b.invalidRunCount}/${b.runsAttempted} invalid (prior restore unconfirmed), ` +
+          `${b.preStaleExcludedTotal} total pre-stale-excluded agent(s)`
       );
     }
+    [report.machine.loadAvg1AtEnd, report.machine.loadAvg5AtEnd, report.machine.loadAvg15AtEnd] =
+      os.loadavg();
     writeReportSoFar(report);
   } finally {
     await browser.close();

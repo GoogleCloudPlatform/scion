@@ -64,6 +64,21 @@ directory, which is the bug RR3 fixed (an earlier version ran
 `git rev-parse HEAD` in the invoking shell's cwd and silently recorded
 whatever OTHER checkout happened to be there).
 
+**Also build from a regular clone/checkout, not a `git worktree add`
+checkout** (bench-rev-4 R3/N2). This applies to `./cmd/scion` (the hub
+binary under test) as much as to `apibench`/`seed`: Go's VCS auto-stamping
+only recognizes a `.git` *directory*; a worktree's `.git` is a file
+pointing back at the main checkout's metadata, which `go build` does not
+follow, so a binary built from a worktree gets NO VCS stamp at all --
+confirmed by bench-rev-4 reproducing this on a throwaway repo (a plain repo
+and a shallow clone both stamped correctly; a worktree did not). This is
+why every bench-rev-3 `browser-*-burstonly.json` recapture's
+`hubScionVersion` read `"unknown"` despite the hub being built from a known,
+pinned commit (`73ebd022`) -- the hub binary was built from a worktree. If
+you need the hub's own build identity recorded reliably, build it from a
+plain `git clone`/checkout, or stamp it explicitly via
+`-ldflags "-X github.com/GoogleCloudPlatform/scion/pkg/version.Commit=$(git rev-parse HEAD)"`.
+
 `scion server start` (the local test-hub subprocess this harness drives) is
 removed from the CLI's command tree in `SCION_CLI_MODE=agent` (see
 `cmd/cli_mode.go`) -- the mode this container's ambient `scion` CLI runs in
@@ -232,7 +247,11 @@ Notes on flags, learned the hard way while building this:
 
 Both the standalone Hub API server and the combined hub+web server cap how
 long a handler may run before its connection is forcibly closed with an
-empty reply to the client:
+empty reply to the client. Line numbers below are as of `73ebd022`, the
+commit this harness's BASELINE measurements were captured against
+(bench-rev-4 F1: they have since shifted on upstream `main` after this
+branch's rebase onto it, which does not affect the baseline -- re-check
+them against whatever commit you are actually measuring):
 
 - `pkg/config/hub_config.go:851` -- `HubServerConfig.WriteTimeout`, default
   `60 * time.Second`, wired into the standalone Hub API's `http.Server` at
@@ -330,11 +349,17 @@ what it is not sufficient for. The report also records the effective
 `--runs`/`--warmup`/`--timeout-seconds`/`--want-perf-trace` settings
 (bench-rev-2 NB4); `harnessCommit` (the binary's own build-time VCS
 revision -- bench-rev-2 NB4, bench-rev-3 RR3 fixed how this is obtained,
-see "One-time setup" above), `harnessCommitDirty`, and
-`harnessCommitSource`; and `hubVersion`/`hubScionVersion` (read from the
-hub's own `GET /health`, bench-rev-3 RR3) -- so a report file is
-self-describing on both sides (harness AND hub) without having to match
-either to a commit by timestamp.
+see "One-time setup" above), `harnessCommitDirty` (bench-rev-4 N9: `*bool`,
+nil when the commit itself is unknown, so "clean" and "dirty state
+unknown" are never indistinguishable), and `harnessCommitSource`; and
+`hubScionVersion` (read from the hub's own `GET /health`, bench-rev-3 RR3)
+-- so a report file is self-describing on both sides (harness AND hub)
+without having to match either to a commit by timestamp. There is
+deliberately no `hubVersion` field (bench-rev-4 R3): `/health`'s `version`
+is a hard-coded placeholder in hub source
+(`pkg/hub/handlers_health.go:86`), constant regardless of which hub commit
+is actually running, and a field that always reads the same value no
+matter what is measured would be worse than no field at all.
 
 **Always pass `--notes`** describing conditions the report fields do not
 capture on their own (bench-rev-3 O7): how many other hub instances were
@@ -444,8 +469,12 @@ seeded owner while checking every POST's status, polls each *accepted*
 agent's own rendered `<scion-status-badge>` until it shows the new value --
 ground truth for "the live update reached the DOM" -- then **restores
 every updated agent to its pre-burst phase AND activity** (bench-rev-2
-NB1) and **waits for the restore to be confirmed in the DOM** before the
-next run starts.
+NB1) and waits, up to a bound, to confirm the restore in the DOM.
+**bench-rev-4 N4:** this does NOT block the next run -- the wait is bounded
+and the next run starts regardless, but if the restore was not fully
+confirmed in that window, the next run is marked `invalid` rather than
+treated as having started from a known-good state. See point 3 below for
+the exact mechanism.
 
 Settle time is measured **per agent, independently, starting the instant
 THAT agent's own POST resolves** (bench-rev-3 RR4; bench-rev-2's NB2 fix
@@ -484,6 +513,36 @@ confirmed to fail against the old idx-only implementation):
    activity instead of phase for a `running` agent with non-empty
    activity) -- comparing against the literal phase, as an earlier version
    did, could never match for those agents no matter how long it waited.
+
+The pre-stale exclusion (guard 2) and the invalid-run exclusion (guard 3)
+are implemented as pure functions in `lib.mjs` (`computePreStaleIds`,
+`summarizeBurstScenario`) with their own `lib.test.mjs` coverage
+(bench-rev-4 N12) -- not only inline in `large-project-bench.mjs`, covered
+only by review-time simulation against a fake hub and DOM.
+
+**bench-rev-4 R4: what the reported statistics mean, precisely.**
+`medianSettleMs` is the median OF THE PER-RUN MEDIANS (one sample per
+valid run -- a median of medians, not a median over every individual
+agent's settle time). `minSettleMs`/`maxSettleMs` are the TRUE per-agent
+range across all valid runs (the min of each run's own min and the max of
+each run's own max), not the range of the per-run medians. Each poll has an
+observation-resolution floor of roughly 170-200ms (a 100ms sleep plus a
+deep shadow-DOM badge read, which runs 14ms alone but ~68ms median -- p90
+98ms -- with `--burst-count` concurrent pollers sharing one page, per
+bench-rev-4's own measurement): a reported settle time below that floor
+cannot distinguish hub-side speed differences. `postFanOutMs` (POST-only
+completion spread) and `burstWallClockMs` (the whole per-agent
+POST-plus-poll sequence) are reported separately -- bench-rev-4 N8: an
+earlier version's single `burstSentMs` field silently changed from meaning
+the former to meaning the latter when bench-rev-3 RR4 moved polling inside
+the same per-agent `Promise.all`.
+
+**Settle times are environment-sensitive** (bench-rev-4 R4): a lower-load,
+single-hub reproduction measured roughly 4x lower settle times at the same
+agent counts than a three-co-resident-hub capture under higher load. The
+browser benchmark's report now records `os.loadavg()` at the start and end
+of the run (bench-rev-4 N11), matching `apibench`'s convention, so a reader
+can tell environment noise from an actual difference.
 
 Raise `--populate-timeout-ms`/`--nav-timeout-ms` (default 120000/120000) for
 large agent counts; at 500 agents on unmodified `main`, some views exceed

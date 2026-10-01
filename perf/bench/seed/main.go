@@ -140,8 +140,10 @@ func normalizeDBPathForStat(dbPath string) string {
 }
 
 // validateDBPathArg rejects any --db value this tool did not expect a
-// caller to supply: a "file:" DSN prefix or a "?query" suffix, both of
-// which openSQLiteForBench adds itself.
+// caller to supply: a "file:" DSN prefix, or any character with special
+// meaning to the URI parsing `openSQLiteForBench`'s DSN eventually goes
+// through ("?", "#", "%"), none of which this tool needs the caller to
+// supply.
 //
 // bench-rev-3 O1: normalizeDBPathForStat's bare `TrimPrefix(dbPath,
 // "file:")` correctly handles "file:/abs/path" and
@@ -149,26 +151,41 @@ func normalizeDBPathForStat(dbPath string) string {
 // form (a valid, if unusual, sqlite3 DSN authority): trimming only the
 // "file:" prefix leaves "//localhost/<path>", which os.Stat never finds on
 // this host, so checkDBNotExists's existence guard silently passed even
-// against an existing, non-empty database -- reproduced: seeding over an
-// existing DB with `--db file://localhost/<path>` ran Migrate and the
-// owner/member bootstrap before failing partway through with the exact
-// "already exists" error checkDBNotExists exists to prevent up front, with
-// no byte-level damage to the existing DB observed but no guarantee of that
-// either. Rather than special-case every DSN authority form sqlite's URI
-// parsing might accept, reject any "file:"-prefixed or "?"-containing --db
-// value outright before it ever reaches checkDBNotExists: this tool adds
-// both itself (see openSQLiteForBench) and never needs the caller to
-// supply either, so there is nothing legitimate this rejects.
+// against an existing, non-empty database. Fixed by rejecting any
+// "file:"-prefixed or "?"-containing --db value outright.
+//
+// bench-rev-4 N1: that fix was still incomplete. `openSQLiteForBench`
+// builds `"file:" + dbPath + "?cache=shared"` by string concatenation (to
+// exactly match `cmd/server_foreground.go`'s production DSN construction --
+// deliberately NOT changed here, since the whole point of this function is
+// to agree with the real `scion server start` subprocess on how a path is
+// opened) and hands the result to Go's `net/url`-based sqlite DSN parser,
+// which gives "#" and "%" their own URI meaning: a trailing `#frag` is
+// parsed as a fragment and silently dropped from the path, and `%XX`
+// sequences are percent-decoded. Both let `--db victim.db%2e` (or similar)
+// resolve to a DIFFERENT filesystem path than the literal string
+// `checkDBNotExists` just confirmed doesn't exist, bypassing the guard the
+// same way the "file://localhost/" form did -- reproduced: both forms
+// passed `checkDBNotExists` and then opened an EXISTING, non-empty
+// database, reaching Migrate and bootstrap before failing at "create owner
+// user: already exists" (no data-corruption was observed in that
+// reproduction, but the guard's entire job is to fail before that point,
+// not to rely on failing safely after it). Rejecting "#" and "%" outright,
+// like "?", closes both without touching `openSQLiteForBench`'s
+// production-matching construction.
 func validateDBPathArg(dbPath string) error {
 	if strings.HasPrefix(dbPath, "file:") {
 		return fmt.Errorf(
 			"--db %q must be a plain filesystem path, not a \"file:\" DSN -- this tool adds the "+
 				"\"file:\" prefix itself (see openSQLiteForBench)", dbPath)
 	}
-	if strings.Contains(dbPath, "?") {
-		return fmt.Errorf(
-			"--db %q must not contain a %q query string -- this tool adds \"?cache=shared\" "+
-				"itself (see openSQLiteForBench)", dbPath, "?")
+	for _, special := range []string{"?", "#", "%"} {
+		if strings.Contains(dbPath, special) {
+			return fmt.Errorf(
+				"--db %q must not contain %q -- it has special meaning to the URI parsing this "+
+					"tool's sqlite DSN goes through (openSQLiteForBench), and this tool adds "+
+					"\"?cache=shared\" itself; use a path without it", dbPath, special)
+		}
 	}
 	return nil
 }

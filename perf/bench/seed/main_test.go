@@ -254,18 +254,21 @@ func TestCheckDBNotExists(t *testing.T) {
 	})
 }
 
-// TestValidateDBPathArg covers bench-rev-3 O1: rather than special-case
-// every DSN authority form sqlite's URI parsing might accept (the
-// "file://localhost/<path>" form bypassed checkDBNotExists's normalization,
-// since TrimPrefix(dbPath, "file:") leaves "//localhost/<path>", which
-// os.Stat never finds), reject any "file:"-prefixed or "?"-containing --db
-// value outright. This closes file://localhost/... along with every other
-// such form, not just the one demonstrated.
+// TestValidateDBPathArg covers bench-rev-3 O1 and bench-rev-4 N1: rather
+// than special-case every DSN form sqlite's URI parsing might accept (the
+// "file://localhost/<path>" authority form, and -- N1 -- "#fragment" and
+// "%XX"-escape forms, all of which let the literal --db string resolve to a
+// DIFFERENT filesystem path than the one checkDBNotExists just confirmed
+// doesn't exist), reject any "file:"-prefixed or "?"/"#"/"%"-containing
+// --db value outright. This closes every such form, not just the ones
+// demonstrated.
 func TestValidateDBPathArg(t *testing.T) {
 	valid := []string{
 		"/tmp/hub.db",
 		"hub.db",
 		"./relative/hub.db",
+		"fileish:name.db", // "file" is a substring, but not the "file:" prefix
+		"/tmp/a path with spaces/hub.db",
 	}
 	for _, p := range valid {
 		if err := validateDBPathArg(p); err != nil {
@@ -280,6 +283,10 @@ func TestValidateDBPathArg(t *testing.T) {
 		"file://localhost/tmp/hub.db?cache=shared",
 		"/tmp/hub.db?cache=shared",
 		"/tmp/hub.db?mode=rw",
+		"/tmp/hub.db#frag",     // N1: URI fragment, silently dropped by the DSN parser
+		"/tmp/%76ictim.db",     // N1: percent-encoding, silently decoded by the DSN parser
+		"/tmp/hub.db#cache=rw", // fragment form disguised as a query-like suffix
+		"/tmp/100%done/hub.db", // "%" anywhere, not just a valid escape sequence
 	}
 	for _, p := range rejected {
 		if err := validateDBPathArg(p); err == nil {

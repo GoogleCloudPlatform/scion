@@ -90,10 +90,18 @@ import (
 // are populated by `go build`'s default VCS auto-stamping and travel with
 // the binary itself, so this is correct regardless of the caller's cwd. It
 // requires building WITHOUT `-buildvcs=false` -- see perf/bench/README.md.
-func harnessBuildInfo() (commit string, dirty bool, source string) {
+//
+// bench-rev-4 N2: it ALSO requires building from a regular clone/checkout,
+// not a `git worktree add` checkout. Go's VCS auto-stamping only recognizes
+// a `.git` *directory*; a worktree's `.git` is a file pointing back at the
+// main checkout's metadata, which `go build` does not follow, so a binary
+// built from a worktree gets no VCS stamp at all -- confirmed by
+// bench-rev-4 reproducing this on a throwaway repo (plain repo and shallow
+// clone both stamped; worktree did not). See perf/bench/README.md.
+func harnessBuildInfo() (commit string, dirty *bool, source string) {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
-		return "", false, "unavailable: no build info (not built with cmd/go, or stripped)"
+		return "", nil, "unavailable: no build info (not built with cmd/go, or stripped)"
 	}
 	var revision, modified string
 	for _, s := range info.Settings {
@@ -105,14 +113,23 @@ func harnessBuildInfo() (commit string, dirty bool, source string) {
 		}
 	}
 	if revision == "" {
-		return "", false, "unavailable: no vcs.revision in build info (built with -buildvcs=false, or source is not a VCS checkout)"
+		return "", nil, "unavailable: no vcs.revision in build info (built with -buildvcs=false, built from a git worktree rather than a regular clone -- Go does not VCS-stamp worktrees, see README -- or source is not a VCS checkout at all)"
 	}
-	return revision, modified == "true", "go build VCS stamp"
+	isDirty := modified == "true"
+	return revision, &isDirty, "go build VCS stamp"
 }
 
 // hubHealth is the subset of pkg/hub's unauthenticated GET /health response
 // (pkg/hub/handlers_health.go's HealthResponse) this tool records.
 type hubHealth struct {
+	// Version is pkg/hub/handlers_health.go:86's `HealthResponse.Version`,
+	// which is a hard-coded `"0.1.0"` literal marked `// TODO: Get from
+	// build info` in hub source -- bench-rev-4 R3. It is deliberately NOT
+	// read into this tool's report: a field that looks like provenance but
+	// is actually a constant is worse than no field at all, the same lesson
+	// RR3 already applied to the harness's own commit field. Decoded here
+	// only so json.Decode does not need a second type for the rest of the
+	// response.
 	Version      string `json:"version"`
 	ScionVersion string `json:"scionVersion"`
 }
@@ -121,20 +138,27 @@ type hubHealth struct {
 // NB4's provenance request also covered the hub build, not just the
 // harness's). Best-effort: returns zero values on any error rather than
 // failing the run, since /health is a nice-to-have, not load-bearing.
-func fetchHubVersion(client *http.Client, hubURL string) (version, scionVersion string) {
+//
+// bench-rev-4 R3: this now returns ONLY scionVersion (from
+// `pkg/version.Short()`, which reflects a real `-ldflags`-injected version
+// or the hub binary's OWN VCS stamp when built correctly -- see
+// perf/bench/README.md's build instructions). The hub's `/health.version`
+// field is deliberately not surfaced as report data; see hubHealth.Version's
+// doc comment.
+func fetchHubVersion(client *http.Client, hubURL string) (scionVersion string) {
 	resp, err := client.Get(strings.TrimRight(hubURL, "/") + "/health")
 	if err != nil {
-		return "", ""
+		return ""
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return "", ""
+		return ""
 	}
 	var h hubHealth
 	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
-		return "", ""
+		return ""
 	}
-	return h.Version, h.ScionVersion
+	return h.ScionVersion
 }
 
 const perfTraceRequestHeader = "X-Scion-Perf-Trace"
@@ -178,19 +202,28 @@ func main() {
 	}
 
 	harnessCommit, harnessDirty, harnessCommitSource := harnessBuildInfo()
-	hubVersion, hubScionVersion := fetchHubVersion(client, *hubURL)
+	hubScionVersion := fetchHubVersion(client, *hubURL)
 	report := benchout.APIBenchReport{
 		GeneratedAt: time.Now().UTC(),
 		// bench-rev-2 NB4, bench-rev-3 RR3: record the harness's own build
 		// commit (from the binary's VCS stamp, not the caller's cwd) and the
 		// hub build under test, so a report can be matched back to the
 		// exact code on both sides without relying on wall-clock proximity.
+		// bench-rev-4 N9: HarnessCommitDirty is now *bool (nil when the
+		// commit itself is unknown) so "clean" and "dirty state unknown"
+		// are never indistinguishable the way a bare `omitempty` bool was.
 		HarnessCommit:       harnessCommit,
 		HarnessCommitDirty:  harnessDirty,
 		HarnessCommitSource: harnessCommitSource,
-		HubVersion:          hubVersion,
-		HubScionVersion:     hubScionVersion,
-		HubBaseURL:          *hubURL,
+		// bench-rev-4 R3: HubVersion was dropped (it only ever held the
+		// hub's hard-coded "0.1.0" /health placeholder -- see
+		// fetchHubVersion's doc comment). HubScionVersion is kept; it
+		// reflects pkg/version.Short() on the HUB side, which is real
+		// provenance when the hub binary is built correctly (see
+		// perf/bench/README.md), and is "unknown" otherwise -- never a
+		// placeholder presented as if it were real.
+		HubScionVersion: hubScionVersion,
+		HubBaseURL:      *hubURL,
 		EffectiveSettings: benchout.EffectiveSettings{
 			Runs:           *runs,
 			Warmup:         *warmup,
