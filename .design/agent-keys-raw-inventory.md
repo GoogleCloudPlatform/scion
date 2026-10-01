@@ -7,29 +7,31 @@ checklist with broker/Hub/client/image versions and removal evidence requirement
 inventory and the rollout checklist as a repo doc"). It does not authorize removal: Phase 4 (tasks
 4.1/4.2/4.3) still owns exercising the replacement and cutting over.
 
-Tested/inventoried revision: `scion/agent-keys-2-2` at `c1af0cbc3` (includes 0.1/0.2/1.1/1.2/2.1/2.2
-and the task 2.2 follow-up adding the agent-caller attach gate). Recheck before Phase 4 acts on
-this: 2.3 and 3.1 are parallel, not-yet-available work at the time this inventory was written, and
-will change some "Pending" rows below to "Migrated" once they land — see "Known pending
-integration" at the end.
+Originally inventoried at `scion/agent-keys-2-2` `c1af0cbc3` (0.1/0.2/1.1/1.2/2.1/2.2 and the task
+2.2 follow-up adding the agent-caller attach gate). Updated against upstream `main` at `e761178`,
+which also includes task 2.3 (the Hub message-raw bridge) and task 3.1 (the CLI/`hubclient` keys
+migration); rows those tasks changed now read "Migrated", "Bridged", or "rerouted". Phase 4
+removal has not happened: raw still works, through the bridge. Recheck before Phase 4 acts on
+this — see "Integration status" at the end.
 
 ## 1. What "raw-dependent" means here
 
 A caller or image is raw-dependent if it builds or transports a `Raw`/`raw`-flagged
 `StructuredMessage`/`MessageRequest` (the pre-cutover keystroke-injection path), or if it embeds a
 `scion` CLI binary whose `cmd/keys.go`/`cmd/message.go` still do so. It is not raw-dependent merely
-for using `scion message`, `scion keys`, or the Hub messaging API without `raw`.
+for using `scion message`, `scion keys`, or the Hub messaging API without `raw`. Since task 3.1, the
+first-party `scion` CLI built from this repository is not raw-dependent in this sense.
 
 ## 2. Repository CLI/SDK callers
 
 | Caller | Owner | Migration status | Evidence |
 | --- | --- | --- | --- |
-| `cmd/keys.go` (`scion keys`, Hub mode) | Client owner (3.1) | **Pending.** Still builds a `Raw=true` `StructuredMessage` via `buildStructuredMessage` and calls `SendStructuredMessage` (`sendKeysViaHub`, `cmd/keys.go:96`-128) — the exact pre-cutover path the master design's finding #1 and contract §8 describe. Not yet switched to the dedicated `/keys` endpoint. | `cmd/keys.go:116`,`120` |
-| `cmd/keys.go`'s own `--help` text (`Long`/`Examples`) | Client owner (3.1 scope item "Correct multi-key example") | **Pending — explicitly owned by 3.1, not this task.** The `Examples:` block still advertises `scion keys my-agent "Up Up Enter"` with no caveat, and the `Short`/`Long` text still says "Send raw keystrokes"/"Supports control keys like arrows, Escape, etc." without the one-argument/no-sequence correction the contract (§2.3, "Deviation from the master design recorded here") requires. This is the exact misleading example this task's own scope ("remove misleading sequence examples") describes, but it lives in Go source (`cmd/keys.go`), not a docs-site/skill file this task's scope covers, and the lead has ruled it is 3.1's to fix alongside the rest of the CLI migration, not 3.2's to edit — 3.2 does not touch `cmd/`. The 3.1 CLI migration's fork PR (open at the time of writing) does not yet touch these lines (checked via its current diff); this row stays Pending until it does. | `cmd/keys.go:33`-35,`45`-48 |
-| `cmd/keys.go` (local mode) | Client owner (3.1) | **Pending (3.1) — this caller is migrated, not unaffected.** 3.1's own scope says "local mode uses manager SendKeys"; today it still calls `agent.Manager.MessageRaw` directly (`cmd/keys.go:86`), which 1.1 already added `SendKeys` alongside without removing (§2a's `MessageRaw` row). Switching this one call site from `MessageRaw` to `SendKeys` is what 3.1 must do for local mode: it adds the `agent_id` container-label identity check `MessageRaw` lacks (`pkg/agent/manager.go:774`-792) and, per contract §2.2, rejects an empty string — `MessageRaw` does not, so local-mode semantics do **not** already fully match the frozen contract today (see §8's empty-string note). Only the one-tmux-argument/no-auto-Enter delivery shape is already identical between the two primitives. **Narrower gap found in 3.1's current fork PR head (`6fa2e72cd`):** its `resolveLocalKeysTarget` requires a Hub-linked project ID to resolve `SendKeys`'s `projectID` parameter at all — a local project with no `scion hub enable` link gets a hard error ("requires this project to have a Hub-linked project ID (none found)"), not a working local-only keys call; its own `TestMessageCmd_RunE_Raw_LocalMode_UsesSendKeysLocal` asserts exactly that error text for the unlinked case. Per the lead, 3.1 is expected to add a further primitive, `Manager.SendKeysLocal`, for unlinked local projects — that primitive is not on 3.1's current head and is not claimed as shipped anywhere in this task's docs. | `cmd/keys.go:86`; `pkg/agent/manager.go:774`-792; 3.1's fork PR (`gh pr diff`, `resolveLocalKeysTarget` and `TestMessageCmd_RunE_Raw_LocalMode_UsesSendKeysLocal`) |
-| `cmd/message.go` `--raw` flag | Client owner (3.1) | **Deprecated, hidden, not yet rerouted.** Hidden (`MarkHidden("raw")`, `cmd/message.go:1470`) and emits a deprecation warning naming `scion keys` as the replacement (`cmd/message.go:63`), satisfying the "no replacement the command cannot yet parse" rule (AC-15a) since `scion keys` already exists and works end-to-end for local mode. Still delivers via `mgr.MessageRaw(ctx, agentName, "", message)` directly in local mode (`cmd/message.go:482`-485, no `StructuredMessage` involved) or, in Hub mode, via `buildStructuredMessage(..., msgRaw, ...)` (`:532` sets `msg.Raw = raw`) followed by the Hub `SendStructuredMessage` path (same as `cmd/keys.go`'s Hub path) — not yet the hidden keys-primitive alias 3.1's scope calls for. | `cmd/message.go:63`,`482`-485,`1458`,`1470` |
-| `pkg/hubclient` (`AgentService`) | Client owner (3.1) | **Pending.** No `SendKeys` method exists yet; `SendStructuredMessage`/`SendStructuredMessageWithOptions` (`pkg/hubclient/agents.go:579`,`589`) are the only way a caller can set `Raw` today, and nothing in this package rejects it. 3.1 adds the typed `SendKeys` call and the no-retry-override described in the contract. | `pkg/hubclient/agents.go:579`,`589` |
-| `pkg/apiclient/transport.go` / `pkg/hubclient.WithRetry` | Client owner (3.1) | **Pending (3.1) — already in scope, not undecided.** `WithRetry` (`pkg/apiclient/transport.go:59`-62, exposed to callers as `hubclient.WithRetry`, `pkg/hubclient/client.go:473`) is a transport-wide, per-client setting; 3.1's own scope ("bypasses generic transport retries even when WithRetry is configured") and its AC4 ("WithRetry(>0) … cannot replay keys") already require 3.1 to make the keys call bypass it even when a caller configured retries for everything else (contract §4.3, AK-34). | `pkg/apiclient/transport.go:59`-89; `pkg/hubclient/client.go:472`-477 |
+| `cmd/keys.go` (`scion keys`, Hub mode) | Client owner (3.1) | **Migrated (3.1).** `sendKeysViaHub` validates locally with `agentkeys.ValidateKeys`, then calls `hubclient` `ProjectAgents(projectID).SendKeys`, which POSTs `{"keys": ...}` to the project-scoped `/keys` route. It never builds a `Raw` `StructuredMessage` and never falls back to `/message`, including against a Hub that predates `/keys` (reported as `hub_unsupported`). | `cmd/keys.go:289`-321 (`hub_unsupported` mapping: `cmd/keys.go:210`-221) |
+| `cmd/keys.go`'s own `--help` text (`Long`/`Examples`) | Client owner (3.1) | **Migrated (3.1).** The `Long` text states the one-argument rule (each example is a separate call, a whole-argument tmux key name is sent as that key, anything else is typed literally, no trailing Enter), and the `Examples:` block no longer contains a multi-key sequence. The `Short` text still reads "Send raw keystrokes", which describes the input, not the deprecated `raw` flag. | `cmd/keys.go:36`-60 |
+| `cmd/keys.go` (local mode) | Client owner (3.1) | **Migrated (3.1).** `sendKeysLocal` resolves the single target within the selected project (`resolveLocalKeysTarget`; ambiguous resolution fails) and calls `agent.Manager.SendKeys` for a Hub-linked project or the additive `agent.Manager.SendKeysLocal` for a purely local project. Both validate input (an empty string is rejected) and bind to the container's `agent_id` before delivery. `MessageRaw` is no longer called from the CLI. | `cmd/keys.go:338`-385,`409`; `pkg/agent/manager.go:876`-895,`914`-927 |
+| `cmd/message.go` `--raw` flag | Client owner (3.1) | **Deprecated, hidden, rerouted (3.1).** Hidden (`MarkHidden("raw")`) with a deprecation warning naming `scion keys`. After client-side combination checks it is a plain alias: Hub mode calls `sendKeysViaHub` (also for same-project `@agent` addressing), local mode calls `sendKeysLocal` — the same paths as `scion keys`, never `MessageRaw` or a `Raw` `StructuredMessage`. Removal is Phase 4. | `cmd/message.go:63`,`475`-484,`499`-504,`520`-525,`1517` |
+| `pkg/hubclient` (`AgentService`) | Client owner (3.1) | **Migrated (3.1).** Typed `AgentService.SendKeys` exists and POSTs to `{id}/keys`. `SendStructuredMessage`/`SendStructuredMessageWithOptions` still accept a `Raw` field for legacy callers; the Hub bridge handles such requests (§2a). | `pkg/hubclient/agents.go:129`-145,`634` |
+| `pkg/apiclient/transport.go` / `pkg/hubclient.WithRetry` | Client owner (3.1) | **Migrated (3.1).** `SendKeys` uses `postNoRetry` → `Transport.DoNoRetry`, which sends once regardless of `WithRetry` and does not follow redirects (contract §4.3, AK-34). `WithRetry` still applies to every other call. | `pkg/hubclient/client.go:361`-368; `pkg/apiclient/transport.go:155`-164 |
 
 **Default retry posture of in-repo callers**, recorded because the contract requires tracking which
 legacy raw clients enable message retries (the master design's "Inventory whether old callers enable
@@ -37,19 +39,17 @@ message retries"):
 
 - The first-party `scion` CLI never calls `hubclient.WithRetry` when building its Hub client
   (`cmd/hub.go:531`-592, the only options appended are auth and a 30s timeout) — `MaxRetries`
-  therefore defaults to `0` (`pkg/apiclient/transport.go:89`). **No *client-side* retry exposure for
-  the CLI's own raw path today.**
-- **Server-side retry exists today on the legacy raw path and is not yet closed.** The Hub's own
-  dispatch of a single-agent raw request (and the agent-to-agent DM raw path) goes through
-  `dispatchWithBrokerRetry`, which retries with exponential backoff (capped at 5s, overall deadline
-  30s) whenever the dispatcher returns `ErrMessageDeferred` — i.e. a temporarily unreachable broker
-  can still receive a raw/keystroke delivery up to ~30s after the original request, with no client
-  involvement or awareness. This is the opposite of `/keys`'s immediate, single-attempt,
-  never-queued semantics (contract §4.2's execute-before deadline, §4.3's no-replay rule) and is
-  exactly what 2.3's cutover removes for the raw path specifically — recorded here as **pending
-  removal by task 2.3**, not a client-retry gap this task's CLI/SDK scope (3.1) would close.
-  Evidence: `pkg/hub/broker_routing.go:140`-167 (`dispatchWithBrokerRetry`, `brokerRetryMaxBackoff`),
-  `pkg/hub/handlers_agent_messaging.go:2581`-2585, `pkg/hub/agent_dm_operation.go:627`-629.
+  therefore defaults to `0`. Since 3.1, the CLI no longer sends raw at all, and its keys call bypasses
+  `WithRetry` regardless (§2).
+- **Server-side retry on the legacy raw path is closed (2.3).** Before the bridge, the Hub's dispatch
+  of a raw request went through `dispatchWithBrokerRetry` (exponential backoff, ~30s overall), so a
+  temporarily unreachable broker could receive a keystroke delivery well after the request. A raw
+  request on either single-agent `/message` route is now handled entirely by the bridge, which
+  delegates to the keys admission/dispatch path (single attempt, execute-before deadline, no
+  replay); and the HTTP dispatcher refuses any `Raw == true` message that still reaches it
+  (`ErrRawDispatchRefused`, zero broker calls). `dispatchWithBrokerRetry` remains for non-raw
+  messages. Evidence: `pkg/hub/agent_keys_message_bridge.go:95`,`285`-290;
+  `pkg/hub/httpdispatcher.go:2645`-2686; `pkg/hub/broker_routing.go:148`.
 - `extras/scion-a2a-bridge` builds several `hubclient.New` clients (`internal/bridge/bridge.go:1376`
   -1436); none pass `WithRetry`. It also never constructs a `Raw`-flagged message — `translate.go`'s
   `TranslateA2AToScion` only sets text/attachment fields — so it is not a raw-dependent caller at
@@ -60,7 +60,9 @@ message retries"):
   401-refresh retry only, not a general send retry); neither sends raw messages (see §4, plugin
   ingress, for why their outbound-only chat relay shape cannot construct one).
 - **No external (non-repository) caller's retry configuration is known.** Per the binding
-  obligation on this task, this is recorded as **unknown**, not assumed safe — see §5.
+  obligation on this task, this is recorded as **unknown**, not assumed safe — see §5. The bridge
+  cannot disable such retries; every bridged response carries migration headers saying so
+  (`setAgentKeysBridgeMigrationHeaders`, `pkg/hub/agent_keys_message_bridge.go:494`).
 
 ## 2a. Hub/broker/shared-type consumers
 
@@ -72,21 +74,21 @@ cleanup") removes or replaces, distinct from the dedicated `/keys` route
 
 | Component | Owner | Migration status | Evidence |
 | --- | --- | --- | --- |
-| Runtime Broker's legacy raw consumer (`isRaw` → `mgr.MessageRaw`) | Broker owner (4.2) | **Pending removal.** The broker's own `/message` action handler branches on `req.StructuredMessage.Raw` and calls `mgr.MessageRaw` directly, bypassing the paste buffer/debounce and logging `"message delivered (raw, unbuffered)"` — this is the broker-side half of the legacy path the dedicated `/keys` broker route (§7 step 1, already merged) does not replace or remove. | `pkg/runtimebroker/handlers.go:2162`-2166,`2211`-2213 |
-| **Hub message-path raw handling** (`agent_dm_operation.go`, `raw_guard.go`) — the agent-to-agent DM half | Hub ingress owner (0.2/2.3/4.2) | **Pending 2.3/4.2 — describing the current base state, not task 2.3's unmerged changes.** `AgentDMInput.Raw` (deprecated client flag, "still functional", `:74`-77); step 4b, the foreign-raw cross-project denial (`MessageDenialCrossProjectRawUnsupported`/`cross_project_raw_unsupported`, `:358`-372); step 4c, the managed-backend raw denial (`MessageDenialRawManagedUnsupported`/`raw_managed_backend_unsupported`, `:376`-390). `raw_guard.go`'s Phase-0.2 containment guards — `crossProjectRawUnsupported` (`:44`), `evaluateRawMessageGuard` (`:116`, the combination-rejection switch), `isRawConversationAddressed` (`:184`), `rejectRawScheduledPayload` (`:206`) — and the `MessageDenialRaw*`/`MessageDenialCrossProjectRawUnsupported` code constants (`pkg/hub/authorize_message.go:46`,`59`-75) are explicitly "containment guards only, not a new permanent raw policy engine" pending the 2.3 bridge. **Not yet merged into this base, but already in flight:** task 2.3's fork PR (open) removes step 4b entirely — raw agent-to-agent DMs stop reaching `ExecuteAgentDM` at all once the bridge classifies them first — and relies on a new dispatch-layer backstop (`httpdispatcher.go`) instead; step 4c and the `raw_guard.go` functions are unchanged by it. Recheck this row once that work (or whatever its successor is) actually merges into `scion/agent-keys-2-2`. | `pkg/hub/agent_dm_operation.go:74`-77,`358`-372,`376`-390; `pkg/hub/raw_guard.go:44`,`116`,`184`,`206`; `pkg/hub/authorize_message.go:46`,`59`-75 |
-| **Single-agent `POST /:id/message` raw path** (`handlers_agent_messaging.go`) | Hub ingress owner (2.3/4.2) | **Pending 2.3/4.2 — this is the main raw ingress, not a secondary one.** Top-level `raw` request field and OR-merge onto `StructuredMessage.Raw`; the managed-backend rejection and the pre-conversation cross-project raw guard on this HTTP path (separate code from, but mirroring, `agent_dm_operation.go`'s step 4b/4c above); raw-aware mention-fanout skip, offload `Qualifies()` call, and observer-publish skip. This is the exact surface task 2.3 bridges onto `ExecuteAgentKeys` and task 4.2 removes; §2a's `agent_dm_operation.go` row above covers the agent-to-agent DM half, this row covers the single-agent HTTP-handler half — the two are siblings, not duplicates. | `pkg/hub/handlers_agent_messaging.go:1482`,`1528`-1529,`1600`,`1698`,`1715`,`2345`,`2400`,`2487`,`2613` |
+| Runtime Broker's legacy raw consumer (`isRaw` → `mgr.MessageRaw`) | Broker owner (4.2) | **Pending removal.** The broker's own `/message` action handler branches on `req.StructuredMessage.Raw` and calls `mgr.MessageRaw` directly, bypassing the paste buffer/debounce and logging `"message delivered (raw, unbuffered)"`. A current Hub never sends it a raw message (bridge plus dispatch backstop, rows below), but an older Hub could; this is the broker-side half of the legacy path the dedicated `/keys` broker route (§7 step 1) does not remove. | `pkg/runtimebroker/handlers.go:2220`-2222,`2269` |
+| **Hub message-path raw handling** (`agent_dm_operation.go`, `raw_guard.go`) — the agent-to-agent DM half | Hub ingress owner (0.2/2.3/4.2) | **Bridged (2.3); residual code pending removal (4.2).** Step 4b (the cross-project raw denial, `cross_project_raw_unsupported`) was removed by 2.3: raw requests no longer reach `ExecuteAgentDM` from the single-agent routes, and a cross-project raw DM now gets `cross_project_keys_unsupported` from the bridge (on the top-level route only when the agent holds `ScopeAgentLifecycle`; without it, `403 keys_denied` first, `pkg/hub/agent_keys_message_bridge.go:342`-348). Still present but unreachable from public single-agent routes: `AgentDMInput.Raw`, step 4c (managed-backend raw denial), and the `evaluateRawMessageGuard`/`isRawConversationAddressed` guards. Still live on other ingress: `rejectRawScheduledPayload` (§4). The dispatch-layer backstop (`ErrRawDispatchRefused`) is the fail-closed guarantee for any `Raw == true` call that reaches dispatch. | `pkg/hub/agent_dm_operation.go:345`-357; `pkg/hub/raw_guard.go`; `pkg/hub/httpdispatcher.go:2674`-2686 |
+| **Single-agent `POST /:id/message` raw path** (`handlers_agent_messaging.go`) | Hub ingress owner (2.3/4.2) | **Bridged (2.3); legacy handler code pending removal (4.2).** Both routers call `tryAgentKeysMessageBridge` before `authorizeAgentMessage`; a raw-selected request is normalized into `authorizeAgentKeys` + `admitAndDispatchAgentKeys` and never reaches `handleAgentMessage`. The legacy raw branches inside `handleAgentMessage` (top-level `raw` OR-merge, managed-backend and cross-project raw guards, raw-aware mention/offload/observer handling) remain as unreachable code until 4.2 removes them. | `pkg/hub/handlers_agents_core.go:3201`; `pkg/hub/handlers_projects_core.go:2555`; `pkg/hub/agent_keys_message_bridge.go:95`-292; `pkg/hub/handlers_agent_messaging.go:1614`,`1699`,`1737` |
 | Message-broker plugin gRPC protocol `raw` field | 4.2 (in-repo); **plugin owner — unknown** for out-of-repo plugins, same as §5 | **Pending removal, with an external compatibility concern §5's other rows don't have.** `StructuredMessage.raw` is wire field 11 in the plugin gRPC protocol itself, not just an internal Go struct field — it round-trips to and from every message-broker plugin, in-repo or not. Removing the Go field without reserving the wire number would let a stale out-of-repo plugin binary silently reuse field 11 for something else; 4.2 must add `reserved 11;` to the `.proto` (and bump/document the protocol version) rather than merely deleting the field, and the migration note should say so. Whether any out-of-repo plugin actually reads/sets this field is **unknown**, consistent with §5. | `proto/broker/v1/broker.proto:44` (`bool raw = 11;`); `proto/broker/v1/broker.pb.go:51`,`168`; `pkg/plugin/grpcbroker/convert.go:43`,`82` |
 | `pkg/messaging` raw-aware rendering/offload, and fan-out forwarding | Message-domain owner (4.2) | **Pending removal.** `DeliveryOptions.Raw`/`Qualifies()`'s raw parameter govern whether rendering returns the bare body instead of the normal envelope and whether a message qualifies for offload (called from both `agent_dm_operation.go:585` and `handlers_agent_messaging.go:2487`); `messagebroker.go`'s `fanOutToProject`/`fanOutGlobal` forward `msg.Raw` unchanged today, documented as safe only because 0.2 already ensures no Hub publisher places a raw message on that bus — a guarantee that becomes moot, not merely safe, once the field is gone. | `pkg/messaging/delivery.go:77`; `pkg/messaging/delivery_compat.go:40`-44; `pkg/messaging/render_delivery.go:86`,`129`; `pkg/messaging/offload.go:189`; `pkg/hub/messagebroker.go:742`-746 |
 | `messages.StructuredMessage.Raw` wire field, incl. its log-attribute handling | Message-domain owner (4.2) | **Pending removal**, with a decode-time tombstone per contract §6.1/AK-36 rather than silent deletion. `FormatForDelivery` already special-cases `Raw` identically to `Plain` (return the bare `Msg`, no envelope); `LogAttrs()` already redacts raw message content in structured logs (`redactedRawContent`) but still logs the `raw` boolean itself — both are call sites 4.2 must account for when the field goes. | `pkg/messages/types.go:133`,`304`-315; `pkg/messages/format.go:71`-73 |
-| `agent.Manager.MessageRaw` primitive | Runtime owner (1.1 added `SendKeys` alongside it; 4.2 removes it) | **Deprecated, still live.** Doc-commented "pending Phase 4 removal... performs no `agent_id` identity binding. New callers must use SendKeys" — this is the exact primitive §2's `cmd/keys.go`/`cmd/message.go` rows and this table's broker-handler row both still call into. Four test doubles also implement this interface method and will need updating when it goes. | `pkg/agent/manager.go:83`-85,`429`; mock implementations at `pkg/runtimebroker/handlers_test.go:130`, `heartbeat_test.go:135`, `protocol_mismatch_test.go:117`, `workspace_handlers_test.go:70` |
+| `agent.Manager.MessageRaw` primitive | Runtime owner (1.1 added `SendKeys` alongside it; 4.2 removes it) | **Deprecated, still live.** Doc-commented "pending Phase 4 removal... performs no `agent_id` identity binding. New callers must use SendKeys". Since 3.1 the CLI no longer calls it; the only remaining caller is this table's broker-handler row. Four test doubles also implement this interface method and will need updating when it goes. | `pkg/agent/manager.go:81`-85 (interface doc comment), `:444` (implementation); `pkg/runtimebroker/handlers.go:2220`-2222; mock implementations in `pkg/runtimebroker/handlers_test.go`, `heartbeat_test.go`, `protocol_mismatch_test.go`, `workspace_handlers_test.go` |
 | `extras/scion-broker-log` (`msg.Raw` field read/display) | Extras owner | **Consumer only; affected by field removal, not itself raw-dependent in the §1 sense** — it reads and summarizes an inbound `messages.StructuredMessage.Raw` value (`flagsSummary` appends `"raw"` to a flag list) for log/audit display; it never constructs or transports a raw request. When 4.2 removes the `Raw` field, this tool's event struct and summary function need a matching update or they silently stop compiling/displaying it. | `extras/scion-broker-log/main.go:457`,`487`,`522` |
 
 ## 3. Skills and templates
 
 | Source | Owner | Migration status | Evidence |
 | --- | --- | --- | --- |
-| `resources/platform_skills/scion-agent-manage/references/troubleshooting.md` | Docs/inventory owner (3.2, this task) | **Migrated in this change.** Previously told operators to run `scion message <agent> --raw "ENTER"` / three separate `--raw` calls — correct in effect (verified live: tmux resolves named keys like `Enter` case-insensitively, so `"ENTER"` did submit, same as `"Enter"`), but it used the deprecated `message --raw` flag and a non-canonical spelling. Rewritten to `scion keys <agent> "Enter"`, the current command and the canonical spelling, keeping the existing one-key-per-call shape (never presented as a sequence). | This task's diff to that file |
-| `resources/platform_skills/scion-messaging/SKILL.md` | Docs/inventory owner (3.2, this task) | **Already used `scion keys`, not `--raw`; amended in this change** to state the attach-vs-message authority distinction and the no-sequence rule explicitly, since neither was previously called out and an agent reading only this skill could reasonably assume message authority was sufficient. | This task's diff to that file |
+| `resources/platform_skills/scion-agent-manage/references/troubleshooting.md` | Docs/inventory owner (task 3.2) | **Migrated in task 3.2's change.** Previously told operators to run `scion message <agent> --raw "ENTER"` / three separate `--raw` calls — correct in effect (verified live: tmux resolves named keys like `Enter` case-insensitively, so `"ENTER"` did submit, same as `"Enter"`), but it used the deprecated `message --raw` flag and a non-canonical spelling. Rewritten to `scion keys <agent> "Enter"`, the current command and the canonical spelling, keeping the existing one-key-per-call shape (never presented as a sequence). | Task 3.2's diff to that file |
+| `resources/platform_skills/scion-messaging/SKILL.md` | Docs/inventory owner (task 3.2) | **Already used `scion keys`, not `--raw`; amended in task 3.2's change** to state the attach-vs-message authority distinction and the no-sequence rule explicitly, since neither was previously called out and an agent reading only this skill could reasonably assume message authority was sufficient. | Task 3.2's diff to that file |
 | `pkg/config/embeds/templates/default/*` (seeded agent home dir, `agents.md`, shell rc files) | Template owner | **Not applicable.** No `raw`/`keys` reference of any kind found in this tree; nothing to migrate. | `grep -r` over `pkg/config/embeds/` — zero matches |
 | `examples/`, `scripts/`, `hack/`, git submodules | N/A | **Not applicable — checked, not merely unchecked.** No file under `examples/` or `scripts/` uses `--raw` or `scion keys` (both only ever call plain `scion message`); `hack/merge-work.sh` likewise. The repository has no git submodules (no `.gitmodules` file, no `160000`-mode gitlinks in `git ls-files -s`). The `examples/amp` and `examples/adk_scion_agent` *Dockerfiles* are a separate, image-level dependency (both inherit the `scion` CLI via `FROM scion-base`) and are inventoried under §6, not here — this row covers their non-Docker source files, which have no raw/keys reference either. | `git grep -l -- '--raw\|scion keys' examples/ scripts/ hack/` — zero matches; absence of `.gitmodules` and of any `160000` entry in `git ls-files -s` |
 | Any user- or project-scoped skill stored in the Hub (not in this repository) | Unknown — not owned by this repository | **Unknown.** Cannot be inventoried from source; see §5. | — |
@@ -122,18 +124,17 @@ explicit owner confirmation... inventory whether old callers enable message retr
 
 - Any third-party script or service calling `POST /api/v1/agents/{id}/message` or the project-scoped
   equivalent directly with `raw`/`structured_message.raw`, bypassing the `scion` CLI/SDK entirely.
-- Any fork or private deployment of the harness images in §6 that has not rebased onto a
-  `scion`-binary release carrying the 3.1 CLI migration.
+- Any fork or private deployment of the harness images in §6 still running a `scion` binary built
+  before the 3.1 CLI migration.
 - Any operator script, cron job, or external automation outside this repository that shells out to
   `scion message --raw` or `scion keys` directly.
 - These callers' retry behavior (whether they wrap the Hub API in their own retry loop, independent
   of `hubclient.WithRetry`) is likewise unknown.
 
-**Removal-gate consequence:** 2.3/4.1 must use the Hub's content-free raw-bridge usage counters
-(contract §5's audit field list, `route: "raw"` — added by task 2.3; **no such audit emission
-exists yet at the tested revision**, verified by `git grep`ing `pkg/` for a `"raw"` route value in an
-audit event) to detect whether *any* caller — known or unknown — is still exercising the bridge,
-rather than relying on this static inventory alone. Low observed usage is explicitly **not** proof
+**Removal-gate consequence:** 4.1 must use the Hub's content-free raw-bridge audit records (contract
+§5's audit field list; task 2.3 emits them with `route` = `message_raw_bridge`,
+`pkg/hub/execute_agent_keys.go:249`,`585`) to detect whether *any* caller — known or unknown — is
+still exercising the bridge, rather than relying on this static inventory alone. Low observed usage is explicitly **not** proof
 per the master design's removal gate; an explicit owner confirmation is still required for every
 *known* caller above before Phase 4 removes the bridge.
 
@@ -149,17 +150,19 @@ this table therefore carries whatever `cmd/keys.go`/`cmd/message.go` behavior is
 `scion` binary at image-build time** — this is the mechanism, not an assumption, and is why the
 CLI/SDK migration (3.1) and these images' rebuild-and-release are two separate, sequenced rollout
 steps (the master design's "Cutover and deployment": CLI/SDK binaries and agent images are one
-deployment step, after the Hub bridge, before removal). Completeness is checked against
-`git ls-files '*Dockerfile*'` run repo-wide (26 tracked Dockerfiles at the tested revision), not
+deployment step, after the Hub bridge, before removal). The CLI source is migrated as of 3.1; the
+**Pending** rows below mean the image still needs a rebuild and release from a commit that includes
+it. Completeness is checked against
+`git ls-files '*Dockerfile*'` run repo-wide (26 tracked Dockerfiles at `e761178`), not
 only under `extras/*` — an r5 review finding caught five Dockerfiles outside `image-build/`,
 `harnesses/` and `extras/` that an `extras/`-scoped sweep had missed.
 
 | Image | Base chain | Owner | Migration status | Evidence |
 | --- | --- | --- | --- | --- |
-| `image-build/scion-base` | `core-base` or `thick-prep` | Image-build owner | **Pending** — builds the `scion` binary from this repo's current `cmd/`; migration status always matches whatever commit it's built from. Not itself raw-dependent code, but the sole source of the binary every image below inherits. | `image-build/scion-base/Dockerfile:36`-64 |
-| `image-build/hub` (Hub server image, GKE-oriented) | `scion-base` | Image-build owner | **Pending CLI migration** (embeds the same `scion` binary for in-container CLI use); the Hub *server* code itself (not the CLI) is already on the real `/keys` implementation — see §8, "Everything else this task documents... is already real and merged." Per `docs/deploy/agent-runbook-terraform-ha.md:263`-266, this is explicitly **not** the image used for the HA Cloud Run deployment pattern (`scripts/cloudrun/Dockerfile` below is) — it runs as root and is called out as "the wrong hub image for this Cloud Run pattern," so 4.1's version-recording step should not assume this row alone covers every deployed Hub image. | `image-build/hub/Dockerfile` |
+| `image-build/scion-base` | `core-base` or `thick-prep` | Image-build owner | **Pending rebuild/release** — builds the `scion` binary from this repo's current `cmd/`, which carries the CLI migration as of `e761178`; migration status always matches whatever commit it's built from. Not itself raw-dependent code, but the sole source of the binary every image below inherits. | `image-build/scion-base/Dockerfile:36`-64 |
+| `image-build/hub` (Hub server image, GKE-oriented) | `scion-base` | Image-build owner | **Pending rebuild/release** (embeds the `scion` binary for in-container CLI use; the CLI migration is in source at `e761178`); the Hub *server* code built from that source already carries `/keys` and the raw-to-keys bridge — see §8. Per `docs/deploy/agent-runbook-terraform-ha.md:263`-266, this is explicitly **not** the image used for the HA Cloud Run deployment pattern (`scripts/cloudrun/Dockerfile` below is) — it runs as root and is called out as "the wrong hub image for this Cloud Run pattern," so 4.1's version-recording step should not assume this row alone covers every deployed Hub image. | `image-build/hub/Dockerfile` |
 | `image-build/omni` (Hub + all harnesses, Cloud Run Instances) | harness chain → `scion-base` | Image-build owner | **Pending** — rebuilds `scion` without `no_embed_web` but from the same `cmd/keys.go` source; inherits every harness image's migration status below. | `image-build/omni/Dockerfile:16`-30 |
-| `harnesses/claude` (default-installed) | `scion-base` | Harness owner | **Pending** — default-install harness; highest-priority rebuild once 3.1 lands. | `harnesses/claude/Dockerfile` |
+| `harnesses/claude` (default-installed) | `scion-base` | Harness owner | **Pending** — default-install harness; highest-priority rebuild now that 3.1 has landed. | `harnesses/claude/Dockerfile` |
 | `harnesses/gemini-cli` (default-installed as "gemini") | `scion-base` | Harness owner | **Pending** — default-install harness. | `harnesses/gemini-cli/Dockerfile` |
 | `harnesses/opencode` | `scion-base` (chained after claude in `omni`) | Harness owner | **Pending**, opt-in | `harnesses/opencode/Dockerfile` |
 | `harnesses/codex` | `scion-base` (chained after opencode in `omni`) | Harness owner | **Pending**, opt-in | `harnesses/codex/Dockerfile` |
@@ -174,7 +177,7 @@ only under `extras/*` — an r5 review finding caught five Dockerfiles outside `
 | `examples/amp/Dockerfile` | `FROM scion-base:latest` | Examples owner | **Pending** — inherits the CLI the same way harness images do; adds only the Amp CLI via npm. | `examples/amp/Dockerfile:15` |
 | `examples/adk_scion_agent/Dockerfile` | `FROM ${BASE_IMAGE}` (its own header comment: "Builds on scion-base") | Examples owner | **Pending** — inherits the CLI; its own comment states runtime input delivery depends on `scion message`/`send-keys` working through tmux, so this example is itself keys-adjacent in intent, not just incidentally built on `scion-base`. | `examples/adk_scion_agent/Dockerfile:16`-27 (header comment), `:31` (`FROM ${BASE_IMAGE}`) |
 | `image-build/core-base`, `image-build/thick-prep` | — (foundations under `scion-base`) | Image-build owner | **Not raw-dependent.** These provide only system dependencies (Go/Node/Python) or the Cloud Workstations compatibility patch; neither builds or embeds the `scion` binary — `scion-base` is the first layer in the chain that does (§6's intro paragraph). | `image-build/core-base/Dockerfile`, `image-build/thick-prep/Dockerfile` — no `go build ... ./cmd/scion/` in either |
-| `docs-site/Dockerfile` | `node:20-slim` → `nginxinc/nginx-unprivileged` | Docs-site owner | **Not raw-dependent.** Builds and serves the static Astro docs site only; no `go build` of any kind, no `scion` binary anywhere in the image. The 26th and last tracked Dockerfile in the repo at the tested revision (`git ls-files '*Dockerfile*'`), listed here so its exclusion from every other row is a checked fact. | `docs-site/Dockerfile:16` (`FROM node:20-slim`), `:42` (`FROM nginxinc/nginx-unprivileged:stable-alpine`) — no `cmd/scion` reference |
+| `docs-site/Dockerfile` | `node:20-slim` → `nginxinc/nginx-unprivileged` | Docs-site owner | **Not raw-dependent.** Builds and serves the static Astro docs site only; no `go build` of any kind, no `scion` binary anywhere in the image. The 26th and last tracked Dockerfile in the repo at `e761178` (`git ls-files '*Dockerfile*'`), listed here so its exclusion from every other row is a checked fact. | `docs-site/Dockerfile:16` (`FROM node:20-slim`), `:42` (`FROM nginxinc/nginx-unprivileged:stable-alpine`) — no `cmd/scion` reference |
 | `extras/scion-a2a-bridge`, `extras/scion-chat-app`, `extras/scion-discord`, `extras/cloudrun-iap-proxy`, `extras/docs-agent`, `extras/scion-telegram` (have a `Dockerfile`, confirmed via `git ls-files 'extras/*/Dockerfile'`) | own Dockerfiles, not `scion-base` | Extras owner | **Not raw-dependent** — standalone services, built per-item: `scion-a2a-bridge` and `scion-chat-app` from their own `./cmd/scion-a2a-bridge`/`./cmd/scion-chat-app`; `scion-discord` and `scion-telegram` from their own `./cmd/scion-plugin-discord`/`./cmd/scion-plugin-telegram`; `cloudrun-iap-proxy` and `docs-agent` from their module root (`go build ... .`, no `cmd/` directory in either). None builds `./cmd/scion` or inherits `scion-base`, so none is a `scion`-CLI-embedding agent image, and none constructs `raw` (§2/§4). (Only `scion-a2a-bridge` and `scion-chat-app` actually import `pkg/hubclient` — verified via `grep -rl`; `scion-discord`, `cloudrun-iap-proxy`, `docs-agent` and `scion-telegram` do not, so "hubclient SDK consumers" does not describe all six.) | `extras/scion-a2a-bridge/Dockerfile:35`; `extras/scion-chat-app/Dockerfile:33`; `extras/scion-discord/Dockerfile:22`-24; `extras/scion-telegram/Dockerfile:37`-39; `extras/cloudrun-iap-proxy/Dockerfile:23`; `extras/docs-agent/Dockerfile:30`; no `FROM scion-base` in any of them; `grep -rl "pkg/hubclient" extras/<name>` — 7/5/0/0/0/0 hits respectively |
 | `extras/scion-slack`, `extras/scion-teams`, `extras/agent-viz`, `extras/fs-watcher-tool`, `extras/scion-broker-log` (no `Dockerfile` at all, per the same `git ls-files` check) | Extras owner | **Not applicable** — not a buildable image in this repository at all, so there is no "every Dockerfile" question for them to close; listed so their absence is a checked fact, not a silent omission. `scion-broker-log` is additionally covered in §2a as a `Raw`-field consumer, which is a source-level dependency, not an image one. | `ls extras/`; absence of `extras/<name>/Dockerfile` for each |
 
@@ -192,14 +195,14 @@ Restates the master design's "Cutover and deployment" and "Removal gate" section
 This is a checklist to execute, not a claim that any step below is already done:
 
 1. **Keys-capable brokers.** Confirm every Runtime Broker intended to support `/keys` has the route
-   (1.1/1.2, already merged on this branch). An old broker without it answers `422
+   (1.1/1.2, already merged on `main`). An old broker without it answers `422
    keys_unsupported` by design (AK-28/AK-47) — record which deployed brokers, if any, are still on
    a pre-1.1 build.
 2. **Hub with the dedicated operation and the temporary bridge.** The dedicated `/keys` operation
-   (2.1/2.2) is merged on this branch; the temporary `message`/`raw` bridge (task 2.3)
-   is not yet. Do not treat the bridge as shipped until task 2.3 merges.
-3. **CLI/SDK binaries, agent images, and operator scripts.** Depends on §2's CLI/SDK migration
-   (task 3.1) landing, then rebuilding and releasing every image in §6, in priority
+   (2.1/2.2) and the temporary `message`/`raw` bridge (2.3) are both merged on upstream `main`.
+   Record which deployed Hubs carry the bridge before relying on it.
+3. **CLI/SDK binaries, agent images, and operator scripts.** §2's CLI/SDK migration (task 3.1) is
+   merged; what remains is rebuilding and releasing every image in §6, in priority
    order: default-installed (`claude`, `gemini-cli`) first, then opt-in harnesses, then `omni`/`hub`.
    Record the actual released version of each image that carries the migrated CLI — this inventory
    names *which* images, 4.1 names *which version*.
@@ -219,67 +222,51 @@ the contract's own copy):
 
 Applied against this inventory specifically:
 
-- "Migrate known scripts/docs/images" → §2 (CLI/SDK), §3 (skills — done in this change), §6 (images,
-  pending 3.1 + rebuild).
+- "Migrate known scripts/docs/images" → §2 (CLI/SDK — migrated by 3.1), §3 (skills — done), §6
+  (images — pending rebuild and release).
 - "No known callers still depend on raw... plus explicit owner confirmation" → every row in §2 marked
-  **Pending** needs its owner's explicit confirmation once migrated, not just a code diff; every row
+  **Migrated** still needs its owner's explicit confirmation, not just a code diff; every row
   in §5 is unknown and cannot be confirmed from this repository alone — the content-free bridge
-  usage counters (contract §5) are the only signal available for those.
+  audit records (`route` = `message_raw_bridge`, `pkg/hub/execute_agent_keys.go:249`) are the only
+  signal available for those.
 - "Upgrade [retry-enabled callers] or disable those retries before bridge use" → §2's retry-posture
   list found no in-repo caller with retries enabled against the raw path; this gate is satisfied
   for known callers today and must be re-checked if that changes.
 - "Record the versions deployed" → §6 names the images; actual version numbers are 4.1's to fill in.
 
-## 8. Known pending integration (for the final integration check)
+## 8. Integration status
 
-The following are specified by the frozen contract and by tasks 2.3/3.1, but are not yet
-implemented on this branch. They are called out here, and in this task's PR body, precisely so the
-integration check after 2.3/3.1 land can confirm each one against the docs this task ships:
+Tasks 2.3 and 3.1 have merged (upstream `main` at `e761178`). Each item this section previously
+listed as pending integration, checked against that revision:
 
-- `cmd/keys.go`'s Hub-mode path and `cmd/message.go`'s `--raw` alias still use the legacy
-  `SendStructuredMessage` transport, not the dedicated `/keys` API (§2 above) — task 3.1.
-- The `message`/`raw` compatibility bridge (classification before `authorizeAgentMessage`,
-  `ExecuteAgentKeys` reuse, legacy field table enforcement) is not yet wired into
-  `handleAgentMessage` — task 2.3. Until it lands, `message --raw` denies/authorizes using
-  the pre-existing message-mode path described in contract §6.3, not the attach-based decision
-  `/keys` and this task's docs describe for the bridge.
-- `pkg/hubclient.AgentService.SendKeys` does not exist yet (§2) — task 3.1.
-- Local-mode `scion keys` for an **unlinked** local project (no `scion hub enable`) depends on a
-  further primitive, `Manager.SendKeysLocal`, that is not on task 3.1's current fork PR head
-  (`6fa2e72cd`) — that head's `resolveLocalKeysTarget` requires a Hub-linked
-  project ID to call `SendKeys` at all, and errors clearly for a project with none (§2's local-mode
-  row). The integration check should confirm `SendKeysLocal` (or whatever it's eventually named)
-  actually lands before treating unlinked-local-project `scion keys` as supported.
-- Consequently, today's `scion keys`/`message --raw` in Hub mode does not print an `operation_id`,
-  and a managed-runtime target gets the pre-existing `422 unsupported_capability`/
-  `raw_managed_backend_unsupported` denial rather than the dedicated operation's `422
-  keys_unsupported` — the integration check should confirm both flip once task 3.1 lands. `scion keys`
-  itself goes through the single-agent `/message` route, so its denial is written at
-  `pkg/hub/handlers_agent_messaging.go:1698`-1701, before `ExecuteAgentDM` is ever reached; the
-  agent-to-agent DM route's equivalent check (`pkg/hub/agent_dm_operation.go:376`-390, §2a above)
-  governs a *different* caller (another agent messaging this one), not `scion keys`'s own call —
-  cited together here since both produce the same code today and both are replaced by
-  `keys_unsupported` post-bridge.
+- `scion keys` (Hub mode) and the `message --raw` alias call the dedicated `/keys` API via
+  `hubclient.AgentService.SendKeys`, not `SendStructuredMessage` (§2). Done.
+- The `message`/`raw` compatibility bridge is wired in front of `authorizeAgentMessage` on both
+  single-agent routes, delegating to `authorizeAgentKeys` and `admitAndDispatchAgentKeys`
+  (`pkg/hub/agent_keys_message_bridge.go:279`,`290`), with legacy field-table enforcement (§2a).
+  `message --raw` and legacy `raw` API callers are authorized like attach. Done.
+- `pkg/hubclient.AgentService.SendKeys` exists, sends once, and bypasses `WithRetry` (§2). Done.
+- Local-mode `scion keys` for an unlinked local project uses `Manager.SendKeysLocal` (§2). Done.
+- `scion keys` reports `dispatched`/`rejected`/`unknown`; JSON output includes the outcome code and
+  `operation_id` when the Hub returns one (`cmd/keys.go:138`-190). A managed-runtime target gets
+  `422 keys_unsupported` from `/keys` (`pkg/hub/execute_agent_keys.go:366`-370), whether called
+  directly, by the CLI, or through the bridge. An empty `keys` string is rejected with
+  `invalid_request` before any request is sent, in both local and Hub mode (`cmd/keys.go:270`-282).
+  Done.
+- The "Migrating from `raw`" callout in `reference/api.md` (size ceiling, authorization tightening,
+  2 MiB pre-authorization body cap, changed codes) now describes current behaviour
+  (`pkg/hub/agent_keys_message_bridge.go:71`,`101`-111,`179`-292). Done.
+- A migrated client calling a Hub without the `/keys` route gets that Hub's generic `404`; the CLI
+  reports it as `hub_unsupported` and never falls back to `/message` (`cmd/keys.go:210`-221,
+  `310`-316). Done.
 
-  An empty `keys` string is **not** one of these: in Hub mode it is already refused client-side
-  (`messaging.ValidateLegacyMessage`, `pkg/messaging/validate_compat.go:74`-76, requires a non-empty
-  `Msg`), just with a generic `msg field is required` error instead of the dedicated operation's
-  `400 invalid_request`; only in **local** mode does an empty string currently reach tmux unchanged
-  (`cmd/keys.go:86` → `MessageRaw`, no validation). The CLI/docs text in this task's diff says
-  exactly this.
-- **Migration note for contract §6.2/§6.3/§6.4** (the size-ceiling reduction, the authorization
-  tightening, and the new 2 MiB pre-authorization body cap the contract requires 3.2 to document):
-  added as a "Migrating from `raw`" callout under `reference/api.md`'s `/:id/keys` entry, explicitly
-  opened as planned follow-up work since none of it is in effect at the tested revision.
-  The integration check should confirm the callout's three behavior changes actually occur once 2.3
-  ships, and remove the "none of this is in effect yet" qualifier at that point.
-- The un-upgraded-Hub case (a 3.1-migrated client calling a pre-2.1 Hub that has no `/keys` route at
-  all, answering with the route's own generic unknown-action `404` rather than any `agentkeys.Outcome`
-  value) only arises once 3.1 ships a client that calls `/keys` directly; it is not yet reachable
-  through today's CLI. Recorded here as a 3.1 integration item rather than documented as a present
-  behavior with no real caller to exhibit it yet.
+Still pending (Phase 4): removal of the bridge, the hidden `--raw` alias, the residual raw code in
+§2a, `MessageRaw`, and the `Raw` wire fields; image rebuilds in §6; and the removal gate in §7. Two
+leftover pieces of raw plumbing are also 4.2 cleanup items, though no first-party path reaches them
+with raw set:
 
-Everything else this task documents (the `/keys` HTTP API itself, its authorization table, the
-agent-caller attach gate added as a task 2.2 follow-up, rate limits, audit, and outcome codes) is
-already real and merged on `scion/agent-keys-2-2` at the tested revision above — not a
-forward-looking claim.
+- `hubclient` `SendStructuredMessage`/`SendStructuredMessageWithOptions` still forward a caller's
+  `Raw` field (`pkg/hubclient/agents.go:608`-626).
+- `cmd/message.go`'s `buildStructuredMessage(..., raw, ...)` still takes and sets `Raw`
+  (`cmd/message.go:576`-579; callers `:618`, `:694`, `:770`, `:884`, `:1035`), although `--raw` now
+  returns through the keys path before any of those callers runs.
