@@ -44,6 +44,24 @@ import { AgentMemberIndex } from './agent-member-index.js';
 
 export type WindowState = 'small' | 'paged';
 
+/**
+ * Candidate count at or below which the project page's first sorted request
+ * asks for the complete set (the small state). Above it the window pages
+ * from the first request, so a mid-size project no longer pays for a full
+ * read and capability pass on every load. The server accepts any fit from 1
+ * to 500 that is at least the page size.
+ */
+export const PROJECT_AGENTS_FIT_THRESHOLD = 50;
+
+/**
+ * The fit value for a first sorted request at the given page size: the
+ * threshold, raised to the page size when the page is larger, because the
+ * server rejects a fit below the limit.
+ */
+export function projectAgentsFitFor(pageSize: number): number {
+  return Math.max(PROJECT_AGENTS_FIT_THRESHOLD, pageSize);
+}
+
 export interface AgentListViewState {
   phaseFilter: AgentPhase | '';
   /** The live-typed label filter preview (small-state local filtering only — never the request label; see `AgentListWindow`'s own `committedLabel`). */
