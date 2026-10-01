@@ -3754,8 +3754,14 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 	}
 
 	if creator, err := s.store.GetAgent(ctx, evt.CreatedBy); err == nil {
-		if creator.ProjectID != evt.ProjectID {
+		if !creator.DeletedAt.IsZero() {
+			return false, fmt.Errorf("scheduled dispatch creator agent %q is deleted; cannot authorize", evt.CreatedBy)
+		}
+		if creator.ProjectID == "" || creator.ProjectID != evt.ProjectID {
 			return false, fmt.Errorf("scheduled dispatch creator agent %q is not in project %q", evt.CreatedBy, evt.ProjectID)
+		}
+		if s.authzService == nil {
+			return false, fmt.Errorf("scheduled dispatch cannot authorize agent creation without authz service")
 		}
 		role, additionalScopes := agentRoleAndScopes(creator)
 		scopes := append(ScopesForRole(role), additionalScopes...)
@@ -3770,35 +3776,41 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 			return false, fmt.Errorf("scheduled dispatch creator agent %q missing required scope: %s", evt.CreatedBy, ScopeAgentCreate)
 		}
 
+		agentIdentity := &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: creator.ID},
+			ProjectID: creator.ProjectID,
+			Scopes:    scopes,
+		}}
+
+		// The creator agent needs agent.create in the project through
+		// Decide, including the delegation ceiling of every live ancestor.
+		if decision := s.agentCreateDecision(ctx, agentIdentity, evt.ProjectID); !decision.Allowed {
+			return false, fmt.Errorf("scheduled dispatch creator agent %q is not authorized to create agents in project %q: %s",
+				evt.CreatedBy, evt.ProjectID, decision.Reason)
+		}
+
 		// CanDelegate check (Phase 1F): at fire time, verify the creator
 		// agent still holds the scopes it would delegate to the new agent.
-		if s.authzService != nil {
-			agentIdentity := &agentIdentityWrapper{&AgentTokenClaims{
-				Claims:    jwt.Claims{Subject: creator.ID},
-				ProjectID: creator.ProjectID,
-				Scopes:    scopes,
-			}}
-			grantDesc := GrantDescriptor{
-				Type:      GrantTypeAgentDelegation,
-				AgentRole: string(role),
-				ProjectID: evt.ProjectID,
-				ScopeType: store.RoleScopeProject,
-				ScopeID:   evt.ProjectID,
-			}
-			delegateDecision := s.authzService.CanDelegate(ctx, agentIdentity, grantDesc)
-			if !delegateDecision.Allowed {
-				s.emitMutationAudit(ctx, &store.MutationAuditRecord{
-					MutationType:       "agent_delegation",
-					ActorPrincipalKind: "agent",
-					ActorPrincipalID:   creator.ID,
-					TargetType:         "scheduled_dispatch",
-					TargetID:           evt.ID,
-					CanDelegateResult:  "deny",
-					CanDelegateReason:  delegateDecision.Reason,
-				})
-				return false, fmt.Errorf("scheduled dispatch creator agent %q failed CanDelegate: %s",
-					evt.CreatedBy, delegateDecision.Reason)
-			}
+		grantDesc := GrantDescriptor{
+			Type:      GrantTypeAgentDelegation,
+			AgentRole: string(role),
+			ProjectID: evt.ProjectID,
+			ScopeType: store.RoleScopeProject,
+			ScopeID:   evt.ProjectID,
+		}
+		delegateDecision := s.authzService.CanDelegate(ctx, agentIdentity, grantDesc)
+		if !delegateDecision.Allowed {
+			s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+				MutationType:       "agent_delegation",
+				ActorPrincipalKind: "agent",
+				ActorPrincipalID:   creator.ID,
+				TargetType:         "scheduled_dispatch",
+				TargetID:           evt.ID,
+				CanDelegateResult:  "deny",
+				CanDelegateReason:  delegateDecision.Reason,
+			})
+			return false, fmt.Errorf("scheduled dispatch creator agent %q failed CanDelegate: %s",
+				evt.CreatedBy, delegateDecision.Reason)
 		}
 
 		return true, nil
@@ -3821,11 +3833,7 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 		return false, fmt.Errorf("scheduled dispatch cannot authorize agent creation without authz service")
 	}
 	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "scheduler")
-	decision := s.authzService.CheckAccess(ctx, identity, Resource{
-		Type:       "agent",
-		ParentType: "project",
-		ParentID:   evt.ProjectID,
-	}, ActionCreate)
+	decision := s.agentCreateDecision(ctx, identity, evt.ProjectID)
 	if !decision.Allowed {
 		return false, fmt.Errorf("scheduled dispatch creator user %q is not authorized to create agents in project %q: %s",
 			evt.CreatedBy, evt.ProjectID, decision.Reason)

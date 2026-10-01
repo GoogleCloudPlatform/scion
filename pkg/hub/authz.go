@@ -257,6 +257,11 @@ type Decision struct {
 	Actor   *DecisionActor `json:"actor,omitempty"`
 	Purpose string         `json:"purpose,omitempty"`
 
+	// DeniedBy names the pipeline stage that produced a deny, as a stable
+	// snake_case value. It is empty on allow and on a deny that is not
+	// attributed to a named stage. Reason is independent of it.
+	DeniedBy DeniedBy `json:"deniedBy,omitempty"`
+
 	// PermissionID is the caller-supplied AuthzRequest.Permission, recorded
 	// only when it is a canonical ID present in the permissions registry.
 	// It is never derived from Resource/Action, and never an unregistered
@@ -291,6 +296,17 @@ type Decision struct {
 	Provenance *DecisionProvenance `json:"provenance,omitempty"`
 }
 
+// DeniedBy is the stable identifier of the stage that denied a decision.
+type DeniedBy string
+
+const (
+	// DeniedByDelegationCeiling: the agent's delegation chain does not
+	// supply the permission (a non-live delegator, a delegator that does
+	// not hold the permission, a missing or ambiguous edge, or a failed
+	// lookup).
+	DeniedByDelegationCeiling DeniedBy = "delegation_ceiling"
+)
+
 // DenyCause is a structural tag for a subset of deny reasons that callers
 // need to distinguish without string-matching Reason. It is deliberately
 // small and closed: only the causes a caller actually branches on get a
@@ -300,12 +316,14 @@ type DenyCause string
 const (
 	// DenyCauseCeilingOrphaned marks a delegation-ceiling deny where the
 	// delegator (the principal that created the agent, directly or
-	// transitively) no longer resolves at all — e.g. its user was deleted.
+	// transitively) does not resolve, is deleted (including a retained
+	// soft-deleted agent), or is the migration sentinel.
 	DenyCauseCeilingOrphaned DenyCause = "ceiling_orphaned"
 
 	// DenyCauseCeilingDelegatorLacksPermission marks a delegation-ceiling
-	// deny where the delegator still exists but no longer holds the
-	// permission being exercised.
+	// deny where the delegator exists but does not hold the permission
+	// being exercised, including a user that is not active (for example
+	// suspended or invited), super-admin or not.
 	DenyCauseCeilingDelegatorLacksPermission DenyCause = "ceiling_delegator_lacks_permission"
 
 	// DenyCauseCeilingError marks a delegation-ceiling deny caused by a
@@ -348,6 +366,11 @@ type AuthzService struct {
 	// progenyAdapters holds progeny sharing-source adapters registered
 	// through RegisterProgenyAdapter.
 	progenyAdapters progenyAdapterRegistry
+
+	// sourceResolver identifies an agent's authoritative source user for
+	// the execution-project relationship stage. Nil selects the stored
+	// agent row and typed delegation edges.
+	sourceResolver ExecutionSourceResolver
 
 	// devLocalEnabled backs devLocalAuthorityEnabled (devauth.go,
 	// ptone/scion#2342 B.3 R6). Set once at server construction via
@@ -803,25 +826,29 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 
 	// ── Step 10: Agent delegation ceiling (post-decision) ────────────
-	// Applies to ALL allowed decisions regardless of grant source
-	// (kernel or relationship grant). C-1 fix: previously only ran on
-	// kernel-allowed decisions because Step 9 returned early.
+	// Applies to every allowed decision for an agent principal, whatever
+	// the grant source (kernel or relationship grant). The ceiling
+	// evaluates the exact permission resolved above. A failed lookup
+	// denies.
 	if decision.Allowed && isAgentPrincipal(principal.Kind) {
 		if agent, ok := principal.Identity.(AgentIdentity); ok {
 			if getDelegationCeilingCache(ctx) == nil {
 				ctx = contextWithDelegationCeilingCache(ctx)
 			}
+			ceilingReq := request
+			ceilingReq.Principal = principal
+			ceilingReq.Permission = permissionID
 			var ceilingCause DenyCause
-			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(ctx, request, agent.ID(), nil, &ceilingCause)
+			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(ctx, ceilingReq, permissionID, agent.ID(), nil, &ceilingCause)
 			if ceilingErr != nil {
-				if !isReadOnlyOperation(request.Action) {
-					decision.Allowed = false
-					decision.Reason = "delegation ceiling check failed (fail-closed): " + ceilingErr.Error()
-					decision.DenyCause = DenyCauseCeilingError
-				}
+				decision.Allowed = false
+				decision.Reason = "delegation ceiling check failed (fail-closed): " + ceilingErr.Error()
+				decision.DeniedBy = DeniedByDelegationCeiling
+				decision.DenyCause = DenyCauseCeilingError
 			} else if !ceilingAllowed {
 				decision.Allowed = false
 				decision.Reason = ceilingReason
+				decision.DeniedBy = DeniedByDelegationCeiling
 				decision.DenyCause = ceilingCause
 			}
 		}

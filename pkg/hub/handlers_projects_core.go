@@ -1779,11 +1779,9 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for nested /agents path
-	if strings.HasPrefix(subPath, "agents") {
-		agentPath := strings.TrimPrefix(subPath, "agents")
-		agentPath = strings.TrimPrefix(agentPath, "/")
-		s.handleProjectAgents(w, r, projectID, agentPath)
+	// Nested /agents paths: routeGuard resolved the agent sub-route.
+	if subPath == "agents" || strings.HasPrefix(subPath, "agents/") {
+		s.handleProjectAgents(w, r, projectID)
 		return
 	}
 
@@ -2027,8 +2025,17 @@ func (s *Server) handleProjectByIDInternal(w http.ResponseWriter, r *http.Reques
 
 // handleProjectAgents handles agent operations scoped to a project
 // Path: /api/v1/projects/{projectId}/agents[/{agentId}[/{action}]]
-func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, projectID, agentPath string) {
+func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
+
+	route, ok := requireAgentSubRoute(w, r)
+	if !ok {
+		return
+	}
+	if resolveProjectID(route.ProjectID) != projectID {
+		NotFound(w, "Project")
+		return
+	}
 
 	// Verify project exists
 	project, err := s.store.GetProject(ctx, projectID)
@@ -2041,14 +2048,14 @@ func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 
-	// Handle stop-all (POST /api/v1/projects/{projectId}/agents/stop-all)
-	if agentPath == "stop-all" {
+	agentIDRaw := route.AgentID
+	switch route.RouteID {
+	case ProjectAgentRouteStopAll:
+		// POST /api/v1/projects/{projectId}/agents/stop-all
 		s.handleStopAllAgents(w, r, project.ID)
-		return
-	}
 
-	// No agent ID - list or create agents in this project
-	if agentPath == "" {
+	case ProjectAgentRouteCollection:
+		// No agent ID - list or create agents in this project
 		switch r.Method {
 		case http.MethodGet:
 			s.listProjectAgents(w, r, project.ID)
@@ -2057,34 +2064,52 @@ func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, pro
 		default:
 			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 		}
-		return
-	}
 
-	// Parse agent ID and action
-	parts := strings.SplitN(agentPath, "/", 2)
-	agentIDRaw := parts[0]
-	action := ""
-	if len(parts) > 1 {
-		action = parts[1]
-	}
+	case ProjectAgentRouteRoot:
+		// Agent by ID within project
+		switch r.Method {
+		case http.MethodGet:
+			s.getProjectAgent(w, r, project.ID, agentIDRaw)
+		case http.MethodPatch:
+			s.updateProjectAgent(w, r, project.ID, agentIDRaw)
+		case http.MethodDelete:
+			s.deleteProjectAgent(w, r, project.ID, agentIDRaw)
+		default:
+			MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
+		}
 
-	// Handle actions
-	if action != "" {
-		s.handleProjectAgentAction(w, r, project.ID, agentIDRaw, action)
-		return
-	}
-
-	// Handle agent by ID within project
-	switch r.Method {
-	case http.MethodGet:
-		s.getProjectAgent(w, r, project.ID, agentIDRaw)
-	case http.MethodPatch:
-		s.updateProjectAgent(w, r, project.ID, agentIDRaw)
-	case http.MethodDelete:
-		s.deleteProjectAgent(w, r, project.ID, agentIDRaw)
 	default:
-		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
+		action, ok := projectAgentRouteActions[route.RouteID]
+		if !ok {
+			NotFound(w, "Agent route")
+			return
+		}
+		s.handleProjectAgentAction(w, r, project.ID, agentIDRaw, action)
 	}
+}
+
+// projectAgentRouteActions maps project-form agent action routes to the
+// action name handleProjectAgentAction dispatches on.
+var projectAgentRouteActions = map[AgentSubRouteID]string{
+	ProjectAgentRouteLogs:              api.AgentActionLogs,
+	ProjectAgentRouteCloudLogs:         "cloud-logs",
+	ProjectAgentRouteCloudLogsStream:   "cloud-logs/stream",
+	ProjectAgentRouteMessageLogs:       api.AgentActionMessageLogs,
+	ProjectAgentRouteMessageLogsStream: api.AgentActionMessageLogsStream,
+	ProjectAgentRouteActionStatus:      api.AgentActionStatus,
+	ProjectAgentRouteActionStart:       api.AgentActionStart,
+	ProjectAgentRouteActionStop:        api.AgentActionStop,
+	ProjectAgentRouteActionSuspend:     api.AgentActionSuspend,
+	ProjectAgentRouteActionRestart:     api.AgentActionRestart,
+	ProjectAgentRouteActionMessage:     api.AgentActionMessage,
+	ProjectAgentRouteActionExec:        api.AgentActionExec,
+	ProjectAgentRouteActionRestore:     api.AgentActionRestore,
+	ProjectAgentRouteActionEnv:         api.AgentActionEnv,
+	ProjectAgentRouteActionOutbound:    api.AgentActionOutboundMessage,
+	ProjectAgentRouteActionMessageMode: api.AgentActionSetMessageMode,
+	ProjectAgentRouteActionReincarnate: api.AgentActionReincarnate,
+	ProjectAgentRouteActionResetAuth:   api.AgentActionResetAuth,
+	ProjectAgentRouteActionKeys:        api.AgentActionKeys,
 }
 
 // listProjectAgents lists agents within a specific project
@@ -2177,7 +2202,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
 		for i := range result.Items {
 			item := result.Items[i]
-			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, capabilityAllows(caps[i], ActionAttach))
+			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
 			agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
 		}
 	case identity != nil:
@@ -2196,7 +2221,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 				continue
 			}
 			item := result.Items[i]
-			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, capabilityAllows(caps[i], ActionAttach))
+			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
 			agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
 		}
 	}
