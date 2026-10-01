@@ -231,7 +231,7 @@ var spaShellTemplate = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
     <title>Scion</title>
 
     <!-- Preconnect to CDNs for faster loading -->
@@ -331,9 +331,35 @@ var spaShellTemplate = `<!DOCTYPE html>
             -moz-osx-font-smoothing: grayscale;
         }
 
-        #app {
-            min-height: 100%;
+        /* mobile-frame:start -- kept identical (modulo comments and
+           indentation) to web/index.html; see TestSPAShellIndexHTMLParity. */
+        :root {
+            --scion-app-height: 100vh;
         }
+        @supports (height: 100dvh) {
+            :root {
+                --scion-app-height: 100dvh;
+            }
+        }
+
+        html, body {
+            overscroll-behavior: none;
+        }
+
+        #app {
+            height: 100%;
+            min-height: 0;
+        }
+
+        /* Frame mode: set by any app shell while mounted (see
+           web/src/components/shared/app-frame.ts). Document-scrolling pages
+           (login, invite, onboarding) never set it. */
+        html.scion-app-frame,
+        html.scion-app-frame body {
+            overflow: hidden;
+            height: 100%;
+        }
+        /* mobile-frame:end */
 
         /* Prevent FOUC for custom elements */
         scion-app:not(:defined),
