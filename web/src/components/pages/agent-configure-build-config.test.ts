@@ -307,14 +307,16 @@ describe('agent-configure buildConfig — R1-1: untouched telemetry/auto-expose 
   it('R2-1 facet (b): the auto-expose control loads its real live value from ac.env even when ic.env has none, and re-sends that exact value after an unrelated row edit', async () => {
     const c = await mountAgentConfigureWithLoadedAgent({
       model: 'claude-opus',
-      // This is the exact shape after any untouched Save/Start: buildConfig
-      // omits `env` entirely in that case, and the PATCH handler still
-      // replaces InlineConfig wholesale (options.md §7.2, not fixed here),
-      // so InlineConfig.Env goes empty while AppliedConfig.Env keeps
-      // everything -- the custom key AND the auto-expose key. Before R2-1,
-      // populateForm read auto-expose from ic.env ONLY, so this shape
+      // ic.env empty while ac.env has everything (the custom key AND the
+      // auto-expose key) is the shape an untouched Save/Start used to leave
+      // behind before the hub's R4-1 carve-out (applyAgentUpdate) started
+      // copying InlineConfig.Env forward -- and could still arise from an
+      // agent that went through that window before R4-1 shipped, or from
+      // any other future bug that leaves the two maps out of sync. Before
+      // R2-1, populateForm read auto-expose from ic.env ONLY, so this shape
       // misread the control as the global default (false) instead of the
-      // agent's real, still-live value (true).
+      // agent's real, still-live value (true); populateForm must keep
+      // getting this right regardless of why the two maps ever diverge.
       env: { EXPLICIT_KEY: 'explicit-value', SCION_AUTO_EXPOSE_PORTS: 'true' },
       inlineConfig: {},
     });
@@ -371,6 +373,34 @@ describe('agent-configure buildConfig — R2-2: untouched-form body matches the 
     // the SAME file.
     const c = await mountAgentConfigureWithLoadedAgent({ model: 'golden-model' });
     const config = c.buildConfig();
+    expect(config).toEqual(goldenUntouchedBody);
+  });
+});
+
+describe('agent-configure buildConfig — R4-2: auto-expose control reads the per-key merged env, ic.env taking precedence', () => {
+  it('reads the auto-expose stamp from InlineConfig.Env even when AppliedConfig.Env is non-empty for an unrelated (e.g. template) key, and an untouched buildConfig() still equals the golden body', async () => {
+    // resolveDerivedConfig (pkg/hub/handlers_agent_create_helpers.go) writes
+    // a hub/project auto-expose stamp into InlineConfig.Env only -- it is
+    // never aliased into AppliedConfig.Env when the create request had no
+    // explicit env of its own. A template's own env can separately make
+    // ac.env non-empty (TEMPLATE_KEY here), which must not hide the stamp
+    // under the old all-or-nothing `ac.env || ic.env` read.
+    const c = await mountAgentConfigureWithLoadedAgent({
+      model: 'golden-model',
+      env: { TEMPLATE_KEY: 'x' },
+      inlineConfig: { env: { SCION_AUTO_EXPOSE_PORTS: 'true' } },
+    });
+    // The control must read the InlineConfig.Env stamp (true), not fall
+    // back to the global default (false, stubbed in stubFetchWithLoadedAgent)
+    // just because ac.env happens to be non-empty for an unrelated reason.
+    expect(c.autoExposePortsEnabled).toBe(true);
+
+    const config = c.buildConfig();
+    // Nothing was actually edited (TEMPLATE_KEY is an unrelated custom row,
+    // and the auto-expose control itself wasn't touched), so buildConfig
+    // must still omit `env` entirely and match the untouched golden body
+    // exactly -- reading the correct live value must not, by itself, cause
+    // it to be echoed.
     expect(config).toEqual(goldenUntouchedBody);
   });
 });

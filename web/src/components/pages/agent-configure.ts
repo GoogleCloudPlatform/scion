@@ -513,17 +513,25 @@ export class ScionPageAgentConfigure extends LitElement {
     const ac = this.agent.appliedConfig;
     const ic = ac?.inlineConfig;
 
-    // The live env, shared by the auto-expose controls below AND the custom
-    // env rows further down -- both must read the SAME map. Reading the
-    // auto-expose controls from ic?.env alone (as before ptone/scion#2493
-    // R2-1) breaks the moment InlineConfig.Env is nil: that happens on
-    // every untouched Save/Start now that buildConfig omits `env` entirely
-    // in that case (the PATCH handler still replaces InlineConfig
-    // wholesale with the request's config -- see options.md §7.2, not
-    // fixed here), which silently fell back to the global default on the
-    // next load even though the agent's real auto-expose setting was still
-    // sitting in ac.env the whole time.
+    // The live env for the custom env rows: ac.env wins outright when it is
+    // non-empty, matching how the hub treats AppliedConfig.Env as the
+    // authoritative live map.
     const env = ac?.env || ic?.env || {};
+
+    // The auto-expose controls need a DIFFERENT merge: per-key, with ic.env
+    // taking precedence over ac.env for each of the four keys individually
+    // (ptone/scion#2493 R4-2), not an all-or-nothing choice between the two
+    // maps. resolveDerivedConfig's hub/project auto-expose stamp
+    // (handlers_agent_create_helpers.go) writes only into
+    // InlineConfig.Env -- it is never aliased into AppliedConfig.Env when
+    // the create request had no explicit env of its own, and a template's
+    // own env (merged into AppliedConfig.Env separately) can otherwise make
+    // `ac.env` non-empty and win outright under the plain `||` merge above,
+    // hiding the stamp the control is supposed to show. The hub's R4-1
+    // carve-out (applyAgentUpdate) keeps InlineConfig.Env populated with the
+    // live auto-expose keys after an untouched Save/Start specifically so
+    // this per-key read keeps seeing them.
+    const autoExposeEnv: Record<string, string> = { ...(ac?.env ?? {}), ...(ic?.env ?? {}) };
 
     // General
     this.model = ac?.model || ic?.model || '';
@@ -538,23 +546,24 @@ export class ScionPageAgentConfigure extends LitElement {
     this.harnessConfig = ac?.harnessConfig || ic?.harness_config || '';
     this.telemetryEnabled = ic?.telemetry?.enabled ?? this.globalTelemetryDefault;
     this.autoExposePortsEnabled =
-      env.SCION_AUTO_EXPOSE_PORTS === 'true'
+      autoExposeEnv.SCION_AUTO_EXPOSE_PORTS === 'true'
         ? true
-        : env.SCION_AUTO_EXPOSE_PORTS === 'false'
+        : autoExposeEnv.SCION_AUTO_EXPOSE_PORTS === 'false'
           ? false
           : this.globalAutoExposePortsDefault;
-    this.autoExposePortsMode = env.SCION_AUTO_EXPOSE_MODE || 'allowlist';
-    this.autoExposePortsList = env.SCION_AUTO_EXPOSE_PORTS_LIST || '';
-    this.autoExposePortsInterval = env.SCION_AUTO_EXPOSE_INTERVAL || '3s';
+    this.autoExposePortsMode = autoExposeEnv.SCION_AUTO_EXPOSE_MODE || 'allowlist';
+    this.autoExposePortsList = autoExposeEnv.SCION_AUTO_EXPOSE_PORTS_LIST || '';
+    this.autoExposePortsInterval = autoExposeEnv.SCION_AUTO_EXPOSE_INTERVAL || '3s';
 
     // Snapshot what was just loaded, so buildConfig can later tell an actual
     // edit to these controls apart from their synthesized starting value
     // (ptone/scion#2493 R1-1). loadedAutoExposeEnvKeys additionally records
-    // exactly which of these keys were PRESENT in the loaded env and their
-    // raw values (as opposed to the derived booleans/strings above, which
-    // can't tell "present and false" from "absent, defaulted to false") --
-    // buildConfig needs that to re-send only what was really there when the
-    // auto-expose controls themselves weren't touched (R2-1 facet (a)).
+    // exactly which of these keys were PRESENT in the loaded (per-key
+    // merged) env and their raw values (as opposed to the derived
+    // booleans/strings above, which can't tell "present and false" from
+    // "absent, defaulted to false") -- buildConfig needs that to re-send
+    // only what was really there when the auto-expose controls themselves
+    // weren't touched (R2-1 facet (a)).
     this.loadedTelemetryEnabled = this.telemetryEnabled;
     this.loadedAutoExposePortsEnabled = this.autoExposePortsEnabled;
     this.loadedAutoExposePortsMode = this.autoExposePortsMode;
@@ -562,8 +571,8 @@ export class ScionPageAgentConfigure extends LitElement {
     this.loadedAutoExposePortsInterval = this.autoExposePortsInterval;
     this.loadedAutoExposeEnvKeys = {};
     for (const key of AUTO_EXPOSE_ENV_KEYS) {
-      if (env[key] !== undefined) {
-        this.loadedAutoExposeEnvKeys[key] = env[key];
+      if (autoExposeEnv[key] !== undefined) {
+        this.loadedAutoExposeEnvKeys[key] = autoExposeEnv[key];
       }
     }
 
