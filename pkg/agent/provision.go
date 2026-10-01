@@ -59,8 +59,20 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	var repoRoot string
 	var externalAgentDir string
 	var worktreeDir string // worktree-per-agent: agent's worktree path
+	var globalWorkspaceDir string
 	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
 		agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
+
+		// The global project's own per-agent workspace
+		// (~/.scion/workspace/<agentName>, see ProvisionAgent's Case 3) is
+		// not under either agentsDir above, so it needs its own cleanup
+		// target: unlike every other project type, where agentDir's own
+		// "workspace" subdirectory is already in dirsToDelete below, a
+		// global-project agent's actual workspace lives outside agentDir
+		// entirely, and removing only agentDir would orphan it.
+		if config.IsGlobalProjectDir(projectDir) {
+			globalWorkspaceDir = filepath.Join(projectDir, "workspace", agentName)
+		}
 
 		// Determine repo root for worktree pruning and branch cleanup.
 		// For worktree-per-agent the shared base lives at
@@ -212,6 +224,12 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		}
 
 		dirsToDelete = append(dirsToDelete, agentDir)
+	}
+
+	if globalWorkspaceDir != "" {
+		if _, err := os.Stat(globalWorkspaceDir); err == nil {
+			dirsToDelete = append(dirsToDelete, globalWorkspaceDir)
+		}
 	}
 
 	// Prune stale worktree records from the repo. This handles cases where the
@@ -947,14 +965,19 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	} else {
 		// Case 3: Non-Git Repository (and no explicit workspace)
 		agentWorkspace = "" // Using external mount, except in the project-configs branch below.
-		if projectName == "global" {
+		if config.IsGlobalProjectDir(projectDir) {
 			// The global project has no repository or externalized workspace
 			// path of its own, so it owns a dedicated workspace directory
 			// under its own project directory rather than mounting whatever
 			// directory the CLI happened to be invoked from. Bootstrap it on
 			// first use, the same way the sibling git-clone branch above
-			// creates agentWorkspace.
-			globalWorkspace := filepath.Join(projectDir, "workspace")
+			// creates agentWorkspace. Namespaced by agentName, the same way
+			// every other project type gives each agent its own workspace:
+			// a bare ~/.scion/workspace shared by every global-project agent
+			// would let two such agents silently read and write the same
+			// files. agentName is already confirmed to be a single, safe
+			// path element by checkAgentDirContained above.
+			globalWorkspace := filepath.Join(projectDir, "workspace", agentName)
 			if err := os.MkdirAll(globalWorkspace, 0755); err != nil {
 				return "", "", nil, fmt.Errorf("failed to create global project workspace directory: %w", err)
 			}

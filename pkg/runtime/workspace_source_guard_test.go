@@ -250,6 +250,103 @@ func TestValidateWorkspaceSource_RootlessScionProjectConfigsSubtreeRefusesNonWor
 	}
 }
 
+// TestValidateAgentHomeSource_AcceptsRealAgentHomeShapes covers
+// ValidateAgentHomeSource's own allow list (isScionHomeAllowedHomeSubtree):
+// the three real shapes config.GetAgentHomePath produces for an agent's home
+// directory under ~/.scion, one for each project layout that keeps it there.
+// This is the positive-acceptance-set proof k8s_runtime.go's Sync() call
+// site depends on (see TestSync_RejectsPersistedHomeDirPath's own comment
+// for why Sync() itself can't exercise the positive case end to end).
+func TestValidateAgentHomeSource_AcceptsRealAgentHomeShapes(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	tests := []string{
+		filepath.Join(tmpHome, ".scion", "agents", "agent-1", "home"),
+		filepath.Join(tmpHome, ".scion", "agents", "agent-1", "home", "sub"),
+		filepath.Join(tmpHome, ".scion", "projects", "my-project", ".scion", "agents", "agent-1", "home"),
+		filepath.Join(tmpHome, ".scion", "project-configs", "hub-slug__11111111", ".scion", "agents", "agent-1", "home"),
+	}
+
+	for _, source := range tests {
+		t.Run(source, func(t *testing.T) {
+			if err := os.MkdirAll(source, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ValidateAgentHomeSource(source, ""); err != nil {
+				t.Errorf("expected %q to be accepted at a rootless call site, got error: %v", source, err)
+			}
+		})
+	}
+}
+
+// TestValidateAgentHomeSource_RefusesWorkspaceShapes confirms the two allow
+// lists are disjoint in practice, not just by the doc comment's claim: every
+// shape ValidateWorkspaceSource admits is refused by ValidateAgentHomeSource,
+// and (the mirror case, covered by the existing
+// TestValidateWorkspaceSource_RootlessScionProjectsSubtreeRefusesNonWorkspacePaths
+// and its project-configs counterpart) every real agent home is refused by
+// ValidateWorkspaceSource.
+func TestValidateAgentHomeSource_RefusesWorkspaceShapes(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	tests := []string{
+		filepath.Join(tmpHome, ".scion", "workspace"),
+		filepath.Join(tmpHome, ".scion", "projects", "my-project"),
+		filepath.Join(tmpHome, ".scion", "projects", "my-project", "workspace"),
+		filepath.Join(tmpHome, ".scion", "projects", "my-project", ".scion", "agents", "agent-1", "workspace"),
+		filepath.Join(tmpHome, ".scion", "project-configs", "hub-slug__11111111", ".scion", "agents", "agent-1", "workspace"),
+	}
+
+	for _, source := range tests {
+		t.Run(source, func(t *testing.T) {
+			if err := os.MkdirAll(source, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ValidateAgentHomeSource(source, ""); err == nil {
+				t.Errorf("expected %q (a workspace shape) to be refused by ValidateAgentHomeSource, got nil", source)
+			}
+		})
+	}
+}
+
+// TestValidateAgentHomeSource_RefusesNearMissHomeShapes covers paths that
+// share a prefix with a real agent-home shape but stop short of it, or
+// extend past it without the required path separator: the bare
+// ~/.scion/agents directory and an agent's own state directory under it
+// (not its "home" leaf), a "home"-prefixed but distinct leaf name
+// ("homework"), the bare externalized project-configs directory and its
+// own ".scion" subdirectory and agents directory (none of which are any
+// agent's home), and the same "home"-prefixed-but-distinct leaf name under
+// a hub-managed project's own agents directory.
+func TestValidateAgentHomeSource_RefusesNearMissHomeShapes(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	tests := []string{
+		filepath.Join(tmpHome, ".scion", "agents"),
+		filepath.Join(tmpHome, ".scion", "agents", "a"),
+		filepath.Join(tmpHome, ".scion", "agents", "a", "workspace"),
+		filepath.Join(tmpHome, ".scion", "agents", "a", "homework"),
+		filepath.Join(tmpHome, ".scion", "project-configs", "hub-slug__11111111"),
+		filepath.Join(tmpHome, ".scion", "project-configs", "hub-slug__11111111", ".scion"),
+		filepath.Join(tmpHome, ".scion", "project-configs", "hub-slug__11111111", ".scion", "agents", "a"),
+		filepath.Join(tmpHome, ".scion", "projects", "my-project", ".scion", "agents", "a", "home2"),
+	}
+
+	for _, source := range tests {
+		t.Run(source, func(t *testing.T) {
+			if err := os.MkdirAll(source, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ValidateAgentHomeSource(source, ""); err == nil {
+				t.Errorf("expected %q to be refused by ValidateAgentHomeSource, got nil", source)
+			}
+		})
+	}
+}
+
 // TestValidateWorkspaceSource_RootlessScionProjectsItselfNotAllowed confirms
 // ~/.scion/projects on its own is refused: it spans every hub-managed
 // project on the machine, so admitting it would defeat the whole point of
@@ -454,6 +551,19 @@ func TestValidateWorkspaceSource_AcceptsExternalizedProjectRoot(t *testing.T) {
 	}
 }
 
+// TestIsFilesystemRoot covers the filepath.Dir(p) == p check directly: a
+// plain literal comparison against the single-separator string "/" would
+// never match a Windows volume root such as `C:\`, which filepath.Dir
+// returns unchanged, the same way it does for "/" on every other OS.
+func TestIsFilesystemRoot(t *testing.T) {
+	if !isFilesystemRoot(string(filepath.Separator)) {
+		t.Errorf("isFilesystemRoot(%q) = false, want true", string(filepath.Separator))
+	}
+	if isFilesystemRoot(filepath.Join(string(filepath.Separator), "some-dir")) {
+		t.Error("isFilesystemRoot of a non-root path = true, want false")
+	}
+}
+
 // TestValidateWorkspaceSource_RejectsSymlinkToFilesystemRoot covers a source
 // that is nominally inside an allowed root, but is actually a symlink
 // resolving to '/'. The containment check must judge it by where it leads,
@@ -648,6 +758,121 @@ func TestValidateWorkspaceSource_NoRootStillRejectsAbsoluteDenySet(t *testing.T)
 	}
 }
 
+// TestValidateWorkspaceSource_RejectsAncestorsOfHomeAndScionHome covers a
+// source that is a strict ancestor of $HOME or ~/.scion, not merely equal to
+// either: accepting such a source would still admit the whole subtree the
+// equality checks exist to protect, since $HOME or ~/.scion sits underneath
+// it. Covers the immediate parent, the grandparent, and the root itself.
+func TestValidateWorkspaceSource_RejectsAncestorsOfHomeAndScionHome(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpHome := filepath.Join(tmpDir, "users", "me")
+	if err := os.MkdirAll(tmpHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ancestors := []string{
+		filepath.Join(tmpDir, "users"), // parent of $HOME
+		tmpDir,                         // grandparent of $HOME
+	}
+	for _, source := range ancestors {
+		t.Run(source, func(t *testing.T) {
+			if _, err := ValidateWorkspaceSource(source, ""); err == nil {
+				t.Errorf("expected %q (an ancestor of $HOME) to be refused, got nil", source)
+			}
+		})
+	}
+
+	// An unrelated sibling directory, not an ancestor of $HOME, is still
+	// accepted at a rootless call site -- this floor must not over-refuse.
+	sibling := filepath.Join(tmpDir, "users", "someone-else")
+	if err := os.MkdirAll(sibling, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateWorkspaceSource(sibling, ""); err != nil {
+		t.Errorf("expected unrelated sibling %q to be accepted, got error: %v", sibling, err)
+	}
+}
+
+// TestValidateWorkspaceSource_RejectsAncestorsWithSymlinkedScionHome covers
+// the same two floors as TestValidateWorkspaceSource_RejectsAncestorsOfHomeAndScionHome,
+// but with ~/.scion symlinked to a location outside $HOME entirely (a real,
+// supported layout — resolveForValidation follows it before either floor
+// runs). With a real ~/.scion directly under $HOME, the $HOME-ancestor and
+// ~/.scion-ancestor floors overlap completely: a source refused by one is
+// always refused by the other too, so neither floor can be shown to matter
+// on its own. Symlinking ~/.scion elsewhere separates them: a source that is
+// only an ancestor of $HOME, not of the symlink target, exercises the
+// $HOME-ancestor floor alone, and a source that is only an ancestor of the
+// symlink target, not of $HOME, exercises the ~/.scion-ancestor floor alone.
+func TestValidateWorkspaceSource_RejectsAncestorsWithSymlinkedScionHome(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpHome := filepath.Join(tmpDir, "users", "me")
+	if err := os.MkdirAll(tmpHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", tmpHome)
+
+	scionData := filepath.Join(tmpDir, "data", "scion-data")
+	if err := os.MkdirAll(scionData, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(scionData, filepath.Join(tmpHome, ".scion")); err != nil {
+		t.Fatal(err)
+	}
+
+	homeAncestorOnly := filepath.Join(tmpDir, "users") // ancestor of $HOME, not of scionData
+	scionAncestorOnly := filepath.Join(tmpDir, "data") // ancestor of scionData, not of $HOME
+
+	if _, err := ValidateWorkspaceSource(homeAncestorOnly, ""); err == nil {
+		t.Errorf("expected %q (an ancestor of $HOME only) to be refused, got nil", homeAncestorOnly)
+	}
+	if _, err := ValidateWorkspaceSource(scionAncestorOnly, ""); err == nil {
+		t.Errorf("expected %q (an ancestor of the symlinked ~/.scion only) to be refused, got nil", scionAncestorOnly)
+	}
+}
+
+// TestValidateWorkspaceSource_RejectsCriticalSystemPaths covers the
+// fsutil.IsCriticalSystemPath floor: accepting one of these as a workspace
+// source would mount or sync a whole system directory instead of one
+// project's own files, regardless of whether a root was supplied.
+func TestValidateWorkspaceSource_RejectsCriticalSystemPaths(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	for _, source := range []string{"/etc", "/usr", "/var"} {
+		t.Run(source, func(t *testing.T) {
+			if _, err := ValidateWorkspaceSource(source, ""); err == nil {
+				t.Errorf("expected critical system path %q to be refused, got nil", source)
+			}
+		})
+	}
+}
+
+// TestValidateWorkspaceSource_RejectsRootEqualToScionHomeWithAllowedSource
+// covers the pathEqualFailSafe(resolvedRoot, scionHomeDir) check in the
+// root-refusal loop: a root of exactly ~/.scion, paired with a source that
+// the ~/.scion allow list itself admits, is the discriminating case for it
+// -- plain containment alone would accept it, so only the explicit
+// root-equality refusal catches it.
+func TestValidateWorkspaceSource_RejectsRootEqualToScionHomeWithAllowedSource(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	scionHome := filepath.Join(tmpHome, ".scion")
+	source := filepath.Join(scionHome, "projects", "p", "workspace")
+	if err := os.MkdirAll(source, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ValidateWorkspaceSource(source, scionHome); err == nil {
+		t.Error("expected a root equal to ~/.scion to be refused even though the source is otherwise allow-listed, got nil")
+	}
+}
+
 // TestValidateWorkspaceSource_UnusableSuppliedRootIsRejected covers a caller
 // that supplies a root, but the root itself is one of the paths this
 // function refuses as a source ('/' or $HOME). That must be refused outright
@@ -663,6 +888,17 @@ func TestValidateWorkspaceSource_UnusableSuppliedRootIsRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The '/' assertion below does not, on its own, prove the root loop's
+	// isFilesystemRoot(resolvedRoot) check runs: the containment check
+	// further down builds resolvedRoot+string(filepath.Separator), which for
+	// root "/" is "//" -- a prefix no real, Clean-d path ever has -- so the
+	// '/' case is also refused by containment alone, on Linux, independent
+	// of isFilesystemRoot. This assertion alone does not distinguish the
+	// two checks; TestIsFilesystemRoot covers isFilesystemRoot directly.
+	// The $HOME assertion below exercises the root loop's separate
+	// pathEqualFailSafe(resolvedRoot, cleanHome) check meaningfully, since
+	// $HOME is not a filesystem root and so is not also caught by
+	// containment's own "//"-shaped non-match.
 	if _, err := ValidateWorkspaceSource(source, "/"); err == nil {
 		t.Error("expected error when the supplied root is '/', got nil")
 	}

@@ -633,6 +633,54 @@ func TestIsRegisteredWorktree_RecreatedWithForeignGitDirRefused(t *testing.T) {
 	_ = PruneWorktreesIn(mainRepo)
 }
 
+// TestIsLinkedWorktreeOf_RejectsGitdirEqualToWorktreesDir covers a real
+// linked worktree's gitdir always naming a specific entry under worktrees/,
+// never the worktrees directory itself -- there is no registration that is
+// the whole administrative directory, so a gitdir resolving to exactly
+// worktreesDir must not be treated as a match.
+func TestIsLinkedWorktreeOf_RejectsGitdirEqualToWorktreesDir(t *testing.T) {
+	mainRepo := setupGitRepo(t)
+
+	commonDir, err := GetCommonGitDir(mainRepo)
+	if err != nil {
+		t.Fatalf("GetCommonGitDir: %v", err)
+	}
+	worktreesDir := filepath.Join(commonDir, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	wtPath := filepath.Join(filepath.Dir(mainRepo), "gitdir-equals-worktreesdir")
+	if err := os.MkdirAll(wtPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(wtPath, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+worktreesDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if isLinkedWorktreeOf(wtPath, worktreesDir) {
+		t.Error("expected a gitdir equal to worktreesDir itself to be rejected, got true")
+	}
+
+	// A gitdir naming a real entry under worktreesDir is still accepted --
+	// this fix must not over-refuse the legitimate shape.
+	namedEntry := filepath.Join(worktreesDir, "some-worktree")
+	if err := os.MkdirAll(namedEntry, 0755); err != nil {
+		t.Fatal(err)
+	}
+	wtPath2 := filepath.Join(filepath.Dir(mainRepo), "gitdir-names-real-entry")
+	if err := os.MkdirAll(wtPath2, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtPath2, ".git"), []byte("gitdir: "+namedEntry+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !isLinkedWorktreeOf(wtPath2, worktreesDir) {
+		t.Error("expected a gitdir naming a real entry under worktreesDir to be accepted, got false")
+	}
+}
+
 func TestPruneWorktrees_SkipsInsideContainer(t *testing.T) {
 	// When SCION_HOST_UID is set (agent container), pruning should be a no-op
 	// to prevent destroying sibling worktree metadata that appears stale from

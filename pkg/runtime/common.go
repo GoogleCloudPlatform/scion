@@ -202,7 +202,20 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		addArg("--network", config.NetworkMode)
 	}
 
+	// Reject a home directory that is not an allowed agent-home path before
+	// it becomes a bind mount, the same way config.Workspace is checked just
+	// below: this is the Docker/Podman/Apple-container counterpart to the
+	// Kubernetes runtime's Run(), which already validates HomeDir this way.
+	// No root is passed: unlike config.Workspace, a home directory has no
+	// per-project root to check it against at this call site at all, so the
+	// fixed deny-set and the named ~/.scion allow list are the only checks,
+	// the same as every other rootless caller of ValidateAgentHomeSource.
 	if config.HomeDir != "" {
+		resolvedHomeDir, err := ValidateAgentHomeSource(config.HomeDir, "")
+		if err != nil {
+			return nil, err
+		}
+		config.HomeDir = resolvedHomeDir
 		registerMount(config.HomeDir, util.GetHomeDir(config.UnixUsername), false, true)
 	}
 	// Reject a workspace source that is not an allowed workspace path before
@@ -578,6 +591,18 @@ func syncGCSVolumes(ctx context.Context, encoded string, direction SyncDirection
 		if volume.Source == "" {
 			continue
 		}
+		// volume.Source is read back from a persisted label on every sync,
+		// not just checked once when the agent started: validate it the
+		// same way every other workspace source is, since nothing upstream
+		// of this decode re-derives or re-checks it. No per-project root is
+		// available at this call site, so only the universal floors apply
+		// (refusing '/', $HOME, ~/.scion outside its own allow list, and
+		// the other critical-system-path and ancestor refusals).
+		resolvedSource, err := ValidateWorkspaceSource(volume.Source, "")
+		if err != nil {
+			return fmt.Errorf("invalid GCS volume source: %w", err)
+		}
+		volume.Source = resolvedSource
 		switch direction {
 		case SyncTo:
 			if err := gcp.SyncToGCS(ctx, volume.Source, volume.Bucket, volume.Prefix); err != nil {

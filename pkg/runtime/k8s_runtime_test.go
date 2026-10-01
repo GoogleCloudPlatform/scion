@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -649,6 +650,32 @@ func TestDefaultKubernetesNamespace(t *testing.T) {
 	})
 }
 
+// TestChownRecursiveCommand covers the shared helper both in-pod chown call
+// sites use: an empty owner must be refused outright rather than build a
+// command with no real target user, and a non-empty owner must produce the
+// expected `chown -R owner:owner path` command.
+func TestChownRecursiveCommand(t *testing.T) {
+	tests := []struct {
+		name    string
+		owner   string
+		path    string
+		wantCmd string
+		wantOK  bool
+	}{
+		{name: "empty owner, home path", owner: "", path: "/home", wantCmd: "", wantOK: false},
+		{name: "empty owner, workspace path", owner: "", path: "/workspace", wantCmd: "", wantOK: false},
+		{name: "non-empty owner", owner: "scion", path: "/workspace", wantCmd: "chown -R scion:scion /workspace", wantOK: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCmd, gotOK := chownRecursiveCommand(tt.owner, tt.path)
+			if gotCmd != tt.wantCmd || gotOK != tt.wantOK {
+				t.Errorf("chownRecursiveCommand(%q, %q) = (%q, %v), want (%q, %v)", tt.owner, tt.path, gotCmd, gotOK, tt.wantCmd, tt.wantOK)
+			}
+		})
+	}
+}
+
 func TestNewKubernetesRuntime_UsesDetectedNamespace(t *testing.T) {
 	clientset := k8sfake.NewClientset()
 	scheme := k8sruntime.NewScheme()
@@ -669,6 +696,19 @@ func TestNewKubernetesRuntime_UsesDetectedNamespace(t *testing.T) {
 // path must be refused before any pod is created, not just logged.
 func TestRun_RejectsUnsafeWorkspaceSource(t *testing.T) {
 	clientset := k8sfake.NewClientset()
+	// Guard-regression safety net, not something this test expects to hit:
+	// if the workspace-source rejection below were ever removed, Run()
+	// would proceed to actually create a pod and call waitForPodReady,
+	// which polls Get in a loop that only stops on an error or its own
+	// internal 10-minute timeout -- against a fake clientset with no real
+	// controller ever advancing the pod to Ready, that would otherwise run
+	// until ctx's deadline, or the full 600s go test package timeout if ctx
+	// had none. Failing every Get on pods here, combined with the short
+	// ctx deadline below, turns a reintroduced regression into a fast
+	// assertion failure instead of a multi-minute hang.
+	clientset.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, fmt.Errorf("test: no real pod backend behind the fake clientset")
+	})
 	scheme := k8sruntime.NewScheme()
 	fc := fake.NewSimpleDynamicClient(scheme)
 	client := k8s.NewTestClient(fc, clientset)
@@ -681,12 +721,57 @@ func TestRun_RejectsUnsafeWorkspaceSource(t *testing.T) {
 		Workspace:    "/",
 	}
 
-	_, err := r.Run(context.Background(), config)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := r.Run(ctx, config)
 	if err == nil {
 		t.Fatal("expected Run() to fail for a workspace source of '/'")
 	}
 	if !strings.Contains(err.Error(), "is not an allowed workspace path") {
 		t.Errorf("expected the rejection to come from workspace source validation, got: %v", err)
+	}
+
+	pods, listErr := clientset.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{})
+	if listErr != nil {
+		t.Fatalf("failed to list pods: %v", listErr)
+	}
+	if len(pods.Items) != 0 {
+		t.Errorf("expected no pods created (fail closed), found %d", len(pods.Items))
+	}
+}
+
+// TestRun_RejectsUnsafeHomeDir is TestRun_RejectsUnsafeWorkspaceSource's
+// counterpart for config.HomeDir: a home directory that is not an allowed
+// agent-home path must be refused before any pod is created, the same way,
+// independent of the workspace check. Without this, an unacceptable home
+// path would reach the pod on this first Run and only be caught afterward,
+// on the next Sync.
+func TestRun_RejectsUnsafeHomeDir(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+	// Same guard-regression safety net as TestRun_RejectsUnsafeWorkspaceSource.
+	clientset.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, fmt.Errorf("test: no real pod backend behind the fake clientset")
+	})
+	scheme := k8sruntime.NewScheme()
+	fc := fake.NewSimpleDynamicClient(scheme)
+	client := k8s.NewTestClient(fc, clientset)
+	r := NewKubernetesRuntime(client)
+
+	config := RunConfig{
+		Name:         "test-agent-unsafe-homedir",
+		Image:        "test-image",
+		UnixUsername: "scion",
+		HomeDir:      "/",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := r.Run(ctx, config)
+	if err == nil {
+		t.Fatal("expected Run() to fail for a home directory of '/'")
+	}
+	if !strings.Contains(err.Error(), "is not an allowed agent home path") {
+		t.Errorf("expected the rejection to come from agent home source validation, got: %v", err)
 	}
 
 	pods, listErr := clientset.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{})
@@ -756,6 +841,87 @@ func TestRun_AcceptsLegitimateScionHomeWorkspaces(t *testing.T) {
 	}
 }
 
+// TestRun_AcceptsRealAgentHomes is TestRun_AcceptsLegitimateScionHomeWorkspaces's
+// counterpart for config.HomeDir: the three real shapes
+// config.GetAgentHomePath produces under ~/.scion, plus a plain in-repo
+// project's own agent home (outside ~/.scion entirely, admitted through the
+// fixed floors alone). Without this, TestRun_RejectsUnsafeHomeDir alone
+// would not catch a validation root pinned too narrowly to admit only '/'
+// while refusing every real home.
+func TestRun_AcceptsRealAgentHomes(t *testing.T) {
+	tests := []struct {
+		name    string
+		relPath []string
+	}{
+		{name: "global project agent home", relPath: []string{".scion", "agents", "a", "home"}},
+		{name: "hub-managed project agent home", relPath: []string{".scion", "projects", "p", ".scion", "agents", "a", "home"}},
+		{name: "externalized git project agent home", relPath: []string{".scion", "project-configs", "d__1", ".scion", "agents", "a", "home"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpHome := t.TempDir()
+			t.Setenv("HOME", tmpHome)
+
+			parts := append([]string{tmpHome}, tt.relPath...)
+			homeDir := filepath.Join(parts...)
+			if err := os.MkdirAll(homeDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+
+			clientset := k8sfake.NewClientset()
+			scheme := k8sruntime.NewScheme()
+			fc := fake.NewSimpleDynamicClient(scheme)
+			client := k8s.NewTestClient(fc, clientset)
+			r := NewKubernetesRuntime(client)
+
+			config := RunConfig{
+				Name:         "test-agent",
+				Image:        "test-image",
+				UnixUsername: "scion",
+				HomeDir:      homeDir,
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+
+			_, err := r.Run(ctx, config)
+			if err != nil && (strings.Contains(err.Error(), "is not an allowed agent home path") || strings.Contains(err.Error(), "outside the permitted agent home root")) {
+				t.Errorf("expected %q to be accepted by agent home source validation, got: %v", homeDir, err)
+			}
+		})
+	}
+
+	t.Run("in-repo project agent home", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		homeDir := filepath.Join(tmpDir, "repo", ".scion", "agents", "a", "home")
+		if err := os.MkdirAll(homeDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		clientset := k8sfake.NewClientset()
+		scheme := k8sruntime.NewScheme()
+		fc := fake.NewSimpleDynamicClient(scheme)
+		client := k8s.NewTestClient(fc, clientset)
+		r := NewKubernetesRuntime(client)
+
+		config := RunConfig{
+			Name:         "test-agent",
+			Image:        "test-image",
+			UnixUsername: "scion",
+			HomeDir:      homeDir,
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+
+		_, err := r.Run(ctx, config)
+		if err != nil && (strings.Contains(err.Error(), "is not an allowed agent home path") || strings.Contains(err.Error(), "outside the permitted agent home root")) {
+			t.Errorf("expected %q to be accepted by agent home source validation, got: %v", homeDir, err)
+		}
+	})
+}
+
 // newFakeAgentPodWithWorkspaceAnnotation builds a fake pod for Sync() tests:
 // List() finds it via the scion.name label, and Sync() reads the workspace
 // path straight from the scion.workspace annotation — exactly the "value
@@ -782,6 +948,18 @@ func newFakeAgentPodWithWorkspaceAnnotation(name, workspacePath string) *corev1.
 			},
 		},
 	}
+}
+
+// newFakeAgentPodWithHomeDirAnnotation is newFakeAgentPodWithWorkspaceAnnotation
+// plus the scion.homedir/scion.username annotations Sync() reads for the
+// home-directory sync, with workspacePath fixed to a plain, outside-~/.scion
+// value the rootless validator accepts unconditionally, so a test using this
+// exercises only the homeDir check.
+func newFakeAgentPodWithHomeDirAnnotation(name, homeDirPath string) *corev1.Pod {
+	pod := newFakeAgentPodWithWorkspaceAnnotation(name, "/some/workspace")
+	pod.Annotations["scion.homedir"] = homeDirPath
+	pod.Annotations["scion.username"] = "scion"
+	return pod
 }
 
 // TestSync_RejectsPersistedWorkspacePath is the fail-closed regression test
@@ -838,6 +1016,62 @@ func TestSync_RejectsPersistedWorkspacePath(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "is not an allowed workspace path") {
 				t.Errorf("expected the rejection to come from workspace source validation, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestSync_RejectsPersistedHomeDirPath is TestSync_RejectsPersistedWorkspacePath's
+// counterpart for the scion.homedir annotation: a home directory path read
+// from an already-persisted pod annotation must still be rejected, the same
+// way, independent of the workspace path check. This call site validates
+// through ValidateAgentHomeSource, not ValidateWorkspaceSource: the error
+// wording below ("agent home path", not "workspace path") is itself part of
+// what proves the right validator ran -- before that fix, this call site
+// used ValidateWorkspaceSource, which would have refused every real agent
+// home under ~/.scion as well, just with the other function's wording.
+//
+// Positive acceptance-set coverage for Sync() is not exercised end to end
+// here, for the same reason given in TestSync_RejectsPersistedWorkspacePath's
+// own comment (the fake clientset's RESTClient() panics on the pod-exec call
+// a successful validation would reach). The acceptance-set proof for this
+// call site is TestValidateAgentHomeSource_AcceptsRealAgentHomeShapes
+// (workspace_source_guard_test.go), which directly covers all three real
+// home shapes this call site's homeDir value can take.
+func TestSync_RejectsPersistedHomeDirPath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+
+	for _, tt := range []struct {
+		name      string
+		direction SyncDirection
+		bad       string
+	}{
+		{name: "SyncTo with root", direction: SyncTo, bad: "/"},
+		{name: "SyncFrom with root", direction: SyncFrom, bad: "/"},
+		{name: "SyncTo with $HOME", direction: SyncTo, bad: home},
+		{name: "SyncFrom with $HOME", direction: SyncFrom, bad: home},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clientset := k8sfake.NewClientset()
+			pod := newFakeAgentPodWithHomeDirAnnotation("test-agent", tt.bad)
+			if _, err := clientset.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+				t.Fatalf("failed to create pod: %v", err)
+			}
+
+			scheme := k8sruntime.NewScheme()
+			fc := fake.NewSimpleDynamicClient(scheme)
+			client := k8s.NewTestClient(fc, clientset)
+			r := NewKubernetesRuntime(client)
+
+			err := r.Sync(context.Background(), "test-agent", tt.direction)
+			if err == nil {
+				t.Fatalf("expected Sync to fail for a persisted home directory path of %q", tt.bad)
+			}
+			if !strings.Contains(err.Error(), "is not an allowed agent home path") {
+				t.Errorf("expected the rejection to come from agent home source validation, got: %v", err)
 			}
 		})
 	}

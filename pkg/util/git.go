@@ -410,6 +410,16 @@ func IsRegisteredWorktree(repoRoot, path string) (bool, error) {
 			// membership: a plain directory later created at the same path
 			// must not inherit the identity of a worktree that no longer
 			// really exists there.
+			//
+			// This specific prunable reason (gitdir file points to a
+			// non-existent location) cannot be exercised independently of
+			// isLinkedWorktreeOf's own check in a real git-backed test:
+			// both read the existence of the exact same file (wtPath's own
+			// .git), so recreating that file with content valid enough for
+			// isLinkedWorktreeOf to accept also, as an unavoidable side
+			// effect, clears this prunable reason in git's own listing
+			// before IsRegisteredWorktree ever sees it. Confirmed
+			// empirically against a real git repository.
 			continue
 		}
 
@@ -483,7 +493,11 @@ func isLinkedWorktreeOf(wtPath, worktreesDir string) bool {
 	if err != nil {
 		return false
 	}
-	return resolvedTarget == worktreesDir || strings.HasPrefix(resolvedTarget, worktreesDir+string(filepath.Separator))
+	// A real linked worktree's gitdir always names a specific entry under
+	// worktrees/, never the worktrees directory itself -- there is no
+	// registration that is the whole administrative directory, so a gitdir
+	// resolving to exactly worktreesDir is not a match.
+	return strings.HasPrefix(resolvedTarget, worktreesDir+string(filepath.Separator))
 }
 
 // BranchExists returns true if the branch exists in the repository.

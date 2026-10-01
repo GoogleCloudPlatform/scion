@@ -1077,12 +1077,17 @@ authDone:
 	// anything derived from it is used to set up a mount. This also catches
 	// a value that was resolved and persisted by an older version of the
 	// resolution logic above — it runs on every start, not just the ones
-	// that just computed effectiveWorkspace fresh. Everything from here on
-	// uses the resolved, symlink-free path the validator returns, not the
-	// original value, narrowing the window between "the path we checked"
-	// and "the path we mount" to components that change after this call
-	// returns (see ValidateWorkspaceSource's doc comment for what that does
-	// and does not cover).
+	// that just computed effectiveWorkspace fresh. Everything between here
+	// and the workspace-storage-backend block below (if any) uses the
+	// resolved, symlink-free path the validator returns, not the original
+	// value, narrowing the window between "the path we checked" and "the
+	// path we mount" to components that change after this call returns (see
+	// ValidateWorkspaceSource's doc comment for what that does and does not
+	// cover). A workspace-storage backend's own Realize call, below, can
+	// still replace effectiveWorkspace with its own mount.HostPath
+	// afterward -- a value this validator never sees, computed by that
+	// backend's own resolver rather than read back from persisted or
+	// request-supplied state.
 	roots, rootsErr := workspaceSourceRoots(explicitWorkspace, effectiveWorkspace, settings, projectDir)
 	if rootsErr != nil {
 		return nil, rootsErr
@@ -1092,9 +1097,13 @@ authDone:
 		// A global agent provisioned before <projectDir>/workspace existed
 		// (or one whose persisted workspace was otherwise never brought
 		// under it) is intentionally refused here on resume, now that the
-		// global project's root is <projectDir>/workspace itself. Name the
-		// two ways to recover, since neither is obvious from the base error.
-		if !explicitWorkspace && config.GetProjectName(projectDir) == "global" {
+		// global project's root is <projectDir>/workspace itself. The same
+		// applies to a hub-dispatched, non-git project-configs project
+		// whose persisted workspace is its own bare externalized directory
+		// rather than a per-agent subdirectory under it (isAllowedProjectConfigsSubtree
+		// never admits the bare directory itself). Name the two ways to
+		// recover, since neither is obvious from the base error.
+		if !explicitWorkspace && (config.IsGlobalProjectDir(projectDir) || isProjectConfigsPath(projectDir)) {
 			return nil, fmt.Errorf("%w (delete and recreate this agent, or restart it with an explicit --workspace, to use a workspace under the project's own directory)", err)
 		}
 		return nil, err
@@ -1643,7 +1652,7 @@ func workspaceSourceRoots(explicitWorkspace bool, effectiveWorkspace string, set
 		return nil, nil
 	}
 	if isGitWorkspaceProject(projectDir) {
-		if config.GetProjectName(projectDir) == "global" {
+		if config.IsGlobalProjectDir(projectDir) {
 			// The global project's own directory (~/.scion) is, unusually,
 			// itself a git work tree (a dotfiles repository, for example).
 			// isGitWorkspaceProject then routes it through this git branch
@@ -1687,7 +1696,7 @@ func workspaceSourceRoots(explicitWorkspace bool, effectiveWorkspace string, set
 		}
 		return roots, nil
 	}
-	if config.GetProjectName(projectDir) == "global" {
+	if config.IsGlobalProjectDir(projectDir) {
 		return []string{filepath.Join(projectDir, "workspace")}, nil
 	}
 	return []string{resolveProjectRoot(settings, projectDir)}, nil

@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
 // DefaultSandboxBin is the path to the Cloud Run sandbox launcher binary.
@@ -348,9 +349,36 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 	// symlink ensures the broker reads from the /scion copy where sandbox
 	// writes are visible via the bind mount.
 	if cfg.HomeDir != "" && !strings.HasPrefix(cfg.HomeDir, rootDir+"/") && cfg.HomeDir != rootDir {
-		if err := relocateToScion(cfg.HomeDir, p.agentHome); err != nil {
-			runtimeLog.Warn("could not relocate HomeDir to /scion; agent home writes may go to overlay",
-				"homeDir", cfg.HomeDir, "scionHome", p.agentHome, "error", err)
+		// Reject a home directory that is not an allowed agent-home path
+		// before relocating from it -- the same second-gate reasoning as the
+		// Workspace check just below, and the Cloud Run counterpart to
+		// buildCommonRunArgs and the Kubernetes runtime's Run().
+		resolvedHomeDir, err := ValidateAgentHomeSource(cfg.HomeDir, "")
+		if err != nil {
+			return p, err
+		}
+		// A second launch of the same sandbox agent finds cfg.HomeDir
+		// already relocated: the first launch replaced it with a symlink to
+		// p.agentHome, and resolving that symlink (as validation must, to
+		// judge the real target) makes resolvedHomeDir p.agentHome itself.
+		// relocateToScion below must run on the ORIGINAL, still-symlinked
+		// cfg.HomeDir in that case, not the resolved path: its own Lstat
+		// check recognizes a symlink and does nothing, which is exactly
+		// right on a restart. Passing the already-resolved path instead
+		// would make relocateToScion operate on p.agentHome as both source
+		// and destination -- Lstat then sees a real directory, not a
+		// symlink, so that short-circuit never fires, every entry gets
+		// renamed onto itself, and the whole directory is removed and
+		// replaced with a symlink to itself, losing the agent's home state
+		// and leaving a symlink loop. Skip relocation entirely once the
+		// resolved path already names this agent's own home, rootDir
+		// itself, or anything else under rootDir: there is nothing left
+		// outside /scion to relocate from.
+		if resolvedHomeDir != p.agentHome && resolvedHomeDir != rootDir && !strings.HasPrefix(resolvedHomeDir, rootDir+string(filepath.Separator)) {
+			if err := relocateToScion(cfg.HomeDir, p.agentHome); err != nil {
+				runtimeLog.Warn("could not relocate HomeDir to /scion; agent home writes may go to overlay",
+					"homeDir", cfg.HomeDir, "scionHome", p.agentHome, "error", err)
+			}
 		}
 	}
 
@@ -408,22 +436,17 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 	// root-owned and chown-to-self is a no-op that wastes syscalls on
 	// large directory trees.
 	//
-	// Lchown is used instead of Chown to avoid following symlinks: if a
-	// relocated directory contains symlinks, we change the link's ownership
-	// rather than the target's (which may be outside our mount).
+	// fsutil.ChownTree refuses a critical-system-path or filesystem-root-lookalike
+	// root before touching anything, keeps the walk from crossing onto a
+	// different device, and Lchown's every entry rather than Chown'ing it
+	// (a relocated directory's symlink is re-owned itself, never its
+	// target, which may be outside our mount) -- all independent of
+	// whatever p.agentHome/p.workspace actually resolved to.
 	if os.Getuid() == 0 && sandboxUID > 0 {
 		for _, d := range []string{p.agentHome, p.workspace} {
-			if walkErr := filepath.WalkDir(d, func(path string, entry fs.DirEntry, err error) error {
-				if err != nil {
-					return err
-				}
-				if chownErr := os.Lchown(path, sandboxUID, sandboxGID); chownErr != nil {
-					runtimeLog.Warn("failed to chown path to sandbox user",
-						"path", path, "uid", sandboxUID, "gid", sandboxGID, "error", chownErr)
-				}
-				return nil
-			}); walkErr != nil {
-				runtimeLog.Warn("failed to walk directory for chown", "dir", d, "error", walkErr)
+			if chownErr := fsutil.ChownTree(context.Background(), d, sandboxUID, sandboxGID); chownErr != nil {
+				runtimeLog.Warn("failed to chown directory to sandbox user",
+					"dir", d, "uid", sandboxUID, "gid", sandboxGID, "error", chownErr)
 			}
 		}
 	}

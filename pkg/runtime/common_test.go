@@ -118,6 +118,16 @@ func TestResolveContainerID_SlugMatchesAgentName(t *testing.T) {
 	}
 }
 
+// homeDirForTest pins $HOME to a deterministic, test-isolated directory and
+// returns it, for test cases that need a value ValidateWorkspaceSource's
+// floors refuse regardless of the host running the test.
+func homeDirForTest(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	return home
+}
+
 func TestSyncGCSVolumesValidation(t *testing.T) {
 	encode := func(t *testing.T, volumes []gcsVolumeInfo) string {
 		t.Helper()
@@ -161,6 +171,18 @@ func TestSyncGCSVolumesValidation(t *testing.T) {
 			name:      "empty list",
 			encoded:   encode(t, nil),
 			direction: SyncUnspecified,
+		},
+		{
+			name:      "root source rejected",
+			encoded:   encode(t, []gcsVolumeInfo{{Source: "/", Bucket: "bucket"}}),
+			direction: SyncTo,
+			wantError: "invalid GCS volume source",
+		},
+		{
+			name:      "home directory source rejected",
+			encoded:   encode(t, []gcsVolumeInfo{{Source: homeDirForTest(t), Bucket: "bucket"}}),
+			direction: SyncTo,
+			wantError: "invalid GCS volume source",
 		},
 	}
 
@@ -1828,6 +1850,98 @@ func TestBuildCommonRunArgs_AcceptsLegitimateScionHomeWorkspaces(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBuildCommonRunArgs_RejectsUnsafeHomeDir is
+// TestBuildCommonRunArgs_RejectsUnsafeWorkspaceSource's counterpart for
+// config.HomeDir: a home directory that is not an allowed agent-home path
+// must be refused before it becomes a bind mount.
+func TestBuildCommonRunArgs_RejectsUnsafeHomeDir(t *testing.T) {
+	config := RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		HomeDir:      "/",
+	}
+
+	args, err := buildCommonRunArgs(config)
+	if err == nil {
+		t.Fatal("expected buildCommonRunArgs to fail for a home directory of '/'")
+	}
+	if len(args) != 0 {
+		t.Errorf("expected no args on rejection (fail closed), got: %v", args)
+	}
+}
+
+// TestBuildCommonRunArgs_AcceptsRealAgentHomes covers the positive
+// acceptance set for config.HomeDir: the three real shapes
+// config.GetAgentHomePath produces under ~/.scion, plus a plain in-repo
+// project's own agent home (outside ~/.scion entirely, admitted through the
+// fixed floors alone, the same as any other source with no per-project
+// root to check against).
+func TestBuildCommonRunArgs_AcceptsRealAgentHomes(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	tests := []struct {
+		name    string
+		relPath []string
+	}{
+		{name: "global project agent home", relPath: []string{".scion", "agents", "a", "home"}},
+		{name: "hub-managed project agent home", relPath: []string{".scion", "projects", "p", ".scion", "agents", "a", "home"}},
+		{name: "externalized git project agent home", relPath: []string{".scion", "project-configs", "d__1", ".scion", "agents", "a", "home"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parts := append([]string{tmpHome}, tt.relPath...)
+			homeDir := filepath.Join(parts...)
+			if err := os.MkdirAll(homeDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+
+			config := RunConfig{
+				Harness:      &harness.Generic{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        "scion-agent:latest",
+				HomeDir:      homeDir,
+			}
+
+			args, err := buildCommonRunArgs(config)
+			if err != nil {
+				t.Fatalf("expected %q to be accepted, got error: %v", homeDir, err)
+			}
+			if !strings.Contains(strings.Join(args, " "), homeDir) {
+				t.Errorf("expected mount args to reference %q, got: %v", homeDir, args)
+			}
+		})
+	}
+
+	t.Run("in-repo project agent home", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		homeDir := filepath.Join(tmpDir, "repo", ".scion", "agents", "a", "home")
+		if err := os.MkdirAll(homeDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		config := RunConfig{
+			Harness:      &harness.Generic{},
+			Name:         "test-agent",
+			UnixUsername: "scion",
+			Image:        "scion-agent:latest",
+			HomeDir:      homeDir,
+		}
+
+		args, err := buildCommonRunArgs(config)
+		if err != nil {
+			t.Fatalf("expected %q to be accepted, got error: %v", homeDir, err)
+		}
+		if !strings.Contains(strings.Join(args, " "), homeDir) {
+			t.Errorf("expected mount args to reference %q, got: %v", homeDir, args)
+		}
+	})
 }
 
 func TestBuildCommonRunArgs_ExtraHosts(t *testing.T) {

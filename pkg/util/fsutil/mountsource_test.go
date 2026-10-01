@@ -64,10 +64,10 @@ func TestCheckMountSourceReader_IgnoresMalformedLines(t *testing.T) {
 
 // TestCheckMountSourceReader_FailsClosedOnScanError locks in the documented
 // fail-closed behavior on CheckMountSource: a mount table that exists but
-// can't be scanned (here, a single line past bufio.Scanner's default token
-// limit) must return an error, not be treated the same as an absent table
-// (which is a no-op). scanner.Err() surfaces such a failure after Scan()
-// returns false without having reached a match.
+// can't be scanned (here, a single line past the scanner's default
+// line-length limit) must return an error, not be treated the same as an
+// absent table (which is a no-op). scanner.Err() surfaces such a failure
+// after Scan() returns false without having reached a match.
 func TestCheckMountSourceReader_FailsClosedOnScanError(t *testing.T) {
 	overlong := strings.Repeat("x", bufio.MaxScanTokenSize+1)
 	err := checkMountSourceReader("/workspace", strings.NewReader(overlong+"\n"))
@@ -89,8 +89,9 @@ func TestCheckMountSourceReader_HandlesOctalEncodedPaths(t *testing.T) {
 }
 
 // TestCheckMountSource_NoOpForNonMountPoint exercises the real-file wrapper
-// (not the injectable reader) against an ordinary, non-mounted root, proving
-// it reads the real mount table and reports no match rather than erroring.
+// (not the test-supplied reader) against an ordinary, non-mounted root,
+// proving it reads the real mount table and reports no match rather than
+// erroring.
 func TestCheckMountSource_NoOpForNonMountPoint(t *testing.T) {
 	if err := CheckMountSource("/definitely/not/a/mount/point/for/this/test"); err != nil {
 		t.Fatalf("CheckMountSource = %v, want nil", err)

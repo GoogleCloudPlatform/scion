@@ -64,9 +64,12 @@ func statDeviceOf(_ string, info fs.FileInfo) (uint64, bool) {
 //     with os.Lstat *before* calling this function, as
 //     cmd/sciontool/commands/init.go's chownTreeRootOwned does, and only
 //     call it once root is known to exist.
-//   - the walk never crosses a filesystem (device) boundary: an entry whose
-//     device differs from root's own device is left untouched, and if it is
-//     a directory, not descended into.
+//   - the walk never crosses onto a different device: an entry whose device
+//     differs from root's own device is left untouched, and if it is a
+//     directory, not descended into. A bind mount of a directory from the
+//     SAME device keeps the same device number, so this check does not stop
+//     the walk from descending into one -- it is a device boundary, not a
+//     mount-point boundary, and callers must not read it as the latter.
 //   - every entry is Lchown'd, never Chown'd: a symlink is re-owned itself
 //     and its target is never touched or dereferenced.
 //   - a failure on one entry does not stop the walk. All per-entry failures

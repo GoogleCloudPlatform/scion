@@ -620,6 +620,16 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ProjectSlug is joined onto the global projects directory below (to
+	// resolve req.ProjectPath) and again later to compute the GCS-bootstrap
+	// workspace directory, in both cases as a single path segment: a value
+	// of ".." would resolve either join to the projects directory's own
+	// parent (~/.scion itself), not a real per-project directory.
+	if req.ProjectSlug != "" && !isSingleCleanPathElement(req.ProjectSlug) {
+		ValidationError(w, "invalid projectSlug", nil)
+		return
+	}
+
 	agentKey := req.ID
 	if agentKey == "" {
 		agentKey = req.Name
@@ -1007,6 +1017,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// For hub-managed projects (ProjectSlug set), use the conventional path
 		// ~/.scion/projects/<slug>/ instead of the worktree-based path.
 		var workspaceDir string
+		var workspaceRoot string
 		if req.ProjectSlug != "" {
 			globalDir, err := config.GetGlobalDir()
 			if err != nil {
@@ -1015,10 +1026,28 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				RuntimeError(w, "Failed to get global dir: "+err.Error())
 				return
 			}
-			workspaceDir = filepath.Join(globalDir, "projects", req.ProjectSlug)
+			workspaceRoot = filepath.Join(globalDir, "projects")
+			workspaceDir = filepath.Join(workspaceRoot, req.ProjectSlug)
 		} else {
-			workspaceDir = filepath.Join(s.config.WorktreeBase, req.Name, "workspace")
+			workspaceRoot = s.config.WorktreeBase
+			workspaceDir = filepath.Join(workspaceRoot, req.Name, "workspace")
 		}
+
+		// Validate before anything is created or written: req.ProjectSlug
+		// and req.Name are already constrained to a single path element
+		// above, but this still runs independently, the same gate every
+		// other workspace source goes through, before MkdirAll/SyncFromGCS
+		// ever touch the filesystem. Use the resolved, symlink-free path it
+		// returns for everything below, not the original join.
+		resolvedWorkspaceDir, verr := scionrt.ValidateWorkspaceSource(workspaceDir, workspaceRoot)
+		if verr != nil {
+			markAttemptFailed(http.StatusBadRequest, "invalid workspace directory")
+			span.SetStatus(codes.Error, verr.Error())
+			BadRequest(w, "Invalid workspace directory: "+verr.Error())
+			return
+		}
+		workspaceDir = resolvedWorkspaceDir
+
 		if err := os.MkdirAll(workspaceDir, 0755); err != nil {
 			markAttemptFailed(http.StatusInternalServerError, "failed to create workspace directory")
 			span.SetStatus(codes.Error, err.Error())

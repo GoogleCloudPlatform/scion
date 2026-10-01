@@ -1160,12 +1160,12 @@ func TestChownTreeRootOwned_RejectsSymlinkToCriticalPath(t *testing.T) {
 	}
 }
 
-// TestChownTreeRootOwned_RejectsHostRootLookalike covers a directory laid
+// TestChownTreeRootOwned_RejectsFilesystemRootLookalike covers a directory laid
 // out like a filesystem root in a temp dir: a workspace whose path carries no
 // critical-path name, but whose contents look like a filesystem root (an
 // etc/passwd, a usr/bin, and a proc marker). This must be refused, and
 // nothing under it may be touched.
-func TestChownTreeRootOwned_RejectsHostRootLookalike(t *testing.T) {
+func TestChownTreeRootOwned_RejectsFilesystemRootLookalike(t *testing.T) {
 	dir := t.TempDir()
 	mustMkdirAllT(t, filepath.Join(dir, "etc"))
 	mustWriteFileT(t, filepath.Join(dir, "etc", "passwd"), "root:x:0:0:root:/root:/bin/sh\n")
@@ -1181,8 +1181,8 @@ func TestChownTreeRootOwned_RejectsHostRootLookalike(t *testing.T) {
 	beforeStat := before.Sys().(*syscall.Stat_t)
 
 	_, _, err = chownTreeRootOwned(dir, os.Getuid()+1, os.Getgid()+1, true)
-	if !errors.Is(err, fsutil.ErrHostRootLookalike) {
-		t.Fatalf("chownTreeRootOwned(%q) = %v, want ErrHostRootLookalike", dir, err)
+	if !errors.Is(err, fsutil.ErrFilesystemRootLookalike) {
+		t.Fatalf("chownTreeRootOwned(%q) = %v, want ErrFilesystemRootLookalike", dir, err)
 	}
 
 	after, err := os.Lstat(passwdPath)
@@ -1327,6 +1327,34 @@ func TestChownTreeRootOwned_ChecksMountSource(t *testing.T) {
 	if afterStat.Uid != beforeStat.Uid || afterStat.Gid != beforeStat.Gid {
 		t.Errorf("ownership changed despite the stubbed mount-source refusal: before uid=%d gid=%d, after uid=%d gid=%d",
 			beforeStat.Uid, beforeStat.Gid, afterStat.Uid, afterStat.Gid)
+	}
+}
+
+// TestChownTreeRootOwned_InvalidRootNeverReachesMountSource proves the
+// ordering chownTreeRootOwned's own comment describes: fsutil.CheckRoot runs
+// before checkMountSource, so a root CheckRoot already refuses is never
+// looked up in the mount table at all. Stubbing checkMountSource to return
+// nil (the "I was never called, nothing to object to" answer) and then
+// asserting the call still never happened is what actually locks in the
+// ordering: asserting only the returned error's type would pass just as
+// well if the two checks ran in the other order and checkMountSource's own
+// (different) refusal reached the caller instead.
+func TestChownTreeRootOwned_InvalidRootNeverReachesMountSource(t *testing.T) {
+	var mountSourceCalls int
+	orig := checkMountSource
+	checkMountSource = func(root string) error {
+		mountSourceCalls++
+		return nil
+	}
+	defer func() { checkMountSource = orig }()
+
+	const criticalRoot = "/etc"
+	_, _, err := chownTreeRootOwned(criticalRoot, os.Getuid()+1, os.Getgid()+1, true)
+	if !errors.Is(err, fsutil.ErrCriticalSystemPath) {
+		t.Fatalf("chownTreeRootOwned(%q) = %v, want fsutil.ErrCriticalSystemPath from CheckRoot", criticalRoot, err)
+	}
+	if mountSourceCalls != 0 {
+		t.Errorf("expected checkMountSource to never run for a root CheckRoot already refuses, got %d call(s)", mountSourceCalls)
 	}
 }
 

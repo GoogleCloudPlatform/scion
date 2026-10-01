@@ -1694,6 +1694,162 @@ profiles:
 	}
 }
 
+// TestStart_AcceptsOrdinaryGitRepoNamedGlobal covers an ordinary git
+// project whose own repository root happens to be named "global" -- not
+// the real global project, which is identified by its resolved directory,
+// not by name. Start must treat it like any other git project: create a
+// worktree and reach Run, rather than refusing it as if it were the global
+// project's own directory misconfigured as a git work tree.
+func TestStart_AcceptsOrdinaryGitRepoNamedGlobal(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	// HOME is a separate directory from the project below, so the real
+	// global directory (HOME/.scion) and this project's own repository
+	// root are unambiguously different paths.
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	home := filepath.Join(tmpDir, "home")
+	_ = os.Setenv("HOME", home)
+
+	globalScionDir := filepath.Join(home, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	agentName := "ordinary-agent"
+	projectDir := filepath.Join(tmpDir, "global")
+	setupTestGitRepoWithBranch(t, projectDir, api.Slugify(agentName))
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	runCalled := false
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			runCalled = true
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        agentName,
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err != nil {
+		t.Fatalf("expected Start to accept an ordinary git repo named %q, got error: %v", filepath.Base(projectDir), err)
+	}
+	if !runCalled {
+		t.Error("expected the runtime's Run to be invoked")
+	}
+}
+
+// TestStart_GlobalProjectResumeUsesConsistentWorkspace covers restart/resume
+// for a global-project agent: ProvisionAgent's Case 3 creates a per-agent
+// subdirectory under ~/.scion/workspace (not a directory shared by every
+// global agent), and a second Start() call for the same agent -- simulating
+// a restart/resume, not a fresh provision -- must resolve to that exact
+// same directory again, not recreate a new one or fall back to the bare
+// ~/.scion/workspace root.
+func TestStart_GlobalProjectResumeUsesConsistentWorkspace(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	agentName := "resumable-global-agent"
+	var capturedWorkspaces []string
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedWorkspaces = append(capturedWorkspaces, config.Workspace)
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	for i := 0; i < 2; i++ {
+		if _, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:        agentName,
+			ProjectPath: globalScionDir,
+			NoAuth:      true,
+		}); err != nil {
+			t.Fatalf("Start call %d failed: %v", i+1, err)
+		}
+	}
+
+	if len(capturedWorkspaces) != 2 {
+		t.Fatalf("expected 2 captured RunConfig.Workspace values, got %d: %v", len(capturedWorkspaces), capturedWorkspaces)
+	}
+
+	wantWorkspace, err := filepath.EvalSymlinks(filepath.Join(globalScionDir, "workspace", agentName))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(want): %v", err)
+	}
+	for i, got := range capturedWorkspaces {
+		evalGot, err := filepath.EvalSymlinks(got)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(call %d): %v", i+1, err)
+		}
+		if evalGot != wantWorkspace {
+			t.Errorf("Start call %d: RunConfig.Workspace = %q, want %q", i+1, evalGot, wantWorkspace)
+		}
+	}
+	if capturedWorkspaces[0] != capturedWorkspaces[1] {
+		t.Errorf("expected the first and second Start calls to resolve to the identical workspace value, got %q then %q", capturedWorkspaces[0], capturedWorkspaces[1])
+	}
+}
+
 // setupHubMarkerProjectConfigsDir creates the externalized .scion directory
 // a hub-dispatched project's marker file resolves to
 // (config.ResolveProjectMarker's output: ~/.scion/project-configs/<dir>/.scion,
@@ -1882,6 +2038,72 @@ func TestStart_RejectsProjectConfigsAgentHome(t *testing.T) {
 	}
 }
 
+// TestStart_RejectsPreExistingProjectConfigsAgentBareWorkspace covers the
+// project-configs counterpart to
+// TestStart_RejectsPreExistingGlobalAgentWorkspaceOutsideProjectDir: an
+// agent whose persisted workspace is its project's own bare externalized
+// directory (~/.scion/project-configs/<dir>, not the per-agent
+// .../agents/<agent-id>/workspace shape underneath it) is refused on
+// resume, since isAllowedProjectConfigsSubtree never admits the bare
+// directory itself. The error must name both ways to recover, the same as
+// the global case, since isProjectConfigsPath(projectDir) now joins
+// IsGlobalProjectDir(projectDir) in the recovery-hint wrap.
+func TestStart_RejectsPreExistingProjectConfigsAgentBareWorkspace(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	projectScionDir := setupHubMarkerProjectConfigsDir(t, tmpDir, "hub-slug4__41111111")
+
+	// The project's own bare externalized directory
+	// (~/.scion/project-configs/<dir>), not a per-agent subdirectory under
+	// it -- the shape isAllowedProjectConfigsSubtree never admits.
+	bareProjectConfigsDir := filepath.Dir(projectScionDir)
+
+	agentName := "pre-existing-pc-agent"
+	agentDir := filepath.Join(projectScionDir, "agents", agentName)
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	agentJSON := fmt.Sprintf(`{"harness": "generic", "volumes": [{"source": %q, "target": "/workspace"}]}`, bareProjectConfigsDir)
+	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	runCalled := false
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			runCalled = true
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        agentName,
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err == nil {
+		t.Fatal("expected Start to refuse a pre-existing project-configs agent's bare-directory workspace")
+	}
+	if !strings.Contains(err.Error(), "is not an allowed workspace path") {
+		t.Errorf("expected the base rejection to come from the ~/.scion allow-list floor, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "recreate") || !strings.Contains(err.Error(), "--workspace") {
+		t.Errorf("expected an actionable error naming both recovery paths (recreate the agent, or an explicit --workspace), got: %v", err)
+	}
+	if runCalled {
+		t.Error("expected the runtime's Run to never be invoked (fail closed), but it was called")
+	}
+}
+
 // TestStart_AcceptsSettingsWorkspacePath is the missing Start()-level
 // positive regression test for the externalized-project branch: a non-git
 // project whose settings.yaml sets workspace_path must have that path
@@ -1897,13 +2119,13 @@ func TestStart_AcceptsSettingsWorkspacePath(t *testing.T) {
 	defer func() { _ = os.Setenv("HOME", originalHome) }()
 	_ = os.Setenv("HOME", tmpDir)
 
-	// A broker/container environment can export SCION_AUTO_EXPOSE_PORTS as a
-	// plain boolean string. Koanf's env provider maps it onto the bare key
-	// "auto_expose_ports", which collides with VersionedSettings' struct-typed
-	// field of the same name and fails the whole decode -- not just that one
-	// field -- taking settings.WorkspacePath down with it. t.Setenv(key, "")
-	// is not enough here: the key merely being present still collides, so it
-	// must be fully unset for the duration of the test.
+	// A broker/container environment can export the ambient port-publishing
+	// setting as a plain boolean string. Koanf's env provider maps it onto a
+	// bare key that collides with VersionedSettings' struct-typed field of
+	// the same name and fails the whole decode -- not just that one field --
+	// taking settings.WorkspacePath down with it. t.Setenv(key, "") is not
+	// enough here: the key merely being present still collides, so it must
+	// be fully unset for the duration of the test.
 	if oldAutoExpose, ok := os.LookupEnv("SCION_AUTO_EXPOSE_PORTS"); ok {
 		_ = os.Unsetenv("SCION_AUTO_EXPOSE_PORTS")
 		defer func() { _ = os.Setenv("SCION_AUTO_EXPOSE_PORTS", oldAutoExpose) }()

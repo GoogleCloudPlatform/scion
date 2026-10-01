@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
 // ValidateWorkspaceSource enforces the rule that a workspace source host path
@@ -44,20 +45,28 @@ import (
 // roots are the per-project root(s) the source may fall under, when the
 // caller has any. A caller with more than one legitimate root for a single
 // source — for example a git repo root and a separately-verified worktree
-// location — passes all of them. The floors below decide first, in order,
-// regardless of whether any roots were passed:
-//   - A source resolving to '/' or the home directory refuses the whole
+// location — passes all of them. The floors below decide first, in the
+// order the code actually runs them, regardless of whether any roots were
+// passed:
+//   - A source resolving to the top of its filesystem (the Unix '/', or a
+//     Windows volume root such as `C:\`) refuses the whole call outright.
+//   - A source naming one of fsutil's critical system paths (see
+//     fsutil.IsCriticalSystemPath) refuses the whole call outright.
+//   - A source equal to, or a strict ancestor of, $HOME refuses the whole
 //     call outright.
-//   - A source under ~/.scion (bare or any descendant) must be in the
-//     named allow list (see isScionHomeAllowedSubtree) regardless of
-//     roots — a hub-managed project workspace under ~/.scion/projects/<slug>
-//     or the global project's own ~/.scion/workspace, for example, is on
-//     that list and passes; anything else under ~/.scion is refused here,
+//   - A source equal to, or a strict ancestor of, ~/.scion refuses the
+//     whole call outright.
+//   - A source under ~/.scion (bare or any descendant, and not already
+//     refused by the ancestor floor just above) must be in the named
+//     allow list (see isScionHomeAllowedSubtree) regardless of roots — a
+//     hub-managed project workspace under ~/.scion/projects/<slug> or the
+//     global project's own ~/.scion/workspace, for example, is on that
+//     list and passes; anything else under ~/.scion is refused here,
 //     before roots are even considered.
-//   - A root resolving to '/', the home directory, or ~/.scion refuses the
-//     whole call outright — a caller should never be supplying one of
-//     those as "a root", and treating it as equivalent to not supplying
-//     one would silently admit anything.
+//   - A root resolving to the top of its filesystem, to $HOME, or to
+//     ~/.scion refuses the whole call outright — a caller should never be
+//     supplying one of those as "a root", and treating it as equivalent to
+//     not supplying one would silently admit anything.
 //
 // Once those floors are satisfied, roots decide the rest:
 //   - With one or more usable roots, the source must also fall under at
@@ -82,6 +91,34 @@ import (
 // here — it returns ("", nil) — callers only invoke this once they have a
 // non-empty source to act on.
 func ValidateWorkspaceSource(source string, roots ...string) (string, error) {
+	return validateHostPathSource(source, "workspace", isScionHomeAllowedSubtree, roots...)
+}
+
+// ValidateAgentHomeSource enforces the exact same floors and root rules as
+// ValidateWorkspaceSource (see its doc comment), with one difference: within
+// ~/.scion, it allows a single agent's own home subtree (see
+// isScionHomeAllowedHomeSubtree) rather than ValidateWorkspaceSource's
+// workspace-bearing subtrees. A workspace and an agent's home are never the
+// same directory and never interchangeable under ~/.scion — none of
+// ValidateWorkspaceSource's allowed shapes name a ".../home" leaf, and no
+// real agent home is named "workspace", "projects/<slug>/workspace", or any
+// of the other shapes that allow list admits — so reusing it here would both
+// wrongly refuse every real agent home under ~/.scion and, the other
+// direction, risk wrongly admitting a workspace path as if it were a home.
+// Call this for any host path about to become an agent's home directory
+// (a sync source or destination, a bind mount, or similar); call
+// ValidateWorkspaceSource for a workspace path instead.
+func ValidateAgentHomeSource(source string, roots ...string) (string, error) {
+	return validateHostPathSource(source, "agent home", isScionHomeAllowedHomeSubtree, roots...)
+}
+
+// validateHostPathSource is the shared implementation behind
+// ValidateWorkspaceSource and ValidateAgentHomeSource. kind names the kind
+// of path being validated for error messages ("workspace" or "agent home"),
+// and allowedScionHomeSubtree decides which ~/.scion subtree the two allow,
+// since a workspace and an agent home are never the same shape (see
+// ValidateAgentHomeSource's doc comment).
+func validateHostPathSource(source, kind string, allowedScionHomeSubtree func(resolvedSource, scionHomeDir string) bool, roots ...string) (string, error) {
 	if source == "" {
 		return "", nil
 	}
@@ -90,44 +127,64 @@ func ValidateWorkspaceSource(source string, roots ...string) (string, error) {
 	// filepath.Clean and filepath.EvalSymlinks preserve that), so it is
 	// never equal to '/', $HOME, or a ~/.scion prefix, and the whole floor
 	// below is skipped by construction. Every legitimate producer of a
-	// workspace source already passes an absolute path; refuse anything
-	// else outright rather than resolve it against an ambient, caller
-	// dependent working directory.
+	// source already passes an absolute path; refuse anything else outright
+	// rather than resolve it against an ambient, caller dependent working
+	// directory.
 	if !filepath.IsAbs(source) {
-		return "", fmt.Errorf("workspace source %q is not an allowed workspace path", source)
+		return "", fmt.Errorf("%s source %q is not an allowed %s path", kind, source, kind)
 	}
 
 	resolvedSource, err := resolveForValidation(source)
 	if err != nil {
-		return "", fmt.Errorf("workspace source %q is not an allowed workspace path", source)
+		return "", fmt.Errorf("%s source %q is not an allowed %s path", kind, source, kind)
 	}
 
-	if resolvedSource == string(filepath.Separator) {
-		return "", fmt.Errorf("workspace source %q is not an allowed workspace path", source)
+	if isFilesystemRoot(resolvedSource) {
+		return "", fmt.Errorf("%s source %q is not an allowed %s path", kind, source, kind)
+	}
+
+	// A source naming one of fsutil's criticalSystemPaths is refused outright,
+	// the same way '/' is above: accepting any of these as a source would
+	// mount or sync a whole system directory instead of one project's own
+	// files. This reuses fsutil's list rather than keeping a second copy of
+	// it that could drift out of sync.
+	if fsutil.IsCriticalSystemPath(resolvedSource) {
+		return "", fmt.Errorf("%s source %q is not an allowed %s path", kind, source, kind)
 	}
 
 	home, homeErr := os.UserHomeDir()
 	if homeErr != nil || home == "" {
-		return "", fmt.Errorf("workspace source %q is not an allowed workspace path: home directory could not be determined", source)
+		return "", fmt.Errorf("%s source %q is not an allowed %s path: home directory could not be determined", kind, source, kind)
 	}
 	cleanHome, err := resolveForValidation(home)
 	if err != nil {
-		return "", fmt.Errorf("workspace source %q is not an allowed workspace path: home directory could not be resolved", source)
+		return "", fmt.Errorf("%s source %q is not an allowed %s path: home directory could not be resolved", kind, source, kind)
 	}
 
 	if pathEqualFailSafe(resolvedSource, cleanHome) {
-		return "", fmt.Errorf("workspace source %q is not an allowed workspace path", source)
+		return "", fmt.Errorf("%s source %q is not an allowed %s path", kind, source, kind)
+	}
+
+	// A source that is a strict ANCESTOR of $HOME -- not just equal to it --
+	// would still admit the user's entire home directory if accepted (every
+	// file under $HOME lives under such a source too): refuse that the same
+	// way, exact spelling and case-fold. pathIsOrUnderCaseFold's arguments
+	// are swapped from their usual (source, ancestor) order here, since the
+	// question is whether cleanHome sits under resolvedSource, the reverse
+	// of every other call to it in this file.
+	if strings.HasPrefix(cleanHome, resolvedSource+string(filepath.Separator)) || pathIsOrUnderCaseFold(cleanHome, resolvedSource) {
+		return "", fmt.Errorf("%s source %q is not an allowed %s path", kind, source, kind)
 	}
 
 	// ~/.scion (bare or any descendant) is a universal floor, the same as
 	// '/' and $HOME above, not something a caller-supplied root can satisfy
 	// by containment: a source under ~/.scion must be in the narrow, named
-	// allow list (see isScionHomeAllowedSubtree) regardless of whether a
-	// root was supplied at all, and regardless of whether that root happens
-	// to also resolve into ~/.scion (a project whose own repo is, unusually,
-	// a git work tree rooted at ~/.scion -- a real dotfiles pattern -- or a
-	// registered worktree of that repo that itself resolves to ~/.scion).
-	// A source outside ~/.scion entirely is unaffected by this check either
+	// allow list (allowedScionHomeSubtree) regardless of whether a root was
+	// supplied at all, and regardless of whether that root happens to also
+	// resolve into ~/.scion (a project whose own repo is, unusually, a git
+	// work tree rooted at ~/.scion -- a real dotfiles pattern -- or a
+	// registered worktree of that repo that itself resolves to ~/.scion). A
+	// source outside ~/.scion entirely is unaffected by this check either
 	// way.
 	//
 	// Resolution failure here fails closed, the same as cleanHome above: a
@@ -142,22 +199,31 @@ func ValidateWorkspaceSource(source string, roots ...string) (string, error) {
 	// silently wave through.
 	scionHomeDir, err := resolveForValidation(filepath.Join(cleanHome, ".scion"))
 	if err != nil {
-		return "", fmt.Errorf("workspace source %q is not an allowed workspace path: ~/.scion could not be resolved", source)
+		return "", fmt.Errorf("%s source %q is not an allowed %s path: ~/.scion could not be resolved", kind, source, kind)
 	}
+
+	// A source that is a strict ancestor of ~/.scion is refused the same way
+	// as an ancestor of $HOME above, and for the same reason: every path
+	// under ~/.scion -- including everything the allow list below protects
+	// -- would also sit under such a source.
+	if strings.HasPrefix(scionHomeDir, resolvedSource+string(filepath.Separator)) || pathIsOrUnderCaseFold(scionHomeDir, resolvedSource) {
+		return "", fmt.Errorf("%s source %q is not an allowed %s path", kind, source, kind)
+	}
+
 	if resolvedSource == scionHomeDir || strings.HasPrefix(resolvedSource, scionHomeDir+string(filepath.Separator)) {
 		// Exact, case-preserving match: component names can be trusted, so
 		// the named allow list decides.
-		if !isScionHomeAllowedSubtree(resolvedSource, scionHomeDir) {
-			return "", fmt.Errorf("workspace source %q is not an allowed workspace path", source)
+		if !allowedScionHomeSubtree(resolvedSource, scionHomeDir) {
+			return "", fmt.Errorf("%s source %q is not an allowed %s path", kind, source, kind)
 		}
 	} else if pathIsOrUnderCaseFold(resolvedSource, scionHomeDir) {
 		// Same file per a case-insensitive filesystem (macOS, Windows), but
 		// not a byte-for-byte match: filepath.Rel-based component matching
-		// in isScionHomeAllowedSubtree cannot be trusted to name the right
+		// in allowedScionHomeSubtree cannot be trusted to name the right
 		// components here, so this fails closed outright rather than
 		// attempting the allow list against a spelling it wasn't computed
 		// for. A source outside ~/.scion by any spelling is unaffected.
-		return "", fmt.Errorf("workspace source %q is not an allowed workspace path", source)
+		return "", fmt.Errorf("%s source %q is not an allowed %s path", kind, source, kind)
 	}
 
 	var usableRoots []string
@@ -169,13 +235,13 @@ func ValidateWorkspaceSource(source string, roots ...string) (string, error) {
 			// Same reasoning as the source check above: a relative root
 			// can never be meaningfully compared for containment, and a
 			// caller should never be supplying one. Refuse the whole call.
-			return "", fmt.Errorf("workspace source %q is outside the permitted workspace root", source)
+			return "", fmt.Errorf("%s source %q is outside the permitted %s root", kind, source, kind)
 		}
 		resolvedRoot, err := resolveForValidation(root)
 		if err != nil {
-			return "", fmt.Errorf("workspace source %q is outside the permitted workspace root", source)
+			return "", fmt.Errorf("%s source %q is outside the permitted %s root", kind, source, kind)
 		}
-		if resolvedRoot == string(filepath.Separator) || pathEqualFailSafe(resolvedRoot, cleanHome) || pathEqualFailSafe(resolvedRoot, scionHomeDir) {
+		if isFilesystemRoot(resolvedRoot) || pathEqualFailSafe(resolvedRoot, cleanHome) || pathEqualFailSafe(resolvedRoot, scionHomeDir) {
 			// The caller supplied a root, but it is itself one of the paths
 			// this function refuses as a source ('/', $HOME, or ~/.scion
 			// itself — the last of these reachable when the project
@@ -187,7 +253,7 @@ func ValidateWorkspaceSource(source string, roots ...string) (string, error) {
 			// ~/.scion floor above would also catch most sources this
 			// would otherwise wave through, but a root supplied on its own
 			// -- with no source-side overlap to catch -- still needs this.)
-			return "", fmt.Errorf("workspace source %q is outside the permitted workspace root", source)
+			return "", fmt.Errorf("%s source %q is outside the permitted %s root", kind, source, kind)
 		}
 		usableRoots = append(usableRoots, resolvedRoot)
 	}
@@ -198,7 +264,7 @@ func ValidateWorkspaceSource(source string, roots ...string) (string, error) {
 				return resolvedSource, nil
 			}
 		}
-		return "", fmt.Errorf("workspace source %q is outside the permitted workspace root", source)
+		return "", fmt.Errorf("%s source %q is outside the permitted %s root", kind, source, kind)
 	}
 
 	// No usable root available: the universal '/', home-directory, and
@@ -355,6 +421,99 @@ func isAllowedProjectConfigsSubtree(rel string) bool {
 	return false
 }
 
+// isScionHomeAllowedHomeSubtree is isScionHomeAllowedSubtree's counterpart
+// for ValidateAgentHomeSource: it reports whether resolvedSource — already
+// confirmed to be an exact, case-preserving match for scionHomeDir itself or
+// a descendant of it — falls under one of the three real shapes
+// config.GetAgentHomePath produces for an agent's own home directory under
+// ~/.scion, for each of the three project layouts that keep an agent's home
+// there:
+//   - ~/.scion/agents/<agent-id>/home, or anything under it — the global
+//     project's own agent homes (GetAgentHomePath's fallback branch, called
+//     with ~/.scion itself as projectDir).
+//   - ~/.scion/projects/<slug>/.scion/agents/<agent-id>/home, or anything
+//     under it — a hub-managed project's agent homes.
+//   - ~/.scion/project-configs/<dir>/.scion/agents/<agent-id>/home, or
+//     anything under it — an externalized git project's agent homes (see
+//     GetGitProjectExternalAgentsDir).
+//
+// None of these name a "workspace" leaf, and nothing isScionHomeAllowedSubtree
+// admits names a "home" leaf: the two allow lists are disjoint by
+// construction, not merely by convention, so a workspace can never pass as a
+// home or vice versa under ~/.scion.
+func isScionHomeAllowedHomeSubtree(resolvedSource, scionHomeDir string) bool {
+	rel, err := filepath.Rel(scionHomeDir, resolvedSource)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		// resolvedSource == scionHomeDir itself: never a home on its own.
+		return false
+	}
+	parts := strings.SplitN(rel, string(filepath.Separator), 2)
+	switch parts[0] {
+	case "agents":
+		// ~/.scion/agents/<agent-id>/home, or anything under it: the global
+		// project's own agent home, with nothing further to distinguish
+		// within it.
+		return len(parts) > 1 && isAgentHomeLeaf(parts[1])
+	case projectkeys.ProjectsDir:
+		return len(parts) > 1 && parts[1] != "" && isAllowedProjectHomeSubtree(parts[1])
+	case projectkeys.ProjectConfigsDir:
+		return len(parts) > 1 && parts[1] != "" && isAllowedProjectConfigsHomeSubtree(parts[1])
+	default:
+		return false
+	}
+}
+
+// isAgentHomeLeaf reports whether rel — the path under
+// ~/.scion/agents/, i.e. "<agent-id>" or "<agent-id>/..." — names a
+// particular agent's "home" leaf, or anything under it.
+func isAgentHomeLeaf(rel string) bool {
+	agentParts := strings.SplitN(rel, string(filepath.Separator), 2)
+	return len(agentParts) == 2 && (agentParts[1] == "home" || strings.HasPrefix(agentParts[1], "home"+string(filepath.Separator)))
+}
+
+// isAllowedProjectHomeSubtree is isAllowedProjectSubtree's counterpart for
+// agent homes: it reports whether rel — the path under
+// ~/.scion/projects/, i.e. "<slug>" or "<slug>/..." — names
+// "<slug>/.scion/agents/<agent-id>/home", or anything under it. Unlike
+// isAllowedProjectSubtree, the bare "<slug>" directory is NOT admitted here:
+// it is a hub-managed project's own directory, not any single agent's home,
+// so there is no equivalent to isAllowedProjectSubtree's bare-"<slug>" shape
+// to admit at this leaf.
+func isAllowedProjectHomeSubtree(rel string) bool {
+	slugParts := strings.SplitN(rel, string(filepath.Separator), 2)
+	if len(slugParts) == 1 || slugParts[1] == "" {
+		return false // "<slug>" itself: not a home, refused.
+	}
+	remainder := slugParts[1]
+	agentsPrefix := filepath.Join(".scion", "agents") + string(filepath.Separator)
+	if after, ok := strings.CutPrefix(remainder, agentsPrefix); ok {
+		return isAgentHomeLeaf(after)
+	}
+	return false
+}
+
+// isAllowedProjectConfigsHomeSubtree is isAllowedProjectConfigsSubtree's
+// counterpart for agent homes: it reports whether rel — the path under
+// ~/.scion/project-configs/, i.e. "<dir>" or "<dir>/..." — names
+// "<dir>/.scion/agents/<agent-id>/home", or anything under it, mirroring
+// GetGitProjectExternalAgentsDir's layout for an externalized git project's
+// agent homes.
+func isAllowedProjectConfigsHomeSubtree(rel string) bool {
+	dirParts := strings.SplitN(rel, string(filepath.Separator), 2)
+	if len(dirParts) == 1 || dirParts[1] == "" {
+		return false // "<dir>" itself: not a home, refused.
+	}
+	remainder := dirParts[1]
+	agentsPrefix := filepath.Join(".scion", "agents") + string(filepath.Separator)
+	if after, ok := strings.CutPrefix(remainder, agentsPrefix); ok {
+		return isAgentHomeLeaf(after)
+	}
+	return false
+}
+
 // caseInsensitiveFilesystem reports whether the current platform's default
 // filesystem is case-insensitive (macOS's APFS/HFS+, Windows' NTFS/FAT).
 // This is a coarse, platform-level check by spelling only, not a per-volume,
@@ -497,4 +656,13 @@ func resolveForValidation(path string) (string, error) {
 			return "", dirErr
 		}
 	}
+}
+
+// isFilesystemRoot reports whether p, already resolved and cleaned, names
+// the top of its filesystem: filepath.Dir of a root returns the root itself
+// on every OS this project supports, including a Windows volume root such as
+// `C:\`, which a literal comparison against the single-separator string "/"
+// (true only for the Unix root) would miss entirely.
+func isFilesystemRoot(p string) bool {
+	return filepath.Dir(p) == p
 }

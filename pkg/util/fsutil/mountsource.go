@@ -24,24 +24,24 @@ import (
 	"strings"
 )
 
-// mountInfoPath is the file CheckMountSource reads. Not exposed for
-// injection; tests instead call checkMountSourceReader directly with
-// fabricated content.
+// mountInfoPath is the file CheckMountSource reads. Not a variable; tests
+// instead call checkMountSourceReader directly with fabricated content.
 const mountInfoPath = "/proc/self/mountinfo"
 
 // CheckMountSource inspects the current process's mount table and, if root
 // is itself a mount point, refuses when the mount's bind source (the path
-// within its own filesystem that was exposed at root — mountinfo field 4)
-// names a critical system directory.
+// within its own filesystem that root's mount makes visible — mountinfo
+// field 4) names a critical system directory.
 //
-// This exists for container-side callers where a bind mount can expose a
-// subdirectory of the host filesystem — e.g. the host's /usr bind-mounted at
-// the container's /workspace — at a path whose own name gives no indication
-// of that (CheckRoot's critical-path-by-name and content-heuristic checks
-// both operate on `root`'s own path, not on where its content actually comes
-// from). A bind source of "/" is deliberately NOT refused here: dedicated
-// volumes and disks legitimately report "/" as their source, and the
-// whole-root case is already caught by CheckRoot's content heuristic.
+// This exists for container-side callers where a bind mount can make a
+// subdirectory of the host filesystem appear — e.g. the host's /usr
+// bind-mounted at the container's /workspace — at a path whose own name
+// gives no indication of that (CheckRoot's critical-path-by-name and
+// content-heuristic checks both operate on `root`'s own path, not on where
+// its content actually comes from). A bind source of "/" is deliberately
+// NOT refused here: dedicated volumes and disks legitimately report "/" as
+// their source, and the whole-root case is already caught by CheckRoot's
+// content heuristic.
 //
 // If root is not a mount point, or the mount table is missing entirely
 // (e.g. not running on Linux, or no /proc), this is a no-op (nil) — it is

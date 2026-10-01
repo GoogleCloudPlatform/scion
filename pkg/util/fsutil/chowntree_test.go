@@ -54,8 +54,8 @@ func TestChownTree_RefusesUnsafeRootWithoutTouchingAnything(t *testing.T) {
 
 	var calls []chownCall
 	err := chownTree(context.Background(), dir, 1000, 1000, nil, recordingChown(&calls, nil), statDeviceOf)
-	if !errors.Is(err, ErrHostRootLookalike) {
-		t.Fatalf("chownTree(%q) = %v, want ErrHostRootLookalike", dir, err)
+	if !errors.Is(err, ErrFilesystemRootLookalike) {
+		t.Fatalf("chownTree(%q) = %v, want ErrFilesystemRootLookalike", dir, err)
 	}
 	if len(calls) != 0 {
 		t.Fatalf("chown called %d times despite refusal: %+v", len(calls), calls)

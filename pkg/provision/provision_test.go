@@ -796,11 +796,11 @@ func TestChownProjectTree_CtxCancellation_StopsTheWalk(t *testing.T) {
 // wiring, and never invoke the recursive chown on anything other than a
 // t.TempDir() tree.
 
-// TestChownProjectTree_RefusesHostRootLookalike proves the guard is actually
+// TestChownProjectTree_RefusesFilesystemRootLookalike proves the guard is actually
 // wired into chownProjectTree (not just defined and unused): given a
 // workspace root laid out like a filesystem root, no chown must be
 // attempted at all.
-func TestChownProjectTree_RefusesHostRootLookalike(t *testing.T) {
+func TestChownProjectTree_RefusesFilesystemRootLookalike(t *testing.T) {
 	dir := t.TempDir()
 	mustMkdirAll(t, filepath.Join(dir, "etc"))
 	mustWriteFile(t, filepath.Join(dir, "etc", "passwd"), "root:x:0:0:root:/root:/bin/sh\n")
@@ -814,8 +814,8 @@ func TestChownProjectTree_RefusesHostRootLookalike(t *testing.T) {
 	beforeStat := before.Sys().(*syscall.Stat_t)
 
 	err = chownProjectTree(context.Background(), dir, dir, os.Getuid()+1, os.Getgid()+1)
-	if !errors.Is(err, fsutil.ErrHostRootLookalike) {
-		t.Fatalf("chownProjectTree(%q) = %v, want it to wrap ErrHostRootLookalike", dir, err)
+	if !errors.Is(err, fsutil.ErrFilesystemRootLookalike) {
+		t.Fatalf("chownProjectTree(%q) = %v, want it to wrap ErrFilesystemRootLookalike", dir, err)
 	}
 
 	after, err := os.Lstat(filepath.Join(dir, "etc", "passwd"))
