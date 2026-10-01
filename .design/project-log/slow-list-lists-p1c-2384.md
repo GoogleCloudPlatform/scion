@@ -162,3 +162,34 @@ Full suite (`npx vitest run --no-file-parallelism`), run after each of the
 two rebases: 3104/3106 then 3106/3107 passing; the one/two failures both
 times are the same pre-existing `agent-create-projects.test.ts` flake,
 unrelated to this branch (confirmed in the original report).
+
+## Round 2 review addendum
+
+Review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1c-rev-2.md`
+(REQUEST CHANGES: 0 critical, 3 required (B1', B2', B3'), 5 non-blocking
+(N1'-N5')). All 8 findings fixed in one commit, rebased onto P1a's latest
+head (`4cdb0b54`); final SHA `11b6db22`. Full finding-to-fix-to-test mapping
+in the dev report addendum: `gs://scion-xproject-exchange/slow-list/reports/lists-p1c-dev.md`.
+
+Summary:
+- **B1':** `setViewState` resets `pageIndex` only in the small state, so a
+  label keystroke while paged no longer desyncs the pager/chip from the
+  rows actually shown.
+- **B2':** the paged-state chip rule now matches design §6.2 exactly in the
+  three reproduced cases — a split on-page/off-page K-range predicate (page
+  0's "absorbs anything newer" exception only applies off-page, and only to
+  the *top*, not the bottom), a state-known non-member outside the
+  committed label is ignored (no chip), and a newly created off-page member
+  only chips if it could land on the page being viewed.
+- **B3':** added the always-paged dir-flip and list<->grid x3 (x6 toggles)
+  tests round 1 asked for; retitled the small-after-promotion test so it no
+  longer implies it covers the always-paged case.
+- **N1'-N5':** window navigation now supersedes a stale pending page-level
+  load; the pager's row range tracks the real offset through short pages;
+  the fit-path label-400 case has a test; `display` is memoized; a loading
+  indicator replaces the empty-filter message during the paged->grid gap.
+
+Full suite (`npx vitest run --no-file-parallelism`) after the rebase: all
+109 files, 3126 tests passed — the previously-flaky
+`agent-create-projects.test.ts` (unrelated to this branch) did not even
+reproduce this run.
