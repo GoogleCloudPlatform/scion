@@ -372,12 +372,11 @@ func TestAgentGCPToken_NoServiceAccountScopeDenied(t *testing.T) {
 // against gcp_service_account.use through the agent's own credential still
 // denies, because the delegating owner does not itself hold
 // gcp_service_account.use. The mint endpoints are unaffected by that: they
-// no longer decide this permission, so they still succeed purely on the live
-// record recheck and the exact token-scope
-// compare. This is the rule enforced: an agent's own credential can name
-// the exact assigned service account; composing it with proof that the
-// delegating authority currently holds authority to assign that account
-// is a separate change.
+// do not decide this permission, so they succeed purely on the live record
+// recheck and the exact token-scope compare. This is the rule enforced: an
+// agent's own credential can name the exact assigned service account;
+// composing it with proof that the delegating authority currently holds
+// authority to assign that account is a separate change.
 func TestGCPServiceAccountUse_MintSucceedsWhilePermissionDecisionDenies(t *testing.T) {
 	f := newGCPMintFixture(t, "parent-authority-pending")
 	setBackfillCompleted(t, f.Store)
