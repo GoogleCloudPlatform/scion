@@ -146,6 +146,14 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 		if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, true); ok {
 			return mapped
 		}
+		if isSettingsExcludedEnv(s) {
+			// SCION_AUTO_EXPOSE_PORTS and SCION_AUTO_EXPOSE_PORTS_LIST are
+			// sciontool-only (see settings_v1.go's versionedEnvKeyMapper,
+			// which drops them for the same reason). The legacy Settings
+			// struct has no colliding field today, but dropping them here
+			// too keeps both mappers' exclusions in sync.
+			return ""
+		}
 		if isRemovedLegacyEnv(s) {
 			// SCION_HUB_GROVE_ID is no longer read. Without this check
 			// it would otherwise fall through to the generic "hub_" mapping
