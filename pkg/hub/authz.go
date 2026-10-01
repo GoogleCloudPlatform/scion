@@ -428,8 +428,10 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// rejected claim. Decide's single audit exit records it.
 	//
 	// A nil Principal.Identity denies first, with reason "missing principal";
-	// every other case below assumes at least an identity was supplied, even
-	// one of an unrecognized concrete type.
+	// a typed-nil concrete identity (see isNilIdentity) takes the same path,
+	// since it carries no usable principal either. Every other case below
+	// assumes at least a non-nil identity was supplied, even one of an
+	// unrecognized concrete type.
 	//
 	// A request with an omitted Principal.Kind/Credential.Kind/Principal.ID
 	// derives it from the identity via the adapter below; an omitted value
@@ -455,7 +457,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// recognized one by supplied context.
 	var denyReason string
 	switch {
-	case request.Principal.Identity == nil:
+	case isNilIdentity(request.Principal.Identity):
 		denyReason = "missing principal"
 	case request.Principal.Kind != "" && request.Principal.Kind != derivedPrincipal.Kind:
 		denyReason = "principal kind does not match identity"
@@ -1720,9 +1722,12 @@ func brokerOnBehalfOfAuthorizes(ctx context.Context, principal PrincipalContext,
 // an unrecognized concrete type, and a package-hub test fake that has not
 // opted into explicitIdentityClassification. It leaves Kind empty, which
 // Decide's fail-closed classification check denies rather than letting it
-// fall through to any implicit default.
+// fall through to any implicit default. A typed-nil concrete identity (see
+// isNilIdentity) takes the same empty-context path as a nil interface: this
+// check runs before identity.ID() or the type switch below touch it, since a
+// nil concrete pointer panics on either.
 func principalContextForIdentity(identity Identity) PrincipalContext {
-	if identity == nil {
+	if isNilIdentity(identity) {
 		return PrincipalContext{}
 	}
 	principal := PrincipalContext{ID: identity.ID(), Identity: identity}
@@ -1761,28 +1766,25 @@ func principalContextForIdentity(identity Identity) PrincipalContext {
 // into explicitIdentityClassification: it returns an empty Kind rather than
 // CredentialKindInteractive, so Decide's fail-closed classification check
 // denies it instead of treating an unknown identity as an ordinary
-// interactive session.
+// interactive session. A typed-nil concrete identity (see isNilIdentity)
+// takes this same empty-context path, checked before the type switch below
+// touches it; see the *ScopedUserIdentity case below for the one exception.
 func credentialContextForIdentity(identity Identity) CredentialContext {
-	if identity == nil {
+	// A typed-nil *ScopedUserIdentity returns Kind == CredentialKindUAT with a
+	// zero Ceiling, not the empty context the other typed-nil types get. A
+	// caller may supply this CredentialContext independently of
+	// Principal.Identity, so Decide's missing-principal check does not cover
+	// it; an empty Kind would skip Decide's
+	// suppliedCredentialCompatible/ceiling check, while a UAT Kind with a
+	// zero Ceiling denies every permission (ptone/scion#2143).
+	if v, ok := identity.(*ScopedUserIdentity); ok && v == nil {
+		return CredentialContext{Kind: CredentialKindUAT}
+	}
+	if isNilIdentity(identity) {
 		return CredentialContext{}
 	}
 	switch v := identity.(type) {
 	case *ScopedUserIdentity:
-		if v == nil {
-			// A typed-nil *ScopedUserIdentity satisfies this type assertion
-			// (ok == true, v == nil) even though identity == nil above was
-			// false, so this is reachable only through that Go
-			// interface/pointer distinction, never through a plain nil
-			// Identity. Keep Kind == CredentialKindUAT rather than falling
-			// through to the zero CredentialContext: callers key the UAT
-			// ceiling restriction (Decide step 7a) on Kind ==
-			// CredentialKindUAT, and a zero Kind reads as "no credential
-			// restriction," which would authorize the request exactly as an
-			// unrestricted principal. The zero-value Ceiling denies every
-			// permission (FrozenPermissionCeiling.Allows), so this stays
-			// fail-closed instead.
-			return CredentialContext{Kind: CredentialKindUAT}
-		}
 		cc := CredentialContext{Kind: CredentialKindUAT, ID: v.CredentialID(), ProjectID: v.ScopedProjectID(), Scopes: v.ScopedScopes(), Ceiling: v.Ceiling()}
 		// Carry the descriptive decoration, if ValidateToken attached one,
 		// through to the credential context. This is the single copy point;
