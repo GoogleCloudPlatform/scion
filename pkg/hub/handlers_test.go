@@ -85,10 +85,15 @@ func testServer(t *testing.T) (*Server, store.Store) {
 // every Server: three chatLinkService.cleanupLoop (telegram/discord/teams),
 // NonceCache.cleanup, and PreviewService.cleanupNonces. srv.Shutdown() never
 // closes these when srv.httpServer is nil, i.e. without Start(), which unit
-// tests never call. Each Close/Stop is idempotent, and these calls run
-// sequentially, so NonceCache.Stop's plain select/close (not sync.Once) is
-// safe here. Refs ptone/scion#2418 (possible contributor; not proven).
+// tests never call. Also cancels srv.ctxCancel, which Shutdown skips for the
+// same reason, in case any handler-triggered work is keyed on srv.ctx. Each
+// Close/Stop is idempotent, and these calls run sequentially, so
+// NonceCache.Stop's plain select/close (not sync.Once) is safe here. Refs
+// ptone/scion#2418 (possible contributor; not proven).
 func closeTestServerBackground(srv *Server) {
+	if srv.ctxCancel != nil {
+		srv.ctxCancel()
+	}
 	if srv.telegramLinkService != nil {
 		srv.telegramLinkService.Close()
 	}
