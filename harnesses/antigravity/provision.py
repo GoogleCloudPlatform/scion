@@ -72,8 +72,8 @@ def _resolve_model(ctx: scion_harness.ProvisionContext) -> str:
 
     Precedence:
       1. SCION_MODEL (the broker-resolved value), via
-         scion_harness.resolve_model(ctx) — already normalized through this
-         harness's config.yaml model_aliases.
+         scion_harness.resolve_model(ctx) — normalized here, at provision
+         time, through this harness's config.yaml model_aliases.
       2. harness_config.model, normalized through the same alias table via
          scion_harness.normalize_model_alias(), rather than passed raw. A
          tier such as "medium" set directly on harness_config (e.g. by an
@@ -599,36 +599,37 @@ def _prestage_onboarding(
     # onboardingComplete lives here (not in cache/onboarding.json) per
     # observed post-login AGY config state.
     settings_path = os.path.join(cli_dir, "settings.json")
-    if not os.path.isfile(settings_path):
-        settings: dict[str, Any] = {
-            "colorScheme": "dark",
-            "onboardingComplete": True,
-            "trustedWorkspaces": [workspace],
-        }
-        if model:
-            settings["model"] = model
-        if auth_method == "api-key":
-            settings["modelProvider"] = "gemini"
-        scion_harness.atomic_write_json(settings_path, settings)
-    else:
-        # settings.json already exists — refresh the model key so
-        # re-provision doesn't leave it stale, and ensure modelProvider is
-        # set for api-key auth, while preserving every other key.
+    settings: dict[str, Any] = {
+        "colorScheme": "dark",
+        "onboardingComplete": True,
+        "trustedWorkspaces": [workspace],
+    }
+    # changed starts True for a brand-new file so it's always written, even
+    # when model is empty and auth_method isn't api-key.
+    changed = True
+    if os.path.isfile(settings_path):
         try:
-            existing = scion_harness.load_json(settings_path) or {}
+            loaded = scion_harness.load_json(settings_path)
         except (OSError, json.JSONDecodeError):
-            existing = {}
-        if not isinstance(existing, dict):
-            existing = {}
-        changed = False
-        if model and existing.get("model") != model:
-            existing["model"] = model
-            changed = True
-        if auth_method == "api-key" and existing.get("modelProvider") != "gemini":
-            existing["modelProvider"] = "gemini"
-            changed = True
-        if changed:
-            scion_harness.atomic_write_json(settings_path, existing)
+            loaded = None
+        if isinstance(loaded, dict):
+            # Use the existing file as the base so every other key (and any
+            # key this function doesn't know about) is preserved. A
+            # malformed or unexpected (non-dict) file falls back to the
+            # fresh defaults above instead of {} — losing
+            # onboardingComplete/trustedWorkspaces here would mean a
+            # headless agent stalls on AGY's interactive onboarding/trust
+            # prompts, which is exactly what those keys exist to skip.
+            settings = loaded
+            changed = False
+    if model and settings.get("model") != model:
+        settings["model"] = model
+        changed = True
+    if auth_method == "api-key" and settings.get("modelProvider") != "gemini":
+        settings["modelProvider"] = "gemini"
+        changed = True
+    if changed:
+        scion_harness.atomic_write_json(settings_path, settings)
 
     # cache/onboarding.json — marks onboarding complete.
     # Always set enterpriseOnboardingComplete=true regardless of auth mode:

@@ -221,6 +221,52 @@ class ModelResolutionTest(unittest.TestCase):
                 model = provision._resolve_model(ctx)
         self.assertEqual(model, provision.FLASH_MODEL)
 
+    # --- Precedence ordering (review round 1, R1) -----------------------
+    # Each test below pins one step of the precedence chain by setting both
+    # the winning source and the next lower one, so a mutant that swaps two
+    # steps' check order fails here (verified by hand: swapping the
+    # SCION_MODEL/harness_config.model checks in _resolve_model breaks
+    # test_scion_model_wins_over_harness_config_model and
+    # test_harness_config_model_wins_over_agy_model below).
+
+    def test_scion_model_wins_over_harness_config_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp, model="large")
+            with env_vars(SCION_MODEL="medium", AGY_MODEL=None):
+                model = provision._resolve_model(ctx)
+        self.assertEqual(model, "Gemini 3.8 Flash (Medium)")
+
+    def test_harness_config_model_wins_over_agy_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp, model="large")
+            with env_vars(SCION_MODEL=None, AGY_MODEL="agy-operator-model"):
+                model = provision._resolve_model(ctx)
+        self.assertEqual(model, "Gemini 3.1 Pro (Low)")
+
+    def test_agy_model_wins_over_flash_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp)
+            with env_vars(SCION_MODEL=None, AGY_MODEL="agy-operator-model"):
+                model = provision._resolve_model(ctx)
+        self.assertEqual(model, "agy-operator-model")
+        self.assertNotEqual(model, provision.FLASH_MODEL)
+
+    def test_blank_scion_model_falls_through_to_harness_config_model(self) -> None:
+        # Whitespace-only SCION_MODEL must be treated as unset, not as a
+        # (non-matching) concrete model that would block the fallback chain.
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp, model="small")
+            with env_vars(SCION_MODEL="  ", AGY_MODEL=None):
+                model = provision._resolve_model(ctx)
+        self.assertEqual(model, "Gemini 3.1 Flash Lite")
+
+    def test_harness_config_model_concrete_id_case_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp, model="Gemini-Custom-Preview")
+            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+                model = provision._resolve_model(ctx)
+        self.assertEqual(model, "Gemini-Custom-Preview")
+
 
 class SettingsJsonReprovisionTest(unittest.TestCase):
     """Covers ptone/scion#2453: _prestage_onboarding used to write the model
@@ -278,6 +324,37 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
 
         self.assertEqual(settings["model"], "new-model")
         self.assertEqual(settings["modelProvider"], "gemini")
+
+    def test_malformed_existing_settings_falls_back_to_fresh_defaults(self) -> None:
+        # Review round 1, R2: a malformed (or unexpectedly non-dict) existing
+        # settings.json must not be rewritten as bare {"model": ...} -- that
+        # drops onboardingComplete/trustedWorkspaces, which this function
+        # exists to pre-stage so a headless agent skips AGY's interactive
+        # onboarding/trust prompts. It should fall back to the same fresh
+        # defaults the first-creation path writes, same as if the file never
+        # existed, with model (and modelProvider for api-key) applied on top.
+        with tempfile.TemporaryDirectory() as tmp:
+            cli_dir = os.path.join(tmp, ".gemini", "antigravity-cli")
+            os.makedirs(cli_dir, exist_ok=True)
+            settings_path = os.path.join(cli_dir, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as f:
+                f.write("{bad json")
+
+            workspace = os.path.join(tmp, "workspace")
+            provision._prestage_onboarding(
+                tmp,
+                workspace=workspace,
+                model="Gemini 3.8 Flash (Medium)",
+                auth_method="api-key",
+            )
+
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+
+        self.assertEqual(settings["model"], "Gemini 3.8 Flash (Medium)")
+        self.assertEqual(settings["modelProvider"], "gemini")
+        self.assertIs(settings["onboardingComplete"], True)
+        self.assertEqual(settings["trustedWorkspaces"], [workspace])
 
 
 if __name__ == "__main__":
