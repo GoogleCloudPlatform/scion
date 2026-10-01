@@ -76,3 +76,59 @@ behavior were tested because those facts are unavailable at this layer.
 - Handler-specific asynchronous loss, filtering, circuit-open behavior, flush
   failure, and backend retention remain properties of the existing logging
   topology and are not strengthened by this sink.
+
+## Review round 1 fixes
+
+Resolved the required cross-handler schema finding and explicitly addressed
+the optional source-location finding from the review of
+`7cf04310333361fe6357dcd3a0a874ce9e06eebe`.
+
+### Handler-portable nested schema
+
+The sink no longer passes request, identity, credential, resource, payload, or
+`impact_counts` structs through `slog.Any`. Every nested object is constructed
+as an explicit `slog.GroupValue` using the exact rendered v1 field names and
+scalar types. Optional leaves are appended only when the renderer would include
+them. Credential labels are a string-valued group, `impact_counts` is a
+uint-valued group, and `changed_fields` uses the standard `[]string` list value
+that the configured OTel bridge converts to an OTel string slice. The
+validation-only `ResourceRef.Scope` is never included in the resource group.
+
+The sink still creates one immutable render snapshot and validates it once.
+All slog attributes are derived from that owned snapshot; caller aliases are
+not read again. Unsupported future payload value types fail closed rather than
+falling back to a struct-valued `KindAny` representation.
+
+New regressions inspect the raw `slog.Record` and require every nested v1
+object to be `KindGroup`, with the only `KindAny` leaf restricted to the
+supported `[]string` list. A second regression sends a complete event through
+the repository's real `logging.NewOTelHandler` path and reconstructs the OTel
+attribute maps/slices. Both raw and OTel objects are exactly JSON-equivalent to
+`Render`, retain scalar types and nesting, and exclude `Scope`.
+
+### Source PC
+
+Direct handler dispatch remains necessary to surface synchronous
+`Handler.Handle` errors. The sink now captures the caller of `SlogSink.Emit`
+with `runtime.Callers` and supplies that PC to `slog.NewRecord`. This makes the
+event's integration call site available to existing source-aware GCP handlers,
+matching normal logger behavior instead of silently omitting source metadata.
+A focused test resolves the PC and pins the caller file/function rather than a
+sink-internal frame. OTel's configured handler currently drops PC unless its
+own source option is enabled; that existing handler policy is unchanged.
+
+### Verification after fixes
+
+At implementation commit `4c9ce00636dc078bfbbee7d9b05fc50870b25c67`:
+
+- `go test -count=1 -p 2 ./pkg/hub/auditevent` — PASS.
+- `go test -count=1 -race -p 2 ./pkg/hub/auditevent` — PASS.
+- `go test -count=1 -p 2 ./pkg/util/logging -run 'Test(NewOTelHandler|SetupWithOTel)'` — PASS.
+- `go vet -p 2 ./pkg/hub/auditevent` — PASS.
+- `GOGC=40 golangci-lint run --new-from-rev=7cf04310333361fe6357dcd3a0a874ce9e06eebe --concurrency=1 ./pkg/hub/auditevent/...` — PASS (`0 issues`).
+- `test -z "$(gofmt -l pkg/hub/auditevent/*.go)"` — PASS.
+- `git diff --check` — PASS.
+
+Local `make ci` and `make ci-full` remain intentionally unrun under the
+campaign broker workload rule. The approved scope/project-ID catalog matrix
+is unchanged, and governance integration remains with the retained author.
