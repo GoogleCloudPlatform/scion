@@ -888,10 +888,21 @@ type reincarnationRequesterContext struct {
 	CreatorResolved bool
 }
 
-// reincarnationRequesterResolveTimeout bounds buildReincarnationRequesterContext's
-// store calls (design Amendment A26.14). A package var, not a const, so a
-// test can shorten it rather than waiting out the real timeout.
-var reincarnationRequesterResolveTimeout = 5 * time.Second
+// defaultReincarnationRequesterResolveTimeout is the production value for
+// Server.requesterResolveTimeout() (design Amendment A26.14/A26.18).
+const defaultReincarnationRequesterResolveTimeout = 5 * time.Second
+
+// requesterResolveTimeout returns the timeout bounding
+// buildReincarnationRequesterContext's store calls. The zero value of the
+// Server field means defaultReincarnationRequesterResolveTimeout; a test
+// sets the field on its own Server instance to shorten it, with no shared
+// mutable state across tests (Amendment A26.18).
+func (s *Server) requesterResolveTimeout() time.Duration {
+	if s.reincarnationRequesterResolveTimeout == 0 {
+		return defaultReincarnationRequesterResolveTimeout
+	}
+	return s.reincarnationRequesterResolveTimeout
+}
 
 // buildReincarnationRequesterContext resolves the requester and, for a
 // self-migration, the creator hint, before the preamble is built (Amendments
@@ -917,7 +928,7 @@ func (s *Server) buildReincarnationRequesterContext(ctx context.Context, agent *
 	// On timeout, resolveReincarnationRequesterName's existing error path
 	// (a non-ErrNotFound error) yields the fallback and logs a WARN, the
 	// same as any other store error.
-	resolveCtx, cancel := context.WithTimeout(ctx, reincarnationRequesterResolveTimeout)
+	resolveCtx, cancel := context.WithTimeout(ctx, s.requesterResolveTimeout())
 	defer cancel()
 
 	if requestedBy != "" && requestedBy == agent.ID {
