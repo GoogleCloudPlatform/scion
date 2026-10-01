@@ -3,7 +3,7 @@ title: Experiments
 description: How hub-wide experiments (feature flags) work, for admins who toggle them and for developers who launch, change, and retire one.
 ---
 
-An **experiment** is an unfinished or risky feature that ships in the binary, off or on per hub, and controlled by admins from **Admin → Server Config → Experiments**. Each experiment is declared once in code with a name, a description, a default, and the layers it gates (the web UI, the hub server, or both). Admins can enable or disable any registered experiment for every user of the hub, taking effect on the next page load, from that tab.
+An **experiment** is an unfinished or risky feature that ships in the binary, is off or on per hub, and is controlled by admins from **Admin → Server Config → Experiments**. Each experiment is declared once in code with a name, a description, a default, and the layers it gates (the web UI, the hub server, or both). From that tab, admins can enable or disable any registered experiment for every user of the hub; the change takes effect on the next page load.
 
 ## For admins
 
@@ -27,14 +27,14 @@ The Experiments tab lists every experiment this hub version knows about: its tit
 
 ## Changing the default
 
-Changing an experiment's default needs a code change to the registry, in a PR that references the tracking issue. Admin overrides are kept across the change — an admin who already set an explicit value for that experiment is unaffected by a default flip.
+Changing an experiment's default needs a code change to the registry, in a PR that references the tracking issue, and an update to `DEFAULT_ON_FLAGS` to match (add the name when the default becomes true, remove it when it becomes false); the consistency test enforces this. Admin overrides are kept across the change — an admin who already set an explicit value for that experiment is unaffected by a default flip.
 
 ## Retiring an experiment
 
 Retiring an experiment is either a **graduation** (the feature becomes permanent) or an **abandonment**:
 
 - **Graduate:** delete the flag-off code path and the `isFeatureEnabled` calls, delete the registry entry, add the name to `compiledRetired`, and remove it from `DEFAULT_ON_FLAGS`.
-- **Abandon:** delete the feature code, delete the registry entry, and add the name to `compiledRetired`.
+- **Abandon:** delete the feature code, delete the registry entry, add the name to `compiledRetired`, and remove it from `DEFAULT_ON_FLAGS` if it was default-on.
 
 In both cases, add a web test asserting that the retired name resolves OFF by default. Stored overrides for a retired name are ignored on read and pruned automatically on the next admin write. Retired names are never reused. Mention the retirement in release notes; if the experiment had `Default: false`, note which hubs may have had it enabled.
 
