@@ -304,3 +304,27 @@ pass; `go test -p 2 -count=1 ./pkg/hub/... -run
 New head after this round: `b4dedcc7e487cf2a6ace65d63c0cca88fb4dfa41`
 (fast-forward push, no rebase needed). Full disposition table and test
 output: gs://scion-xproject-exchange/slow-list/reports/lists-p1b-dev.md.
+
+## Rebase onto origin/main 224eb0328
+
+`origin/main` moved 10 commits past this branch's base (`8429bb7e` ->
+`224eb0328`) during round 2; the EM flagged overlap in
+`handlers_agents_core.go`, `models.go` and `server.go` and asked for a
+rebase before round 3. `git rebase origin/main` replayed all 20 commits
+cleanly with **zero conflicts**: the only new-range commit touching those
+files (`224eb0328`, GCP passthrough runtime-awareness) is confined to
+`createAgentInProject`'s GCP-passthrough branch, `GCPIdentityConfig`/
+`RuntimeBroker.DefaultProfile`, and `RemoteGCPIdentityConfig` -- nowhere
+near this branch's own edits to those files (`ListAgentsResponse` gaining
+`Sort`/`Dir`/`Complete`/`Stats`; no `RuntimeBroker`/`GCPIdentityConfig`
+changes at all here).
+
+`go build ./...` and `go vet ./pkg/hub/... ./pkg/store/...` both pass.
+Force-pushed with `--force-with-lease`. Targeted re-run:
+`go test -p 2 -count=1 ./pkg/hub/... -run
+'TestListProjectAgentsSorted|TestListProjectAgentsLegacy|TestResourceEqual|TestMergeCapabilities'`
+(62 subtests) plus `go test -p 2 -count=1 ./pkg/store/... -run
+'TestCountAgents_|TestListAgentMembers_'` (5 subtests) -- 0 failures, exit 0
+on both.
+
+New head: `8edbf3f58b12f9ac216a928b2e77658053e92daf`.
