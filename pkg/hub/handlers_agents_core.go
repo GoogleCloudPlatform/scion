@@ -2188,6 +2188,51 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	})
 }
 
+// resolveAgentRuntime returns the runtime type of the broker profile the
+// agent actually applied, matched by name against the broker's advertised
+// profiles (ptone/scion#2262). Display-time enrichment previously defaulted
+// to the type of the first *available* profile on the broker, which is
+// wrong whenever a broker advertises more than one profile type (e.g.
+// docker and kubernetes): an agent dispatched to the kubernetes profile
+// could be shown as docker just because docker sorted first.
+//
+// If the agent's applied profile is unknown, or doesn't match any profile
+// name the broker advertises, this falls back to the broker's profile type
+// only when every advertised profile shares that same non-empty type — that
+// case is unambiguous regardless of which profile the agent used. If the
+// broker advertises more than one type, resolveAgentRuntime returns ""
+// rather than guessing from an unrelated profile.
+func resolveAgentRuntime(agent *store.Agent, broker *store.RuntimeBroker) string {
+	if agent == nil || broker == nil {
+		return ""
+	}
+	if agent.AppliedConfig != nil && agent.AppliedConfig.Profile != "" {
+		for _, p := range broker.Profiles {
+			if p.Name == agent.AppliedConfig.Profile {
+				return p.Type
+			}
+		}
+	}
+	return commonProfileType(broker.Profiles)
+}
+
+// commonProfileType returns the shared type of profiles, or "" if profiles
+// is empty or its entries don't all share the same non-empty type.
+func commonProfileType(profiles []store.BrokerProfile) string {
+	var t string
+	for _, p := range profiles {
+		if p.Type == "" {
+			return ""
+		}
+		if t == "" {
+			t = p.Type
+		} else if t != p.Type {
+			return ""
+		}
+	}
+	return t
+}
+
 // enrichAgents populates Project and RuntimeBrokerName fields for a slice of agents.
 // This provides human-readable names from the related IDs for display purposes.
 func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
@@ -2249,13 +2294,11 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 		}
 		if broker, ok := brokerInfo[agents[i].RuntimeBrokerID]; ok {
 			agents[i].RuntimeBrokerName = broker.Name
-			// Also populate Runtime if not already set (from broker's active profile)
-			if agents[i].Runtime == "" && len(broker.Profiles) > 0 {
-				for _, p := range broker.Profiles {
-					if p.Available {
-						agents[i].Runtime = p.Type
-						break
-					}
+			// Populate Runtime from the agent's own applied profile if not
+			// already set.
+			if agents[i].Runtime == "" {
+				if rt := resolveAgentRuntime(&agents[i], broker); rt != "" {
+					agents[i].Runtime = rt
 				}
 			}
 		}
@@ -2302,12 +2345,9 @@ func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, project *s
 	// Populate broker info
 	if broker != nil {
 		agent.RuntimeBrokerName = broker.Name
-		if agent.Runtime == "" && len(broker.Profiles) > 0 {
-			for _, p := range broker.Profiles {
-				if p.Available {
-					agent.Runtime = p.Type
-					break
-				}
+		if agent.Runtime == "" {
+			if rt := resolveAgentRuntime(agent, broker); rt != "" {
+				agent.Runtime = rt
 			}
 		}
 	} else if agent.RuntimeBrokerID != "" {
@@ -2317,12 +2357,9 @@ func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, project *s
 		} else {
 			agent.RuntimeBrokerName = b.Name
 			s.agentLifecycleLog.Debug("enriched agent with broker name", "agent_id", agent.ID, "slug", agent.Slug, "brokerName", b.Name)
-			if agent.Runtime == "" && len(b.Profiles) > 0 {
-				for _, p := range b.Profiles {
-					if p.Available {
-						agent.Runtime = p.Type
-						break
-					}
+			if agent.Runtime == "" {
+				if rt := resolveAgentRuntime(agent, b); rt != "" {
+					agent.Runtime = rt
 				}
 			}
 		}
