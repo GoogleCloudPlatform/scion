@@ -94,7 +94,6 @@ async function mountPalette(
   groups: Partial<Record<PaletteGroup, GroupState>>
 ): Promise<ScionChatSwitcher> {
   const el = document.createElement('scion-chat-switcher') as ScionChatSwitcher;
-  el.paletteMode = true;
   el.open = true;
   el.groups = groups;
   document.body.appendChild(el);
@@ -606,5 +605,76 @@ describe('ensureGroupExpandedFor: defensive guards (private method, direct invoc
       );
     }).not.toThrow();
     expect(el.shadowRoot?.querySelectorAll('.palette-option').length).toBe(15);
+  });
+});
+
+// ===========================================================================
+// The listbox-owned placeholder option for "every group finished loading with
+// nothing to show" — a role=listbox requires at least one real role=option/
+// role=group descendant (WAI-ARIA's required-owned-elements rule), which a
+// query (or an empty index) matching nothing anywhere would otherwise leave
+// unsatisfied, since each group's own "No matches"/error text carries no
+// ARIA role of its own.
+// ===========================================================================
+
+function placeholderOption(el: ScionChatSwitcher): Element | null {
+  return el.shadowRoot!.querySelector('#palette-empty-overall');
+}
+
+function listboxOwns(el: ScionChatSwitcher): string[] {
+  return (
+    el.shadowRoot!.querySelector('#palette-result-list')?.getAttribute('aria-owns') ?? ''
+  ).split(' ');
+}
+
+describe('the "no results anywhere" listbox placeholder', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('is absent when at least one group has a real match', async () => {
+    const el = await mountPalette({
+      agents: ready([agentCandidate('a1', 'Agent One')]),
+      people: ready([]),
+    });
+    expect(placeholderOption(el)).toBeNull();
+  });
+
+  it('is present when every present group is ready with zero candidates', async () => {
+    const el = await mountPalette({ agents: ready([]), people: ready([]) });
+    expect(placeholderOption(el)).not.toBeNull();
+    expect(placeholderOption(el)?.getAttribute('role')).toBe('option');
+    expect(placeholderOption(el)?.getAttribute('aria-disabled')).toBe('true');
+    expect(placeholderOption(el)?.getAttribute('aria-selected')).toBe('false');
+  });
+
+  it('is absent while any present group is still loading, even if every other group is empty', async () => {
+    const el = await mountPalette({
+      agents: { status: 'loading', candidates: [] },
+      people: ready([]),
+    });
+    expect(placeholderOption(el)).toBeNull();
+  });
+
+  it('is present once every group has finished loading, including an all-error case', async () => {
+    const el = await mountPalette({
+      agents: { status: 'error', candidates: [], error: 'boom' },
+      people: ready([]),
+    });
+    expect(placeholderOption(el)).not.toBeNull();
+  });
+
+  it("is included in the listbox's aria-owns alongside every present group's region, in reading order, only when rendered", async () => {
+    const elWithMatches = await mountPalette({
+      agents: ready([agentCandidate('a1', 'Agent One')]),
+    });
+    expect(listboxOwns(elWithMatches)).toEqual(['palette-group-region-agents']);
+
+    const elEmpty = await mountPalette({ agents: ready([]), people: ready([]) });
+    expect(listboxOwns(elEmpty)).toEqual([
+      'palette-group-region-agents',
+      'palette-group-region-people',
+      'palette-empty-overall',
+    ]);
   });
 });
