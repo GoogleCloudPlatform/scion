@@ -41,6 +41,11 @@ func TestOperationContextRoundTripAndCreation(t *testing.T) {
 	assert.NotEqual(t, op.CorrelationID, generated.CorrelationID)
 	_, err = uuid.Parse(generated.CorrelationID)
 	assert.NoError(t, err)
+
+	_, err = NewOperationContext("")
+	assert.Error(t, err)
+	_, err = NewOperationContext(strings.Repeat("x", 129))
+	assert.Error(t, err)
 }
 
 func TestPhaseOutcomeMatrix(t *testing.T) {
@@ -185,6 +190,7 @@ func TestValidationRejectsBoundsAndInvalidEnums(t *testing.T) {
 		{"empty resource id", func(e *EnvelopeV1) { e.Resource.ID = "" }},
 		{"empty project id", func(e *EnvelopeV1) { e.Resource.ProjectID = "" }},
 		{"bad event id", func(e *EnvelopeV1) { e.EventID = "not-a-uuid" }},
+		{"noncanonical event id", func(e *EnvelopeV1) { e.EventID = strings.ReplaceAll(e.EventID, "-", "") }},
 		{"non utc timestamp", func(e *EnvelopeV1) { e.OccurredAt = e.OccurredAt.In(time.FixedZone("offset", 3600)) }},
 		{"wrong severity", func(e *EnvelopeV1) { e.Severity = SeverityWarning }},
 		{"oversized changed fields", func(e *EnvelopeV1) {

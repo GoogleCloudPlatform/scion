@@ -58,8 +58,8 @@ func Validate(event EnvelopeV1) error {
 	if event.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("schema_version must be %d", SchemaVersion)
 	}
-	if _, err := uuid.Parse(event.EventID); err != nil {
-		return fmt.Errorf("event_id must be a UUID: %w", err)
+	if err := validateUUID("event_id", event.EventID); err != nil {
+		return err
 	}
 	if event.OccurredAt.IsZero() || event.OccurredAt.Location() != time.UTC {
 		return fmt.Errorf("occurred_at must be a non-zero UTC timestamp")
@@ -83,8 +83,8 @@ func Validate(event EnvelopeV1) error {
 		return err
 	}
 	if event.CausationID != "" {
-		if _, err := uuid.Parse(event.CausationID); err != nil {
-			return fmt.Errorf("causation_id must be a UUID: %w", err)
+		if err := validateUUID("causation_id", event.CausationID); err != nil {
+			return err
 		}
 	}
 	if err := validateRequest(event.Request, event.CorrelationID); err != nil {
@@ -275,6 +275,14 @@ func validateBoundedString(name, value string, maxBytes int) error {
 		return fmt.Errorf("%s is required", name)
 	}
 	return validateOptionalBoundedString(name, value, maxBytes)
+}
+
+func validateUUID(name, value string) error {
+	parsed, err := uuid.Parse(value)
+	if err != nil || parsed.String() != value {
+		return fmt.Errorf("%s must be a canonical UUID", name)
+	}
+	return nil
 }
 
 func validateOptionalBoundedString(name, value string, maxBytes int) error {
