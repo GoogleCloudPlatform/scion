@@ -1,0 +1,58 @@
+# tz-refactor task 19 (P3a): web formatter fan-out, lists and relative times
+
+**Date:** 2026-10-02
+**Branch:** `scion/tz-t19`
+**Fork issue:** ptone/scion#2512 (part of ptone/scion#2457, design Option A, D4)
+
+## What changed
+
+- 15 web files now format times only through `web/src/utils/time.ts` and
+  numbers through `formatNumber`. Each one left the format-scan allowlist
+  (42 entries before, 27 after):
+  - pages: `agent-detail.ts`, `project-detail.ts`, `brokers.ts`,
+    `broker-detail.ts`, `home.ts`, `project-settings.ts`;
+  - shared lists: `env-var-list.ts`, `gcp-service-account-list.ts`,
+    `pre-start-hook-list.ts`, `project-template-list.ts`, `schedule-list.ts`,
+    `scheduled-event-list.ts`, `secret-list.ts`, `subscription-manager.ts`,
+    `token-list.ts`.
+- Each private `Intl.RelativeTimeFormat` copy in those files was replaced
+  with `formatRelative`. The local guards stay: an em dash for a zero or
+  unparsable time, and "now" for an overdue next run or fire time.
+- Absolute times use `formatInstantWithZone`, which gives the effective zone,
+  24-hour time and a zone label. Date-only cells (token expiry, template and
+  hook created dates, the home page's fallback for items older than 30 days)
+  use the `'date'` style, which keeps the label.
+- Components that render an absolute time use `DisplayZoneController`, so a
+  change to the display zone re-renders them without a reload.
+- AC15: each active row in the schedule list shows its next run twice, as a
+  relative time and as the absolute time in the display zone with its label.
+  The detail dialog does the same. The cron column header and the dialog's
+  cron row now read "Cron (UTC)", so the UTC cron expression and the zoned
+  next run sit next to each other with distinct labels. The tooltip on a
+  scheduled event's fire time shows the zoned absolute instant.
+
+## Out of scope (left on the allowlist)
+
+- Admin, access-boundary and role-binding views, including
+  `role-binding-utils.ts`. These belong to tz-refactor task 20.
+- Log viewers, chat, `file-browser.ts` and `chat-palette-data.ts`. These
+  belong to tz-refactor task 21.
+- `profile-settings.ts`, which belongs to tz-refactor task 13.
+- Schedule-list paging and the edit dialog (ptone/scion#2643).
+
+## Tests
+
+- Vitest pins `TZ=UTC`. Each new case sets the display preference to
+  `Asia/Tokyo` and uses `2026-10-01T15:00:00Z`, which is midnight in Tokyo,
+  so the expected output is `00:00`.
+  - `schedule-list.test.ts`: the zoned next run in the row and in the dialog,
+    a re-render when the zone changes, no next run for a paused schedule,
+    and the "Cron (UTC)" header.
+  - `scheduled-event-list.test.ts`: the zoned tooltip on the fire time.
+  - `list-time-zone.test.ts`: dates on the broker and project detail pages,
+    token expiry, template and hook created dates, and the Auto fallback to
+    the browser zone.
+  - `agent-detail.test.ts`: `formatDate` at midnight, and the em dash for a
+    zero time.
+- `npm run typecheck` passes. The touched component tests and the format
+  scan pass with `--maxWorkers=2`. No Go code changed.
