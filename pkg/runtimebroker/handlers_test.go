@@ -150,6 +150,18 @@ func (m *mockManager) List(ctx context.Context, filter map[string]string) ([]api
 	if m.listErr != nil {
 		return nil, m.listErr
 	}
+	// Honor a scion.name filter as real runtimes do (they filter on that
+	// label), so a slug lookup against a multi-agent fixture resolves to
+	// the one matching agent instead of an ambiguous match.
+	if name, ok := filter["scion.name"]; ok {
+		var out []api.AgentInfo
+		for _, a := range m.agents {
+			if a.Name == name || a.Labels["scion.name"] == name {
+				out = append(out, a)
+			}
+		}
+		return out, nil
+	}
 	return m.agents, nil
 }
 
