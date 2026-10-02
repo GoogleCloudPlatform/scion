@@ -76,6 +76,8 @@ module.exports = {
                 'e2e/chat-palette/terminal-and-modal.pw.ts',
                 'e2e/chat-palette/terminal-guard-under-shell.pw.ts',
                 'e2e/chat-palette/thread-navigation.pw.ts',
+                'e2e/chat-palette/typography.pw.ts',
+                'e2e/palette-typography.ts',
             ],
             parserOptions: { project: './e2e/chat-palette/tsconfig.json' },
         },
