@@ -168,12 +168,13 @@ findings, all in tests and documentation, none in production behavior:
   real regression protection in CI: dropping `.UTC()` at `:177` passed under
   `TZ=UTC` and only failed under a manual `TZ=Asia/Tokyo` run. Fixed by
   re-executing the test in a child process pinned to `TZ=Asia/Tokyo`
-  (`os/exec`, filtered to just this test by name), with a
-  `time.Local == time.UTC` sanity check in the child so a silent `TZ`
-  lookup failure fails loudly instead of passing vacuously again. This adds
-  no write to `time.Local` in the shared test binary, so it does not
-  reintroduce the R1-3 race class. `TZ=Asia/Kathmandu` is not used for the
-  re-exec: `newTestStore`'s migration hits the known pre-existing baseline
+  (`os/exec`, filtered to just this test by name), with a sanity check in
+  the child that the effective UTC offset is actually `+09:00`, so a silent
+  `TZ` lookup failure fails loudly instead of passing vacuously again (see
+  round 3 below for a correction to this check). This adds no write to
+  `time.Local` in the shared test binary, so it does not reintroduce the
+  R1-3 race class. `TZ=Asia/Kathmandu` is not used for the re-exec:
+  `newTestStore`'s migration hits the known pre-existing baseline
   (tz-refactor task 2) before the handler under test ever runs. Verified
   with the same mutation as before (drop `.UTC()` at `:177`): the test now
   fails even when the outer process is `TZ=UTC`.
@@ -195,6 +196,61 @@ findings, all in tests and documentation, none in production behavior:
   instead); corrected the stale "two commits ahead of upstream/main" count
   (it was never meant to be a fixed number — reworded to not assert one).
 
+## Review round 3
+
+No production code changed since round 2 (confirmed by range-diff: commits
+1-7 identical patches, 8-10 new and round-2-only). Round 3 found 1 Medium
+and 2 Low, all in the R2-1 re-exec test:
+
+- **R3-2 (Low): the re-exec's `-test.run` pattern was a hardcoded copy of
+  the test name.** If the function were renamed and the string literal
+  left alone, the child would match zero tests, print "testing: warning: no
+  tests to run", exit 0, and the parent would pass without having checked
+  anything. Fixed by building the pattern from the running test itself,
+  `"^" + regexp.QuoteMeta(t.Name()) + "$"`, and by asserting the child's
+  output actually contains `--- PASS: ` + the test name (a child that
+  matches zero tests, or that fails for an unrelated reason, no longer
+  passes silently). A child `--- SKIP` is propagated with `t.Skip`, so a
+  skip (e.g. no sqlite driver) is reported as a skip, not swallowed as a
+  pass.
+- **R3-1 (Medium): the child's anti-vacuity guard, `time.Local ==
+  time.UTC`, could never fire.** `time.Local` and `time.UTC` are different
+  `*time.Location` pointers unless something assigns `time.Local =
+  time.UTC` directly; a failed `TZ` lookup does not do that; it leaves
+  `time.Local` pointing at a `*Location` holding UTC data under the name
+  `"UTC"`, which compares unequal to the `time.UTC` pointer. So the check
+  was always false, whether the zone resolved correctly or not, and gave no
+  real protection against a silent zone-lookup failure. Fixed by checking
+  the actual UTC offset instead (`time.Now().Zone()` must return `9*60*60`
+  for `TZ=Asia/Tokyo`), and by adding `_ "time/tzdata"` to the test file so
+  the child's zone resolution does not depend on the host having system
+  zoneinfo.
+- **R3-3 (Low): the PR body overstated the AST-test mutation evidence,**
+  claiming "8 reviewer mutations ... all correctly fail" when round 2
+  recorded 6 mutations that fail and 2 deliberate evasions (an aliased
+  `util` import, taking the seam as a value) that the syntactic AST check
+  cannot catch (documented as an accepted limitation, not a defect).
+  Corrected the PR body to say 6 mutations fail and name the 2 evasions.
+  Also corrected the PR body and this log: the upstream `pkg/agent` CI
+  break was **caused by** commit `5ff96b98` (not fixed by it, as round 1's
+  wording implied), and the actual fixes are `888e4b911626`
+  (`GoogleCloudPlatform/scion#2259`) and `a09e3828815f`
+  (`GoogleCloudPlatform/scion#2262`) — cited as commits, not bare PR
+  numbers (see the Rebase section below).
+
+Verified with the review's exact mutations, each reverted after the run:
+- drop `.UTC()` at `admin_invites.go:177`, outer `TZ=UTC`: **FAIL** (as
+  before).
+- the same, plus the child's `TZ` env changed to a bogus zone
+  (`TZ=Bogus/NoSuchZone`): previously **PASS** (the vacuous-guard bug);
+  now **FAIL**, reporting the actual offset (`time.Local="UTC" offset=0s`).
+- the same, plus the re-exec pattern broken to match zero tests: previously
+  (per the review's demonstration, with the old hardcoded-string version)
+  **PASS**; with the `t.Name()`-derived pattern a simple rename no longer
+  reproduces this, so this was verified by deliberately breaking the
+  pattern construction itself, which correctly **FAILs**
+  ("child process did not report running ... matched nothing?").
+
 ## Rebase onto upstream main
 
 Round 1: rebased `scion/tz-t1` onto `GoogleCloudPlatform/scion` main
@@ -202,9 +258,14 @@ Round 1: rebased `scion/tz-t1` onto `GoogleCloudPlatform/scion` main
 and task 14, `GoogleCloudPlatform/scion#2218`). No conflicts: neither task
 touches the files this branch changes.
 
-Round 2: rebased again onto `GoogleCloudPlatform/scion` main at `ef9c0b65`
-(fork CI's unrelated `pkg/agent` failure, `5ff96b98`, had merged by then, so
-`Build & Test`/`Full Test Suite` are expected to go green). No conflicts.
+Round 2: rebased again onto `GoogleCloudPlatform/scion` main at `ef9c0b65`.
+The fork's unrelated `pkg/agent` CI failure was caused by upstream commit
+`5ff96b98` (bumped `harnesses/claude/config.yaml`'s `medium` alias to
+`claude-sonnet-5-5` without updating `TestReResolveModelAlias`'s
+expectation) and fixed by `888e4b911626` (`GoogleCloudPlatform/scion#2259`)
+and `a09e3828815f` (`GoogleCloudPlatform/scion#2262`); both had merged by
+the time of this rebase, so `Build & Test`/`Full Test Suite` were expected
+to go green (confirmed below). No conflicts.
 `git log upstream/main..HEAD` shows only this branch's own commits at each
 point — none of upstream's commits are replayed.
 
@@ -304,6 +365,31 @@ point — none of upstream's commits are replayed.
   "...+09:00", want a Z-suffixed (UTC) RFC3339 timestamp`, from inside the
   `TZ=Asia/Tokyo` child) -- previously this mutation passed under `TZ=UTC`.
   Reverted after confirming.
+
+### Round 3
+
+- `go build -buildvcs=false -p 2 ./pkg/hub/...`: clean.
+  `gofmt -l pkg/hub`: clean.
+- `TZ=UTC go test -buildvcs=false -p 2 -count=1 -run
+  'TestAdminInvitesCreate_AuditLogExpiresAtIsUTC' -v ./pkg/hub/`: `PASS`
+  (unchanged happy path).
+- Mutation (a), review round 2's: revert `admin_invites.go:177`'s `.UTC()`,
+  outer `TZ=UTC`: **FAIL**, as before.
+- Mutation (b), review round 3's: mutation (a) plus the child's `TZ`
+  changed to `TZ=Bogus/NoSuchZone`: now **FAIL**
+  (`expected TZ=Asia/Tokyo (+09:00) in the child process, got
+  time.Local="UTC" offset=0s`) -- previously this combination **PASS**ed
+  (the dead-guard bug, R3-1). Reverted the child `TZ` and the production
+  mutation after confirming.
+- Mutation (c)-equivalent: the review's "rename the function and leave the
+  `-test.run` literal" no longer reproduces once the pattern is derived
+  from `t.Name()` (a rename changes both together). To verify the
+  zero-match guard itself, the pattern construction was instead broken
+  directly (appended a non-matching suffix): now **FAIL**
+  (`child process did not report running
+  TestAdminInvitesCreate_AuditLogExpiresAtIsUTC (pattern "...NoSuchTest$"
+  matched nothing?)`, with the child's own "testing: warning: no tests to
+  run / PASS" captured in the failure message). Reverted after confirming.
 
 ## Deliberately out of scope (per the issue)
 
