@@ -270,11 +270,26 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// Worktree case: workspace is a subdirectory of repo root.
 			// Mount .git separately and workspace at its relative path.
 			registerMount(filepath.Join(config.RepoRoot, ".git"), "/repo-root/.git", false, true)
-			// Hardening (Phase 1, Docker + hub-native only): narrow the
-			// container's write access to the shared base repo's admin
-			// surface — see narrowGitAdminMounts.
-			if config.RuntimeName == "docker" && isHubManagedWorktreeBase(config.RepoRoot) {
-				narrowGitAdminMounts(registerMount, config.RepoRoot, config.Workspace)
+			if config.RuntimeName == "docker" {
+				// Hardening (Phase 1, Docker + hub-native only): narrow the
+				// container's write access to the shared base repo's admin
+				// surface — see narrowGitAdminMounts. This broader surface
+				// (hooks/info/config/config.worktree) stays hub-native-only:
+				// a linked project's own host-trusted hooks/config may have a
+				// legitimate need to stay writable that a hub-native base
+				// does not, and that question is unresolved for the local
+				// path.
+				if isHubManagedWorktreeBase(config.RepoRoot) {
+					narrowGitAdminMounts(registerMount, config.RepoRoot, config.Workspace)
+				}
+				// Hardening (Part B, Docker, hub-native AND local): narrow the
+				// sharer registry and every worktree's admin back-link — see
+				// narrowSharerRegistryMounts. Unlike the broader surface
+				// above, neither of these two paths is ever legitimately
+				// written by anything other than the broker itself on any
+				// base type, so this narrower surface applies regardless of
+				// isHubManagedWorktreeBase.
+				narrowSharerRegistryMounts(registerMount, config.RepoRoot, config.Workspace)
 			}
 			containerWorkspace := filepath.Join("/repo-root", relWorkspace)
 			registerMount(config.Workspace, containerWorkspace, false, true)
@@ -690,6 +705,57 @@ func narrowGitAdminMounts(registerMount func(string, string, bool, bool), repoRo
 		registerMount(configWorktree, filepath.Join("/repo-root/.git/worktrees", worktreeName, "config.worktree"), true, true)
 	}
 }
+
+// narrowSharerRegistryMounts layers read-only bind mounts over two further
+// paths in the shared base repo's .git, on top of the already-registered
+// read-write /repo-root/.git mount: the sharer-registry marker directory
+// (.git/scion-sharers/) and this worktree's admin back-link file
+// (.git/worktrees/<name>/gitdir). This is Part B of the broker-git worktree
+// containment change, and — unlike narrowGitAdminMounts above — applies on
+// Docker regardless of isHubManagedWorktreeBase: neither path is ever
+// legitimately written by anything other than the broker itself, on either
+// base type, so the hub-native-only carve-out that exists for the broader
+// admin surface (a linked project's own host-trusted hooks/config) does not
+// apply here.
+//
+// pkg/provision's read/JOIN/teardown boundary validation (sharers.go's
+// readMarker and worktree_validate.go's ValidateWorktreeForBase) is the
+// primary, base-type-independent control: it already makes a poisoned
+// marker or a rewritten back-link harmless regardless of whether this mount
+// narrowing applies. This function is defense-in-depth on top of that — it
+// prevents the write from inside a container in the first place.
+//
+// The sharer registry directory may not exist yet (no branch has been
+// shared) — it is created on the host first so the read-only mount always
+// applies, the same fail-open concern narrowGitAdminMounts' hooks/info
+// handling documents: otherwise a container could create its own writable
+// one directly in the still-read-write .git root. The admin back-link file,
+// by contrast, is written once by `git worktree add` before this worktree's
+// container ever starts, so — like config.worktree above — it keeps
+// skip-if-missing: there is no create-first fail-open gap to close, only a
+// path that legitimately might not exist for a base with no worktrees yet.
+func narrowSharerRegistryMounts(registerMount func(string, string, bool, bool), repoRoot, workspace string) {
+	gitDir := filepath.Join(repoRoot, ".git")
+
+	sharersDir := filepath.Join(gitDir, sharerRegistryDirName)
+	if err := os.MkdirAll(sharersDir, 0755); err == nil {
+		registerMount(sharersDir, filepath.Join("/repo-root/.git", sharerRegistryDirName), true, true)
+	}
+	// If the directory cannot even be created, mounting it read-only isn't
+	// possible either; leave it uncovered rather than fail agent startup.
+
+	worktreeName := resolveWorktreeAdminName(workspace)
+	if backLink := filepath.Join(gitDir, "worktrees", worktreeName, "gitdir"); fileExists(backLink) {
+		registerMount(backLink, filepath.Join("/repo-root/.git/worktrees", worktreeName, "gitdir"), true, true)
+	}
+}
+
+// sharerRegistryDirName is the marker directory pkg/provision's sharer
+// registry stores under a shared base's .git — see the unexported sharerDir
+// constant in pkg/provision/sharers.go, which this must match. Duplicated as
+// a literal because that constant is unexported (an internal name for
+// pkg/provision's own registry-path helper, not part of its public API).
+const sharerRegistryDirName = "scion-sharers"
 
 // fileExists reports whether path exists (file or directory).
 func fileExists(path string) bool {
