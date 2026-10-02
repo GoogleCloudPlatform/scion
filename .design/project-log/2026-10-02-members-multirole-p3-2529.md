@@ -115,3 +115,47 @@ PR #127's per-binding POST/DELETE sequence.
   only direct project bindings, so the column could be dropped or repurposed.
 - **No per-role reasons for disabled custom roles in an admin's dialog.**
   The single caption covers them.
+
+## Review round 1 fixes
+
+Round 1 raised four Low and three Nit findings. All seven were fixed in
+new commits on top of the branch. History was not rewritten.
+
+- **Late picker events (R1-1).** `onPrincipalChange` now checks for Add mode
+  before it assigns anything. A debounced picker event that arrives after
+  the dialog has switched to Edit can no longer retarget the PUT.
+- **Automatic switch to Edit follows the row rules (R1-2).** Add mode can
+  land on an existing member: through the picker, or through 409
+  `principal_roles_changed` after save. The dialog then applies the same
+  tier rule as the row pencil.
+  - When the actor may not edit that member, the dialog shows "Only project
+    owners can change this member's roles." Every role control, Remove
+    member and Save are disabled.
+  - For a principal not in the loaded rows (typed by email), the tier comes
+    from the built-in role in `currentRoleDefinitionIds`. When a role ID is
+    not in the catalog, the tier fails closed to owner.
+  - Last-owner status on that path is computed from the reloaded rows, not
+    forced to false.
+- **Labels (R1-3).** Test names, comments and this log now describe the
+  behaviour instead of citing design-document labels.
+- **Catalog failure and group URLs (R1-4).** New tests cover:
+  - an assignable-roles failure: the error is shown, the catalog is
+    cleared rather than left stale, and held roles stay visible and are
+    kept in the save;
+  - group principals: Add, Edit and row delete all use
+    `/members/principals/group/<encoded id>`.
+
+  The first test found a gap: when the catalog failed to load, the held
+  built-in role disappeared from the dialog, although the PUT still kept
+  it. The dialog now shows it, as it already did for held custom roles.
+- **Row-delete confirmation (R1-5)** now ends with "This removes all of
+  their project roles.", the same as the dialog's Remove member.
+- **Trash condition (R1-6)** simplified to `editable`. The removed clause
+  could never add a case.
+- **Deviation 4 wording (R1-7)** corrected above: Remove member is shown
+  disabled with the reason.
+
+Each new test was checked against the unfixed code, or against a
+targeted mutant where the fix was test-only, and failed there. The editor
+suite now has 60 cases (60/60). `npm run typecheck` and `npm run build`
+pass. eslint reports 0 errors in the editor source.
