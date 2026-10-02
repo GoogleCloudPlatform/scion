@@ -166,7 +166,7 @@ test('@static the rail sort and space-actions icon buttons have a 44px hit area'
   // upgraded (no shadowRoot yet) on the first check.
   const sortBase = await computedBoxDeepRetrying(
     page,
-    'sl-icon-button[label="Sort spaces"]',
+    'sl-icon-button[label="Sort"]',
     '[part="base"]'
   );
   expect(sortBase.widthPx).toBeGreaterThanOrEqual(MIN_ROW_PX);
@@ -485,7 +485,7 @@ test('@static the rail sort dropdown menu items are at least 44px', async ({ pag
   // '.sort-btn' is reused by chat-members.ts's own sort dropdown, which is
   // present (inert, off-screen) in the DOM alongside the rail's; the label
   // disambiguates which one gets clicked.
-  await page.locator('sl-icon-button[label="Sort spaces"]').first().click();
+  await page.locator('sl-icon-button[label="Sort"]').first().click();
   await page.locator('sl-menu-item[value="activity"]').first().waitFor({ state: 'visible' });
   await page.waitForTimeout(250);
 
