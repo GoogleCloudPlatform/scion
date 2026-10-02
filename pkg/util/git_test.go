@@ -444,7 +444,7 @@ func TestIsRegisteredWorktree_MainWorktreeAcceptedWhenRepoRootIsLinkedWorktree(t
 
 	linkedPath := filepath.Join(filepath.Dir(mainRepo), "linked-repo-feature")
 	addWorktreeDirect(t, mainRepo, linkedPath, "feature")
-	defer func() { _, _ = RemoveWorktree(linkedPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, linkedPath, true) }()
 
 	// repoRoot is the LINKED worktree here, simulating a project that lives
 	// there; path is the MAIN worktree, which must still be recognized as
@@ -466,7 +466,7 @@ func TestIsRegisteredWorktree_SiblingWorktreeAccepted(t *testing.T) {
 	// `git worktree add` accepts any destination.
 	siblingPath := filepath.Join(filepath.Dir(mainRepo), "sibling-repo-feature")
 	addWorktreeDirect(t, mainRepo, siblingPath, "feature")
-	defer func() { _, _ = RemoveWorktree(siblingPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, siblingPath, true) }()
 
 	ok, err := IsRegisteredWorktree(mainRepo, siblingPath)
 	if err != nil {
@@ -486,7 +486,7 @@ func TestIsRegisteredWorktree_ScionWorktreesConventionAccepted(t *testing.T) {
 	// -- it needs no special-case handling, only real git registration.
 	wtPath := filepath.Join(filepath.Dir(mainRepo), ".scion_worktrees", "proj", "agent")
 	addWorktreeDirect(t, mainRepo, wtPath, "agent-branch")
-	defer func() { _, _ = RemoveWorktree(wtPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, wtPath, true) }()
 
 	ok, err := IsRegisteredWorktree(mainRepo, wtPath)
 	if err != nil {
@@ -526,7 +526,7 @@ func TestIsRegisteredWorktree_DifferentRepoWorktreeRejected(t *testing.T) {
 	// be accepted as a worktree of repoA.
 	wtOfB := filepath.Join(filepath.Dir(repoB), "repoB-feature")
 	addWorktreeDirect(t, repoB, wtOfB, "feature")
-	defer func() { _, _ = RemoveWorktree(wtOfB, true) }()
+	defer func() { _, _ = RemoveWorktree(repoB, wtOfB, true) }()
 
 	ok, err := IsRegisteredWorktree(repoA, wtOfB)
 	if err != nil {
@@ -627,7 +627,7 @@ func TestIsRegisteredWorktree_RecreatedWithForeignGitDirRefused(t *testing.T) {
 
 	linkedPath := filepath.Join(filepath.Dir(mainRepo), "linked-repo-for-foreign-gitdir-test")
 	addWorktreeDirect(t, mainRepo, linkedPath, "linked-branch")
-	defer func() { _, _ = RemoveWorktree(linkedPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, linkedPath, true) }()
 
 	recreatedWt := filepath.Join(filepath.Dir(mainRepo), "recreated-wt")
 	addWorktreeDirect(t, mainRepo, recreatedWt, "recreated-branch")
@@ -864,6 +864,77 @@ func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
 		}
 		if deleted {
 			t.Error("expected deleted=false for a non-existent path")
+		}
+	})
+}
+
+// TestRemoveWorktree_PreRemovalValidationFailures_NoFallback covers a
+// required fix: every pre-removal validation failure — not just the explicit
+// not-contained case — must wrap ErrPathNotContained, so a caller checking
+// errors.Is(err, ErrPathNotContained) correctly treats ALL of them as
+// no-fallback-eligible. Previously, empty/relative input, a non-ENOENT
+// Lstat error, and an EvalSymlinks failure (symlink loop, unresolvable
+// component) returned plain errors that a caller would NOT recognize as
+// containment failures, and would therefore incorrectly fall back to a raw,
+// unvalidated RemoveAllSafe(path) — exactly what this whole check exists to
+// prevent.
+func TestRemoveWorktree_PreRemovalValidationFailures_NoFallback(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	t.Run("empty base", func(t *testing.T) {
+		_, err := RemoveWorktree("", "/some/path", false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for empty base, got: %v", err)
+		}
+	})
+
+	t.Run("empty path", func(t *testing.T) {
+		_, err := RemoveWorktree("/some/base", "", false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for empty path, got: %v", err)
+		}
+	})
+
+	t.Run("relative base", func(t *testing.T) {
+		_, err := RemoveWorktree("relative/base", "/some/path", false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for relative base, got: %v", err)
+		}
+	})
+
+	t.Run("relative path", func(t *testing.T) {
+		_, err := RemoveWorktree("/some/base", "relative/path", false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for relative path, got: %v", err)
+		}
+	})
+
+	t.Run("non-ENOENT Lstat error (path under a regular file, not a directory)", func(t *testing.T) {
+		base := t.TempDir()
+		notADir := filepath.Join(base, "not-a-dir")
+		if err := os.WriteFile(notADir, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		candidate := filepath.Join(notADir, "child")
+		_, err := RemoveWorktree(base, candidate, false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for a non-ENOENT Lstat error, got: %v", err)
+		}
+	})
+
+	t.Run("EvalSymlinks failure (symlink loop)", func(t *testing.T) {
+		base := t.TempDir()
+		loopA := filepath.Join(base, "loop-a")
+		loopB := filepath.Join(base, "loop-b")
+		if err := os.Symlink(loopB, loopA); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(loopA, loopB); err != nil {
+			t.Fatal(err)
+		}
+		_, err := RemoveWorktree(base, loopA, false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for a symlink loop, got: %v", err)
 		}
 	})
 }

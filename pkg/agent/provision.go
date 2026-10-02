@@ -60,7 +60,15 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	var externalAgentDir string
 	var worktreeDir string // worktree-per-agent: agent's worktree path
 	var globalWorkspaceDir string
+	// resolvedProjectDir is config.GetResolvedProjectDir's return value,
+	// captured here (rather than only inside the block below) so the
+	// sharer-registry calls further down can pass it through as the
+	// ProvisionAgent-layout shape check's root — see
+	// provision.WorktreePathIsScionCreated's doc comment on why this must be
+	// the actual resolved project directory, not derived from repoRoot.
+	var resolvedProjectDir string
 	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
+		resolvedProjectDir = projectDir
 		agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
 
 		// The global project's own per-agent workspace
@@ -139,16 +147,34 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		// Do NOT silently swallow registry errors and fall through to the legacy
 		// path — that path could delete the shared worktree out from under live
 		// joiners. On a real registry I/O error, fail loudly instead.
-		branch, _, found, findErr := provision.FindBranchForAgent(repoRoot, agentName)
+		branch, _, found, findErr := provision.FindBranchForAgent(repoRoot, resolvedProjectDir, agentName)
 		if findErr != nil {
 			return branchDeleted, fmt.Errorf("delete: FindBranchForAgent for %s: %w", agentName, findErr)
 		}
 		if found {
-			remaining, wtPath, unregErr := provision.UnregisterSharer(repoRoot, branch, agentName)
+			remaining, wtPath, unregErr := provision.UnregisterSharer(repoRoot, resolvedProjectDir, branch, agentName)
 			if unregErr != nil {
 				return branchDeleted, fmt.Errorf("delete: UnregisterSharer for branch %s agent %s: %w", branch, agentName, unregErr)
 			}
 			if len(remaining) == 0 {
+				// Defense-in-depth: re-check wtPath's unresolved/lexical form
+				// against a scion-created shape immediately before acting on
+				// it, rather than trusting that UnregisterSharer's return
+				// value is still exactly what the read boundary validated.
+				// This is deliberately a second LEXICAL check, not a new
+				// EvalSymlinks anchor for the removal step below — the
+				// resolved-containment check inside util.RemoveWorktree stays
+				// anchored at repoRoot (see its own doc comment on why
+				// narrowing that anchor to a per-marker subdirectory would
+				// let a symlinked intermediate component pass through
+				// unchecked, defeating that check's purpose). This only scopes what counts as
+				// an acceptable shape going into that call, one guard closer
+				// to the removal itself.
+				if wtPath != "" && !provision.WorktreePathIsScionCreated(repoRoot, resolvedProjectDir, wtPath) {
+					slog.Warn("delete: worktree path no longer matches a scion-created shape at removal time; skipping worktree removal",
+						"agent_id", agentName, "branch", branch, "path", wtPath)
+					wtPath = ""
+				}
 				if wtPath == "" {
 					// The registry read boundary (pkg/provision.readMarker)
 					// already fails closed on an out-of-tree/relative/empty
@@ -281,6 +307,37 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 
 	// Phase 2: directory removal.
 	for _, agentDir := range dirsToDelete {
+		// ProvisionAgent's worktree-mode layout nests an agent's worktree at
+		// agentDir/workspace — for the creator of a shared branch (the
+		// ProvisionAgent attach-to-existing-worktree case), this is the SAME
+		// physical worktree another live sharer may still be using. The
+		// refcount path above already decided whether that worktree may be
+		// removed (skipping it here via refcountHandled when other sharers
+		// remain); a blanket RemoveAllSafe(agentDir) would ignore that
+		// decision and destroy it anyway, since it has no notion of a
+		// worktree being nested inside the directory it's asked to remove.
+		// If workspace/ is still a live worktree at this point, clean up
+		// everything else in agentDir but leave it in place.
+		workspaceStillLive := false
+		if _, err := os.Stat(filepath.Join(agentDir, "workspace", ".git")); err == nil {
+			workspaceStillLive = true
+		}
+		if workspaceStillLive {
+			entries, err := os.ReadDir(agentDir)
+			if err != nil {
+				return branchDeleted, fmt.Errorf("read agent directory %s: %w", agentDir, err)
+			}
+			for _, e := range entries {
+				if e.Name() == "workspace" {
+					continue
+				}
+				if err := util.RemoveAllSafe(filepath.Join(agentDir, e.Name())); err != nil {
+					return branchDeleted, fmt.Errorf("failed to remove agent directory entry: %w", err)
+				}
+			}
+			util.Debugf("delete: preserved shared workspace, removed other entries in: %s", agentDir)
+			continue
+		}
 		util.Debugf("delete: removing directory: %s", agentDir)
 		removeStart := time.Now()
 		if err := util.RemoveAllSafe(agentDir); err != nil {
@@ -1107,7 +1164,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				if rootErr != nil {
 					return "", "", nil, fmt.Errorf("resolve repo root for sharer registration: %w", rootErr)
 				}
-				if regErr := provision.RegisterSharer(root, targetBranch, existingPath, agentName); regErr != nil {
+				if regErr := provision.RegisterSharer(root, projectDir, targetBranch, existingPath, agentName); regErr != nil {
 					return "", "", nil, fmt.Errorf("register sharer (attach): %w", regErr)
 				}
 			}
@@ -1191,7 +1248,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		if rootErr != nil {
 			return "", "", nil, fmt.Errorf("resolve repo root for sharer registration: %w", rootErr)
 		}
-		if regErr := provision.RegisterSharer(root, worktreeBranch, agentWorkspace, agentName); regErr != nil {
+		if regErr := provision.RegisterSharer(root, projectDir, worktreeBranch, agentWorkspace, agentName); regErr != nil {
 			return "", "", nil, fmt.Errorf("register sharer (create): %w", regErr)
 		}
 

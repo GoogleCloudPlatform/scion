@@ -43,14 +43,14 @@ func TestRegisterAndListSharers(t *testing.T) {
 	branch := "feature/foo"
 	wt := inTreeWT(base, "wt-foo")
 
-	if err := RegisterSharer(base, branch, wt, "agent-1"); err != nil {
+	if err := RegisterSharer(base, "", branch, wt, "agent-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := RegisterSharer(base, branch, wt, "agent-2"); err != nil {
+	if err := RegisterSharer(base, "", branch, wt, "agent-2"); err != nil {
 		t.Fatal(err)
 	}
 
-	sharers, path, err := ListSharers(base, branch)
+	sharers, path, err := ListSharers(base, "", branch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,14 +70,14 @@ func TestUnregisterSharer_OneRemaining(t *testing.T) {
 	branch := "feature/bar"
 	wt := inTreeWT(base, "wt-bar")
 
-	if err := RegisterSharer(base, branch, wt, "agent-1"); err != nil {
+	if err := RegisterSharer(base, "", branch, wt, "agent-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := RegisterSharer(base, branch, wt, "agent-2"); err != nil {
+	if err := RegisterSharer(base, "", branch, wt, "agent-2"); err != nil {
 		t.Fatal(err)
 	}
 
-	remaining, path, err := UnregisterSharer(base, branch, "agent-1")
+	remaining, path, err := UnregisterSharer(base, "", branch, "agent-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,11 +100,11 @@ func TestUnregisterSharer_LastRemoves(t *testing.T) {
 	branch := "feature/baz"
 	wt := inTreeWT(base, "wt-baz")
 
-	if err := RegisterSharer(base, branch, wt, "agent-1"); err != nil {
+	if err := RegisterSharer(base, "", branch, wt, "agent-1"); err != nil {
 		t.Fatal(err)
 	}
 
-	remaining, path, err := UnregisterSharer(base, branch, "agent-1")
+	remaining, path, err := UnregisterSharer(base, "", branch, "agent-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,14 +125,14 @@ func TestUnregisterSharer_LastRemoves(t *testing.T) {
 func TestFindBranchForAgent(t *testing.T) {
 	base := setupBase(t)
 
-	if err := RegisterSharer(base, "feature/alpha", inTreeWT(base, "alpha"), "agent-A"); err != nil {
+	if err := RegisterSharer(base, "", "feature/alpha", inTreeWT(base, "alpha"), "agent-A"); err != nil {
 		t.Fatal(err)
 	}
-	if err := RegisterSharer(base, "feature/beta", inTreeWT(base, "beta"), "agent-B"); err != nil {
+	if err := RegisterSharer(base, "", "feature/beta", inTreeWT(base, "beta"), "agent-B"); err != nil {
 		t.Fatal(err)
 	}
 
-	branch, wt, found, err := FindBranchForAgent(base, "agent-A")
+	branch, wt, found, err := FindBranchForAgent(base, "", "agent-A")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestFindBranchForAgent(t *testing.T) {
 		t.Errorf("worktreePath = %q, want %q", wt, inTreeWT(base, "alpha"))
 	}
 
-	_, _, found, err = FindBranchForAgent(base, "agent-missing")
+	_, _, found, err = FindBranchForAgent(base, "", "agent-missing")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,17 +160,17 @@ func TestIdempotentRegister(t *testing.T) {
 	branch := "feature/idem"
 	wt := inTreeWT(base, "idem")
 
-	if err := RegisterSharer(base, branch, wt, "agent-1"); err != nil {
+	if err := RegisterSharer(base, "", branch, wt, "agent-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := RegisterSharer(base, branch, wt, "agent-1"); err != nil {
+	if err := RegisterSharer(base, "", branch, wt, "agent-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := RegisterSharer(base, branch, wt, "agent-1"); err != nil {
+	if err := RegisterSharer(base, "", branch, wt, "agent-1"); err != nil {
 		t.Fatal(err)
 	}
 
-	sharers, _, err := ListSharers(base, branch)
+	sharers, _, err := ListSharers(base, "", branch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestIdempotentRegister(t *testing.T) {
 func TestListSharers_NoMarker(t *testing.T) {
 	base := setupBase(t)
 
-	sharers, path, err := ListSharers(base, "nonexistent-branch")
+	sharers, path, err := ListSharers(base, "", "nonexistent-branch")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestListSharers_NoMarker(t *testing.T) {
 func TestUnregisterSharer_NoMarker(t *testing.T) {
 	base := setupBase(t)
 
-	remaining, path, err := UnregisterSharer(base, "nonexistent", "agent-1")
+	remaining, path, err := UnregisterSharer(base, "", "nonexistent", "agent-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,9 +214,9 @@ func TestUnregisterSharer_AgentNotInList(t *testing.T) {
 	branch := "feature/noop"
 	wt := inTreeWT(base, "noop")
 
-	_ = RegisterSharer(base, branch, wt, "agent-1")
+	_ = RegisterSharer(base, "", branch, wt, "agent-1")
 
-	remaining, path, err := UnregisterSharer(base, branch, "agent-unknown")
+	remaining, path, err := UnregisterSharer(base, "", branch, "agent-unknown")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,13 +228,21 @@ func TestUnregisterSharer_AgentNotInList(t *testing.T) {
 	}
 }
 
-// TestListSharers_OutOfTreeMarker_Rejected covers Phase 1 acceptance
-// criterion 1: a marker whose WorktreePath does not resolve in-tree under
-// base (an absolute external path, a ".." traversal, or a path reached only
-// through a symlink) is treated as invalid. The whole marker is discarded —
-// ListSharers, UnregisterSharer, and FindBranchForAgent must all report it
-// as absent, not merely blank the path.
-func TestListSharers_OutOfTreeMarker_Rejected(t *testing.T) {
+// TestListSharers_OutOfTreeMarker_DegradesPathKeepsRefcount covers this fix:
+// a marker whose WorktreePath matches neither scion-created shape (an
+// absolute external path, a ".." traversal, a too-deep nested path, an empty
+// path, or a relative path) must never surface that path — but the Sharers
+// refcount must be preserved, not discarded. Discarding the whole marker was
+// a real data-loss regression: it silently dropped legitimate ProvisionAgent-layout
+// sharers (see TestWorktreePathIsScionCreated below and, at the integration
+// level, pkg/agent's TestDeleteAgentFiles_ProvisionAgentLayout_* tests),
+// causing teardown to remove a worktree another agent still used. A path
+// that only diverges after symlink resolution (a symlinked intermediate
+// directory or leaf) is NOT covered by this lexical check — see
+// TestRemoveWorktree_RefusesOutOfTreePath in pkg/util for that; this test is
+// about the shape of the stored path string, not what it resolves to on
+// disk.
+func TestListSharers_OutOfTreeMarker_DegradesPathKeepsRefcount(t *testing.T) {
 	outside := t.TempDir()
 
 	cases := []struct {
@@ -281,23 +289,84 @@ func TestListSharers_OutOfTreeMarker_Rejected(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			sharers, wtPath, err := ListSharers(base, branch)
+			sharers, wtPath, err := ListSharers(base, "", branch)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if wtPath != "" {
-				t.Errorf("worktreePath = %q, want empty for a marker with an out-of-tree path", wtPath)
+				t.Errorf("worktreePath = %q, want empty for a marker with an invalid path", wtPath)
 			}
-			if sharers != nil {
-				t.Errorf("sharers = %v, want nil (whole marker discarded)", sharers)
+			if len(sharers) != 1 || sharers[0] != "agent-c" {
+				t.Errorf("sharers = %v, want [agent-c] (refcount must survive an invalid path)", sharers)
 			}
 
-			branchFound, wtFound, found, err := FindBranchForAgent(base, "agent-c")
+			branchFound, wtFound, found, err := FindBranchForAgent(base, "", "agent-c")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if found {
-				t.Errorf("FindBranchForAgent found=true for a marker with an out-of-tree path (branch=%q, wt=%q)", branchFound, wtFound)
+			if !found {
+				t.Error("FindBranchForAgent found=false, want true (refcount must survive an invalid path)")
+			}
+			if branchFound != branch {
+				t.Errorf("branch = %q, want %q", branchFound, branch)
+			}
+			if wtFound != "" {
+				t.Errorf("worktreePath = %q, want empty", wtFound)
+			}
+		})
+	}
+}
+
+// TestWorktreePathIsScionCreated covers both scion-created worktree shapes
+// this fix accepts, and confirms a path matching neither is rejected —
+// including the ProvisionAgent "attach to an existing worktree" case, which
+// is legitimate but does not match either shape (see readMarker's degrade
+// behavior, not a discard, for that case).
+func TestWorktreePathIsScionCreated(t *testing.T) {
+	base := "/base"
+	// projectDir is the actual resolved project directory a caller like
+	// ProvisionAgent has in scope — here, the common top-level layout where
+	// .scion sits directly under the repo root. See the subdirectory-layout
+	// case below and TestDeleteAgentFiles_ProvisionAgentLayout_ScionInSubdirectory
+	// (pkg/agent) for the non-top-level case this must NOT be confused with.
+	projectDir := "/base/.scion"
+
+	cases := []struct {
+		name       string
+		projectDir string
+		candidate  string
+		want       bool
+	}{
+		{"ProvisionShared shape", projectDir, "/base/worktrees/agent-a", true},
+		{"ProvisionAgent create shape", projectDir, "/base/.scion/agents/agent-a/workspace", true},
+		{"ProvisionAgent shape, different agent name", projectDir, "/base/.scion/agents/some-other-name/workspace", true},
+		{"neither shape: bare agents dir", projectDir, "/base/.scion/agents/agent-a", false},
+		{"neither shape: extra nesting under agents", projectDir, "/base/.scion/agents/agent-a/workspace/extra", false},
+		{"neither shape: wrong leaf under agents", projectDir, "/base/.scion/agents/agent-a/home", false},
+		{"neither shape: external path (e.g. a user hand-created worktree)", projectDir, "/elsewhere/worktree", false},
+		{"neither shape: empty", projectDir, "", false},
+		{"neither shape: relative", projectDir, "agents/agent-a/workspace", false},
+		{"no projectDir (caller with no ProvisionAgent-layout concept): shape-2 candidate rejected", "", "/base/.scion/agents/agent-a/workspace", false},
+		{"no projectDir: shape-1 candidate still accepted", "", "/base/worktrees/agent-a", true},
+		{
+			name:       ".scion in a repo subdirectory: shape-2 candidate under the REAL projectDir is accepted",
+			projectDir: "/base/nested/project/.scion",
+			candidate:  "/base/nested/project/.scion/agents/agent-a/workspace",
+			want:       true,
+		},
+		{
+			name:       ".scion in a repo subdirectory: reconstructing projectDir as base/.scion would wrongly reject this — must use the real projectDir instead",
+			projectDir: "/base/nested/project/.scion",
+			candidate:  "/base/.scion/agents/agent-a/workspace",
+			want:       false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := WorktreePathIsScionCreated(base, tc.projectDir, tc.candidate)
+			if got != tc.want {
+				t.Errorf("WorktreePathIsScionCreated(%q, %q, %q) = %v, want %v", base, tc.projectDir, tc.candidate, got, tc.want)
 			}
 		})
 	}
@@ -310,11 +379,11 @@ func TestListSharers_LegitimateInTreePath(t *testing.T) {
 	branch := "feature/legit"
 	wt := inTreeWT(base, "legit")
 
-	if err := RegisterSharer(base, branch, wt, "agent-1"); err != nil {
+	if err := RegisterSharer(base, "", branch, wt, "agent-1"); err != nil {
 		t.Fatal(err)
 	}
 
-	sharers, wtPath, err := ListSharers(base, branch)
+	sharers, wtPath, err := ListSharers(base, "", branch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +398,7 @@ func TestListSharers_LegitimateInTreePath(t *testing.T) {
 func TestFindBranchForAgent_NoDir(t *testing.T) {
 	base := setupBase(t)
 
-	_, _, found, err := FindBranchForAgent(base, "agent-1")
+	_, _, found, err := FindBranchForAgent(base, "", "agent-1")
 	if err != nil {
 		t.Fatal(err)
 	}

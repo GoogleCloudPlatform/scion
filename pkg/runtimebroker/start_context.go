@@ -1312,7 +1312,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		}
 	}
 	if !preExisted {
-		_, regPath, listErr := provision.ListSharers(result.ProjectRoot, branch)
+		_, regPath, listErr := provision.ListSharers(result.ProjectRoot, "", branch)
 		if listErr != nil {
 			// The registry read boundary refused this branch's marker outright
 			// (an escape/symlink smell, not merely a stale or foreign value —
@@ -1403,10 +1403,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	// Source the authoritative worktree path from the sharer registry.
 	// For a JOIN, the agent shares an existing worktree rather than having
 	// its own at WorktreePath(base, agentID).
-	actualWorkspace := result.WorktreePath
-	if _, regPath, err := provision.ListSharers(result.ProjectRoot, branch); err == nil && regPath != "" {
-		actualWorkspace = regPath
-	}
+	actualWorkspace := resolveActualWorkspace(result.ProjectRoot, branch, result.WorktreePath, in.AgentID)
 
 	// The authoritative gate before mounting: whichever path actualWorkspace
 	// turned out to be — this agent's own worktree, or a sharer-registry
@@ -1433,10 +1430,43 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	if s.config.Debug {
 		s.agentLifecycleLog.Debug("Worktree-per-agent mode enabled",
 			"agent_id", in.AgentID,
-			"workspace", result.WorktreePath,
-			"project_root", result.ProjectRoot)
+			"repo_root", result.ProjectRoot,
+			"workspace", actualWorkspace)
 	}
 	return true, result.ProjectRoot, nil
+}
+
+// resolveActualWorkspace decides the actual host path to mount for a
+// worktree-per-agent agent after ProvisionShared has run: the sharer
+// registry's recorded path for branch if — and only if — it passes the full
+// worktree relationship check (ValidateWorktreeForBase), otherwise
+// fallbackWorktreePath (the agent's own freshly-provisioned path).
+//
+// The read boundary (pkg/provision.ListSharers -> readMarker) only proves the
+// recorded path is in-tree-SHAPED (lexical); it may still be an in-tree decoy
+// or a fake-back-link redirect (see pkg/provision/provision.go's JOIN path,
+// which applies this identical full check to its own two JOIN sources). This
+// is a second, independent read of the registry after ProvisionShared's own
+// internal JOIN decision — a defensive re-check against a marker that could
+// have been rewritten between the two reads — so it must not skip the full
+// check just because ProvisionShared already validated once.
+//
+// Hub-managed worktree-per-agent bases always use the ProvisionShared
+// (repoRoot/worktrees/<name>) layout, never ProvisionAgent's local shape, so
+// "" is passed as ListSharers' projectDir — see WorktreePathIsScionCreated's
+// doc comment for why that's the correct value for a caller with no
+// ProvisionAgent-layout concept.
+func resolveActualWorkspace(repoRoot, branch, fallbackWorktreePath, agentID string) string {
+	_, regPath, err := provision.ListSharers(repoRoot, "", branch)
+	if err != nil || regPath == "" {
+		return fallbackWorktreePath
+	}
+	if valErr := provision.IsValidJoinWorktree(repoRoot, regPath); valErr != nil {
+		slog.Warn("worktree-per-agent: registry worktree path failed relationship validation, using freshly provisioned path instead",
+			"agent_id", agentID, "branch", branch, "path", regPath, "error", valErr)
+		return fallbackWorktreePath
+	}
+	return regPath
 }
 
 // projectProvisionMutex returns the per-project mutex for serializing worktree

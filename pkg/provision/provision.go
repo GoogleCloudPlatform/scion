@@ -2133,7 +2133,7 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 		}
 		slog.Debug("ProvisionShared: worktree already exists",
 			"agent_id", in.AgentID, "path", worktreePath)
-		return RegisterSharer(base, branchName, worktreePath, in.AgentID)
+		return RegisterSharer(base, "", branchName, worktreePath, in.AgentID)
 	}
 
 	// Verify the shared checkout exists (.git dir present).
@@ -2149,8 +2149,10 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 	// worktree-mode agent's own container (it lives under the shared,
 	// read-write-mounted .git); only join the path it names when that path
 	// is both a real worktree of this same base and a direct child of its
-	// "worktrees" directory.
-	sharers, existingWtPath, err := ListSharers(base, branchName)
+	// "worktrees" directory. ensureWorktree always operates in the
+	// base/worktrees/<name> shape, so "" is passed for projectDir (the
+	// ProvisionAgent-layout shape never applies here).
+	sharers, existingWtPath, err := ListSharers(base, "", branchName)
 	if err != nil {
 		return fmt.Errorf("ProvisionShared: list sharers for branch %q: %w", branchName, err)
 	}
@@ -2159,7 +2161,7 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 			slog.Info("ProvisionShared: joining existing worktree (registry)",
 				"agent_id", in.AgentID, "branch", branchName, "path", existingWtPath,
 				"existing_sharers", sharers)
-			return RegisterSharer(base, branchName, existingWtPath, in.AgentID)
+			return RegisterSharer(base, "", branchName, existingWtPath, in.AgentID)
 		} else {
 			slog.Warn("ProvisionShared: registry worktree path failed relationship validation, will create new worktree",
 				"agent_id", in.AgentID, "branch", branchName, "stale_path", existingWtPath, "error", valErr)
@@ -2171,7 +2173,7 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 		if validateJoinCandidate(base, existingPath, in.AgentID, branchName, "git-worktree-list") {
 			slog.Info("ProvisionShared: joining pre-existing worktree (git)",
 				"agent_id", in.AgentID, "branch", branchName, "path", existingPath)
-			return RegisterSharer(base, branchName, existingPath, in.AgentID)
+			return RegisterSharer(base, "", branchName, existingPath, in.AgentID)
 		}
 	}
 
@@ -2204,7 +2206,7 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 				validateJoinCandidate(base, attachPath, in.AgentID, branchName, "git-fallback") {
 				slog.Info("ProvisionShared: attaching to existing worktree (git fallback)",
 					"agent_id", in.AgentID, "branch", branchName, "path", attachPath)
-				return RegisterSharer(base, branchName, attachPath, in.AgentID)
+				return RegisterSharer(base, "", branchName, attachPath, in.AgentID)
 			}
 			return fmt.Errorf("git worktree add: branch %q already checked out but cannot find existing worktree: %s",
 				branchName, outputStr)
@@ -2222,19 +2224,19 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 						validateJoinCandidate(base, attachPath, in.AgentID, branchName, "reuse-fallback") {
 						slog.Info("ProvisionShared: attaching to existing worktree (reuse fallback)",
 							"agent_id", in.AgentID, "branch", branchName, "path", attachPath)
-						return RegisterSharer(base, branchName, attachPath, in.AgentID)
+						return RegisterSharer(base, "", branchName, attachPath, in.AgentID)
 					}
 					return fmt.Errorf("git worktree add: branch %q already checked out: %s", branchName, reuse)
 				}
 				return fmt.Errorf("git worktree add (reuse branch): %s", reuse)
 			}
-			return RegisterSharer(base, branchName, worktreePath, in.AgentID)
+			return RegisterSharer(base, "", branchName, worktreePath, in.AgentID)
 		}
 
 		return fmt.Errorf("git worktree add: %s", outputStr)
 	}
 
-	return RegisterSharer(base, branchName, worktreePath, in.AgentID)
+	return RegisterSharer(base, "", branchName, worktreePath, in.AgentID)
 }
 
 // findWorktreeForBranch parses 'git worktree list --porcelain' output to find
