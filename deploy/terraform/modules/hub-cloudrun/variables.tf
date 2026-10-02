@@ -48,24 +48,14 @@ variable "hub_iam_grants" {
   type        = list(string)
 }
 
-variable "hub_iam_condition_expression" {
-  description = "hub-identity's legacy conditioned secretmanager.admin expression, used only as a time_sleep trigger so the propagation wait re-arms if the condition ever changes (e.g. a different hub_name) rather than protecting only the very first apply."
-  type        = string
-}
-
 variable "hub_iam_condition_expression_prefixed" {
-  description = "hub-identity's hub-prefixed conditioned secretmanager.admin expression (ptone/scion#2152), used only as a time_sleep trigger alongside hub_iam_condition_expression so the propagation wait re-arms if either condition ever changes."
+  description = "hub-identity's hub-prefixed conditioned secretmanager.admin expression (ptone/scion#2152), used only as a time_sleep trigger so the propagation wait re-arms if the condition ever changes (e.g. a different hub_name) rather than protecting only the very first apply."
   type        = string
 }
 
 variable "boot_prerequisites" {
   description = "Map of real resource attributes (never bare input variables or computed strings) that the Cloud Run service must not boot before — the nfs-init Job's own identity (its Job actually finished, not just that its export path string is known), and the cloudsql-database/hub-identity resources this module doesn't otherwise reference directly. Consumed only by terraform_data.boot_prerequisites below, which google_cloud_run_v2_service.hub depends on; no data source may depend on it (see that resource's comment). Replaces a module-level depends_on that used to sit on this module's caller (configurations/hub/main.tf) — that forced Terraform to defer *every* resource and data source inside this module, including a data source that used to read the DB password (since removed, along with the sensitive var.db_password input it was replaced by, once the DSN moved entirely into a dedicated secret — see var.dsn_secret_id/var.dsn_secret_version), whenever hub-identity/agent-runtime-k8s/cloudsql-database had any pending change. That made the settings secret_data unknown at plan time and forced a spurious replace of the settings secret version on a real apply."
   type        = map(string)
-}
-
-variable "hub_scope_secret_hash" {
-  description = "hub-identity's 12-char hub-scope secret hash (scion-hub-<hash>-*), used verbatim to pre-provision the OIDC signing key secret ID so it falls under the hub SA's existing conditioned secretmanager.admin grant. Not recomputed here — hub-identity is the one source of truth, shared with its IAM condition."
-  type        = string
 }
 
 variable "network_name" {

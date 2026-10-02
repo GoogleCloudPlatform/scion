@@ -41,11 +41,7 @@ import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
-import {
-  isFeatureEnabled,
-  NATIVE_CHAT_V2_FLAG,
-  TERMINAL_WORKSPACE_FLAG,
-} from '../../utils/feature-flags.js';
+import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../../utils/feature-flags.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
@@ -885,7 +881,7 @@ export class ScionHeader extends LitElement {
    * The header's quick-switcher button. Renders as a single element shared
    * by every responsive tier (positioned via `.header-right`'s own flex
    * layout, see the render() call site) rather than duplicated per tier.
-   * Visible on every width when signed in on a v2 chat route: narrow screens
+   * Visible on every width when signed in on a chat route: narrow screens
    * need it most since they have no keyboard shortcut, but desktop keeps it
    * too, both to discover the shortcut (via the tooltip) and for a
    * pointer/trackpad user who would rather click than reach for a chord.
@@ -893,7 +889,6 @@ export class ScionHeader extends LitElement {
   private renderPaletteButton(): TemplateResult | typeof nothing {
     if (!this.user) return nothing;
     if (!this.isChatView()) return nothing;
-    if (!isFeatureEnabled(NATIVE_CHAT_V2_FLAG)) return nothing;
 
     const isTouch = this.touchPrimary.isTouch;
     const isMac = isMacPlatform();

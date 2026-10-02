@@ -69,6 +69,121 @@ func TestLoadEnvOverlay_FromFileResolves(t *testing.T) {
 	}
 }
 
+// TestLoadEnvOverlay_FromFileProjectedSecretStyleSymlinkResolves reproduces
+// a real Kubernetes projected-secret volume layout mounted as an
+// allowedRoot: a timestamped directory holding the actual key, a "..data"
+// symlink to it, and the requested key itself as a symlink through
+// "..data" (e.g. "token" -> "..data/token"). The from_file resolver must
+// allow that layout: refusing every symlink unconditionally would make
+// from_file unable to read a key out of a volume mounted this way — this is
+// the acceptance-gate test for that behaviour.
+func TestLoadEnvOverlay_FromFileProjectedSecretStyleSymlinkResolves(t *testing.T) {
+	dir := t.TempDir()
+	timestamped := "..2026_09_28_12_00_00.123456789"
+	if err := os.MkdirAll(filepath.Join(dir, timestamped), 0700); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(dir, timestamped, "token")
+	if err := os.WriteFile(tokenPath, []byte("sa-token-value\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(timestamped, filepath.Join(dir, "..data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..data", "token"), filepath.Join(dir, "token")); err != nil {
+		t.Fatal(err)
+	}
+
+	overlay := filepath.Join(dir, "env.json")
+	body := `{"TOKEN":{"from_file":"` + filepath.Join(dir, "token") + `"}}`
+	if err := os.WriteFile(overlay, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadEnvOverlay(overlay, []string{dir})
+	if err != nil {
+		t.Fatalf("LoadEnvOverlay: %v", err)
+	}
+	if got["TOKEN"] != "sa-token-value" {
+		t.Fatalf("expected the projected-secret token to resolve, got %q", got["TOKEN"])
+	}
+}
+
+// TestLoadEnvOverlay_FromFileSymlinkInsideRootEscapesRejected fails if
+// containment is checked by comparing path strings instead of walking an
+// fd chain anchored at the allowed root: the symlink's own name sits
+// inside the allowed root, but its target does not, so a string-prefix (or
+// filepath.Rel) check alone would accept it.
+func TestLoadEnvOverlay_FromFileSymlinkInsideRootEscapesRejected(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	secretFile := filepath.Join(outside, "leaked")
+	if err := os.WriteFile(secretFile, []byte("nope"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(secretFile, link); err != nil {
+		t.Fatal(err)
+	}
+
+	overlay := filepath.Join(dir, "env.json")
+	body := `{"X":{"from_file":"` + link + `"}}`
+	if err := os.WriteFile(overlay, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadEnvOverlay(overlay, []string{dir})
+	if err == nil {
+		t.Fatal("expected a symlink whose name is inside the allowed root but whose target is not to be rejected")
+	}
+}
+
+// TestLoadEnvOverlay_FromFileParentEscapeRejected fails if the containment
+// check is dropped or bypassed: a from_file value that walks back out of
+// the allowed root via ".." must be refused even though evaluating it
+// component-by-component would eventually land back inside a different
+// permitted root's tree.
+func TestLoadEnvOverlay_FromFileParentEscapeRejected(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	secretFile := filepath.Join(outside, "leaked")
+	if err := os.WriteFile(secretFile, []byte("nope"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	escaping := filepath.Join(dir, "..", filepath.Base(outside), "leaked")
+	overlay := filepath.Join(dir, "env.json")
+	body := `{"X":{"from_file":"` + escaping + `"}}`
+	if err := os.WriteFile(overlay, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadEnvOverlay(overlay, []string{dir})
+	if err == nil || !strings.Contains(err.Error(), "escapes allowed roots") {
+		t.Fatalf("expected escape rejection, got %v", err)
+	}
+}
+
+// TestLoadEnvOverlay_OverlayFileSymlinkRejected fails if the overlay file's
+// own read stops refusing symlinks: swapping the overlay path itself for a
+// symlink must not make LoadEnvOverlay read through it.
+func TestLoadEnvOverlay_OverlayFileSymlinkRejected(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.json")
+	if err := os.WriteFile(real, []byte(`{"FOO":"bar"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	overlay := filepath.Join(dir, "env.json")
+	if err := os.Symlink(real, overlay); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadEnvOverlay(overlay, nil)
+	if err == nil {
+		t.Fatal("expected an error reading an overlay path that is a symlink, got nil")
+	}
+}
+
 func TestLoadEnvOverlay_FromFileEscapingPathRejected(t *testing.T) {
 	dir := t.TempDir()
 	other := t.TempDir()

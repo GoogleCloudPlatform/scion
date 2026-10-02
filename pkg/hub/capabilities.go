@@ -238,6 +238,17 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 
 // ComputeCapabilitiesBatch evaluates capabilities for a list of resources, optimized
 // for batch operation by expanding groups and fetching policies once.
+//
+// PINNED to ComputeCapabilitiesForActions below: the two evaluation loops
+// (the IsScopedUserIdentity branch and the CheckAccess branch) must stay in
+// lockstep, field for field, with ComputeCapabilitiesForActions's loops over
+// an explicit action list. They are intentionally a duplicated body rather
+// than one delegating to the other: this function's body is deliberately
+// left unchanged here so the shared `withAuthzInputMemo` install site in
+// this file is unaffected.
+// TestListProjectAgentsSorted_CapsDeepEqualLegacy asserts the two stay
+// byte-identical on real requests; if you change one loop, change the other
+// and re-run that test.
 func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Identity, resources []Resource, resourceType string) []*Capabilities {
 	actions, ok := ResourceActions[resourceType]
 	if !ok {
@@ -276,6 +287,66 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		caps[i] = &Capabilities{Actions: allowed}
 	}
 	return caps
+}
+
+// ComputeCapabilitiesForActions evaluates identity's capabilities over
+// resources for exactly the given actions, in that order, rather than the
+// full ResourceActions[resourceType] set ComputeCapabilitiesBatch uses. It is
+// the thin read-pass variant design lists-graph.md 5.3 (step 3, the sorted
+// project endpoint's per-candidate ActionRead-only pass) and step 5a/6 (the
+// full-row re-decision and remaining-actions merge) call for.
+//
+// It runs the identical evaluation path ComputeCapabilitiesBatch does —
+// DecideFromContext for a scoped UAT, CheckAccess otherwise — so a caller
+// that passes ResourceActions[resourceType] here gets byte-identical results
+// to ComputeCapabilitiesBatch (the decision-count test suite's
+// non-waivable gate asserts this deep-equality for the merged per-item
+// result). Each (resource, action) pair costs exactly one decision and one
+// audit record, same as today.
+func (a *AuthzService) ComputeCapabilitiesForActions(ctx context.Context, identity Identity, resources []Resource, actions []Action) []*Capabilities {
+	if IsScopedUserIdentity(identity) {
+		caps := make([]*Capabilities, len(resources))
+		for i, resource := range resources {
+			caps[i] = a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
+		}
+		return caps
+	}
+
+	caps := make([]*Capabilities, len(resources))
+	for i, resource := range resources {
+		var allowed []string
+		for _, action := range actions {
+			decision := a.CheckAccess(ctx, identity, resource, action)
+			if decision.Allowed {
+				allowed = append(allowed, string(action))
+			}
+		}
+		if allowed == nil {
+			allowed = []string{}
+		}
+		caps[i] = &Capabilities{Actions: allowed}
+	}
+	return caps
+}
+
+// mergeCapabilities combines a read-only capability result (the read pass,
+// evaluated on the member snapshot) with a capability result for the
+// remaining actions (evaluated on the full row), preserving the action order
+// ResourceActions[resourceType] defines — the same order
+// ComputeCapabilitiesBatch produces, which is what design lists-graph.md 5.3
+// step 6 requires (the non-waivable deep-equality gate) and what the
+// decision-count accounting depends on: an item whose read decision came
+// from step 3 and whose remaining
+// actions came from step 6 must look identical to one where every action was
+// decided by a single ComputeCapabilitiesBatch call.
+func mergeCapabilities(order []Action, readCap, restCap *Capabilities) *Capabilities {
+	allowed := make([]string, 0, len(order))
+	for _, action := range order {
+		if capabilityAllows(readCap, action) || capabilityAllows(restCap, action) {
+			allowed = append(allowed, string(action))
+		}
+	}
+	return &Capabilities{Actions: allowed}
 }
 
 // computeCapabilitiesWithContext evaluates every action through the canonical

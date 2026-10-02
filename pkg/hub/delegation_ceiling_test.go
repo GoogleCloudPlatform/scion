@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -304,19 +305,6 @@ func TestDelegationCeiling_FailClosedMinting(t *testing.T) {
 	// Minting operation should fail closed when delegator can't be resolved
 	decision := authz.CheckAccess(ctx, agent, resource, ActionCreate)
 	assert.False(t, decision.Allowed, "minting operation should fail closed on delegation ceiling error")
-}
-
-// --- Test: isMintingOperation ---
-
-func TestIsMintingOperation(t *testing.T) {
-	assert.True(t, isMintingOperation(ActionCreate), "ActionCreate is minting")
-	assert.True(t, isMintingOperation(ActionManage), "ActionManage is minting")
-	assert.True(t, isMintingOperation(ActionAddMember), "ActionAddMember is minting")
-	assert.True(t, isMintingOperation(ActionMint), "ActionMint is minting")
-	assert.True(t, isMintingOperation(ActionAssign), "ActionAssign is minting")
-	assert.True(t, isMintingOperation(ActionRegister), "ActionRegister is minting")
-	assert.False(t, isMintingOperation(ActionRead), "ActionRead is not minting")
-	assert.False(t, isMintingOperation(ActionList), "ActionList is not minting")
 }
 
 // --- Test: Request-scoped caching ---
@@ -777,16 +765,16 @@ func TestDelegationCeiling_PostBackfillNoEdge_ReadAllowed_WriteBlocked(t *testin
 		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
 	require.NoError(t, err, "should be able to set backfill marker")
 
-	// No delegation edge — post-backfill. Read-only operations should be
-	// allowed (fail-open for hub-attested local agents), while write
-	// operations remain ceiling-capped.
+	// No delegation edge, post-backfill. A hub-attested local agent keeps
+	// the registered non-sensitive read allowance; every other action is
+	// ceiling-capped.
 	// CO1: Use project resource — agent.read has no AgentScopes. With project
 	// resource the kernel allows, so the denial comes from the delegation
 	// ceiling (post-backfill, no edge), which is the intended test target.
 	agent := dcAgentIdentity(agentID, projectID, AgentRoleFull)
 	resource := Resource{Type: "project", ID: projectID}
 
-	// Read-only operations are allowed despite missing edge (fail-open).
+	// A registered non-sensitive read is allowed without an edge (read allowance).
 	decision := authz.CheckAccess(ctx, agent, resource, ActionRead)
 	assert.True(t, decision.Allowed, "post-backfill read-only should be allowed despite missing edge")
 
@@ -924,12 +912,13 @@ func TestDelegationEdge_CreateRevokeCreateRevoke(t *testing.T) {
 // --- R2-2: isReadOnlyOperation tests ---
 
 func TestIsReadOnlyOperation(t *testing.T) {
-	// Read-only operations (fail-open on store errors)
+	// Read-class operations (candidates for the registered non-sensitive
+	// read allowance; a store error denies every action)
 	assert.True(t, isReadOnlyOperation(ActionRead), "ActionRead is read-only")
 	assert.True(t, isReadOnlyOperation(ActionList), "ActionList is read-only")
 	assert.True(t, isReadOnlyOperation(ActionVerify), "ActionVerify is read-only")
 
-	// Non-read-only operations (fail-closed on store errors)
+	// Non-read-class operations (never qualify for the read allowance)
 	assert.False(t, isReadOnlyOperation(ActionCreate), "ActionCreate is NOT read-only")
 	assert.False(t, isReadOnlyOperation(ActionDelete), "ActionDelete is NOT read-only")
 	assert.False(t, isReadOnlyOperation(ActionUpdate), "ActionUpdate is NOT read-only")
@@ -1005,7 +994,7 @@ func TestDelegationCeiling_DeleteFailsClosedOnOrphanedDelegation(t *testing.T) {
 		"ActionRead should still be allowed on orphaned delegation")
 }
 
-// --- R2-3: Unmapped permission in handleOrphanedDelegation must deny ---
+// --- R2-3: Unmapped permission under the migration sentinel must deny ---
 
 func TestDelegationCeiling_UnmappedPermissionOrphanedDeny(t *testing.T) {
 	authz, s := setupDelegationCeilingTest(t)
@@ -1032,17 +1021,11 @@ func TestDelegationCeiling_UnmappedPermissionOrphanedDeny(t *testing.T) {
 
 	agent := dcAgentIdentity(agentID, projectID, AgentRoleFull)
 
-	// Use a resource type that produces a permission ID not in the registry
-	// (e.g., "imaginary_resource.read" won't be in the permissions registry).
+	// A resource type with no registered permission: the migration
+	// sentinel authorizes only registered non-sensitive reads, so an
+	// unmapped permission denies.
 	unmappedResource := Resource{Type: "imaginary_resource", ParentType: "project", ParentID: projectID}
-
-	// Even though this is a "read" action, the resource type is unknown,
-	// so the permission will not be in the registry. For orphaned delegations,
-	// genuinely unmapped permissions must deny.
 	decision := authz.CheckAccess(ctx, agent, unmappedResource, ActionRead)
-	// The resolvePermissionID will construct "imaginary_resource.read" which
-	// won't be in the registry, so permissionToAgentScope returns "".
-	// The isKnownRead check should find it's NOT in the registry and deny.
 	assert.False(t, decision.Allowed,
 		"unmapped permission in orphaned delegation must deny (R2-3)")
 }
@@ -1369,4 +1352,82 @@ func TestDelegationCeiling_CrossProjectChainDenied(t *testing.T) {
 	decisionQ := authz.CheckAccess(ctx, parentIdentity, resourceQ, ActionRead)
 	assert.True(t, decisionQ.Allowed,
 		"parent agent operating in its own project Q should be allowed (sanity check)")
+}
+
+// TestDelegationCeiling_EffectivePermissionsCacheNotAliased pins that merging
+// system-scoped permissions into a project-scoped permission list fetched
+// from the request-scoped cache builds a new slice rather than appending in
+// place. getCachedEffectivePermissions returns the cached slice directly
+// (same backing array on every lookup within the request); appending to it
+// in place can silently write into spare capacity the cache entry still
+// claims as unused, so a later read of that same cache entry would surface
+// whatever the append wrote there.
+//
+// The test seeds the project-scope cache entry by hand with a slice that has
+// spare capacity, fills that spare capacity with a sentinel value, then
+// drives two lookups that each force a project+system permission merge. It
+// then re-slices the cache entry out to its capacity and asserts the
+// sentinel survives: nothing wrote past the entry's own length.
+func TestDelegationCeiling_EffectivePermissionsCacheNotAliased(t *testing.T) {
+	authz, s := setupDelegationCeilingTest(t)
+	ctx := context.Background()
+
+	userID := tid("alias-user")
+	projectID := tid("alias-project")
+	createDCProject(t, s, projectID, "alias-project")
+	createDCUser(t, s, userID, "alias@test.com", projectID, store.ProjectRoleMember)
+	assertNotSystemAdmin(t, authz, ctx, userID)
+
+	// A system-scoped role granting a permission distinct from the seeded
+	// project-scope cache entry below, so the merge actually appends
+	// something.
+	now := time.Now()
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		ID:          tid("alias-sys-role"),
+		Name:        "alias-sys-role",
+		Description: "test role granting a system-scoped permission",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"agent.create"},
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	cacheCtx := contextWithDelegationCeilingCache(ctx)
+	cache := getDelegationCeilingCache(cacheCtx)
+	require.NotNil(t, cache)
+	key := store.RoleBindingPrincipalUser + ":" + userID + ":" + store.RoleScopeProject + ":" + projectID
+
+	seeded := make([]string, 1, 8)
+	seeded[0] = "project.read"
+	full := seeded[:cap(seeded)]
+	for i := 1; i < len(full); i++ {
+		full[i] = "SENTINEL"
+	}
+	cache.perms[key] = seeded[:1]
+
+	resource := Resource{Type: "project", ID: projectID}
+	for i, permID := range []string{"project.read", "agent.create"} {
+		allowed, reason, err := authz.evaluateUserDelegatorAuthority(
+			cacheCtx, userID, resource, ActionRead, permID, store.RoleScopeProject, projectID)
+		require.NoErrorf(t, err, "lookup %d", i)
+		assert.Truef(t, allowed, "lookup %d (%s): %s", i, permID, reason)
+	}
+
+	cached := cache.perms[key]
+	require.Equal(t, 1, len(cached), "cached project-scope perms entry length must not change")
+	require.Equal(t, "project.read", cached[0])
+	beyond := cached[:cap(cached)]
+	for i := 1; i < len(beyond); i++ {
+		assert.Equalf(t, "SENTINEL", beyond[i],
+			"system-permission merge must not write into the cached slice's backing array at index %d", i)
+	}
 }

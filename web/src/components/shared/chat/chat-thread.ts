@@ -730,6 +730,7 @@ export class ScionChatThread extends LitElement {
         flex: 1;
         overflow-y: auto;
         overflow-x: hidden;
+        overscroll-behavior: contain;
         padding: 0.5rem 0;
         display: flex;
         flex-direction: column;

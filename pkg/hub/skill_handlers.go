@@ -360,8 +360,9 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 // through its bucket: (scope kind, project) for hub and project skills, and
 // (scope kind, owning user) for user skills. The project-scoped JWT binding,
 // the synthetic agent-skill-catalog binding (Step 5b/5b2, global/core only
-// after Step 5c), the personal-skill progeny relationship grant (Step 9,
-// user skills owned by the agent's origin user only), the JWT scope restriction
+// after Step 5c), the personal-skill progeny relationship grant (Step 9, user
+// skills owned by the agent's origin user only, with that user's admission to
+// the agent's execution project, a per-agent fact), the JWT scope restriction
 // and access constraints (Step 7), and the delegation ceiling (Step 10,
 // permission-level at the agent's project) all read nothing else from the
 // row. So one probe per bucket equals the per-row outcome for every row in

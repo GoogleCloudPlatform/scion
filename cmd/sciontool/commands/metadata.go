@@ -17,6 +17,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
 
 var metadataCmd = &cobra.Command{
@@ -172,13 +173,19 @@ func runMetadataStatus() int {
 		fmt.Println("[INFO] Not running as root — skipping iptables check")
 	} else {
 		portStr := strconv.Itoa(cfg.Port)
-		cmd := exec.Command("iptables", "-t", "nat", "-C", "OUTPUT",
-			"-d", "169.254.169.254", "-p", "tcp", "--dport", "80",
-			"-j", "REDIRECT", "--to-port", portStr)
-		if err := cmd.Run(); err != nil {
-			fmt.Printf("[WARN] iptables REDIRECT rule not found (port %s)\n", portStr)
+		iptablesPath, err := rootexec.Resolve("iptables")
+		if err != nil {
+			fmt.Printf("[WARN] could not resolve a trusted iptables binary: %v\n", err)
 		} else {
-			fmt.Printf("[ OK ] iptables REDIRECT rule present (169.254.169.254:80 -> localhost:%s)\n", portStr)
+			cmd := exec.Command(iptablesPath, "-t", "nat", "-C", "OUTPUT",
+				"-d", "169.254.169.254", "-p", "tcp", "--dport", "80",
+				"-j", "REDIRECT", "--to-port", portStr)
+			cmd.Env = rootexec.Env()
+			if err := cmd.Run(); err != nil {
+				fmt.Printf("[WARN] iptables REDIRECT rule not found (port %s)\n", portStr)
+			} else {
+				fmt.Printf("[ OK ] iptables REDIRECT rule present (169.254.169.254:80 -> localhost:%s)\n", portStr)
+			}
 		}
 	}
 

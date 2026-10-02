@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
@@ -20,7 +22,7 @@ func TestInitLimitsFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
-	err := InitLimitsFile(limitsPath, 50, 200)
+	err := InitLimitsFile(limitsPath, 50, 200, 0, 0)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(limitsPath)
@@ -42,7 +44,7 @@ func TestInitLimitsFile_ZeroValues(t *testing.T) {
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
-	err := InitLimitsFile(limitsPath, 0, 0)
+	err := InitLimitsFile(limitsPath, 0, 0, 0, 0)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(limitsPath)
@@ -62,7 +64,7 @@ func TestLimitsHandler_TurnCounting(t *testing.T) {
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
 	// Initialize the limits file
-	err := InitLimitsFile(limitsPath, 5, 0)
+	err := InitLimitsFile(limitsPath, 5, 0, 0, 0)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
@@ -89,7 +91,7 @@ func TestLimitsHandler_ModelCallCounting(t *testing.T) {
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
-	err := InitLimitsFile(limitsPath, 0, 10)
+	err := InitLimitsFile(limitsPath, 0, 10, 0, 0)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
@@ -115,7 +117,7 @@ func TestLimitsHandler_IgnoresIrrelevantEvents(t *testing.T) {
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
-	err := InitLimitsFile(limitsPath, 10, 10)
+	err := InitLimitsFile(limitsPath, 10, 10, 0, 0)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
@@ -157,7 +159,7 @@ func TestLimitsHandler_NoLimitsConfigured(t *testing.T) {
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
-	err := InitLimitsFile(limitsPath, 0, 0)
+	err := InitLimitsFile(limitsPath, 0, 0, 0, 0)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
@@ -190,7 +192,7 @@ func TestLimitsHandler_TurnLimitDetection(t *testing.T) {
 	statusPath := filepath.Join(tmpDir, "agent-info.json")
 	triggerPath := filepath.Join(tmpDir, "scion-limits-exceeded")
 
-	err := InitLimitsFile(limitsPath, 3, 0)
+	err := InitLimitsFile(limitsPath, 3, 0, 0, 0)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
@@ -230,7 +232,7 @@ func TestLimitsHandler_ModelCallLimitDetection(t *testing.T) {
 	statusPath := filepath.Join(tmpDir, "agent-info.json")
 	triggerPath := filepath.Join(tmpDir, "scion-limits-exceeded")
 
-	err := InitLimitsFile(limitsPath, 0, 2)
+	err := InitLimitsFile(limitsPath, 0, 2, 0, 0)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
@@ -264,7 +266,7 @@ func TestLimitsHandler_BothLimitsIndependent(t *testing.T) {
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
-	err := InitLimitsFile(limitsPath, 100, 100)
+	err := InitLimitsFile(limitsPath, 100, 100, 0, 0)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
@@ -370,7 +372,7 @@ func TestWriteLimitsState_AtomicWrite(t *testing.T) {
 		StartedAt:      "2026-02-22T10:30:00Z",
 	}
 
-	err := writeLimitsState(limitsPath, ls)
+	err := writeLimitsState(limitsPath, ls, 0, 0)
 	require.NoError(t, err)
 
 	// Read and verify
@@ -386,6 +388,74 @@ func TestWriteLimitsState_AtomicWrite(t *testing.T) {
 	assert.Equal(t, 50, read.MaxTurns)
 	assert.Equal(t, 200, read.MaxModelCalls)
 	assert.Equal(t, "2026-02-22T10:30:00Z", read.StartedAt)
+}
+
+// TestWriteLimitsState_ChownsTempFdBeforeRename proves the uid>0 path
+// actually chowns the temp file's open fd BEFORE the rename that publishes
+// it at path, not merely that the call succeeds without error: the
+// intercepted chown hook checks path's own content at the instant it
+// fires, which must still be the pre-existing seed — if chown ran after
+// the rename instead, the new content would already be visible there.
+func TestWriteLimitsState_ChownsTempFdBeforeRename(t *testing.T) {
+	scrubHubEnv(t)
+	tmpDir := t.TempDir()
+	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+	require.NoError(t, os.WriteFile(limitsPath, []byte("old-seed-content"), 0o600))
+
+	orig := chownLimitsStateFn
+	var chownCalled, sawPreRenameContent bool
+	chownLimitsStateFn = func(fd, uid, gid int) error {
+		chownCalled = true
+		data, rerr := os.ReadFile(limitsPath)
+		sawPreRenameContent = rerr == nil && string(data) == "old-seed-content"
+		return syscall.Fchown(fd, uid, gid)
+	}
+	t.Cleanup(func() { chownLimitsStateFn = orig })
+
+	ls := &LimitsState{MaxTurns: 1, StartedAt: "2026-02-22T10:30:00Z"}
+	err := writeLimitsState(limitsPath, ls, os.Getuid(), os.Getgid())
+	require.NoError(t, err)
+
+	require.True(t, chownCalled, "expected the chown hook to fire for uid>0")
+	assert.True(t, sawPreRenameContent, "path still showed the pre-existing content when chown fired, proving chown ran before the rename that publishes the new content")
+
+	entries, err := os.ReadDir(tmpDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "no temp file should remain after a successful write")
+	assert.Equal(t, "agent-limits.json", entries[0].Name())
+}
+
+// TestWriteLimitsState_SymlinkAtLimitsPathReplacedNotFollowed proves a
+// symlink planted at agent-limits.json — the workload owns the containing
+// directory and can always do this — is replaced outright by the atomic
+// install, never written through: the symlink's target must be left
+// completely untouched, and a fresh regular file with the new limits state
+// must end up at limitsPath.
+func TestWriteLimitsState_SymlinkAtLimitsPathReplacedNotFollowed(t *testing.T) {
+	scrubHubEnv(t)
+	tmpDir := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim")
+	const victimContent = "do-not-touch"
+	require.NoError(t, os.WriteFile(victim, []byte(victimContent), 0o600))
+
+	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+	require.NoError(t, os.Symlink(victim, limitsPath))
+
+	ls := &LimitsState{MaxTurns: 1, StartedAt: "2026-02-22T10:30:00Z"}
+	err := writeLimitsState(limitsPath, ls, os.Getuid(), os.Getgid())
+	require.NoError(t, err)
+
+	victimData, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	assert.Equal(t, victimContent, string(victimData), "the symlink's target must be untouched")
+
+	fi, err := os.Lstat(limitsPath)
+	require.NoError(t, err)
+	assert.Zero(t, fi.Mode()&os.ModeSymlink, "limitsPath should no longer be a symlink after a write")
+
+	read, err := os.ReadFile(limitsPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(read), "2026-02-22T10:30:00Z", "the new limits state should have been installed at limitsPath")
 }
 
 func TestLimitsTriggerFileConstant(t *testing.T) {
@@ -407,6 +477,107 @@ func TestSignalLimitsExceeded_CreatesTriggerFile(t *testing.T) {
 	// Verify the trigger file was created
 	_, err = os.Stat(triggerPath)
 	assert.NoError(t, err, "trigger file should exist after signalLimitsExceeded")
+}
+
+// TestLimitsHandler_ReadLimitsStateNormalRead proves the hardened read
+// still returns ordinary limits state for a plain, legitimate file.
+func TestLimitsHandler_ReadLimitsStateNormalRead(t *testing.T) {
+	scrubHubEnv(t)
+	tmpDir := t.TempDir()
+	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+	require.NoError(t, InitLimitsFile(limitsPath, 7, 9, 0, 0))
+
+	h := &LimitsHandler{limitsPath: limitsPath}
+	ls, err := h.readLimitsState()
+	require.NoError(t, err)
+	assert.Equal(t, 7, ls.MaxTurns)
+	assert.Equal(t, 9, ls.MaxModelCalls)
+}
+
+// TestLimitsHandler_SymlinkAtLimitsPathIsRefused proves a symlink swapped
+// in at agent-limits.json (the workload owns the containing directory and
+// can always do this) is refused rather than followed. This fails if
+// readLimitsState is ever reverted to a plain os.ReadFile, which follows
+// symlinks unconditionally.
+func TestLimitsHandler_SymlinkAtLimitsPathIsRefused(t *testing.T) {
+	scrubHubEnv(t)
+	tmpDir := t.TempDir()
+	secret := filepath.Join(tmpDir, "root-only-secret.json")
+	require.NoError(t, os.WriteFile(secret, []byte(`{"turn_count":999}`), 0o600))
+
+	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+	require.NoError(t, os.Symlink(secret, limitsPath))
+
+	h := &LimitsHandler{limitsPath: limitsPath}
+	_, err := h.readLimitsState()
+	assert.Error(t, err, "expected a symlink at limitsPath to be refused, not followed")
+}
+
+// wantAgentLimitsMaxBytes is this test's OWN, independently hardcoded copy
+// of the size bound limits.go documents for agentLimitsMaxBytes (1 MiB) —
+// not a reference to that constant. See status_test.go's
+// wantAgentInfoMaxBytes for why a test that instead sized its fixture as
+// agentLimitsMaxBytes+1 could never notice a regression that widens that
+// constant: the fixture and the cap would drift together.
+const wantAgentLimitsMaxBytes = 1 << 20
+
+// limitsStateJSONOfSize returns a syntactically valid, LimitsState-shaped
+// JSON document of exactly n bytes, by padding the started_at field. n must
+// be at least the length of the zero-padding LimitsState marshals to.
+func limitsStateJSONOfSize(t *testing.T, n int) []byte {
+	t.Helper()
+	base, err := json.Marshal(LimitsState{StartedAt: ""})
+	if err != nil {
+		t.Fatalf("marshal base LimitsState: %v", err)
+	}
+	pad := n - len(base)
+	if pad < 0 {
+		t.Fatalf("limitsStateJSONOfSize: n=%d is smaller than the unpadded encoding (%d bytes)", n, len(base))
+	}
+	// 'a' padding, not NUL bytes: json.Marshal escapes a control character
+	// like NUL as \u0000 (6 bytes of output per 1 byte of input), which would
+	// make the padding math below wrong. 'a' round-trips as a single byte.
+	padded, err := json.Marshal(LimitsState{StartedAt: strings.Repeat("a", pad)})
+	if err != nil {
+		t.Fatalf("marshal padded LimitsState: %v", err)
+	}
+	if len(padded) != n {
+		t.Fatalf("limitsStateJSONOfSize(%d) produced %d bytes", n, len(padded))
+	}
+	return padded
+}
+
+// TestLimitsHandler_OversizeRegularLimitsPathIsRefused proves the size bound
+// on readLimitsState is enforced against an actual regular file, not just a
+// symlink or a fixture that would fail to parse regardless of the cap: the
+// fixture here is syntactically valid, LimitsState-shaped JSON one byte over
+// wantAgentLimitsMaxBytes, which would unmarshal successfully if the cap did not
+// refuse it first. This fails if the cap is removed or widened.
+func TestLimitsHandler_OversizeRegularLimitsPathIsRefused(t *testing.T) {
+	scrubHubEnv(t)
+	tmpDir := t.TempDir()
+	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+	require.NoError(t, os.WriteFile(limitsPath, limitsStateJSONOfSize(t, wantAgentLimitsMaxBytes+1), 0o600))
+
+	h := &LimitsHandler{limitsPath: limitsPath}
+	_, err := h.readLimitsState()
+	assert.Error(t, err, "expected an oversize regular agent-limits.json to be refused")
+}
+
+// TestLimitsHandler_AtCapRegularLimitsPathIsRead is
+// OversizeRegularLimitsPathIsRefused's companion: the same valid-JSON shape
+// at exactly wantAgentLimitsMaxBytes (not one byte over) is read and parsed
+// successfully, pinning the boundary at the documented cap.
+func TestLimitsHandler_AtCapRegularLimitsPathIsRead(t *testing.T) {
+	scrubHubEnv(t)
+	tmpDir := t.TempDir()
+	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+	require.NoError(t, os.WriteFile(limitsPath, limitsStateJSONOfSize(t, wantAgentLimitsMaxBytes), 0o600))
+
+	h := &LimitsHandler{limitsPath: limitsPath}
+	ls, err := h.readLimitsState()
+	require.NoError(t, err)
+	assert.NotNil(t, ls)
 }
 
 // readLimitsFile reads and parses an agent-limits.json file for test assertions.

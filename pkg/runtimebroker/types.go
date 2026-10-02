@@ -60,6 +60,17 @@ type BrokerProfile struct {
 	Available bool   `json:"available"`
 	Context   string `json:"context,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
+	// Attach reports whether this profile's runtime supports interactive
+	// attach (pkg/runtime.AttachCapableRuntime, via HasAttachSupport). A
+	// pointer, not a plain bool: this broker can only answer for a profile
+	// backed by a runtime instance it has already built (the default
+	// runtime, or an auxiliary runtime some prior request already
+	// constructed) — buildInfoProfiles never builds one just to answer this
+	// field. nil means unknown (no live instance to ask), which every
+	// consumer must read as supported, the same missing-capability default
+	// HasAttachSupport itself uses for a runtime that doesn't implement the
+	// interface.
+	Attach *bool `json:"attach,omitempty"`
 }
 
 // BrokerCapabilities describes what this runtime broker can do.

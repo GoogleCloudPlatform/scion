@@ -83,17 +83,27 @@ func writeForbidden(w http.ResponseWriter, msg string) {
 // The resource ID and internal policy reason are deliberately omitted to avoid
 // leaking information that aids enumeration (design §denied-detail).
 func writeForbiddenStructured(w http.ResponseWriter, msg string, resourceType string, action Action) {
+	writeForbiddenStructuredDenial(w, msg, resourceType, action, "")
+}
+
+// writeForbiddenStructuredDenial is writeForbiddenStructured for a denial
+// with a known deciding stage. A delegation-ceiling denial adds
+// details.denied_by; no other stage adds anything.
+func writeForbiddenStructuredDenial(w http.ResponseWriter, msg string, resourceType string, action Action, deniedBy DeniedBy) {
 	if msg == "" {
 		msg = "Insufficient permissions"
 	}
 	var details map[string]interface{}
-	if resourceType != "" || action != "" {
+	if resourceType != "" || action != "" || deniedBy == DeniedByDelegationCeiling {
 		details = make(map[string]interface{})
 		if resourceType != "" {
 			details["resource_type"] = resourceType
 		}
 		if action != "" {
 			details["denied_action"] = string(action)
+		}
+		if deniedBy == DeniedByDelegationCeiling {
+			details["denied_by"] = string(DeniedByDelegationCeiling)
 		}
 	}
 	writeError(w, http.StatusForbidden, ErrCodeForbidden, msg, details)
@@ -134,7 +144,7 @@ func (s *Server) authorizeWithMessage(w http.ResponseWriter, r *http.Request, re
 	decision := s.authzService.CheckAccess(ctx, identity, resource, action)
 	if !decision.Allowed {
 		logAuthzDenial(r, identity, resource, action, decision.Reason)
-		writeForbiddenStructured(w, msg, resource.Type, action)
+		writeForbiddenStructuredDenial(w, msg, resource.Type, action, decision.DeniedBy)
 		return false
 	}
 	return true
@@ -210,20 +220,39 @@ func (s *Server) brokerMayReadCatalogResource(ctx context.Context, broker Broker
 	}
 }
 
-// authorizeAgentCreate gates agent creation for every caller kind. Exhaustive
-// and fail-closed. Replaces the caller-kind branch in createAgent, which had no
-// else clause, and supplies the gate createProjectAgent never had.
+// agentCreateDenyMessage is the client message for a denied agent creation.
+const agentCreateDenyMessage = "You don't have permission to create agents in this project"
+
+// agentCreateDecision decides whether identity may create an agent in
+// projectID: the exact agent.create permission on the project's agent
+// collection through Decide, which applies the caller's roles, token
+// restrictions and, for an agent caller, the delegation ceiling of every
+// live ancestor.
+func (s *Server) agentCreateDecision(ctx context.Context, identity Identity, projectID string) Decision {
+	return s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credentialContextForIdentity(identity),
+		Resource:   agentCreateResource(projectID),
+		Action:     ActionCreate,
+		Permission: "agent.create",
+	})
+}
+
+// agentCreateResource is the authorization target of agent creation in
+// projectID.
+func agentCreateResource(projectID string) Resource {
+	return Resource{Type: "agent", ParentType: "project", ParentID: projectID}
+}
+
+// authorizeAgentCreate gates agent creation for every caller kind, fail
+// closed, with a terminating default for unknown kinds.
 //
-// The agent path is scope-gated rather than policy-gated: sub-agent creation is
-// a template-administered capability (ScopeAgentCreate), constrained to the
-// calling agent's own project.
+//   - An agent caller needs ScopeAgentCreate (template-administered) and must
+//     create within its own project (both project IDs non-empty).
+//   - Every caller then needs agentCreateDecision.
 func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, projectID string) bool {
 	ctx := r.Context()
-	resource := Resource{
-		Type:       "agent",
-		ParentType: "project",
-		ParentID:   projectID,
-	}
+	resource := agentCreateResource(projectID)
 
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
@@ -231,8 +260,6 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 		return false
 	}
 
-	// A switch with a terminating default, not a chain of ifs: an unhandled
-	// caller kind falling through the guard is precisely the #591 bug.
 	switch identity.Type() {
 	case "agent":
 		agentIdent, ok := identity.(AgentIdentity)
@@ -247,27 +274,18 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 			writeForbidden(w, "Missing required scope: "+string(ScopeAgentCreate))
 			return false
 		}
-		if agentIdent.ProjectID() != projectID {
+		if projectID == "" || agentIdent.ProjectID() != projectID {
 			logAuthzDenial(r, identity, resource, ActionCreate, "agent project mismatch")
 			writeForbidden(w, "Agents can only create sub-agents within their own project")
 			return false
 		}
-		return true
 
 	case "user", "dev":
-		userIdent, ok := identity.(UserIdentity)
-		if !ok {
+		if _, ok := identity.(UserIdentity); !ok {
 			logAuthzDenial(r, identity, resource, ActionCreate, "invalid user identity")
 			writeForbidden(w, "")
 			return false
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, resource, ActionCreate)
-		if !decision.Allowed {
-			logAuthzDenial(r, identity, resource, ActionCreate, decision.Reason)
-			writeForbidden(w, "You don't have permission to create agents in this project")
-			return false
-		}
-		return true
 
 	default:
 		logAuthzDenial(r, identity, resource, ActionCreate,
@@ -275,11 +293,150 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 		writeForbidden(w, "")
 		return false
 	}
+
+	decision := s.agentCreateDecision(ctx, identity, projectID)
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, resource, ActionCreate, decision.Reason)
+		writeForbiddenDenial(w, agentCreateDenyMessage, decision.DeniedBy)
+		return false
+	}
+	return true
+}
+
+// agentTargetDenyMessage is the client message for a denied action on an
+// existing agent.
+const agentTargetDenyMessage = "insufficient permission for this agent action"
+
+// agentTargetPermission is the exact registered permission for an authz
+// action on an existing agent. Any other action has none and is denied.
+func agentTargetPermission(action Action) string {
+	switch action {
+	case ActionLifecycle:
+		return "agent.lifecycle"
+	case ActionAttach:
+		return "agent.attach"
+	case ActionDelete:
+		return "agent.delete"
+	default:
+		return ""
+	}
+}
+
+// agentTargetDenial describes a denied action on an existing agent.
+type agentTargetDenial struct {
+	// status is the HTTP status (401 or 403).
+	status int
+	// message is the client message; empty selects the default 403 text.
+	message string
+	// reason is the internal reason, for logs only.
+	reason string
+	// deniedBy is the decision stage that denied, when attributed.
+	deniedBy DeniedBy
+}
+
+// authorizeAgentTargetAction decides whether identity may perform action on
+// the existing agent target. It is the single rule for lifecycle, attach and
+// delete on an agent, for every caller kind, and returns nil when allowed.
+//
+//   - An agent caller needs ScopeAgentLifecycle and must be in the target's
+//     project (both project IDs non-empty).
+//   - Every caller then needs the exact permission for action on the target
+//     through Decide, which applies the caller's roles, named relationships,
+//     token restrictions and, for an agent caller, the delegation ceiling of
+//     every live ancestor.
+//
+// Unknown caller kinds and unmapped actions are denied.
+func (s *Server) authorizeAgentTargetAction(ctx context.Context, identity Identity, target *store.Agent, action Action) *agentTargetDenial {
+	if identity == nil {
+		return &agentTargetDenial{status: http.StatusUnauthorized, reason: "unauthenticated"}
+	}
+	if target == nil {
+		return &agentTargetDenial{status: http.StatusForbidden, reason: "nil agent"}
+	}
+	permissionID := agentTargetPermission(action)
+	if permissionID == "" {
+		return &agentTargetDenial{status: http.StatusForbidden, reason: "no permission for action " + string(action)}
+	}
+
+	switch identity.Type() {
+	case "agent":
+		agentIdent, ok := identity.(AgentIdentity)
+		if !ok {
+			return &agentTargetDenial{status: http.StatusForbidden, reason: "invalid agent identity"}
+		}
+		if !agentIdent.HasScope(ScopeAgentLifecycle) {
+			return &agentTargetDenial{
+				status:  http.StatusForbidden,
+				message: "Missing required scope: " + string(ScopeAgentLifecycle),
+				reason:  "missing scope " + string(ScopeAgentLifecycle),
+			}
+		}
+		if target.ProjectID == "" || agentIdent.ProjectID() == "" || agentIdent.ProjectID() != target.ProjectID {
+			return &agentTargetDenial{
+				status:  http.StatusForbidden,
+				message: "Agents can only manage agents within their own project",
+				reason:  "agent project mismatch",
+			}
+		}
+	case "user", "dev":
+		if _, ok := identity.(UserIdentity); !ok {
+			return &agentTargetDenial{status: http.StatusForbidden, reason: "invalid user identity"}
+		}
+	default:
+		return &agentTargetDenial{status: http.StatusForbidden, reason: "identity type may not act on agents"}
+	}
+
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credentialContextForIdentity(identity),
+		Resource:   agentResource(target),
+		Action:     action,
+		Permission: permissionID,
+	})
+	if !decision.Allowed {
+		return &agentTargetDenial{
+			status:   http.StatusForbidden,
+			message:  agentTargetDenyMessage,
+			reason:   decision.Reason,
+			deniedBy: decision.DeniedBy,
+		}
+	}
+	return nil
+}
+
+// writeAgentTargetDenial logs and writes a denial from
+// authorizeAgentTargetAction. A delegation-ceiling denial carries the single
+// detail denied_by=delegation_ceiling and nothing else.
+func writeAgentTargetDenial(w http.ResponseWriter, r *http.Request, identity Identity, target *store.Agent, action Action, denial *agentTargetDenial) {
+	if denial.status == http.StatusUnauthorized {
+		Unauthorized(w)
+		return
+	}
+	resource := Resource{Type: "agent"}
+	if target != nil {
+		resource = agentResource(target)
+	}
+	logAuthzDenial(r, identity, resource, action, denial.reason)
+	writeForbiddenDenial(w, denial.message, denial.deniedBy)
+}
+
+// writeForbiddenDenial writes a 403 with message (default text when empty).
+// A delegation-ceiling denial adds details.denied_by and no other detail.
+func writeForbiddenDenial(w http.ResponseWriter, message string, deniedBy DeniedBy) {
+	if deniedBy != DeniedByDelegationCeiling {
+		writeForbidden(w, message)
+		return
+	}
+	if message == "" {
+		message = "Insufficient permissions"
+	}
+	writeError(w, http.StatusForbidden, ErrCodeForbidden, message,
+		map[string]interface{}{"denied_by": string(DeniedByDelegationCeiling)})
 }
 
 // authorizeAgentLifecycle gates operations on an existing agent, for every
-// caller kind. Exhaustive and fail-closed. action selects the permission a
-// user caller must hold (see agentActionPermission):
+// caller kind, through authorizeAgentTargetAction. action selects the
+// permission (see agentActionPermission):
 //   - ActionLifecycle for management (start/stop/suspend/restart/restore)
 //   - ActionAttach for observation (terminal, exec, env, reset-auth)
 //
@@ -287,69 +444,16 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 // agent.attach, so they can manage members' agents without being able to
 // observe them (miller79/scion#88).
 //
-// An agent caller passes on ScopeAgentLifecycle within its own project, which
-// includes project peers as well as its own descendants. That breadth is
-// deliberate (design Q3): the scope is template-administered rather than
-// ambient, and handleProjectBroadcast already reads it as conferring exactly
-// this authority. Narrowing it later is a change to this one function.
+// An agent caller needs ScopeAgentLifecycle within its own project and the
+// exact permission on the target through Decide, which includes the
+// delegation ceiling of every live ancestor.
 func (s *Server) authorizeAgentLifecycle(w http.ResponseWriter, r *http.Request, agent *store.Agent, action Action) bool {
-	ctx := r.Context()
-
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
+	identity := GetIdentityFromContext(r.Context())
+	if denial := s.authorizeAgentTargetAction(r.Context(), identity, agent, action); denial != nil {
+		writeAgentTargetDenial(w, r, identity, agent, action, denial)
 		return false
 	}
-	if agent == nil {
-		// Caller bug rather than a policy outcome; deny rather than panic.
-		logAuthzDenial(r, identity, Resource{Type: "agent"}, action, "nil agent")
-		writeForbidden(w, "")
-		return false
-	}
-	resource := agentResource(agent)
-
-	switch identity.Type() {
-	case "agent":
-		agentIdent, ok := identity.(AgentIdentity)
-		if !ok {
-			logAuthzDenial(r, identity, resource, action, "invalid agent identity")
-			writeForbidden(w, "")
-			return false
-		}
-		if !agentIdent.HasScope(ScopeAgentLifecycle) {
-			logAuthzDenial(r, identity, resource, action,
-				"missing scope "+string(ScopeAgentLifecycle))
-			writeForbidden(w, "Missing required scope: "+string(ScopeAgentLifecycle))
-			return false
-		}
-		if agentIdent.ProjectID() != agent.ProjectID {
-			logAuthzDenial(r, identity, resource, action, "agent project mismatch")
-			writeForbidden(w, "Agents can only manage agents within their own project")
-			return false
-		}
-		return true
-
-	case "user", "dev":
-		userIdent, ok := identity.(UserIdentity)
-		if !ok {
-			logAuthzDenial(r, identity, resource, action, "invalid user identity")
-			writeForbidden(w, "")
-			return false
-		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, resource, action)
-		if !decision.Allowed {
-			logAuthzDenial(r, identity, resource, action, decision.Reason)
-			writeForbidden(w, "")
-			return false
-		}
-		return true
-
-	default:
-		logAuthzDenial(r, identity, resource, action,
-			"identity type may not act on agent lifecycle")
-		writeForbidden(w, "")
-		return false
-	}
+	return true
 }
 
 // agentLifecycleAllowed reports whether identity may manage target (start,
@@ -364,25 +468,21 @@ func (s *Server) authorizeAgentLifecycle(w http.ResponseWriter, r *http.Request,
 // name-conflict response instead, disclosing nothing about the agent it was
 // denied against.
 func (s *Server) agentLifecycleAllowed(ctx context.Context, identity Identity, target *store.Agent) bool {
-	if identity == nil || target == nil {
-		return false
-	}
-	switch identity.Type() {
-	case "agent":
-		agentIdent, ok := identity.(AgentIdentity)
-		if !ok {
-			return false
-		}
-		return agentIdent.HasScope(ScopeAgentLifecycle) && agentIdent.ProjectID() == target.ProjectID
-	case "user", "dev":
-		userIdent, ok := identity.(UserIdentity)
-		if !ok {
-			return false
-		}
-		return s.authzService.CheckAccess(ctx, userIdent, agentResource(target), ActionLifecycle).Allowed
-	default:
-		return false
-	}
+	return s.authorizeAgentTargetAction(ctx, identity, target, ActionLifecycle) == nil
+}
+
+// agentFullHistoryDecision decides whether identity sees an agent's full
+// message and log history: the exact agent.attach permission on the agent
+// through Decide. A caller without it sees only history it participates in,
+// subject to agent.read.
+func (s *Server) agentFullHistoryDecision(ctx context.Context, identity Identity, agent *store.Agent) Decision {
+	return s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credentialContextForIdentity(identity),
+		Resource:   agentResource(agent),
+		Action:     ActionAttach,
+		Permission: "agent.attach",
+	})
 }
 
 // agentActionPermission maps an agent action name (api.AgentAction*) to the

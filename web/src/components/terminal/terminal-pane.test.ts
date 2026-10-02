@@ -554,7 +554,7 @@ describe('theme', () => {
   // A viewport selector must end the class name exactly (so, for example,
   // .terminal-wrapper-foo is not exempt).
   const VIEWPORT =
-    /^\.(terminal-wrapper|terminal-container|disconnected-overlay|drop-overlay)(?=[\s.:#[>+~]|$)/;
+    /^\.(terminal-wrapper|terminal-container|disconnected-overlay|idle-overlay|drop-overlay)(?=[\s.:#[>+~]|$)/;
   // Colour-bearing properties, including shadows and every custom property
   // (for example --sl-panel-background-color or --indicator-color); custom
   // properties with non-colour values never match LITERAL_COLOR.

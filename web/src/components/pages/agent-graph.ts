@@ -236,6 +236,7 @@ export class AgentGraphPage extends LitElement {
                   .agents=${this.visibleAgents}
                   focusId=${this.focusId}
                   orientation=${this.orientation}
+                  filterKey=${this.projectFilter}
                   @orientation-change=${this.onOrientationChange}
                 ></scion-agent-tree-view>
               `}

@@ -165,6 +165,7 @@ func (a *AuthzService) checkHubDeliveryCeiling(
 	ctx context.Context,
 	req AuthzRequest,
 	h *hubDeliveryIdentity,
+	permissionID string,
 	agentID string,
 	explain *[]DecisionStep,
 	cause *DenyCause,
@@ -194,13 +195,9 @@ func (a *AuthzService) checkHubDeliveryCeiling(
 		return deny("delivery credential is bound to a different agent")
 	}
 
-	// Permission resolved exactly as walkDelegationChain does
-	// (resolvePermissionID), so an empty req.Permission is resolved the same
-	// way rather than treated as an automatic pass or deny.
-	permissionID := req.Permission
-	if permissionID == "" {
-		permissionID = resolvePermissionID(req.Resource, req.Action)
-	}
+	// Keyed on the permissionID argument checkDelegationCeiling receives,
+	// the same permission its ordinary walk evaluates. An empty permission
+	// is not one of the three deliver permissions, so it denies here.
 	if _, ok := hubDeliveryPermissionIDs[permissionID]; !ok {
 		return deny("delivery credential is limited to deliver permissions")
 	}

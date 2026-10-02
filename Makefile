@@ -72,15 +72,18 @@ test-fast:
 	@echo "Running tests (no SQLite)..."
 	@go test -tags no_sqlite ./...
 
-## test-hub-sqlite: Run pkg/hub tests with SQLite enabled (no build tag). This is
-# the ~67% of pkg/hub's test files that "make test-fast" never compiles (see
-# ptone/scion#1118). Skips four tests with known pre-existing, tracked failures
+## test-hub-sqlite: Run pkg/hub (and perf/bench/seed) tests with SQLite
+# enabled (no build tag). This is the ~67% of pkg/hub's test files that
+# "make test-fast" never compiles (see ptone/scion#1118), plus
+# perf/bench/seed's own SQLite-backed tests, which carry the same
+# `//go:build !no_sqlite` constraint for the same reason (ptone/scion#2393).
+# Skips four pkg/hub tests with known pre-existing, tracked failures
 # (ptone/scion#1847) so this target can be used as a CI merge gate.
 test-hub-sqlite:
-	@echo "Running pkg/hub tests (SQLite-enabled)..."
+	@echo "Running pkg/hub + perf/bench/seed tests (SQLite-enabled)..."
 	@go test -count=1 -timeout 25m \
 		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
-		./pkg/hub/...
+		./pkg/hub/... ./perf/bench/seed/...
 
 ## test-launch-store-postgres: Run the T1 async-create launch store/reaper
 # suite against a real Postgres server (design t1-async-create-v11.md §6,
@@ -140,7 +143,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \

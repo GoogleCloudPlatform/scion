@@ -163,9 +163,13 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Name:     s.config.BrokerName,
 		Version:  s.version,
 		Capabilities: &BrokerCapabilities{
-			WebPTY:      false, // TODO: Implement WebSocket PTY
-			Sync:        true,
-			Attach:      true,
+			WebPTY: false, // TODO: Implement WebSocket PTY
+			Sync:   true,
+			// Attach reflects the default runtime's own capability
+			// (scionrt.HasAttachSupport) rather than a blanket true, so a
+			// runtime that opts out via the optional AttachCapableRuntime
+			// interface is reported accurately here too.
+			Attach:      scionrt.HasAttachSupport(s.runtime),
 			Exec:        true,
 			Reprovision: true,
 		},
@@ -187,11 +191,18 @@ func isLocalOnlyRuntime(runtimeType string) bool {
 
 // buildInfoProfiles enumerates configured profiles from effective settings.
 // Falls back to a single "default" profile when no profiles are configured.
+//
+// Each profile's advertised Type is its resolved runtime type
+// (VersionedSettings.ResolveRuntime: the runtime entry's explicit type,
+// else its runtimes-map key), not the map key itself, so a profile whose
+// runtime entry is keyed differently from its type (e.g. an entry
+// "k8s-staging" of type kubernetes) is advertised, and filtered, as the
+// type it actually runs.
 func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 	vs, _, err := config.LoadEffectiveSettings("")
 	if err != nil || len(vs.Profiles) == 0 {
 		return []BrokerProfile{
-			{Name: "default", Type: defaultRuntimeType, Available: true},
+			{Name: "default", Type: defaultRuntimeType, Available: true, Attach: s.attachSupportedForProfile(defaultRuntimeType, defaultRuntimeType)},
 		}
 	}
 
@@ -203,40 +214,88 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 
 	var profiles []BrokerProfile
 	for _, name := range names {
-		profileCfg := vs.Profiles[name]
-		rtType := profileCfg.Runtime
-		if rtType == "" {
-			rtType = defaultRuntimeType
-		}
+		rtType, rtCfg := resolveInfoProfileRuntime(vs, name, defaultRuntimeType)
 
 		if !isLocalOnlyRuntime(defaultRuntimeType) && isLocalOnlyRuntime(rtType) {
 			continue
-		}
-
-		var ctx, ns string
-		if vs.Runtimes != nil {
-			if rtCfg, ok := vs.Runtimes[rtType]; ok {
-				ctx = rtCfg.Context
-				ns = rtCfg.Namespace
-			}
 		}
 
 		profiles = append(profiles, BrokerProfile{
 			Name:      name,
 			Type:      rtType,
 			Available: true,
-			Context:   ctx,
-			Namespace: ns,
+			Context:   rtCfg.Context,
+			Namespace: rtCfg.Namespace,
+			Attach:    s.attachSupportedForProfile(rtType, defaultRuntimeType),
 		})
 	}
 
 	if len(profiles) == 0 {
 		return []BrokerProfile{
-			{Name: "default", Type: defaultRuntimeType, Available: true},
+			{Name: "default", Type: defaultRuntimeType, Available: true, Attach: s.attachSupportedForProfile(defaultRuntimeType, defaultRuntimeType)},
 		}
 	}
 
 	return profiles
+}
+
+// resolveLiveRuntimeInstance returns the already-built Runtime instance
+// backing a profile resolving to rtType, without constructing anything new:
+// s.runtime for the default type, or the auxiliary runtime some prior
+// request already built and cached under that type in s.auxiliaryRuntimes.
+// ok is false when no live instance exists yet for rtType — most commonly
+// an auxiliary runtime type no request has resolved yet — and callers must
+// leave the capability unknown in that case rather than guess from the type
+// string alone (a named profile on a broker with a different default type is
+// not "probably fine" just because it's not the default type).
+func (s *Server) resolveLiveRuntimeInstance(rtType, defaultRuntimeType string) (rt scionrt.Runtime, ok bool) {
+	if rtType == defaultRuntimeType {
+		if s.runtime == nil {
+			return nil, false
+		}
+		return s.runtime, true
+	}
+	s.auxiliaryRuntimesMu.RLock()
+	aux, found := s.auxiliaryRuntimes[rtType]
+	s.auxiliaryRuntimesMu.RUnlock()
+	if !found || aux.Runtime == nil {
+		return nil, false
+	}
+	return aux.Runtime, true
+}
+
+// attachSupportedForProfile reports whether a profile resolving to rtType
+// supports attach, asking resolveLiveRuntimeInstance for the live instance
+// that actually backs it. nil means unknown (no live instance to ask, per
+// resolveLiveRuntimeInstance) — callers, and every consumer of the
+// resulting BrokerProfile.Attach, must read nil as supported.
+func (s *Server) attachSupportedForProfile(rtType, defaultRuntimeType string) *bool {
+	rt, ok := s.resolveLiveRuntimeInstance(rtType, defaultRuntimeType)
+	if !ok {
+		return nil
+	}
+	v := scionrt.HasAttachSupport(rt)
+	return &v
+}
+
+// resolveInfoProfileRuntime returns the runtime type and runtime config
+// buildInfoProfiles advertises for the named profile:
+//
+//   - a profile naming a runtime entry that exists resolves through
+//     VersionedSettings.ResolveRuntime (explicit type, else the map key);
+//   - a profile naming no runtime uses the broker's default runtime type,
+//     with that type's runtimes-map entry if one exists;
+//   - a profile naming a runtime entry that doesn't exist falls back to the
+//     name as given, with no runtime config.
+func resolveInfoProfileRuntime(vs *config.VersionedSettings, name, defaultRuntimeType string) (string, config.V1RuntimeConfig) {
+	key := vs.Profiles[name].Runtime
+	if key == "" {
+		return defaultRuntimeType, vs.Runtimes[defaultRuntimeType]
+	}
+	if rtCfg, rtType, err := vs.ResolveRuntime(name); err == nil {
+		return rtType, rtCfg
+	}
+	return key, config.V1RuntimeConfig{}
 }
 
 // handleHubConnections returns live status of all hub connections.
@@ -558,6 +617,16 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// non-empty value must be a single path element.
 	if req.ProjectID != "" && !isSingleCleanPathElement(req.ProjectID) {
 		ValidationError(w, "invalid projectId", nil)
+		return
+	}
+
+	// ProjectSlug is joined onto the global projects directory below (to
+	// resolve req.ProjectPath) and again later to compute the GCS-bootstrap
+	// workspace directory, in both cases as a single path segment: a value
+	// of ".." would resolve either join to the projects directory's own
+	// parent (~/.scion itself), not a real per-project directory.
+	if req.ProjectSlug != "" && !isSingleCleanPathElement(req.ProjectSlug) {
+		ValidationError(w, "invalid projectSlug", nil)
 		return
 	}
 
@@ -948,6 +1017,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// For hub-managed projects (ProjectSlug set), use the conventional path
 		// ~/.scion/projects/<slug>/ instead of the worktree-based path.
 		var workspaceDir string
+		var workspaceRoot string
 		if req.ProjectSlug != "" {
 			globalDir, err := config.GetGlobalDir()
 			if err != nil {
@@ -956,10 +1026,28 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				RuntimeError(w, "Failed to get global dir: "+err.Error())
 				return
 			}
-			workspaceDir = filepath.Join(globalDir, "projects", req.ProjectSlug)
+			workspaceRoot = filepath.Join(globalDir, "projects")
+			workspaceDir = filepath.Join(workspaceRoot, req.ProjectSlug)
 		} else {
-			workspaceDir = filepath.Join(s.config.WorktreeBase, req.Name, "workspace")
+			workspaceRoot = s.config.WorktreeBase
+			workspaceDir = filepath.Join(workspaceRoot, req.Name, "workspace")
 		}
+
+		// Validate before anything is created or written: req.ProjectSlug
+		// and req.Name are already constrained to a single path element
+		// above, but this still runs independently, the same gate every
+		// other workspace source goes through, before MkdirAll/SyncFromGCS
+		// ever touch the filesystem. Use the resolved, symlink-free path it
+		// returns for everything below, not the original join.
+		resolvedWorkspaceDir, verr := scionrt.ValidateWorkspaceSource(workspaceDir, workspaceRoot)
+		if verr != nil {
+			markAttemptFailed(http.StatusBadRequest, "invalid workspace directory")
+			span.SetStatus(codes.Error, verr.Error())
+			BadRequest(w, "Invalid workspace directory: "+verr.Error())
+			return
+		}
+		workspaceDir = resolvedWorkspaceDir
+
 		if err := os.MkdirAll(workspaceDir, 0755); err != nil {
 			markAttemptFailed(http.StatusInternalServerError, "failed to create workspace directory")
 			span.SetStatus(codes.Error, err.Error())
@@ -1931,29 +2019,6 @@ func isContainerStopTolerable(err error) bool {
 		strings.Contains(msg, "exit status 125")
 }
 
-// projectScopedTarget resolves an agent slug to its project-scoped container
-// identifier (container ID for docker/podman, pod name for k8s) via
-// LookupContainerID. When multiple projects on this broker have an agent with
-// the same slug, this ensures single-container operations act on the agent in
-// the requested project rather than whichever the slug matches first.
-//
-// When a projectID is supplied but the agent cannot be resolved, it returns ""
-// — callers must treat that as "not found in this project" rather than falling
-// back to the bare slug, which would risk acting on a same-slug agent in a
-// different project. Only when no projectID is supplied does it degrade to the
-// original id for backward compatibility (solo/CLI mode, unlabeled containers).
-//
-// In the project-scoped case, a lookup failure other than a genuine
-// ErrAgentNotFound (e.g. a runtime listing error, an ambiguous match) is
-// returned to the caller rather than silently treated as "not found" —
-// callers must surface it as a real error instead of reporting a successful
-// stop/restart. ErrAgentNotFound also covers a matching agent record with no
-// resolvable container id (e.g. a malformed or partial runtime entry that
-// carries no container id — nothing addressable to stop): that case is
-// folded into the same "not found in this project" outcome as a genuine
-// no-match. The solo/CLI
-// fallback above predates project scoping and is left unchanged: it already
-// tolerates lookup failures by degrading to the bare id.
 // agentsWithoutProjectLabel returns the subset of agents that carry no
 // scion.project_id label. The project-scoped lookups fall back to a
 // slug-only search for backward compatibility with pre-existing / solo-mode
@@ -1971,18 +2036,47 @@ func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
 	return filtered
 }
 
-func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) (string, error) {
-	containerID, err := s.LookupContainerID(ctx, id, projectID)
+// projectScopedTarget resolves an agent slug to its project-scoped container
+// identifier (container ID for docker/podman, pod name for k8s) via
+// lookupAgentTarget, together with the agent.Manager whose runtime reported
+// that identifier. When multiple projects on this broker have an agent with
+// the same slug, this ensures single-container operations act on the agent
+// in the requested project rather than whichever the slug matches first,
+// and the returned manager is the one the identifier came from, so the
+// operation is dispatched to that same runtime.
+//
+// When a projectID is supplied but the agent cannot be resolved, it returns
+// "" and a nil manager — callers must treat that as "not found in this
+// project" rather than falling back to the bare slug, which would risk
+// acting on a same-slug agent in a different project. Only when no
+// projectID is supplied does it degrade to the original id (and the
+// manager resolveManagerForAgent picks) for backward compatibility
+// (solo/CLI mode, unlabeled containers).
+//
+// In the project-scoped case, a lookup failure other than a genuine
+// ErrAgentNotFound (a runtime listing error — including an auxiliary
+// runtime's, when no other runtime matched — or an ambiguous match) is
+// returned to the caller rather than silently treated as "not found" —
+// callers must surface it as a real error instead of reporting a successful
+// stop/restart. ErrAgentNotFound also covers a matching agent record with no
+// resolvable container id (e.g. a malformed or partial runtime entry that
+// carries no container id — nothing addressable to stop): that case is
+// folded into the same "not found in this project" outcome as a genuine
+// no-match. The solo/CLI fallback above predates project scoping and is
+// left unchanged: it already tolerates lookup failures by degrading to the
+// bare id.
+func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) (string, agent.Manager, error) {
+	containerID, mgr, _, err := s.lookupAgentTarget(ctx, id, projectID)
 	if err == nil && containerID != "" {
-		return containerID, nil
-	}
-	if projectID != "" && err != nil && !errors.Is(err, ErrAgentNotFound) {
-		return "", err
+		return containerID, mgr, nil
 	}
 	if projectID != "" {
-		return "", nil
+		if err != nil && !errors.Is(err, ErrAgentNotFound) {
+			return "", nil, err
+		}
+		return "", nil, nil
 	}
-	return id, nil
+	return id, s.resolveManagerForAgent(ctx, id, projectID), nil
 }
 
 func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
@@ -1995,22 +2089,28 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		attribute.String("scion.project.id", projectID),
 	)
 
-	mgr := s.resolveManagerForAgent(ctx, id, projectID)
-
 	// Resolve the project-scoped container so that same-slug agents in
 	// different projects on this broker don't collide. An empty target means
 	// the agent isn't present in this project; treat that as an idempotent
-	// no-op rather than stopping a same-slug agent in another project. A
-	// lookup error other than "not found" (e.g. the runtime listing itself
-	// failed) must not be reported as a successful stop.
-	target, err := s.projectScopedTarget(ctx, id, projectID)
+	// no-op rather than stopping a same-slug agent in another project.
+	//
+	// A lookup error other than ErrAgentNotFound (a runtime listing failed
+	// with no match found on any other runtime, or the match was ambiguous)
+	// is a real failure, not a successful stop: a failed List on the one
+	// runtime that may hold the agent must not be misread as "not found".
+	// The same lookup also supplies the manager Stop is dispatched through
+	// below — the manager whose List call actually produced the matched
+	// entry, not one re-resolved by a second, independent lookup that could
+	// land on a different runtime than the one the target came from.
+	target, mgr, err := s.projectScopedTarget(ctx, id, projectID)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, ErrAgentListUnavailable) {
 			AgentLookupUnavailable(w, err, id, "stop", "")
 			return
 		}
-		RuntimeError(w, "Failed to stop agent: "+err.Error())
+		s.agentLifecycleLog.Warn("Stop agent: lookup failed", "agent_id", id, "error", err)
+		RuntimeError(w, "Failed to stop agent")
 		return
 	}
 	if target == "" {
@@ -2118,9 +2218,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 
 	// Stop then start — tolerate stop errors since the container may already
 	// be exited and the subsequent start will handle cleanup.
-	// Use resolveManagerForAgent to find the agent on auxiliary runtimes.
-	stopMgr := s.resolveManagerForAgent(ctx, id, projectID)
-	stopTarget, err := s.projectScopedTarget(ctx, id, projectID)
+	// The lookup also returns the manager whose runtime reported the
+	// target, so the stop goes to that same runtime (default or auxiliary).
+	stopTarget, stopMgr, err := s.projectScopedTarget(ctx, id, projectID)
 	if err != nil {
 		// A lookup error other than "not found" must abort the restart
 		// without starting a second container — otherwise a runtime hiccup
@@ -2130,7 +2230,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			AgentLookupUnavailable(w, err, id, "restart", "")
 			return
 		}
-		RuntimeError(w, "Failed to restart agent: "+err.Error())
+		s.agentLifecycleLog.Warn("Restart agent: lookup failed", "agent_id", id, "error", err)
+		RuntimeError(w, "Failed to restart agent")
 		return
 	}
 	// An empty target means the agent isn't present in this project — skip the
@@ -2585,23 +2686,25 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 		defer cancel()
 	}
 
-	// Resolve the correct runtime for this agent (may be on an auxiliary runtime like K8s).
-	// projectID scopes the lookup so that, when multiple projects on this broker
-	// have an agent with the same slug, we operate on the agent in the requested
-	// project rather than whichever the runtime happens to match by slug first.
-	rt := s.resolveRuntimeForAgent(ctx, id, projectID)
-
 	// Resolve the project-scoped container identifier (container ID for
-	// docker/podman, pod name for k8s) and exec against that rather than the
-	// bare slug. Without this, rt.Exec resolves the slug to a container across
-	// all projects and can target the wrong agent — e.g. "scion look
-	// coordinator" in project A showing project B's terminal. Mirrors the
-	// project-scoped lookup used by the PTY attach handler.
-	// LookupContainerID can return an empty identifier without an error (e.g.
-	// a matching agent record with no resolvable container), so guard against
-	// both — execing an empty target would fall back to slug resolution inside
-	// the runtime and reintroduce the cross-project collision.
-	target, err := s.LookupContainerID(ctx, id, projectID)
+	// docker/podman, pod name for k8s) and exec against the runtime whose
+	// List call produced it, rather than a separately (and
+	// non-deterministically) resolved one. Without this, rt.Exec resolves
+	// the slug to a container across all projects and can target the wrong
+	// agent — e.g. "scion look coordinator" in project A showing project
+	// B's terminal — or, when the target and the runtime it executes
+	// against are resolved by two independent lookups, dispatch a correct
+	// container ID to the wrong runtime entirely. lookupAgentTarget pairs
+	// the manager and runtime at the stage that produced the match, so
+	// there is no independent runtime resolution to disagree with the
+	// target. Mirrors the project-scoped lookup used by the PTY attach
+	// handler and the single-lookup manager dispatch already applied to
+	// stop/restart. lookupAgentTarget can return an empty identifier
+	// without an error (e.g. a matching agent record with no resolvable
+	// container), so guard against both — execing an empty target would
+	// fall back to slug resolution inside the runtime and reintroduce the
+	// cross-project collision.
+	target, _, rt, err := s.lookupAgentTarget(ctx, id, projectID)
 	if errors.Is(err, ErrAgentListUnavailable) {
 		// The container runtime itself failed to respond, not "no such
 		// agent" — tell the caller to retry rather than reporting the agent
@@ -2612,13 +2715,24 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 	// A lookup failure other than a genuine ErrAgentNotFound (e.g. an
 	// ambiguous match) reflects a real problem resolving the agent and must
 	// be surfaced as an error rather than reported as "not found", mirroring
-	// projectScopedTarget's use by stopAgent and restartAgent.
+	// projectScopedTarget's use by stopAgent and restartAgent. The
+	// underlying err is logged server-side only, never echoed into the
+	// response body.
 	if err != nil && !errors.Is(err, ErrAgentNotFound) {
-		RuntimeError(w, "Failed to execute command: "+err.Error())
+		s.agentLifecycleLog.Warn("Exec: lookup failed", "agent_id", id, "error", err)
+		RuntimeError(w, "Failed to execute command")
 		return
 	}
 	if err != nil || target == "" {
 		NotFound(w, "Agent")
+		return
+	}
+	if rt == nil {
+		// Defensive only: lookupAgentTarget pairs a runtime with every
+		// successful match, so this should be unreachable. Fail closed
+		// rather than fall back to a default runtime that could differ
+		// from the one the target actually came from.
+		RuntimeUnavailable(w, "Agent runtime unavailable")
 		return
 	}
 
@@ -2662,8 +2776,12 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 		return
 	}
 
-	rt := s.resolveRuntimeForAgent(ctx, id, projectID)
-	target, err := s.LookupContainerID(ctx, id, projectID)
+	// The runtime whose List call produced the container ID is paired with
+	// it by lookupAgentTarget itself, so the token write and the PID 1
+	// signal below dispatch to the same backend the target came from
+	// rather than a separately (and non-deterministically) resolved one —
+	// see execCommand's matching comment for why that matters.
+	target, _, rt, err := s.lookupAgentTarget(ctx, id, projectID)
 	if errors.Is(err, ErrAgentListUnavailable) {
 		// The container runtime itself failed to respond, not "no such
 		// agent" — tell the caller to retry rather than reporting the agent
@@ -2674,13 +2792,21 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 	// A lookup failure other than a genuine ErrAgentNotFound (e.g. an
 	// ambiguous match) reflects a real problem resolving the agent and must
 	// be surfaced as an error rather than reported as "not found", mirroring
-	// projectScopedTarget's use by stopAgent and restartAgent.
+	// projectScopedTarget's use by stopAgent and restartAgent. The
+	// underlying err is logged server-side only, never echoed into the
+	// response body.
 	if err != nil && !errors.Is(err, ErrAgentNotFound) {
-		RuntimeError(w, "Failed to reset auth: "+err.Error())
+		s.agentLifecycleLog.Warn("Reset auth: lookup failed", "agent_id", id, "error", err)
+		RuntimeError(w, "Failed to reset auth")
 		return
 	}
 	if err != nil || target == "" {
 		NotFound(w, "Agent")
+		return
+	}
+	if rt == nil {
+		// Defensive only: see execCommand's matching guard.
+		RuntimeUnavailable(w, "Agent runtime unavailable")
 		return
 	}
 
@@ -2780,6 +2906,14 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 	}
 	logs, err := rt.GetLogs(ctx, containerID)
 	if err != nil {
+		if errors.Is(err, scionrt.ErrLogsNotSupported) {
+			// The sentinel's own fixed text, never err.Error(): errors.Is also
+			// matches a wrapped error, and a wrapping fmt.Errorf could carry a
+			// runtime-specific scope or actor id that must never reach this
+			// response body.
+			RuntimeLogsUnsupported(w, scionrt.ErrLogsNotSupported.Error())
+			return
+		}
 		RuntimeError(w, "Failed to get logs: "+err.Error())
 		return
 	}
@@ -3710,6 +3844,27 @@ func (s *Server) resolveManagerForAgent(ctx context.Context, id, projectID strin
 	return manager
 }
 
+// allManagers returns the default manager plus every distinct auxiliary
+// runtime's manager, in deterministic (sorted-by-name) order. Used by
+// resolveDeleteTarget to search every registered runtime rather than only
+// the one a slug-based lookup happens to resolve to first.
+func (s *Server) allManagers() []agent.Manager {
+	managers := []agent.Manager{s.manager}
+	s.auxiliaryRuntimesMu.RLock()
+	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
+	for name := range s.auxiliaryRuntimes {
+		auxNames = append(auxNames, name)
+	}
+	sort.Strings(auxNames)
+	for _, name := range auxNames {
+		if aux := s.auxiliaryRuntimes[name]; aux.Manager != nil && aux.Manager != s.manager {
+			managers = append(managers, aux.Manager)
+		}
+	}
+	s.auxiliaryRuntimesMu.RUnlock()
+	return managers
+}
+
 // resolveRuntimeForAgent returns the runtime for direct operations such as
 // exec and log retrieval.
 func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID string) scionrt.Runtime {
@@ -3731,6 +3886,10 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID strin
 func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, string) {
 	if s.config.ForceRuntime != "" {
 		if s.config.ForceRuntime == s.runtime.Name() {
+			// A ForceRuntime naming the default runtime returns s.manager
+			// here, bypassing the per-profile resolution below entirely —
+			// a second profile of the same runtime type with its own
+			// runtime config is not reachable under ForceRuntime.
 			return s.manager, s.runtime.Name()
 		}
 		s.auxiliaryRuntimesMu.RLock()
@@ -3764,7 +3923,19 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 		return s.manager, s.runtime.Name()
 	}
 
-	if runtimeType == s.runtime.Name() {
+	// A profile resolving to the default runtime's type is normally served
+	// by the default manager: for most runtimes, the same type means the
+	// same backend. A runtime whose instances are bound to one profile's
+	// configuration (the optional PerProfileInstancesRuntime capability)
+	// can't be shared that way — a second profile of the same type may
+	// carry its own runtime config — so when the default runtime reports
+	// that capability, the type-only shortcut is skipped and the profile
+	// gets its own manager below (the ForceRuntime branch above still takes
+	// the type-only shortcut). The broker does not keep the default
+	// runtime's profile identity, so it cannot tell whether the requested
+	// profile is the one the default runtime was built from; it relies on
+	// the capability instead.
+	if runtimeType == s.runtime.Name() && !scionrt.HasPerProfileInstances(s.runtime) {
 		return s.manager, s.runtime.Name()
 	}
 
@@ -4000,19 +4171,7 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 		mgr   agent.Manager
 		entry api.AgentInfo
 	}
-	managers := []agent.Manager{s.manager}
-	s.auxiliaryRuntimesMu.RLock()
-	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
-	for name := range s.auxiliaryRuntimes {
-		auxNames = append(auxNames, name)
-	}
-	sort.Strings(auxNames)
-	for _, name := range auxNames {
-		if aux := s.auxiliaryRuntimes[name]; aux.Manager != nil && aux.Manager != s.manager {
-			managers = append(managers, aux.Manager)
-		}
-	}
-	s.auxiliaryRuntimesMu.RUnlock()
+	managers := s.allManagers()
 
 	var listErr error
 	collect := func(filter map[string]string, accept func(api.AgentInfo) bool) []candidate {

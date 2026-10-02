@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
 )
 
 // defaultAgentListLimit and maxAgentListLimit mirror the pagination bounds of
@@ -854,6 +856,145 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 		result.Items = items
 	}
 	return result, nil
+}
+
+// CountAgents returns the number of agents matching filter, using the exact
+// predicate ListAgents applies for its own total count (agentFilterPredicates),
+// with no row loaded. It backs the sorted-mode candidate ceiling pre-check
+// (design lists-graph.md 5.3 step 0): a cheap COUNT before any member row is
+// read, so a candidate pool above the ceiling costs no more than one query.
+func (s *AgentStore) CountAgents(ctx context.Context, filter store.AgentFilter) (int, error) {
+	preds, err := agentFilterPredicates(filter)
+	if err != nil {
+		return 0, err
+	}
+	query := s.client.Agent.Query()
+	if len(preds) > 0 {
+		query.Where(preds...)
+	}
+	return query.Count(ctx)
+}
+
+// agentMemberSelectFields is the exact SQL column list ListAgentMembers
+// selects: precisely the fields agentResource (pkg/hub/capabilities.go)
+// reads (ID, OwnerID, ProjectID, Labels, Ancestry), plus Phase, Created,
+// Updated and LastActivityEvent for positioning (pkg/store/agentsort) and
+// stats. This list, not a separately maintained one, is the projection's
+// definition (design lists-graph.md 5.1): widening agentResource's
+// inputs without adding the new field here is exactly what the non-waivable
+// equality gate is meant to catch. That gate -- a reflection-filled
+// store.Agent written and read back through the real ListAgentMembers and
+// GetAgentsByIDs, compared via reflect.DeepEqual(memberResource(m),
+// agentResource(full)) -- lives in pkg/hub (TestListProjectAgentsSorted_
+// MemberProjectionEquality, agent_sorted_project_list_reflection_test.go),
+// not in this package: agentResource and memberResource are only visible
+// from package hub. TestListAgentMembers_ProjectionEqualsFullRow in this
+// package is a narrower, store-only check that the narrow SELECT's columns
+// agree with a full-row read; it is not itself reflection-filled and cannot
+// substitute for the hub-level gate.
+var agentMemberSelectFields = []string{
+	agent.FieldID,
+	agent.FieldOwnerID,
+	agent.FieldProjectID,
+	agent.FieldLabels,
+	agent.FieldAncestry,
+	agent.FieldPhase,
+	agent.FieldCreated,
+	agent.FieldUpdated,
+	agent.FieldLastActivityEvent,
+}
+
+// entAgentToMember converts a partial *ent.Agent — one hydrated only from
+// agentMemberSelectFields — into a store.AgentMember. Unlike entAgentToStore,
+// it never reads a field outside that list, so a row fetched via the narrow
+// SELECT below can never appear to carry a value (e.g. an AppliedConfig)
+// that was simply never selected.
+func entAgentToMember(a *ent.Agent) store.AgentMember {
+	m := store.AgentMember{
+		ID:        a.ID.String(),
+		ProjectID: a.ProjectID.String(),
+		Labels:    a.Labels,
+		Ancestry:  a.Ancestry,
+		Phase:     a.Phase,
+		Created:   a.Created,
+		Updated:   a.Updated,
+	}
+	if a.OwnerID != nil {
+		m.OwnerID = a.OwnerID.String()
+	}
+	if a.LastActivityEvent != nil {
+		m.LastActivityEvent = *a.LastActivityEvent
+	}
+	return m
+}
+
+// ListAgentMembers returns up to max agents matching filter, projected down
+// to the narrow AgentMember shape and ordered per the section-4.2 total
+// order for (sort, dir) (design lists-graph.md 5.1, 5.3).
+//
+// The SQL SELECT list is exactly agentMemberSelectFields — no wide column
+// (AppliedConfig in particular) is ever read off the wire for a candidate
+// row — which is what keeps a 2,000-row candidate scan cheap enough for the
+// server's request WriteTimeout, not just what the design's equality gate
+// requires.
+//
+// The candidate set is bounded by the caller's ceiling check to at most a
+// couple thousand rows, so this fetches every matching row up to max (with
+// no ORDER BY at the SQL level — order does not matter for a candidate pool
+// this small, and comparing every row afterward with agentsort.SortRows
+// keeps exactly one implementation of the tie-break rules instead of asking
+// each dialect to reproduce it) and sorts them in Go.
+func (s *AgentStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sortKey, dir string, max int) ([]store.AgentMember, error) {
+	// Fail closed on an unrecognized sort or dir (design lists-graph.md 5.1:
+	// "Unknown values return ErrInvalidInput"), rather than letting
+	// agentsort.KeyFor/Less silently fall back to a default ordering. The
+	// hub handler already validates these before calling in; this is the
+	// store API's own contract, independent of any one caller.
+	if sortKey != agentsort.Created && sortKey != agentsort.Updated {
+		return nil, fmt.Errorf("ListAgentMembers: invalid sort %q: %w", sortKey, store.ErrInvalidInput)
+	}
+	if dir != agentsort.Asc && dir != agentsort.Desc {
+		return nil, fmt.Errorf("ListAgentMembers: invalid dir %q: %w", dir, store.ErrInvalidInput)
+	}
+
+	preds, err := agentFilterPredicates(filter)
+	if err != nil {
+		return nil, err
+	}
+	query := s.client.Agent.Query()
+	if len(preds) > 0 {
+		query.Where(preds...)
+	}
+	if max <= 0 {
+		max = defaultAgentListLimit
+	}
+	rows, err := query.Select(agentMemberSelectFields...).Limit(max).All(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	members := make([]store.AgentMember, 0, len(rows))
+	rowsForSort := make([]agentsort.Row, 0, len(rows))
+	for _, a := range rows {
+		m := entAgentToMember(a)
+		members = append(members, m)
+		rowsForSort = append(rowsForSort, agentsort.KeyFor(sortKey, m.ID, m.Created, m.Updated, m.LastActivityEvent))
+	}
+
+	// Sort members using the same permutation computed over rowsForSort, by
+	// sorting a slice of indices rather than re-deriving keys mid-sort.
+	idx := make([]int, len(members))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.Slice(idx, func(i, j int) bool {
+		return agentsort.Less(dir, rowsForSort[idx[i]], rowsForSort[idx[j]])
+	})
+	ordered := make([]store.AgentMember, len(members))
+	for i, j := range idx {
+		ordered[i] = members[j]
+	}
+	return ordered, nil
 }
 
 // ListAgentsWithStaleNonTerminalReincarnationState is the agent-state

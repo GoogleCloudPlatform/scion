@@ -64,6 +64,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 afterEach(() => {
   apiFetchMock.mockReset();
+  vi.useRealTimers();
 });
 
 describe('fetchAllPaletteAgents: full pagination', () => {
@@ -762,6 +763,272 @@ describe('ChatPaletteDataController: cancellation and stale-load guarding', () =
       .mockResolvedValueOnce(jsonResponse({}, 500));
     const controller = new ChatPaletteDataController();
     await expect(controller.loadAgentsGroup()).rejects.toThrow(PaletteLoadError);
+  });
+});
+
+describe('ChatPaletteDataController: Agents group progressive onProgress', () => {
+  it('publishes each page as it arrives, ahead of the final DM-joined result', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          agents: [{ id: 'a0', name: 'First', _capabilities: { actions: ['attach'] } }],
+          nextCursor: 'c1',
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          agents: [{ id: 'a1', name: 'Second', _capabilities: { actions: ['attach'] } }],
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          dms: [
+            {
+              conversationKey: 'k',
+              peerId: 'a1',
+              peerKind: 'agent',
+              lastActivityAt: '2026-01-01T00:00:00Z',
+            },
+          ],
+        })
+      );
+
+    const progressCalls: Array<ReadonlyArray<{ label: string; activityMs: number }>> = [];
+    const controller = new ChatPaletteDataController();
+    const candidates = await controller.loadAgentsGroup((partial) => {
+      progressCalls.push(partial.map((c) => ({ label: c.label, activityMs: c.activityMs })));
+    });
+
+    // Two progress calls, one per page, each cumulative and with unknown
+    // recency (no DMs fetched yet at that point).
+    expect(progressCalls).toEqual([
+      [{ label: 'First', activityMs: 0 }],
+      [
+        { label: 'First', activityMs: 0 },
+        { label: 'Second', activityMs: 0 },
+      ],
+    ]);
+
+    // The final resolved value is the real, DM-joined result — Second's
+    // recency is no longer 0 once the DM list is known.
+    expect(candidates).toHaveLength(2);
+    const second = candidates.find((c) => c.label === 'Second');
+    expect(second?.activityMs).toBeGreaterThan(0);
+  });
+
+  it('a superseded load never publishes progress through onProgress after the newer load starts', async () => {
+    let resolveSecondAgentsPage!: (v: Response) => void;
+    apiFetchMock
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveSecondAgentsPage = resolve;
+          })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          agents: [{ id: 'a1', name: 'Second', _capabilities: { actions: ['attach'] } }],
+        })
+      )
+      .mockResolvedValueOnce(jsonResponse({ dms: [] }));
+
+    const controller = new ChatPaletteDataController();
+    const staleProgress: unknown[] = [];
+    const firstLoad = controller.loadAgentsGroup((partial) => staleProgress.push(partial));
+    const secondLoad = controller.loadAgentsGroup();
+
+    // The stale first load's own pending page now resolves — its onProgress
+    // must not fire, since a newer load has already started.
+    resolveSecondAgentsPage(
+      jsonResponse({
+        agents: [{ id: 'a0', name: 'First', _capabilities: { actions: ['attach'] } }],
+      })
+    );
+
+    await expect(firstLoad).rejects.toMatchObject({ name: 'AbortError' });
+    await secondLoad;
+    expect(staleProgress).toEqual([]);
+  });
+});
+
+describe('ChatPaletteDataController: Agents group idle timeout', () => {
+  it('a request that never settles is aborted after the idle bound and surfaces a retryable PaletteLoadError, not a silent AbortError', async () => {
+    vi.useFakeTimers();
+    apiFetchMock.mockImplementationOnce((_url, options) => {
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      });
+    });
+
+    const controller = new ChatPaletteDataController();
+    const load = controller.loadAgentsGroup();
+    // Attach the rejection expectation before advancing timers so the
+    // rejection (which lands mid-advance) is never briefly unhandled.
+    const expectation = expect(load).rejects.toBeInstanceOf(PaletteLoadError);
+    // Just past the 90s idle bound.
+    await vi.advanceTimersByTimeAsync(90_000 + 1);
+
+    await expectation;
+  });
+
+  it('does not trip 1ms before the idle bound, but does 1ms after — pinning the exact bound, not just its rough size', async () => {
+    // Distinguishes the real 90s bound from a mutated one (larger or
+    // smaller): either direction would move one of these two checks to the
+    // wrong side of its assertion.
+    vi.useFakeTimers();
+    let aborted = false;
+    apiFetchMock.mockImplementationOnce((_url, options) => {
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          aborted = true;
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      });
+    });
+
+    const controller = new ChatPaletteDataController();
+    const load = controller.loadAgentsGroup();
+    load.catch(() => {}); // settles later; avoids a transient unhandled-rejection warning below
+
+    await vi.advanceTimersByTimeAsync(89_999);
+    expect(aborted).toBe(false);
+
+    const expectation = expect(load).rejects.toBeInstanceOf(PaletteLoadError);
+    await vi.advanceTimersByTimeAsync(2);
+    expect(aborted).toBe(true);
+    await expectation;
+  });
+
+  it('a load whose total duration exceeds the idle bound still succeeds, as long as each step arrives before its own idle window elapses', async () => {
+    // Proves this is a *stall* timeout reset per step, not a cap on total
+    // duration: four steps at 30s apart (120s total, well past the 90s
+    // bound) all complete, each comfortably inside its own 90s window. Three
+    // agents pages (not two) makes the cumulative page time before the DM
+    // fetch even starts reach 90s on its own, so this only holds if every
+    // page's own reset counts toward the bound — not just the initial reset
+    // and the one covering the DM fetch — with a full 30s of margin so the
+    // boundary isn't a coin flip. Each mocked step also rejects on its
+    // request's own abort signal, like a real fetch would — without that, an
+    // idle-timeout abort would have no observable effect here, and this test
+    // would pass regardless of whether the production code resets anything
+    // at all.
+    vi.useFakeTimers();
+    let resolvePage1!: (v: Response) => void;
+    let resolvePage2!: (v: Response) => void;
+    let resolvePage3!: (v: Response) => void;
+    let resolveDms!: (v: Response) => void;
+    const abortable = (resolve: (fn: (v: Response) => void) => void) => {
+      return (_url: string, options?: { signal?: AbortSignal }) =>
+        new Promise<Response>((res, reject) => {
+          resolve(res);
+          options?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError'))
+          );
+        });
+    };
+    apiFetchMock
+      .mockImplementationOnce(abortable((r) => (resolvePage1 = r)))
+      .mockImplementationOnce(abortable((r) => (resolvePage2 = r)))
+      .mockImplementationOnce(abortable((r) => (resolvePage3 = r)))
+      .mockImplementationOnce(abortable((r) => (resolveDms = r)));
+
+    const controller = new ChatPaletteDataController();
+    const load = controller.loadAgentsGroup();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    resolvePage1(
+      jsonResponse({
+        agents: [{ id: 'a0', name: 'Coder', _capabilities: { actions: ['attach'] } }],
+        nextCursor: 'c1',
+      })
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    resolvePage2(
+      jsonResponse({
+        agents: [{ id: 'a1', name: 'Second', _capabilities: { actions: ['attach'] } }],
+        nextCursor: 'c2',
+      })
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    resolvePage3(jsonResponse({ agents: [] }));
+    await vi.advanceTimersByTimeAsync(30_000);
+    resolveDms(jsonResponse({ dms: [] }));
+
+    const candidates = await load;
+    expect(candidates).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('clears its idle timer once a load settles successfully, leaving no pending timers behind', async () => {
+    vi.useFakeTimers();
+    apiFetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          agents: [{ id: 'a0', name: 'Coder', _capabilities: { actions: ['attach'] } }],
+        })
+      )
+      .mockResolvedValueOnce(jsonResponse({ dms: [] }));
+
+    const controller = new ChatPaletteDataController();
+    const candidates = await controller.loadAgentsGroup();
+    expect(candidates).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('clears its idle timer when the load is cancelled, leaving no pending timers behind', async () => {
+    vi.useFakeTimers();
+    apiFetchMock.mockImplementationOnce((_url, options) => {
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      });
+    });
+
+    const controller = new ChatPaletteDataController();
+    const load = controller.loadAgentsGroup();
+    const expectation = expect(load).rejects.toMatchObject({ name: 'AbortError' });
+    controller.cancel();
+    await expectation;
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a DM fetch that hangs after every agents page lands is still aborted by the idle bound, not left running past it', async () => {
+    // The last agents page's own reset is the only reset covering the DM
+    // fetch (see AGENTS_IDLE_TIMEOUT_MS's doc comment) — this pins that the
+    // DM step is actually bounded by it, not left to run unbounded once
+    // pagination itself is done.
+    vi.useFakeTimers();
+    let dmAborted = false;
+    apiFetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          agents: [{ id: 'a0', name: 'Coder', _capabilities: { actions: ['attach'] } }],
+        })
+      )
+      .mockImplementationOnce((_url, options) => {
+        return new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => {
+            dmAborted = true;
+            reject(new DOMException('aborted', 'AbortError'));
+          });
+        });
+      });
+
+    const controller = new ChatPaletteDataController();
+    const load = controller.loadAgentsGroup();
+    load.catch(() => {}); // settles later; avoids a transient unhandled-rejection warning below
+
+    await vi.advanceTimersByTimeAsync(89_999);
+    expect(dmAborted).toBe(false);
+
+    const expectation = expect(load).rejects.toBeInstanceOf(PaletteLoadError);
+    await vi.advanceTimersByTimeAsync(2);
+    expect(dmAborted).toBe(true);
+    await expectation;
   });
 });
 

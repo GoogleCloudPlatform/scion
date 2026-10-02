@@ -137,17 +137,22 @@ resource "google_service_account_iam_member" "agent_workload_identity_user" {
 # namespace; it costs nothing on Autopilot.
 resource "kubernetes_job_v1" "nfs_init" {
   metadata {
-    name      = "${var.hub_name}-nfs-init"
-    namespace = kubernetes_namespace.this.metadata[0].name
+    generate_name = "${var.hub_name}-nfs-init-"
+    namespace     = kubernetes_namespace.this.metadata[0].name
   }
 
   spec {
     backoff_limit = 3
 
     template {
-      metadata {
-        name = "${var.hub_name}-nfs-init"
-      }
+      # No metadata.name here: the kubernetes_job_v1 provider schema rejects
+      # spec.template.metadata.name together with the Job's own
+      # metadata.generate_name ("Conflicting configuration arguments"). The
+      # ConflictsWith is the absolute path metadata.0.generate_name, i.e. a
+      # provider schema quirk, not a Kubernetes rule. The pod template needs
+      # no name of its own; Kubernetes names the pods it creates from this
+      # template.
+      metadata {}
 
       spec {
         restart_policy = "OnFailure"
@@ -163,8 +168,8 @@ resource "kubernetes_job_v1" "nfs_init" {
           command = ["sh", "-c"]
           # subpath_root is passed via env rather than interpolated straight
           # into the shell script text, so the script body itself is a fixed
-          # string regardless of the configured value (defense in depth
-          # alongside the variable's own validation block).
+          # string regardless of the configured value. The variable also has
+          # its own validation block.
           args = [
             "mkdir -p \"/mnt/share/${var.hub_name}/$SUBPATH_ROOT\" && chown ${var.nfs_uid}:${var.nfs_gid} \"/mnt/share/${var.hub_name}\" \"/mnt/share/${var.hub_name}/$SUBPATH_ROOT\""
           ]

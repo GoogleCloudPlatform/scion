@@ -126,6 +126,39 @@ describe('scion-chat-switcher: renders a grouped Agents list', () => {
     expect(el.shadowRoot?.querySelector('.palette-option')?.textContent).toContain('Coder One');
   });
 
+  it('a query matching none of a loading group\'s candidates-so-far shows "Loading more…", not a bare heading', async () => {
+    // Progressive publishing (a loading group with some candidates already
+    // in, but a query that matches none of them) must not fall through to
+    // rendering nothing at all for that group: without this, the group
+    // would show only its heading, with no indication that more rows could
+    // still arrive and match.
+    const el = await mountPalette({
+      agents: {
+        status: 'loading',
+        candidates: [
+          {
+            id: dmCandidateId('agent', 'a1'),
+            group: 'agents',
+            label: 'Coder One',
+            searchFields: ['Coder One'],
+            secondaryLabel: '',
+            activityMs: 0,
+            target: { kind: 'dm', peerKind: 'agent', peerId: 'a1', displayName: 'Coder One' },
+          },
+        ],
+      },
+    });
+    const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
+    input.value = 'no agent named this yet';
+    input.dispatchEvent(new InputEvent('input'));
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.palette-empty')).toBeNull();
+    const loading = el.shadowRoot?.querySelector('.palette-loading');
+    expect(loading).not.toBeNull();
+    expect(loading?.textContent).toContain('Loading more');
+  });
+
   it('"No matches" only shows once ready with zero ranked candidates — not while loading, not on error, not with matches', async () => {
     // The "No matches" condition is `status !== 'loading' && status !==
     // 'error' && ranked.length === 0` — three independent conditions, so

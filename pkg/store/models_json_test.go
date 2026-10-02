@@ -360,7 +360,7 @@ func TestNotification_JSON_CanonicalKeysOnly(t *testing.T) {
 func TestUserAccessToken_JSON_CanonicalKeysOnly(t *testing.T) {
 	tok := UserAccessToken{
 		ID: "uat-1", UserID: "u-1", Name: "tok", Prefix: "scion_pat_ab",
-		ProjectID: "p-1", Scopes: []string{"agent:read"}, Revoked: false,
+		BoundaryKind: "project", ProjectID: "p-1", Scopes: []string{"agent:read"}, Revoked: false,
 	}
 	data, err := json.Marshal(tok)
 	if err != nil {
@@ -368,7 +368,7 @@ func TestUserAccessToken_JSON_CanonicalKeysOnly(t *testing.T) {
 	}
 	assertNoLegacyKeys(t, "UserAccessToken", data)
 	assertExactKeySet(t, "UserAccessToken", data, []string{
-		"id", "userId", "name", "prefix", "projectId", "scopes", "revoked", "created",
+		"id", "userId", "name", "prefix", "boundaryKind", "projectId", "scopes", "revoked", "created",
 	})
 
 	var rt UserAccessToken

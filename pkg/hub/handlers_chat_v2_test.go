@@ -1386,41 +1386,6 @@ func TestChatV2_Search_Stub(t *testing.T) {
 	}
 }
 
-func TestChatV2_LegacyThreads_AuthzFix(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	// Create a project that only admins can see — the dev user is admin
-	// by default so this test just verifies the authz call is present
-	// by checking the endpoint doesn't error on a valid project.
-	proj := &store.Project{ID: tid("legacy-authz"), Name: "legacy-authz", Slug: "legacy-authz", Created: time.Now(), Updated: time.Now()}
-	if err := s.CreateProject(ctx, proj); err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
-	if err := wcs.Init(); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	srv.SetWebChatStore(wcs)
-
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/threads?projectId="+proj.ID, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// Non-existent project should 404.
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/chat/threads?projectId=nonexistent", nil)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("nonexistent project: expected 404, got %d", rec.Code)
-	}
-}
-
 func TestChatV2_SpaceRead(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

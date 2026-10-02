@@ -39,6 +39,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -1047,6 +1048,20 @@ type Server struct {
 	// protection. Set once in New and read without the lock; nil-safe.
 	mentionPairLimiter *mentionPairLimiter
 
+	// Independent token-bucket limiters for the agent-keys operation
+	// (task 2.2, .design/agent-keys-contract.md "Concrete defaults"):
+	// keysPrincipalLimiter is keyed per authenticated principal+project,
+	// keysTargetLimiter is keyed per target agent. Both must allow a
+	// request; they are separate from chatSendLimiter's aggregate DM
+	// allowance (keys must not charge or evade it) and are shared by the
+	// /keys routes and the temporary raw bridge (task 2.3) alike. Set once
+	// in New and read without the lock; nil-safe. In-memory and per-Hub
+	// instance, not a distributed quota service (contract §5): N Hub
+	// replicas behind a load balancer allow N times the configured rate in
+	// aggregate, and a Hub restart resets both buckets to full.
+	keysPrincipalLimiter *keysRateLimiter
+	keysTargetLimiter    *keysRateLimiter
+
 	// In-memory idempotency cache for chat message sends (#1055).
 	// Keyed by senderID:idempotencyKey with a 5-minute TTL.
 	chatIdempotency *ChatIdempotencyCache
@@ -1381,6 +1396,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Per-pair agent mention loop/storm protection.
 	srv.mentionPairLimiter = newMentionPairLimiter()
+
+	// Agent-keys admission rate limiters (task 2.2, contract "Concrete
+	// defaults"): 5 req/s burst 10 per principal+project, 10 req/s burst 20
+	// per target.
+	srv.keysPrincipalLimiter = newKeysRateLimiter(agentkeys.PrincipalProjectRateLimit, agentkeys.PrincipalProjectBurst)
+	srv.keysTargetLimiter = newKeysRateLimiter(agentkeys.TargetRateLimit, agentkeys.TargetBurst)
 
 	ctx := context.Background()
 
@@ -3754,8 +3775,14 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 	}
 
 	if creator, err := s.store.GetAgent(ctx, evt.CreatedBy); err == nil {
-		if creator.ProjectID != evt.ProjectID {
+		if !creator.DeletedAt.IsZero() {
+			return false, fmt.Errorf("scheduled dispatch creator agent %q is deleted; cannot authorize", evt.CreatedBy)
+		}
+		if creator.ProjectID == "" || creator.ProjectID != evt.ProjectID {
 			return false, fmt.Errorf("scheduled dispatch creator agent %q is not in project %q", evt.CreatedBy, evt.ProjectID)
+		}
+		if s.authzService == nil {
+			return false, fmt.Errorf("scheduled dispatch cannot authorize agent creation without authz service")
 		}
 		role, additionalScopes := agentRoleAndScopes(creator)
 		scopes := append(ScopesForRole(role), additionalScopes...)
@@ -3770,35 +3797,41 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 			return false, fmt.Errorf("scheduled dispatch creator agent %q missing required scope: %s", evt.CreatedBy, ScopeAgentCreate)
 		}
 
+		agentIdentity := &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: creator.ID},
+			ProjectID: creator.ProjectID,
+			Scopes:    scopes,
+		}}
+
+		// The creator agent needs agent.create in the project through
+		// Decide, including the delegation ceiling of every live ancestor.
+		if decision := s.agentCreateDecision(ctx, agentIdentity, evt.ProjectID); !decision.Allowed {
+			return false, fmt.Errorf("scheduled dispatch creator agent %q is not authorized to create agents in project %q: %s",
+				evt.CreatedBy, evt.ProjectID, decision.Reason)
+		}
+
 		// CanDelegate check (Phase 1F): at fire time, verify the creator
 		// agent still holds the scopes it would delegate to the new agent.
-		if s.authzService != nil {
-			agentIdentity := &agentIdentityWrapper{&AgentTokenClaims{
-				Claims:    jwt.Claims{Subject: creator.ID},
-				ProjectID: creator.ProjectID,
-				Scopes:    scopes,
-			}}
-			grantDesc := GrantDescriptor{
-				Type:      GrantTypeAgentDelegation,
-				AgentRole: string(role),
-				ProjectID: evt.ProjectID,
-				ScopeType: store.RoleScopeProject,
-				ScopeID:   evt.ProjectID,
-			}
-			delegateDecision := s.authzService.CanDelegate(ctx, agentIdentity, grantDesc)
-			if !delegateDecision.Allowed {
-				s.emitMutationAudit(ctx, &store.MutationAuditRecord{
-					MutationType:       "agent_delegation",
-					ActorPrincipalKind: "agent",
-					ActorPrincipalID:   creator.ID,
-					TargetType:         "scheduled_dispatch",
-					TargetID:           evt.ID,
-					CanDelegateResult:  "deny",
-					CanDelegateReason:  delegateDecision.Reason,
-				})
-				return false, fmt.Errorf("scheduled dispatch creator agent %q failed CanDelegate: %s",
-					evt.CreatedBy, delegateDecision.Reason)
-			}
+		grantDesc := GrantDescriptor{
+			Type:      GrantTypeAgentDelegation,
+			AgentRole: string(role),
+			ProjectID: evt.ProjectID,
+			ScopeType: store.RoleScopeProject,
+			ScopeID:   evt.ProjectID,
+		}
+		delegateDecision := s.authzService.CanDelegate(ctx, agentIdentity, grantDesc)
+		if !delegateDecision.Allowed {
+			s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+				MutationType:       "agent_delegation",
+				ActorPrincipalKind: "agent",
+				ActorPrincipalID:   creator.ID,
+				TargetType:         "scheduled_dispatch",
+				TargetID:           evt.ID,
+				CanDelegateResult:  "deny",
+				CanDelegateReason:  delegateDecision.Reason,
+			})
+			return false, fmt.Errorf("scheduled dispatch creator agent %q failed CanDelegate: %s",
+				evt.CreatedBy, delegateDecision.Reason)
 		}
 
 		return true, nil
@@ -3821,11 +3854,7 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 		return false, fmt.Errorf("scheduled dispatch cannot authorize agent creation without authz service")
 	}
 	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "scheduler")
-	decision := s.authzService.CheckAccess(ctx, identity, Resource{
-		Type:       "agent",
-		ParentType: "project",
-		ParentID:   evt.ProjectID,
-	}, ActionCreate)
+	decision := s.agentCreateDecision(ctx, identity, evt.ProjectID)
 	if !decision.Allowed {
 		return false, fmt.Errorf("scheduled dispatch creator user %q is not authorized to create agents in project %q: %s",
 			evt.CreatedBy, evt.ProjectID, decision.Reason)
@@ -5014,6 +5043,9 @@ func (s *Server) registerRoutes() {
 		s.handleUserMeInjectedSkillByID(w, r, entryID)
 	}))
 
+	// User-scoped terminal workspace persistence (/users/me/terminal-workspace)
+	s.mux.HandleFunc("/api/v1/users/me/terminal-workspace", s.guarded("/api/v1/users/me/terminal-workspace", s.handleUserMeTerminalWorkspace))
+
 	// User-scoped template endpoints (/users/me/templates)
 	s.mux.HandleFunc("/api/v1/users/me/templates", s.guarded("/api/v1/users/me/templates", s.handleUserMeTemplates))
 	s.mux.HandleFunc("/api/v1/users/me/templates/", s.guarded("/api/v1/users/me/templates/", func(w http.ResponseWriter, r *http.Request) {
@@ -5123,10 +5155,6 @@ func (s *Server) registerRoutes() {
 	if s.nativeChatEnabled() {
 		// Chat thread prefs (Phase 3 — visibility mode persistence)
 		s.mux.HandleFunc("/api/v1/chat/prefs", s.guarded("/api/v1/chat/prefs", s.handleChatPrefs))
-
-		// Chat thread endpoints (Phase 5 — thread rail, legacy)
-		s.mux.HandleFunc("/api/v1/chat/threads", s.guarded("/api/v1/chat/threads", s.handleChatThreads))
-		s.mux.HandleFunc("/api/v1/chat/threads/", s.guarded("/api/v1/chat/threads/", s.handleChatThreadRoutes))
 
 		// Wave-2 chat endpoints (conversation REST API)
 		s.mux.HandleFunc("/api/v1/chat/spaces", s.guarded("/api/v1/chat/spaces", s.handleChatSpaces))

@@ -20,6 +20,21 @@ Hub-wide enable and disable is through the **Experiments tab**: Admin → Server
 - **Per-user override (dev/QA only)**: `localStorage.setItem('scion:feature:web.terminal_workspace', 'true')` or `'false'`. This only takes effect when the experiments fetch fails or the user is signed out; for a signed-in user on a working hub, the admin value wins.
 - **Behavior on disable**: active retained sessions are preserved in memory until the next page reload. On reload, the flag is re-evaluated and the app reverts to the legacy disposable-pane mode (`/agents/{id}/terminal`). In-memory terminal state (scrollback, xterm instances, layout assignments) is discarded on page reload. The agent process continues running server-side; users can re-attach after reload.
 
+## Persisted Terminal List (ptone/scion#2278)
+
+- The Hub saves each user's open terminal list (agent IDs, order, and which
+  one was frontmost) at `/api/v1/users/me/terminal-workspace`, gated on this
+  same flag client-side: with `web.terminal_workspace` off, the persistence
+  module is never constructed, so no GET or PUT is ever sent. The route
+  itself is not flag-gated server-side — it stores per-user UI state and has
+  no effect unless a client calls it.
+- Flag rollback does not touch the saved row: it is Hub-side state, separate
+  from the in-memory session/layout state the "Rollback (Disable)" section
+  above describes. A later re-enable restores the list exactly as before,
+  pruned of any agent that no longer exists or is no longer attachable.
+- No migration is needed either way: the table is created by AutoMigrate on
+  Hub start and is simply unused while the flag is off.
+
 ## Prerequisites
 
 - All P3 sibling issues merged (reconnect, ownership, teardown, layout, entry points).

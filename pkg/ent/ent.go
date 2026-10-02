@@ -75,6 +75,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 )
 
 // ent aliases to avoid import conflicts in user's code.
@@ -198,6 +199,7 @@ func checkColumn(t, c string) error {
 			usagereservation.Table:         usagereservation.ValidColumn,
 			user.Table:                     user.ValidColumn,
 			useraccesstoken.Table:          useraccesstoken.ValidColumn,
+			userterminalworkspace.Table:    userterminalworkspace.ValidColumn,
 		})
 	})
 	return columnCheck(t, c)

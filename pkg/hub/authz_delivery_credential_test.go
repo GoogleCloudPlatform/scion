@@ -42,14 +42,19 @@ import (
 
 // newHubDeliveryTestAgent creates a store.Agent in projectID, descending
 // from ownerID, for a hubDeliveryIdentity built through the real
-// constructor.
+// constructor. It also records the active user-to-agent delegation edge in
+// projectID, so the execution-project relationship stage resolves ownerID
+// as the agent's authoritative source user and later stages decide the
+// outcome. ownerID must be a stored user admitted to projectID.
 func newHubDeliveryTestAgent(t *testing.T, s store.Store, agentID, projectID, ownerID string) {
 	t.Helper()
 	require.NoError(t, s.CreateAgent(context.Background(), &store.Agent{
 		ID: agentID, Slug: "slug-" + agentID[:8], Name: "name-" + agentID[:8],
 		ProjectID: projectID, Phase: string(state.PhaseRunning),
-		Ancestry: []string{ownerID},
+		OwnerID: ownerID, CreatedBy: ownerID, Ancestry: []string{ownerID},
 	}))
+	createDCEdge(t, s, store.DelegationPrincipalUser, ownerID, store.DelegationPrincipalAgent, agentID,
+		store.RoleScopeProject, projectID, string(AgentRoleFull))
 }
 
 // TestHubDelivery_PipelineReachesRelationshipStage is the end-to-end
@@ -193,12 +198,10 @@ func TestHubDelivery_Step10ArmDeniesWithoutStep0b(t *testing.T) {
 			wantReason: "delivery credential is limited to deliver permissions",
 		},
 		{
-			// An empty permission is resolved exactly as walkDelegationChain
-			// resolves it (resolvePermissionID): no registered permission
-			// pairs resource type "agent" with ActionDeliver, so it falls
-			// back to a non-deliver synthetic ID, which denies the same way
-			// an explicit non-deliver permission does.
-			name:       "permission_empty_resolves_non_deliver",
+			// An empty permission argument is not one of the three deliver
+			// permissions, so it denies the same way an explicit
+			// non-deliver permission does.
+			name:       "permission_empty",
 			identity:   baseIdentity(),
 			permission: "", action: ActionDeliver,
 			resource:   Resource{Type: "agent", ID: validAgentID},
@@ -240,7 +243,7 @@ func TestHubDelivery_Step10ArmDeniesWithoutStep0b(t *testing.T) {
 			}
 			var explain []DecisionStep
 			var cause DenyCause
-			allowed, reason, err := f.authz.checkDelegationCeiling(ctx, req, agentIDArg, &explain, &cause)
+			allowed, reason, err := f.authz.checkDelegationCeiling(ctx, req, tc.permission, agentIDArg, &explain, &cause)
 			require.NoError(t, err)
 			assert.False(t, allowed)
 			assert.Equal(t, tc.wantReason, reason)
@@ -253,14 +256,14 @@ func TestHubDelivery_Step10ArmDeniesWithoutStep0b(t *testing.T) {
 }
 
 // newHubDeliveryNoItemGrantIdentity builds a hub_delivery identity for the
-// role-does-not-substitute fixture: agent C's ancestry names a user with no
-// opted-in secret, env var or skill injection, so no association, progeny
+// role-does-not-substitute fixture: agent C's ancestry names an alpha
+// project member with no opted-in secret, env var or skill injection, so no association, progeny
 // or skill-default grant exists for it on any golden fixture resource. A
 // role binding naming a deliver permission is therefore the only grant the
 // kernel could match for it.
 func newHubDeliveryNoItemGrantIdentity(t *testing.T, f *goldenFixture, agentID string) *hubDeliveryIdentity {
 	t.Helper()
-	newHubDeliveryTestAgent(t, f.store, agentID, f.projectAlpha.ID, tid("hd-no-item-grant-unrelated-owner"))
+	newHubDeliveryTestAgent(t, f.store, agentID, f.projectAlpha.ID, f.memberAlphaID)
 	h, err := f.authz.newHubDeliveryIdentity(context.Background(), agentID)
 	require.NoError(t, err)
 	return h

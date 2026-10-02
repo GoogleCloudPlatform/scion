@@ -269,10 +269,16 @@ func TestNFSProvision_Idempotent(t *testing.T) {
 		t.Fatalf("second Provision: %v", err)
 	}
 
-	// Lock acquired twice (once per call — lock is always acquired, sentinel
-	// check happens after lock).
-	if got := atomic.LoadInt64(&locker.acquires); got != 2 {
-		t.Errorf("expected 2 lock acquires, got %d", got)
+	// Lock acquired once, not twice: SharedPlain mode checks the sentinel
+	// BEFORE taking the lock, so an already-provisioned project's second
+	// call returns without ever touching the lock at all (an already-done
+	// project must not contend a lock some unrelated crashed holder
+	// elsewhere might be sitting on).
+	// WorktreePerAgent mode still takes the lock on every call (ensureWorktree
+	// needs it even when the base clone is already done) — see
+	// TestNFSProvision_WorktreePerAgent* below for that coverage.
+	if got := atomic.LoadInt64(&locker.acquires); got != 1 {
+		t.Errorf("expected 1 lock acquire (second call should skip the lock via the pre-lock sentinel check), got %d", got)
 	}
 }
 
