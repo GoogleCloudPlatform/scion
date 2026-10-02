@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -141,11 +142,24 @@ type cancelingCreateDispatcher struct {
 	heldBeforeCleanup reservationsHeld
 	ctxNotCanceled    bool
 	delete            ctxObservation
+	// credJTI is a credential the mock records for the agent, standing in
+	// for the one a real dispatcher mints, so the test can observe whether
+	// the cleanup revoked it.
+	credJTI string
 }
 
 func (d *cancelingCreateDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
 	d.capturedAgent = agent
 	d.heldBeforeCleanup = observeReservations(d.t, d.s, agent.ID)
+	d.credJTI = "p0-cred-" + agent.ID
+	now := time.Now()
+	require.NoError(d.t, d.s.CreateAgentCredential(context.Background(), &store.AgentCredential{
+		AgentID:      agent.ID,
+		ProjectID:    agent.ProjectID,
+		TokenJTIHash: hashJTI(d.credJTI),
+		IssuedAt:     now,
+		ExpiresAt:    now.Add(time.Hour),
+	}))
 	d.cancelRequest()
 	d.ctxNotCanceled = !awaitCanceled(ctx) // the handler's ctx is the request's
 	if d.createErr != nil {
@@ -180,10 +194,15 @@ func TestCreateAgent_CanceledRequest_FailureCleanupStillRuns(t *testing.T) {
 		gatherEnv bool
 		createErr error
 		envReqs   *RemoteEnvRequirementsResponse
+		// wantRevoked: only the missing-env path revokes in the cleanup. On
+		// a dispatch error the real dispatcher has already revoked (this mock
+		// does not), so the cleanup must leave the credential alone rather
+		// than revoke a second time.
+		wantRevoked bool
 	}{
 		{name: "dispatch failure", createErr: fmt.Errorf("simulated broker dispatch failure")},
 		{name: "gather-env dispatch failure", gatherEnv: true, createErr: fmt.Errorf("simulated broker dispatch failure")},
-		{name: "missing env vars", envReqs: &RemoteEnvRequirementsResponse{Needs: []string{"SOME_REQUIRED_KEY"}}},
+		{name: "missing env vars", envReqs: &RemoteEnvRequirementsResponse{Needs: []string{"SOME_REQUIRED_KEY"}}, wantRevoked: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -215,6 +234,15 @@ func TestCreateAgent_CanceledRequest_FailureCleanupStillRuns(t *testing.T) {
 			assert.ErrorIs(t, err, store.ErrNotFound, "cleanup must delete the agent row despite the canceled request")
 
 			assertNoReservations(t, s, agentID)
+
+			cred := getTestAgentCredential(t, s, disp.credJTI)
+			if tc.wantRevoked {
+				require.NotNil(t, cred.RevokedAt, "the missing-env cleanup must revoke the credential despite the canceled request")
+				require.NotNil(t, cred.RevokeReason)
+				assert.Equal(t, agentCredentialRevokeReasonCreateFailed, *cred.RevokeReason)
+			} else {
+				assert.Nil(t, cred.RevokedAt, "the cleanup must not revoke on a dispatch error: the dispatcher already did")
+			}
 		})
 	}
 }
@@ -377,4 +405,38 @@ func TestHandleExistingAgent_EnvGatherRecreate_CanceledAfterRowDelete_ReleasesQu
 
 	require.True(t, wrapped.deleted, "the env-gather recreate must hard-delete the existing provisioning agent")
 	assertNoReservations(t, s, oldID)
+}
+
+// TestCreateAgent_WorkspaceBootstrapNoStorage_CleansUp covers the
+// workspace-bootstrap failure returns, which come after the row and
+// reservations were written but before any dispatch: with no storage
+// configured, the create must still remove the row and release both
+// reservations.
+func TestCreateAgent_WorkspaceBootstrapNoStorage_CleansUp(t *testing.T) {
+	srv, s, project := setupCreateAgentServer(t, &createAgentDispatcher{})
+	require.Nil(t, srv.GetStorage(), "precondition: no storage configured")
+	setAgentQuotaLimits(t, s)
+	ctx := context.Background()
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:           "bootstrap-no-storage",
+		ProjectID:      project.ID,
+		Task:           "do something",
+		WorkspaceFiles: []transfer.FileInfo{{Path: "main.go", Size: 100, Hash: "sha256:abc123"}},
+	})
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "Storage not configured")
+
+	result, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, result.Items, "a failed workspace-bootstrap create must delete its agent row")
+
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID),
+		"a failed workspace-bootstrap create must release the per-broker reservation")
+	def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerProject)
+	require.NoError(t, err)
+	projectReservations, err := s.CountActiveReservations(ctx, def.ID, DevUserID, store.QuotaScopeProject, project.ID)
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, projectReservations,
+		"a failed workspace-bootstrap create must release the per-project reservation")
 }

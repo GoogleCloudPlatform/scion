@@ -896,10 +896,9 @@ const (
 
 	// createCleanupRuntimeTimeout bounds the runtime-side delete of a failed
 	// create (DispatchAgentDelete / managedAgentDelete). It is deliberately
-	// longer than dispatchDeleteTimeout (15s): a cross-node delete first tries
-	// the broker directly, then falls back to a deferred dispatch whose wait is
-	// dispatchDeleteTimeout of its own, and this budget must leave that whole
-	// wait intact rather than cut it short.
+	// longer than dispatchDeleteTimeout (15s): a cross-node delete is routed
+	// to a deferred dispatch whose rolling wait is dispatchDeleteTimeout, and
+	// this budget must leave that wait intact rather than cut it short.
 	createCleanupRuntimeTimeout = 30 * time.Second
 )
 
@@ -1831,7 +1830,12 @@ func (s *Server) createAgentInProject(
 
 		if !hasLocalPath && !s.isEmbeddedBroker(runtimeBrokerID) {
 			stor := s.GetStorage()
+			// Both failures below come after the row and reservations were
+			// written but before any dispatch: nothing to delete on a broker
+			// (nil deleteRuntime) and no credential minted yet (minting happens
+			// in the dispatcher), so no revoke.
 			if stor == nil {
+				s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, nil)
 				RuntimeError(w, "Storage not configured for workspace bootstrap")
 				return
 			}
@@ -1839,6 +1843,7 @@ func (s *Server) createAgentInProject(
 			storagePath := storage.WorkspaceStoragePath(s.HubID(), agent.ProjectID, agent.ID)
 			uploadURLs, existingFiles, err := generateWorkspaceUploadURLs(ctx, stor, storagePath, req.WorkspaceFiles)
 			if err != nil {
+				s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, nil)
 				RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
 				return
 			}
