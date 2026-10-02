@@ -17,7 +17,8 @@
 /**
  * The hub buckets dashboard series by UTC calendar day, so the day-bucket
  * labels must say "(UTC)" (tz-refactor task 7, ptone/scion#2500). These
- * tests pin the chart x-axis title and the per-day chart headings.
+ * tests pin the chart x-axis title and the per-day chart headings on every
+ * day-bucketed tab (sessions, model-calls, tokens).
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
@@ -60,7 +61,29 @@ const SESSIONS = {
     { timestamp: '2026-03-11', value: 2 },
     { timestamp: '2026-03-10', value: 1 },
   ],
-  activeAgents: [{ timestamp: '2026-03-10', value: 1 }],
+  activeAgents: [
+    { timestamp: '2026-03-11', value: 1 },
+    { timestamp: '2026-03-10', value: 1 },
+  ],
+};
+
+const GROUPED = [
+  {
+    label: 'm1',
+    points: [
+      { timestamp: '2026-03-11', value: 4 },
+      { timestamp: '2026-03-10', value: 3 },
+    ],
+  },
+];
+
+const MODEL_CALLS = { periodDays: 7, byModel: GROUPED, byHarness: GROUPED };
+const TOKENS = { periodDays: 7, input: GROUPED, output: GROUPED };
+
+const VIEW_BODIES: Record<string, unknown> = {
+  sessions: SESSIONS,
+  'model-calls': MODEL_CALLS,
+  tokens: TOKENS,
 };
 
 type MetricsPage = HTMLElement & {
@@ -77,12 +100,13 @@ async function settle(el: MetricsPage): Promise<void> {
   await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
 }
 
-async function mountOnSessionsTab(): Promise<MetricsPage> {
+async function mountOnTab(tab: string): Promise<MetricsPage> {
   vi.stubGlobal(
     'fetch',
     vi.fn((url: string | URL | Request) => {
       const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
-      const body = path.includes('view=sessions') ? SESSIONS : SUMMARY;
+      const view = new URL(path, 'http://localhost').searchParams.get('view') ?? '';
+      const body = VIEW_BODIES[view] ?? SUMMARY;
       return Promise.resolve(
         new Response(JSON.stringify(body), {
           status: 200,
@@ -94,8 +118,8 @@ async function mountOnSessionsTab(): Promise<MetricsPage> {
   const el = document.createElement('scion-page-metrics') as MetricsPage;
   document.body.appendChild(el);
   await settle(el);
-  el.activeTab = 'sessions';
-  await el.loadView('sessions');
+  el.activeTab = tab;
+  await el.loadView(tab);
   await settle(el);
   return el;
 }
@@ -120,19 +144,32 @@ describe('scion-page-metrics — UTC day-bucket labels', () => {
     expect(mod.DAY_BUCKET_AXIS_TITLE).toBe('Day (UTC)');
   });
 
-  it('renders the sessions charts with UTC headings, UTC axis title and the hub date labels', async () => {
-    element = await mountOnSessionsTab();
+  it.each([
+    { tab: 'sessions', headings: ['Daily Sessions (UTC)', 'Active Agents per Day (UTC)'] },
+    {
+      tab: 'model-calls',
+      headings: ['Daily API Calls by Model (UTC)', 'Daily API Calls by Harness (UTC)'],
+    },
+    {
+      tab: 'tokens',
+      headings: ['Daily Input Tokens by Model (UTC)', 'Daily Output Tokens by Model (UTC)'],
+    },
+  ])(
+    'renders the $tab charts with UTC headings, UTC axis title and the hub date labels',
+    async ({ tab, headings }) => {
+      element = await mountOnTab(tab);
 
-    const headings = [...(element.shadowRoot?.querySelectorAll('.chart-section-title') ?? [])].map(
-      (h) => h.textContent?.trim()
-    );
-    expect(headings).toEqual(['Daily Sessions (UTC)', 'Active Agents per Day (UTC)']);
+      const rendered = [
+        ...(element.shadowRoot?.querySelectorAll('.chart-section-title') ?? []),
+      ].map((h) => h.textContent?.trim());
+      expect(rendered).toEqual(headings);
 
-    expect(chartConfigs).toHaveLength(2);
-    for (const config of chartConfigs) {
-      expect(config.options.scales.x.title).toMatchObject({ display: true, text: 'Day (UTC)' });
+      expect(chartConfigs).toHaveLength(2);
+      for (const config of chartConfigs) {
+        expect(config.options.scales.x.title).toMatchObject({ display: true, text: 'Day (UTC)' });
+        // The tick labels are the hub's UTC day keys, unchanged by the viewer's zone.
+        expect(config.data.labels).toEqual(['2026-03-10', '2026-03-11']);
+      }
     }
-    // The tick labels are the hub's UTC day keys, unchanged by the viewer's zone.
-    expect(chartConfigs[0].data.labels).toEqual(['2026-03-10', '2026-03-11']);
-  });
+  );
 });
