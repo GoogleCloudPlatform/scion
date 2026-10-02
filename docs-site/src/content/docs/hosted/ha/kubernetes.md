@@ -30,6 +30,8 @@ runtimes:
     gke: false                     # enable GKE-specific features
     list_all_namespaces: false     # list agents across all namespaces
     priority_class_name: scion-agent-priority  # default PriorityClass for agent pods (optional)
+    # shared_dir_storage_class: standard-rwx  # RWX class for shared-dir PVCs (see below)
+    # shared_dir_size: 10Gi                    # size per shared-dir PVC
 
 profiles:
   default:
@@ -62,6 +64,58 @@ kubernetes:
     limits:
       nvidia.com/gpu: "1"
 ```
+
+### Shared Directory PVCs
+
+Each project [shared directory](/scion/local/workspace/#5-project-shared-directories) gets its own `ReadWriteMany` PersistentVolumeClaim, created on first use and reused by later agents in the same project. Two keys control these claims:
+
+| Key | Default | Description |
+|---|---|---|
+| `shared_dir_storage_class` | cluster default class | StorageClass for new shared-dir PVCs. It must support `ReadWriteMany`. |
+| `shared_dir_size` | `10Gi` | Requested size for each new shared-dir PVC. |
+
+You can set them in three places. Each key is resolved separately, and the first source that sets it wins:
+
+1. The agent's or template's `kubernetes:` block.
+2. The profile entry in `settings.yaml`.
+3. The profile's runtime entry in `settings.yaml`.
+4. Otherwise: the cluster's default StorageClass, and `10Gi`.
+
+The settings values are read every time an agent starts. They apply only on the Kubernetes runtime.
+
+On GKE Autopilot the default class (`standard-rwo`) cannot provision `ReadWriteMany` volumes. The claim stays unbound and the agent pod stays `Pending`. To avoid this, set an RWX class such as `standard-rwx` (Filestore CSI) on the runtime or the profile:
+
+```yaml
+runtimes:
+  gke-autopilot:
+    type: kubernetes
+    context: my-autopilot-cluster
+    namespace: scion-agents
+    shared_dir_storage_class: standard-rwx
+    shared_dir_size: 1Ti
+
+profiles:
+  gke:
+    runtime: gke-autopilot
+    # Optional per-profile override; wins over the runtime entry.
+    # shared_dir_storage_class: premium-rwx
+```
+
+A template or agent can still override this for itself:
+
+```yaml
+kubernetes:
+  shared_dir_storage_class: standard-rwx
+  shared_dir_size: 10Gi
+```
+
+:::note
+Existing PVCs are reused as they are and never changed. A new class or size only applies to claims created after the change. To move an existing shared directory to a new class, delete its PVC (`scion-shared-…`, labelled `scion.shared-dir=<name>`) after copying out its data.
+:::
+
+:::caution[Cost with many projects]
+Each dynamically provisioned RWX PVC can be its own backing volume. On GKE, every `standard-rwx` claim is a separate Filestore instance, with that tier's minimum capacity. With many projects or shared directories this adds up quickly. For larger fleets, use the NFS backend instead: one pre-provisioned RWX export, mounted by every pod with a `subPath` per project and directory, and no per-directory PVCs. See [`server.shared_dir_storage`](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage) (`backend: nfs`) or the NFS [`server.workspace_storage`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage) backend, which serves shared directories from the workspace export.
+:::
 
 ### Resource Configuration
 

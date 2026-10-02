@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -312,4 +313,45 @@ func TestCreateSharedDirPVCs_MissingProjectLabel(t *testing.T) {
 	err := rt.createSharedDirPVCs(ctx, "default", config)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing scion.project label")
+}
+
+// TestCreateSharedDirPVCs_SettingsResolvedClassAndSize feeds createSharedDirPVCs
+// the Kubernetes block the start path builds from settings defaults
+// (config.ApplySharedDirDefaults): the template's explicit size wins, the
+// settings class fills the gap, and an unset size keeps the 10Gi default
+// (ptone/scion#2634).
+func TestCreateSharedDirPVCs_SettingsResolvedClassAndSize(t *testing.T) {
+	tests := []struct {
+		name      string
+		base      *api.KubernetesConfig
+		class     string
+		size      string
+		wantClass string
+		wantSize  string
+	}{
+		{"settings class and size, no template block", nil, "standard-rwx", "1Ti", "standard-rwx", "1Ti"},
+		{"template size wins, settings class fills", &api.KubernetesConfig{SharedDirSize: "20Gi"}, "standard-rwx", "1Ti", "standard-rwx", "20Gi"},
+		{"template class wins", &api.KubernetesConfig{SharedDirStorageClass: "tpl-rwx"}, "standard-rwx", "", "tpl-rwx", defaultSharedDirSize},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt, clientset, _ := newTestK8sRuntime()
+			ctx := context.Background()
+			cfg := RunConfig{
+				Name:       "test-agent",
+				Image:      "test:latest",
+				Labels:     map[string]string{"scion.project": "myproject"},
+				SharedDirs: []api.SharedDir{{Name: "data"}},
+				Kubernetes: config.ApplySharedDirDefaults(tt.base, tt.class, tt.size),
+			}
+			require.NoError(t, rt.createSharedDirPVCs(ctx, "default", cfg))
+
+			pvc, err := clientset.CoreV1().PersistentVolumeClaims("default").Get(ctx, "scion-shared-myproject-data", metav1.GetOptions{})
+			require.NoError(t, err)
+			require.NotNil(t, pvc.Spec.StorageClassName)
+			assert.Equal(t, tt.wantClass, *pvc.Spec.StorageClassName)
+			storageReq := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+			assert.Equal(t, tt.wantSize, storageReq.String())
+		})
+	}
 }

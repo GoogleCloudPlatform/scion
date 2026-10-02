@@ -113,6 +113,9 @@ runtimes:
 | `sync` | string | File sync strategy (e.g., `tar`). |
 | `gke` | bool | (Kubernetes) Enable GKE-specific features (e.g., Workload Identity, Autopilot scheduling). Default: `false`. |
 | `priority_class_name` | string | (Kubernetes) Default `priorityClassName` applied to agent pods using this runtime entry. Must name a `PriorityClass` that already exists on the cluster — Scion does not create one. A template/agent `kubernetes.priorityClassName` overrides this. Unset means no priority class (pods schedule at priority 0). |
+| `list_all_namespaces` | bool | (Kubernetes) List agents across all namespaces. Default: `false`. |
+| `shared_dir_storage_class` | string | (Kubernetes) Default StorageClass for shared-dir PVCs. Must support `ReadWriteMany`. A profile's value wins over this, and a template or agent `kubernetes.shared_dir_storage_class` wins over both. Default: the cluster's default class. |
+| `shared_dir_size` | string | (Kubernetes) Default size for each shared-dir PVC (e.g. `10Gi`). Same precedence as `shared_dir_storage_class`. Default: `10Gi`. |
 | `env` | map | Environment variables to set for the runtime. |
 
 :::note
@@ -219,6 +222,10 @@ profiles:
 | `timezone` | string | IANA timezone name (e.g., `America/Los_Angeles`) injected as `TZ` into agent containers dispatched by a Hub under this profile. Validated on write; an invalid name is rejected with `422`. |
 | `harness_overrides` | map | Per-harness-config overrides. Keys match `harness_configs` names. |
 | `secrets` | list | Required secrets for agents created under this profile. |
+| `shared_dir_storage_class` | string | (Kubernetes) StorageClass for shared-dir PVCs created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.shared_dir_storage_class` wins over this. |
+| `shared_dir_size` | string | (Kubernetes) Size for each shared-dir PVC created under this profile. Same precedence as `shared_dir_storage_class`. |
+
+**Shared-dir PVC class and size (Kubernetes).** Each key is resolved separately, and the first source that sets it wins: the agent's or template's `kubernetes:` block, then the profile, then the profile's runtime entry, then the built-in default (the cluster's default class and `10Gi`). On GKE Autopilot, set an RWX class such as `standard-rwx`. See [Shared Directory PVCs](/scion/hosted/ha/kubernetes/#shared-directory-pvcs).
 
 **Agent timezone (Hub-dispatched agents).** The Hub sets `TZ` in the agent container from the first source that is set:
 
