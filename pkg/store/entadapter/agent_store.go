@@ -28,6 +28,7 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
@@ -1444,6 +1445,8 @@ const containerMissingStatus = "missing"
 // container_missing, that MarkAgentContainerMissing keeps (together with the
 // stored message and exit code) when the agent already has one: the runtime
 // broker recorded why the container went away before it disappeared.
+// These match the ExitReason values added by ptone/scion#2542; switch to
+// those constants once both changes have landed.
 var containerMissingKeptExitReasons = []string{"preempted", "evicted"}
 
 // MarkAgentContainerMissing implements store.AgentStore. See the interface
@@ -1500,7 +1503,7 @@ func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID
 			agent.ExitReasonNotIn(containerMissingKeptExitReasons...),
 		)).
 			ClearExitCode().
-			SetExitReason("container_missing").
+			SetExitReason(string(state.ExitReasonContainerMissing)).
 			SetMessage(message).
 			Save(ctx)
 		if err != nil {

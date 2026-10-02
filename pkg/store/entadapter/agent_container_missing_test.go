@@ -105,56 +105,59 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 		assert.Nil(t, got.ExitCode)
 	})
 
-	t.Run("guards apply when the exit reason is kept", func(t *testing.T) {
-		a := create("kept-but-seen", func(a *store.Agent) { a.LastSeen = time.Now() })
-		setExit(t, a.ID, "preempted", 137, "preempted")
-		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
-		require.NoError(t, err)
-		assert.Nil(t, got)
-		stored, err := s.GetAgent(ctx, a.ID)
-		require.NoError(t, err)
-		assert.Equal(t, "running", stored.Phase)
-	})
-
+	// Each guard is checked with no stored exit reason (the second UPDATE)
+	// and with a stored preempted reason (the first UPDATE), so both
+	// conditional writes are guard-tested on their own.
 	guards := []struct {
 		name   string
 		broker string
 		mutate func(a *store.Agent)
+		after  func(t *testing.T, a *store.Agent)
 	}{
 		{name: "other broker", broker: "broker-2"},
 		{name: "not running", broker: "broker-1", mutate: func(a *store.Agent) { a.Phase = "provisioning" }},
 		{name: "seen after cutoff", broker: "broker-1", mutate: func(a *store.Agent) { a.LastSeen = time.Now() }},
+		{name: "reincarnating", broker: "broker-1", after: func(t *testing.T, a *store.Agent) {
+			a.ReincarnationState = store.ReincarnationStatePending
+			require.NoError(t, s.UpdateAgent(ctx, a))
+		}},
+		{name: "soft deleted", broker: "broker-1", after: func(t *testing.T, a *store.Agent) {
+			a.DeletedAt = time.Now()
+			require.NoError(t, s.UpdateAgent(ctx, a))
+		}},
 	}
-	for i, tc := range guards {
-		t.Run(tc.name, func(t *testing.T) {
-			a := create("guard-"+string(rune('a'+i)), tc.mutate)
-			got, err := s.MarkAgentContainerMissing(ctx, a.ID, tc.broker, cutoff, "gone")
-			require.NoError(t, err)
-			assert.Nil(t, got)
-			stored, err := s.GetAgent(ctx, a.ID)
-			require.NoError(t, err)
-			assert.NotEqual(t, "error", stored.Phase)
-			assert.Empty(t, stored.ExitReason)
-		})
+	for _, stored := range []string{"", "preempted"} {
+		for i, tc := range guards {
+			name := tc.name
+			if stored != "" {
+				name += " with a stored " + stored + " reason"
+			}
+			t.Run(name, func(t *testing.T) {
+				a := create(fmt.Sprintf("guard-%s-%d", stored, i), tc.mutate)
+				if tc.after != nil {
+					tc.after(t, a)
+				}
+				if stored != "" {
+					setExit(t, a.ID, stored, 137, "kept message")
+				}
+				before, err := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
+				require.NoError(t, err)
+
+				got, err := s.MarkAgentContainerMissing(ctx, a.ID, tc.broker, cutoff, "gone")
+				require.NoError(t, err)
+				assert.Nil(t, got)
+
+				row, err := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
+				require.NoError(t, err)
+				assert.Equal(t, before.Phase, row.Phase)
+				assert.NotEqual(t, "error", row.Phase)
+				assert.Equal(t, before.ContainerStatus, row.ContainerStatus)
+				assert.Equal(t, stored, row.ExitReason)
+				assert.Equal(t, before.Message, row.Message)
+				assert.Equal(t, before.ExitCode, row.ExitCode)
+			})
+		}
 	}
-
-	t.Run("reincarnating", func(t *testing.T) {
-		a := create("reincarnating", nil)
-		a.ReincarnationState = store.ReincarnationStatePending
-		require.NoError(t, s.UpdateAgent(ctx, a))
-		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
-		require.NoError(t, err)
-		assert.Nil(t, got)
-	})
-
-	t.Run("soft deleted", func(t *testing.T) {
-		a := create("deleted", nil)
-		a.DeletedAt = time.Now()
-		require.NoError(t, s.UpdateAgent(ctx, a))
-		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
-		require.NoError(t, err)
-		assert.Nil(t, got)
-	})
 
 	t.Run("unknown agent", func(t *testing.T) {
 		got, err := s.MarkAgentContainerMissing(ctx, "00000000-0000-0000-0000-00000000dead", "broker-1", cutoff, "gone")

@@ -886,7 +886,7 @@
         },
         "missing_agent_grace": {
           "type": "string",
-          "description": "How long a running agent must be absent from its runtime broker's complete heartbeat inventory before the Hub marks it phase 'error' with exit reason 'container_missing' (e.g. '3m'; default '3m', minimum '1m').",
+          "description": "How long a running agent must be absent from its runtime broker's complete heartbeat inventory before the Hub marks it phase 'error' with exit reason 'container_missing' (an existing preempted or evicted exit reason is kept) (e.g. '3m'; default '3m', minimum '1m').",
           "x-env-var": "SCION_SERVER_HUB_MISSINGAGENTGRACE",
           "x-since": "1"
         }

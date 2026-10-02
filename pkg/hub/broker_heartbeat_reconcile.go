@@ -39,7 +39,7 @@ import (
 // phase running, whose recorded target this heartbeat lists as complete, but
 // which are absent from the report. Once such an agent has been continuously
 // absent for the grace period it is moved to phase error with exit reason
-// container_missing.
+// container_missing (an existing preempted or evicted exit reason is kept).
 //
 // The mechanism is runtime-neutral: it applies to Docker, Podman, Apple
 // container and Kubernetes brokers alike, because it only compares the

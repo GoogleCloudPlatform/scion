@@ -155,8 +155,9 @@ type ServerConfig struct {
 	StalledThreshold time.Duration
 	// MissingAgentGrace is how long a running agent must be continuously
 	// absent from its runtime broker's complete heartbeat inventory before
-	// the Hub marks it phase=error with exit reason container_missing
-	// (default: 3 minutes, minimum: 1 minute; lower values use the default).
+	// the Hub marks it phase=error with exit reason container_missing (an
+	// existing preempted or evicted exit reason is kept) (default: 3 minutes,
+	// minimum: 1 minute; lower values use the default).
 	MissingAgentGrace time.Duration
 	// AutoSuspendStalled controls whether stalled agents are automatically
 	// suspended (container stopped, phase set to "suspended"). Default: false.
