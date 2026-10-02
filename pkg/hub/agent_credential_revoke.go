@@ -67,7 +67,14 @@ const agentCredentialRevokeTimeout = 5 * time.Second
 // failure is being handled (the request that triggered the failure may be
 // unwinding) — see agent_dm_delivery.go's identical pattern for finalization
 // calls made from an error path.
+//
+// A nil credStore is logged and skipped rather than dereferenced, so the
+// helper keeps its no-error, no-panic contract on every caller's error path.
 func revokeAgentCredentialsBestEffort(ctx context.Context, credStore store.AgentCredentialStore, agentID, reason string) {
+	if credStore == nil {
+		slog.Warn("Skipping agent credential revoke: no credential store configured", "agent_id", agentID, "reason", reason)
+		return
+	}
 	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentCredentialRevokeTimeout)
 	defer cancel()
 	if _, err := credStore.RevokeAgentCredentialsByAgent(revokeCtx, agentID, "system", reason); err != nil {
@@ -174,8 +181,11 @@ var errStartRequestNotSent = errors.New("request not sent")
 // any other body, and every status above 500 regardless of body, is left
 // unconfirmed, since a reverse proxy or load balancer can return those
 // after it has already forwarded the request, so they say nothing about
-// whether the broker acted on it.
+// whether the broker acted on it. A nil e is not a confirmed rejection.
 func isConfirmedBrokerRejection(e *brokerStatusError) bool {
+	if e == nil {
+		return false
+	}
 	if e.StatusCode < 500 {
 		return true
 	}

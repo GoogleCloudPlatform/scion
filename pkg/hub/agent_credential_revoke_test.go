@@ -146,6 +146,14 @@ func TestRevokeAgentCredentialsBestEffort_CancelledParentContextStillRevokes(t *
 	}
 }
 
+// TestRevokeAgentCredentialsBestEffort_NilStore covers the best-effort
+// helper being handed no credential store: it must return without
+// panicking, keeping its contract of never disrupting the caller's error
+// path.
+func TestRevokeAgentCredentialsBestEffort_NilStore(t *testing.T) {
+	revokeAgentCredentialsBestEffort(context.Background(), nil, tid("revoke-besteffort-nil-store-agent"), agentCredentialRevokeReasonCreateFailed)
+}
+
 // TestIsConfirmedNonRunningPhase is a direct table test over every
 // state.Phase value, plus an empty phase and an unrecognized one, so a
 // change to the allow-list is caught here even if it happens not to be
@@ -228,6 +236,9 @@ func TestIsConfirmedStartNotActedOnError(t *testing.T) {
 		{"control channel context cancelled", fmt.Errorf("control channel request failed: %w", context.Canceled), false},
 		{"http decode failure on a 2xx response", fmt.Errorf("failed to decode response: %w (body=%q)", errors.New("invalid character"), "not-json"), false},
 		{"plain unclassified error", errors.New("broker hiccup"), false},
+		// A typed-nil *brokerStatusError wrapped in a non-nil error makes
+		// errors.As yield a nil pointer; that must read as unconfirmed.
+		{"wrapped typed-nil broker status error", fmt.Errorf("start failed: %w", (*brokerStatusError)(nil)), false},
 		// A read failure that happens after the request was already sent
 		// must not be confused with errStartBrokerNotConnected just because
 		// the OS error text also contains the words "not connected"
@@ -321,6 +332,7 @@ func TestIsConfirmedBrokerRejection(t *testing.T) {
 		{"502 bad gateway, no body", &brokerStatusError{StatusCode: 502, Body: ""}, false},
 		{"503 with a valid envelope", &brokerStatusError{StatusCode: 503, Body: `{"error":{"code":"runtime_unavailable","message":"busy"}}`}, false},
 		{"504 with an HTML body", &brokerStatusError{StatusCode: 504, Body: "<html><body>504 Gateway Time-out</body></html>"}, false},
+		{"nil", nil, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
