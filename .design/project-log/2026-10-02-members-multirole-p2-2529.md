@@ -305,3 +305,70 @@ Not run, per the task's resource limits: `make ci` and the full
   PUT and 404 `not_found` on DELETE, checked against the round-2 head.
   L-500 was scoped to user principals only. Extending
   `validateMemberPrincipalAddress` to agents would be a one-line change.
+
+## P1 corrections: principal addressing
+
+Three fixes correct how P1's `PUT`/`DELETE
+…/members/principals/{type}/{id}` handle a principal address that does not
+resolve. Each one used to fall through to the store and come back with the
+wrong status. In every case the fix uses `invalid_request`, the code P1
+already uses for an unknown email.
+
+| Input | PUT before → after | DELETE before → after | Fix |
+|---|---|---|---|
+| `user/not-a-uuid` | 500 `internal_error` → 400 `invalid_request` | 404 `not_found` → 400 `invalid_request` | L-500 (round 2) |
+| `agent/not-a-uuid` | 500 `internal_error` → 400 `invalid_request` | 404 `not_found` → 400 `invalid_request` | malformed agent ID |
+| `user/<unknown UUID>` | 500 `internal_error` → 400 `invalid_request` | 404 `not_found` (unchanged) | nonexistent principal |
+| `agent/<unknown UUID>` | 500 `internal_error` → 400 `invalid_request` | 404 `not_found` (unchanged) | nonexistent principal |
+
+- **L-500** (round 2, above) made `validateMemberPrincipalAddress` reject a
+  user principal that is neither an email nor a UUID.
+- **Malformed agent ID:** `validateMemberPrincipalAddress` now also rejects
+  an agent principal that is not a UUID. Agents have no email form, so an
+  `@` address is malformed too. Covered by
+  `TestSetMemberRoles_MalformedAgentPrincipalID400`.
+- **Nonexistent user or agent:** the binding create inside the transaction
+  checks that the principal exists. The store reports a missing principal
+  as `ErrNotFound`, and that error became a 500. `SetMemberRoles` now looks
+  up the addressed user or agent as the last Phase P step, and only when
+  the plan creates a binding. If the record is not found, the PUT returns
+  400 `invalid_request` ("user not found: …" or "agent not found: …").
+  - **Only the not-found is mapped.** Any other error from that lookup is
+    still a 500. This was not done by mapping the transaction's error: the
+    entadapter's existence probe turns *every* `Get` failure into
+    `ErrNotFound`, so a mapping there could not tell a missing user from a
+    database fault.
+  - **Why the check is last in Phase P and not in the handler:** the P1
+    eligibility tests address agents that do not exist and pin 400
+    `principal_ineligible`. A check in the handler would have changed
+    their code. Placed last, every earlier refusal keeps its code: precondition,
+    eligibility, governance, CanDelegate, and the in-transaction
+    deleted-role-definition 400 `invalid_role_set`.
+  - **DELETE keeps its 404** "principal has no bindings in this project",
+    which is pinned in a test.
+  - Covered by `TestSetMemberRoles_NonexistentPrincipalID`,
+    `TestSetMemberRoles_ExistingAgentPrincipalStillAddressable` and
+    `TestSetMemberRoles_PrincipalLookupStoreErrorIs500`.
+
+Revert proof, run in a throwaway detached worktree:
+- Reverting the agent-ID validation fails its test on PUT (500) and DELETE
+  (404) at its own commit. At the final head it fails on DELETE only.
+- Removing the existence check fails `TestSetMemberRoles_NonexistentPrincipalID`
+  (PUT 500).
+- A mutation that maps every lookup error to 400 fails
+  `TestSetMemberRoles_PrincipalLookupStoreErrorIs500`.
+
+Residual: a user or agent that was deleted while still holding bindings
+can still be removed with DELETE, and with a PUT that only removes roles.
+A PUT that adds a binding for it now gets 400 instead of 500.
+
+### Gates run (principal addressing)
+
+- The mandated `pkg/hub` subset (`Assignable|Grouped|…|Flat`) and
+  `pkg/hub/authzop`: pass.
+- gofmt and `go vet ./pkg/hub/`: clean. `go build -buildvcs=false ./...`:
+  ok.
+- `golangci-lint --new-from-rev=<P1 base> ./pkg/hub/...`: 0 issues.
+
+Not run, per the task's resource limits: `make ci` and the full
+`make test-hub-sqlite`.
