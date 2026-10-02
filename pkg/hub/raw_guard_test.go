@@ -1290,6 +1290,29 @@ func TestCreateScheduledEvent_MalformedPayload_SanitizedBadRequest(t *testing.T)
 	}
 }
 
+// TestValidateScheduledEventPayloadJSON_UnknownEventType_FailsClosed pins a
+// Gemini code-review finding on GoogleCloudPlatform/scion#2286: the
+// default branch of validateScheduledEventPayloadJSON previously fell back
+// to a lenient syntax-only check (json.Valid) for any eventType outside
+// {"message", "dispatch_agent"}, rather than rejecting it outright. Every
+// current caller already restricts eventType to that closed set before
+// calling this function, so the branch is unreachable in production today --
+// but if a third event type is ever added to the closed set without a
+// matching case here, its payload would silently skip structural
+// validation instead of failing closed. This drives the method directly
+// (the only way to reach the default branch at all, since no HTTP call site
+// can) and asserts it now rejects an otherwise-well-formed JSON object for
+// an unrecognized type.
+func TestValidateScheduledEventPayloadJSON_UnknownEventType_FailsClosed(t *testing.T) {
+	srv, _, _ := setupScheduledEventTest(t)
+
+	rec := httptest.NewRecorder()
+	ok := srv.validateScheduledEventPayloadJSON(rec, "some_future_event_type", `{"agentName":"test-agent"}`)
+
+	assert.False(t, ok, "an unrecognized event type must fail closed, not fall back to a syntax-only check")
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+}
+
 // TestCreateScheduledEvent_RawPlusMistypedField_Returns422NotBadRequest
 // covers: a valid JSON object carrying a "raw" key
 // alongside some unrelated mistyped field must still return 422 (the

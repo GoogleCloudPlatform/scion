@@ -297,13 +297,13 @@ func (s *Server) validateScheduledEventPayloadJSON(w http.ResponseWriter, eventT
 		decodeErr = json.Unmarshal([]byte(payload), &p)
 	default:
 		// Every caller validates eventType against the closed
-		// {message, dispatch_agent} set before reaching here; this branch
-		// is unreachable in practice. It does not fail closed — it falls
-		// back to a syntax-only check
-		// because there is no struct to decode into for an unknown type.
-		if !json.Valid([]byte(payload)) {
-			decodeErr = fmt.Errorf("invalid JSON")
-		}
+		// {message, dispatch_agent} set before reaching here, so this branch
+		// is unreachable in practice. Fail closed for an unrecognized event
+		// type rather than falling back to a lenient syntax-only check: if a
+		// future event type is ever added to the closed set without a
+		// matching case here, its payload must not silently skip structural
+		// validation.
+		decodeErr = fmt.Errorf("unsupported event type: %s", eventType)
 	}
 	if decodeErr != nil {
 		BadRequest(w, "payload must be a valid JSON object for the "+eventType+" event type")
