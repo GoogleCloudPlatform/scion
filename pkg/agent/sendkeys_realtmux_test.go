@@ -188,6 +188,18 @@ func TestRealTmuxSendKeys(t *testing.T) {
 	literal(`back\slash`)
 	literal("dollar$sign")
 
+	// AK-17: shell metacharacters -- a command
+	// substitution, a backtick, a semicolon, and a pipe -- must reach the
+	// pane exactly as themselves, octal-escaped and unevaluated by tmux's
+	// own command parser (there is no shell in this delivery path at all;
+	// this proves tmux's own send-keys/paste-buffer handling doesn't do
+	// anything special with them either). If "$(id)" or "`id`" were ever
+	// evaluated, the pane would show a UID line instead of the literal text.
+	literal("$(id)")
+	literal("`id`")
+	literal("a;b|c")
+	literal("a$(id)b`id`c|d")
+
 	// A multiline string: newlines inside the payload are just more escaped
 	// bytes, not line breaks in the generated command file.
 	literal("line1\nline2")
@@ -387,6 +399,7 @@ func TestRealTmuxSendKeys_DeliveryFailureAfterProbeIsAmbiguous(t *testing.T) {
 		t.Fatalf("starting the unrelated keep-alive session: %v", err)
 	}
 
+	var capturedDeliveryOutput string
 	shim := &runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 			return []api.AgentInfo{{
@@ -419,6 +432,7 @@ func TestRealTmuxSendKeys_DeliveryFailureAfterProbeIsAmbiguous(t *testing.T) {
 			c := exec.Command(tmuxPath, append([]string{"-S", sock}, cmd[1:]...)...)
 			c.Stdin = stdin
 			out, err := c.CombinedOutput()
+			capturedDeliveryOutput = string(out)
 			if err != nil {
 				return string(out), fmt.Errorf("tmux %v failed: %w (%s)", cmd[1:], err, out)
 			}
@@ -434,12 +448,23 @@ func TestRealTmuxSendKeys_DeliveryFailureAfterProbeIsAmbiguous(t *testing.T) {
 	if errors.Is(err, agentkeys.ErrTargetNotFound) || errors.Is(err, agentkeys.ErrAgentNotRunning) || errors.Is(err, agentkeys.ErrTerminalNotReady) || errors.Is(err, ErrKeysNotStarted) {
 		t.Fatalf("a real delivery-time failure must never be reported as one of the proven-before-execution sentinels, got: %v", err)
 	}
-	// Confirms this is genuinely the missing-target failure the correction
-	// names, not merely "no server reachable":
-	// the "other" session above keeps the server alive after "scion" is
-	// killed, so tmux's own real error text for a missing session must
-	// survive into SendKeys's returned error.
-	if !strings.Contains(err.Error(), "can't find session") {
-		t.Fatalf("expected tmux's real missing-session error text to survive, got: %v", err)
+	// Positive control, captured directly from the real tmux invocation
+	// (not from SendKeys's returned error, which must not carry it):
+	// confirms this is genuinely the missing-target failure the correction
+	// names, not merely "no server reachable" — the "other" session above
+	// keeps the server alive after "scion" is killed, so tmux's own real
+	// output must contain its missing-session text.
+	if !strings.Contains(capturedDeliveryOutput, "can't find session") {
+		t.Fatalf("test setup error: expected tmux's real missing-session output, got: %q", capturedDeliveryOutput)
+	}
+	// SendKeys must report only the fixed, content-free error class
+	// (sendKeysDeliveryErrorClass) — never the backend's own error text,
+	// which may carry caller-supplied content (contract §5) and, via the
+	// local-mode CLI path, would otherwise be printed straight to the user.
+	if strings.Contains(err.Error(), "can't find session") {
+		t.Fatalf("tmux's real error text must not survive into SendKeys's returned error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "exit_status_") {
+		t.Fatalf("expected a sanitized exit_status_<N> error class, got: %v", err)
 	}
 }

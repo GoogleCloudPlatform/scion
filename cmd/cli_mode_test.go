@@ -616,3 +616,21 @@ func TestApplyModeRestrictions_AgentRealSkillTree(t *testing.T) {
 		collectCommandNames(root),
 		"agent mode must keep exactly the read-only skill browse verbs")
 }
+
+// TestAgentModeAllowsKeys covers the A.6 gap: pins, against the real command
+// tree (not just the agentAllowed map TestAgentAllowedList already checks),
+// that "keys" survives applyModeRestrictions in agent mode -- an agent
+// running inside its own container must be able to send terminal
+// keystrokes to another agent it created.
+func TestAgentModeAllowsKeys(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "agent")
+	root := &cobra.Command{Use: "scion"}
+	real := resolveCommandPath(rootCmd, "keys")
+	require.NotNil(t, real, "real command %q must exist", "keys")
+	root.AddCommand(cloneCommandShape(real))
+
+	applyModeRestrictions(root)
+
+	assert.Equal(t, []string{"keys"}, collectCommandNames(root),
+		"agent mode must keep the keys command")
+}

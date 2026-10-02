@@ -148,10 +148,22 @@ func TestHybridBrokerClient_ExecuteKeys_RouteHTTP(t *testing.T) {
 
 // TestHybridBrokerClient_ExecuteKeys_RouteForwardAndUndeliverable prove that,
 // unlike MessageAgent (which defers to a durable queue via
-// ErrMessageDeferred), keys has no durable queue: both routeForward (another
-// node believed to own the broker) and routeUndeliverable (no owner, no
-// endpoint) must return agentkeys.ErrNotDispatched directly, and must never
-// call the HTTP client.
+// ErrMessageDeferred, consumed by dispatchWithBrokerRetry), keys has no
+// durable queue: both routeForward (another node believed to own the broker)
+// and routeUndeliverable (no owner, no endpoint) must return
+// agentkeys.ErrNotDispatched directly — never ErrMessageDeferred, which would
+// imply a retry/durable-delivery path that does not exist for keys (contract
+// §4.3 "concrete trap named and closed") — and must never call the HTTP
+// client.
+//
+// HybridBrokerClient's ExecuteKeys path has no reference to any message
+// queue or store at all (only controlChannel and httpClient), so "zero
+// message-queue writes" holds structurally here, not just by assertion: there
+// is nothing in this call graph capable of writing to one. The explicit
+// !errors.Is(err, ErrMessageDeferred) check below is still asserted directly,
+// so a future change that routed keys through dispatchWithBrokerRetry (which
+// is the only producer of a message-queue write reachable from that
+// sentinel) would be caught here before it could reintroduce the trap.
 func TestHybridBrokerClient_ExecuteKeys_RouteForwardAndUndeliverable(t *testing.T) {
 	mgr := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
 	httpClient := &fakeKeysHTTPClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}
@@ -168,6 +180,9 @@ func TestHybridBrokerClient_ExecuteKeys_RouteForwardAndUndeliverable(t *testing.
 		if !errors.Is(err, agentkeys.ErrNotDispatched) {
 			t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
 		}
+		if errors.Is(err, ErrMessageDeferred) {
+			t.Fatalf("keys must never report ErrMessageDeferred (no durable queue exists for keys), got %v", err)
+		}
 		if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysUnavailable {
 			t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysUnavailable)
 		}
@@ -182,6 +197,9 @@ func TestHybridBrokerClient_ExecuteKeys_RouteForwardAndUndeliverable(t *testing.
 		_, err := c.ExecuteKeys(context.Background(), "broker-remote", "", "agent-1", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
 		if !errors.Is(err, agentkeys.ErrNotDispatched) {
 			t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
+		}
+		if errors.Is(err, ErrMessageDeferred) {
+			t.Fatalf("keys must never report ErrMessageDeferred (no durable queue exists for keys), got %v", err)
 		}
 		if httpClient.calls != 0 {
 			t.Fatalf("HTTP client must not be called for routeUndeliverable, got %d calls", httpClient.calls)
