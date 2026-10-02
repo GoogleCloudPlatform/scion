@@ -73,3 +73,20 @@ rename or not-found contract change must update both the matcher and equivalence
 tests. Authentication implementations added outside the two covered middleware
 paths must independently preserve the same anti-enumeration contract before
 serving this route.
+
+## Review round 1 verification
+
+- Focused normal broker/direct-auth regressions with `go test -count=1 -p 2
+  ./pkg/hub` and an exact test-name filter — PASS.
+- The same focused broker/direct-auth regressions with `go test -race -count=1
+  -p 2 ./pkg/hub` — PASS.
+- `go vet -p 2 ./pkg/hub` — PASS.
+- `go build -buildvcs=false -p 2 ./pkg/hub` — PASS.
+- `golangci-lint run --new-from-rev=9e15dd892fa341dce5f9b795606a89b52cc03717
+  --concurrency=1 ./pkg/hub/...`, with `GOGC=40` and a hard 10-minute timeout —
+  PASS with `0 issues` inside the bound.
+- `gofmt` over the changed Go files and `git diff --check
+  9e15dd892fa341dce5f9b795606a89b52cc03717..HEAD` — PASS.
+
+`make ci` and `make ci-full` were not run because the campaign workload rule
+prohibits them; the bounded targeted gates above were used instead.
