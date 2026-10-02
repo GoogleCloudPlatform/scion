@@ -1339,6 +1339,85 @@ describe('_loadPalettePeople', () => {
       await el._resolveSelfUserId();
       expect(el._selfUserAbortController).toBeNull();
     });
+
+    it('aborts a pending /auth/me even when a newer call resolves synchronously from a now-known id', async () => {
+      // The predecessor-abort step in _resolveSelfUserId runs before the
+      // `known` early return, specifically so this case (identity becomes
+      // known elsewhere while a fetch is still in flight) still stops the
+      // old request. Moving the abort back below that check would make a
+      // known-id call skip it entirely.
+      const el = createPage();
+      el.pageData = {};
+      el.v2PaletteOpen = true;
+      const abortedOrder: number[] = [];
+      let authMeCalls = 0;
+      vi.mocked(apiFetch).mockImplementation((url: string, options?: { signal?: AbortSignal }) => {
+        if (url === '/api/v1/auth/me') {
+          authMeCalls++;
+          const n = authMeCalls;
+          return new Promise<Response>((_resolve, reject) => {
+            options?.signal?.addEventListener('abort', () => {
+              abortedOrder.push(n);
+              reject(new DOMException('aborted', 'AbortError'));
+            });
+          });
+        }
+        return Promise.resolve(jsonResponse({ users: [], dms: [] }));
+      });
+
+      const load1 = el._loadPalettePeople();
+      await vi.waitFor(() => expect(authMeCalls).toBe(1));
+
+      // Identity becomes known from elsewhere (e.g. resolveDMByPeerId) while
+      // load1's /auth/me is still pending.
+      el.pageData.user = { id: 'me', email: '', name: '' };
+      const load2 = el._loadPalettePeople();
+      // Synchronous: load2's predecessor-abort runs before its own `known`
+      // check even returns, in the same synchronous prologue — no await
+      // needed between starting load2 and observing load1's controller abort.
+      expect(abortedOrder).toEqual([1]);
+
+      await Promise.all([load1, load2]);
+
+      expect(el._selfUserAbortController).toBeNull();
+      expect(el.v2PaletteGroups.people.status).toBe('ready');
+      // Only load1 ever reached /auth/me — load2 resolved synchronously from
+      // the now-known pageData.user.id instead of fetching again.
+      expect(authMeCalls).toBe(1);
+    });
+
+    it('aborts a pending /auth/me on disconnect, and the resulting abort is never published as an identity error', async () => {
+      const el = createPage();
+      el.pageData = {};
+      el.v2PaletteOpen = true;
+      document.body.appendChild(el);
+      let aborted = false;
+      let authMeCalled = false;
+      vi.mocked(apiFetch).mockImplementation((url: string, options?: { signal?: AbortSignal }) => {
+        if (url === '/api/v1/auth/me') {
+          authMeCalled = true;
+          return new Promise<Response>((_resolve, reject) => {
+            options?.signal?.addEventListener('abort', () => {
+              aborted = true;
+              reject(new DOMException('aborted', 'AbortError'));
+            });
+          });
+        }
+        return Promise.resolve(jsonResponse({ users: [], dms: [] }));
+      });
+
+      const load = el._loadPalettePeople();
+      await vi.waitFor(() => expect(authMeCalled).toBe(true));
+      expect(aborted).toBe(false);
+      el.remove();
+
+      expect(aborted).toBe(true);
+      await load;
+      // The seq bump in disconnectedCallback is what keeps this from
+      // publishing as "Could not resolve your identity yet." on an element
+      // nothing can see anymore.
+      expect(el.v2PaletteGroups.people.status).toBe('loading');
+    });
   });
 
   describe('unknown identity — connected element: no route side effects from resolving it', () => {

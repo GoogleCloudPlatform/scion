@@ -973,10 +973,14 @@ export class ScionPageChat extends LitElement {
     this._paletteDocumentsUnsubscribe?.();
     this._paletteDocumentsUnsubscribe = null;
     this._paletteDataController.cancel();
-    // Same resource-usage reasoning as `_closePaletteAndCancelLoad`'s own
-    // abort: a disconnect while People's identity fetch is still pending
-    // should not leave it running for up to AGENTS_IDLE_TIMEOUT_MS on a
-    // detached page.
+    // Same reasoning as `_closePaletteAndCancelLoad`'s own close-time
+    // handling, both parts: the seq bump first is the correctness guard (a
+    // disconnect-time abort resolves to '', and without this an in-flight
+    // People load would still publish that as a visible identity error on
+    // the now-detached page); the abort itself is the resource-usage
+    // measure (don't leave the fetch running for up to AGENTS_IDLE_TIMEOUT_MS
+    // on a page nothing can use the result of).
+    this._peopleLoadSeq++;
     this._selfUserAbortController?.abort();
     this._selfUserAbortController = null;
     this._stopPaletteVisibilityWatchdog();
@@ -3492,9 +3496,9 @@ export class ScionPageChat extends LitElement {
     try {
       const mySeq = ++this._peopleLoadSeq;
       const selfId = await this._resolveSelfUserId();
-      // The identity fetch above is now aborted directly on close/supersede
-      // (not only bounded by its own idle-timeout signal), but that abort is
-      // a resource-usage measure, not what keeps a stale result from
+      // The identity fetch above is aborted directly on close/supersede as
+      // well as bounded by its own idle-timeout signal, but that abort is a
+      // resource-usage measure, not what keeps a stale result from
       // publishing — this manual guard, keyed on this load's own sequence
       // token, is. Not `v2PaletteOpen`: closing and reopening sets
       // `v2PaletteOpen` back to `true`, which would let a stale load's
