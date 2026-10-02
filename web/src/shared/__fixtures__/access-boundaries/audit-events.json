@@ -29,7 +29,6 @@
       "operation": "create",
       "actorKind": "user",
       "actorId": "usr-lin",
-      "correlationId": "req-11ff20a0",
       "beforeRevision": null,
       "afterRevision": "1",
       "classification": "tighten",

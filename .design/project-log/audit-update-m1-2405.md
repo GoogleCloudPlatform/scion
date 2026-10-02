@@ -136,3 +136,29 @@ The approved shared-auth review already supplied a focused race pass at exact
 dependency head `b4b2d7bb`. The resumed delta changes no production Go or auth
 code, so that accepted race evidence was not repeated. `make ci` and
 `make ci-full` remain prohibited by the campaign workload rule.
+
+## Review round 1 disposition
+
+Required finding 1 is resolved. The Go retained-history response intentionally
+uses `omitempty` for an empty correlation ID, and the matching
+`AccessBoundaryAuditEvent.correlationId` client field is now optional. The
+adjacent commit-response contract remains required; it was restored after the
+earlier edit was found to have matched that wrong declaration. No Go wire,
+cursor, auth, store, persistence, or view behavior changed.
+
+Focused regressions prove all three sides of the correction:
+
+- a retained row with an empty correlation ID produces an endpoint item with no
+  `correlationId` property;
+- the retained fixture and API client accept the omitted property without
+  synthesizing a value, and the existing timeline does not render a correlation
+  label/value for it;
+- populated endpoint, fixture, client, and timeline behavior remains unchanged
+  and renders the original correlation value.
+
+Pre-checkpoint evidence:
+
+- `npm test -- --run src/client/access-boundaries-api.test.ts src/components/shared/access-boundary-audit-timeline.test.ts src/shared/access-boundaries.test.ts` — PASS, 3 files / 67 tests. The fixture assertion first failed because it still required every correlation ID to be a string, then passed after the optional contract correction.
+- `npm run typecheck` — PASS.
+- `go test -count=1 -p 2 ./pkg/hub -run '^TestConstraintAuditHistory_(OmitsEmptyCorrelationID|CreateIdentityFlowsThroughEndpoint)$'` — PASS (package 1.462s).
+- Focused Prettier and Go formatting — clean.

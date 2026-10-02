@@ -531,9 +531,13 @@ describe('fixture shape validation', () => {
         expect(typeof event.constraintId).toBe('string');
         expect(typeof event.timestamp).toBe('string');
         expect(['create', 'update', 'delete']).toContain(event.operation);
-        expect(typeof event.correlationId).toBe('string');
+        if (event.correlationId !== undefined) {
+          expect(typeof event.correlationId).toBe('string');
+        }
         expect(event).not.toHaveProperty('actor.credentialId');
       }
+      expect(data.items[0].correlationId).toBe('req-3c0e91aa');
+      expect(data.items[1]).not.toHaveProperty('correlationId');
     });
 
     it('covers multiple event types', () => {

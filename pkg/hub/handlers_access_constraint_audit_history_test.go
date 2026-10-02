@@ -272,6 +272,25 @@ func TestConstraintAuditHistory_StoreUnavailableIsExplicit(t *testing.T) {
 	assert.NotContains(t, resp.Body.String(), `"items":[]`)
 }
 
+func TestConstraintAuditHistory_OmitsEmptyCorrelationID(t *testing.T) {
+	srv, s := b7TestServer(t)
+	constraint := b7SeedConstraint(t, s, "empty-correlation-history")
+	entry := historyEntry(constraint.ID,
+		"00000000-0000-0000-0000-000000000011", time.Now().UTC())
+	entry.CorrelationID = ""
+	appendConstraintHistory(t, s, entry)
+
+	response := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/access-constraints/"+constraint.ID+"/audit", nil)
+	require.Equal(t, http.StatusOK, response.Code, "body: %s", response.Body.String())
+	var payload struct {
+		Items []map[string]any `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &payload))
+	require.Len(t, payload.Items, 1)
+	assert.NotContains(t, payload.Items[0], "correlationId")
+}
+
 func TestConstraintAuditHistory_CreateIdentityFlowsThroughEndpoint(t *testing.T) {
 	srv, s := b7TestServer(t)
 	targetUserID := pvSeedUser(t, s, "endpoint-history-target")
@@ -301,6 +320,7 @@ func TestConstraintAuditHistory_CreateIdentityFlowsThroughEndpoint(t *testing.T)
 	assert.Equal(t, result.AuditID, page.Items[0].ID)
 	assert.Equal(t, result.Constraint.ID, page.Items[0].ConstraintID)
 	assert.Equal(t, "create", page.Items[0].Operation)
+	assert.Equal(t, "request-audit-create", page.Items[0].CorrelationID)
 	assert.Equal(t, result.Constraint.Revision, mustParseRevision(t, page.Items[0].AfterRevision))
 
 	history, err := s.ListConstraintHistory(t.Context(), result.Constraint.ID)

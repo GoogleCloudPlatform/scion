@@ -9,6 +9,10 @@ const { apiFetch } = vi.hoisted(() => ({ apiFetch: vi.fn() }));
 vi.mock('./api.js', () => ({ apiFetch }));
 
 import { listAudit, StaleResponseError } from './access-boundaries-api.js';
+import type {
+  AccessBoundaryAuditEvent,
+  AccessBoundaryAuditPage,
+} from '../shared/access-boundaries.js';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -54,7 +58,19 @@ describe('listAudit', () => {
       { signal: null }
     );
     expect(page).toEqual(retainedPage);
+    expect(page.items[0].correlationId).toBe('request-1');
     expect(page.items[0]).not.toHaveProperty('actor.credentialId');
+  });
+
+  it('accepts a retained event whose correlation ID is omitted', async () => {
+    const { correlationId: _correlationId, ...withoutCorrelation } = retainedPage.items[0];
+    const event: AccessBoundaryAuditEvent = withoutCorrelation;
+    const page: AccessBoundaryAuditPage = { ...retainedPage, items: [event] };
+    apiFetch.mockResolvedValueOnce(jsonResponse(page));
+
+    const result = await listAudit('constraint/a');
+
+    expect(result.items[0]).not.toHaveProperty('correlationId');
   });
 
   it('rejects an older response superseded for the same constraint', async () => {

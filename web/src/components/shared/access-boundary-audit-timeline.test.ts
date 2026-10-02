@@ -49,11 +49,24 @@ describe('access boundary audit timeline', () => {
     expect(text).toContain('Tightening');
     expect(text).toContain('— → 1');
     expect(text).toContain('2 agents');
+    expect(text).toContain('Correlation:');
+    expect(text).toContain('request-safe');
     expect(text).not.toContain('must-not-render');
     const ids = [...(element.shadowRoot?.querySelectorAll('.timeline-event') ?? [])].map((node) =>
       node.getAttribute('data-event-id')
     );
     expect(ids).toEqual(['event-safe', 'event-older']);
+  });
+
+  it('does not invent or render a correlation value when the property is absent', async () => {
+    const element = await mount();
+    const { correlationId: _correlationId, ...withoutCorrelation } = event;
+    element.events = [withoutCorrelation];
+    await element.updateComplete;
+
+    const text = element.shadowRoot?.textContent ?? '';
+    expect(text).not.toContain('Correlation:');
+    expect(text).not.toContain('request-safe');
   });
 
   it('renders loading, empty, and explicit error states', async () => {

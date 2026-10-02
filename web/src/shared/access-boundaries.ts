@@ -606,7 +606,7 @@ export interface AccessBoundaryCommitResponse {
   constraint: AccessBoundaryDetail | AccessBoundarySummary;
   revision: BoundaryRevision;
   auditEventId: string;
-  correlationId?: string;
+  correlationId: string;
   requestId?: string;
   committed: {
     previewId: string;
@@ -635,7 +635,7 @@ export interface AccessBoundaryAuditEvent {
   operation: string;
   actorKind?: string;
   actorId?: string;
-  correlationId: string;
+  correlationId?: string;
   batchOperationId?: string;
   beforeRevision: BoundaryRevision | null;
   afterRevision: BoundaryRevision | null;
