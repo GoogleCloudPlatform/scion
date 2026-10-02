@@ -400,6 +400,8 @@ export class ScionProjectMembersEditor extends LitElement {
   @state() private dlgDisplayName = '';
   @state() private dlgBuiltIn = NO_PROJECT_ROLE;
   @state() private dlgCurrentBuiltIn = NO_PROJECT_ROLE;
+  /** Role name of dlgCurrentBuiltIn, so it can be shown without a catalog. */
+  @state() private dlgCurrentBuiltInName = '';
   @state() private dlgCustomIds: string[] = [];
   @state() private dlgHeldCustom: ProjectMemberBinding[] = [];
   @state() private dlgExpectedIds: string[] = [];
@@ -981,6 +983,7 @@ export class ScionProjectMembersEditor extends LitElement {
     this.dlgPrincipalId = '';
     this.dlgDisplayName = '';
     this.dlgCurrentBuiltIn = NO_PROJECT_ROLE;
+    this.dlgCurrentBuiltInName = '';
     this.dlgBuiltIn = defaultBuiltInForAdd(this.capabilities, 'user', this.assignableRoles);
     this.dlgCustomIds = [];
     this.dlgHeldCustom = [];
@@ -1002,6 +1005,7 @@ export class ScionProjectMembersEditor extends LitElement {
     this.dlgPrincipalId = group.principalId;
     this.dlgDisplayName = principalLabel(group);
     this.dlgCurrentBuiltIn = builtIn?.roleDefinitionId ?? NO_PROJECT_ROLE;
+    this.dlgCurrentBuiltInName = builtIn?.roleName ?? '';
     this.dlgBuiltIn = this.dlgCurrentBuiltIn;
     this.dlgHeldCustom = held;
     this.dlgCustomIds = held.map((b) => b.roleDefinitionId);
@@ -1031,6 +1035,7 @@ export class ScionProjectMembersEditor extends LitElement {
     this.dlgPrincipalId = principalId;
     this.dlgDisplayName = displayName || principalId;
     this.dlgCurrentBuiltIn = builtIn ?? NO_PROJECT_ROLE;
+    this.dlgCurrentBuiltInName = this.assignableRoles.find((r) => r.id === builtIn)?.name ?? '';
     this.dlgBuiltIn = this.dlgCurrentBuiltIn;
     this.dlgHeldCustom = customIds.map((id) => {
       const role = this.assignableRoles.find((r) => r.id === id);
@@ -1589,6 +1594,23 @@ export class ScionProjectMembersEditor extends LitElement {
 
   private renderBuiltInRadios() {
     const builtIns = builtInCatalog(this.assignableRoles);
+    // A held built-in role missing from the catalog (e.g. the catalog failed
+    // to load) is still shown, so the dialog never hides a role it keeps.
+    if (
+      this.dialogMode === 'edit' &&
+      this.dlgCurrentBuiltIn !== NO_PROJECT_ROLE &&
+      this.dlgCurrentBuiltInName &&
+      !builtIns.some((r) => r.id === this.dlgCurrentBuiltIn)
+    ) {
+      builtIns.push({
+        id: this.dlgCurrentBuiltIn,
+        name: this.dlgCurrentBuiltInName,
+        description: '',
+        roleKind: 'builtin',
+        grantable: false,
+        reason: '',
+      });
+    }
     if (builtIns.length === 0) return nothing;
     const ctx = this.builtInContext();
     const locked = !!this.dlgLockedReason;

@@ -1155,6 +1155,88 @@ describe('400 invalid_role_set', () => {
 });
 
 // ---------------------------------------------------------------------------
+// assignable-roles failure
+// ---------------------------------------------------------------------------
+
+describe('assignable-roles failure', () => {
+  const FRANK = group('user', 'u-frank', [R_MEMBER, R_MSG, R_CEIL], 'Frank');
+
+  function failingCatalogRoute(): Route {
+    return (url) =>
+      url.endsWith('/members/assignable-roles')
+        ? apiError(500, 'internal', 'catalog unavailable')
+        : undefined;
+  }
+
+  it('shows the error, keeps no catalog, and still shows and keeps held roles', async () => {
+    routeApi(listRoute([ALICE, FRANK], OWNER_CAPS), failingCatalogRoute());
+    const el = new ScionProjectMembersEditor();
+    el.projectId = 'p-1';
+    document.body.appendChild(el);
+    mounted.push(el);
+    const i = el as unknown as EditorInternals;
+    await vi.waitFor(() => expect(i.loading).toBe(false));
+    expect(i.assignableRoles).toEqual([]);
+
+    i.openEditDialog(FRANK);
+    await i.updateComplete;
+    expect(q(i, '.dialog-error')?.textContent).toContain(
+      "Couldn't load the list of roles: catalog unavailable"
+    );
+    // The held built-in role is still offered (and selected), with None.
+    expect(qa(i, 'sl-radio-group sl-radio').map((r) => r.getAttribute('value'))).toEqual([
+      'r-member',
+      NO_PROJECT_ROLE,
+    ]);
+    expect(radio(i, 'r-member').textContent).toContain('Member');
+    expect(q<HTMLElement & { value: string }>(i, 'sl-radio-group')?.value).toBe('r-member');
+    // Held custom roles are still shown, checked.
+    expect(checkbox(i, 'r-msg')?.hasAttribute('checked')).toBe(true);
+    expect(checkbox(i, 'r-ceil')?.hasAttribute('checked')).toBe(true);
+
+    // Dropping one custom role keeps the built-in and the other custom role.
+    i.toggleCustomRole('r-ceil', false);
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValueOnce(jsonResponse(200, {}));
+    i.loadData = async () => {};
+    await i.handleSave();
+    expect(writes()).toEqual([
+      {
+        method: 'PUT',
+        url: '/api/v1/projects/p-1/members/principals/user/u-frank',
+        body: {
+          roleDefinitionIds: ['r-member', 'r-msg'],
+          expectedRoleDefinitionIds: ['r-member', 'r-msg', 'r-ceil'],
+        },
+      },
+    ]);
+  });
+
+  it('a failed refresh clears the previous catalog instead of keeping it stale', async () => {
+    const el = makeEditor(OWNER_CAPS, { groups: [ALICE, FRANK] });
+    el.openEditDialog(FRANK);
+    el.toggleCustomRole('r-ceil', false);
+    routeApi(
+      (url, init) =>
+        init?.method === 'PUT'
+          ? apiError(400, 'invalid_role_set', 'unknown role definition: r-x', {
+              roleDefinitionId: 'r-x',
+            })
+          : undefined,
+      failingCatalogRoute()
+    );
+    await el.handleSave();
+    expect(el.assignableRoles).toEqual([]);
+    expect((el as unknown as { catalogError: string | null }).catalogError).toBe(
+      'catalog unavailable'
+    );
+    // Held roles survive the cleared catalog.
+    expect(el.dlgBuiltIn).toBe('r-member');
+    expect(el.dlgCustomIds).toEqual(['r-msg']);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Delete
 // ---------------------------------------------------------------------------
 
@@ -1172,6 +1254,37 @@ describe('row delete', () => {
       },
     ]);
     expect(el.actionFeedback).toEqual({ message: 'Member removed', variant: 'success' });
+  });
+
+  it('group principals use …/principals/group/{encoded id} for Add, Edit and row delete', async () => {
+    const team = group('group', 'g/ops team', [R_MEMBER], 'Ops');
+    const el = makeEditor(OWNER_CAPS, { groups: [...ALL_GROUPS, team] });
+    vi.mocked(apiFetch).mockImplementation(async () => jsonResponse(200, {}));
+
+    el.openAddDialog();
+    el.onPrincipalTypeChange('group');
+    el.onPrincipalChange({ principalType: 'group', principalId: 'g/new team', displayLabel: '' });
+    await el.handleSave();
+
+    el.openEditDialog(team);
+    el.dlgBuiltIn = 'r-admin';
+    await el.handleSave();
+
+    await el.handleRemoveRow(team);
+
+    expect(writes().map((c) => `${c.method} ${c.url}`)).toEqual([
+      'PUT /api/v1/projects/p-1/members/principals/group/g%2Fnew%20team',
+      'PUT /api/v1/projects/p-1/members/principals/group/g%2Fops%20team',
+      'DELETE /api/v1/projects/p-1/members/principals/group/g%2Fops%20team',
+    ]);
+    expect(writes()[0].body).toEqual({
+      roleDefinitionIds: ['r-admin'],
+      expectedRoleDefinitionIds: [],
+    });
+    expect(writes()[1].body).toEqual({
+      roleDefinitionIds: ['r-admin'],
+      expectedRoleDefinitionIds: ['r-member'],
+    });
   });
 
   it('refuses the last direct owner without a request', async () => {
