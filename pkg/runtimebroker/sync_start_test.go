@@ -313,8 +313,12 @@ func TestSyncCreate_SupersedeWaitTimeoutFails(t *testing.T) {
 	go func() { aDone <- createSync(srv, "agent-a-id", projectPath) }()
 	waitSignal(t, aStarted, "agent A's start")
 
+	mgr.starts <- func(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+		t.Error("agent B's start ran although agent A had not finished")
+		return nil, errors.New("unexpected start")
+	}
 	bw := createSync(srv, "agent-b-id", projectPath)
-	if bw.Code != http.StatusBadGateway && bw.Code != http.StatusInternalServerError {
+	if bw.Code != http.StatusInternalServerError {
 		t.Fatalf("agent B create status = %d, want a runtime error: %s", bw.Code, bw.Body.String())
 	}
 	if !strings.Contains(bw.Body.String(), errSyncStartSupersedeTimeout.Error()) {
