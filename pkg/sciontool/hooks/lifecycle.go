@@ -431,7 +431,10 @@ func runEnforcedCmd(cmd *exec.Cmd) error {
 // (below) or, on the non-asRoot path, any caller — asked for a dropped
 // credential but no valid workload uid/gid is on hand to drop to.
 func (m *LifecycleManager) buildEnforcedCmd(scriptFile *os.File, path, eventName string, asRoot bool) (*exec.Cmd, error) {
-	cmd := execViaFd(scriptFile, path)
+	cmd, err := execViaFd(scriptFile, path)
+	if err != nil {
+		return nil, err
+	}
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 

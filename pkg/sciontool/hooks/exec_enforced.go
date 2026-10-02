@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -178,6 +179,24 @@ const execFdSlot = 3
 
 var execScriptPath = fmt.Sprintf("/proc/self/fd/%d", execFdSlot)
 
+// UnsupportedPlatformError is returned by execViaFd on any platform other
+// than Linux. Running a verified hook script through its open fd relies on
+// /proc/self/fd, which is Linux-specific; enforced hook execution fails
+// closed there instead of falling back to a different, untested exec
+// mechanism (such as /dev/fd) or to running the script by path.
+type UnsupportedPlatformError struct {
+	GOOS string
+}
+
+func (e *UnsupportedPlatformError) Error() string {
+	return fmt.Sprintf("hooks: running a verified hook script by file descriptor is supported only on linux, not %s", e.GOOS)
+}
+
+// execViaFdGOOS is the platform execViaFd checks before building a command.
+// Production always leaves it at runtime.GOOS; a test overrides it to
+// exercise the non-Linux refusal on a Linux host.
+var execViaFdGOOS = runtime.GOOS
+
 // execViaFd builds an *exec.Cmd that runs the file referenced by the
 // already-open, already-verified f — never displayPath, which is used only
 // for argv[0]/logging and is never itself opened or resolved again.
@@ -202,11 +221,18 @@ var execScriptPath = fmt.Sprintf("/proc/self/fd/%d", execFdSlot)
 // "/proc/self/fd/<original-number>" directly would instead require clearing
 // f's own CLOEXEC bit, exposing it to every other child this process forks
 // for as long as f stays open.
-func execViaFd(f *os.File, displayPath string) *exec.Cmd {
+//
+// On any platform other than Linux it returns an *UnsupportedPlatformError
+// and no command: /proc/self/fd is Linux-specific, and the enforced hook
+// path fails closed rather than exec the script some other way.
+func execViaFd(f *os.File, displayPath string) (*exec.Cmd, error) {
+	if execViaFdGOOS != "linux" {
+		return nil, &UnsupportedPlatformError{GOOS: execViaFdGOOS}
+	}
 	cmd := exec.Command(execScriptPath)
 	cmd.Args = []string{displayPath}
 	cmd.ExtraFiles = []*os.File{f}
-	return cmd
+	return cmd, nil
 }
 
 // fdIsExecutable Fstats an already-open file and reports whether any of the

@@ -92,7 +92,7 @@ var execSiteAllowlist = map[string]string{
 	// "/proc/self/fd/<n>" string, never a bare name — PATH is never
 	// consulted for it, so there is nothing for this guard to resolve
 	// through rootexec.
-	"pkg/sciontool/hooks/exec_enforced.go:206": "constructed /proc/self/fd path, not a bare name; PATH is never consulted",
+	"pkg/sciontool/hooks/exec_enforced.go:232": "constructed /proc/self/fd path, not a bare name; PATH is never consulted",
 
 	// hooks/lifecycle.go's executeScript, non-enforced branch (returns
 	// early via executeScriptEnforced when EnforcePrivilegeDrop is set):

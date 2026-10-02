@@ -247,10 +247,57 @@ func TestPrepareEnforcedExec_WorkloadWritableChainYieldsDropped(t *testing.T) {
 	}
 }
 
+// skipUnlessFdExecSupported skips a test that runs a hook script through
+// execViaFd on a platform where execViaFd refuses to build a command (any
+// platform other than Linux; see UnsupportedPlatformError).
+func skipUnlessFdExecSupported(t *testing.T) {
+	t.Helper()
+	if execViaFdGOOS != "linux" {
+		t.Skipf("running a hook script by file descriptor is supported only on linux, not %s", execViaFdGOOS)
+	}
+}
+
+// TestExecViaFd_RefusesNonLinux proves execViaFd fails closed on any
+// platform other than Linux: it returns an *UnsupportedPlatformError naming
+// the platform and no command, rather than exec'ing the script some other
+// way.
+func TestExecViaFd_RefusesNonLinux(t *testing.T) {
+	orig := execViaFdGOOS
+	execViaFdGOOS = "darwin"
+	t.Cleanup(func() { execViaFdGOOS = orig })
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "hook")
+	mustWriteExecutableScript(t, script, "#!/bin/sh\necho -n hello\n")
+	f, err := os.Open(script)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	cmd, err := execViaFd(f, script)
+	if cmd != nil {
+		t.Errorf("execViaFd returned a command on darwin; want nil")
+	}
+	var upe *UnsupportedPlatformError
+	if !errors.As(err, &upe) {
+		t.Fatalf("execViaFd error = %v, want an *UnsupportedPlatformError", err)
+	}
+	if upe.GOOS != "darwin" {
+		t.Errorf("UnsupportedPlatformError.GOOS = %q, want %q", upe.GOOS, "darwin")
+	}
+
+	m := &LifecycleManager{EnforcePrivilegeDrop: true, WorkloadUID: os.Getuid(), WorkloadGID: os.Getgid()}
+	if _, err := m.buildEnforcedCmd(f, script, EventPostStart, true); !errors.As(err, &upe) {
+		t.Fatalf("buildEnforcedCmd error = %v, want an *UnsupportedPlatformError", err)
+	}
+}
+
 // TestExecViaFd_RunsShebangScript proves execViaFd's /proc/self/fd/<n> exec
 // actually runs a shebang script end to end, unprivileged (the as-root
 // branch — no SysProcAttr.Credential — needs no capability to run).
 func TestExecViaFd_RunsShebangScript(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "hook")
 	mustWriteExecutableScript(t, script, "#!/bin/sh\necho -n hello\n")
@@ -261,7 +308,11 @@ func TestExecViaFd_RunsShebangScript(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 
-	out, err := execViaFd(f, script).Output()
+	cmd, err := execViaFd(f, script)
+	if err != nil {
+		t.Fatalf("execViaFd(...): %v", err)
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("execViaFd(...).Output(): %v", err)
 	}
@@ -279,6 +330,7 @@ func TestExecViaFd_RunsShebangScript(t *testing.T) {
 // keeps open across the swap) is provably the file that runs, matching
 // executeScriptEnforced's own no-TOCTOU construction.
 func TestExecViaFd_SwapAfterOpenRunsOriginalInode(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "hook")
 	mustWriteExecutableScript(t, script, "#!/bin/sh\necho -n original\n")
@@ -294,7 +346,11 @@ func TestExecViaFd_SwapAfterOpenRunsOriginalInode(t *testing.T) {
 	}
 	mustWriteExecutableScript(t, script, "#!/bin/sh\necho -n replaced\n")
 
-	out, err := execViaFd(f, script).Output()
+	cmd, err := execViaFd(f, script)
+	if err != nil {
+		t.Fatalf("execViaFd(...): %v", err)
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("execViaFd(...).Output(): %v", err)
 	}
@@ -321,6 +377,7 @@ func findPython3(t *testing.T) string {
 // `/usr/bin/env python3` one go through two different re-exec paths (env(1)
 // itself execs python3 as a second hop), so both are exercised explicitly.
 func TestExecViaFd_RunsPython3ShebangScript(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	findPython3(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "hook")
@@ -332,7 +389,11 @@ func TestExecViaFd_RunsPython3ShebangScript(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 
-	out, err := execViaFd(f, script).Output()
+	cmd, err := execViaFd(f, script)
+	if err != nil {
+		t.Fatalf("execViaFd(...): %v", err)
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("execViaFd(...).Output(): %v", err)
 	}
@@ -349,6 +410,7 @@ func TestExecViaFd_RunsPython3ShebangScript(t *testing.T) {
 // fd-3 mechanics and the hardened/allowlisted environment do not, between
 // them, break either interpreter's own shebang re-exec.
 func TestBuildEnforcedCmd_AsRootRunsShellAndPythonShebangs(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	findPython3(t)
 	dir := t.TempDir()
 
@@ -417,6 +479,7 @@ func TestExecuteScriptEnforced_NonExecutableScriptIsSkipped(t *testing.T) {
 // inherited cwd is the workload's own, workload-writable git workspace, not
 // root's, whether or not the workload exists yet.
 func TestBuildEnforcedCmd_AsRoot(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "30-project-custom")
 	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
@@ -456,6 +519,7 @@ func TestBuildEnforcedCmd_AsRoot(t *testing.T) {
 // own PATH-based lookups, and neither must an LD_PRELOAD/BASH_ENV-style
 // variable, nor an inherited HOME.
 func TestBuildEnforcedCmd_AsRootPreStartHardensPathAndStripsDangerousVars(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "30-project-custom")
 	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
@@ -509,6 +573,7 @@ func TestBuildEnforcedCmd_AsRootPreStartHardensPathAndStripsDangerousVars(t *tes
 // root) or if the name check were inverted (a project/hub hook would then be
 // dropped instead of the provisioner).
 func TestBuildEnforcedCmd_HarnessProvisionRunsDroppedNotRoot(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, harness.HarnessProvisionHookFilename)
 	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
@@ -592,6 +657,7 @@ func TestHarnessProvisionHookFilenameMatchesWriter(t *testing.T) {
 // python/bash/git/pip/node hook load workload-planted content and execute
 // it as root, the same escalation class DecideExecAsRoot exists to close.
 func TestBuildEnforcedCmd_AsRootPostWorkloadEvent(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "10-post-start")
 	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
@@ -627,6 +693,7 @@ func TestBuildEnforcedCmd_AsRootPostWorkloadEvent(t *testing.T) {
 // stop a tool that reads one of these directly instead of resolving through
 // HOME or PATH.
 func TestHardenedRootHookEnv_DropsInterpreterAndLoaderRedirectors(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	redirectors := map[string]string{
 		"PYTHONPATH":        "/home/scion/lib",
 		"PYTHONSTARTUP":     "/home/scion/.pythonrc",
@@ -681,6 +748,7 @@ func TestHardenedRootHookEnv_DropsInterpreterAndLoaderRedirectors(t *testing.T) 
 // redirector (PYTHONPATH), and asserts the first two are the ONLY ones that
 // survive.
 func TestHardenedRootHookEnv_EnvIsExactlyAllowlistPlusOverrides(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	t.Setenv("LANG", "en_US.UTF-8")
 	t.Setenv("TERM", "xterm-256color")
 	t.Setenv("TZ", "UTC")
@@ -735,6 +803,7 @@ func TestHardenedRootHookEnv_EnvIsExactlyAllowlistPlusOverrides(t *testing.T) {
 // dropped identity, and sets Dir to WorkloadWorkingDir — "env and cwd
 // handled the same way as the harness process".
 func TestBuildEnforcedCmd_Dropped(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "session-end")
 	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
@@ -857,6 +926,7 @@ func TestExecuteScriptEnforced_DroppedFailsClosedWithoutWorkloadUIDOrGID(t *test
 // TestPrepareEnforcedExec_WorkloadWritableChainYieldsDropped above is the
 // unprivileged equivalent for the decision itself.
 func TestExecuteScriptEnforced_WorkloadOwnedRunsDropped(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	if os.Geteuid() != 0 {
 		t.Skip("requires CAP_SETGID (root) to exercise the real setgroups(2)+exec path; see TestPrepareEnforcedExec_WorkloadWritableChainYieldsDropped and TestBuildEnforcedCmd_Dropped for the unprivileged-safe equivalents")
 	}
@@ -896,6 +966,7 @@ func TestExecuteScriptEnforced_WorkloadOwnedRunsDropped(t *testing.T) {
 // branch's own real setuid/setgid exec for the two-hop env(1)->python3
 // re-exec, not just a shell script. Same root/CAP_SETGID gate as that test.
 func TestExecuteScriptEnforced_WorkloadOwnedRunsDropped_PythonShebang(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	if os.Geteuid() != 0 {
 		t.Skip("requires CAP_SETGID (root) to exercise the real setgroups(2)+exec path; see TestExecViaFd_RunsPython3ShebangScript for the unprivileged-safe equivalent")
 	}
@@ -947,6 +1018,7 @@ func TestExecuteScriptEnforced_WorkloadOwnedRunsDropped_PythonShebang(t *testing
 // TestExecuteScriptEnforced_HarnessProvisionHookRunsDroppedNotRoot
 // immediately below for its own real-exec proof.
 func TestExecuteScriptEnforced_RootOwnedChainRunsAsRoot(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	if os.Geteuid() != 0 {
 		t.Skip("requires root to create a root-owned, non-world-writable directory outside /tmp; DecideExecAsRoot's table tests already cover the decision itself")
 	}
@@ -992,6 +1064,7 @@ func TestExecuteScriptEnforced_RootOwnedChainRunsAsRoot(t *testing.T) {
 // the workload uid, never 0. This would fail if the carve-out in
 // buildEnforcedCmd were removed or its name check broken.
 func TestExecuteScriptEnforced_HarnessProvisionHookRunsDroppedNotRoot(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	if os.Geteuid() != 0 {
 		t.Skip("requires root to create a root-owned, non-world-writable directory outside /tmp; TestBuildEnforcedCmd_HarnessProvisionRunsDroppedNotRoot is the unprivileged-safe equivalent")
 	}
@@ -1274,6 +1347,7 @@ var startHooksProcreapReaperOnce sync.Once
 // the managed call is also race-free in practice, not to replace it as the
 // authoritative regression guard.
 func TestExecuteScriptEnforced_AsRootRunsUnderActiveReaperWithoutECHILD(t *testing.T) {
+	skipUnlessFdExecSupported(t)
 	startHooksProcreapReaperOnce.Do(procreap.StartReaper)
 
 	const iterations = 50
