@@ -999,12 +999,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Check for git clone mode from context
 	gitClone := api.GitCloneFromContext(ctx)
 
-	// Non-empty when `workspace` is a broker-provisioned worktree-per-agent
-	// checkout (tryProvisionWorktree in pkg/runtimebroker), not a user
-	// --workspace override. Persisted below on AgentInfo (agent-info.json),
-	// never on ScionConfig — see AgentInfo.ProvisionedWorktreeRepoRoot for why.
-	provisionedWorktreeRepoRoot := api.ProvisionedWorktreeRepoRootFromContext(ctx)
-
 	// Reject relative workspace for git-clone projects early, before the
 	// workspace resolution logic where gitClone takes priority.
 	if gitClone != nil && workspace != "" && !filepath.IsAbs(workspace) {
@@ -1843,25 +1837,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		info.ExplicitImagePullPolicy = explicitPullPolicy
 	}
 
-	// Persisted to a broker-owned file in agentDir, never on AgentInfo
-	// (agent-info.json lives in agentHome, which the container can write).
-	// Validated first, applied consistently with run.go's own persistence
-	// path: ctx is broker-only so this value is already trusted more than a
-	// template or inline config ever could be, but persisting it unvalidated
-	// here would still let a broker-side bug (a wrong workspace/root pairing
-	// reaching tryProvisionWorktree) write a value to disk that outlives
-	// this dispatch. A write failure, or a value that fails validation, is
-	// non-fatal either way: it only means a later resume falls back to
-	// detectRepoRoot.
-	if provisionedWorktreeRepoRoot != "" {
-		if validateProvisionedWorktreeRepoRoot(provisionedWorktreeRepoRoot, workspaceSource) != "" {
-			if err := writeProvisionedWorktreeRepoRoot(agentDir, provisionedWorktreeRepoRoot); err != nil {
-				util.Debugf("ProvisionAgent: failed to persist provisioned worktree repo root: %v", err)
-			}
-		} else {
-			util.Debugf("ProvisionAgent: provisioned worktree repo root %q did not validate against workspace %q, not persisting", provisionedWorktreeRepoRoot, workspaceSource)
-		}
-	}
+	// The broker-provisioned worktree's repo root (when this is that case) is
+	// persisted only by run.go's Start, not here: that is the single write
+	// site, and it covers both this first-provision call (Start runs right
+	// after GetAgent returns) and the case where GetAgent skips ProvisionAgent
+	// entirely because the agent directory already exists. See
+	// readProvisionedWorktreeRepoRoot / writeProvisionedWorktreeRepoRoot.
 
 	agentCfgData, err := json.MarshalIndent(finalScionCfg, "", "  ")
 	if err != nil {
@@ -2259,13 +2240,15 @@ func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
 
 // provisionedWorktreeStateFile is the broker-owned file that persists the
 // broker-provisioned worktree's repo root (see
-// api.ContextWithProvisionedWorktreeRepoRoot). It lives directly in agentDir —
-// never in agentHome or the agent's workspace, the only two directories
-// bind-mounted read-write into the agent container
-// (pkg/runtime/common.go). A container that could write this file could
-// forge RunConfig.RepoRoot on its next resume;
-// agentDir itself, which holds this file, prompt.md, and scion-agent.json,
-// is never bind-mounted anywhere.
+// api.ContextWithProvisionedWorktreeRepoRoot). It lives directly in agentDir,
+// a sibling of prompt.md and scion-agent.json — never in agentHome or the
+// agent's workspace, which pkg/runtime/common.go bind-mounts read-write into
+// the agent container. agentDir itself is not mounted for hub-native/broker
+// agents. It can fall inside a read-write mount in some local, non-broker
+// configurations (e.g. an explicit --workspace pointed at the project root);
+// provision.ValidateWorktreeForBase is the backstop that applies regardless
+// of where this file lives, so its correctness never depends on the storage
+// location alone.
 const provisionedWorktreeStateFile = "provisioned-worktree.json"
 
 // provisionedWorktreeState is the on-disk shape of provisionedWorktreeStateFile.

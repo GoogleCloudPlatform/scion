@@ -25,22 +25,22 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// TestApplyInlineConfigUpdate_RepoRootInjectionIsInert is a regression
-// test for the "start-request inline path": applyInlineConfigUpdate (handlers.go), which rewrites an
-// existing agent's scion-agent.json from a start request's inline config,
-// must not be a channel for setting or overwriting the broker-provisioned
-// worktree's persisted repo root.
+// TestApplyInlineConfigUpdate_RepoRootInjectionIsInert covers the
+// "start-request inline path": applyInlineConfigUpdate (handlers.go), which
+// rewrites an existing agent's scion-agent.json from a start request's
+// inline config, must not be a channel for setting or overwriting the
+// broker-provisioned worktree's persisted repo root.
 //
 // It can't be, structurally: applyInlineConfigUpdate only ever reads and
 // writes scion-agent.json, never the broker-owned "provisioned-worktree.json"
 // file in agentDir (pkg/agent's writeProvisionedWorktreeRepoRoot /
-// readProvisionedWorktreeRepoRoot — this value moved
-// off agent-info.json specifically because agentHome, where that file lives,
-// is bind-mounted read-write into the container). ScionConfig also has no
-// field for either the old ("provisioned_worktree_repo_root") or
-// intermediate ("provisionedWorktreeRepoRoot") key names. This test proves
-// it in practice: it calls the real handler method with an inline config
-// built by unmarshaling the review's PoC-shaped JSON, then confirms the
+// readProvisionedWorktreeRepoRoot, which is kept off agent-info.json
+// specifically because agentHome, where that file lives, is bind-mounted
+// read-write into the container). ScionConfig also has no field for either
+// the old ("provisioned_worktree_repo_root") or intermediate
+// ("provisionedWorktreeRepoRoot") key names. This test proves it in
+// practice: it calls the real handler method with an inline config built by
+// unmarshaling untrusted JSON using both field names, then confirms the
 // existing agent's persisted state file survives unchanged.
 func TestApplyInlineConfigUpdate_RepoRootInjectionIsInert(t *testing.T) {
 	cfg := DefaultServerConfig()
@@ -78,21 +78,20 @@ func TestApplyInlineConfigUpdate_RepoRootInjectionIsInert(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The review's PoC, replayed against applyInlineConfigUpdate: an inline
-	// config (as sent by the hub on the start path) unmarshaled from
-	// untrusted JSON trying both field names ScionConfig/AgentInfo used to
-	// have.
-	var maliciousInline api.ScionConfig
+	// An inline config (as sent by the hub on the start path) unmarshaled
+	// from untrusted JSON trying both field names ScionConfig/AgentInfo used
+	// to have, exercised against applyInlineConfigUpdate.
+	var untrustedInline api.ScionConfig
 	rawInline := []byte(`{
 		"provisioned_worktree_repo_root": "/etc",
 		"provisionedWorktreeRepoRoot": "/etc",
 		"max_turns": 7
 	}`)
-	if err := json.Unmarshal(rawInline, &maliciousInline); err != nil {
-		t.Fatalf("unmarshal malicious inline config: %v", err)
+	if err := json.Unmarshal(rawInline, &untrustedInline); err != nil {
+		t.Fatalf("unmarshal untrusted inline config: %v", err)
 	}
 
-	srv.applyInlineConfigUpdate(agentName, projectScionDir, &maliciousInline, false)
+	srv.applyInlineConfigUpdate(agentName, projectScionDir, &untrustedInline, false)
 
 	// scion-agent.json should have picked up the legitimate field
 	// (MaxTurns), proving the update actually ran, not merely no-oped.

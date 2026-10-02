@@ -3230,15 +3230,15 @@ profiles:
 	}
 }
 
-// TestStartInvalidatesProvisionedRepoRootWhenNFSBackendReplacesWorkspace is
-// the round-2 review's N5 regression guard: server.workspace_storage.backend
-// == "nfs" applies to worktree-per-agent mode too (runtime.SelectWorkspaceBackend),
-// and when it fires it replaces effectiveWorkspace with the NFS-backed host
-// path — which can combine with a ctx-provisioned repo root from
-// tryProvisionWorktree's LOCAL host-side worktree in the same dispatch. The
-// repo root validated against the PRE-backend workspace no longer
-// corresponds to the FINAL workspace RunConfig actually uses, so it must be
-// re-validated (and here, correctly invalidated) rather than left stale.
+// TestStartInvalidatesProvisionedRepoRootWhenNFSBackendReplacesWorkspace
+// covers server.workspace_storage.backend == "nfs", which applies to
+// worktree-per-agent mode too (runtime.SelectWorkspaceBackend), and when it
+// fires it replaces effectiveWorkspace with the NFS-backed host path — which
+// can combine with a ctx-provisioned repo root from tryProvisionWorktree's
+// local host-side worktree in the same dispatch. The repo root validated
+// against the pre-backend workspace no longer corresponds to the final
+// workspace RunConfig actually uses, so it must be re-validated (and here,
+// correctly invalidated) rather than left stale.
 func TestStartInvalidatesProvisionedRepoRootWhenNFSBackendReplacesWorkspace(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	tmpDir := t.TempDir()
@@ -3471,14 +3471,13 @@ profiles:
 }
 
 // TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkipped
-// is the round-1 review's O1 regression guard: GetAgent skips ProvisionAgent
-// entirely once an agent directory already exists on disk (e.g. a leftover
-// from a deleted hub agent recreated under the same name), so a fresh ctx
-// signal on that dispatch would otherwise never be persisted — stranding
-// RepoRoot on the very next resume, which has no ctx signal of its own.
-// Start must persist the fresh value itself whenever it validates and
-// differs from what's already on disk, independent of whether ProvisionAgent
-// ran.
+// covers GetAgent skipping ProvisionAgent entirely once an agent directory
+// already exists on disk (e.g. a leftover from a deleted hub agent recreated
+// under the same name), so a fresh ctx signal on that dispatch would
+// otherwise never be persisted — stranding RepoRoot on the very next resume,
+// which has no ctx signal of its own. Start must persist the fresh value
+// itself whenever it validates and differs from what's already on disk,
+// independent of whether ProvisionAgent ran.
 func TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkipped(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	tmpDir := t.TempDir()
@@ -3533,10 +3532,9 @@ profiles:
 	}
 
 	// The workspace must be a REAL worktree of sharedBase (not just a plain
-	// directory) — the hardened validator (round-2 review finding C1) only
-	// persists a ctx signal that actually validates, and validation now
-	// requires a genuine git worktree relationship, not just a matching
-	// directory shape.
+	// directory) — Start only persists a ctx signal that actually validates,
+	// and validation requires a genuine git worktree relationship, not just
+	// a matching directory shape.
 	sharedBase := t.TempDir()
 	setupGitRepo(t, sharedBase)
 	worktreesDir := filepath.Join(sharedBase, "worktrees")
@@ -3595,12 +3593,11 @@ profiles:
 	}
 }
 
-// TestStartDoesNotPersistUnvalidatedCtxRepoRoot is the round-2 review's N2
-// regression guard: the O1 persistence path must only ever write a repo root
-// that actually validated (repoRoot == ctxRepoRoot), never a bare ctx value
-// that the validator rejected and detectRepoRoot then fell back past.
-// Otherwise a bad value could reach disk even though it never reached
-// RunConfig on the dispatch that produced it.
+// TestStartDoesNotPersistUnvalidatedCtxRepoRoot covers the persistence path:
+// it must only ever write a repo root that actually validated (repoRoot ==
+// ctxRepoRoot), never a bare ctx value that the validator rejected and
+// detectRepoRoot then fell back past. Otherwise a bad value could reach disk
+// even though it never reached RunConfig on the dispatch that produced it.
 func TestStartDoesNotPersistUnvalidatedCtxRepoRoot(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -3690,22 +3687,20 @@ profiles:
 	}
 }
 
-// TestStartResumeIgnoresForgedAgentInfoRepoRoot is the round-2 review's
-// required C1 regression test, shaped exactly like the reviewer's PoC: a
-// user --workspace agent on a directory shaped like
-// "<repo>/worktrees/<name>" (not a real git worktree — the PoC did not need
-// one, since round-1's validator only checked path shape). The first Start
+// TestStartResumeDoesNotAdoptRepoRootFromAgentInfoFile is a regression test
+// for the storage boundary that keeps the persisted repo root out of
+// container-writable storage: a user --workspace agent on a directory shaped
+// like "<repo>/worktrees/<name>" (not a real git worktree). The first Start
 // correctly yields an empty RepoRoot. Simulating the container, this test
-// then forges agentHome/agent-info.json with the field name AgentInfo used
-// to carry the repo root under in round 1
-// ("provisionedWorktreeRepoRoot") — agentHome is bind-mounted read-write
-// into the container (pkg/runtime/common.go), so a compromised or
-// prompt-injected agent can write this file for real. A resume must still
-// yield an empty RepoRoot: run.go no longer reads agent-info.json for this
-// value at all (it moved to a broker-owned file under agentDir, which is
-// never bind-mounted), and even if it did, the hardened validator would
-// still reject this non-worktree directory.
-func TestStartResumeIgnoresForgedAgentInfoRepoRoot(t *testing.T) {
+// then writes agentHome/agent-info.json with the field name AgentInfo used
+// to carry the repo root under previously ("provisionedWorktreeRepoRoot") —
+// agentHome is bind-mounted read-write into the container
+// (pkg/runtime/common.go), so a compromised or prompt-injected agent can
+// write this file for real. A resume must still yield an empty RepoRoot:
+// run.go no longer reads agent-info.json for this value at all (it moved to
+// a broker-owned file under agentDir, which is never bind-mounted), and even
+// if it did, the validator would still reject this non-worktree directory.
+func TestStartResumeDoesNotAdoptRepoRootFromAgentInfoFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, err := os.Getwd()
@@ -3757,12 +3752,11 @@ profiles:
 		t.Fatalf("failed to write template: %v", err)
 	}
 
-	// The PoC precondition, strengthened to isolate the storage-boundary fix
-	// from the validator: a REAL git worktree, so the forged value below
-	// would validate successfully if run.go consulted agent-info.json for
-	// it. That isolates "is the container-writable file even consulted"
+	// Use a REAL git worktree so the isolation is precise: the written value
+	// below would validate successfully if run.go consulted agent-info.json
+	// for it. That isolates "is the container-writable file even consulted"
 	// (this test) from "does the validator reject a fake worktree shape"
-	// (TestValidateProvisionedWorktreeRepoRoot_RejectsPlainMkdirWorktree).
+	// (covered separately in pkg/provision's validator tests).
 	t.Setenv("SCION_HOST_UID", "")
 	userRepo := filepath.Join(tmpDir, "userrepo")
 	if err := os.MkdirAll(userRepo, 0755); err != nil {
@@ -3795,17 +3789,17 @@ profiles:
 		t.Fatalf("baseline RunConfig.RepoRoot = %q, want \"\" before forging anything", capturedConfig.RepoRoot)
 	}
 
-	// Simulate the container: forge agent-info.json in agentHome (bind-mounted
-	// read-write into the container) with the field name AgentInfo carried
-	// this value under in round 1.
+	// Simulate the container: write agent-info.json in agentHome (bind-mounted
+	// read-write into the container) with the field name AgentInfo previously
+	// carried this value under.
 	agentHome := config.GetAgentHomePath(projectScionDir, "agent-a")
-	forged := []byte(`{"provisionedWorktreeRepoRoot":"` + userRepo + `"}`)
-	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), forged, 0644); err != nil {
-		t.Fatalf("failed to forge agent-info.json: %v", err)
+	containerWritten := []byte(`{"provisionedWorktreeRepoRoot":"` + userRepo + `"}`)
+	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), containerWritten, 0644); err != nil {
+		t.Fatalf("failed to write agent-info.json: %v", err)
 	}
 
-	// Resume: no ctx signal, empty Workspace — exactly the shape the reviewer
-	// used to turn the forged file into a live RepoRoot in round 1.
+	// Resume: no ctx signal, empty Workspace — the shape that would surface
+	// a container-writable value as a live RepoRoot if it were still consulted.
 	capturedConfig = runtime.RunConfig{}
 	if _, err := mgr.Start(context.Background(), api.StartOptions{
 		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Resume: true, Env: env,
@@ -3814,7 +3808,7 @@ profiles:
 	}
 
 	if capturedConfig.RepoRoot != "" {
-		t.Fatalf("resume RunConfig.RepoRoot = %q, want \"\" — a forged agent-info.json (container-writable) must not be able to set RepoRoot", capturedConfig.RepoRoot)
+		t.Fatalf("resume RunConfig.RepoRoot = %q, want \"\" — a container-writable agent-info.json must not be able to set RepoRoot", capturedConfig.RepoRoot)
 	}
 }
 

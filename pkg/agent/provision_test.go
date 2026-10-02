@@ -3812,21 +3812,15 @@ func TestGetAgent_RelativeWorkspaceResume(t *testing.T) {
 	}
 }
 
-// TestProvisionAgent_ProvisionedWorktreePersistsRepoRoot is the regression
-// guard for the ExplicitWorkspace-misclassification risk called out for the
-// broker-provisioned worktree fix: ProvisionAgent must persist the repo root
-// (in addition to ExplicitWorkspace, which stays true for both this case and
-// a user --workspace override) whenever ctx carries
-// api.ContextWithProvisionedWorktreeRepoRoot, so run.go's Start can recover
-// RepoRoot on resume/restart — dispatches where the broker does not re-run
-// tryProvisionWorktree and ctx carries no fresh signal.
-//
-// Persisted in a broker-owned file under agentDir
-// (readProvisionedWorktreeRepoRoot), not on ScionConfig (round-1 review
-// finding C1: no template or inline config can set or overwrite it) and not
-// on AgentInfo/agent-info.json either (round-2 review finding C1:
-// agent-info.json lives in agentHome, which the container can write).
-func TestProvisionAgent_ProvisionedWorktreePersistsRepoRoot(t *testing.T) {
+// TestProvisionAgent_DoesNotPersistRepoRoot confirms ProvisionAgent never
+// writes the provisioned-worktree state file itself: run.go's Start is the
+// single write site for it (covering both the normal first-provision path
+// and the case where GetAgent skips ProvisionAgent entirely because the
+// agent directory already exists — see
+// TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkipped
+// in run_test.go). ProvisionAgent still sets ExplicitWorkspace, needed
+// either way for GetAgent's managed-worktree recovery skip on resume.
+func TestProvisionAgent_DoesNotPersistRepoRoot(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	tmpDir := t.TempDir()
 
@@ -3853,10 +3847,8 @@ func TestProvisionAgent_ProvisionedWorktreePersistsRepoRoot(t *testing.T) {
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	_ = os.MkdirAll(projectScionDir, 0755)
 
-	// Stand in for a broker-provisioned worktree. ProvisionAgent validates
-	// before persisting (round-2 review finding N2, applied consistently
-	// with run.go's own persistence path), so this must be a REAL git
-	// worktree, not just a matching directory shape.
+	// Stand in for a broker-provisioned worktree: a real git worktree, so
+	// this test isn't the reason a validation gate would reject it.
 	repoRoot := filepath.Join(tmpDir, "shared-base")
 	_ = os.MkdirAll(repoRoot, 0755)
 	setupGitRepo(t, repoRoot)
@@ -3877,33 +3869,8 @@ func TestProvisionAgent_ProvisionedWorktreePersistsRepoRoot(t *testing.T) {
 	}
 
 	agentDir := config.GetAgentDir(projectScionDir, agentName, false)
-	if got := readProvisionedWorktreeRepoRoot(agentDir); got != repoRoot {
-		t.Errorf("readProvisionedWorktreeRepoRoot(agentDir) = %q, want %q", got, repoRoot)
-	}
-
-	// The value must NOT be reachable from agent-info.json (agentHome), which
-	// the container can write — round-2 review finding C1.
-	agentHome := config.GetAgentHomePath(projectScionDir, agentName)
-	infoData, err := os.ReadFile(filepath.Join(agentHome, "agent-info.json"))
-	if err != nil {
-		t.Fatalf("reading agent-info.json: %v", err)
-	}
-	if strings.Contains(string(infoData), repoRoot) {
-		t.Fatalf("agent-info.json unexpectedly contains the repo root: %s", infoData)
-	}
-
-	// Resume: no fresh ctx signal (the broker does not re-run
-	// tryProvisionWorktree on start/restart) — the persisted state file must
-	// survive so run.go's Start can still resolve RepoRoot. GetAgent doesn't
-	// read the state file itself (only Start does, via agentDir), so this
-	// just confirms GetAgent's resume path doesn't disturb the file.
-	if _, _, _, resumeCfg, err := GetAgent(context.Background(), agentName, "", "", "", projectScionDir, "", "", "", ""); err != nil {
-		t.Fatalf("GetAgent (resume) failed: %v", err)
-	} else if !resumeCfg.ExplicitWorkspace {
-		t.Error("expected ExplicitWorkspace to persist across resume")
-	}
-	if got := readProvisionedWorktreeRepoRoot(agentDir); got != repoRoot {
-		t.Errorf("resume readProvisionedWorktreeRepoRoot(agentDir) = %q, want %q", got, repoRoot)
+	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
+		t.Errorf("readProvisionedWorktreeRepoRoot(agentDir) = %q, want \"\" (ProvisionAgent must not persist it; Start does)", got)
 	}
 }
 
@@ -3954,12 +3921,12 @@ func TestProvisionAgent_UserWorkspaceOverrideLeavesRepoRootUnset(t *testing.T) {
 	}
 }
 
-// TestProvisionAgent_TemplateInjectedRepoRootIsInert is the C1 regression
-// test (round-1 review): a template's scion-agent.json setting
+// TestProvisionAgent_TemplateInjectedRepoRootIsInert is a regression test
+// proving a template's scion-agent.json setting
 // "provisioned_worktree_repo_root" (the old, now-removed ScionConfig field
 // name) or "provisionedWorktreeRepoRoot" (the also-removed AgentInfo field
-// name) must have no effect. Neither ScionConfig nor AgentInfo has a field
-// for either key, so no unmarshal of a template document can ever populate
+// name) has no effect. Neither ScionConfig nor AgentInfo has a field for
+// either key, so no unmarshal of a template document can ever populate
 // anything ProvisionAgent or run.go trusts — proven here by asserting no
 // repo root gets persisted for a plain --workspace agent.
 func TestProvisionAgent_TemplateInjectedRepoRootIsInert(t *testing.T) {
@@ -3979,8 +3946,8 @@ func TestProvisionAgent_TemplateInjectedRepoRootIsInert(t *testing.T) {
 
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
-	// The PoC from the round-1 review: a template that tries to set the repo
-	// root to "/" via both the old and new field names.
+	// A template that tries to set the repo root to "/" via both the old and
+	// new field names.
 	tplDir := filepath.Join(globalTemplatesDir, "claude")
 	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `{
@@ -3997,8 +3964,8 @@ func TestProvisionAgent_TemplateInjectedRepoRootIsInert(t *testing.T) {
 	userWorkspace := filepath.Join(tmpDir, "operators-own-dir")
 	_ = os.MkdirAll(userWorkspace, 0755)
 
-	// Plain user --workspace, no broker ctx signal — the attack surface the
-	// review PoC exploited (any hub user or template author can reach this).
+	// Plain user --workspace, no broker ctx signal — reachable by any hub
+	// user or template author, so it must stay inert.
 	agentName := "template-injection-agent"
 	_, _, _, err := ProvisionAgent(context.Background(), agentName, "claude", "", "", projectScionDir, "", "", "", userWorkspace)
 	if err != nil {
@@ -4010,8 +3977,8 @@ func TestProvisionAgent_TemplateInjectedRepoRootIsInert(t *testing.T) {
 	}
 }
 
-// TestProvisionAgent_InlineConfigInjectedRepoRootIsInert is C1's inline-config
-// variant of the same PoC: an inline config (as sent by the hub for
+// TestProvisionAgent_InlineConfigInjectedRepoRootIsInert is the inline-config
+// variant of the same case: an inline config (as sent by the hub for
 // CreateAgentRequest.Config or --config) setting the same two field names
 // must also have no effect.
 func TestProvisionAgent_InlineConfigInjectedRepoRootIsInert(t *testing.T) {

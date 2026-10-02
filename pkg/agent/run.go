@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -1082,11 +1083,12 @@ authDone:
 	// Priority: a fresh ctx signal (this dispatch just ran
 	// tryProvisionWorktree) beats the value persisted in agentDir's
 	// broker-owned state file (recovered on resume/restart, when the broker
-	// does not re-run tryProvisionWorktree). Either source is re-validated
-	// against the real filesystem below before being trusted — see
-	// validateProvisionedWorktreeRepoRoot. A user --workspace override
-	// supplies neither, so it always falls through to detectRepoRoot and
-	// stays "".
+	// does not re-run tryProvisionWorktree). Neither source is trusted as-is:
+	// provision.ValidateWorktreeForBase re-proves the pair against the real
+	// filesystem — both lexically and after resolving symlinks — before
+	// RunConfig.RepoRoot is allowed to name a host path. A user --workspace
+	// override supplies neither, so it always falls through to
+	// detectRepoRoot and stays "".
 	//
 	// This first pass validates against the pre-workspace-backend
 	// effectiveWorkspace, only because containerWorkspace (computed below)
@@ -1100,7 +1102,7 @@ authDone:
 	if candidateRepoRoot == "" {
 		candidateRepoRoot = persistedRepoRoot
 	}
-	repoRoot := validateProvisionedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
+	repoRoot := validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
 	if repoRoot == "" {
 		repoRoot = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
 	}
@@ -1343,7 +1345,7 @@ authDone:
 	// exactly the lexical mismatch that misroutes common.go into its
 	// full-root fallback mount.
 	if effectiveWorkspace != preBackendWorkspace {
-		repoRoot = validateProvisionedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
+		repoRoot = validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
 		if repoRoot == "" {
 			repoRoot = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
 		}
@@ -1355,11 +1357,11 @@ authDone:
 	// deleted hub agent recreated under the same name. In that case this
 	// dispatch's signal would never be persisted, and a later resume/restart
 	// (which has no fresh ctx signal of its own) would fall back to
-	// detectRepoRoot and lose RepoRoot again. Persist it here whenever it
-	// actually validated (repoRoot == ctxRepoRoot, not a value detectRepoRoot
-	// produced on its own) and differs from what
-	// is already on disk; a no-op on the normal first-provision path, where
-	// ProvisionAgent already wrote the same value.
+	// detectRepoRoot and lose RepoRoot again. This is also the single write
+	// site for the value (ProvisionAgent's own first-provision call does not
+	// write it — see provision.go): persist it here whenever it actually
+	// validated (repoRoot == ctxRepoRoot, not a value detectRepoRoot produced
+	// on its own) and differs from what is already on disk.
 	if ctxRepoRoot != "" && repoRoot == ctxRepoRoot && ctxRepoRoot != persistedRepoRoot {
 		if err := writeProvisionedWorktreeRepoRoot(agentDir, ctxRepoRoot); err != nil {
 			util.Debugf("Start: failed to persist provisioned worktree repo root for %s: %v", opts.Name, err)
@@ -1795,136 +1797,19 @@ func workspaceSharesProjectRepo(projectDir, workspace string) bool {
 	return resolvedProjectCommonDir == resolvedWorkspaceCommonDir
 }
 
-// provisionedWorktreesSubdir is the fixed layout tryProvisionWorktree and
-// provision.WorktreePath use for a broker-provisioned worktree:
-// <repoRoot>/worktrees/<agentID>.
-const provisionedWorktreesSubdir = "worktrees"
-
-// validateProvisionedWorktreeRepoRoot re-checks a candidate broker-provisioned
-// repo root (sourced from ctx or from the broker-owned persisted state file —
-// see readProvisionedWorktreeRepoRoot) against the real filesystem before
-// Start trusts it for a host bind-mount. A wrong, stale, or forged value here
-// would let pkg/runtime/common.go bind-mount an unintended host path
-// read-write into the container, so this proves an actual git-worktree
-// relationship rather than just a matching directory shape. Returns "" on
-// any failure, which routes the caller back to detectRepoRoot.
-//
-// Checks, all required:
-//  1. root and effectiveWorkspace are non-empty and resolve (EvalSymlinks
-//     both, so a symlink can't disguise either path).
-//  2. <root>/.git is a directory (root is a real repo).
-//  3. effectiveWorkspace resolves to exactly <root>/worktrees/<name> for a
-//     non-empty <name> — the layout tryProvisionWorktree creates, no deeper
-//     and no shallower.
-//  4. effectiveWorkspace/.git is a regular gitfile (not a directory — a
-//     plain mkdir'd lookalike fails here), and its "gitdir:" pointer
-//     resolves to root/.git/worktrees/<name>, which must itself exist.
-//  5. That admin directory's own "gitdir" back-link resolves back to
-//     effectiveWorkspace/.git. A real `git worktree add` always creates this
-//     file, so a forged pairing that only satisfies steps 1-4 (e.g. two
-//     unrelated real worktrees with the right directory shape) still fails
-//     here.
-//
-// On success, returns the ORIGINAL (pre-EvalSymlinks) root argument, not the
-// resolved one: RunConfig.Workspace (effectiveWorkspace) is never
-// symlink-resolved, and pkg/runtime/common.go computes
-// filepath.Rel(RepoRoot, Workspace) lexically. Returning a resolved root
-// while the workspace stays lexical would desync that relative-path
-// computation on any host with a symlink component in the shared prefix
-// (e.g. a symlinked $HOME, or macOS's /var -> /private/var) and misroute the
-// mount into common.go's full-root fallback branch.
-func validateProvisionedWorktreeRepoRoot(root, effectiveWorkspace string) string {
-	if root == "" || effectiveWorkspace == "" {
+// validatedWorktreeRepoRoot returns candidateRoot unchanged if
+// provision.ValidateWorktreeForBase confirms it is a genuine worktree base
+// for effectiveWorkspace, or "" otherwise (including when either argument is
+// empty). A thin wrapper so Start's repoRoot resolution reads as a single
+// value lookup rather than an error check at each of its two call sites.
+func validatedWorktreeRepoRoot(candidateRoot, effectiveWorkspace string) string {
+	if candidateRoot == "" || effectiveWorkspace == "" {
 		return ""
 	}
-	resolvedRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
+	if err := provision.ValidateWorktreeForBase(candidateRoot, effectiveWorkspace); err != nil {
 		return ""
 	}
-	resolvedWorkspace, err := filepath.EvalSymlinks(effectiveWorkspace)
-	if err != nil {
-		return ""
-	}
-
-	gitDirInfo, err := os.Stat(filepath.Join(resolvedRoot, ".git"))
-	if err != nil || !gitDirInfo.IsDir() {
-		return ""
-	}
-
-	rel, err := filepath.Rel(resolvedRoot, resolvedWorkspace)
-	if err != nil || rel == "." || rel == ".." ||
-		strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return ""
-	}
-	// Exactly "worktrees/<name>" — not "worktrees" alone, and not deeper.
-	segments := strings.SplitN(rel, string(filepath.Separator), 3)
-	if len(segments) != 2 || segments[0] != provisionedWorktreesSubdir || segments[1] == "" {
-		return ""
-	}
-	name := segments[1]
-
-	// The workspace's gitfile must be a regular file, not a directory: a
-	// plain mkdir'd "worktrees/<name>" has no .git at all and is rejected
-	// here.
-	workspaceGitPath := filepath.Join(resolvedWorkspace, ".git")
-	wgInfo, err := os.Stat(workspaceGitPath)
-	if err != nil || wgInfo.IsDir() {
-		return ""
-	}
-	gitfileContent, err := os.ReadFile(workspaceGitPath)
-	if err != nil {
-		return ""
-	}
-	const gitdirPrefix = "gitdir:"
-	line := strings.TrimSpace(string(gitfileContent))
-	if !strings.HasPrefix(line, gitdirPrefix) {
-		return ""
-	}
-	pointedAdminDir := strings.TrimSpace(line[len(gitdirPrefix):])
-	if !filepath.IsAbs(pointedAdminDir) {
-		pointedAdminDir = filepath.Join(resolvedWorkspace, pointedAdminDir)
-	}
-	resolvedPointedAdminDir, err := filepath.EvalSymlinks(pointedAdminDir)
-	if err != nil {
-		return ""
-	}
-
-	adminDir := filepath.Join(resolvedRoot, ".git", "worktrees", name)
-	adminDirInfo, err := os.Stat(adminDir)
-	if err != nil || !adminDirInfo.IsDir() {
-		return ""
-	}
-	resolvedAdminDir, err := filepath.EvalSymlinks(adminDir)
-	if err != nil {
-		return ""
-	}
-	if resolvedPointedAdminDir != resolvedAdminDir {
-		return ""
-	}
-
-	// The admin dir's own back-link must resolve back to the workspace's
-	// gitfile. git writes this relative to the admin dir itself.
-	backLinkContent, err := os.ReadFile(filepath.Join(adminDir, "gitdir"))
-	if err != nil {
-		return ""
-	}
-	backLinkTarget := strings.TrimSpace(string(backLinkContent))
-	if !filepath.IsAbs(backLinkTarget) {
-		backLinkTarget = filepath.Join(adminDir, backLinkTarget)
-	}
-	resolvedBackLinkTarget, err := filepath.EvalSymlinks(backLinkTarget)
-	if err != nil {
-		return ""
-	}
-	resolvedWorkspaceGitPath, err := filepath.EvalSymlinks(workspaceGitPath)
-	if err != nil {
-		return ""
-	}
-	if resolvedBackLinkTarget != resolvedWorkspaceGitPath {
-		return ""
-	}
-
-	return root
+	return candidateRoot
 }
 
 // extractWorkspaceFromVolumes finds a volume mounted to /workspace and returns its source path.
