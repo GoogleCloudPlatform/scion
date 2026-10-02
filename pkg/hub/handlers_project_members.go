@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -753,6 +754,23 @@ func validatePrincipalType(w http.ResponseWriter, principalType string) bool {
 	}
 }
 
+// validateMemberPrincipalAddress rejects a user principal addressed by
+// something that is neither an email nor a well-formed user ID, writing a
+// 400 invalid_request (the code P1 already uses for unresolvable principal
+// addressing) and returning false. Without it the malformed ID reached the
+// store, whose validation error surfaced as a 500 on PUT (ptone/scion#2529,
+// review r2 L-500) and as "no bindings" 404 on DELETE.
+func validateMemberPrincipalAddress(w http.ResponseWriter, principalType, principalID string) bool {
+	if principalType != store.RoleBindingPrincipalUser || strings.Contains(principalID, "@") {
+		return true
+	}
+	if _, err := uuid.Parse(principalID); err != nil {
+		BadRequest(w, "user principal must be addressed by user ID or email: "+principalID)
+		return false
+	}
+	return true
+}
+
 func (s *Server) putProjectMemberPrincipal(w http.ResponseWriter, r *http.Request, projectID, principalType, principalID string) {
 	ctx := r.Context()
 
@@ -783,6 +801,9 @@ func (s *Server) putProjectMemberPrincipal(w http.ResponseWriter, r *http.Reques
 	}
 
 	if !validatePrincipalType(w, principalType) {
+		return
+	}
+	if !validateMemberPrincipalAddress(w, principalType, principalID) {
 		return
 	}
 
@@ -869,6 +890,9 @@ func (s *Server) deleteProjectMemberPrincipal(w http.ResponseWriter, r *http.Req
 	}
 
 	if !validatePrincipalType(w, principalType) {
+		return
+	}
+	if !validateMemberPrincipalAddress(w, principalType, principalID) {
 		return
 	}
 

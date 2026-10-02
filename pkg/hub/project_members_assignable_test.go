@@ -501,3 +501,30 @@ func TestAssignableRoles_RoutingKeepsMemberAddressing(t *testing.T) {
 	assert.Less(t, rec.Code, 300, "binding-ID DELETE: %s", rec.Body.String())
 	assert.Empty(t, mmrBindingsFor(t, f.store, "group", groupID, f.projectID))
 }
+
+// TestSetMemberRoles_MalformedUserPrincipalID400: a user principal addressed
+// by something that is neither an email nor a well-formed user ID is a 400
+// invalid_request on both PUT and DELETE. It used to reach the store and
+// surface as a 500 (PUT) or a "no bindings" 404 (DELETE)
+// (ptone/scion#2529, review r2 L-500). Nothing is written.
+func TestSetMemberRoles_MalformedUserPrincipalID400(t *testing.T) {
+	f := setupMMRFixture(t)
+	const malformed = "not-a-uuid"
+
+	rec := putMemberRoles(t, f.srv, f.owner, f.projectID, "user", malformed, []string{f.memberRD.ID}, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"code":"`+ErrCodeInvalidRequest+`"`)
+
+	rec = deleteMemberRoles(t, f.srv, f.owner, f.projectID, "user", malformed)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"code":"`+ErrCodeInvalidRequest+`"`)
+
+	assert.Empty(t, mmrBindingsFor(t, f.store, "user", malformed, f.projectID))
+
+	// Well-formed addressing is unaffected: a UUID with no bindings is
+	// still DELETE's 404, and an unknown email still PUT's 400.
+	rec = deleteMemberRoles(t, f.srv, f.owner, f.projectID, "user", tid(t.Name()+"-nobody"))
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	rec = putMemberRoles(t, f.srv, f.owner, f.projectID, "user", "nobody-l500@test.com", []string{f.memberRD.ID}, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+}
