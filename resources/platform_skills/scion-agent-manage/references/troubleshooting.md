@@ -14,25 +14,25 @@ Most stuck agents are recoverable without recreation. Always start with `scion l
 | Phase `created`, lastSeen zero, persists 5+ min | Agent creation timed out | Wait a few minutes; if stuck, delete and recreate. **If recurring:** system is under load — reduce concurrent agent count rather than retrying |
 | `scion start` fails with 422 `no_runtime_broker` | Temporary connection issue after a system restart or reconnect | Wait 30–60s and retry. If persistent, escalate to an operator. Reduce concurrent starts if it recurs under load |
 | Phase `starting` + activity `completed` | A duplicate sciontool process resets the agent's phase. Common trigger: `go test` (or any child process) inheriting hub env vars and spawning a second `sciontool init` | Kill duplicate process, recreate. **Diagnostic:** look for `sciontool init starting as PID <different-pid>` and `Failed to start telemetry: ... address already in use` in agent logs — the second PID and the port conflict confirm a duplicate |
-| Context at 100% | Memory/context limit reached | Send raw clear sequence (see below) |
+| Context at 100% | Memory/context limit reached | Send the clear keystrokes (see below) |
 | `gh` CLI returns 401 | Stale `GH_TOKEN` env var, not an agent state issue | Fall back to `curl` with known-good token |
 | Rebase fails "unrelated histories" | Shallow clone hides common ancestor | `git fetch --unshallow` then retry `git rebase origin/main` — **not** force-push or branch recreation |
-| Interactive prompt blocking agent | Harness waiting for user input | `scion message <agent> --raw "ENTER"` or appropriate dismissal |
+| Interactive prompt blocking agent | Harness waiting for user input | `scion keys <agent> "Enter"` or appropriate dismissal |
 
 ## Context Clear
 
-When an agent's context approaches 100%, clear it manually with raw terminal input:
+When an agent's context approaches 100%, clear it manually with literal terminal input — one key per call, since `scion keys` has no sequence syntax:
 
 ```bash
-scion message <agent> --raw "/"
-scion message <agent> --raw "clear"
-scion message <agent> --raw "ENTER"
+scion keys <agent> "/"
+scion keys <agent> "clear"
+scion keys <agent> "Enter"
 ```
 
-Always `scion look <agent>` first to verify screen state before sending raw input.
+Always `scion look <agent>` first to verify screen state before sending keystrokes.
 
 ## Anti-Patterns
 
 - **Recreating on first sign of trouble.** Most stuck states recover with `scion message <agent> "continue"`. Recreation destroys unpushed work and in-memory state.
-- **Sending raw input blind.** Always `scion look` first — raw keystrokes go to whatever is on screen.
+- **Sending keystrokes blind.** Always `scion look` first — `scion keys` input goes to whatever is on screen.
 - **Treating all 401s the same.** Hub token 401 (agent state) and GitHub token 401 (API auth) have different recovery paths.

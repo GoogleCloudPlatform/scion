@@ -401,6 +401,91 @@ func TestHTTPAgentDispatcher_DispatchAgentMessage(t *testing.T) {
 	}
 }
 
+// TestHTTPAgentDispatcher_DispatchAgentMessage_RefusesRaw proves the
+// contract's §6.1 "(a) Dispatch-layer backstop" directly against the one
+// production AgentDispatcher.DispatchAgentMessage implementation: from task
+// 2.3 onward, a structuredMsg carrying Raw == true is refused
+// unconditionally, before requireRuntimeBrokerAssigned or any broker
+// endpoint lookup runs, and the underlying RuntimeBrokerClient is never
+// called at all. No broker or agent setup is required for this case
+// precisely because the refusal happens before anything broker-specific is
+// touched.
+func TestHTTPAgentDispatcher_DispatchAgentMessage_RefusesRaw(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:   tid("agent-raw-backstop"),
+		Name: "test-agent-raw",
+		Slug: "test-agent-raw",
+		// Deliberately no RuntimeBrokerID: if the backstop did not run
+		// first, requireRuntimeBrokerAssigned would fail for an unrelated
+		// reason and this test would not actually prove the backstop ran.
+	}
+
+	err := dispatcher.DispatchAgentMessage(ctx, agent, "C-c", false, &messages.StructuredMessage{Raw: true})
+	if !errors.Is(err, ErrRawDispatchRefused) {
+		t.Fatalf("DispatchAgentMessage error = %v, want ErrRawDispatchRefused", err)
+	}
+	if mockClient.messageCalled {
+		t.Error("expected MessageAgent to never be called for a Raw==true structuredMsg")
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgentRaw verifies a nil
+// agent is rejected with errNoRuntimeBrokerAssigned (not a panic in the raw
+// backstop log) and that no broker call is made.
+func TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgentRaw(t *testing.T) {
+	memStore := createTestStore(t)
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	err := dispatcher.DispatchAgentMessage(context.Background(), nil, "C-c", false, &messages.StructuredMessage{Raw: true})
+	if !errors.Is(err, errNoRuntimeBrokerAssigned) {
+		t.Fatalf("DispatchAgentMessage error = %v, want errNoRuntimeBrokerAssigned", err)
+	}
+	if mockClient.messageCalled {
+		t.Error("expected MessageAgent to never be called for a nil agent")
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentMessage_PlainStillDelivers is the
+// backstop's negative control: Plain (and ordinary, non-raw) messages are
+// completely unaffected, proving the Raw check above is not accidentally
+// over-broad.
+func TestHTTPAgentDispatcher_DispatchAgentMessage_PlainStillDelivers(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("host-raw-backstop-plain"),
+		Name:     "test-host-plain",
+		Slug:     "test-host-plain",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	require.NoError(t, memStore.CreateRuntimeBroker(ctx, broker))
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-raw-backstop-plain"),
+		Name:            "test-agent-plain",
+		Slug:            "test-agent-plain",
+		RuntimeBrokerID: broker.ID,
+	}
+
+	err := dispatcher.DispatchAgentMessage(ctx, agent, "hello", false, &messages.StructuredMessage{Plain: true})
+	require.NoError(t, err)
+	if !mockClient.messageCalled {
+		t.Error("expected MessageAgent to be called for a Plain (non-raw) structuredMsg")
+	}
+}
+
 func TestHTTPRuntimeBrokerClient_CreateAgent(t *testing.T) {
 	// Create a mock server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

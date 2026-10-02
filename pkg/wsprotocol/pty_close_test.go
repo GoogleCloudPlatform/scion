@@ -59,7 +59,7 @@ func TestClassifyPTYClose_Parity(t *testing.T) {
 		ClosePTYNormal, ClosePTYGoingAway, ClosePTYAbnormal, ClosePTYInternalError,
 		ClosePTYServiceRestart, ClosePTYTryAgainLater, ClosePTYAuthRequired,
 		ClosePTYForbidden, ClosePTYAgentNotFound, ClosePTYSessionGone,
-		ClosePTYUpstreamUnavailable, ClosePTYUpstreamTimeout,
+		ClosePTYUpstreamUnavailable, ClosePTYUpstreamTimeout, ClosePTYAttachUnsupported,
 	} {
 		if !seen[code] {
 			t.Errorf("contract constant %d has no fixture row", code)

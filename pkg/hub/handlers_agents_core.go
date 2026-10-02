@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -617,6 +618,30 @@ func (s *Server) addAgentCreateIfAnyProjectAllows(
 			}
 		}
 	}
+}
+
+// syncToGCSForWorkspaceUpload is gcp.SyncToGCS by default; a test replaces
+// it with a recording stub so the upload-guard wiring below can be verified
+// without a real GCS bucket or network access, and so a test can tell "the
+// guard refused this and the upload never ran" apart from "the upload itself
+// failed" -- the two are indistinguishable from the HTTP response alone,
+// since both are logged as warnings rather than surfaced as request errors.
+var syncToGCSForWorkspaceUpload = gcp.SyncToGCS
+
+// resolveHubManagedWorkspaceForUpload validates workspace -- normally
+// agent.AppliedConfig.Workspace, which starts as the caller-supplied
+// req.Workspace (buildAppliedConfig) and is only ever replaced by the
+// resolved hub-managed project path when the caller left it empty -- against
+// projectSlug's own managed path before it is used as a GCS upload source. A
+// non-empty, caller-supplied workspace otherwise reaches the upload
+// unresolved and unvalidated. Returns the resolved, symlink-free path to
+// upload, or an error naming why workspace was refused.
+func (s *Server) resolveHubManagedWorkspaceForUpload(workspace, projectSlug string) (string, error) {
+	workspaceRoot, err := s.hubManagedProjectPath(projectSlug)
+	if err != nil {
+		return "", err
+	}
+	return runtime.ValidateWorkspaceSource(workspace, workspaceRoot)
 }
 
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
@@ -1702,17 +1727,24 @@ func (s *Server) createAgentInProject(
 		if !hasLocalPath && !s.isEmbeddedBroker(runtimeBrokerID) {
 			stor := s.GetStorage()
 			if stor != nil {
-				storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
-				if err := gcp.SyncToGCS(ctx, agent.AppliedConfig.Workspace, stor.Bucket(), storagePath+"/files"); err != nil {
-					s.agentLifecycleLog.Warn("Failed to upload hub-managed project workspace to GCS",
+				resolvedWorkspace, workspaceErr := s.resolveHubManagedWorkspaceForUpload(agent.AppliedConfig.Workspace, project.Slug)
+				if workspaceErr != nil {
+					s.agentLifecycleLog.Warn("Skipping GCS upload of invalid hub-managed project workspace",
 						"agent_id", agent.ID,
-						"project_id", project.ID, "error", err)
+						"project_id", project.ID, "error", workspaceErr)
 				} else {
-					// Swap workspace to storage path for remote broker
-					agent.AppliedConfig.Workspace = ""
-					agent.AppliedConfig.WorkspaceStoragePath = storagePath
-					if err := s.store.UpdateAgent(ctx, agent); err != nil {
-						s.agentLifecycleLog.Warn("Failed to update agent with workspace storage path", "agent_id", agent.ID, "error", err)
+					storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
+					if err := syncToGCSForWorkspaceUpload(ctx, resolvedWorkspace, stor.Bucket(), storagePath+"/files"); err != nil {
+						s.agentLifecycleLog.Warn("Failed to upload hub-managed project workspace to GCS",
+							"agent_id", agent.ID,
+							"project_id", project.ID, "error", err)
+					} else {
+						// Swap workspace to storage path for remote broker
+						agent.AppliedConfig.Workspace = ""
+						agent.AppliedConfig.WorkspaceStoragePath = storagePath
+						if err := s.store.UpdateAgent(ctx, agent); err != nil {
+							s.agentLifecycleLog.Warn("Failed to update agent with workspace storage path", "agent_id", agent.ID, "error", err)
+						}
 					}
 				}
 			}
@@ -3188,6 +3220,17 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 		targetAgent, err := s.store.GetAgent(r.Context(), id)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
+			return
+		}
+
+		// --- Task 2.3 (ptone/scion#2197): message-raw bridge ---
+		// Classify raw before authorizeAgentMessage runs (contract §6.1's
+		// branch-point invariant): a raw-selected request is handled here
+		// entirely, through authorizeAgentKeys/ExecuteAgentKeys exclusively,
+		// and never reaches authorizeAgentMessage or handleAgentMessage. A
+		// non-raw request (including an unparseable body) falls through
+		// completely unaffected, with the body restored byte-for-byte.
+		if s.tryAgentKeysMessageBridge(w, r, targetAgent, id, "/api/v1/agents/"+targetAgent.ID+"/keys", false) {
 			return
 		}
 

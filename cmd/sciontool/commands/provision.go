@@ -7,8 +7,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -48,10 +50,24 @@ to prevent shell injection via crafted values.`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Wired locally to this one subcommand, not at the root command
+		// level: a pod deleted mid-provisioning sends this init container
+		// SIGTERM, and without this, cmd.Context() never observes it
+		// (rootCmd.Execute() does not itself install a signal-to-context
+		// handler). Cancelling the context here makes acquireFileLock's
+		// wait loop return promptly instead of running out its retry budget,
+		// and — since ProvisionShared's lock release is always deferred, and
+		// exec.CommandContext kills the in-flight git process on
+		// cancellation too — makes an in-progress holder's own defer still
+		// fire and release the lock cleanly, instead of leaving it for
+		// provisionLockStaleAfter to reclaim.
+		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+
 		if provisionWaitSentinel {
-			return runWaitForSentinel(cmd.Context())
+			return runWaitForSentinel(ctx)
 		}
-		return runProvision(cmd.Context())
+		return runProvision(ctx)
 	},
 }
 

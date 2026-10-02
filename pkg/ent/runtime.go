@@ -68,6 +68,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/google/uuid"
 )
 
@@ -1815,4 +1816,24 @@ func init() {
 	useraccesstokenDescID := useraccesstokenFields[0].Descriptor()
 	// useraccesstoken.DefaultID holds the default value on creation for the id field.
 	useraccesstoken.DefaultID = useraccesstokenDescID.Default.(func() uuid.UUID)
+	userterminalworkspaceFields := schema.UserTerminalWorkspace{}.Fields()
+	_ = userterminalworkspaceFields
+	// userterminalworkspaceDescSchemaVersion is the schema descriptor for schema_version field.
+	userterminalworkspaceDescSchemaVersion := userterminalworkspaceFields[4].Descriptor()
+	// userterminalworkspace.DefaultSchemaVersion holds the default value on creation for the schema_version field.
+	userterminalworkspace.DefaultSchemaVersion = userterminalworkspaceDescSchemaVersion.Default.(int)
+	// userterminalworkspaceDescRevision is the schema descriptor for revision field.
+	userterminalworkspaceDescRevision := userterminalworkspaceFields[5].Descriptor()
+	// userterminalworkspace.DefaultRevision holds the default value on creation for the revision field.
+	userterminalworkspace.DefaultRevision = userterminalworkspaceDescRevision.Default.(int64)
+	// userterminalworkspaceDescUpdateTime is the schema descriptor for update_time field.
+	userterminalworkspaceDescUpdateTime := userterminalworkspaceFields[6].Descriptor()
+	// userterminalworkspace.DefaultUpdateTime holds the default value on creation for the update_time field.
+	userterminalworkspace.DefaultUpdateTime = userterminalworkspaceDescUpdateTime.Default.(func() time.Time)
+	// userterminalworkspace.UpdateDefaultUpdateTime holds the default value on update for the update_time field.
+	userterminalworkspace.UpdateDefaultUpdateTime = userterminalworkspaceDescUpdateTime.UpdateDefault.(func() time.Time)
+	// userterminalworkspaceDescID is the schema descriptor for id field.
+	userterminalworkspaceDescID := userterminalworkspaceFields[0].Descriptor()
+	// userterminalworkspace.DefaultID holds the default value on creation for the id field.
+	userterminalworkspace.DefaultID = userterminalworkspaceDescID.Default.(func() uuid.UUID)
 }

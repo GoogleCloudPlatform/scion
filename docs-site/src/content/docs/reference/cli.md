@@ -149,7 +149,7 @@ Sends a message to a running agent or user.
     - `--plain`: *(Deprecated — will be removed.)*  Mark for plain-text delivery.
     - `--channel <channel>`: *(Deprecated — use conversation addressing instead.)* Target a specific message channel (e.g., `telegram`, `gchat`, `teams`, `web`).
     - `--thread-id <id>`: *(Deprecated — use conversation addressing instead.)* Target a specific thread ID within the channel.
-    - `--raw`: *(Deprecated — use `scion keys` instead.)* Send literal bytes via tmux send-keys with no trailing Enter. Only a plain message to a single agent in the same project is accepted; combining `--raw` with `--plain`, broadcast, groups, attachments, `--interrupt`, `--wake`, or conversation addressing is rejected (see [Raw Message Restrictions](/scion/reference/messaging-authorization/#raw-message-restrictions)).
+    - `--raw`: *(Deprecated — use `scion keys` instead.)* Hidden, migration-only alias for `scion keys`: it sends through the same keys operation (the Hub's `/keys` route in Hub mode, the same local keys primitive in local mode), never through the message path; do not use it in new scripts or skills. Only an ordinary message to a single agent in the same project is accepted: before sending anything, the CLI rejects `--raw` combined with `--plain`, `--attach`, `--interrupt`, `--wake`, `--notify`, `--cc`, `--in`/`--at`, `--channel`/`--thread-id`, user or `group[...]` recipients, conversation addressing other than a same-project agent, or a cross-project target.
     - `--in <duration>`: *(Deprecated — use `scion schedule create --in` instead.)* Schedule message delivery after a duration.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
 
@@ -193,9 +193,27 @@ This command replaces the removed `--broadcast` / `--all` flags on `scion messag
 
 ### `scion keys`
 
-Sends raw keystrokes to an agent's terminal via tmux `send-keys` with no trailing Enter. Supports control keys like arrows and Escape. Works for Hub-managed agents as well as local ones. When run by an agent, it can only target agents in the agent's own project — cross-project targets are refused; a human operator using `--project` can still target other projects. This command replaces the deprecated `--raw` flag on `scion message`.
+Sends literal terminal input to an agent's tmux session via `send-keys`, with no trailing Enter and no envelope. It is a distinct operation from messaging, authorized like terminal attach rather than like `scion message`.
 
 **Usage:** `scion keys <agent-name> <keys>`
+
+**One argument, one tmux argument — not a sequence.** The entire `<keys>` string becomes exactly one `send-keys` argument, in local mode and Hub mode alike. tmux recognizes a small set of named keys (`Enter`, `Escape`, `C-c`, arrow names, etc.; `Enter` is the canonical spelling) only when the *whole* argument matches one name exactly; anything else — including a string containing spaces — is typed character by character. `scion keys my-agent "Up Up Enter"` therefore sends the eleven literal characters `U`, `p`, ` `, `U`, `p`, ` `, `E`, `n`, `t`, `e`, `r`, not three key presses. The command takes exactly two arguments, so leaving the keys unquoted (e.g. `scion keys my-agent Up Up Enter`, four arguments) is rejected outright with an argument-count error rather than silently reinterpreted — quote any `<keys>` value containing spaces. To send multiple key presses, issue separate `scion keys` calls, one per press — there is no atomic multi-key sequence form.
+
+```bash
+scion keys my-agent "Escape"
+scion keys my-agent "C-c"
+scion keys my-agent "Enter"
+```
+
+**Project isolation.** When run by an agent, `scion keys` can only target agents in the agent's own project: cross-project targets are refused, both by the CLI itself and by the Hub's `/keys` authorization. A human operator using `--project` can target other projects — there is no blanket human cross-project ban — but in Hub mode needs attach authority on the target (the same authority as `scion attach`), not message authority. Local mode has no Hub authorization.
+
+**In Hub mode**, `scion keys` calls the Hub's dedicated keys operation described in [API Reference](/scion/reference/api/#agents-apiv1agents) (the project-scoped `/keys` route), never the message path. That means: input validation and bounding to 4096 UTF-8 bytes before dispatch (an empty `<keys>` string is rejected before any request is sent); authorization mirroring `agent.attach` (a human operator needs the same authority as opening a terminal — closed/`none` message mode does not block it, and message-only authority does not grant it; an agent caller additionally needs a live attach relationship on the target — see [Permissions & Policy](/scion/hosted/ha/permissions/)); a `409` rather than a wake/start for a stopped or suspended target, and a `503` (safe to retry only after fixing the route — never a `502`/`504`, which must never be retried automatically) for an unreachable broker or no immediate route; single-attempt delivery with no automatic retry, even if the client is configured with retries; no message, conversation, or terminal-content record, only content-free audit; and a `422 keys_unsupported` error for a managed-runtime target or an un-upgraded Runtime Broker — see [API Reference](/scion/reference/api/#agents-apiv1agents) for the full outcome table. A Hub predating the `/keys` route itself (rather than just an old broker behind an up-to-date Hub) answers with that Hub's own generic `404`. The CLI reports any `404`/`405` without an `operation_id` — an old Hub, or a project the Hub does not recognize — as a rejection (`hub_unsupported`), and never falls back to the message path.
+
+**Outcome reporting.** Every attempt resolves to one of three outcomes: `dispatched` (the Runtime Broker acknowledged terminal injection — not that the harness acted on it), `rejected` (definitely not delivered; safe to correct and retry), or `unknown` (may or may not have reached the terminal; check with `scion look` before resending). With `--format json`, the CLI prints exactly one result object on success or failure, including the outcome, the machine outcome code when known, and the Hub's `operation_id` when one was returned.
+
+**In local mode**, `scion keys` uses the local keys primitive with identical tmux-argument semantics and the same input validation (including rejecting an empty string). It works for projects linked to a Hub project and for purely local projects that never ran `scion hub enable`; the target is resolved within the selected project only, and an ambiguous match fails rather than guessing. There is no Hub authorization, rate limit, or audit record, since no Hub is involved.
+
+`scion message --raw` is the deprecated predecessor of this command, kept only as a hidden alias that sends through the same keys operation — new scripts and skills should call `scion keys` directly, never `--raw`.
 
 ### `scion set-message-mode`
 

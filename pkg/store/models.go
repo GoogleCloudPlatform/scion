@@ -724,6 +724,14 @@ type BrokerProfile struct {
 	Available bool   `json:"available"`
 	Context   string `json:"context,omitempty"`   // K8s context
 	Namespace string `json:"namespace,omitempty"` // K8s namespace
+	// Attach reports whether this profile's runtime supports interactive
+	// attach, mirrored from pkg/runtimebroker.BrokerProfile.Attach. A
+	// pointer, not a plain bool: a profile recorded from an older broker
+	// that predates this field decodes with Attach == nil, and nil must
+	// mean supported (the same missing-capability default
+	// pkg/runtime.HasAttachSupport uses), not false. A plain bool could not
+	// tell that "never reported" apart from an explicit false.
+	Attach *bool `json:"attach,omitempty"`
 }
 
 // ProjectProvider links a runtime broker to a project.
@@ -960,7 +968,8 @@ type User struct {
 type UserPreferences struct {
 	DefaultTemplate string `json:"defaultTemplate,omitempty"`
 	DefaultProfile  string `json:"defaultProfile,omitempty"`
-	Theme           string `json:"theme,omitempty"` // light, dark
+	Theme           string `json:"theme,omitempty"`    // light, dark
+	Timezone        string `json:"timezone,omitempty"` // IANA zone name; empty means Auto (browser zone)
 }
 
 // UserRole constants

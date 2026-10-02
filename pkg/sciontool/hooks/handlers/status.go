@@ -10,14 +10,23 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
+
+// agentInfoMaxBytes bounds readAgentInfoMap's read. A legitimate
+// agent-info.json is a small, flat JSON object; 1 MiB is generous headroom
+// with no legitimate case anywhere near it — see readAgentInfoMap's own
+// doc comment for why an unbounded read here is unsafe.
+const agentInfoMaxBytes = 1 << 20
 
 // StatusHandler manages agent status in a JSON file.
 type StatusHandler struct {
@@ -215,48 +224,63 @@ func (h *StatusHandler) updateActivityIfNotSticky(activity state.Activity, toolN
 	return h.writeAgentInfoLocked(info)
 }
 
-// readAgentInfoMap reads agent-info.json into a generic map, preserving all fields.
-// Caller must hold h.mu.
+// readAgentInfoMap reads agent-info.json into a generic map, preserving all
+// fields. Caller must hold h.mu.
+//
+// This handler is registered in the root PID-1 init process and is called
+// throughout the workload's lifetime (post-start, pre-stop, session-end,
+// limits-exceeded, auth-reset), while $HOME — which StatusPath lives in —
+// is owned outright by the workload. The workload can unlink and replace
+// agent-info.json with anything: a symlink, a FIFO, or an oversized file.
+// dirfd.ReadFileNoFollow refuses (rather than follows) a symlink at any
+// component, requires a single-link regular file, and bounds the read, so
+// none of those substitutions can make root either read arbitrary content
+// or block. In particular a FIFO with no writer must never hang this call:
+// this runs in root's own PID-1 process, and every lifecycle update that
+// depends on it (including the shutdown/limits paths) would stall with it.
+// Any refusal is logged and treated as "no prior state" — the same
+// non-fatal, empty-map fallback a missing file already produced — never a
+// crash or a propagated error.
 func (h *StatusHandler) readAgentInfoMap() map[string]interface{} {
 	info := make(map[string]interface{})
-	if data, err := os.ReadFile(h.StatusPath); err == nil {
-		_ = json.Unmarshal(data, &info)
+	data, err := dirfd.ReadFileNoFollow(h.StatusPath, agentInfoMaxBytes)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Error("Refusing to read %s: %v", h.StatusPath, err)
+		}
+		return info
 	}
+	_ = json.Unmarshal(data, &info)
 	return info
 }
 
 // writeAgentInfoLocked writes the agent info map to disk atomically.
 // Caller must hold h.mu.
+//
+// dirfd.WriteFileNoFollow creates the temp file in StatusPath's parent
+// directory via that directory's own no-follow fd, sets its mode via fchmod
+// on the open fd, and renames it into place with a single fd-relative
+// rename — never a path-based os.Chmod, which a symlink swapped into the
+// temp file's directory entry between create and chmod (something the
+// workload can always do, since it owns the containing directory) could
+// otherwise redirect onto an arbitrary target's permissions. dirfd.ReplaceLeaf
+// is the right policy here, not dirfd.RefuseSymlink: StatusPath lives inside
+// a directory the workload owns outright, so a symlink already there is a
+// stale leaf to overwrite on this write, exactly like every other write —
+// refusing it would buy nothing, since the read side (readAgentInfoMap,
+// above) already refuses to follow it regardless of what this write does.
 func (h *StatusHandler) writeAgentInfoLocked(info map[string]interface{}) error {
 	data, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling status: %w", err)
 	}
 
-	dir := filepath.Dir(h.StatusPath)
-	tmpFile, err := os.CreateTemp(dir, "agent-info-*.json")
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
+	// Widen to 0644 (CreateExclAt's own default is 0600) so the broker
+	// process — which may run as a different uid than the container init —
+	// can read and converge the file after the container exits.
+	if err := dirfd.WriteFileNoFollow(h.StatusPath, data, 0644, 0, 0, dirfd.ReplaceLeaf); err != nil {
+		return fmt.Errorf("writing %s: %w", h.StatusPath, err)
 	}
-	tmpPath := tmpFile.Name()
-
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("writing temp file: %w", err)
-	}
-	_ = tmpFile.Close()
-
-	// CreateTemp uses mode 0600. Widen to 0644 so the broker process
-	// (which may run as a different uid than the container init) can
-	// read and converge the file after the container exits.
-	os.Chmod(tmpPath, 0644) //nolint:errcheck
-
-	if err := os.Rename(tmpPath, h.StatusPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("atomic rename: %w", err)
-	}
-
 	return nil
 }
 

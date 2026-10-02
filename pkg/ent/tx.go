@@ -138,6 +138,8 @@ type Tx struct {
 	User *UserClient
 	// UserAccessToken is the client for interacting with the UserAccessToken builders.
 	UserAccessToken *UserAccessTokenClient
+	// UserTerminalWorkspace is the client for interacting with the UserTerminalWorkspace builders.
+	UserTerminalWorkspace *UserTerminalWorkspaceClient
 
 	// lazily loaded.
 	client     *Client
@@ -332,6 +334,7 @@ func (tx *Tx) init() {
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.User = NewUserClient(tx.config)
 	tx.UserAccessToken = NewUserAccessTokenClient(tx.config)
+	tx.UserTerminalWorkspace = NewUserTerminalWorkspaceClient(tx.config)
 }
 
 // txDriver wraps the given dialect.Tx with a nop dialect.Driver implementation.

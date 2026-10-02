@@ -22,6 +22,7 @@ import {
   TERMINAL_DRAG_MIME,
   type TerminalSessionCountDetail,
 } from './terminal-workspace-events.js';
+import { enterAppFrame, exitAppFrame } from '../components/shared/app-frame.js';
 import '../components/shared/header.js';
 import '../components/terminal/terminal-pane.js';
 
@@ -113,13 +114,32 @@ export class TerminalWorkspaceRoot {
    */
   private suppressUrlSync = false;
 
+  /**
+   * True while restore() is creating background (deferConnect) entries via
+   * the coordinator. Suppresses syncSessions()'s auto-select-last-session
+   * behavior so a restored entry
+   * does not steal the frontmost slot; the persistence module selects the
+   * saved frontmost explicitly, outside this suspension.
+   */
+  private autoSelectSuspended = false;
+
   private user: User | null = null;
+
+  /**
+   * Tracks whether this root currently holds a frame-mode reference, so
+   * `show()` only calls `enterAppFrame()`/`exitAppFrame()` on an actual
+   * visibility transition — repeated `show(true)` calls for successive
+   * `/terminals` navigations (see `main.ts`'s router) must not inflate the
+   * shared ref count.
+   */
+  private _frameEntered = false;
 
   constructor(user: User | null = null) {
     this.user = user;
     this.element.id = 'terminal-workspace';
     this.element.hidden = true;
-    this.element.style.cssText = 'height:100vh;min-height:0;display:none;flex-direction:column';
+    this.element.style.cssText =
+      'height:var(--scion-app-height, 100dvh);min-height:0;display:none;flex-direction:column';
     this.element.className = 'terminal-workspace-root';
     // Expose workspace root on the element for coordinator and test access.
     (this.element as HTMLElement & { workspaceRoot?: TerminalWorkspaceRoot }).workspaceRoot = this;
@@ -304,7 +324,11 @@ export class TerminalWorkspaceRoot {
     this.header.currentPath = path;
   }
 
-  create(registry: TerminalSessionRegistry, agentId: string): TerminalSession {
+  create(
+    registry: TerminalSessionRegistry,
+    agentId: string,
+    options?: { deferConnect?: boolean }
+  ): TerminalSession {
     this.bindRegistry(registry);
     const pane = document.createElement('scion-terminal-pane');
     pane.className = 'terminal-pane';
@@ -313,16 +337,38 @@ export class TerminalWorkspaceRoot {
     pane.setVisible(false);
     this.paneHost.appendChild(pane);
     try {
-      const session = pane.open(registry, agentId);
+      const session = pane.open(registry, agentId, options);
       this.panes.set(session.state.key, pane);
-      // Check overflow: if the current multi preset is at capacity, switch to
-      // single so the newly opened agent is visible.  Multi-pane assignments
-      // are preserved — the user can switch back to see the prior grid.
-      this.layoutManager.open(session.state.key);
+      // deferConnect entries are restored in the background: they must not
+      // become visible or selected, so layoutManager.open() (which would
+      // show/select them) is skipped. The caller selects the frontmost
+      // entry separately.
+      if (!options?.deferConnect) {
+        // Check overflow: if the current multi preset is at capacity, switch to
+        // single so the newly opened agent is visible.  Multi-pane assignments
+        // are preserved — the user can switch back to see the prior grid.
+        this.layoutManager.open(session.state.key);
+      }
       return session;
     } catch (error) {
       pane.remove();
       throw error;
+    }
+  }
+
+  /**
+   * Runs fn with the auto-select-last-session behavior in syncSessions()
+   * suspended, so entries created inside fn (typically background restore
+   * entries) never displace whatever is already selected. See
+   * autoSelectSuspended.
+   */
+  withAutoSelectSuspended<T>(fn: () => T): T {
+    const previous = this.autoSelectSuspended;
+    this.autoSelectSuspended = true;
+    try {
+      return fn();
+    } finally {
+      this.autoSelectSuspended = previous;
     }
   }
 
@@ -351,6 +397,13 @@ export class TerminalWorkspaceRoot {
   show(visible: boolean): void {
     this.element.hidden = !visible;
     this.element.style.display = visible ? 'flex' : 'none';
+    if (visible && !this._frameEntered) {
+      this._frameEntered = true;
+      enterAppFrame();
+    } else if (!visible && this._frameEntered) {
+      this._frameEntered = false;
+      exitAppFrame();
+    }
     this.refreshPaneVisibility();
   }
 
@@ -413,7 +466,13 @@ export class TerminalWorkspaceRoot {
             // (ptone/scion#2096); treat both the same so a crashed agent's
             // pane also re-arms once it is running again.
             (next.agent?.phase === 'stopped' || next.agent?.phase === 'error') &&
-            entry.session.state.connection !== 'closed'
+            entry.session.state.connection !== 'closed' &&
+            // Idle entries (restored, not yet connected) stay idle while
+            // their agent is stopped: marking a never-connected entry
+            // unavailable would strand it, since noteAgentAvailable()'s
+            // re-arm requires everConnected. Selecting it later behaves like
+            // opening a stopped agent's terminal today.
+            entry.session.state.connection !== 'idle'
           ) {
             if (entry.session.state.connection !== 'unavailable') {
               entry.session.markUnavailable('agent-stopped', AGENT_STOPPED_MESSAGE);
@@ -450,9 +509,11 @@ export class TerminalWorkspaceRoot {
       });
       this.entries.set(session.state.key, entry);
     }
-    // If no active session, auto-select via layout manager
+    // If no active session, auto-select via layout manager. Suspended while
+    // restore() creates background entries (autoSelectSuspended), so a
+    // restored entry never displaces the frontmost slot on its own.
     const currentSlots = this.layoutManager.getVisibleSlots();
-    if (!currentSlots.some((s) => s !== null) && sessions.length > 0) {
+    if (!currentSlots.some((s) => s !== null) && sessions.length > 0 && !this.autoSelectSuspended) {
       this.layoutManager.open(sessions[sessions.length - 1].state.key);
     }
     this.refresh();
@@ -798,6 +859,9 @@ export class TerminalWorkspaceRoot {
       entry.state.connection === 'connecting' ||
       entry.state.connection === 'connected' ||
       entry.state.connection === 'closed' ||
+      // Idle entries connect via selection (setFrontmost), not the rail's
+      // manual Reconnect action.
+      entry.state.connection === 'idle' ||
       entry.state.disconnectReason === 'agent-deleted';
     reconnect.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -1449,6 +1513,8 @@ export class TerminalWorkspaceRoot {
 
 function connectionLabel(state: TerminalConnectionState): string {
   switch (state) {
+    case 'idle':
+      return 'Not connected';
     case 'loading':
       return 'Pending';
     case 'connecting':
@@ -1465,7 +1531,13 @@ function connectionLabel(state: TerminalConnectionState): string {
 }
 
 function disconnectLabel(state: TerminalConnectionState, reason: TerminalDisconnectReason): string {
-  if (state === 'connected' || state === 'loading' || state === 'connecting' || state === 'closed')
+  if (
+    state === 'connected' ||
+    state === 'loading' ||
+    state === 'connecting' ||
+    state === 'closed' ||
+    state === 'idle'
+  )
     return connectionLabel(state);
   switch (reason) {
     case 'auth-401':

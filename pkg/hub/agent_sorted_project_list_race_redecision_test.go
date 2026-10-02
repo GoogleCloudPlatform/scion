@@ -129,7 +129,7 @@ func (o *ownerChangingAfterMembersStore) ListAgentMembers(ctx context.Context, f
 			return
 		}
 		a.OwnerID = o.newOwnerID
-		_ = o.Store.UpdateAgent(ctx, a)
+		_ = o.UpdateAgent(ctx, a)
 	})
 	return members, nil
 }
@@ -271,12 +271,12 @@ func (l *labelsNilToEmptyAfterMembersStore) ListAgentMembers(ctx context.Context
 		return nil, err
 	}
 	l.once.Do(func() {
-		a, gerr := l.Store.GetAgent(ctx, l.agentID)
+		a, gerr := l.GetAgent(ctx, l.agentID)
 		if gerr != nil {
 			return
 		}
 		a.Labels = map[string]string{}
-		_ = l.Store.UpdateAgent(ctx, a)
+		_ = l.UpdateAgent(ctx, a)
 	})
 	return members, nil
 }
@@ -322,12 +322,12 @@ func (f *fieldMutatingAfterMembersStore) ListAgentMembers(ctx context.Context, f
 		return nil, err
 	}
 	f.once.Do(func() {
-		a, gerr := f.Store.GetAgent(ctx, f.agentID)
+		a, gerr := f.GetAgent(ctx, f.agentID)
 		if gerr != nil {
 			return
 		}
 		f.mutate(a)
-		_ = f.Store.UpdateAgent(ctx, a)
+		_ = f.UpdateAgent(ctx, a)
 	})
 	return members, nil
 }

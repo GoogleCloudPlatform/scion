@@ -653,11 +653,11 @@ func (e *brokerStatusError) brokerErrorMessage() string {
 	return strings.TrimSpace(e.Body)
 }
 
-// brokerErrorCode returns the top-level error.code from a broker JSON error
-// body, or "" if the body is not in that form. Used to identify a
-// skill-resolution failure (ErrCodeSkillResolution) so its status and message
-// can be relayed verbatim instead of folded into the generic dispatch 502
-// (#2546 R2).
+// brokerErrorCode returns the machine-readable code from a broker JSON error
+// body ({"error":{"code":...}}), or "" if the body is not in that form. Used,
+// among other call sites, to identify a skill-resolution failure
+// (ErrCodeSkillResolution) so its status and message can be relayed verbatim
+// instead of folded into the generic dispatch 502 (#2546 R2).
 func (e *brokerStatusError) brokerErrorCode() string {
 	var body struct {
 		Error struct {

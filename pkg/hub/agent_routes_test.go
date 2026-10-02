@@ -181,6 +181,7 @@ func TestResolveAgentSubRoute_RejectsUnknownAndMalformed(t *testing.T) {
 		{http.MethodGet, "/api/v1/agents/%2E%2E/logs"},
 		{http.MethodGet, "/api/v1/agents/a%zz/logs"},
 		{http.MethodGet, "/api/v1/agents/a/ports/3%2F0/proxy"},
+		{http.MethodGet, "/api/v1/agents/a/ports/3%000/proxy"},
 		{http.MethodPost, "/api/v1/agents/stop-all/x"},
 		{http.MethodGet, "/api/v1/projects/p/agents/a/pty"},
 		{http.MethodGet, "/api/v1/projects/p/agents/a/groups"},
@@ -198,6 +199,15 @@ func TestResolveAgentSubRoute_RejectsUnknownAndMalformed(t *testing.T) {
 		_, ok := ResolveAgentSubRoute(tc.method, tc.path)
 		assert.False(t, ok, "%s %s must not resolve", tc.method, tc.path)
 	}
+}
+
+// TestAgentRouteSegment_NULRejectedByEachCheck pins the escaped-form and
+// decoded-form null-byte checks independently, so that removing either one
+// on its own fails a test.
+func TestAgentRouteSegment_NULRejectedByEachCheck(t *testing.T) {
+	assert.False(t, agentRouteGrammarSegmentOK("a%00b"), "escaped-form check")
+	_, ok := decodeAgentRouteSegment("a\x00b")
+	assert.False(t, ok, "decoded-form check")
 }
 
 // TestResolveAgentSubRoute_ClientPaths pins that every agent path the CLI

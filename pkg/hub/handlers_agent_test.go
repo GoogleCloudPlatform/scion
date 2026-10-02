@@ -817,6 +817,7 @@ type createAgentDispatcher struct {
 	// ptone/scion#1986) can read it back after the HTTP response, which for
 	// a failure path never echoes the ID.
 	capturedAgent *store.Agent
+	logsErr       error
 }
 
 func (d *createAgentDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) error {
@@ -892,7 +893,7 @@ func (d *failingCreateDispatcher) DispatchAgentDelete(_ context.Context, _ *stor
 	return nil
 }
 func (d *createAgentDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
-	return "", nil
+	return "", d.logsErr
 }
 func (d *createAgentDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
 	return d.execOutput, d.execExitCode, nil
