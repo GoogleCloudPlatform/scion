@@ -39,18 +39,17 @@ type projectMemberInfo struct {
 	Source               string `json:"source"` // "direct" for direct bindings
 	PrincipalDisplayName string `json:"principalDisplayName,omitempty"`
 	CreatedByDisplayName string `json:"createdByDisplayName,omitempty"`
-	// RoleKind is "builtin" or "custom". Additive field (ptone/scion#2529 P1,
-	// design.md §3.1); every existing consumer of projectMemberInfo ignores
-	// unknown JSON fields. No `omitempty` (review r1 L5): design.md §3.1 says
-	// it appears "on every endpoint", and every construction site sets it via
-	// projectRoleKind, so it is never the empty string in practice.
+	// RoleKind is "builtin" or "custom". Additive field (ptone/scion#2529 P1);
+	// every existing consumer of projectMemberInfo ignores unknown JSON
+	// fields. No `omitempty` (review r1 L5): the field must appear on every
+	// endpoint that returns a binding, and every construction site sets it
+	// via projectRoleKind, so it is never the empty string in practice.
 	RoleKind string `json:"roleKind"`
 }
 
 // projectMemberGroup is one principal's project membership: its built-in
 // role (if any) plus every custom role it holds, as returned by
-// PUT/DELETE …/members/principals/{type}/{id} (ptone/scion#2529 P1,
-// design.md §3.1).
+// PUT/DELETE …/members/principals/{type}/{id} (ptone/scion#2529 P1).
 type projectMemberGroup struct {
 	PrincipalType        string              `json:"principalType"`
 	PrincipalID          string              `json:"principalId"`
@@ -58,8 +57,8 @@ type projectMemberGroup struct {
 	BuiltInRoleName      string              `json:"builtInRoleName"`
 	Bindings             []projectMemberInfo `json:"bindings"`
 	// Changed deliberately has no `omitempty`: the idempotent PUT response
-	// must show `"changed":false` explicitly (design.md §3.6), not omit the
-	// field, so clients can distinguish it from a response that never set it.
+	// must show `"changed":false` explicitly, not omit the field, so clients
+	// can distinguish it from a response that never set it.
 	Changed bool `json:"changed"`
 }
 
@@ -269,8 +268,8 @@ func (s *Server) addProjectMember(w http.ResponseWriter, r *http.Request, projec
 	}
 
 	// Resolve a user email or group slug to its canonical ID (extracted as
-	// resolveMemberPrincipal, design.md §3.1, so the PUT/DELETE principal
-	// endpoints share this resolution logic with POST).
+	// resolveMemberPrincipal so the PUT/DELETE principal endpoints share
+	// this resolution logic with POST).
 	if req.PrincipalType == store.RoleBindingPrincipalUser || req.PrincipalType == store.RoleBindingPrincipalGroup {
 		resolvedID, err := s.resolveMemberPrincipal(ctx, req.PrincipalType, req.PrincipalID)
 		if err != nil {
@@ -562,7 +561,7 @@ const ErrCodePrincipalIneligible = "principal_ineligible"
 
 // ---------------------------------------------------------------------------
 // resolveMemberPrincipal — shared user-email / group-slug resolution
-// (ptone/scion#2529 P1, design.md §3.1). Extracted from addProjectMember so
+// (ptone/scion#2529 P1). Extracted from addProjectMember so
 // POST /members and PUT/DELETE …/members/principals/{type}/{id} resolve
 // principals the same way. Returns store.ErrNotFound when a user email or
 // group slug does not resolve; callers format their own error message so
@@ -604,7 +603,7 @@ func (s *Server) resolveMemberPrincipal(ctx context.Context, principalType, prin
 // ---------------------------------------------------------------------------
 // PUT/DELETE /api/v1/projects/{id}/members/principals/{principalType}/{principalId}
 // — atomic "set this principal's whole project role set" (ptone/scion#2529
-// P1, design.md §3.1, §3.2).
+// P1).
 // ---------------------------------------------------------------------------
 
 // setMemberRolesRequestBody is the payload for
@@ -653,8 +652,9 @@ func (s *Server) putProjectMemberPrincipal(w http.ResponseWriter, r *http.Reques
 	// agent token (which no permission in the registry maps project.manage
 	// to, so it can never pass the authorize() call below anyway) would
 	// still surface as a generic resource-authorization denial rather than
-	// the credential_insufficient code design.md §12 P1 / acceptance 7 ask
-	// for uniformly across UAT and agent credentials.
+	// the credential_insufficient code the PUT/DELETE acceptance criteria
+	// (ptone/scion#2529 acceptance 7) ask for uniformly across UAT and agent
+	// credentials.
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
@@ -797,7 +797,7 @@ func (s *Server) deleteProjectMemberPrincipal(w http.ResponseWriter, r *http.Req
 // buildProjectMemberGroup assembles the projectMemberGroup response for the
 // PUT/DELETE principal endpoints from the principal's post-state bindings.
 // Bindings are ordered built-in first, then custom roles alphabetically by
-// name (design.md §3.1).
+// name.
 func (s *Server) buildProjectMemberGroup(ctx context.Context, principalType, principalID string, bindings []*store.RoleBinding) *projectMemberGroup {
 	group := &projectMemberGroup{
 		PrincipalType: principalType,

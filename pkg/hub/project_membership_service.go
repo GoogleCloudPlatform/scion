@@ -687,8 +687,9 @@ const (
 )
 
 // projectRoleKind returns roleKindBuiltIn or roleKindCustom for a
-// project-scoped role name (design.md §3.1's additive roleKind field). N1
-// (review r1): this was previously inlined at four call sites
+// project-scoped role name, for the additive roleKind response field
+// (ptone/scion#2529 P1). N1 (review r1): this was previously inlined at four
+// call sites
 // (list/add/buildProjectMemberGroup in handlers_project_members.go, plus the
 // audit code in project_membership_set.go); extracted here so there is
 // exactly one definition of "builtin" vs "custom" for display and audit
@@ -1663,18 +1664,21 @@ func (svc *ProjectMembershipService) highestAuthorityBindingFromStore(ctx contex
 // applyRolePlanTx applies one rolePlan's mutations inside an open
 // SetMemberRoles transaction (ptone/scion#2529 P1, project_membership_set.go):
 // every Remove is deleted, then every Create is created (D4 partial unique
-// index ordering, design.md §3.2 Phase T step 5). The new binding half of
-// plan.BuiltInChange, if any, inherits NotBefore/ExpiresAt from the old
-// binding it replaces; every other create uses notBefore/expiresAt as given.
+// index ordering: a stale not-yet-deleted binding row must not collide with
+// the new one). The new binding half of plan.BuiltInChange, if any, inherits
+// NotBefore/ExpiresAt from the old binding it replaces; every other create
+// uses notBefore/expiresAt as given.
 //
 // This is the ONLY place SetMemberRoles mutates role bindings, and it is a
 // purpose-named step — not a reusable forwarder — so the authzop mutation
 // catalog (catalog.go) can classify it as exactly what it is: the governed
 // delete-then-create step of the membership service's "set roles for
 // principal" engine (review r1 F3). By the time this is called,
-// SetMemberRoles has already run the credential gate, the governance matrix
-// / custom-role authority (design-d3-addendum.md) including the F1
-// role_binding.* structural guard, and CanDelegate — the same ordering
+// SetMemberRoles has already run the credential gate and CanDelegate
+// pre-transaction, and has re-evaluated governance/custom-role authority —
+// including the F1 role_binding.* structural guard and an actor-authority-
+// change check (review r2 R2-2) — under the project lock inside this same
+// transaction, immediately before this call. This is the same ordering
 // AddMember/UpdateMemberRole/TransferOwnership use before replaceBindingTx
 // above. The last-owner check runs AFTER this call, inside the same
 // transaction: it is a post-state count over the full binding set (the
