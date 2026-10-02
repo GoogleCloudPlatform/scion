@@ -1071,7 +1071,27 @@ authDone:
 	// On resume/restart opts.Workspace is empty, so re-derive the explicit intent
 	// from the persisted config to keep the explicit workspace plain-mounted.
 	explicitWorkspace := opts.Workspace != "" || (finalScionCfg != nil && finalScionCfg.ExplicitWorkspace)
-	repoRoot := detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
+
+	// A broker-provisioned worktree-per-agent workspace (runtimebroker's
+	// tryProvisionWorktree) already knows its own repo root — resolve it
+	// directly instead of routing through detectRepoRoot, whose
+	// explicit-workspace skip exists for a user's own --workspace override
+	// and must not swallow the broker's own worktree provisioning too
+	// (that would leave in-container git broken: no /repo-root/.git mount).
+	// Priority: a fresh signal on ctx (this dispatch just ran
+	// tryProvisionWorktree) beats the persisted value (recovered on
+	// resume/restart, when the broker does not re-run tryProvisionWorktree and
+	// ctx carries nothing fresh). A user --workspace override sets neither, so
+	// it always falls through to detectRepoRoot and stays "".
+	var repoRoot string
+	switch {
+	case api.ProvisionedWorktreeRepoRootFromContext(ctx) != "":
+		repoRoot = api.ProvisionedWorktreeRepoRootFromContext(ctx)
+	case finalScionCfg != nil && finalScionCfg.ProvisionedWorktreeRepoRoot != "":
+		repoRoot = finalScionCfg.ProvisionedWorktreeRepoRoot
+	default:
+		repoRoot = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
+	}
 
 	// Reject a workspace source that is not an allowed workspace path before
 	// anything derived from it is used to set up a mount. This also catches

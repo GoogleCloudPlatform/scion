@@ -999,6 +999,13 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Check for git clone mode from context
 	gitClone := api.GitCloneFromContext(ctx)
 
+	// Non-empty when `workspace` is a broker-PROVISIONED worktree-per-agent
+	// checkout (tryProvisionWorktree in pkg/runtimebroker), not a user
+	// --workspace override. Persisted below alongside ExplicitWorkspace so
+	// run.go's Start can resolve RepoRoot directly on resume, when the broker
+	// does not re-run tryProvisionWorktree and ctx carries no fresh signal.
+	provisionedWorktreeRepoRoot := api.ProvisionedWorktreeRepoRootFromContext(ctx)
+
 	// Reject relative workspace for git-clone projects early, before the
 	// workspace resolution logic where gitClone takes priority.
 	if gitClone != nil && workspace != "" && !filepath.IsAbs(workspace) {
@@ -1797,6 +1804,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	if explicitWorkspace {
 		finalScionCfg.ExplicitWorkspace = true
+	}
+	if provisionedWorktreeRepoRoot != "" {
+		finalScionCfg.ProvisionedWorktreeRepoRoot = provisionedWorktreeRepoRoot
 	}
 
 	// Update agent-specific scion-agent.json

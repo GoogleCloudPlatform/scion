@@ -3091,7 +3091,7 @@ func TestResolveWorktreeProvision_Eligible(t *testing.T) {
 		if result.ShouldProvision {
 			t.Fatal("expected ShouldProvision=false when git is too old")
 		}
-		t.Skip("git < 2.47, worktree mode not eligible on this host")
+		t.Skip("git < 2.48, worktree mode not eligible on this host")
 	}
 
 	if !result.ShouldProvision {
@@ -3130,7 +3130,7 @@ func TestResolveWorktreeProvision_BranchOverridesAgentName(t *testing.T) {
 	projectDir := t.TempDir()
 	eligible, _ := runtime.WorktreeModeEligible()
 	if !eligible {
-		t.Skip("git < 2.47, worktree mode not eligible on this host")
+		t.Skip("git < 2.48, worktree mode not eligible on this host")
 	}
 
 	result := resolveWorktreeProvision(worktreeProvisionInput{
@@ -3356,15 +3356,15 @@ func TestResolveWorktreeProvision_GitTooOld_Fallback(t *testing.T) {
 		AgentID:     "agent-1",
 		AgentName:   "test-agent",
 		eligibilityOverride: func() (bool, string) {
-			return false, "git >= 2.47.0 required for worktree-per-agent mode (--relative-paths), found 2.39.0"
+			return false, "git >= 2.48.0 required for worktree-per-agent mode (--relative-paths), found 2.39.0"
 		},
 	})
 
 	if result.ShouldProvision {
 		t.Fatal("expected ShouldProvision=false when git is too old")
 	}
-	if !strings.Contains(result.Reason, "2.47") {
-		t.Errorf("expected reason to mention git 2.47 requirement, got %q", result.Reason)
+	if !strings.Contains(result.Reason, "2.48") {
+		t.Errorf("expected reason to mention git 2.48 requirement, got %q", result.Reason)
 	}
 	if result.ProvisionInput.ProjectID != "" {
 		t.Error("expected empty ProvisionInput when ineligible")
@@ -3408,7 +3408,7 @@ func TestResolveWorktreeProvision_KubernetesNodeLocal_Rejected(t *testing.T) {
 func TestResolveWorktreeProvision_DockerRuntime_NotRejected(t *testing.T) {
 	eligible, _ := runtime.WorktreeModeEligible()
 	if !eligible {
-		t.Skip("git < 2.47, worktree mode not eligible on this host")
+		t.Skip("git < 2.48, worktree mode not eligible on this host")
 	}
 
 	projectDir := t.TempDir()
@@ -3435,7 +3435,7 @@ func TestResolveWorktreeProvision_DockerRuntime_NotRejected(t *testing.T) {
 func TestResolveWorktreeProvision_EmptyRuntime_NotRejected(t *testing.T) {
 	eligible, _ := runtime.WorktreeModeEligible()
 	if !eligible {
-		t.Skip("git < 2.47, worktree mode not eligible on this host")
+		t.Skip("git < 2.48, worktree mode not eligible on this host")
 	}
 
 	projectDir := t.TempDir()
@@ -3460,7 +3460,7 @@ func TestResolveWorktreeProvision_EmptyRuntime_NotRejected(t *testing.T) {
 func TestResolveWorktreeProvision_FullCloneDepth(t *testing.T) {
 	eligible, _ := runtime.WorktreeModeEligible()
 	if !eligible {
-		t.Skip("git < 2.47, worktree mode not eligible on this host")
+		t.Skip("git < 2.48, worktree mode not eligible on this host")
 	}
 
 	projectDir := t.TempDir()
@@ -3571,7 +3571,7 @@ func TestTryProvisionWorktree_JoinResolvesSharedPath(t *testing.T) {
 
 	// Provision agent-b with --branch "agent-a" → should JOIN, not fail.
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, repoRoot, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-b", AgentID: "agent-b",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -3583,6 +3583,9 @@ func TestTryProvisionWorktree_JoinResolvesSharedPath(t *testing.T) {
 
 	if !ok {
 		t.Fatal("expected JOIN to succeed, got ok=false (fell back to clone-per-agent)")
+	}
+	if repoRoot != base {
+		t.Errorf("repoRoot = %q, want %q (the shared base)", repoRoot, base)
 	}
 
 	// opts.Workspace must point to agent-a's worktree (the shared path).

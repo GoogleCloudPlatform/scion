@@ -53,6 +53,15 @@ type startContext struct {
 	// yet (GoogleCloudPlatform/scion#127 P3b); this exists so the broker's
 	// own classifications survive the function that computes them.
 	EnvClassifications map[string]api.EnvKind
+
+	// ProvisionedWorktreeRoot is the shared-base repo root when
+	// tryProvisionWorktree provisioned a broker-managed worktree for this
+	// dispatch, or "" otherwise. It never crosses the wire — it is broker-local
+	// state, discovered only as a side effect of buildStartContext's own
+	// provisioning work. The caller threads it onto ctx via
+	// api.ContextWithProvisionedWorktree before calling Manager.Start/Provision,
+	// exactly like withHubAgentDefaults threads req.Config's agent_defaults.
+	ProvisionedWorktreeRoot string
 }
 
 // startContextInputs captures the handler-specific fields that vary across
@@ -730,9 +739,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// or if git is too old (< 2.47) — but only when this call has not yet
 	// created the agent's own worktree; see tryProvisionWorktree.
 	worktreeProvisioned := false
+	var provisionedWorktreeRoot string
 	if in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
 		var err error
-		worktreeProvisioned, err = s.tryProvisionWorktree(ctx, in, &opts, env)
+		worktreeProvisioned, provisionedWorktreeRoot, err = s.tryProvisionWorktree(ctx, in, &opts, env)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			return nil, &startContextError{Status: http.StatusInternalServerError, Message: err.Error()}
@@ -859,10 +869,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	downgradeUnverifiedHubDefaultPassthrough(env, envCls, gcpMetadataMode, requireLocalRuntime, dispatchRuntimeType)
 
 	return &startContext{
-		Opts:               opts,
-		TemplateSlug:       templateSlug,
-		Manager:            mgr,
-		EnvClassifications: envCls,
+		Opts:                    opts,
+		TemplateSlug:            templateSlug,
+		Manager:                 mgr,
+		EnvClassifications:      envCls,
+		ProvisionedWorktreeRoot: provisionedWorktreeRoot,
 	}, nil
 }
 
@@ -1208,10 +1219,23 @@ func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
 
 // tryProvisionWorktree attempts to provision a per-agent worktree on the host
 // for worktree-per-agent mode. On success it sets opts.Workspace to the
-// worktree path and returns true (opts.GitClone is NOT set, suppressing the
-// in-container clone). On failure or if git is too old, it logs a warning and
-// returns false so the caller falls through to clone-per-agent.
-func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs, opts *api.StartOptions, env map[string]string) (bool, error) {
+// worktree path and returns (true, repoRoot, nil), where repoRoot is the
+// shared base clone's path — the git repo root that owns this worktree
+// (opts.GitClone is NOT set, suppressing the in-container clone). On an
+// ordinary fallback condition (git too old, no valid worktree-per-agent
+// input) it logs a warning and returns (false, "", nil) so the caller falls
+// through to clone-per-agent. On a condition that must not silently fall
+// back (missing agent identity on a start dispatch, or a pre-existing
+// worktree this call must not touch or replace), it returns a non-nil error
+// instead so the caller fails the dispatch.
+//
+// The caller threads repoRoot onto ctx via api.ContextWithProvisionedWorktree
+// so pkg/agent/run.go's Start can resolve RunConfig.RepoRoot directly for
+// this workspace, instead of routing it through detectRepoRoot's
+// explicit-`--workspace`-skips-detection heuristic — that heuristic exists
+// for a user's own --workspace override and must not swallow the broker's
+// own worktree provisioning too.
+func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs, opts *api.StartOptions, env map[string]string) (bool, string, error) {
 	runtimeName := ""
 	if s.runtime != nil {
 		runtimeName = s.runtime.Name()
@@ -1236,13 +1260,13 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		// whatever this agent's real worktree holds, and there is no way to
 		// tell from here whether one exists.
 		if result.MissingIdentity && in.Operation != opCreate {
-			return false, fmt.Errorf("worktree-per-agent: agent identity is not available for this start dispatch")
+			return false, "", fmt.Errorf("worktree-per-agent: agent identity is not available for this start dispatch")
 		}
 		if result.Reason != "" {
 			slog.Warn("worktree-per-agent: falling back to clone-per-agent",
 				"agent_id", in.AgentID, "reason", result.Reason)
 		}
-		return false, nil
+		return false, "", nil
 	}
 
 	// Set Ctx from the buildStartContext context.
@@ -1272,7 +1296,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	// fresh by ensureWorktree.
 	worktreesDir := filepath.Join(result.ProjectRoot, "worktrees")
 	if wtInfo, statErr := os.Lstat(worktreesDir); statErr == nil && wtInfo.Mode()&os.ModeSymlink != 0 {
-		return false, fmt.Errorf("worktree-per-agent: %s must not be a symlink", worktreesDir)
+		return false, "", fmt.Errorf("worktree-per-agent: %s must not be a symlink", worktreesDir)
 	}
 
 	// Record whether this agent's own worktree, or the worktree of another
@@ -1304,7 +1328,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	// either the sentinel or the shared base's .git is missing, which is a
 	// superset of that trigger condition.
 	if preExisted && !worktreeBaseIsProvisioned(result.ProvisionInput) {
-		return false, fmt.Errorf("worktree-per-agent: the existing worktree for agent %q is missing its provisioning marker or the shared base's .git; refusing to provision to avoid replacing it", in.AgentID)
+		return false, "", fmt.Errorf("worktree-per-agent: the existing worktree for agent %q is missing its provisioning marker or the shared base's .git; refusing to provision to avoid replacing it", in.AgentID)
 	}
 
 	if err := provision.ProvisionShared(result.ProvisionInput); err != nil {
@@ -1326,7 +1350,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 			// logged server-side only; the client sees a generic message.
 			slog.Error("worktree-per-agent: provisioning failed for an existing worktree; refusing to remove it or fall back to a fresh clone",
 				"agent_id", in.AgentID, "path", result.WorktreePath, "clone_url", cloneURL, "error", sanitizedErr)
-			return false, fmt.Errorf("worktree-per-agent: provisioning failed for the existing worktree of agent %q; the existing workspace was left untouched", in.AgentID)
+			return false, "", fmt.Errorf("worktree-per-agent: provisioning failed for the existing worktree of agent %q; the existing workspace was left untouched", in.AgentID)
 		}
 		slog.Warn("worktree-per-agent: provisioning failed, falling back to clone-per-agent",
 			"agent_id", in.AgentID, "clone_url", cloneURL, "error", sanitizedErr)
@@ -1361,7 +1385,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 					"agent_id", in.AgentID, "path", result.WorktreePath)
 			}
 		}
-		return false, nil
+		return false, "", nil
 	}
 
 	// Source the authoritative worktree path from the sharer registry.
@@ -1382,7 +1406,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	if err := validateMountedWorktree(actualWorkspace, result.ProjectRoot); err != nil {
 		slog.Error("worktree-per-agent: resolved workspace failed validation; refusing to mount it",
 			"agent_id", in.AgentID, "path", actualWorkspace, "error", err)
-		return false, fmt.Errorf("worktree-per-agent: the resolved workspace for agent %q failed validation", in.AgentID)
+		return false, "", fmt.Errorf("worktree-per-agent: the resolved workspace for agent %q failed validation", in.AgentID)
 	}
 
 	// Write .scion workspace marker so the in-container CLI discovers project context.
@@ -1400,7 +1424,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 			"workspace", result.WorktreePath,
 			"project_root", result.ProjectRoot)
 	}
-	return true, nil
+	return true, result.ProjectRoot, nil
 }
 
 // projectProvisionMutex returns the per-project mutex for serializing worktree

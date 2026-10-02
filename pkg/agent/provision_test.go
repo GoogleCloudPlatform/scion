@@ -3811,3 +3811,120 @@ func TestGetAgent_RelativeWorkspaceResume(t *testing.T) {
 		}
 	}
 }
+
+// TestProvisionAgent_ProvisionedWorktreePersistsRepoRoot is the regression
+// guard for the ExplicitWorkspace-misclassification risk called out for the
+// broker-provisioned worktree fix: ProvisionAgent must persist
+// ProvisionedWorktreeRepoRoot (in addition to ExplicitWorkspace, which stays
+// true for both this case and a user --workspace override) whenever ctx
+// carries api.ContextWithProvisionedWorktree, so run.go's Start can
+// recover RepoRoot on resume/restart — dispatches where the broker does not
+// re-run tryProvisionWorktree and ctx carries no fresh signal.
+func TestProvisionAgent_ProvisionedWorktreePersistsRepoRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
+
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	tplDir := filepath.Join(globalTemplatesDir, "claude")
+	_ = os.MkdirAll(tplDir, 0755)
+	tplConfig := `{"default_harness_config": "claude"}`
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	// Stand in for a broker-provisioned worktree: any existing absolute
+	// directory the "explicit workspace" branch will mount directly.
+	worktree := filepath.Join(tmpDir, "shared-base", "worktrees", "agent-1")
+	_ = os.MkdirAll(worktree, 0755)
+	repoRoot := filepath.Join(tmpDir, "shared-base")
+
+	ctx := api.ContextWithProvisionedWorktree(context.Background(), repoRoot)
+
+	agentName := "provisioned-wt-agent"
+	_, ws, cfg, err := ProvisionAgent(ctx, agentName, "claude", "", "", projectScionDir, "", "", "", worktree)
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+	if ws != "" {
+		t.Errorf("expected empty managed workspace path, got %q", ws)
+	}
+	if !cfg.ExplicitWorkspace {
+		t.Error("expected ExplicitWorkspace to be true (needed for GetAgent's resume-recovery skip)")
+	}
+	if cfg.ProvisionedWorktreeRepoRoot != repoRoot {
+		t.Errorf("ProvisionedWorktreeRepoRoot = %q, want %q", cfg.ProvisionedWorktreeRepoRoot, repoRoot)
+	}
+
+	// Resume: no fresh ctx signal (the broker does not re-run
+	// tryProvisionWorktree on start/restart) — the persisted field must
+	// survive so run.go's Start can still resolve RepoRoot.
+	_, _, _, resumeCfg, err := GetAgent(context.Background(), agentName, "", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("GetAgent (resume) failed: %v", err)
+	}
+	if !resumeCfg.ExplicitWorkspace {
+		t.Error("expected ExplicitWorkspace to persist across resume")
+	}
+	if resumeCfg.ProvisionedWorktreeRepoRoot != repoRoot {
+		t.Errorf("resume ProvisionedWorktreeRepoRoot = %q, want %q", resumeCfg.ProvisionedWorktreeRepoRoot, repoRoot)
+	}
+}
+
+// TestProvisionAgent_UserWorkspaceOverrideLeavesRepoRootUnset confirms the
+// counterpart: a plain user --workspace (no ContextWithProvisionedWorktree on
+// ctx) must NOT persist ProvisionedWorktreeRepoRoot, so run.go's Start falls
+// through to detectRepoRoot and keeps RepoRoot "" for this case.
+func TestProvisionAgent_UserWorkspaceOverrideLeavesRepoRootUnset(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
+
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	tplDir := filepath.Join(globalTemplatesDir, "claude")
+	_ = os.MkdirAll(tplDir, 0755)
+	tplConfig := `{"default_harness_config": "claude"}`
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	userWorkspace := filepath.Join(tmpDir, "operators-own-dir")
+	_ = os.MkdirAll(userWorkspace, 0755)
+
+	_, _, cfg, err := ProvisionAgent(context.Background(), "user-ws-agent", "claude", "", "", projectScionDir, "", "", "", userWorkspace)
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+	if !cfg.ExplicitWorkspace {
+		t.Error("expected ExplicitWorkspace to be true for a user --workspace override")
+	}
+	if cfg.ProvisionedWorktreeRepoRoot != "" {
+		t.Errorf("expected ProvisionedWorktreeRepoRoot to stay empty for a user --workspace override, got %q", cfg.ProvisionedWorktreeRepoRoot)
+	}
+}

@@ -3230,6 +3230,113 @@ profiles:
 	}
 }
 
+// TestStartUserWorkspaceOverrideYieldsEmptyRepoRoot is the required
+// counterpart to the broker-provisioned-worktree RepoRoot stitching fix
+// (ptone/scion#2062): a user-supplied --workspace (opts.Workspace set with no
+// api.ContextWithProvisionedWorktree signal on ctx) must still produce an
+// empty RunConfig.RepoRoot, exactly like before the fix — even when the
+// workspace happens to sit inside a git repo, which is the case #642 added
+// the explicit-workspace skip for in the first place.
+func TestStartUserWorkspaceOverrideYieldsEmptyRepoRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir to tmpDir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatalf("failed to set HOME: %v", err)
+	}
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+		t.Fatalf("failed to create project .scion dir: %v", err)
+	}
+
+	settingsYAML := `schema_version: "1"
+active_profile: local
+harness_configs:
+  test-harness:
+    harness: gemini
+    user: scion
+    image: test-image:latest
+profiles:
+  local:
+    runtime: docker
+`
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+
+	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
+	if err := os.MkdirAll(hcDir, 0755); err != nil {
+		t.Fatalf("failed to create harness-config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644); err != nil {
+		t.Fatalf("failed to write harness config: %v", err)
+	}
+
+	tplDir := filepath.Join(projectScionDir, "templates", "default")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatalf("failed to create template dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644); err != nil {
+		t.Fatalf("failed to write template: %v", err)
+	}
+
+	// The operator's own workspace: a real git repo, so the "explicit
+	// workspace skips git detection" guarantee is actually exercised, not
+	// vacuously true because there was no repo to detect.
+	userWorkspace := filepath.Join(tmpDir, "operators-own-repo")
+	if err := os.MkdirAll(userWorkspace, 0755); err != nil {
+		t.Fatalf("failed to create user workspace dir: %v", err)
+	}
+	setupGitRepo(t, userWorkspace)
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+
+	mgr := NewManager(mockRT)
+	// context.Background(): no api.ContextWithProvisionedWorktree signal —
+	// this is the plain CLI/local dispatch shape for a user --workspace flag.
+	_, err = mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		Workspace:   userWorkspace,
+		Env: map[string]string{
+			"SCION_AGENT_ID":   "agent-456",
+			"SCION_PROJECT_ID": "proj-123",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	if capturedConfig.RepoRoot != "" {
+		t.Fatalf("RunConfig.RepoRoot = %q, want \"\" for a user --workspace override", capturedConfig.RepoRoot)
+	}
+	if capturedConfig.Workspace != userWorkspace {
+		t.Fatalf("RunConfig.Workspace = %q, want %q", capturedConfig.Workspace, userWorkspace)
+	}
+}
+
 func TestStartResolvesHarnessConfigUserSettingsOverride(t *testing.T) {
 	// When settings define a user in harness_configs, it should override
 	// the on-disk harness-config user.
