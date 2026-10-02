@@ -17,6 +17,8 @@
 package hub
 
 import (
+	"context"
+	"net/http"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -78,4 +80,32 @@ func TestSetMemberRoles_MemberRoleDecision_CheckSelectionAndOrder(t *testing.T) 
 	d, reason := svc.memberRoleDecision(ctx, actor, f.projectID, owner, addOf(f.withinCeiling.Name), f.withinCeiling, memberRoleCheckAll)
 	assert.Nil(t, d)
 	assert.NotEmpty(t, reason, "an allowed CanDelegate returns its reason for the audit row")
+}
+
+// TestSetMemberRoles_HubOverride_ReachableBySuperAdminOverHTTP pins who
+// reaches the system-only hub-override branches of the members PUT/DELETE
+// (ptone/scion#2646 item 1): a super-admin with no built-in project role
+// passes the endpoint's project.manage gate (super-admin carries every
+// permission at system scope) and, holding system role_binding.*, is
+// authorized by the hub override rather than refused with "actor has no
+// project role". Super-admin's CanDelegate ceiling covers every role, so the
+// grant and the removal both commit.
+func TestSetMemberRoles_HubOverride_ReachableBySuperAdminOverHTTP(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+	superID := tid(t.Name() + "-super")
+	createTestUserWithRole(t, f.store, superID, superID+"@test.com", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
+	ensureHubMembership(ctx, f.store, superID)
+	super, err := f.store.GetUser(ctx, superID)
+	require.NoError(t, err)
+	require.Empty(t, mmrBindingsFor(t, f.store, "user", superID, f.projectID), "the super-admin holds no project role")
+
+	target := grpUser(t, f.store, t.Name()+"-target", "Target")
+	rec := putMemberRoles(t, f.srv, super, f.projectID, "user", target.ID, []string{f.memberRD.ID}, &[]string{})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	require.Len(t, mmrBindingsFor(t, f.store, "user", target.ID, f.projectID), 1)
+
+	rec = deleteMemberRoles(t, f.srv, super, f.projectID, "user", f.member.ID)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	assert.Empty(t, mmrBindingsFor(t, f.store, "user", f.member.ID, f.projectID))
 }

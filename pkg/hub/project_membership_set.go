@@ -501,9 +501,13 @@ func (svc *ProjectMembershipService) reevaluateActorTx(ctx context.Context, tx s
 		return actorRole, isDirectOwner, false, nil
 	}
 
-	// No built-in project role: both role_binding.create and
-	// role_binding.delete authority are required when the plan has both
-	// creates and removes.
+	// No built-in project role: the system-only hub override, revalidated
+	// under the lock. Who reaches it (only actors who pass the members
+	// endpoints' project.manage gate with no built-in project role, in
+	// practice a non-member super-admin) is documented at the pre-tx branch
+	// in memberActorAuthorityPreTx (ptone/scion#2646 item 1). Both
+	// role_binding.create and role_binding.delete authority are required
+	// when the plan has both creates and removes.
 	if needCreate {
 		ok, hErr := svc.actorHasHubRoleBindingAuthorityTx(ctx, tx, actorID, MembershipOpAdd)
 		if hErr != nil {

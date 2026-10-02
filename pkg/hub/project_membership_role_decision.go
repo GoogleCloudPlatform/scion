@@ -93,6 +93,26 @@ func (svc *ProjectMembershipService) memberActorAuthorityPreTx(ctx context.Conte
 	a := &memberActorAuthority{}
 	a.role = svc.projectEffectiveRole(ctx, actorID, projectID)
 	if a.role == "" {
+		// The system-only hub override (ptone/scion#2646 item 1). Over HTTP
+		// both callers sit behind a project.manage gate, so this branch is
+		// reached only by an actor who holds project.manage WITHOUT any
+		// built-in project role (direct or group-derived: those set a.role)
+		// and who also holds SYSTEM-scope role_binding.create/delete:
+		//   - a super-admin (system scope, every permission) who is not a
+		//     member of the project — the common, intended case: platform
+		//     admins managing a project they do not belong to
+		//     (TestSetMemberRoles_HubOverride_ReachableBySuperAdminOverHTTP);
+		//   - a holder of a custom role carrying project.manage, project-
+		//     scoped on this project or system-scoped, who also holds system
+		//     role_binding.* (e.g. hub-admin, which alone lacks
+		//     project.manage and so fails the gate).
+		// The override bypasses only the built-in governance matrix and the
+		// direct-owner rule (checkBuiltInChangeGovernance); the structural
+		// role_binding.* guard, custom-role authority, CanDelegate, the
+		// last-owner guard and the in-tx revalidation (reevaluateActorTx)
+		// still apply. Kept deliberately: removing it would leave
+		// non-member super-admins unable to manage membership through these
+		// endpoints.
 		authorized := true
 		if needCreate && !svc.actorHasHubRoleBindingAuthority(ctx, actorID, MembershipOpAdd) {
 			authorized = false
