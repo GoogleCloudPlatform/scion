@@ -39,6 +39,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -1245,6 +1246,12 @@ type Server struct {
 	// refreshGitHubSkillInBackground and ghRefreshFailureBackoff).
 	ghRefreshFailMu      sync.Mutex
 	ghLastRefreshFailure map[string]time.Time
+
+	// ghCooldown holds gh:// resolution requests back per credential
+	// identity after a GitHub rate-limit response (see agent.GitHubCooldown).
+	// Nil means the process-wide agent.SharedGitHubCooldown, the same
+	// tracker the broker-side resolver uses; tests set their own.
+	ghCooldown *agent.GitHubCooldown
 
 	// nonceCacheStore is the DB-backed HMAC nonce replay cache (nil when entClient is nil).
 	// When set, it replaces the in-memory NonceCache in BrokerAuthService for

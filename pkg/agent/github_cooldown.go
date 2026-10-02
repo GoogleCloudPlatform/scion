@@ -134,6 +134,18 @@ func GitHubCooldownIdentity(token string) string {
 	return credentialFingerprint(token)
 }
 
+// GitHubCooldownIdentityForInstallation returns the cooldown identity for
+// requests made with a GitHub App installation token. GitHub limits those
+// per installation, and a fresh installation token is minted per request,
+// so a fingerprint of each token would never match the next one. installID
+// "public" or "" means unauthenticated and maps to the anonymous identity.
+func GitHubCooldownIdentityForInstallation(installID string) string {
+	if installID == "" || installID == "public" {
+		return githubAnonIdentity
+	}
+	return "installation:" + installID
+}
+
 // Active reports whether identity is in a cooldown, and when it ends.
 func (c *GitHubCooldown) Active(identity string) (time.Time, bool) {
 	c.mu.Lock()
