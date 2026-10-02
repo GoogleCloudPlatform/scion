@@ -2113,6 +2113,153 @@ func TestGCSLink_ContentType_NeverFromMetadata(t *testing.T) {
 	})
 }
 
+// gcsPNGBytes, gcsJPEGBytes, gcsGIFBytes and gcsWebPBytes are minimal byte
+// strings that http.DetectContentType recognizes as the four supported
+// raster image types: each is the type's magic-number prefix followed by NUL
+// filler.
+func gcsPNGBytes() []byte {
+	return append([]byte("\x89PNG\x0D\x0A\x1A\x0A"), bytes.Repeat([]byte{0}, 16)...)
+}
+
+func gcsJPEGBytes() []byte {
+	return append([]byte("\xFF\xD8\xFF\xE0"), bytes.Repeat([]byte{0}, 16)...)
+}
+
+func gcsGIFBytes() []byte {
+	return append([]byte("GIF89a"), bytes.Repeat([]byte{0}, 16)...)
+}
+
+func gcsWebPBytes() []byte {
+	return append([]byte("RIFF\x00\x00\x00\x00WEBPVP8 "), bytes.Repeat([]byte{0}, 16)...)
+}
+
+// TestGCSLink_ContentType_ImageSniffing pins the content-typing half of
+// image rendering: each of the four supported raster types is recognized
+// from its sniffed byte signature alone, and a `.png` object whose actual
+// bytes are HTML is never classified as an image, regardless of its
+// extension or (per TestGCSLink_ContentType_NeverFromMetadata) its stored
+// metadata.
+func TestGCSLink_ContentType_ImageSniffing(t *testing.T) {
+	f := newGCSFixture(t)
+
+	imageCases := []struct {
+		name  string
+		body  func() []byte
+		ctype string
+	}{
+		{"png", gcsPNGBytes, "image/png"},
+		{"jpeg", gcsJPEGBytes, "image/jpeg"},
+		{"gif", gcsGIFBytes, "image/gif"},
+		{"webp", gcsWebPBytes, "image/webp"},
+	}
+	for _, tc := range imageCases {
+		t.Run(tc.name+"_sniffed_as_image", func(t *testing.T) {
+			seed := "img-" + tc.name
+			object := "pic." + tc.name
+			viewer, msg := gcsHappyPathFixture(t, f, seed, "gs://bkt/"+object)
+			body := tc.body()
+			f.source.putObject("bkt", object, &storage.ObjectAttrs{Size: int64(len(body)), Generation: 1}, body)
+
+			rec := doRequestAsUser(t, f.srv, viewer, http.MethodGet, gcsRequestPath(msg.ID, "bkt", object), nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Equal(t, tc.ctype, rec.Header().Get("Content-Type"))
+			require.Equal(t, body, rec.Body.Bytes())
+		})
+	}
+
+	// http.DetectContentType also recognizes BMP and Windows icon/cursor
+	// signatures as image types; none of them is on the allow-list. The
+	// non-UTF-8 filler keeps the text rule from deciding the result, so
+	// each case reaches the image allow-list and must fall through to
+	// application/octet-stream. (The standard library has no TIFF or AVIF
+	// signature, so neither can reach the allow-list.)
+	nonAllowListedImageCases := []struct {
+		name          string
+		signature     string
+		detectedImage string
+	}{
+		{"bmp", "BM", "image/bmp"},
+		{"ico", "\x00\x00\x01\x00", "image/x-icon"},
+		{"cur", "\x00\x00\x02\x00", "image/x-icon"},
+	}
+	for _, tc := range nonAllowListedImageCases {
+		t.Run(tc.name+"_signature_is_not_an_image", func(t *testing.T) {
+			body := append([]byte(tc.signature), bytes.Repeat([]byte{0xFF}, 16)...)
+			require.Equal(t, tc.detectedImage, http.DetectContentType(body),
+				"the vector must be one the standard sniffer classifies as an image")
+
+			object := "pic." + tc.name
+			viewer, msg := gcsHappyPathFixture(t, f, "img-"+tc.name, "gs://bkt/"+object)
+			f.source.putObject("bkt", object, &storage.ObjectAttrs{Size: int64(len(body)), Generation: 1}, body)
+
+			rec := doRequestAsUser(t, f.srv, viewer, http.MethodGet, gcsRequestPath(msg.ID, "bkt", object), nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			ct := rec.Header().Get("Content-Type")
+			require.False(t, strings.HasPrefix(ct, "image/"), "content type %q must not be an image type", ct)
+			require.Equal(t, "application/octet-stream", ct)
+		})
+	}
+
+	t.Run("png_extension_with_html_bytes_is_not_an_image", func(t *testing.T) {
+		viewer, msg := gcsHappyPathFixture(t, f, "img-fake-png", "gs://bkt/fake.png")
+		body := []byte("<html><body>not a png</body></html>")
+		f.source.putObject("bkt", "fake.png", &storage.ObjectAttrs{Size: int64(len(body)), Generation: 1}, body)
+
+		rec := doRequestAsUser(t, f.srv, viewer, http.MethodGet, gcsRequestPath(msg.ID, "bkt", "fake.png"), nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		ct := rec.Header().Get("Content-Type")
+		require.NotContains(t, ct, "image/", "a .png object whose bytes are HTML must not be served as an image")
+		require.NotEqual(t, "text/html", ct)
+		require.Equal(t, "text/plain; charset=utf-8", ct)
+	})
+
+	t.Run("svg_bytes_are_never_an_image_or_svg_xml", func(t *testing.T) {
+		viewer, msg := gcsHappyPathFixture(t, f, "img-svg", "gs://bkt/pic.svg")
+		body := []byte(`<svg xmlns="http://www.w3.org/2000/svg"><circle r="1"/></svg>`)
+		f.source.putObject("bkt", "pic.svg", &storage.ObjectAttrs{Size: int64(len(body)), Generation: 1}, body)
+
+		rec := doRequestAsUser(t, f.srv, viewer, http.MethodGet, gcsRequestPath(msg.ID, "bkt", "pic.svg"), nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		ct := rec.Header().Get("Content-Type")
+		require.NotContains(t, ct, "image/", "an svg object must never be served as an image type")
+		require.NotEqual(t, "image/svg+xml", ct)
+		require.Equal(t, "text/plain; charset=utf-8", ct)
+	})
+
+	t.Run("xml_declared_svg_bytes_are_never_an_image_or_svg_xml", func(t *testing.T) {
+		// Unlike a bare <svg ...> root, this prefix matches
+		// http.DetectContentType's own "<?xml" signature (text/xml), a
+		// different non-image, non-svg+xml result than the bare case above -
+		// exercised separately so a future image-detection change cannot
+		// special-case one SVG spelling and miss the other.
+		viewer, msg := gcsHappyPathFixture(t, f, "img-svg-xmldecl", "gs://bkt/pic2.svg")
+		body := []byte(`<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>`)
+		f.source.putObject("bkt", "pic2.svg", &storage.ObjectAttrs{Size: int64(len(body)), Generation: 1}, body)
+
+		rec := doRequestAsUser(t, f.srv, viewer, http.MethodGet, gcsRequestPath(msg.ID, "bkt", "pic2.svg"), nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		ct := rec.Header().Get("Content-Type")
+		require.NotContains(t, ct, "image/")
+		require.NotEqual(t, "image/svg+xml", ct)
+	})
+
+	t.Run("content_encoding_overrides_an_otherwise_valid_image_signature", func(t *testing.T) {
+		// A real gzip-encoded object's stored bytes are compressed and would
+		// not actually carry a raw PNG signature, but the ordering this
+		// pins - Content-Encoding is checked before any image sniff - must
+		// hold regardless of what the sniffed bytes happen to look like.
+		body := gcsPNGBytes()
+		viewer, msg := gcsHappyPathFixture(t, f, "img-gzip-png", "gs://bkt/weird.png.gz")
+		f.source.putObject("bkt", "weird.png.gz", &storage.ObjectAttrs{
+			Size: int64(len(body)), Generation: 1, ContentEncoding: "gzip",
+		}, body)
+
+		rec := doRequestAsUser(t, f.srv, viewer, http.MethodGet, gcsRequestPath(msg.ID, "bkt", "weird.png.gz"), nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Equal(t, "application/octet-stream", rec.Header().Get("Content-Type"))
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Exactly one audit event per request, with the listed fields.
 // ---------------------------------------------------------------------------
@@ -2583,4 +2730,12 @@ func TestGCSLink_NewBaseTransport_ClonesRealDefaultTransport(t *testing.T) {
 	transport := newGCSLinkBaseTransport()
 	require.NotNil(t, transport)
 	require.NotSame(t, http.DefaultTransport.(*http.Transport), transport, "must be a Clone(), never the shared DefaultTransport itself")
+}
+
+// TestGCSLink_RequestDeadlineProductionValue pins the whole-request deadline
+// as a literal, and checks that a server with no test override uses it.
+func TestGCSLink_RequestDeadlineProductionValue(t *testing.T) {
+	require.Equal(t, 60*time.Second, gcsLinkRequestDeadline, "the request deadline must be exactly 60s")
+	f := newGCSFixture(t)
+	require.Equal(t, 60*time.Second, gcsLinkEffectiveRequestDeadline(f.srv))
 }
