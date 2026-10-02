@@ -839,6 +839,13 @@ func (r *KubernetesRuntime) createAgentSecret(ctx context.Context, namespace, ag
 // references to K8s-synced secrets for environment variable injection.
 func (r *KubernetesRuntime) createSecretProviderClass(ctx context.Context, namespace, agentName string, secrets []api.ResolvedSecret, labels map[string]string) (string, error) {
 	spcName := fmt.Sprintf("scion-agent-%s", agentName)
+	// envSecretName is only ever referenced below when !r.GKEMode (the
+	// secretObjects block a few lines down is skipped entirely in GKE mode).
+	// Run only calls createSecretProviderClass when r.GKEMode is true
+	// (useGKEPath starts from r.GKEMode), so today this name is declared but
+	// never placed into secretObjects, and the Secrets Store CSI driver never
+	// materializes it. cleanupAgentSecrets deliberately does not delete this
+	// name; see its doc comment.
 	envSecretName := fmt.Sprintf("scion-agent-%s-env", agentName)
 
 	// Build the GCP SM secrets parameter as YAML
@@ -1038,30 +1045,65 @@ func toStringInterfaceMap(m map[string]string) map[string]interface{} {
 	return result
 }
 
-// cleanupAgentSecrets removes K8s Secrets and (if GKE mode) SecretProviderClasses
-// associated with an agent, identified by the scion.agent label.
+// cleanupAgentSecrets removes the per-agent Secrets (scion-agent-<name>,
+// scion-auth-<name>) and, in GKE mode, the SecretProviderClass created for an
+// agent. These three names are the only per-agent Secret/SecretProviderClass
+// objects this runtime ever creates (createAgentSecret and
+// createSecretProviderClass for scion-agent-<name>, createAuthFileSecret for
+// scion-auth-<name> — there is no fourth creation site), so deleting exactly
+// these three leaves nothing of this runtime's own making behind.
+//
+// agentName must be the exact identifier used to create those objects —
+// config.Name in Run, and the pod-name id in Delete. Delete's id is normally
+// the pod name (config.Name): callers resolve the agent to its pod first and
+// pass that name, falling back to the raw id only when the pod is not listed
+// (see pkg/agent/manager.go Stop). createAgentSecret, createSecretProviderClass,
+// and createAuthFileSecret derive their object names deterministically from
+// that same agentName (scion-agent-<agentName>, scion-auth-<agentName>),
+// which already embeds the project when the caller built it as
+// "<project>--<agent>" (see containerName in pkg/agent/run.go). Deleting by
+// that exact name is therefore inherently agent- and project-scoped: it
+// cannot be confused with another agent's or another project's objects, even
+// when several projects share a namespace and an agent's bare name.
+//
+// It does NOT also derive and delete a "scion-agent-<agentName>-env" name for
+// the CSI driver-synced Secret described on envSecretName in
+// createSecretProviderClass. Unlike the two names above, that one is built by
+// appending a suffix rather than being the object's own creation-time name,
+// so it is not guaranteed to be unique: a slug may itself end in "-env" (an
+// agent literally named "<agent>-env" is valid), in which case the derived
+// name collides with that other agent's own real, deterministic
+// scion-agent-<other-agent> Secret. Guessing it is therefore unsafe, and that
+// object is not reachable via Run today anyway (see envSecretName's own
+// comment), so it is simply left alone.
+//
+// Known limitation: deletion here, like the Pod deletion in Delete and
+// cleanupStalePod, is unconditional on the deterministic name alone, with no
+// check of which run/incarnation of "this agent name" currently owns it. A
+// delete that overlaps in time with a fast recreate of the same agent name
+// can therefore remove the new incarnation's object instead of the old one's.
+// Closing that fully needs an incarnation identifier threaded through the
+// Runtime interface's Delete/Stop methods (shared across every runtime
+// backend), which is out of scope here.
 func (r *KubernetesRuntime) cleanupAgentSecrets(ctx context.Context, namespace, agentName string) {
-	selector := fmt.Sprintf("scion.agent=%s", agentName)
-
-	// Delete K8s Secrets by listing then deleting individually
-	secretList, err := r.Client.Clientset.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: selector,
-	})
-	if err == nil {
-		for _, s := range secretList.Items {
-			_ = r.Client.Clientset.CoreV1().Secrets(namespace).Delete(ctx, s.Name, metav1.DeleteOptions{})
+	secretNames := []string{
+		fmt.Sprintf("scion-agent-%s", agentName), // env/variable/file secrets (createAgentSecret)
+		fmt.Sprintf("scion-auth-%s", agentName),  // ResolvedAuth files (createAuthFileSecret)
+	}
+	for _, name := range secretNames {
+		if err := r.Client.Clientset.CoreV1().Secrets(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+			runtimeLog.Warn("Failed to delete per-agent Secret during cleanup",
+				"kind", "Secret", "name", name, "agent", agentName, "namespace", namespace, "error", err)
 		}
 	}
 
-	// Delete SecretProviderClasses if GKE mode
+	// SecretProviderClass shares the same name as the main agent Secret, but
+	// is a distinct GVR (secrets-store.csi.x-k8s.io), so there is no collision.
 	if r.GKEMode {
-		spcList, err := r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: selector,
-		})
-		if err == nil {
-			for _, spc := range spcList.Items {
-				_ = r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).Delete(ctx, spc.GetName(), metav1.DeleteOptions{})
-			}
+		spcName := fmt.Sprintf("scion-agent-%s", agentName)
+		if err := r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).Delete(ctx, spcName, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+			runtimeLog.Warn("Failed to delete per-agent SecretProviderClass during cleanup",
+				"kind", "SecretProviderClass", "name", spcName, "agent", agentName, "namespace", namespace, "error", err)
 		}
 	}
 }
@@ -2500,7 +2542,10 @@ func (r *KubernetesRuntime) Delete(ctx context.Context, id string) error {
 		namespace = r.resolveNamespace(ctx, id)
 	}
 
-	// Clean up agent secrets and SecretProviderClasses before deleting the pod
+	// Clean up agent secrets and SecretProviderClasses before deleting the
+	// pod. id is the pod name regardless of whether the pod itself still
+	// exists, so this is scoped to the right agent and project even when
+	// the pod was already gone (see cleanupAgentSecrets).
 	r.cleanupAgentSecrets(ctx, namespace, id)
 
 	// 'id' is the pod name
