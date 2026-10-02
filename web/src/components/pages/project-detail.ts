@@ -1640,7 +1640,7 @@ export class ScionPageProjectDetail extends LitElement {
     // earlier flush; drop any such ID before it enters page-level state
     // (`stateManager.seedAgents` already drops it from its own map, but
     // `this.agents`/the window are this page's own copies).
-    const freshAgents = dropTombstoned(data.agents, stateManager.getDeletedAgentIds());
+    const freshAgents = dropTombstoned(data.agents || [], stateManager.getDeletedAgentIds());
 
     if (data.complete) {
       this.agents = freshAgents;
@@ -1815,7 +1815,7 @@ export class ScionPageProjectDetail extends LitElement {
     return {
       // Same race as the page-load paths above: a server page can still
       // list an ID whose SSE `deleted` this client already processed.
-      agents: dropTombstoned(data.agents, stateManager.getDeletedAgentIds()),
+      agents: dropTombstoned(data.agents || [], stateManager.getDeletedAgentIds()),
       nextCursor: data.nextCursor,
       totalCount: data.totalCount,
       stats: this.freshStats(data.stats),

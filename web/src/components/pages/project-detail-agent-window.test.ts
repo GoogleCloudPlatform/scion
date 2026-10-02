@@ -53,6 +53,25 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+/**
+ * Re-stubs fetch so a sorted agents GET answers with a body that has no
+ * `agents` field; every other request still reaches `inner`.
+ */
+function stubSortedAgentsWithoutList(projectId: string, inner: typeof fetch): void {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: string | URL | Request, init?: RequestInit) => {
+      const rawUrl =
+        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const u = new URL(rawUrl, 'http://localhost');
+      if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+        return Promise.resolve(jsonResponse({ totalCount: 0, complete: true }));
+      }
+      return inner(input, init);
+    })
+  );
+}
+
 function makeAgent(i: number, overrides: Partial<Agent> = {}): Agent {
   return {
     id: `a-${i}`,
@@ -217,6 +236,7 @@ interface Internals {
     items: Agent[];
     pageIndex: number;
     updatesAvailable: boolean;
+    error: string | null;
   };
   agentStats: { total: number; running: number };
   listViewUsesWindow: boolean;
@@ -938,6 +958,32 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentStats.total).toBe(4);
     });
 
+    it("the window's own page fetcher tolerates a response with no agents field", async () => {
+      // With a tombstone recorded, dropTombstoned iterates its input, so a
+      // missing `agents` field must fall back to an empty list, not throw.
+      const projectId = 'p-paged-fetcher-missing-agents';
+      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      const el = await mountForcedPaged(projectId, agents, requests);
+      expect(internals(el).agentWindow.state).toBe('paged');
+
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.deleted`,
+        data: { agentId: agents[0].id },
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      stubSortedAgentsWithoutList(projectId, globalThis.fetch);
+      await internals(el).agentWindow.refresh();
+      await el.updateComplete;
+
+      expect(internals(el).agentWindow.error).toBeNull();
+      expect(internals(el).agentWindow.items).toEqual([]);
+    });
+
     it('an off-page change that newly passes the active phase filter raises the chip', async () => {
       const projectId = 'p-paged-newly-passes';
       const agents = Array.from({ length: 30 }, (_, i) =>
@@ -1313,6 +1359,47 @@ describe('project-detail — agent list window', () => {
       await el.updateComplete;
 
       expect((el as unknown as { agents: Agent[] }).agents.some((a) => a.id === 'a-1')).toBe(false);
+    });
+
+    it('a page-level load tolerates a response with no agents field', async () => {
+      // With a tombstone recorded, dropTombstoned iterates its input, so a
+      // missing `agents` field must fall back to an empty list, not throw.
+      const projectId = 'p-small-missing-agents';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      localStorage.setItem(
+        `scion-sort-project-agents-${projectId}`,
+        JSON.stringify({ field: 'updated', dir: 'desc' })
+      );
+      const agents = Array.from({ length: 3 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
+        )
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('small');
+
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.deleted`,
+        data: { agentId: 'a-1' },
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      stubSortedAgentsWithoutList(projectId, globalThis.fetch);
+      const warn = vi.spyOn(console, 'warn');
+      internals(el).backgroundRefresh('lifecycle-refresh');
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      expect(warn).not.toHaveBeenCalledWith('Background refresh failed:', expect.anything());
+      expect((el as unknown as { agents: Agent[] }).agents).toEqual([]);
+      expect(internals(el).agentWindow.items).toEqual([]);
     });
   });
 
