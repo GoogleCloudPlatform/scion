@@ -117,6 +117,13 @@ const JUMP_SCROLL_VIEW_TOLERANCE_PX = 24;
 const JUMP_SCROLL_MAX_RECHECKS = 2;
 
 /**
+ * /status: safety bound on agent-list pages followed via `nextCursor`. At the
+ * server's 500-per-page cap this covers 10,000 agents; past it the listing
+ * is shown with a truncation note rather than looping indefinitely.
+ */
+const MAX_STATUS_AGENT_PAGES = 20;
+
+/**
  * Jump-to-message re-check: how long the fallback poll (older Safari, no
  * `scrollend`) must see a stable `scrollTop` before treating the scroll as
  * settled. This is a stability *window*, not the sampling interval — see
@@ -3777,21 +3784,49 @@ export class ScionChatThread extends LitElement {
     }
   }
 
-  /** /status — Fetch agent status for the project. */
+  /**
+   * /status — Fetch agent status for the project.
+   *
+   * Like /stop, a chat-page DM resolves the peer agent's project via
+   * `peerAgentProjectId()`, since `this.projectId` there is only the
+   * inherited project. Non-DM threads use `this.projectId`.
+   */
   private async handleSlashStatus(): Promise<void> {
-    if (!this.projectId) {
+    const projectId = this.isDM ? this.peerAgentProjectId() : this.projectId;
+    if (!projectId) {
       this.insertLocalSystemMessage('No project context available.');
       return;
     }
 
+    // GET /api/v1/agents filters on `projectId` and returns
+    // `{ agents, nextCursor }`. Pages are capped server-side, so follow
+    // `nextCursor` until it is empty. The cursor is bound to the request's
+    // filter, so every page must repeat the same `projectId`.
+    const base = `/api/v1/agents?projectId=${encodeURIComponent(projectId)}`;
+    const agents: Agent[] = [];
+    const seenCursors = new Set<string>();
+    let cursor = '';
+    let pages = 0;
+
     try {
-      const res = await apiFetch(`/api/v1/agents?project=${encodeURIComponent(this.projectId)}`);
-      if (!res.ok) {
-        this.insertLocalSystemMessage('Failed to fetch project status.');
-        return;
-      }
-      const data = (await res.json()) as { items?: Agent[] };
-      const agents = data?.items ?? [];
+      do {
+        const url = cursor ? `${base}&cursor=${encodeURIComponent(cursor)}` : base;
+        const res = await apiFetch(url);
+        if (!res.ok) {
+          this.insertLocalSystemMessage('Failed to fetch project status.');
+          return;
+        }
+        const data = (await res.json()) as { agents?: Agent[]; nextCursor?: string } | null;
+        if (Array.isArray(data?.agents)) agents.push(...data.agents);
+        const next = typeof data?.nextCursor === 'string' ? data.nextCursor : '';
+        if (next && seenCursors.has(next)) {
+          this.insertLocalSystemMessage('Failed to fetch project status.');
+          return;
+        }
+        if (next) seenCursors.add(next);
+        cursor = next;
+        pages++;
+      } while (cursor && pages < MAX_STATUS_AGENT_PAGES);
 
       if (agents.length === 0) {
         this.insertLocalSystemMessage('No agents found in this project.');
@@ -3803,6 +3838,7 @@ export class ScionChatThread extends LitElement {
         const phase = a.phase || 'unknown';
         return `  ${slug}: ${phase}`;
       });
+      if (cursor) lines.push('  … (list truncated)');
       this.insertLocalSystemMessage(`Project agents:\n${lines.join('\n')}`);
     } catch {
       this.insertLocalSystemMessage('Failed to fetch project status.');

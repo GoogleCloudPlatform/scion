@@ -5908,6 +5908,232 @@ describe('scion-chat-thread /stop slash command', () => {
   });
 });
 
+describe('scion-chat-thread /status slash command', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    fakeStateManager.clearAgents();
+  });
+
+  type StatusInternals = { handleSlashStatus(): Promise<void> };
+
+  function agentsPage(agents: Array<{ slug: string; phase: string }>, nextCursor?: string) {
+    return {
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(nextCursor ? { agents, nextCursor } : { agents }),
+    };
+  }
+
+  function systemMessages(el: ScionChatThread): Array<string | null> {
+    return Array.from(el.shadowRoot?.querySelectorAll('scion-chat-system-line') ?? []).map((l) =>
+      l.getAttribute('message')
+    );
+  }
+
+  function agentListCalls(): string[] {
+    return apiFetch.mock.calls
+      .map((c) => String(c[0]))
+      .filter((u) => u.startsWith('/api/v1/agents?'));
+  }
+
+  /**
+   * The GET /api/v1/agents list handler filters on `projectId` and returns
+   * `{ agents, nextCursor }`. A `project=` param is ignored, and a client
+   * reading `items` never sees any agents.
+   */
+  it('queries by projectId and renders the agents from the response', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce(
+      agentsPage([
+        { slug: 'coder', phase: 'running' },
+        { slug: 'reviewer', phase: 'stopped' },
+      ])
+    );
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    expect(agentListCalls()).toEqual(['/api/v1/agents?projectId=proj-1']);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain(
+        'Project agents:\n  coder: running\n  reviewer: stopped'
+      );
+    });
+  });
+
+  /**
+   * The server caps each page (500 at the store) and returns `nextCursor`
+   * when more remain. The cursor is bound to the request filter, so each
+   * follow-up page must repeat the same `projectId`.
+   */
+  it('follows nextCursor across pages, repeating the projectId filter', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a1', phase: 'running' }], 'c1'))
+      .mockResolvedValueOnce(agentsPage([], 'c2'))
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a2', phase: 'stopped' }]));
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    expect(agentListCalls()).toEqual([
+      '/api/v1/agents?projectId=proj-1',
+      '/api/v1/agents?projectId=proj-1&cursor=c1',
+      '/api/v1/agents?projectId=proj-1&cursor=c2',
+    ]);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('Project agents:\n  a1: running\n  a2: stopped');
+    });
+  });
+
+  it('stops with a failure message when the server repeats a cursor', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a1', phase: 'running' }], 'c1'))
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a2', phase: 'running' }], 'c1'));
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    expect(agentListCalls()).toHaveLength(2);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('Failed to fetch project status.');
+    });
+  });
+
+  /**
+   * Mirrors the component's MAX_STATUS_AGENT_PAGES bound in chat-thread.ts
+   * (the server has no page limit). A server that keeps minting new cursors
+   * must not be followed forever: the walk stops at the bound and the
+   * listing ends with a truncation note.
+   */
+  const MAX_STATUS_AGENT_PAGES = 20;
+
+  it('stops at the page bound and notes truncation when cursors never end', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    let page = 0;
+    apiFetch.mockImplementation((url: string) => {
+      if (!String(url).startsWith('/api/v1/agents?')) return Promise.resolve(emptyHistory());
+      page++;
+      // Stop minting cursors well past the bound so an unbounded walk
+      // fails the call-count assertion instead of hanging the test.
+      const next = page < MAX_STATUS_AGENT_PAGES + 5 ? `c${page}` : undefined;
+      return Promise.resolve(agentsPage([{ slug: `a${page}`, phase: 'running' }], next));
+    });
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    expect(agentListCalls()).toHaveLength(MAX_STATUS_AGENT_PAGES);
+    const expected = Array.from(
+      { length: MAX_STATUS_AGENT_PAGES },
+      (_, i) => `  a${i + 1}: running`
+    );
+    expected.push('  … (list truncated)');
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain(`Project agents:\n${expected.join('\n')}`);
+    });
+  });
+
+  it('does not note truncation when the last page has no nextCursor', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a1', phase: 'running' }], 'c1'))
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a2', phase: 'running' }]));
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('Project agents:\n  a1: running\n  a2: running');
+    });
+    expect(systemMessages(el).some((m) => m?.includes('list truncated'))).toBe(false);
+  });
+
+  it('fails without showing earlier pages when a follow-up page errors', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a1', phase: 'running' }], 'c1'))
+      .mockResolvedValueOnce({ ok: false, status: 500, json: () => Promise.resolve({}) })
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a2', phase: 'running' }]));
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    expect(agentListCalls()).toEqual([
+      '/api/v1/agents?projectId=proj-1',
+      '/api/v1/agents?projectId=proj-1&cursor=c1',
+    ]);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('Failed to fetch project status.');
+    });
+    expect(systemMessages(el).some((m) => m?.startsWith('Project agents:'))).toBe(false);
+  });
+
+  /**
+   * In a chat-page DM, `projectId` is only the inherited project (whatever
+   * the user viewed before opening the DM). Like /stop, /status must list
+   * the DM peer agent's own project instead.
+   */
+  it('in a DM, lists the peer agent project, not the inherited projectId', async () => {
+    fakeStateManager.setAgent('coder', 'proj-peer');
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'dm:agent:coder:user:u1';
+    el.isDM = true;
+    // The previously viewed project; a DM's /status must never use it.
+    el.projectId = 'proj-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValueOnce(agentsPage([{ slug: 'coder', phase: 'running' }]));
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    expect(agentListCalls()).toEqual(['/api/v1/agents?projectId=proj-peer']);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('Project agents:\n  coder: running');
+    });
+  });
+
+  it('in a DM with no peer project, sends no list request', async () => {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'dm:agent:unknown-agent:user:u1';
+    el.isDM = true;
+    // Non-empty, to prove it is never used as a fallback in a DM.
+    el.projectId = 'proj-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    expect(agentListCalls()).toEqual([]);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('No project context available.');
+    });
+  });
+
+  it('shows the empty-project message when the response has no agents', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce(agentsPage([]));
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('No agents found in this project.');
+    });
+  });
+});
+
 describe('scion-chat-thread gcs-link-click', () => {
   type GcsInternals = {
     filePreview: {
