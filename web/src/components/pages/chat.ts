@@ -772,6 +772,15 @@ export class ScionPageChat extends LitElement {
       overflow: hidden;
     }
 
+    /* The thread fills what the header leaves and may shrink to nothing
+       but its composer: its own 300px floor (kept for other hosts) would
+       push the composer out of a short frame — a landscape phone, or a
+       small one with the keyboard open. */
+    .v2-content scion-chat-thread {
+      flex: 1 1 0;
+      min-height: 0;
+    }
+
     .empty-state {
       flex: 1;
       display: flex;
