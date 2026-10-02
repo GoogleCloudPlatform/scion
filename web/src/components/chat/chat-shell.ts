@@ -39,6 +39,7 @@ import { showAccessDeniedToast } from '../../utils/access-denied.js';
 import { performLogout } from '../../utils/auth.js';
 import { setDocumentTitle, PAGE_TITLE_EVENT } from '../../client/page-title.js';
 import type { PageTitleDetail } from '../../client/page-title.js';
+import { enterAppFrame, exitAppFrame } from '../shared/app-frame.js';
 
 @customElement('scion-chat-shell')
 export class ScionChatShell extends LitElement {
@@ -55,8 +56,7 @@ export class ScionChatShell extends LitElement {
   static override styles = css`
     :host {
       display: flex;
-      height: 100vh;
-      height: 100dvh;
+      height: var(--scion-app-height, 100dvh);
       background: var(--scion-bg, #f8fafc);
     }
 
@@ -88,6 +88,7 @@ export class ScionChatShell extends LitElement {
    */
   override connectedCallback(): void {
     super.connectedCallback();
+    enterAppFrame();
     window.addEventListener('scion:access-denied', this._accessDeniedHandler as EventListener);
     this.addEventListener(PAGE_TITLE_EVENT, this._pageTitleHandler as EventListener);
     this.updateDocumentTitle();
@@ -95,6 +96,7 @@ export class ScionChatShell extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    exitAppFrame();
     window.removeEventListener('scion:access-denied', this._accessDeniedHandler as EventListener);
     this.removeEventListener(PAGE_TITLE_EVENT, this._pageTitleHandler as EventListener);
   }

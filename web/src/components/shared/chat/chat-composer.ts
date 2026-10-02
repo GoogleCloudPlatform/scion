@@ -1572,7 +1572,11 @@ export class ScionChatComposer extends LitElement {
       requestAnimationFrame(() => {
         const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
         if (slTextarea) {
-          (slTextarea as HTMLElement).focus();
+          // preventScroll: this is not the fix for the off-screen-panel
+          // horizontal drift (overflow:clip + inert on the panels is), but it
+          // stops the message list from jumping when this runs while the
+          // composer's panel isn't the one on screen.
+          (slTextarea as HTMLElement).focus({ preventScroll: true });
         }
       });
     });
@@ -1616,12 +1620,12 @@ export class ScionChatComposer extends LitElement {
     if (ta) {
       const end = ta.value.length;
       ta.setSelectionRange(end, end);
-      ta.focus();
+      ta.focus({ preventScroll: true });
       return;
     }
     const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
     if (slTextarea) {
-      (slTextarea as HTMLElement).focus();
+      (slTextarea as HTMLElement).focus({ preventScroll: true });
     }
   }
 

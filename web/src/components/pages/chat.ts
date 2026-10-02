@@ -506,6 +506,17 @@ export class ScionPageChat extends LitElement {
   private _touchStartTime = 0;
   private _isSwiping = false;
 
+  /**
+   * Whether the viewport is under the mobile breakpoint. Driven by a
+   * matchMedia listener rather than re-measured per call, so the CSS media
+   * query (`@media (max-width: 768px)`, MOBILE_BREAKPOINT_PX) and this
+   * reactive state always agree on the same breakpoint — `isMobileViewport()`
+   * just reads it.
+   */
+  @state() private isMobileLayout = false;
+  private _mobileLayoutQuery: MediaQueryList | null = null;
+  private _onMobileLayoutChange = this._handleMobileLayoutChange.bind(this);
+
   static override styles = css`
     :host {
       display: flex;
@@ -600,6 +611,11 @@ export class ScionPageChat extends LitElement {
       min-width: 0;
       display: flex;
       overflow: hidden;
+      /* 'clip' wins over 'hidden' where supported (Safari 16+, Chrome 90+)
+         and, unlike 'hidden', is never itself a scroll container — nothing
+         (focus, scrollIntoView, native iOS reveal) can set its scrollLeft.
+         Desktop has no off-screen content, so this is harmless there. */
+      overflow: clip;
     }
 
     .v2-rail {
@@ -669,17 +685,6 @@ export class ScionPageChat extends LitElement {
       font-size: var(--chat-fs-md);
       font-weight: 600;
       color: var(--scion-text, #1e293b);
-    }
-
-    .v2-members-body {
-      flex: 1;
-      overflow-y: auto;
-      padding: 0.5rem;
-      font-size: var(--chat-fs-md);
-      color: var(--scion-text-muted, #64748b);
-      display: flex;
-      align-items: center;
-      justify-content: center;
     }
 
     .v2-thread-header {
@@ -757,7 +762,13 @@ export class ScionPageChat extends LitElement {
         max-width: none;
         flex: none;
         transition: transform 0.3s ease;
-        overflow-y: auto;
+        /* Each panel delegates scrolling to its own inner scroller
+           (.rail-body, .messages-scroll, chat-members' .members-body) —
+           see the base .v2-rail/.v2-content rules above. The panel itself
+           no longer scrolls, so native focus reveal and scrollIntoView
+           can't drift it horizontally. */
+        overflow: hidden;
+        overflow: clip;
         /* The global '* { box-sizing: border-box }' does not cross the shadow
            boundary, so these panels default to content-box: the desktop
            border-right/border-left would add 1px on top of the full-viewport
@@ -768,7 +779,12 @@ export class ScionPageChat extends LitElement {
 
       /* ---- Left panel active ---- */
       .v2-panels[data-panel='left'] .v2-rail {
-        transform: translateX(0);
+        /* 'none' rather than 'translateX(0)': a transform of any kind makes
+           this panel the containing block for position:fixed descendants
+           (custom context menus), offsetting them by the panel's page
+           position instead of the viewport. The transition still
+           interpolates to/from the translateX() values below. */
+        transform: none;
       }
 
       .v2-panels[data-panel='left'] .v2-content {
@@ -785,7 +801,7 @@ export class ScionPageChat extends LitElement {
       }
 
       .v2-panels[data-panel='center'] .v2-content {
-        transform: translateX(0);
+        transform: none;
       }
 
       .v2-panels[data-panel='center'] .v2-members {
@@ -802,7 +818,7 @@ export class ScionPageChat extends LitElement {
       }
 
       .v2-panels[data-panel='right'] .v2-members {
-        transform: translateX(0);
+        transform: none;
       }
 
       /* The members panel is a swipe target on mobile, so it stays in the
@@ -904,6 +920,9 @@ export class ScionPageChat extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    this._mobileLayoutQuery = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT_PX}px)`);
+    this.isMobileLayout = this._mobileLayoutQuery.matches;
+    this._mobileLayoutQuery.addEventListener('change', this._onMobileLayoutChange);
     this.restoreMembersWidth();
     // Restore persisted layout density preference.
     try {
@@ -935,6 +954,8 @@ export class ScionPageChat extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     ++this._unreadDMRequestId;
+    this._mobileLayoutQuery?.removeEventListener('change', this._onMobileLayoutChange);
+    this._mobileLayoutQuery = null;
     document.removeEventListener('keydown', this._onKeydown);
     document.removeEventListener(CHAT_PALETTE_OPEN_REQUEST_EVENT, this._onPaletteOpenRequest);
     document.removeEventListener('sl-show', this._onDocumentModalShow);
@@ -2638,7 +2659,27 @@ export class ScionPageChat extends LitElement {
 
   /** Are we under the breakpoint where panels behave as separate screens? */
   private isMobileViewport(): boolean {
-    return window.innerWidth <= MOBILE_BREAKPOINT_PX;
+    return this.isMobileLayout;
+  }
+
+  private _handleMobileLayoutChange(e: MediaQueryListEvent): void {
+    this.isMobileLayout = e.matches;
+  }
+
+  /**
+   * Fallback for browsers that don't support `overflow: clip` on
+   * `.v2-panels`: it is still a scroll container there, so a native focus
+   * reveal or `scrollIntoView` can set its scroll offset. Resetting it on
+   * every scroll event costs nothing where `clip` is supported, because
+   * those engines never let the container become scrollable in the first
+   * place.
+   */
+  private _handleV2PanelsScroll(e: Event): void {
+    const el = e.currentTarget as HTMLElement;
+    if (el.scrollLeft !== 0 || el.scrollTop !== 0) {
+      el.scrollLeft = 0;
+      el.scrollTop = 0;
+    }
   }
 
   /** Open the DM conversation with a member in the centre panel. */
@@ -3951,8 +3992,9 @@ export class ScionPageChat extends LitElement {
         @touchmove=${this.handleTouchMove}
         @touchend=${this.handleTouchEnd}
         @mention-click=${this.handleMentionClick}
+        @scroll=${this._handleV2PanelsScroll}
       >
-        <div class="v2-rail">
+        <div class="v2-rail" ?inert=${this.isMobileLayout && this.mobilePanel !== 'left'}>
           ${this.v2SpaceRailLoaded
             ? html`
                 <scion-chat-space-rail
@@ -3965,7 +4007,7 @@ export class ScionPageChat extends LitElement {
             : html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`}
         </div>
 
-        <div class="v2-content">
+        <div class="v2-content" ?inert=${this.isMobileLayout && this.mobilePanel !== 'center'}>
           ${this.v2Conversation
             ? this.renderV2Conversation()
             : html`
@@ -3983,6 +4025,7 @@ export class ScionPageChat extends LitElement {
         <div
           class="v2-members ${this.v2MembersExpanded ? '' : 'collapsed'}"
           style="--members-w: ${this.membersWidth}px"
+          ?inert=${this.isMobileLayout && this.mobilePanel !== 'right'}
         >
           <button
             class="v2-members-resizer"
