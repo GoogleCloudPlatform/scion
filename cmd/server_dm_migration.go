@@ -74,6 +74,8 @@ func dmMigrationConfigFromFlags() messaging.DMMigrationConfig {
 }
 
 func runServerDMMigration(cmd *cobra.Command, _ []string) error {
+	pinProcessUTC()
+
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
