@@ -478,7 +478,7 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 			"broker_id", brokerID, "agent_id", a.ID, "agent", a.Slug, "project_id", a.ProjectID,
 			"previous_activity", a.Activity, "missing_since", firstSeen[a.ID], "last_seen", a.LastSeen,
 			"exit_reason", updated.ExitReason)
-		s.reconcileBrokerQuotaOnPhaseChange(ctx, &a, string(state.PhaseRunning), updated.Phase)
+		s.reconcileBrokerQuotaOnPhaseChange(ctx, updated, string(state.PhaseRunning), updated.Phase)
 		s.events.PublishAgentStatus(ctx, updated)
 	}
 }

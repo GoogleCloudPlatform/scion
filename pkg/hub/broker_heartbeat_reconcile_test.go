@@ -202,6 +202,37 @@ func TestReconcileMissing_IssueScenario(t *testing.T) {
 	assert.False(t, f.hasClock(omitted.ID), "clock is dropped after the reconcile")
 }
 
+// TestReconcileMissing_ReleasesBrokerQuota: the reconciled agent's
+// max_agents_per_broker reservation is released, and a reported agent keeps
+// its reservation.
+func TestReconcileMissing_ReleasesBrokerQuota(t *testing.T) {
+	f := newReconcileFixture(t)
+	ctx := context.Background()
+	setBrokerAgentCeiling(t, f.s, 5)
+	reported := f.addAgent("reported", "running", "working")
+	omitted := f.addAgent("omitted", "running", "working")
+	for _, a := range []*store.Agent{reported, omitted} {
+		_, err := f.srv.checkAndReserveBrokerQuota(ctx, a)
+		require.NoError(t, err)
+	}
+	require.EqualValues(t, 2, brokerReservationCount(t, f.s, f.brokerID))
+
+	f.heartbeat(completeInventory(), reported.Slug)
+	f.expireClock(omitted.ID)
+	f.heartbeat(completeInventory(), reported.Slug)
+
+	f.assertReconciled(omitted.ID)
+	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.brokerID))
+	def, err := f.s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	has, err := f.s.HasActiveReservation(ctx, def.ID, omitted.ID)
+	require.NoError(t, err)
+	assert.False(t, has, "the reconciled agent's reservation is released")
+	has, err = f.s.HasActiveReservation(ctx, def.ID, reported.ID)
+	require.NoError(t, err)
+	assert.True(t, has, "the reported agent keeps its reservation")
+}
+
 // TestReconcileMissing_PeriodicWritesDoNotDelay: the hub's periodic sweeps
 // write the agent row (and bump its updated timestamp) during the grace
 // period; the agent is still reconciled.
