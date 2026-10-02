@@ -5,6 +5,7 @@ Copyright 2026 The Scion Authors.
 package log
 
 import (
+	stdlog "log"
 	"log/slog"
 	"path/filepath"
 	"sync"
@@ -20,6 +21,9 @@ func resetUninitializedForTest(t *testing.T) {
 	origPath, origFile := logPath, logFile
 	origInitialized, origDebug, origQuiet := initialized.Load(), debug.Load(), quiet.Load()
 	origDefault := slog.Default()
+	// slog.SetDefault also redirects the std log package, so save its
+	// writer and flags too and restore them after slog.SetDefault below.
+	origStdWriter, origStdFlags := stdlog.Writer(), stdlog.Flags()
 	logPath = filepath.Join(t.TempDir(), "agent.log")
 	logFile = nil
 	initialized.Store(false)
@@ -40,6 +44,8 @@ func resetUninitializedForTest(t *testing.T) {
 		quiet.Store(origQuiet)
 		mu.Unlock()
 		slog.SetDefault(origDefault)
+		stdlog.SetOutput(origStdWriter)
+		stdlog.SetFlags(origStdFlags)
 	})
 }
 
@@ -74,7 +80,8 @@ func TestWrite_ConcurrentBeforeInit(t *testing.T) {
 }
 
 // TestWrite_ConcurrentFirstCallsInitOnce checks that concurrent first log
-// calls run the lazy init exactly once.
+// calls run the lazy init exactly once. It relies on -race for a
+// deterministic signal (the race-detection CI workflow runs this package).
 func TestWrite_ConcurrentFirstCallsInitOnce(t *testing.T) {
 	resetUninitializedForTest(t)
 	fanOut(32, func(i int) { Error("line %d", i) })

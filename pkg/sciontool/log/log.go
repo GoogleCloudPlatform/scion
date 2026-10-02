@@ -29,8 +29,9 @@ var (
 	quiet       atomic.Bool
 	mu          sync.Mutex
 	initialized atomic.Bool
-	// initRuns counts executions of initLocked; tests use it to check that
-	// concurrent first log calls run the lazy init exactly once.
+	// initRuns counts executions of initLocked. It is test-only, with no
+	// production purpose: tests use it to check that concurrent first log
+	// calls run the lazy init exactly once.
 	initRuns atomic.Int64
 	// logFile is the cached, already-opened handle for logPath, guarded by
 	// mu, and reused for every log line for the life of the process:
@@ -60,7 +61,7 @@ func Init() {
 	initLocked()
 }
 
-// ensureInit runs Init once if nothing has initialized the package yet.
+// ensureInit runs the init logic (initLocked) once if nothing has initialized the package yet.
 // Concurrent first callers serialize on mu; only the first one runs
 // initLocked, the rest see initialized set and return.
 func ensureInit() {
@@ -78,9 +79,6 @@ func ensureInit() {
 // initLocked does the work of Init. Callers must hold mu.
 func initLocked() {
 	initRuns.Add(1)
-
-	// If already initialized, we might still want to re-init slog if logPath changed
-	// but for now let's just allow re-setting slog default to our handler
 
 	if logPath == "" {
 		// Priority 1: Check if /home/scion exists (standard agent home)
