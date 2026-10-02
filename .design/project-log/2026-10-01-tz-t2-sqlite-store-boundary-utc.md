@@ -1,4 +1,4 @@
-# tz-refactor task #2 (U2a): SQLite store boundary in UTC
+# tz-refactor task 2 (U2a): SQLite store boundary in UTC
 
 **Date:** 2026-10-01
 **Branch:** `scion/tz-t2`
@@ -33,7 +33,8 @@ What's left after both carve-outs, and what this change implements:
   honours the first value for a repeated key). This makes every SQLite bind
   and scan canonical UTC regardless of `time.Local`, including legacy rows
   written with a non-UTC zone suffix.
-- **Ent mutation hook.** `utcTimeHook` calls `.UTC()` on every
+- **Ent mutation hook.** `entc.UTCTimeHook` (exported; see "Review round
+  1 fixes" below for why) calls `.UTC()` on every
   `time.Time` field value present in a mutation (explicit sets and
   schema `Default`/`UpdateDefault` values, since ent populates defaults on
   the mutation before hooks run). Registered via `client.Use(...)` in
@@ -43,8 +44,8 @@ What's left after both carve-outs, and what this change implements:
   create/update response.
 - **Predicates.** No predicate sites were in scope after the two
   carve-outs above — the only predicate sites named in `impl-issues.md`
-  task #2 are the agent-store thresholds (owned by #2470) and the
-  message-store purge/cursor sites (owned by #2553). The DSN option alone
+  task 2 are the agent-store thresholds (owned by ptone/scion#2470) and the
+  message-store purge/cursor sites (owned by ptone/scion#2553). The DSN option alone
   already makes a threshold bound in any location compare correctly on
   SQLite (verified by test, see below); `.UTC()` at a bind site is
   belt-and-braces for Postgres parity with pre-existing explicit binds, not
@@ -81,7 +82,7 @@ What's left after both carve-outs, and what this change implements:
 - `go test -p 2 -count=1 ./pkg/store/entadapter/... ./pkg/store/enttest/...`
   — pass under default TZ, `TZ=Asia/Tokyo`, and `TZ=Asia/Kathmandu` (this
   is the KNOWN BASELINE package from dev-common.md; it now passes under
-  Kathmandu without needing PR ptone/scion#2470/#2476).
+  Kathmandu without needing PR ptone/scion#2470 or PR ptone/scion#2476).
 - `golangci-lint run --new-from-rev=upstream/main --concurrency=1
   ./pkg/ent/entc/...` — 0 issues.
 - `gofmt -l` on changed files — clean.
@@ -95,7 +96,7 @@ What's left after both carve-outs, and what this change implements:
   canonicalises every SQLite bind regardless of whether the predicate
   site calls `.UTC()` explicitly (design §2.1.2), so the agent-store/
   schedule-store thresholds are already correct on SQLite even before
-  #2470/#2476 land. Those two PRs still matter for **Postgres**, where
+  PR ptone/scion#2470 or PR ptone/scion#2476 land. Those two PRs still matter for **Postgres**, where
   there's no DSN-level equivalent — correctness there depends on their
   explicit bind-site `.UTC()` plus this PR's hook (which only normalises
   what's echoed back, since Postgres `timestamptz` is already
@@ -172,7 +173,7 @@ skipped); all 15 originally-failing tests still pass individually under
 ./pkg/ent/entc/... ./pkg/hub/...` — 0 issues. Confirmed no other
 `pkg/hub` test file wraps a raw `sql.Open` in an `ent.Client` — grepped
 every other `sql.Open(` site in `pkg/hub/*_test.go` (about 20 files);
-all are the raw `webchat_*` stores, task #3 (U2b) territory, untouched.
+all are the raw `webchat_*` stores, task 3 (U2b) territory, untouched.
 
 ## Decided: no change at the other predicate sites (tz-lead ruling, 2026-10-01)
 
@@ -190,5 +191,62 @@ backends — SQLite canonicalises every bound `time.Time` through the DSN
 `Location`. The predicate `.UTC()` calls in `design.md` are
 defense-in-depth for the two named stores only, not a general
 requirement. This is recorded as a decision (see the PR's "Decided: no
-change" section) so task #5's `make time-literals` gate treats these
+change" section) so task 5's `make time-literals` gate treats these
 sites as already correct.
+
+## Review round 1 fixes (`gs://scion-xproject-exchange/tz-refactor/out/t2/review-1.md`)
+
+Verdict: CHANGES REQUESTED (0 Critical/High, 1 Medium, 3 Low, 2 Nit). ACs
+confirmed met; every new test confirmed to fail without its fix (reviewer
+ran the mutations). Full response filed at
+`gs://scion-xproject-exchange/tz-refactor/out/t2/review-1-response.md`;
+summary here:
+
+- **R1-1 (Medium):** `withUTCTimezone` discarded the caller's whole DSN
+  query on a `url.ParseQuery` error (`values = url.Values{}`), which
+  could silently drop `mode=memory`/`mode=ro` and masked the error
+  modernc's own `applyQueryParams` would otherwise surface at open time.
+  Fixed: on a parse error, return `dsn` unchanged. Added
+  `TestWithUTCTimezone_MalformedQueryIsNotMasked` (two fixtures: invalid
+  percent-encoding, a `;`-containing `_pragma` value).
+- **R1-2 (Low):** `entc.UTCTimeHook`'s doc now lists what it does not
+  cover — predicate arguments, `OnConflict().Update(...)`, raw SQL,
+  JSON-embedded times — and which backend (SQLite vs. Postgres) each gap
+  matters for.
+- **R1-3 (Low) / R1-6 (Nit), taken together:** `ge_exchange_test.go`'s
+  `newPersistentTestExchangeService` left predicate binds
+  uncanonicalised on SQLite (the hook only reaches mutation field
+  values, not predicate arguments), and the `35c9516`/`613e488` "revert"
+  had also dropped the original `_journal_mode=WAL&_busy_timeout=5000`
+  DSN query params, which was more than a revert and wrongly justified
+  for the mattn `sqlite3` driver (which *does* read those keys, even
+  though the resulting behaviour happened to be unchanged). Fixed
+  together: restored the original query params, and added
+  `sqliteTimezoneDSNOption(driverName)`, appending `_timezone=UTC` for
+  modernc's `"sqlite"` or `_loc=UTC` for mattn's `"sqlite3"`.
+- **R1-4 (Low):** every bare `#N` and `task #N` (same GitHub-autolink
+  problem) was fixed throughout the PR body and this project log.
+  Reworded the two flagged commits' messages and rebuilt the branch on
+  top of them via cherry-pick + `commit --amend -m` (not `rebase -i`,
+  per the sandbox's git rules), then pushed with `--force-with-lease` as
+  tz-em instructed. Every SHA on the branch changed as a result; old → new
+  for the commits referenced elsewhere in this log: `7e57894` → `588f4ec`,
+  `fb3fe12` → `326ab83`, `f4b0bd8` → `4d7e0f9`, `35c9516` → `613e488`,
+  `262f4c0` had no further descendants to rebase (its tree is now
+  `2383671`'s parent chain).
+- **R1-5 (Nit):** this log's `utcTimeHook` reference (above) corrected
+  to `entc.UTCTimeHook`; the PR body's inaccurate claim that "modernc's
+  `_timezone` option only ever adjusts a value that isn't already
+  UTC-located" corrected to describe what `formatTime` actually does
+  (only calls `t.In(loc)` when `_timezone` is configured; otherwise
+  formats the value as-is, so an already-`.UTC()` value is still
+  canonical).
+
+Verified post-fix: `go build -buildvcs=false -p 2 ./...`; `go test -p 2
+-count=1 ./pkg/ent/...` and `go test -tags no_sqlite -p 2 -count=1
+./pkg/hub/...`, each under default TZ, `TZ=Asia/Tokyo` and
+`TZ=Asia/Kathmandu` — all green; `golangci-lint
+run --new-from-rev=upstream/main --concurrency=1 ./pkg/ent/entc/...
+./pkg/hub/...` — 0 issues; `gofmt -l` clean. Full `pkg/hub` suite
+(default tags) re-run under `TZ=Asia/Kathmandu` after the R1 fixes:
+still zero failures.
