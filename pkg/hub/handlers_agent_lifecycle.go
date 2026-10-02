@@ -340,6 +340,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	var newPhase string
 	var dispatchErr error
 
+	// Collect warnings the start leg raises (hub-side TZ drops and the
+	// broker's hub-only env warnings) so the start and restart responses
+	// carry them.
+	ctx, dispatchWarns := withDispatchWarnings(ctx)
+
 	// If a dispatcher is available, dispatch the operation to the runtime broker
 	dispatcher := s.GetDispatcher()
 
@@ -519,7 +524,15 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 
 	respAgent := *agent
 	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
-	writeJSON(w, http.StatusOK, respAgent)
+	writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
+}
+
+// agentLifecycleResponse is the lifecycle action response: the agent, plus
+// any warnings the dispatch raised. Warnings is omitted when empty, so the
+// body is unchanged for clients that only read the agent.
+type agentLifecycleResponse struct {
+	*store.Agent
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // stopAllResult represents the outcome of stopping a single agent.

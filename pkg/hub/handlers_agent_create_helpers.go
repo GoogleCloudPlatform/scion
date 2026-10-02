@@ -1113,7 +1113,8 @@ func (s *Server) handleExistingAgent(
 
 		s.enrichAgent(ctx, existingAgent, project, nil)
 		writeJSON(w, http.StatusOK, CreateAgentResponse{
-			Agent: redactedAgentCopy(ctx, s, existingAgent),
+			Agent:    redactedAgentCopy(ctx, s, existingAgent),
+			Warnings: dispatchWarningsFromContext(ctx),
 		})
 		return existingAgentStarted
 	}
@@ -1191,7 +1192,8 @@ func (s *Server) handleExistingAgent(
 
 			s.enrichAgent(ctx, existingAgent, project, nil)
 			writeJSON(w, http.StatusOK, CreateAgentResponse{
-				Agent: redactedAgentCopy(ctx, s, existingAgent),
+				Agent:    redactedAgentCopy(ctx, s, existingAgent),
+				Warnings: dispatchWarningsFromContext(ctx),
 			})
 			return existingAgentStarted
 		}
@@ -1304,7 +1306,8 @@ func (s *Server) handleExistingAgent(
 		// Enrich and return the existing agent.
 		s.enrichAgent(ctx, existingAgent, project, nil)
 		writeJSON(w, http.StatusOK, CreateAgentResponse{
-			Agent: redactedAgentCopy(ctx, s, existingAgent),
+			Agent:    redactedAgentCopy(ctx, s, existingAgent),
+			Warnings: dispatchWarningsFromContext(ctx),
 		})
 		return existingAgentStarted
 	}

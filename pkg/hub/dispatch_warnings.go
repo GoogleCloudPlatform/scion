@@ -77,3 +77,13 @@ func (w *dispatchWarnings) Warnings() []string {
 	defer w.mu.Unlock()
 	return append([]string(nil), w.list...)
 }
+
+// dispatchWarningsFromContext returns a copy of the warnings collected by the
+// collector carried by ctx, or nil when there is none.
+func dispatchWarningsFromContext(ctx context.Context) []string {
+	if ctx == nil {
+		return nil
+	}
+	w, _ := ctx.Value(dispatchWarningsKey{}).(*dispatchWarnings)
+	return w.Warnings()
+}

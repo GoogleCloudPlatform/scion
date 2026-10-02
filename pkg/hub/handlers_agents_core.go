@@ -1193,6 +1193,11 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
+	// Collect warnings the dispatcher raises (hub-side TZ drops and the
+	// broker's hub-only env warnings) so they reach this response, including
+	// when an existing agent is started, resumed or recovered below.
+	ctx, dispatchWarns := withDispatchWarnings(ctx)
+
 	switch s.handleExistingAgent(ctx, w, existingAgent, project, runtimeBrokerID, req, notifySubscriberType, notifySubscriberID, createdBy) {
 	case existingAgentStarted, existingAgentErrored:
 		return // Response already written.
@@ -1853,9 +1858,6 @@ func (s *Server) createAgentInProject(
 	s.agentLifecycleLog.Info("Hub: pre-dispatch setup complete",
 		preDispatchAttrs...)
 	var warnings []string
-	// Collect warnings the dispatcher raises (hub-side TZ drops and the
-	// broker's hub-only env warnings) so they reach this response.
-	ctx, dispatchWarns := withDispatchWarnings(ctx)
 	if dispatcher := s.GetDispatcher(); dispatcher != nil {
 		if !req.ProvisionOnly {
 			// Use env-gather dispatch if requested
