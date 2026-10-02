@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -196,17 +197,29 @@ func TestConstraintAuditHistory_InvalidTokensFailBeforeHistoryQuery(t *testing.T
 	require.NoError(t, err)
 	unknownToken := base64.RawURLEncoding.EncodeToString(unknownVersion)
 
-	for _, token := range []string{
-		"not-base64!",
-		base64.RawURLEncoding.EncodeToString([]byte(`{"version":1}`)),
-		unknownToken,
-		base64.RawURLEncoding.EncodeToString([]byte(`{"version":1,"constraintId":"x","occurredAt":"not-time","eventId":"e"}`)),
+	validCursor := fmt.Sprintf(
+		`{"version":1,"constraintId":%q,"occurredAt":"2026-10-02T01:02:03Z","eventId":"event"}`,
+		constraint.ID,
+	)
+	for _, tc := range []struct {
+		name  string
+		token string
+	}{
+		{name: "malformed base64", token: "not-base64!"},
+		{name: "incomplete object", token: base64.RawURLEncoding.EncodeToString([]byte(`{"version":1}`))},
+		{name: "unknown version", token: unknownToken},
+		{name: "malformed timestamp", token: base64.RawURLEncoding.EncodeToString([]byte(`{"version":1,"constraintId":"x","occurredAt":"not-time","eventId":"e"}`))},
+		{name: "unknown field", token: base64.RawURLEncoding.EncodeToString([]byte(validCursor[:len(validCursor)-1] + `,"unknown":"value"}`))},
+		{name: "trailing JSON value", token: base64.RawURLEncoding.EncodeToString([]byte(validCursor + ` {}`))},
+		{name: "encoded token over 2048 characters", token: strings.Repeat("a", 2049)},
 	} {
-		resp := doRequest(t, srv, http.MethodGet,
-			"/api/v1/admin/access-constraints/"+constraint.ID+"/audit?pageToken="+token, nil)
-		assert.Equal(t, http.StatusBadRequest, resp.Code, "body: %s", resp.Body.String())
+		t.Run(tc.name, func(t *testing.T) {
+			resp := doRequest(t, srv, http.MethodGet,
+				"/api/v1/admin/access-constraints/"+constraint.ID+"/audit?pageToken="+tc.token, nil)
+			assert.Equal(t, http.StatusBadRequest, resp.Code, "body: %s", resp.Body.String())
+			assert.Zero(t, spy.listCalls, "invalid cursor must fail before ListConstraintHistory")
+		})
 	}
-	assert.Zero(t, spy.listCalls)
 }
 
 func TestConstraintAuditHistory_PrivacySafeNotFound(t *testing.T) {
