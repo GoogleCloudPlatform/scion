@@ -3816,44 +3816,72 @@ func TestGetAgent_RelativeWorkspaceResume(t *testing.T) {
 // itself persists a fresh, validated provisioned-worktree repo root, not
 // only run.go's Start. Start does not always run after ProvisionAgent: the
 // hub's provision-only flow (DispatchAgentProvision, via Manager.Provision)
-// and its reincarnate flow (DispatchAgentReprovision, via Reprovision, which
-// also calls ProvisionAgent directly) can both provision an agent without
-// starting it in the same dispatch. Without a persist here, a later
-// start/restart — which carries no ctx signal of its own, since the broker
-// does not re-run tryProvisionWorktree on that dispatch — would find nothing
-// on disk and fall back to detectRepoRoot, losing RepoRoot. Both call sites
-// share one gate, persistProvisionedWorktreeRepoRootIfValid: Start's own
-// call still covers the one case ProvisionAgent never runs at all — GetAgent
-// skipping it because the agent directory already exists (see
+// can provision an agent without starting it in the same dispatch. Without a
+// persist here, a later start/restart — which carries no ctx signal of its
+// own, since the broker does not re-run tryProvisionWorktree on that
+// dispatch — would find nothing on disk and fall back to detectRepoRoot,
+// losing RepoRoot. Both call sites share one gate,
+// persistProvisionedWorktreeRepoRootIfValid: Start's own call still covers
+// the one case ProvisionAgent never runs at all — GetAgent skipping it
+// because the agent directory already exists (see
 // TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkipped
 // in run_test.go). ProvisionAgent still sets ExplicitWorkspace, needed
 // either way for GetAgent's managed-worktree recovery skip on resume.
-func TestProvisionAgent_PersistsValidatedRepoRoot(t *testing.T) {
-	t.Setenv("SCION_HOST_UID", "")
-	tmpDir := t.TempDir()
+// provisionAgentRepoRootScaffold creates a minimal global .scion dir under
+// tmpDir with a "claude" harness-config and a "claude" template
+// (default_harness_config pointing at it), changes the working directory and
+// HOME to tmpDir for the duration of the test, and creates an empty project
+// .scion dir under tmpDir/project. Returns the project's .scion directory
+// (the projectPath ProvisionAgent expects) and the template directory, so a
+// caller that needs to mutate the template's scion-agent.json (e.g. an
+// injection test) can overwrite filepath.Join(tplDir, "scion-agent.json")
+// afterward.
+func provisionAgentRepoRootScaffold(t *testing.T, tmpDir string) (projectScionDir, tplDir string) {
+	t.Helper()
 
-	oldWd, _ := os.Getwd()
-	_ = os.Chdir(tmpDir)
-	defer func() { _ = os.Chdir(oldWd) }()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatal(err)
+	}
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	_ = os.MkdirAll(globalTemplatesDir, 0755)
+	if err := os.MkdirAll(globalTemplatesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
-	tplDir := filepath.Join(globalTemplatesDir, "claude")
-	_ = os.MkdirAll(tplDir, 0755)
-	tplConfig := `{"default_harness_config": "claude"}`
-	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+	tplDir = filepath.Join(globalTemplatesDir, "claude")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "claude"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	projectDir := filepath.Join(tmpDir, "project")
-	projectScionDir := filepath.Join(projectDir, ".scion")
-	_ = os.MkdirAll(projectScionDir, 0755)
+	projectScionDir = filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	return projectScionDir, tplDir
+}
+
+func TestProvisionAgent_PersistsValidatedRepoRoot(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir, _ := provisionAgentRepoRootScaffold(t, tmpDir)
 
 	// Stand in for a broker-provisioned worktree: a real git worktree, so
 	// this test isn't the reason a validation gate would reject it.
@@ -3876,17 +3904,13 @@ func TestProvisionAgent_PersistsValidatedRepoRoot(t *testing.T) {
 		t.Error("expected ExplicitWorkspace to be true (needed for GetAgent's resume-recovery skip)")
 	}
 
+	// Exact comparison, not EvalSymlinks-normalized: the value is persisted
+	// verbatim from ctx, and run.go/common.go's mount-branch decision depends
+	// on that exact lexical string, so a persist that silently changed the
+	// spelling of the path would be a real regression this must catch.
 	agentDir := config.GetAgentDir(projectScionDir, agentName, false)
-	gotRoot, err := filepath.EvalSymlinks(readProvisionedWorktreeRepoRoot(agentDir))
-	if err != nil {
-		t.Fatalf("EvalSymlinks(persisted repo root): %v", err)
-	}
-	wantRoot, err := filepath.EvalSymlinks(repoRoot)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(repoRoot): %v", err)
-	}
-	if gotRoot != wantRoot {
-		t.Errorf("persisted repo root = %q, want %q (ProvisionAgent must persist a validated ctx signal itself)", gotRoot, wantRoot)
+	if got := readProvisionedWorktreeRepoRoot(agentDir); got != repoRoot {
+		t.Errorf("persisted repo root = %q, want %q (ProvisionAgent must persist a validated ctx signal itself)", got, repoRoot)
 	}
 }
 
@@ -3896,29 +3920,7 @@ func TestProvisionAgent_PersistsValidatedRepoRoot(t *testing.T) {
 // Start falls through to detectRepoRoot and keeps RepoRoot "" for this case.
 func TestProvisionAgent_UserWorkspaceOverrideLeavesRepoRootUnset(t *testing.T) {
 	tmpDir := t.TempDir()
-
-	oldWd, _ := os.Getwd()
-	_ = os.Chdir(tmpDir)
-	defer func() { _ = os.Chdir(oldWd) }()
-
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
-
-	globalScionDir := filepath.Join(tmpDir, ".scion")
-	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	_ = os.MkdirAll(globalTemplatesDir, 0755)
-
-	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
-
-	tplDir := filepath.Join(globalTemplatesDir, "claude")
-	_ = os.MkdirAll(tplDir, 0755)
-	tplConfig := `{"default_harness_config": "claude"}`
-	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
-
-	projectDir := filepath.Join(tmpDir, "project")
-	projectScionDir := filepath.Join(projectDir, ".scion")
-	_ = os.MkdirAll(projectScionDir, 0755)
+	projectScionDir, _ := provisionAgentRepoRootScaffold(t, tmpDir)
 
 	userWorkspace := filepath.Join(tmpDir, "operators-own-dir")
 	_ = os.MkdirAll(userWorkspace, 0755)
@@ -3947,35 +3949,18 @@ func TestProvisionAgent_UserWorkspaceOverrideLeavesRepoRootUnset(t *testing.T) {
 // repo root gets persisted for a plain --workspace agent.
 func TestProvisionAgent_TemplateInjectedRepoRootIsInert(t *testing.T) {
 	tmpDir := t.TempDir()
-
-	oldWd, _ := os.Getwd()
-	_ = os.Chdir(tmpDir)
-	defer func() { _ = os.Chdir(oldWd) }()
-
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
-
-	globalScionDir := filepath.Join(tmpDir, ".scion")
-	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	_ = os.MkdirAll(globalTemplatesDir, 0755)
-
-	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+	projectScionDir, tplDir := provisionAgentRepoRootScaffold(t, tmpDir)
 
 	// A template that tries to set the repo root to "/" via both the old and
 	// new field names.
-	tplDir := filepath.Join(globalTemplatesDir, "claude")
-	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"provisioned_worktree_repo_root": "/",
 		"provisionedWorktreeRepoRoot": "/"
 	}`
-	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
-
-	projectDir := filepath.Join(tmpDir, "project")
-	projectScionDir := filepath.Join(projectDir, ".scion")
-	_ = os.MkdirAll(projectScionDir, 0755)
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644); err != nil {
+		t.Fatalf("failed to overwrite template config: %v", err)
+	}
 
 	userWorkspace := filepath.Join(tmpDir, "operators-own-dir")
 	_ = os.MkdirAll(userWorkspace, 0755)
@@ -3999,28 +3984,7 @@ func TestProvisionAgent_TemplateInjectedRepoRootIsInert(t *testing.T) {
 // must also have no effect.
 func TestProvisionAgent_InlineConfigInjectedRepoRootIsInert(t *testing.T) {
 	tmpDir := t.TempDir()
-
-	oldWd, _ := os.Getwd()
-	_ = os.Chdir(tmpDir)
-	defer func() { _ = os.Chdir(oldWd) }()
-
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
-
-	globalScionDir := filepath.Join(tmpDir, ".scion")
-	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	_ = os.MkdirAll(globalTemplatesDir, 0755)
-
-	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
-
-	tplDir := filepath.Join(globalTemplatesDir, "claude")
-	_ = os.MkdirAll(tplDir, 0755)
-	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "claude"}`), 0644)
-
-	projectDir := filepath.Join(tmpDir, "project")
-	projectScionDir := filepath.Join(projectDir, ".scion")
-	_ = os.MkdirAll(projectScionDir, 0755)
+	projectScionDir, _ := provisionAgentRepoRootScaffold(t, tmpDir)
 
 	userWorkspace := filepath.Join(tmpDir, "operators-own-dir")
 	_ = os.MkdirAll(userWorkspace, 0755)

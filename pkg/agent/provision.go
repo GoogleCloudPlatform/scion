@@ -1840,14 +1840,15 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Persist the broker-provisioned worktree's repo root now, if the ctx
 	// signal validates against workspaceSource: run.go's Start does not
 	// always run after this call returns — the hub's provision-only flow
-	// (Manager.Provision, DispatchAgentProvision) and reincarnate flow
-	// (Reprovision, DispatchAgentReprovision, which calls ProvisionAgent
-	// directly rather than through Start) can both provision an agent
+	// (Manager.Provision, DispatchAgentProvision) can provision an agent
 	// without starting it in the same dispatch, and a later start/restart
-	// carries no ctx signal of its own. Start still carries its own call to
-	// the same gate, for the one case this function never runs at all:
-	// GetAgent skipping ProvisionAgent because the agent directory already
-	// exists. See persistProvisionedWorktreeRepoRootIfValid.
+	// carries no ctx signal of its own. (Reprovision is clone-per-agent only
+	// today, so it never carries this signal; if it gains worktree support,
+	// this call already covers it, since Reprovision also reaches
+	// ProvisionAgent directly.) Start still carries its own call to the same
+	// gate, for the one case this function never runs at all: GetAgent
+	// skipping ProvisionAgent because the agent directory already exists.
+	// See persistProvisionedWorktreeRepoRootIfValid.
 	persistProvisionedWorktreeRepoRootIfValid(agentDir, api.ProvisionedWorktreeRepoRootFromContext(ctx), workspaceSource)
 
 	agentCfgData, err := json.MarshalIndent(finalScionCfg, "", "  ")
@@ -2300,11 +2301,14 @@ func readProvisionedWorktreeRepoRoot(agentDir string) string {
 //
 // This is the single persistence gate shared by every call site that can be
 // the first to see a fresh ctx signal for a given dispatch:
-//   - ProvisionAgent, for a fresh create (reached directly by Reprovision,
-//     and via GetAgent for Manager.Provision/Manager.Start's normal
-//     first-provision path) — the hub's provision-only and reincarnate flows
-//     provision without ever calling Start in the same dispatch, so this is
-//     the only chance to record the value for those.
+//   - ProvisionAgent, for a fresh create (via GetAgent, for
+//     Manager.Provision/Manager.Start's normal first-provision path) — the
+//     hub's provision-only flow provisions without ever calling Start in the
+//     same dispatch, so this is the only chance to record the value there.
+//     Reprovision is clone-per-agent only today, so it never carries this
+//     signal; if it gains worktree support, the persist in ProvisionAgent
+//     already covers it, since Reprovision also calls ProvisionAgent
+//     directly.
 //   - run.go's Start, for the case ProvisionAgent never runs at all: GetAgent
 //     skips it when the agent directory already exists on disk (e.g. a
 //     leftover from a deleted hub agent recreated under the same name).

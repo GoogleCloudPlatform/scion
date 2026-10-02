@@ -3231,6 +3231,69 @@ profiles:
 	}
 }
 
+// startRepoRootProjectScaffold creates a minimal project under tmpDir that
+// Start can resolve harness/template/settings from (docker profile, a
+// "test-harness" harness-config, and a "default" template), changes the
+// working directory and HOME to tmpDir for the duration of the test, and
+// returns the project's .scion directory (the ProjectPath Start expects).
+// Mirrors pkg/runtimebroker's setupRepoRootProjectScaffold. A caller that
+// needs non-default settings.yaml content (e.g. an NFS-backed
+// workspace_storage config) can overwrite
+// filepath.Join(projectScionDir, "settings.yaml") after calling this.
+func startRepoRootProjectScaffold(t *testing.T, tmpDir string) string {
+	t.Helper()
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+		t.Fatalf("failed to create project .scion dir: %v", err)
+	}
+	settingsYAML := `schema_version: "1"
+active_profile: local
+harness_configs:
+  test-harness:
+    harness: gemini
+    user: scion
+    image: test-image:latest
+profiles:
+  local:
+    runtime: docker
+`
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
+	if err := os.MkdirAll(hcDir, 0755); err != nil {
+		t.Fatalf("failed to create harness-config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644); err != nil {
+		t.Fatalf("failed to write harness config: %v", err)
+	}
+	tplDir := filepath.Join(projectScionDir, "templates", "default")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatalf("failed to create template dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644); err != nil {
+		t.Fatalf("failed to write template: %v", err)
+	}
+	return projectScionDir
+}
+
 // TestStartInvalidatesProvisionedRepoRootWhenNFSBackendReplacesWorkspace
 // covers server.workspace_storage.backend == "nfs", which applies to
 // worktree-per-agent mode too (runtime.SelectWorkspaceBackend), and when it
@@ -3243,27 +3306,7 @@ profiles:
 func TestStartInvalidatesProvisionedRepoRootWhenNFSBackendReplacesWorkspace(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	tmpDir := t.TempDir()
-
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get working directory: %v", err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("failed to chdir to tmpDir: %v", err)
-	}
-	defer func() { _ = os.Chdir(oldWd) }()
-
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	if err := os.Setenv("HOME", tmpDir); err != nil {
-		t.Fatalf("failed to set HOME: %v", err)
-	}
-
-	projectDir := filepath.Join(tmpDir, "project")
-	projectScionDir := filepath.Join(projectDir, ".scion")
-	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
-		t.Fatalf("failed to create project .scion dir: %v", err)
-	}
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
 
 	nfsMountRoot := filepath.Join(tmpDir, "nfs")
 	settingsYAML := fmt.Sprintf(`schema_version: "1"
@@ -3288,20 +3331,6 @@ profiles:
     runtime: docker
 `, nfsMountRoot)
 	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
-		t.Fatalf("failed to write settings: %v", err)
-	}
-	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
-	if err := os.MkdirAll(hcDir, 0755); err != nil {
-		t.Fatalf("failed to create harness-config dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644); err != nil {
-		t.Fatalf("failed to write harness config: %v", err)
-	}
-	tplDir := filepath.Join(projectScionDir, "templates", "default")
-	if err := os.MkdirAll(tplDir, 0755); err != nil {
-		t.Fatalf("failed to create template dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644); err != nil {
 		t.Fatalf("failed to write template: %v", err)
 	}
 
@@ -3329,7 +3358,7 @@ profiles:
 	mgr := NewManager(mockRT)
 
 	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), sharedBase)
-	_, err = mgr.Start(ctx, api.StartOptions{
+	if _, err := mgr.Start(ctx, api.StartOptions{
 		Name:        "agent-a",
 		ProjectPath: projectScionDir,
 		NoAuth:      true,
@@ -3338,8 +3367,7 @@ profiles:
 			"SCION_AGENT_ID":   "agent-a",
 			"SCION_PROJECT_ID": "proj-123",
 		},
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
 
@@ -3372,58 +3400,7 @@ profiles:
 // #642 added the explicit-workspace skip for in the first place.
 func TestStartUserWorkspaceOverrideYieldsEmptyRepoRoot(t *testing.T) {
 	tmpDir := t.TempDir()
-
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get working directory: %v", err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("failed to chdir to tmpDir: %v", err)
-	}
-	defer func() { _ = os.Chdir(oldWd) }()
-
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	if err := os.Setenv("HOME", tmpDir); err != nil {
-		t.Fatalf("failed to set HOME: %v", err)
-	}
-
-	projectDir := filepath.Join(tmpDir, "project")
-	projectScionDir := filepath.Join(projectDir, ".scion")
-	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
-		t.Fatalf("failed to create project .scion dir: %v", err)
-	}
-
-	settingsYAML := `schema_version: "1"
-active_profile: local
-harness_configs:
-  test-harness:
-    harness: gemini
-    user: scion
-    image: test-image:latest
-profiles:
-  local:
-    runtime: docker
-`
-	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
-		t.Fatalf("failed to write settings: %v", err)
-	}
-
-	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
-	if err := os.MkdirAll(hcDir, 0755); err != nil {
-		t.Fatalf("failed to create harness-config dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644); err != nil {
-		t.Fatalf("failed to write harness config: %v", err)
-	}
-
-	tplDir := filepath.Join(projectScionDir, "templates", "default")
-	if err := os.MkdirAll(tplDir, 0755); err != nil {
-		t.Fatalf("failed to create template dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644); err != nil {
-		t.Fatalf("failed to write template: %v", err)
-	}
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
 
 	// The operator's own workspace: a real git repo, so the "explicit
 	// workspace skips git detection" guarantee is actually exercised, not
@@ -3449,7 +3426,7 @@ profiles:
 	// context.Background(): no api.ContextWithProvisionedWorktreeRepoRoot
 	// signal — this is the plain CLI/local dispatch shape for a user
 	// --workspace flag.
-	_, err = mgr.Start(context.Background(), api.StartOptions{
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:        "test-agent",
 		ProjectPath: projectScionDir,
 		NoAuth:      true,
@@ -3458,8 +3435,7 @@ profiles:
 			"SCION_AGENT_ID":   "agent-456",
 			"SCION_PROJECT_ID": "proj-123",
 		},
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
 
@@ -3482,55 +3458,7 @@ profiles:
 func TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkipped(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	tmpDir := t.TempDir()
-
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get working directory: %v", err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("failed to chdir to tmpDir: %v", err)
-	}
-	defer func() { _ = os.Chdir(oldWd) }()
-
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	if err := os.Setenv("HOME", tmpDir); err != nil {
-		t.Fatalf("failed to set HOME: %v", err)
-	}
-
-	projectDir := filepath.Join(tmpDir, "project")
-	projectScionDir := filepath.Join(projectDir, ".scion")
-	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
-		t.Fatalf("failed to create project .scion dir: %v", err)
-	}
-	settingsYAML := `schema_version: "1"
-active_profile: local
-harness_configs:
-  test-harness:
-    harness: gemini
-    user: scion
-    image: test-image:latest
-profiles:
-  local:
-    runtime: docker
-`
-	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
-		t.Fatalf("failed to write settings: %v", err)
-	}
-	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
-	if err := os.MkdirAll(hcDir, 0755); err != nil {
-		t.Fatalf("failed to create harness-config dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644); err != nil {
-		t.Fatalf("failed to write harness config: %v", err)
-	}
-	tplDir := filepath.Join(projectScionDir, "templates", "default")
-	if err := os.MkdirAll(tplDir, 0755); err != nil {
-		t.Fatalf("failed to create template dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644); err != nil {
-		t.Fatalf("failed to write template: %v", err)
-	}
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
 
 	// The workspace must be a REAL worktree of sharedBase (not just a plain
 	// directory) — Start only persists a ctx signal that actually validates,
@@ -3601,55 +3529,7 @@ profiles:
 // even though it never reached RunConfig on the dispatch that produced it.
 func TestStartDoesNotPersistUnvalidatedCtxRepoRoot(t *testing.T) {
 	tmpDir := t.TempDir()
-
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get working directory: %v", err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("failed to chdir to tmpDir: %v", err)
-	}
-	defer func() { _ = os.Chdir(oldWd) }()
-
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	if err := os.Setenv("HOME", tmpDir); err != nil {
-		t.Fatalf("failed to set HOME: %v", err)
-	}
-
-	projectDir := filepath.Join(tmpDir, "project")
-	projectScionDir := filepath.Join(projectDir, ".scion")
-	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
-		t.Fatalf("failed to create project .scion dir: %v", err)
-	}
-	settingsYAML := `schema_version: "1"
-active_profile: local
-harness_configs:
-  test-harness:
-    harness: gemini
-    user: scion
-    image: test-image:latest
-profiles:
-  local:
-    runtime: docker
-`
-	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
-		t.Fatalf("failed to write settings: %v", err)
-	}
-	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
-	if err := os.MkdirAll(hcDir, 0755); err != nil {
-		t.Fatalf("failed to create harness-config dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644); err != nil {
-		t.Fatalf("failed to write harness config: %v", err)
-	}
-	tplDir := filepath.Join(projectScionDir, "templates", "default")
-	if err := os.MkdirAll(tplDir, 0755); err != nil {
-		t.Fatalf("failed to create template dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644); err != nil {
-		t.Fatalf("failed to write template: %v", err)
-	}
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
 
 	// ctxRoot is a real git repo, but it has no relationship at all to
 	// userWorkspace (a plain, unrelated directory) — the validator must
@@ -3693,62 +3573,14 @@ profiles:
 // container-writable storage: a user --workspace agent on a directory shaped
 // like "<repo>/worktrees/<name>" (not a real git worktree). The first Start
 // correctly yields an empty RepoRoot. agent-info.json is writable at
-// runtime, so this test writes it directly (using the field name AgentInfo
-// used to carry the repo root under previously, "provisionedWorktreeRepoRoot")
-// to prove run.go no longer sources RepoRoot from it on resume; the value
-// lives in a broker-owned file under agentDir that is not mounted into the
-// container, and the validator rejects a non-worktree directory regardless.
+// runtime, so this test writes a "provisionedWorktreeRepoRoot" key into it
+// directly to prove run.go must never source RepoRoot from agentHome on
+// resume; the value lives in a broker-owned file under agentDir that is not
+// mounted into the container, and the validator rejects a non-worktree
+// directory regardless.
 func TestStartResumeDoesNotAdoptRepoRootFromAgentInfoFile(t *testing.T) {
 	tmpDir := t.TempDir()
-
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get working directory: %v", err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("failed to chdir to tmpDir: %v", err)
-	}
-	defer func() { _ = os.Chdir(oldWd) }()
-
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	if err := os.Setenv("HOME", tmpDir); err != nil {
-		t.Fatalf("failed to set HOME: %v", err)
-	}
-
-	projectDir := filepath.Join(tmpDir, "project")
-	projectScionDir := filepath.Join(projectDir, ".scion")
-	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
-		t.Fatalf("failed to create project .scion dir: %v", err)
-	}
-	settingsYAML := `schema_version: "1"
-active_profile: local
-harness_configs:
-  test-harness:
-    harness: gemini
-    user: scion
-    image: test-image:latest
-profiles:
-  local:
-    runtime: docker
-`
-	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
-		t.Fatalf("failed to write settings: %v", err)
-	}
-	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
-	if err := os.MkdirAll(hcDir, 0755); err != nil {
-		t.Fatalf("failed to create harness-config dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644); err != nil {
-		t.Fatalf("failed to write harness config: %v", err)
-	}
-	tplDir := filepath.Join(projectScionDir, "templates", "default")
-	if err := os.MkdirAll(tplDir, 0755); err != nil {
-		t.Fatalf("failed to create template dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644); err != nil {
-		t.Fatalf("failed to write template: %v", err)
-	}
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
 
 	// Use a REAL git worktree so the isolation is precise: the written value
 	// below would validate successfully if run.go consulted agent-info.json
@@ -3787,9 +3619,9 @@ profiles:
 		t.Fatalf("baseline RunConfig.RepoRoot = %q, want \"\" before the state file is written", capturedConfig.RepoRoot)
 	}
 
-	// Simulate the container: write agent-info.json in agentHome (bind-mounted
-	// read-write into the container) with the field name AgentInfo previously
-	// carried this value under.
+	// Write a "provisionedWorktreeRepoRoot" key into agent-info.json in
+	// agentHome (bind-mounted read-write into the container); RepoRoot must
+	// never be read from agentHome.
 	agentHome := config.GetAgentHomePath(projectScionDir, "agent-a")
 	containerWritten := []byte(`{"provisionedWorktreeRepoRoot":"` + userRepo + `"}`)
 	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), containerWritten, 0644); err != nil {

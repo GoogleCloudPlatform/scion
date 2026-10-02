@@ -840,9 +840,17 @@ func TestReprovision_IgnoresProvisionedWorktreeSignalForCloneWorkspace(t *testin
 	ws := filepath.Join(scionDir, "agents", agentName, "workspace")
 	_ = os.MkdirAll(filepath.Join(ws, ".git"), 0755)
 
+	// A REAL base with a REAL worktree, so this test proves the ctx signal is
+	// rejected because Reprovision's clone-per-agent path never hands the
+	// gate a validating workspace — not merely because the injected value
+	// happens to point at something that doesn't exist on disk.
+	realBase := t.TempDir()
+	setupGitRepo(t, realBase)
+	_ = createRealWorktree(t, realBase, "agent-1")
+
 	mgr := NewManager(&runtime.MockRuntime{})
 	reprovisionCtx := api.ContextWithProvisionedWorktreeRepoRoot(
-		api.ContextWithGitClone(context.Background(), gc), "/some/unrelated/base")
+		api.ContextWithGitClone(context.Background(), gc), realBase)
 	if _, err := mgr.Reprovision(reprovisionCtx, api.StartOptions{
 		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true, GitClone: gc,
 	}); err != nil {
@@ -850,6 +858,6 @@ func TestReprovision_IgnoresProvisionedWorktreeSignalForCloneWorkspace(t *testin
 	}
 	agentDir := config.GetAgentDir(scionDir, agentName, false)
 	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
-		t.Fatalf("readProvisionedWorktreeRepoRoot(agentDir) = %q, want \"\" (a ctx signal must not be trusted against a clone-per-agent workspace)", got)
+		t.Fatalf("readProvisionedWorktreeRepoRoot(agentDir) = %q, want \"\" (a ctx signal must not be trusted against a clone-per-agent workspace, even one naming a genuine worktree base elsewhere)", got)
 	}
 }

@@ -332,13 +332,12 @@ func TestTryProvisionWorktree_Start_RepoRootSurvivesResume(t *testing.T) {
 // TestTryProvisionWorktree_ProvisionThenStart_RepoRootSurvives is the
 // required regression guard for the hub's provision-only dispatch shape
 // (DispatchAgentProvision: Manager.Provision, never followed by Start in the
-// same dispatch — the hub sends a separate, later DispatchAgentStart, and
-// the reincarnate flow's DispatchAgentReprovision/DispatchAgentStart pair
-// follows the same two-dispatch shape). The broker does not re-run
-// tryProvisionWorktree for that later start, so nothing but this dispatch's
-// own persistence can carry the repo root forward: Manager.Provision (via
-// GetAgent -> ProvisionAgent) must persist the validated ctx signal itself,
-// since Start never runs in this phase to do it.
+// same dispatch — the hub sends a separate, later DispatchAgentStart). The
+// broker does not re-run tryProvisionWorktree for that later start, so
+// nothing but this dispatch's own persistence can carry the repo root
+// forward: Manager.Provision (via GetAgent -> ProvisionAgent) must persist
+// the validated ctx signal itself, since Start never runs in this phase to
+// do it.
 func TestTryProvisionWorktree_ProvisionThenStart_RepoRootSurvives(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
@@ -524,6 +523,104 @@ func TestCreateAgent_WiresProvisionedWorktreeRepoRootOntoStartContext(t *testing
 	}
 }
 
+// TestCreateAgent_ProvisionOnlyThenStart_RepoRootSurvives drives the real
+// HTTP createAgent handler with "provisionOnly": true (mirroring
+// DispatchAgentProvision), then a separate, bare Manager.Start (mirroring
+// the hub's later, separate DispatchAgentStart). This is the coverage gap
+// TestTryProvisionWorktree_ProvisionThenStart_RepoRootSurvives (pkg/agent
+// package, calling mgr.Provision directly) cannot close: the ctx wrap at
+// handlers.go's createAgent sits before the req.ProvisionOnly branch, so a
+// change that moved it into the start-only branch would leave that test —
+// and TestCreateAgent_WiresProvisionedWorktreeRepoRootOntoStartContext —
+// green while the provision-only path broke. This test drives the real
+// handler for the provision-only phase, so it would catch exactly that.
+func TestCreateAgent_ProvisionOnlyThenStart_RepoRootSurvives(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
+		t.Skipf("git too old, worktree mode not eligible on this host: %s", reason)
+	}
+
+	bare := initBareRepoWithCommit(t)
+	brokerTmp := t.TempDir()
+	projectScionDir := setupRepoRootProjectScaffold(t, brokerTmp)
+	projectPath := projectScionDir
+
+	var capturedConfig runtime.RunConfig
+	runCalled := false
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			runCalled = true
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	cfg := DefaultServerConfig()
+	cfg.ForceRuntime = "docker"
+	mgr := agent.NewManager(mockRT)
+	srv := New(cfg, mgr, mockRT)
+
+	body := `{
+		"name": "agent-a",
+		"id": "agent-a",
+		"slug": "agent-a",
+		"projectPath": ` + jsonStr(projectPath) + `,
+		"projectId": "p1",
+		"projectSlug": "proj",
+		"workspaceMode": "worktree-per-agent",
+		"noAuth": true,
+		"provisionOnly": true,
+		"config": {
+			"gitClone": {"url": ` + jsonStr(bare) + `, "branch": "main"}
+		}
+	}`
+
+	// Phase 1: provision-only through the real HTTP handler. The container
+	// must never start in this phase.
+	postCreateAgentExpectCreated(t, srv, body)
+	if runCalled {
+		t.Fatal("RunFunc was called during a provisionOnly request — the container must not start")
+	}
+
+	// Phase 2: a later, separate start dispatch — no ctx signal (the broker
+	// does not re-run tryProvisionWorktree for a plain start) and an empty
+	// Workspace (exactly what the hub sends on start after provision-only).
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "agent-a",
+		ProjectPath: projectPath,
+		NoAuth:      true,
+		Workspace:   "",
+		Env:         map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "p1"},
+	}); err != nil {
+		t.Fatalf("start Start failed: %v", err)
+	}
+	if !runCalled {
+		t.Fatal("RunFunc was never called on the later start (test setup broken)")
+	}
+
+	if capturedConfig.RepoRoot == "" {
+		t.Fatal("RunConfig.RepoRoot is empty — the real provisionOnly handler never persisted the repo root, so the later start lost it")
+	}
+	expectedBase := filepath.Join(projectPath, "workspace")
+	gotRoot, err := filepath.EvalSymlinks(capturedConfig.RepoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(RepoRoot): %v", err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(expectedBase)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(expectedBase): %v", err)
+	}
+	if gotRoot != wantRoot {
+		t.Fatalf("RunConfig.RepoRoot = %q, want %q (the shared base)", gotRoot, wantRoot)
+	}
+	if wantContainerWorkspace := "/repo-root/worktrees/agent-a"; capturedConfig.ContainerWorkspace != wantContainerWorkspace {
+		t.Fatalf("RunConfig.ContainerWorkspace = %q, want %q", capturedConfig.ContainerWorkspace, wantContainerWorkspace)
+	}
+}
+
 // jsonStr quotes s as a JSON string literal, for building request bodies
 // containing filesystem paths (which may need escaping on some platforms).
 func jsonStr(s string) string {
@@ -533,16 +630,12 @@ func jsonStr(s string) string {
 // TestTryProvisionWorktree_Start_SymlinkedBase_ContainerWorkspaceStaysConsistent
 // is a regression guard: when the broker's project path runs through a
 // symlink (a symlinked $HOME, a symlinked projects dir, or macOS's
-// /var -> /private/var), the repo root validateProvisionedWorktreeRepoRoot
-// returns must stay lexically consistent with the unresolved
+// /var -> /private/var), the repo root that provision.ValidateWorktreeForBase
+// accepts must stay lexically consistent with the unresolved
 // RunConfig.Workspace, or pkg/runtime/common.go's
 // filepath.Rel(RepoRoot, Workspace) breaks and misroutes the mount into the
 // full-root fallback branch (ContainerWorkspace == "/workspace" instead of
 // "/repo-root/worktrees/<id>", and in-container git breaks again).
-//
-// Before the fix, validateProvisionedWorktreeRepoRoot returned
-// EvalSymlinks(root) while effectiveWorkspace (and so RunConfig.Workspace)
-// stayed lexical, exactly reproducing this break.
 func TestTryProvisionWorktree_Start_SymlinkedBase_ContainerWorkspaceStaysConsistent(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {

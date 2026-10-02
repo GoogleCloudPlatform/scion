@@ -364,6 +364,7 @@ func TestWorktreeIsLexicallyUnderBase_RejectsEmptyOrRelativeInputs(t *testing.T)
 		{"absolute base, relative candidate", absBase, "worktrees/agent-1"},
 		{"absolute base, empty candidate", absBase, ""},
 		{"empty base, absolute candidate", "", filepath.Join(absBase, "worktrees", "agent-1")},
+		{"relative base, absolute candidate", "base", filepath.Join(absBase, "worktrees", "agent-1")},
 		{"both empty", "", ""},
 	}
 	for _, tc := range cases {
