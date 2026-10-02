@@ -43,7 +43,7 @@ sections 4.3, 6.1-6.4, 7, 9, 11, 13 read before coding):
   listener, added `onAgentsChanged` wired to `agents-changed`, merging through
   `mergeChanged` with `shouldAdd: () => this.agentScope === 'all'` (today's
   global add rule: scope `all` only) and `this.scopeCapabilities`. No
-  `agent-list-window`/paging on this page yet (left for a later phase per
+  `agent-list-window`/paging on this page yet (left for a later change per
   §11); this is a straight swap of the live-update mechanism only.
 - **`state.ts` (TTL/seed-epoch fix carried into this slice):** `bufferAgentDelta`'s
   30s expiry timer now also deletes the expiring ID's entry from every
@@ -55,10 +55,10 @@ sections 4.3, 6.1-6.4, 7, 9, 11, 13 read before coding):
   stale value live state never showed. Both stores are now kept in sync at
   expiry; a later delta for the same ID still starts both fresh via the
   existing fold-or-create paths.
-- Neither `markAgentSetComplete` nor `isAgentSetComplete` gained a caller in
-  this phase (left for later). `home.ts`, `agent-graph.ts` and `debug-log.ts` are
-  untouched and stay on `agents-updated`, which `state.ts` still emits once
-  per flush (already landed).
+- Neither `markAgentSetComplete` nor `isAgentSetComplete` gained a caller
+  here; that is left for a later change. `home.ts`, `agent-graph.ts` and
+  `debug-log.ts` are untouched and stay on `agents-updated`, which
+  `state.ts` still emits once per flush (already landed).
 
 ## Why
 
@@ -80,7 +80,7 @@ own test.
   agent only (not on an existing one, and not when the new agent already
   carries its own); combined deletes+upserts in one call; unknown-ID deltas
   ignored; a 20-agent burst exercising multiple upserts/one delete/one create
-  in a single flush with full identity-preservation checks (W2). A dedicated
+  in a single flush with full identity-preservation checks. A dedicated
   reference-equality test ("carries the untouched object through by
   reference") pins the mutation-check contract.
 - **Mutation check (brief requirement):** temporarily changed the final
@@ -104,10 +104,11 @@ own test.
   agent is the same object before and after) — this test already exercised
   the new `mergeAgentsChanged` path end-to-end (real `stateManager`, real SSE
   delta via `handleUpdate`, zero extra requests) since it supersedes the old
-  `onAgentsUpdated`; the new assertion makes the W2/A10 identity claim
+  `onAgentsUpdated`; the new assertion makes the identity-preservation claim
   explicit rather than implicit in the existing phase/count assertions.
-- **`agents-live-updates.test.ts` (new):** end-to-end W2/W3 coverage for the
-  `/agents` page, mirroring the project-detail integration-test style (real
+- **`agents-live-updates.test.ts` (new):** end-to-end coverage of
+  coalescing and identity preservation for the `/agents` page, mirroring
+  the project-detail integration-test style (real
   `stateManager`, faked `fetch`/`EventSource`/`localStorage`): a status delta
   updates one row while every untouched agent stays `===` and zero requests
   are issued; an SSE-created agent is added under scope `all`; an SSE delete
@@ -161,7 +162,7 @@ own test.
   work evidently implemented the grid/list render with `.map()` rather than the design
   doc's `repeat(items, a => a.id, ...)` proposal. Raised during development;
   **decision: accepted, no change here** — keyed rendering of window items
-  belongs to the later phase that rebuilds grid and list from the window.
+  belongs to a later change that rebuilds grid and list from the window.
 
 ## Follow-up: tombstone-race fix
 
@@ -222,28 +223,27 @@ warnings), unchanged from the prior commit's baseline; `npx prettier
    `project-detail.ts:loadAgentsForViewImpl` (both branches),
    `loadLegacyAgentsImpl`, `fetchAgentsPage`, and `agents.ts:fetchAndMergeAgents`.
 
-## W2/W3/W10 sub-cases to test names
+## Test coverage map
 
-- **W2 (coalescing/identity):** `agent-merge.test.ts` → "unchanged agents stay
-  the same object...", "...20-agent burst...", "...applies deletes and
-  upserts together...", "carries the untouched object through by
-  reference...", and the `dropTombstoned` block (four tests);
+- **Coalescing and identity preservation:** `agent-merge.test.ts` → "unchanged
+  agents stay the same object...", "...20-agent burst...", "...applies
+  deletes and upserts together...", "carries the untouched object through
+  by reference...", and the `dropTombstoned` block (four tests);
   `project-detail-agent-window.test.ts` → "small state: live
   updates" (extended with the `===` assertion, plus the new "a REST response
   landing after an SSE delete does not resurrect the deleted agent");
   `agents-live-updates.test.ts` → "merges a status delta in place, preserving
   identity for every untouched agent...", plus its own new "a REST response
   landing after an SSE delete does not resurrect the deleted agent".
-- **W3 (seed epoch):** `state-seed-epoch.test.ts` → "a TTL-expired buffered
+- **Seed-epoch behavior:** `state-seed-epoch.test.ts` → "a TTL-expired buffered
   delta is not replayed by a later seed" > "matches live state once the
   buffer entry it was recorded from has expired".
-- **W10 (request counts, rows 1-18 unchanged):** `project-detail-agent-window.test.ts`'s
+- **Request counts stay unchanged:** `project-detail-agent-window.test.ts`'s
   existing request-count gate test ("page load issues exactly one agents
   request...") and every other request-count assertion in that file, rerun
   unchanged and still passing (zero added); `agents-live-updates.test.ts`'s
   tests each assert `requests.length` (or an equivalent fetch-call count)
-  stays at its pre-delta count
-  across every SSE delta.
+  stays at its pre-delta count across every SSE delta.
 
 ## Follow-up: capability carry-forward, pending-buffer timer and tombstone filtering
 
@@ -297,7 +297,7 @@ Smaller fixes, also closed:
   capabilities a *page* inherited on top of its own object — the false
   premise behind the capabilities-dropped fix above.
 - **Removed design-process tags from new comments and test names:**
-  dropped the acceptance/test-plan tags this phase had introduced
+  dropped the acceptance/test-plan tags this change had introduced
   (`agent-merge.ts`, `agent-merge.test.ts`, `agents-live-updates.test.ts`,
   `project-detail-agent-window.test.ts`, `state-seed-epoch.test.ts`),
   replacing them with plain wording. Pre-existing occurrences already on
@@ -310,7 +310,7 @@ Smaller fixes, also closed:
 Other items considered:
 
 - **A created event landing mid-load has a weaker self-heal than `main`
-  had:** accepted as a known limitation, deferred to a later phase. A
+  had:** accepted as a known limitation, deferred to a later change. A
   created event that lands while a page's own REST load is already in
   flight is added by `mergeChanged` and then overwritten by that load's
   REST assignment if the snapshot predates the create; it now heals only
@@ -318,9 +318,9 @@ Other items considered:
   update (flush) as `main`'s full rebuild happened to provide. The seed-epoch
   machinery already used for drains is the natural fix once these load
   paths adopt it. Not blocking: the design explicitly removes full
-  rebuilds. **Decided by ptone (2026-10-01 23:05Z): postponed to the
-  list-window phase, tracked as `ptone/scion#2560`.** Noted in the PR body
-  as a known limitation referencing that issue.
+  rebuilds. **Decided by ptone (2026-10-01 23:05Z): postponed to a later
+  change, tracked in `ptone/scion#2560`.** Noted in the PR body as a known
+  limitation referencing that issue.
 - **A paged-fetcher page-shortening edge case:** no action needed.
   Dropping a tombstoned row can shorten a server page, which can make the
   "empty page past the first steps back" rule step back one page early if
@@ -350,7 +350,7 @@ Other items considered:
   this follow-up + 8 new: 3 for the capability-preservation fix, 1 for the
   stale-timer fix, 1 for the paged-stats fix, 3 for the tombstone-site
   test-gap closures).
-- Full targeted suite (the same 13 files tracked throughout this phase):
+- Full targeted suite (the same 13 files tracked throughout this work):
   216/216 passing.
 - `npx eslint` on the four non-test files: 160 problems (52 errors, 108
   warnings), unchanged from the prior baseline — zero new issues.
