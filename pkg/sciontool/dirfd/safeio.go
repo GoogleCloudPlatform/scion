@@ -248,29 +248,43 @@ func WriteFileNoFollow(path string, data []byte, mode os.FileMode, uid, gid int,
 // its existing tests can intercept the fchown call without actually needing
 // CAP_CHOWN — calls this directly with its own chown function instead.
 func WriteFileNoFollowWithChown(path string, data []byte, mode os.FileMode, uid, gid int, policy LeafPolicy, chown func(fd, uid, gid int) error) (err error) {
-	if policy != ReplaceLeaf && policy != RefuseSymlink && policy != TruncateInPlaceOrCreate {
-		return fmt.Errorf("dirfd: WriteFileNoFollow %s: invalid LeafPolicy %d (every caller must choose ReplaceLeaf, RefuseSymlink, or TruncateInPlaceOrCreate)", path, policy)
-	}
-
 	dirFd, leaf, err := OpenParentNoFollow(path)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = syscall.Close(dirFd) }()
 
+	return WriteAtNoFollowWithChown(dirFd, leaf, path, data, mode, uid, gid, policy, chown)
+}
+
+// WriteAtNoFollowWithChown is WriteFileNoFollowWithChown's core, taking an
+// already-open, already-verified parent directory fd and the leaf name
+// directly instead of resolving them itself via OpenParentNoFollow. A
+// caller that has already walked to its own parent directory by some other
+// no-follow-safe means (e.g. EnsureDirTrustedAncestorFollow) calls this
+// directly, so the leaf write is anchored at the SAME fd that walk
+// produced — never re-resolving dirFd's path as a string, which could let
+// something swapped in between the walk and the write redirect the
+// destination again. pathForErrors is used only in error messages, never to
+// resolve anything.
+func WriteAtNoFollowWithChown(dirFd int, leaf, pathForErrors string, data []byte, mode os.FileMode, uid, gid int, policy LeafPolicy, chown func(fd, uid, gid int) error) error {
+	if policy != ReplaceLeaf && policy != RefuseSymlink && policy != TruncateInPlaceOrCreate {
+		return fmt.Errorf("dirfd: WriteFileNoFollow %s: invalid LeafPolicy %d (every caller must choose ReplaceLeaf, RefuseSymlink, or TruncateInPlaceOrCreate)", pathForErrors, policy)
+	}
+
 	if policy == RefuseSymlink {
 		if rerr := RefuseSymlinkOrNonRegularAt(dirFd, leaf); rerr != nil {
-			return fmt.Errorf("dirfd: refusing to write %s: %w", path, rerr)
+			return fmt.Errorf("dirfd: refusing to write %s: %w", pathForErrors, rerr)
 		}
 	}
 
 	if policy == TruncateInPlaceOrCreate {
 		isRegular, cerr := existingLeafIsRegularAt(dirFd, leaf)
 		if cerr != nil {
-			return fmt.Errorf("dirfd: refusing to write %s: %w", path, cerr)
+			return fmt.Errorf("dirfd: refusing to write %s: %w", pathForErrors, cerr)
 		}
 		if isRegular {
-			return writeInPlaceAt(dirFd, leaf, path, data, mode, uid, gid, chown)
+			return writeInPlaceAt(dirFd, leaf, pathForErrors, data, mode, uid, gid, chown)
 		}
 		// Leaf is absent: fall through to the create-then-rename path
 		// below, exactly like every other policy takes for a missing leaf.
@@ -282,9 +296,9 @@ func WriteFileNoFollowWithChown(path string, data []byte, mode os.FileMode, uid,
 	tmpName := fmt.Sprintf(".%s.tmp-%d-%d", leaf, os.Getpid(), time.Now().UnixNano())
 	tmpFile, err := CreateExclAt(dirFd, tmpName, 0o600)
 	if err != nil {
-		return fmt.Errorf("dirfd: create temp for %s: %w", path, err)
+		return fmt.Errorf("dirfd: create temp for %s: %w", pathForErrors, err)
 	}
-	return writeTempAndRename(dirFd, tmpFile, tmpName, leaf, path, data, mode, uid, gid, chown)
+	return writeTempAndRename(dirFd, tmpFile, tmpName, leaf, pathForErrors, data, mode, uid, gid, chown)
 }
 
 // existingLeafIsRegularAt reports whether leaf, relative to dirFd, already

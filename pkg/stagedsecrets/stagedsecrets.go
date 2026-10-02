@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
@@ -81,9 +82,16 @@ func Decode(encoded string) (*Staged, error) {
 // component-by-component via dirfd.EnsureDirNoFollowUnderRoot, which never
 // follows a symlink at any level and only chowns a component it creates
 // itself. A target outside homeDir (a legitimate operator-configured
-// absolute path) is created the ordinary way and never chowned to the
-// workload — matching the ownership boundary the leaf write itself
-// enforces via the uid/gid it is given.
+// absolute path, e.g. /var/run/secrets/sa.json) is created
+// component-by-component via dirfd.EnsureDirTrustedAncestorFollow and never
+// chowned to the workload — matching the ownership boundary the leaf write
+// itself enforces via the uid/gid it is given. That walk follows a symlink
+// at a component only when both the symlink and its containing directory
+// are root-owned and free of the group/other-write bits — a system alias
+// like "/var/run" -> "/run" that no workload can plant or redirect — and
+// refuses, fatally, any other symlink along the way, so an operator path
+// through ordinary system aliases still works while a workload-plantable
+// redirection still fails closed.
 func Write(homeDir string, staged *Staged) error {
 	var uid, gid int
 	if os.Getuid() == 0 {
@@ -115,7 +123,7 @@ func writeAs(homeDir string, staged *Staged, uid, gid int) error {
 		}
 
 		dir := filepath.Dir(fs.Target)
-		underHome, derr := dirfd.EnsureDirNoFollowUnderRoot(homeDir, dir, 0755, uid, gid)
+		dirFd, underHome, derr := dirfd.EnsureDirNoFollowUnderRoot(homeDir, dir, 0755, uid, gid)
 		if derr != nil {
 			return fmt.Errorf("failed to create directory for secret %s: %w", fs.Name, derr)
 		}
@@ -123,37 +131,64 @@ func writeAs(homeDir string, staged *Staged, uid, gid int) error {
 		if !underHome {
 			// dir does not resolve under homeDir at all: this is an
 			// operator-configured target outside the agent home (e.g.
-			// /etc/ssl/private/key.pem), created as at base, and never
+			// /var/run/secrets/sa.json, /etc/ssl/private/key.pem), never
 			// chowned to the workload — only a target under homeDir is
 			// eligible for that, and containment is decided by the walk
-			// above, not by a string prefix check.
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				return fmt.Errorf("failed to create directory for secret %s: %w", fs.Name, err)
+			// above, not by a string prefix check. dir's own chain is
+			// resolved via EnsureDirTrustedAncestorFollow, which replaces
+			// the plain os.MkdirAll this used at base: missing components
+			// are still created (0755, root-owned) exactly like MkdirAll
+			// did, but a symlink at any component is followed only when it
+			// and its containing directory are both root-owned and free of
+			// the group/other-write bits (a system alias like "/var/run"
+			// -> "/run", which no workload can plant or redirect) — never
+			// an ordinary EvalSymlinks, which would also follow a
+			// WORKLOAD-plantable ancestor and let root write into or
+			// truncate a directory the workload chose instead of the
+			// operator.
+			var ferr error
+			dirFd, ferr = dirfd.EnsureDirTrustedAncestorFollow(dir)
+			if ferr != nil {
+				return fmt.Errorf("failed to create directory for secret %s: %w", fs.Name, ferr)
 			}
 			fileUID, fileGID = 0, 0
 		}
-		// A file-secret target may be a bind-mounted path (e.g. gcloud's
-		// application_default_credentials.json): renaming a freshly created
-		// file over a bind-mounted regular file's directory entry fails
-		// EBUSY, so this leaf is written in place when it already exists as
-		// a regular file rather than replaced via create+rename.
-		if err := dirfd.WriteFileNoFollow(fs.Target, data, 0600, fileUID, fileGID, dirfd.TruncateInPlaceOrCreate); err != nil {
-			return fmt.Errorf("failed to write secret file %s: %w", fs.Name, err)
+		// The leaf write is anchored at dirFd — the fd EnsureDirNoFollowUnderRoot
+		// or EnsureDirTrustedAncestorFollow just resolved above — never by
+		// re-resolving fs.Target as a string: either walk may have followed
+		// a trusted symlink (homeDir's own ancestor, or an outside-home
+		// system alias like "/var/run" -> "/run") that a fresh path-based
+		// walk would refuse the second time around. A file-secret target
+		// may also be a bind-mounted path (e.g. gcloud's
+		// application_default_credentials.json): renaming a freshly
+		// created file over a bind-mounted regular file's directory entry
+		// fails EBUSY, so this leaf is written in place when it already
+		// exists as a regular file rather than replaced via create+rename.
+		werr := dirfd.WriteAtNoFollowWithChown(dirFd, filepath.Base(fs.Target), fs.Target, data, 0600, fileUID, fileGID, dirfd.TruncateInPlaceOrCreate, syscall.Fchown)
+		_ = syscall.Close(dirFd)
+		if werr != nil {
+			return fmt.Errorf("failed to write secret file %s: %w", fs.Name, werr)
 		}
 	}
 
 	if len(staged.VariableSecrets) > 0 {
 		scionDir := filepath.Join(homeDir, ".scion")
-		if _, err := dirfd.EnsureDirNoFollowUnderRoot(homeDir, scionDir, 0700, uid, gid); err != nil {
+		scionDirFd, _, err := dirfd.EnsureDirNoFollowUnderRoot(homeDir, scionDir, 0700, uid, gid)
+		if err != nil {
 			return fmt.Errorf("failed to create .scion directory: %w", err)
 		}
 		data, err := json.Marshal(staged.VariableSecrets)
 		if err != nil {
+			_ = syscall.Close(scionDirFd)
 			return fmt.Errorf("failed to marshal secrets.json: %w", err)
 		}
-		secretsPath := filepath.Join(scionDir, "secrets.json")
-		if err := dirfd.WriteFileNoFollow(secretsPath, data, 0600, uid, gid, dirfd.RefuseSymlink); err != nil {
-			return fmt.Errorf("failed to write secrets.json: %w", err)
+		// Anchored at scionDirFd (which may have resolved homeDir through a
+		// trusted ancestor symlink), not by re-resolving secretsPath as a
+		// string — see the file-secret leaf write above for why.
+		werr := dirfd.WriteAtNoFollowWithChown(scionDirFd, "secrets.json", filepath.Join(scionDir, "secrets.json"), data, 0600, uid, gid, dirfd.RefuseSymlink, syscall.Fchown)
+		_ = syscall.Close(scionDirFd)
+		if werr != nil {
+			return fmt.Errorf("failed to write secrets.json: %w", werr)
 		}
 	}
 

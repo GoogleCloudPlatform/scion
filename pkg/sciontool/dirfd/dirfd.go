@@ -152,8 +152,9 @@ func EnsureDirNoFollow(path string, mode os.FileMode) (*os.File, error) {
 // ever calling relUnderRoot.
 //
 // When path DOES resolve under root, this walks from root (opened once via
-// OpenDirNoFollow, so a symlink at root's own leaf or any of root's own
-// ancestors is refused too) down to path one component at a time, exactly
+// EnsureDirTrustedAncestorFollow, so a trusted symlink at root's own leaf or
+// any of root's own ancestors is followed rather than refused — see that
+// function's own doc comment) down to path one component at a time, exactly
 // like OpenParentNoFollow's walk: each component is opened with
 // O_DIRECTORY|O_NOFOLLOW relative to the previous component's own already-
 // open fd, never by re-parsing a path string. A missing component is
@@ -161,11 +162,10 @@ func EnsureDirNoFollow(path string, mode os.FileMode) (*os.File, error) {
 // the create itself) and then reopened no-follow; a component that already
 // exists as a symlink or as any non-directory is refused before anything —
 // including a chown — happens to it. Only a component this call itself
-// creates is chowned (via Chown on that component's own open *os.File,
-// i.e. fchown on the fd, never a path-based os.Chown) to uid:gid, when
-// uid > 0; a pre-existing
-// component's ownership is left exactly as it was. mode is the permission
-// bits used for any component this call creates.
+// creates is chowned (fchown on that component's own open fd, never a
+// path-based os.Chown) to uid:gid, when uid > 0; a pre-existing component's
+// ownership is left exactly as it was. mode is the permission bits used for
+// any component this call creates.
 //
 // This is what closes the gap a path-based os.MkdirAll + os.Chown leaves
 // open for a directory chain under a directory the WORKLOAD controls (e.g.
@@ -176,38 +176,56 @@ func EnsureDirNoFollow(path string, mode os.FileMode) (*os.File, error) {
 // guards ever run. Once every component is confirmed real and either
 // pre-existing (untouched) or freshly created (owned by uid:gid), there is
 // nothing left along the chain for a symlink swap to redirect.
-func EnsureDirNoFollowUnderRoot(root, path string, mode os.FileMode, uid, gid int) (underRoot bool, err error) {
+//
+// On success, dirFd is an open, symlink-safe O_DIRECTORY fd for path
+// itself: the caller writes its own leaf through this SAME fd (e.g. via
+// WriteAtNoFollowWithChown), never by re-resolving path as a string again —
+// which matters here specifically because root may have been reached
+// through a trusted symlink EnsureDirTrustedAncestorFollow followed, and a
+// fresh path-based walk (OpenParentNoFollow's strict no-follow) would
+// refuse that same symlink the second time around. The caller owns dirFd
+// and must close it; dirFd is -1 whenever err is non-nil or underRoot is
+// false.
+func EnsureDirNoFollowUnderRoot(root, path string, mode os.FileMode, uid, gid int) (dirFd int, underRoot bool, err error) {
 	if absRoot, aerr := filepath.Abs(root); aerr == nil {
 		if absPath, aerr := filepath.Abs(path); aerr == nil && filepath.Clean(absRoot) == filepath.Clean(absPath) {
 			// path IS root itself (e.g. a file secret directly inside
 			// $HOME): nothing to create or chown along an empty component
-			// list, but root itself must still resolve to a real,
-			// symlink-free directory before this reports it as usable.
-			rootFile, oerr := OpenDirNoFollow(root)
+			// list, but root itself must still resolve to a real directory
+			// before this reports it as usable. root's own chain is walked
+			// via EnsureDirTrustedAncestorFollow, not a strict no-follow
+			// open: root (e.g. $HOME) may itself be reached through a
+			// root-owned system symlink (an image with "/home" ->
+			// "/var/home"), which is not workload-plantable and must not
+			// break this the way a strict no-follow walk would.
+			rootFd, oerr := EnsureDirTrustedAncestorFollow(root)
 			if oerr != nil {
-				return true, fmt.Errorf("dirfd: open root %s: %w", root, oerr)
+				return -1, true, fmt.Errorf("dirfd: open root %s: %w", root, oerr)
 			}
-			_ = rootFile.Close()
-			return true, nil
+			return rootFd, true, nil
 		}
 	}
 
 	rel, rerr := relUnderRoot(root, path)
 	if rerr != nil {
-		return false, nil
+		return -1, false, nil
 	}
 
-	rootFile, oerr := OpenDirNoFollow(root)
+	// root's own chain, like the root-equals-path case above, is walked
+	// via EnsureDirTrustedAncestorFollow so a root-owned system symlink
+	// anywhere in root's own path — an ancestor (an image with "/home" ->
+	// "/var/home") or root's own final component — does not break this the
+	// way a strict no-follow walk would. Everything BELOW root, from here
+	// down to path, still goes through the strict no-follow walk below:
+	// only root's own resolution tolerates a trusted symlink.
+	curFd, oerr := EnsureDirTrustedAncestorFollow(root)
 	if oerr != nil {
-		return true, fmt.Errorf("dirfd: open root %s: %w", root, oerr)
+		return -1, true, fmt.Errorf("dirfd: open root %s: %w", root, oerr)
 	}
-	defer func() { _ = rootFile.Close() }()
-
-	curFd := int(rootFile.Fd())
-	var owned *os.File
+	closeOnReturn := true
 	defer func() {
-		if owned != nil {
-			_ = owned.Close()
+		if closeOnReturn {
+			_ = syscall.Close(curFd)
 		}
 	}()
 
@@ -219,37 +237,34 @@ func EnsureDirNoFollowUnderRoot(root, path string, mode os.FileMode, uid, gid in
 			// A real, pre-existing directory: leave its ownership alone.
 		case syscall.ENOENT:
 			if merr := unix.Mkdirat(curFd, name, uint32(mode)); merr != nil && merr != syscall.EEXIST {
-				return true, fmt.Errorf("dirfd: mkdir %s: %w", name, merr)
+				return -1, true, fmt.Errorf("dirfd: mkdir %s: %w", name, merr)
 			}
 			child, operr = unix.Openat(curFd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 			if operr != nil {
-				return true, fmt.Errorf("dirfd: open %s after create: %w", name, operr)
+				return -1, true, fmt.Errorf("dirfd: open %s after create: %w", name, operr)
 			}
 			created = true
 		case syscall.ELOOP:
-			return true, fmt.Errorf("dirfd: refusing %s: existing entry is a symlink", name)
+			return -1, true, fmt.Errorf("dirfd: refusing %s: existing entry is a symlink", name)
 		case syscall.ENOTDIR:
-			return true, fmt.Errorf("dirfd: refusing %s: existing entry is not a directory", name)
+			return -1, true, fmt.Errorf("dirfd: refusing %s: existing entry is not a directory", name)
 		default:
-			return true, fmt.Errorf("dirfd: open %s: %w", name, operr)
+			return -1, true, fmt.Errorf("dirfd: open %s: %w", name, operr)
 		}
 
-		if owned != nil {
-			_ = owned.Close()
-		}
-		owned = os.NewFile(uintptr(child), name)
+		_ = syscall.Close(curFd)
 		curFd = child
 
 		if created && uid > 0 {
-			// owned.Chown is fchown(fd, uid, gid) on the fd this call just
-			// created and opened — portable across platforms, unlike the
-			// Linux-only AT_EMPTY_PATH form of fchownat.
-			if cerr := owned.Chown(uid, gid); cerr != nil {
-				return true, fmt.Errorf("dirfd: chown %s: %w", name, cerr)
+			// fchown on the fd this call just created and opened, never a
+			// path-based os.Chown.
+			if cerr := unix.Fchown(curFd, uid, gid); cerr != nil {
+				return -1, true, fmt.Errorf("dirfd: chown %s: %w", name, cerr)
 			}
 		}
 	}
-	return true, nil
+	closeOnReturn = false
+	return curFd, true, nil
 }
 
 // RenameAt renames oldName to newName, both resolved relative to dirFd via

@@ -47,21 +47,35 @@ resolves under the agent home) chowned the same symlink-safe way, via
 down is opened `O_DIRECTORY|O_NOFOLLOW`, a missing component is created with
 `mkdirat` and only that newly created component is ever chowned (by fd,
 never a path-based `os.Chown`), and a symlink or any non-directory at any
-component — the home directory itself, an intermediate directory, or the
-immediate parent — is refused before anything is touched. A file secret
-whose target lives directly inside the agent home (its parent directory IS
-the home directory itself, e.g. `~/.netrc`) is chown-eligible exactly like
-one nested deeper. A directory that does not resolve under the agent home
-at all (a legitimate operator-configured absolute target) is created the
-ordinary way and is never chowned to the workload; containment is decided
-by walking the chain, not by a string-prefix check on the path.
+component below the home directory is refused before anything is touched.
+A file secret whose target lives directly inside the agent home (its parent
+directory IS the home directory itself, e.g. `~/.netrc`) is chown-eligible
+exactly like one nested deeper.
 
-On this runtime, a staged secret's parent directory is resolved with a
-no-follow walk from the filesystem root; any symlinked path component is
-refused, for every target — not only targets under the agent home — and
-init refuses the write rather than following one. This is intended
-behavior, not a defect — the alternative is resolving a workload-plantable
-link as root.
+The home directory's OWN chain — its ancestors, and its own final
+component — is resolved differently, via `dirfd.EnsureDirTrustedAncestorFollow`:
+a symlink there is followed, not refused, when it and its containing
+directory are both owned by uid 0 with no group/other-write bit (a
+system-configured alias such as `/home` -> `/var/home`, which no workload
+can plant or redirect), and refused otherwise. The same walk resolves a
+file secret's directory when it does NOT resolve under the agent home at
+all (a legitimate operator-configured absolute target, e.g.
+`/var/run/secrets/sa.json`): missing components are still created
+(`mkdirat`, 0755) exactly as a plain `os.MkdirAll` would, but a symlink is
+followed only under that same root-owned, non-group/other-writable rule —
+an ordinary `EvalSymlinks` is deliberately not used here, since it would
+also follow a workload-plantable ancestor (e.g. a target under a
+workload-owned directory with a redirected component) and let root write
+into or truncate a directory the workload chose instead of the operator.
+Containment (whether a target resolves under the agent home) is decided by
+walking the chain, not by a string-prefix check on the path, and is
+unaffected by which ancestors turn out to be trusted symlinks.
+
+An untrusted symlink anywhere in either chain — a link not owned by uid 0,
+or sitting in a group/other-writable directory — is refused (fatal) in
+both enforced and non-enforced mode, and nothing is created past the
+refusal. Writing a secret to an unintended, workload-influenceable
+location is worse than not starting.
 
 A file-secret target may itself be a path the runtime bind-mounts into the
 container (for example gcloud's `application_default_credentials.json`).

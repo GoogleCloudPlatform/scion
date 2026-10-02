@@ -20,6 +20,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 )
 
 func TestWriteFileSecrets(t *testing.T) {
@@ -443,5 +445,163 @@ func TestDecodeErrors(t *testing.T) {
 				t.Fatal("expected error")
 			}
 		})
+	}
+}
+
+// TestWriteAs_OutsideHomeTrustedSymlinkedAncestorSucceeds is the regression
+// test for a file-secret Target outside homeDir whose path crosses a
+// TRUSTED (root-owned, non-group/other-writable) symlinked ancestor — the
+// shape of a real "/var/run" -> "/run" alias, the Kubernetes-conventional
+// secrets location. Before the trusted-ancestor-follow fix, the outside-home
+// branch's os.MkdirAll(dir) would have created "varrun/secrets" as a
+// regular directory tree (never resolving the symlink itself, since
+// MkdirAll only fails on a symlink it walks THROUGH, not one it walks
+// INTO) while the following WriteFileNoFollow(fs.Target, ...) call's own
+// strict no-follow walk refused the very same "varrun" symlinked ancestor
+// outright — so the whole write failed closed even for this trusted,
+// operator/system path. This test fails on that old code path and passes
+// once the outside-home branch resolves dir via
+// dirfd.EnsureDirTrustedAncestorFollow instead.
+func TestWriteAs_OutsideHomeTrustedSymlinkedAncestorSucceeds(t *testing.T) {
+	restore := dirfd.SetTrustedAncestorOwnerUIDForTest(os.Getuid())
+	defer restore()
+
+	homeDir := t.TempDir()
+	parent := t.TempDir()
+	run := filepath.Join(parent, "run")
+	if err := os.Mkdir(run, 0755); err != nil {
+		t.Fatal(err)
+	}
+	varrun := filepath.Join(parent, "varrun")
+	if err := os.Symlink(run, varrun); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(varrun, "secrets", "sa.json")
+
+	staged := &Staged{FileSecrets: []FileSecret{
+		{Name: "SA", Target: target, Value: base64.StdEncoding.EncodeToString([]byte("sa-token"))},
+	}}
+	if err := writeAs(homeDir, staged, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("writeAs() = %v, want nil (a trusted symlinked ancestor like /var/run -> /run must still work)", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(run, "secrets", "sa.json"))
+	if err != nil {
+		t.Fatalf("read %s/secrets/sa.json: %v", run, err)
+	}
+	if string(content) != "sa-token" {
+		t.Errorf("content = %q, want %q", content, "sa-token")
+	}
+}
+
+// TestWriteAs_OutsideHomeUntrustedSymlinkedAncestorFails proves the negative
+// twin of the test above: an ancestor symlink that is NOT owned by the
+// trusted uid is refused (fatal), and nothing is created at the link's
+// destination — writing a secret to an unintended, workload-influenceable
+// location is worse than not starting.
+func TestWriteAs_OutsideHomeUntrustedSymlinkedAncestorFails(t *testing.T) {
+	// trustedAncestorOwnerUID stays at its default (0); this test's own
+	// fixtures are owned by its real, non-root uid, so the symlink below is
+	// never trusted.
+	homeDir := t.TempDir()
+	parent := t.TempDir()
+	run := filepath.Join(parent, "run")
+	if err := os.Mkdir(run, 0755); err != nil {
+		t.Fatal(err)
+	}
+	varrun := filepath.Join(parent, "varrun")
+	if err := os.Symlink(run, varrun); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(varrun, "secrets", "sa.json")
+
+	staged := &Staged{FileSecrets: []FileSecret{
+		{Name: "SA", Target: target, Value: base64.StdEncoding.EncodeToString([]byte("sa-token"))},
+	}}
+	if err := writeAs(homeDir, staged, os.Getuid(), os.Getgid()); err == nil {
+		t.Fatal("writeAs() = nil error, want a refusal for an untrusted symlinked ancestor")
+	}
+
+	if _, err := os.Stat(filepath.Join(run, "secrets")); !os.IsNotExist(err) {
+		t.Errorf("run/secrets exists after a refused untrusted ancestor (stat err=%v); nothing must be created at the link's destination", err)
+	}
+}
+
+// TestWriteAs_OutsideHomeGroupWritableAncestorParentFails proves the other
+// negative shape: a symlink owned by the trusted uid but sitting in a
+// group/other-writable directory is still refused, and nothing is created
+// at the link's destination — ownership of the link alone is not enough,
+// since a workload with write access to its containing directory could
+// have replanted it.
+func TestWriteAs_OutsideHomeGroupWritableAncestorParentFails(t *testing.T) {
+	restore := dirfd.SetTrustedAncestorOwnerUIDForTest(os.Getuid())
+	defer restore()
+
+	homeDir := t.TempDir()
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0777); err != nil {
+		t.Fatal(err)
+	}
+	run := filepath.Join(parent, "run")
+	if err := os.Mkdir(run, 0755); err != nil {
+		t.Fatal(err)
+	}
+	varrun := filepath.Join(parent, "varrun")
+	if err := os.Symlink(run, varrun); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(varrun, "secrets", "sa.json")
+
+	staged := &Staged{FileSecrets: []FileSecret{
+		{Name: "SA", Target: target, Value: base64.StdEncoding.EncodeToString([]byte("sa-token"))},
+	}}
+	if err := writeAs(homeDir, staged, os.Getuid(), os.Getgid()); err == nil {
+		t.Fatal("writeAs() = nil error, want a refusal for a symlink in a group/other-writable directory")
+	}
+
+	if _, err := os.Stat(filepath.Join(run, "secrets")); !os.IsNotExist(err) {
+		t.Errorf("run/secrets exists after a refused world-writable-parent ancestor (stat err=%v); nothing must be created at the link's destination", err)
+	}
+}
+
+// TestWriteAs_HomeDirReachedViaTrustedSymlinkedAncestor proves the second
+// half of the R1 fix: homeDir itself reached through a trusted symlinked
+// ancestor — an image where, say, "/home" -> "/var/home" — still works
+// end to end, including the under-home chown path, instead of aborting
+// every staged-secret write the way a strict no-follow open of homeDir's
+// own chain would.
+func TestWriteAs_HomeDirReachedViaTrustedSymlinkedAncestor(t *testing.T) {
+	restore := dirfd.SetTrustedAncestorOwnerUIDForTest(os.Getuid())
+	defer restore()
+
+	parent := t.TempDir()
+	varHome := filepath.Join(parent, "varhome")
+	if err := os.Mkdir(varHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	homeLink := filepath.Join(parent, "home")
+	if err := os.Symlink(varHome, homeLink); err != nil {
+		t.Fatal(err)
+	}
+	// homeDir itself ("home/scion") does not exist yet under the real
+	// target (varhome/scion): EnsureDirTrustedAncestorFollow must create it
+	// while resolving homeDir's own chain, the same as it would for any
+	// other missing component.
+	homeDir := filepath.Join(homeLink, "scion")
+	target := filepath.Join(homeDir, ".netrc")
+
+	staged := &Staged{FileSecrets: []FileSecret{
+		{Name: "NETRC", Target: target, Value: base64.StdEncoding.EncodeToString([]byte("machine example.com"))},
+	}}
+	if err := writeAs(homeDir, staged, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("writeAs() = %v, want nil (homeDir reached via a trusted symlinked ancestor must still work)", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(varHome, "scion", ".netrc"))
+	if err != nil {
+		t.Fatalf("read %s/scion/.netrc: %v", varHome, err)
+	}
+	if string(content) != "machine example.com" {
+		t.Errorf("content = %q, want %q", content, "machine example.com")
 	}
 }
