@@ -208,13 +208,12 @@ func TestTryProvisionWorktree_Start_StitchesRepoRoot(t *testing.T) {
 	}
 }
 
-// TestTryProvisionWorktree_Start_RepoRootSurvivesResume is the required R2
-// regression guard: a SECOND Start call for the same agent — with an empty
-// Workspace and no ctx signal, exactly like a hub-dispatched restart/resume,
-// where the broker does not re-run tryProvisionWorktree — must still resolve
-// RunConfig.RepoRoot to the same shared base, via the persisted
-// AgentInfo.ProvisionedWorktreeRepoRoot value and run.go's validation, not via
-// any value this test supplies directly.
+// TestTryProvisionWorktree_Start_RepoRootSurvivesResume covers a SECOND Start
+// call for the same agent — with an empty Workspace and no ctx signal,
+// exactly like a hub-dispatched restart/resume, where the broker does not
+// re-run tryProvisionWorktree — which must still resolve RunConfig.RepoRoot
+// to the same shared base, via the persisted repo-root state and run.go's
+// validation, not via any value this test supplies directly.
 func TestTryProvisionWorktree_Start_RepoRootSurvivesResume(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
@@ -342,11 +341,11 @@ func postCreateAgentExpectCreated(t *testing.T, srv *Server, body string) {
 	}
 }
 
-// TestCreateAgent_WiresProvisionedWorktreeRepoRootOntoStartContext is the
-// required R1 regression guard: it drives the real HTTP createAgent handler
-// (not a hand-built ctx) for a worktree-per-agent, git-backed create request,
-// with the primary Manager backed by a capturing runtime.MockRuntime, and
-// asserts RunConfig.RepoRoot equals the shared base. This is the one seam
+// TestCreateAgent_WiresProvisionedWorktreeRepoRootOntoStartContext drives the
+// real HTTP createAgent handler (not a hand-built ctx) for a
+// worktree-per-agent, git-backed create request, with the primary Manager
+// backed by a capturing runtime.MockRuntime, and asserts RunConfig.RepoRoot
+// equals the shared base. This is the one seam
 // TestTryProvisionWorktree_Start_StitchesRepoRoot cannot cover: that test
 // builds ctx by hand, so it never exercises createAgent's
 // `ctx = api.ContextWithProvisionedWorktreeRepoRoot(ctx, sc.ProvisionedWorktreeRepoRoot)`
