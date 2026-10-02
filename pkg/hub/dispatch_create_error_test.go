@@ -138,6 +138,14 @@ func TestDispatchCreateErrorResponse_SkillResolutionRelaysStatusAndRetryAfter(t 
 			if !strings.Contains(resp.Error.Message, "gh://owner/repo/my-skill@main") {
 				t.Errorf("expected message to name the unresolved skill ref as a top-level error, got: %s", resp.Error.Message)
 			}
+			// The broker message is relayed without a hub prefix (#2546 N4).
+			if want := `required skill "gh://owner/repo/my-skill@main" could not be resolved: boom`; resp.Error.Message != want {
+				t.Errorf("expected the broker message verbatim %q, got %q", want, resp.Error.Message)
+			}
+			// The broker's structured details are forwarded (#2546 N3).
+			if resp.Error.Details["skill"] != "gh://owner/repo/my-skill@main" || resp.Error.Details["cause"] != "irrelevant-for-this-test" {
+				t.Errorf("expected details {skill, cause} forwarded from the broker, got %v", resp.Error.Details)
+			}
 		})
 	}
 }

@@ -1222,11 +1222,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			"name", req.Name, "slug", req.Slug,
 			"error", err)
 
-		// Clean up provisioned agent files so they don't become orphans left
-		// behind in the "created" phase — this runs for every Start failure,
-		// including a skill resolution failure above (#2546): the agent
-		// directory ProvisionAgent created is removed here exactly as it is
-		// for any other mid-provision error.
+		// Clean up provisioned agent files so they don't become orphans on
+		// the broker. This runs for every Start failure, including a skill
+		// resolution failure above (#2546): the agent directory
+		// ProvisionAgent created is removed exactly as for any other
+		// mid-provision error. It covers broker files only, not the hub's
+		// agent record.
 		if opts.ProjectPath != "" {
 			if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
 				s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",

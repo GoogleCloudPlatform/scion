@@ -3644,12 +3644,8 @@ func isContainerNameConflict(err error) bool {
 		strings.Contains(msg, "is already in use by container")
 }
 
-// skillResolutionErrorCode is the broker's error.code for a required skill
-// reference that could not be resolved (pkg/runtimebroker/errors.go
-// ErrCodeSkillResolution). Duplicated as a string literal rather than
-// importing pkg/runtimebroker, which would invert the Hub/Runtime Broker
-// layering (AGENTS.md "Hub/Runtime Broker Separation"); the wire contract
-// (the JSON error code) is what both sides actually agree on.
+// skillResolutionErrorCode mirrors runtimebroker.ErrCodeSkillResolution; it
+// is duplicated because importing pkg/runtimebroker would invert layering.
 const skillResolutionErrorCode = "skill_resolution_failed"
 
 // dispatchCreateErrorResponse classifies a failed create/provision dispatch to
@@ -3663,13 +3659,8 @@ const skillResolutionErrorCode = "skill_resolution_failed"
 // checked here before falling back to the generic "runtime broker failed"
 // 502 every other failure still gets (ptone/scion#1316 fault 3).
 //
-// A required-skill resolution failure is relayed the same way, but verbatim
-// rather than pattern-matched by status: the broker already picked the
-// status matching the cause (404/429/504/502; see skillResolutionHTTPStatus)
-// and built a message naming the ref, so the Hub passes both straight
-// through — including the Retry-After header for a rate limit — instead of
-// collapsing every status but 404 into RuntimeError's 502 with the ref only
-// reachable inside an embedded raw JSON body (#2546 R2).
+// A required-skill resolution failure is relayed verbatim: the broker's
+// status, message, details and Retry-After, with no hub prefix (#2546 R2).
 func dispatchCreateErrorResponse(w http.ResponseWriter, err error) {
 	var se *brokerStatusError
 	isSkillResolution := errors.As(err, &se) && se.brokerErrorCode() == skillResolutionErrorCode
@@ -3681,7 +3672,7 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error) {
 		if se.RetryAfter != "" {
 			w.Header().Set("Retry-After", se.RetryAfter)
 		}
-		writeError(w, se.StatusCode, skillResolutionErrorCode, "Failed to dispatch to runtime broker: "+se.brokerErrorMessage(), nil)
+		writeError(w, se.StatusCode, skillResolutionErrorCode, se.brokerErrorMessage(), se.brokerErrorDetails())
 	case isBrokerStatus(err, http.StatusNotFound):
 		message := err.Error()
 		if errors.As(err, &se) {
