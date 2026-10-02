@@ -1579,7 +1579,6 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	//     pods and nodes without per-start chown (design §9.1).
 	//   - Local backend: host GID (today's behavior) so synced files remain
 	//     writable by the broker user.
-	const containerUID int64 = 1000
 	fsGroupGID := int64(os.Getgid()) // default: host GID (local backend)
 	if config.WorkspaceBackendName == "nfs" {
 		nfsGID := config.NFSGID
@@ -1719,7 +1718,11 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			// Lock winner (or no locker available): provision (mkdir+chown,
 			// plus clone if GitCloneForInit is set) if sentinel is absent,
 			// skip if already provisioned. The command is idempotent.
-			initCommand = nfsProvisionCommand(config.GitCloneForInit, config.NFSUID, config.NFSGID)
+			// Ownership follows the pod securityContext above: uid is the
+			// RunAsUser the agent runs as, gid is the NFS fsGroup. The
+			// configured NFS uid is not applied to RunAsUser, so it is not
+			// passed here either.
+			initCommand = nfsProvisionCommand(config.GitCloneForInit, int(containerUID), int(fsGroupGID))
 		}
 
 		// F-111: shared dirs served from the workspace PVC by subPath
@@ -3306,15 +3309,20 @@ func nfsInitContainerInjected(config RunConfig) bool {
 	return config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 }
 
+// containerUID is the uid agent pods run as (pod RunAsUser/RunAsGroup):
+// the image's non-root scion user. The NFS provisioning init container
+// chowns the workspace to this uid so the agent owns what it clones.
+const containerUID int64 = 1000
+
 // nfsProvisionCommand builds the Command slice for the lock-winner init
 // container. It invokes `sciontool provision` with numeric flags for depth
-// and the NFS ownership uid/gid. URL and branch are passed via env vars
+// and the workspace ownership uid/gid. URL and branch are passed via env vars
 // (nfsProvisionEnv) to prevent shell injection.
 //
-// uid and gid are the configured workspace_storage.nfs values
-// (RunConfig.NFSUID/NFSGID). A zero value means unset: the flag is omitted
-// and sciontool's default of 1000 applies, matching the 1000:1000 default
-// used for the pod fsGroup and by the Cloud Run runtime.
+// buildPod passes the identity the agent container runs as: uid is the pod
+// RunAsUser (containerUID) and gid is the pod fsGroup (the resolved
+// workspace_storage.nfs gid). A zero value omits the flag, so sciontool's
+// own default of 1000 applies.
 func nfsProvisionCommand(gc *api.GitCloneConfig, uid, gid int) []string {
 	cmd := []string{"sciontool", "provision"}
 	if gc != nil && gc.URL != "" && gc.Depth != nil {

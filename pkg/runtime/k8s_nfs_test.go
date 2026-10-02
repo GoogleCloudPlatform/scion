@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -475,10 +476,11 @@ func TestNFSProvisionCommand_NilConfig(t *testing.T) {
 	assert.Equal(t, []string{"sciontool", "provision"}, cmd)
 }
 
-// TestNFSProvisionCommand_UIDGID verifies the configured NFS uid/gid are
-// passed to `sciontool provision`, with and without a git clone config, and
-// that unset (zero) values leave the flags off so sciontool's 1000 default
-// applies.
+// TestNFSProvisionCommand_UIDGID verifies the helper passes the given
+// uid/gid to `sciontool provision` independently, with and without a git
+// clone config, and that zero values leave the flags off so sciontool's 1000
+// default applies. Which uid/gid buildPod passes is covered by
+// TestBuildPod_NFSInitOwnershipMatchesSecurityContext.
 func TestNFSProvisionCommand_UIDGID(t *testing.T) {
 	gc := &api.GitCloneConfig{
 		URL:   "https://github.com/example/repo.git",
@@ -511,6 +513,12 @@ func TestNFSProvisionCommand_UIDGID(t *testing.T) {
 			gc:   nil,
 			gid:  1003,
 			want: []string{"sciontool", "provision", "--gid", "1003"},
+		},
+		{
+			name: "only uid set",
+			gc:   nil,
+			uid:  1000,
+			want: []string{"sciontool", "provision", "--uid", "1000"},
 		},
 		{
 			name: "unset with git clone",
@@ -1908,4 +1916,76 @@ func findVolumeMount(container *corev1.Container, name string) *corev1.VolumeMou
 		}
 	}
 	return nil
+}
+
+// effectiveProvisionID returns the value `sciontool provision` uses for an
+// ownership flag: the flag's argument if present, otherwise sciontool's
+// default of 1000 (cmd/sciontool/commands/provision.go).
+func effectiveProvisionID(t *testing.T, cmd []string, flag string) int64 {
+	t.Helper()
+	for i, arg := range cmd {
+		if arg == flag {
+			if i+1 >= len(cmd) {
+				t.Fatalf("%s has no value in %v", flag, cmd)
+			}
+			v, err := strconv.ParseInt(cmd[i+1], 10, 64)
+			if err != nil {
+				t.Fatalf("%s value %q: %v", flag, cmd[i+1], err)
+			}
+			return v
+		}
+	}
+	return 1000
+}
+
+// TestBuildPod_NFSInitOwnershipMatchesSecurityContext checks that the
+// lock-winner init container chowns the workspace to the identity the agent
+// container actually runs as: --uid follows the pod RunAsUser and --gid
+// follows the pod fsGroup. A configured NFS uid is not applied to the pod
+// RunAsUser, so it must not reach the init container either; otherwise the
+// cloned tree ends up owned by a uid the agent is not (ptone/scion#2605 R1).
+func TestBuildPod_NFSInitOwnershipMatchesSecurityContext(t *testing.T) {
+	tests := []struct {
+		name    string
+		uid     int
+		gid     int
+		wantUID int64
+		wantGID int64
+	}{
+		{name: "configured uid and gid", uid: 997, gid: 1003, wantUID: 1000, wantGID: 1003},
+		{name: "gid only", gid: 1003, wantUID: 1000, wantGID: 1003},
+		{name: "uid only", uid: 997, wantUID: 1000, wantGID: 1000},
+		{name: "unset", wantUID: 1000, wantGID: 1000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newNFSTestK8sRuntime()
+			config := nfsBaseConfig("test-nfs-init-owner")
+			config.NFSUID = tt.uid
+			config.NFSGID = tt.gid
+
+			pod, err := r.buildPod("default", config)
+			if err != nil {
+				t.Fatalf("buildPod failed: %v", err)
+			}
+			if len(pod.Spec.InitContainers) != 1 {
+				t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
+			}
+			sc := pod.Spec.SecurityContext
+			if sc == nil || sc.RunAsUser == nil || sc.FSGroup == nil {
+				t.Fatal("pod security context, RunAsUser or FSGroup is nil")
+			}
+
+			cmd := pod.Spec.InitContainers[0].Command
+			assert.True(t, hasFlag(cmd, "--uid"), "init command should pass --uid explicitly: %v", cmd)
+			assert.True(t, hasFlag(cmd, "--gid"), "init command should pass --gid explicitly: %v", cmd)
+			gotUID := effectiveProvisionID(t, cmd, "--uid")
+			gotGID := effectiveProvisionID(t, cmd, "--gid")
+
+			assert.Equal(t, tt.wantUID, *sc.RunAsUser, "pod RunAsUser")
+			assert.Equal(t, tt.wantGID, *sc.FSGroup, "pod FSGroup")
+			assert.Equal(t, *sc.RunAsUser, gotUID, "init --uid must equal pod RunAsUser (cmd %v)", cmd)
+			assert.Equal(t, *sc.FSGroup, gotGID, "init --gid must equal pod FSGroup (cmd %v)", cmd)
+		})
+	}
 }
