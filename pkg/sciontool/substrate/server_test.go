@@ -873,6 +873,50 @@ func TestWriteBootstrapFile_RefusesTargetOutsideAgentHome(t *testing.T) {
 	})
 }
 
+// TestWriteBootstrapFile_UnixUsernameMismatchFailsSafe documents an
+// intentional cross-package asymmetry: agentHomeDir here is always
+// util.GetHomeDir("scion") — this package has no notion of
+// RunConfig.UnixUsername at all — while pkg/runtime's broker-side bootstrap
+// composition (substrate_bootstrap.go) resolves the agent's home via
+// util.GetHomeDir(cfg.UnixUsername), whatever unix user a template
+// configures. If those two ever disagree (a template sets a UnixUsername
+// other than "scion"), every file bootstrap composes for that OTHER home
+// directory is rejected here as outside-home — fail-safe (nothing is
+// written somewhere this containment check didn't expect), not a silent
+// misdirected write, but worth pinning explicitly rather than leaving as an
+// unexercised interaction between the two packages.
+func TestWriteBootstrapFile_UnixUsernameMismatchFailsSafe(t *testing.T) {
+	root := realTempDir(t)
+	fakeHome := filepath.Join(root, "home", "scion")
+	withAgentHomeFixture(t, fakeHome)
+	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The shape pkg/runtime's util.GetHomeDir("otheruser") would produce
+	// for a template with UnixUsername: "otheruser" — a sibling of
+	// agentHomeDir, not a descendant of it.
+	otherUserHome := filepath.Join(root, "home", "otheruser")
+	if err := os.MkdirAll(otherUserHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	targetPath := filepath.Join(otherUserHome, "app", "config.json")
+
+	srv := NewServer(WithChownOwner(-1, -1))
+	err := srv.writeBootstrapFile(BootstrapFile{
+		Path:       targetPath,
+		Mode:       0o644,
+		ContentB64: base64.StdEncoding.EncodeToString([]byte("config-for-a-different-user")),
+	})
+	var pathErr *bootstrapPathError
+	if !errors.As(err, &pathErr) || pathErr.code != codeBootstrapPathOutsideHome {
+		t.Fatalf("err = %v, want a *bootstrapPathError with code %q (fail safe on a UnixUsername mismatch)", err, codeBootstrapPathOutsideHome)
+	}
+	if _, statErr := os.Stat(targetPath); statErr == nil {
+		t.Error("the bootstrap file was written into the other user's home despite the mismatch")
+	}
+}
+
 // TestBootstrap_SymlinkedFileRejectionSurfacesAs422WithStableCode proves the
 // end-to-end handler path for the binding decision on symlinked targets: a symlink-traversal
 // rejection reaches the client as HTTP 422 with the stable
