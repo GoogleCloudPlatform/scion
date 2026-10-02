@@ -898,6 +898,8 @@ func TestDecide_TypedNilScopedUserIdentityDenied(t *testing.T) {
 	}, "a typed-nil *ScopedUserIdentity must be denied, not cause a nil-pointer panic")
 
 	assert.False(t, result.Allowed, "a typed-nil identity must never be treated as unconstrained")
+	assert.Equal(t, "token holder lacks active access to the target project", result.Reason,
+		"a typed-nil identity must be denied by the step-1 UAT gate in enforceUATConstraints")
 }
 
 // TestEnforceUATConstraints_UserHubLevel verifies that user resources

@@ -1449,7 +1449,7 @@ func principalContextForIdentity(identity Identity) PrincipalContext {
 		// credentialContextForIdentity below guards against. ID() and
 		// Type() are promoted from the embedded UserIdentity field, so
 		// calling them on a nil receiver would dereference nil. Report a
-		// user principal with no identity rather than calling through.
+		// user principal with an empty ID rather than calling through.
 		return PrincipalContext{Kind: PrincipalKindUser, Identity: identity}
 	}
 	principal := PrincipalContext{ID: identity.ID(), Identity: identity}
