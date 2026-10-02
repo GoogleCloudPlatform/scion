@@ -706,6 +706,9 @@ type RefreshTokenResponse struct {
 	Token     string              `json:"token"`
 	ExpiresAt string              `json:"expires_at"`
 	Tokens    []RefreshTokenEntry `json:"tokens,omitempty"`
+	// TransportError is set by the hub when it is configured to mint
+	// transport tokens but could not mint one for this refresh.
+	TransportError string `json:"transportError,omitempty"`
 }
 
 // RefreshToken calls the Hub to refresh the agent's authentication token.
@@ -785,6 +788,7 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	if len(result.Tokens) > 0 {
 		c.applyRefreshTokens(result.Tokens, chownUID, chownGID)
 	}
+	c.recordTransportRefreshOutcome(result, chownUID, chownGID)
 
 	return result.Token, expiresAt, nil
 }
@@ -830,6 +834,41 @@ func (c *Client) hasHubProvidedTransport() bool {
 		return true
 	}
 	return false
+}
+
+// recordTransportRefreshOutcome records whether this refresh delivered a
+// transport token, so a hub-side mint failure is visible inside the agent
+// (agent log and sciontool doctor) instead of only in hub logs. It only
+// records for agents that use a hub-provided transport token, or when the
+// response mentions transport at all.
+func (c *Client) recordTransportRefreshOutcome(result RefreshTokenResponse, uid, gid int) {
+	hasEntry := false
+	for _, e := range result.Tokens {
+		if e.Layer == "transport" && e.Type == "google_oidc" && e.Value != "" {
+			hasEntry = true
+			break
+		}
+	}
+	if !hasEntry && result.TransportError == "" && !c.hasHubProvidedTransport() {
+		return
+	}
+
+	st := TransportRefreshStatus{At: time.Now().UTC()}
+	switch {
+	case hasEntry:
+		st.Outcome = TransportRefreshOutcomeRefreshed
+	case result.TransportError != "":
+		st.Outcome = TransportRefreshOutcomeFailed
+		st.Error = result.TransportError
+		log.Error("Token refresh succeeded but no transport token was issued: %s", result.TransportError)
+	default:
+		st.Outcome = TransportRefreshOutcomeAbsent
+		log.Error("Token refresh succeeded but the hub returned no transport token; " +
+			"the current transport token will not be renewed")
+	}
+	if err := WriteTransportRefreshStatus(st, uid, gid); err != nil {
+		log.Error("Failed to record transport refresh status: %v", err)
+	}
 }
 
 // adjustRefreshForTransportTokens checks if the OIDC source has a shorter
@@ -1637,6 +1676,68 @@ func RemoveTransportTokenFile() (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// Transport refresh outcomes recorded in TransportRefreshStatus.
+const (
+	// TransportRefreshOutcomeRefreshed: the refresh delivered a transport token.
+	TransportRefreshOutcomeRefreshed = "refreshed"
+	// TransportRefreshOutcomeFailed: the hub reported it could not mint one.
+	TransportRefreshOutcomeFailed = "failed"
+	// TransportRefreshOutcomeAbsent: no transport token and no reason given
+	// (for example the hub has no transport minter configured).
+	TransportRefreshOutcomeAbsent = "absent"
+)
+
+// transportRefreshStatusFileName is written next to the transport token
+// file. It never contains token values.
+const transportRefreshStatusFileName = transportauth.TransportTokenFileName + ".status"
+
+// TransportRefreshStatus is the outcome of the most recent token refresh
+// for the transport layer, persisted for sciontool doctor.
+type TransportRefreshStatus struct {
+	At      time.Time `json:"at"`
+	Outcome string    `json:"outcome"`
+	Error   string    `json:"error,omitempty"`
+}
+
+// TransportRefreshStatusPath returns the path of the transport refresh
+// status file.
+func TransportRefreshStatusPath() string {
+	return filepath.Join(tokenHomeResolver(), ".scion", transportRefreshStatusFileName)
+}
+
+// WriteTransportRefreshStatus persists st to the transport refresh status
+// file (mode 0600, chowned to uid:gid when uid > 0).
+func WriteTransportRefreshStatus(st TransportRefreshStatus, uid, gid int) error {
+	if testing.Testing() && !tokenHomeOverridden {
+		panic("scion/hub: WriteTransportRefreshStatus called during a test without SetTokenHome()")
+	}
+	data, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	path := TransportRefreshStatusPath()
+	d, err := dirfd.EnsureDirNoFollow(filepath.Dir(path), 0700)
+	if err != nil {
+		return fmt.Errorf("failed to create transport status directory: %w", err)
+	}
+	_ = d.Close()
+	return WriteFileNoFollowChown(path, data, tokenFileMode, uid, gid)
+}
+
+// ReadTransportRefreshStatus reads the transport refresh status file.
+// ok is false when the file does not exist or cannot be parsed.
+func ReadTransportRefreshStatus() (TransportRefreshStatus, bool) {
+	var st TransportRefreshStatus
+	data, err := readTokenFileGuarded(TransportRefreshStatusPath())
+	if err != nil {
+		return st, false
+	}
+	if err := json.Unmarshal([]byte(data), &st); err != nil {
+		return st, false
+	}
+	return st, true
 }
 
 // readTransportTokenFile reads the transport token file through the same

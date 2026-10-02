@@ -36,6 +36,12 @@ type TransportTokenMinter interface {
 	MintIDToken(ctx context.Context, audience string) (token string, expiry time.Time, err error)
 }
 
+// TransportMintFailedMessage is returned to an agent in the refresh
+// response's transportError field when the hub is configured to mint
+// transport tokens but could not mint one. It is deliberately generic; the
+// underlying error is logged on the hub.
+const TransportMintFailedMessage = "hub could not mint a transport token; see hub logs for the cause"
+
 // RefreshTokenEntry represents a single token in the generalized refresh response.
 // Used in both the refresh endpoint response and internally for dispatch payload construction.
 type RefreshTokenEntry struct {

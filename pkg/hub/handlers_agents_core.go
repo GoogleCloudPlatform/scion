@@ -3999,14 +3999,24 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		},
 	}
 
-	// Mint a transport token if transport auth is configured
+	// Mint a transport token if transport auth is configured. A mint
+	// failure does not fail the refresh (the app token is still valid), but
+	// it is reported to the agent in transportError so it can be surfaced
+	// there (sciontool doctor, agent logs) rather than only in hub logs.
+	// The underlying error stays in hub logs; the agent gets a fixed,
+	// non-sensitive description.
+	transportError := ""
 	if s.transportMinter != nil && s.transportAudience != "" {
 		tToken, tExpiry, tErr := s.transportMinter.MintIDToken(r.Context(), s.transportAudience)
 		if tErr != nil {
-			// Log but don't fail the refresh — app token is still valid
 			slog.Warn("Failed to mint transport token during refresh",
 				"agent_id", id, "error", tErr)
-		} else if tToken != "" {
+			transportError = TransportMintFailedMessage
+		} else if tToken == "" {
+			slog.Warn("Transport token minter returned an empty token during refresh",
+				"agent_id", id)
+			transportError = TransportMintFailedMessage
+		} else {
 			tokens = append(tokens, RefreshTokenEntry{
 				Layer:     "transport",
 				Type:      "google_oidc",
@@ -4020,11 +4030,15 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 	// Response includes both the legacy single-token fields (backward compat)
 	// and the generalized tokens[] array. Old clients ignore tokens[];
 	// new clients prefer tokens[].
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"token":      newToken,
 		"expires_at": expiresAt.UTC().Format(time.RFC3339),
 		"tokens":     tokens,
-	})
+	}
+	if transportError != "" {
+		resp["transportError"] = transportError
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleAgentResetAuth handles POST /api/v1/agents/{id}/reset-auth.
