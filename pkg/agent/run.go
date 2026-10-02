@@ -1791,7 +1791,7 @@ func containerName(projectName, agentName string) string {
 // (opts.Env, which carries the hub's resolved env for a broker-mode start)
 // into the container environment. extraEnv wins on conflict.
 //
-// With brokerMode set, hub-only keys (see isHubOnlyEnvKey) are skipped while
+// With brokerMode set, hub-only keys (see IsHubOnlyEnvKey) are skipped while
 // iterating the config layer, matched on the post-expansion key, and each
 // skipped value is returned in dropped. scionCfg itself is never modified.
 // An empty hub-only key in extraEnv is omitted without being reported as
@@ -1808,7 +1808,7 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, broker
 			if expandedKey == "" {
 				continue
 			}
-			if isHubOnlyEnvKey(brokerMode, expandedKey) {
+			if skipBrokerLocalEnvKey(brokerMode, expandedKey) {
 				// Checked before the host passthrough below, so an empty
 				// marker never pulls in the broker host's value.
 				dropped = append(dropped, droppedBrokerEnv{Key: expandedKey, Value: expandedValue, Layer: envLayerConfig})
@@ -1837,7 +1837,7 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, broker
 
 	agentEnv := []string{}
 	for k, v := range combined {
-		if v == "" && isHubOnlyEnvKey(brokerMode, k) {
+		if v == "" && skipBrokerLocalEnvKey(brokerMode, k) {
 			continue
 		}
 		if v == "" {
@@ -1856,7 +1856,7 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, broker
 // sequence Start runs at the point auth resolution begins, extracted so it can
 // be exercised directly in tests.
 //
-// For a broker-mode start, hub-only keys (see isHubOnlyEnvKey) in the
+// For a broker-mode start, hub-only keys (see IsHubOnlyEnvKey) in the
 // harness-config entry are not merged; they are returned in dropped instead.
 func resolveAuthEnvOverlay(opts *api.StartOptions, settings *config.VersionedSettings, profileName, harnessConfigName string) (overlay map[string]string, dropped []droppedBrokerEnv) {
 	// Inject harness-config env into opts.Env BEFORE the auth overlay is built,
@@ -1878,7 +1878,7 @@ func resolveAuthEnvOverlay(opts *api.StartOptions, settings *config.VersionedSet
 				opts.Env = make(map[string]string)
 			}
 			for k, v := range hcEntry.Env {
-				if isHubOnlyEnvKey(opts.BrokerMode, k) {
+				if skipBrokerLocalEnvKey(opts.BrokerMode, k) {
 					dropped = append(dropped, droppedBrokerEnv{Key: k, Value: v, Layer: envLayerHarnessConfigEntry})
 					continue
 				}

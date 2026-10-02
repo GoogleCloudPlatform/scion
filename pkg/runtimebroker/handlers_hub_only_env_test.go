@@ -103,3 +103,48 @@ profiles:
 		t.Errorf("response must not ask for TZ: %s", w.Body.String())
 	}
 }
+
+// TestExtractRequiredEnvKeys_TZNeverAnAuthAlternative covers the alternatives
+// map, which is filled only from harness-config auth key groups: an unmet
+// any_of group led by TZ must not surface TZ as a required key or carry
+// alternatives under it. CUSTOM_AUTH_KEY is the control group.
+func TestExtractRequiredEnvKeys_TZNeverAnAuthAlternative(t *testing.T) {
+	t.Setenv("TZ", "Asia/Tokyo")
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		`harness: claude
+image: test-image
+user: scion
+auth_selected_type: api-key
+auth:
+  default_type: api-key
+  types:
+    api-key:
+      required_env:
+        - any_of: ["TZ", "TZ_ALT"]
+        - any_of: ["CUSTOM_AUTH_KEY", "CUSTOM_AUTH_ALT"]
+`,
+		`
+schema_version: "1"
+profiles:
+  default:
+    runtime: mock
+`)
+
+	var req CreateAgentRequest
+	req.ProjectPath = projectDir
+	req.Config = &CreateAgentConfig{HarnessConfig: "claude", Profile: "default"}
+
+	required, _, alternatives, _ := srv.extractRequiredEnvKeys(req, "")
+	if slices.Contains(required, "TZ") {
+		t.Errorf("TZ must never be a required env key; required=%v", required)
+	}
+	if alts, ok := alternatives["TZ"]; ok {
+		t.Errorf("TZ must not carry alternatives; alternatives[TZ]=%v", alts)
+	}
+	if !slices.Contains(required, "CUSTOM_AUTH_KEY") {
+		t.Errorf("control: CUSTOM_AUTH_KEY should be required; required=%v", required)
+	}
+	if got := alternatives["CUSTOM_AUTH_KEY"]; !slices.Equal(got, []string{"CUSTOM_AUTH_ALT"}) {
+		t.Errorf("control: alternatives[CUSTOM_AUTH_KEY] = %v, want [CUSTOM_AUTH_ALT]", got)
+	}
+}

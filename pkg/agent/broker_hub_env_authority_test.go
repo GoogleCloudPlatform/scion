@@ -231,7 +231,7 @@ func capturingRuntime(captured *[]string) *runtime.MockRuntime {
 	}
 }
 
-func readPersistedEnv(t *testing.T, agentDir string) map[string]string {
+func readPersistedConfig(t *testing.T, agentDir string) api.ScionConfig {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(agentDir, "scion-agent.json"))
 	if err != nil {
@@ -241,7 +241,7 @@ func readPersistedEnv(t *testing.T, agentDir string) map[string]string {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		t.Fatal(err)
 	}
-	return cfg.Env
+	return cfg
 }
 
 // TestStart_BrokerMode_HubIsOnlyTZSource covers rung test (ii): a
@@ -288,9 +288,14 @@ func TestStart_BrokerMode_HubIsOnlyTZSource(t *testing.T) {
 		}
 	}
 
-	persisted := readPersistedEnv(t, agentDir)
-	if persisted["TZ"] != "Europe/Paris" {
-		t.Errorf("on-disk scion-agent.json TZ = %q, want Europe/Paris left intact", persisted["TZ"])
+	persisted := readPersistedConfig(t, agentDir)
+	// AuthSelectedType proves Start rewrote scion-agent.json from
+	// finalScionCfg; the TZ check then proves the rewrite kept it.
+	if persisted.AuthSelectedType != "api-key" {
+		t.Errorf("on-disk auth_selectedType = %q, want api-key (the HarnessAuth rewrite did not run)", persisted.AuthSelectedType)
+	}
+	if persisted.Env["TZ"] != "Europe/Paris" {
+		t.Errorf("on-disk scion-agent.json TZ = %q, want Europe/Paris left intact", persisted.Env["TZ"])
 	}
 }
 

@@ -45,9 +45,9 @@ func IsHubOnlyEnvKey(key string) bool {
 	return ok
 }
 
-// isHubOnlyEnvKey reports whether key must be skipped from broker-local layers
+// skipBrokerLocalEnvKey reports whether key must be skipped from broker-local layers
 // for a start in the given mode.
-func isHubOnlyEnvKey(brokerMode bool, key string) bool {
+func skipBrokerLocalEnvKey(brokerMode bool, key string) bool {
 	return brokerMode && IsHubOnlyEnvKey(key)
 }
 
