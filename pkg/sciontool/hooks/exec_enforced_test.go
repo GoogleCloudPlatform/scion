@@ -1246,12 +1246,18 @@ var startHooksProcreapReaperOnce sync.Once
 // requirement TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD
 // documents).
 //
-// Positive control: this test is not vacuously green. Reverting
-// runEnforcedCmd's call back to a raw cmd.Run() makes this test fail under
-// `go test -race -count=5 -run
-// TestExecuteScriptEnforced_AsRootRunsUnderActiveReaperWithoutECHILD
-// ./pkg/sciontool/hooks/`; with procreap.RunManaged in place it passes
-// reliably.
+// Positive control: this test is not vacuously green, but the failure is
+// probabilistic, not deterministic — reverting runEnforcedCmd's call back
+// to a raw cmd.Run() makes it fail only intermittently (empirically
+// clustered in the first iteration right after the reaper starts; later
+// iterations in the same process rarely hit the race), so a single `go
+// test -race -count=5` run reverted is not guaranteed to show red. The
+// deterministic guard for this same revert is the static audit
+// cmd/sciontool/commands/execaudit_test.go's TestNoRawExecInPID1Path, which
+// fails every time on either this file's raw cmd.Run() or a raw exec call
+// anywhere else in the PID-1 path — this test exists alongside it to prove
+// the managed call is also race-free in practice, not to replace it as the
+// authoritative regression guard.
 func TestExecuteScriptEnforced_AsRootRunsUnderActiveReaperWithoutECHILD(t *testing.T) {
 	startHooksProcreapReaperOnce.Do(procreap.StartReaper)
 
