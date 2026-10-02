@@ -1218,9 +1218,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// have started since (for example, this agent was deleted while
 		// its start was blocked and the name was reused); its files must
 		// survive this start's failure. ownsName is a fresh read of the
-		// name's marker, taken right before the removal. This runs for
-		// every Start failure, including a skill resolution failure above
-		// (#2546). It covers broker files only, not the hub's agent record.
+		// name's marker, taken right before the removal. Subject to that
+		// guard, this covers every Start failure, including a skill
+		// resolution failure above (#2546). It covers broker files only,
+		// not the hub's agent record.
 		if opts.ProjectPath != "" && !ss.ownsName() {
 			s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent name is now owned by a newer start",
 				"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
