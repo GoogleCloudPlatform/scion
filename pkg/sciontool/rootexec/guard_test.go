@@ -49,10 +49,10 @@ var execSiteAllowlist = map[string]string{
 	// Runs before RunInit populates any workload-owned directory, so no
 	// workload-influenceable PATH entry exists yet: realigning the "scion"
 	// system account's uid/gid.
-	"cmd/sciontool/commands/init.go:1647": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:1652": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:1699": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:1708": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:1648": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:1653": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:1700": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:1709": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
 
 	// gitCloneWorkspace's clone-path git calls (including detectDefaultBranch,
 	// which it calls into): configureGitCommand sets a Credential to (uid,
@@ -64,18 +64,18 @@ var execSiteAllowlist = map[string]string{
 	// which case this runs as root. Either way the call is not otherwise
 	// reachable by a workload-influenceable PATH, which is what this guard
 	// itself checks for.
-	"cmd/sciontool/commands/init.go:1869": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:1893": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:1908": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:1964": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:1978": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:1989": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2008": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2027": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2035": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2039": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2049": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2386": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:1870": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:1894": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:1909": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:1965": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:1979": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:1990": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2009": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2028": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2036": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2040": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2050": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2431": "runs as the workload uid via Credential whenever uid>0",
 
 	// The harness-provision subcommand's own subprocess: inherits the
 	// credentials of the pre-start hook that invoked it (root when init
@@ -94,7 +94,7 @@ var execSiteAllowlist = map[string]string{
 	// describes as the preferred route: the bare-name lookup happens in the
 	// (root) parent using its inherited PATH, and the resulting process
 	// runs as the workload's own uid whenever that happens.
-	"pkg/sciontool/supervisor/supervisor.go:123": "runs as the workload uid via Credential whenever UID/GID>0",
+	"pkg/sciontool/supervisor/supervisor.go:124": "runs as the workload uid via Credential whenever UID/GID>0",
 
 	// services.Manager.start: svc.spec.Command[0] comes from a workload-
 	// supplied services.yaml — the identical Go-level drop-before-exec
