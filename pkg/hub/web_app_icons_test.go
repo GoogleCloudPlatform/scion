@@ -74,11 +74,21 @@ func TestAppIcons_ServedWithoutSession(t *testing.T) {
 }
 
 func TestAppIcons_AdminModeStillBlocksOtherPaths(t *testing.T) {
+	// robots.txt is a real root-level file that skips session auth: the
+	// admin-mode allowlist must stay exact rather than letting every
+	// root-level static file through.
 	ws := newAppIconWebServer(t, true)
-	handler := ws.Handler()
-	// robots.txt is a real root-level file: the allowlist must stay exact
-	// rather than letting every root-level static file through.
-	for _, p := range []string{"/robots.txt", "/dashboard", "/manifest.webmanifest/x"} {
+	req := httptest.NewRequest(http.MethodGet, "/robots.txt", nil)
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "GET /robots.txt in admin mode")
+
+	// Without a session the full chain redirects other paths to /login
+	// before admin mode runs, so check the middleware directly.
+	mw := newTestWebServerWithMaintenance(true, "")
+	mw.mux.HandleFunc("/", passthrough)
+	handler := mw.adminModeWebMiddleware(mw.mux)
+	for _, p := range []string{"/robots.txt", "/dashboard", "/manifest.webmanifest/x", "/icon-1024.png"} {
 		req := httptest.NewRequest(http.MethodGet, p, nil)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
