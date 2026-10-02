@@ -15,6 +15,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -2820,22 +2821,39 @@ const reaperTestChildEnv = "SCION_TEST_REAPER_CHILD"
 func runInReaperChild(t *testing.T) bool {
 	t.Helper()
 	if os.Getenv(reaperTestChildEnv) == "1" {
+		// Keep the marker out of the environment of every process the
+		// child body starts (git, etc.).
+		if err := os.Unsetenv(reaperTestChildEnv); err != nil {
+			t.Fatalf("os.Unsetenv(%s): %v", reaperTestChildEnv, err)
+		}
 		return true
 	}
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatalf("os.Executable: %v", err)
 	}
-	cmd := exec.CommandContext(t.Context(), exe,
-		"-test.run=^"+t.Name()+"$", "-test.count=1", "-test.v")
+	quotedName := regexp.QuoteMeta(t.Name())
+	args := []string{"-test.run=^" + quotedName + "$", "-test.count=1", "-test.v"}
+	// Propagate the parent's deadline so a hung child cannot outlive the
+	// parent: CommandContext does not kill the child if the parent panics
+	// on its own -timeout.
+	if d, ok := t.Deadline(); ok {
+		if remaining := time.Until(d); remaining > 0 {
+			args = append(args, "-test.timeout="+remaining.String())
+		}
+	}
+	cmd := exec.CommandContext(t.Context(), exe, args...)
 	cmd.Env = append(os.Environ(), reaperTestChildEnv+"=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("reaper child test failed: %v\n%s", err, out)
 	}
 	// Guard against a vacuous pass: the child must have actually run
-	// (and passed) this test, not matched nothing.
-	if !strings.Contains(string(out), "--- PASS: "+t.Name()) {
+	// (and passed) exactly this test, not matched nothing. Match the whole
+	// result line so a test like <name>_Longer or <name>/sub cannot satisfy
+	// it.
+	passLine := regexp.MustCompile(`(?m)^--- PASS: ` + quotedName + ` \(`)
+	if !passLine.Match(out) {
 		t.Fatalf("reaper child did not report a pass for %s:\n%s", t.Name(), out)
 	}
 	return false
