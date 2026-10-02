@@ -1087,8 +1087,9 @@ authDone:
 	// provision.ValidateWorktreeForBase re-proves the pair against the real
 	// filesystem — both lexically and after resolving symlinks — before
 	// RunConfig.RepoRoot is allowed to name a host path. A user --workspace
-	// override supplies neither, so it always falls through to
-	// detectRepoRoot and stays "".
+	// override normally supplies neither; a persisted value is honored only
+	// if it re-validates against that workspace, so it otherwise falls
+	// through to detectRepoRoot and stays "".
 	//
 	// This first pass validates against the pre-workspace-backend
 	// effectiveWorkspace, only because containerWorkspace (computed below)
@@ -1358,10 +1359,10 @@ authDone:
 	// dispatch's signal would never be persisted anywhere else, and a later
 	// resume/restart (which has no fresh ctx signal of its own) would fall
 	// back to detectRepoRoot and lose RepoRoot again. ProvisionAgent shares
-	// this same gate for the call sites Start never reaches on its own — the
-	// hub's provision-only and reincarnate flows, which provision without
-	// starting — so there is exactly one persistence gate even though there
-	// is more than one caller.
+	// this same gate for the flow Start never reaches on its own — the hub's
+	// provision-only dispatch, which provisions without starting — so there
+	// is exactly one persistence gate even though there is more than one
+	// caller.
 	persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, effectiveWorkspace)
 
 	runCfg := runtime.RunConfig{

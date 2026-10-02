@@ -824,11 +824,13 @@ func TestReprovision_NeitherGitCloneNorWorkspace_Refused(t *testing.T) {
 // pkg/runtimebroker). Reprovision is clone-per-agent only (GitClone must be
 // set), so ProvisionAgent's workspace-resolution logic never assigns
 // workspaceSource for it — only the git-clone branch runs, which leaves
-// workspaceSource empty. A ctx signal on this path (never produced in
-// practice today, since tryProvisionWorktree and Reprovision's GitClone
-// precondition are mutually exclusive) must still be handled safely rather
-// than validated against an empty workspace and accidentally trusted: no
-// repo-root state file should end up on disk.
+// workspaceSource empty. Reprovision's clone-per-agent path leaves
+// workspaceSource empty, so the shared gate must not persist any ctx value,
+// even one naming a genuine worktree base: no repo-root state file should
+// end up on disk. (A ctx signal is never produced on this path in practice
+// today, since tryProvisionWorktree and Reprovision's GitClone precondition
+// are mutually exclusive; this test injects one anyway to prove the gate
+// itself is safe regardless.)
 func TestReprovision_IgnoresProvisionedWorktreeSignalForCloneWorkspace(t *testing.T) {
 	scionDir, _ := reprovisionSetup(t)
 	agentName := "clone-agent-with-signal"
@@ -840,10 +842,11 @@ func TestReprovision_IgnoresProvisionedWorktreeSignalForCloneWorkspace(t *testin
 	ws := filepath.Join(scionDir, "agents", agentName, "workspace")
 	_ = os.MkdirAll(filepath.Join(ws, ".git"), 0755)
 
-	// A REAL base with a REAL worktree, so this test proves the ctx signal is
-	// rejected because Reprovision's clone-per-agent path never hands the
-	// gate a validating workspace — not merely because the injected value
-	// happens to point at something that doesn't exist on disk.
+	// A REAL base with a REAL worktree — deliberately a value that WOULD
+	// validate if it were ever checked against a matching workspace, so this
+	// test cannot pass merely because the injected value is garbage. The
+	// gate still must not persist it, because workspaceSource stays empty on
+	// this path regardless of what the ctx value names.
 	realBase := t.TempDir()
 	setupGitRepo(t, realBase)
 	_ = createRealWorktree(t, realBase, "agent-1")

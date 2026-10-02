@@ -3812,21 +3812,6 @@ func TestGetAgent_RelativeWorkspaceResume(t *testing.T) {
 	}
 }
 
-// TestProvisionAgent_PersistsValidatedRepoRoot confirms ProvisionAgent
-// itself persists a fresh, validated provisioned-worktree repo root, not
-// only run.go's Start. Start does not always run after ProvisionAgent: the
-// hub's provision-only flow (DispatchAgentProvision, via Manager.Provision)
-// can provision an agent without starting it in the same dispatch. Without a
-// persist here, a later start/restart — which carries no ctx signal of its
-// own, since the broker does not re-run tryProvisionWorktree on that
-// dispatch — would find nothing on disk and fall back to detectRepoRoot,
-// losing RepoRoot. Both call sites share one gate,
-// persistProvisionedWorktreeRepoRootIfValid: Start's own call still covers
-// the one case ProvisionAgent never runs at all — GetAgent skipping it
-// because the agent directory already exists (see
-// TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkipped
-// in run_test.go). ProvisionAgent still sets ExplicitWorkspace, needed
-// either way for GetAgent's managed-worktree recovery skip on resume.
 // provisionAgentRepoRootScaffold creates a minimal global .scion dir under
 // tmpDir with a "claude" harness-config and a "claude" template
 // (default_harness_config pointing at it), changes the working directory and
@@ -3839,20 +3824,8 @@ func TestGetAgent_RelativeWorkspaceResume(t *testing.T) {
 func provisionAgentRepoRootScaffold(t *testing.T, tmpDir string) (projectScionDir, tplDir string) {
 	t.Helper()
 
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
-
-	origHome := os.Getenv("HOME")
-	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
-	if err := os.Setenv("HOME", tmpDir); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
@@ -3878,6 +3851,21 @@ func provisionAgentRepoRootScaffold(t *testing.T, tmpDir string) (projectScionDi
 	return projectScionDir, tplDir
 }
 
+// TestProvisionAgent_PersistsValidatedRepoRoot confirms ProvisionAgent
+// itself persists a fresh, validated provisioned-worktree repo root, not
+// only run.go's Start. Start does not always run after ProvisionAgent: the
+// hub's provision-only flow (DispatchAgentProvision, via Manager.Provision)
+// can provision an agent without starting it in the same dispatch. Without a
+// persist here, a later start/restart — which carries no ctx signal of its
+// own, since the broker does not re-run tryProvisionWorktree on that
+// dispatch — would find nothing on disk and fall back to detectRepoRoot,
+// losing RepoRoot. Both call sites share one gate,
+// persistProvisionedWorktreeRepoRootIfValid: Start's own call still covers
+// the one case ProvisionAgent never runs at all — GetAgent skipping it
+// because the agent directory already exists (see
+// TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkipped
+// in run_test.go). ProvisionAgent still sets ExplicitWorkspace, needed
+// either way for GetAgent's managed-worktree recovery skip on resume.
 func TestProvisionAgent_PersistsValidatedRepoRoot(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	tmpDir := t.TempDir()

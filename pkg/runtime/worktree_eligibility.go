@@ -28,11 +28,8 @@ import (
 // The caller is responsible for logging and for choosing the fallback
 // (typically clone-per-agent).
 //
-// 2.48 (not 2.47) is required: git added the --relative-paths flag to
-// `git worktree add` in 2.48. On 2.47.x the flag is unrecognized
-// ("unknown option relative-paths"), which previously caused this check to
-// pass and provisioning to fail later — silently falling back to
-// clone-per-agent instead of failing this eligibility check up front.
+// 2.48 is required: `git worktree add --relative-paths` first shipped in
+// git 2.48; 2.47.x rejects the flag.
 func WorktreeModeEligible() (bool, string) {
 	version, _, err := util.GetGitVersion()
 	if err != nil {

@@ -3243,20 +3243,8 @@ profiles:
 func startRepoRootProjectScaffold(t *testing.T, tmpDir string) string {
 	t.Helper()
 
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
-
-	origHome := os.Getenv("HOME")
-	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
-	if err := os.Setenv("HOME", tmpDir); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -3331,7 +3319,7 @@ profiles:
     runtime: docker
 `, nfsMountRoot)
 	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
-		t.Fatalf("failed to write template: %v", err)
+		t.Fatalf("failed to write settings: %v", err)
 	}
 
 	// A REAL local worktree — this is what tryProvisionWorktree would have
