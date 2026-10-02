@@ -789,7 +789,6 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 			s.projectsLogger().Warn("failed to add creator to project members group",
 				"project_id", project.ID, "user", project.CreatedBy, "error", err.Error())
 		}
-
 	}
 
 	// This function deliberately does NOT create a project-owner role binding

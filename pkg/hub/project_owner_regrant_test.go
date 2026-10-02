@@ -107,8 +107,10 @@ func addProjectOwner(t *testing.T, srv *Server, s store.Store, actor, user *stor
 }
 
 // A creator removed by a co-owner (no transfer, so project.OwnerID is still
-// the creator and the resource-owner rule still grants read) must not become
-// owner again by reading the project.
+// the creator and the resource-owner rule still grants resource-owner access:
+// read/update/manage/register/set_messaging_policy/clone/list/secret_read)
+// must not become owner again by reading the project. That residual access is
+// a known gap tracked separately; this test pins only the no-re-grant fix.
 func TestGetProject_RemovedCreatorSelfGETStaysRemoved(t *testing.T) {
 	srv, s, alice, bob, project := setupDemoPolicyTest(t)
 
