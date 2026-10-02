@@ -212,9 +212,15 @@ func TestResolveGitHubSkill_MissDuringCooldownFailsFast(t *testing.T) {
 	require.Equal(t, int64(1), gh.limitedCalls.Load())
 
 	const uri = "gh://acme/skills/s@main"
+	var joins atomic.Int64
+	join := func(string) { joins.Add(1) }
+	ghFlightJoinHook.Store(&join)
+	t.Cleanup(func() { ghFlightJoinHook.Store(nil) })
+
 	_, err = srv.resolveGitHubSkill(ctx, uri, projectID, nil)
 	require.True(t, errors.As(err, &rl), "want a rate-limit error, got %v", err)
 	assert.False(t, rl.Sent)
+	assert.Equal(t, int64(0), joins.Load(), "a miss during the cooldown must not start a flight")
 	assert.Equal(t, uri, rl.Ref)
 	assert.Equal(t, int64(0), gh.calls.Load(), "no request during the cooldown")
 
