@@ -69,6 +69,53 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 		assert.Equal(t, "container_missing", stored.ExitReason)
 	})
 
+	// setExit stores an exit reason, code and message directly, as a
+	// broker status report would have before the container went away.
+	setExit := func(t *testing.T, id, reason string, code int, message string) {
+		t.Helper()
+		require.NoError(t, s.client.Agent.UpdateOneID(uuid.MustParse(id)).
+			SetExitReason(reason).SetExitCode(code).SetMessage(message).Exec(ctx))
+	}
+
+	for _, reason := range []string{"preempted", "evicted"} {
+		t.Run("keeps a "+reason+" exit reason", func(t *testing.T) {
+			a := create("kept-"+reason, nil)
+			setExit(t, a.ID, reason, 137, "node "+reason+" the pod")
+			got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			assert.Equal(t, "error", got.Phase)
+			assert.Equal(t, "", got.Activity)
+			assert.Equal(t, "missing", got.ContainerStatus)
+			assert.Equal(t, reason, got.ExitReason)
+			assert.Equal(t, "node "+reason+" the pod", got.Message)
+			require.NotNil(t, got.ExitCode)
+			assert.Equal(t, 137, *got.ExitCode)
+		})
+	}
+
+	t.Run("replaces another exit reason", func(t *testing.T) {
+		a := create("replaced-reason", nil)
+		setExit(t, a.ID, "crashed", 1, "earlier crash")
+		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, "container_missing", got.ExitReason)
+		assert.Equal(t, "gone", got.Message)
+		assert.Nil(t, got.ExitCode)
+	})
+
+	t.Run("guards apply when the exit reason is kept", func(t *testing.T) {
+		a := create("kept-but-seen", func(a *store.Agent) { a.LastSeen = time.Now() })
+		setExit(t, a.ID, "preempted", 137, "preempted")
+		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
+		require.NoError(t, err)
+		assert.Nil(t, got)
+		stored, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "running", stored.Phase)
+	})
+
 	guards := []struct {
 		name   string
 		broker string
@@ -146,20 +193,26 @@ func TestAgentStore_MarkAgentContainerMissing_GuardsInUpdate(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	var update string
+	// Two conditional UPDATEs run (kept exit reason, then the rest); no read
+	// precedes either, and each carries every guard.
+	var updates []string
 	for _, q := range stmts {
 		if strings.Contains(q, "UPDATE") && strings.Contains(q, "agents") {
-			update = q
-			break
+			updates = append(updates, q)
+			continue
 		}
-		assert.NotContains(t, q, "SELECT", "no read may precede the conditional update: %s", q)
+		if len(updates) < 2 {
+			assert.NotContains(t, q, "SELECT", "no read may precede the conditional updates: %s", q)
+		}
 	}
-	require.NotEmpty(t, update, "expected an UPDATE statement, got %v", stmts)
-	for _, cond := range []string{"deleted_at", "runtime_broker_id", "phase", "reincarnation_state", "last_seen"} {
+	require.Len(t, updates, 2, "expected two UPDATE statements, got %v", stmts)
+	for _, update := range updates {
 		where := update[strings.Index(update, "WHERE"):]
-		assert.Contains(t, where, cond, "guard %s must be in the UPDATE predicate", cond)
+		for _, cond := range []string{"deleted_at", "runtime_broker_id", "phase", "reincarnation_state", "last_seen", "exit_reason"} {
+			assert.Contains(t, where, cond, "guard %s must be in the UPDATE predicate", cond)
+		}
+		assert.Regexp(t, `deleted_at[`+"`"+`"]? IS NULL`, update, "soft-delete guard must be deleted_at IS NULL")
 	}
-	assert.Regexp(t, `deleted_at[`+"`"+`"]? IS NULL`, update, "soft-delete guard must be deleted_at IS NULL")
 }
 
 func TestAgentStore_ClearAgentRuntimeTarget(t *testing.T) {

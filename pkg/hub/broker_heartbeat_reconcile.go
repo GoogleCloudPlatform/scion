@@ -477,7 +477,7 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 		s.agentLifecycleLog.Warn("heartbeat reconcile: agent container missing, marked error",
 			"broker_id", brokerID, "agent_id", a.ID, "agent", a.Slug, "project_id", a.ProjectID,
 			"previous_activity", a.Activity, "missing_since", firstSeen[a.ID], "last_seen", a.LastSeen,
-			"exit_reason", string(state.ExitReasonContainerMissing))
+			"exit_reason", updated.ExitReason)
 		s.reconcileBrokerQuotaOnPhaseChange(ctx, &a, string(state.PhaseRunning), updated.Phase)
 		s.events.PublishAgentStatus(ctx, updated)
 	}
