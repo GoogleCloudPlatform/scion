@@ -304,18 +304,6 @@ type userPreferencesPatch struct {
 	Timezone        *string
 }
 
-// nonPortableTimezoneNames denylists zoneinfo entries that time.LoadLocation
-// accepts but that do not name a portable IANA zone: each one resolves to
-// something local to the server rather than to a fixed place, which is
-// exactly what the Auto/explicit-zone split exists to avoid, and which
-// task 11's Intl.DateTimeFormat-based formatters cannot render.
-var nonPortableTimezoneNames = map[string]bool{
-	"Local":      true,
-	"localtime":  true,
-	"posixrules": true,
-	"Factory":    true,
-}
-
 // decodeStringPref unmarshals one preferences sub-field's raw JSON value
 // into a string, for the per-key preferences PATCH merge. A JSON null is a
 // no-op onto the freshly zero-valued result, so it decodes to "" — the same
@@ -331,17 +319,22 @@ func decodeStringPref(key string, rv json.RawMessage) (string, error) {
 }
 
 // validateUserTimezone validates a user display-timezone preference value.
-// "" means Auto (the browser-detected zone) and is always valid. Any name in
-// nonPortableTimezoneNames is rejected (a case-sensitive lookup), and every
-// other value must resolve via time.LoadLocation.
+// "" means Auto (the browser-detected zone) and is always valid.
+//
+// Delegates the actual check to validateIANATimezone (timezone_validate.go),
+// shared with the hub-wide agent_defaults.default_timezone validator
+// (admin_settings.go's validateDefaultTimezone), so the two can't drift.
+// Each validator keeps its own wrapping here, because the right message
+// differs: this one points users at "" for Auto, which means nothing for
+// the hub-wide default.
 func validateUserTimezone(tz string) error {
 	if tz == "" {
 		return nil
 	}
-	if nonPortableTimezoneNames[tz] {
-		return fmt.Errorf("timezone %q is not allowed; use an IANA zone name, or \"\" for Auto", tz)
-	}
-	if _, err := time.LoadLocation(tz); err != nil {
+	if err := validateIANATimezone(tz); err != nil {
+		if errors.Is(err, errNonPortableTimezone) {
+			return fmt.Errorf("timezone %q is not allowed; use an IANA zone name, or \"\" for Auto", tz)
+		}
 		return fmt.Errorf("invalid timezone %q: %v", tz, err)
 	}
 	return nil
@@ -732,15 +725,10 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	// Preferences follow the same per-viewer visibility rule on this response
-	// as on GET (stripPreferencesForViewer; used by getUser and listUsers).
-	// Computed independently here rather than reusing the
-	// needsCrossUserUpdate decision above, because that permission check
-	// does not run for every request shape that can reach this point.
-	if identity := GetIdentityFromContext(ctx); identity != nil {
-		cap := s.authzService.ComputeCapabilities(ctx, identity, userResource(user))
-		stripPreferencesForViewer(ctx, user, cap)
-	}
+	// This response applies the same per-viewer preferences visibility rule
+	// as GET (stripPreferencesForViewer; used by getUser and listUsers).
+	cap := s.authzService.ComputeCapabilities(ctx, actor, userResource(user))
+	stripPreferencesForViewer(ctx, user, cap)
 
 	writeJSON(w, http.StatusOK, user)
 }

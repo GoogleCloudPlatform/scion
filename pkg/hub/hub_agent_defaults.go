@@ -34,10 +34,12 @@ import (
 // handing callers the live pointer would let a downstream merge mutate the
 // server's config out from under the lock.
 //
-// In file mode this always returns the zero value: BuildLayer1SnapshotFromFile
-// deliberately leaves the agent-defaults fields empty (design §3.2.4), so
-// callers that gate on "non-empty" never fire in file mode. That is what keeps
-// file-mode dispatch byte-identical to the pre-change behaviour.
+// In file mode, BuildLayer1SnapshotFromFile populates only
+// DefaultHarnessConfig, DefaultTimezone and the two GCP identity fields (read
+// from their own top-level settings.yaml keys); every other agent-defaults
+// field stays at its zero value, so callers that gate on "non-empty" for
+// those never fire in file mode. That is what keeps file-mode dispatch of
+// the other fields byte-identical to the pre-change behaviour.
 func (s *Server) hubAgentDefaults() opsettings.AgentDefaultsSettings {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
