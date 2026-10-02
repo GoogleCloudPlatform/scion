@@ -35,9 +35,9 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// b3EdgeColumns lists the provenance, effect-ceiling and deactivation
+// provenanceEdgeColumns lists the provenance, effect-ceiling and deactivation
 // columns on delegation_edges. A database that predates them has none.
-var b3EdgeColumns = []string{
+var provenanceEdgeColumns = []string{
 	"provenance_version", "source_principal_kind", "source_principal_id",
 	"source_credential_kind", "source_credential_id", "source_event_id",
 	"source_schedule_id", "source_authorization_revision",
@@ -75,11 +75,11 @@ func assertLegacyEdgeUnrecorded(t *testing.T, client *ent.Client) {
 	assert.Equal(t, store.Deactivation{}, e.Deactivation)
 }
 
-// TestB3_MigrationExistingEdgesUnrecorded upgrades a delegation_edges table
+// TestMigrationExistingEdgesUnrecorded upgrades a delegation_edges table
 // that predates the provenance columns and checks that an existing edge
 // reads back as unrecorded. The SQLite case always runs. The Postgres case
 // runs under -tags integration with SCION_TEST_POSTGRES_URL set.
-func TestB3_MigrationExistingEdgesUnrecorded(t *testing.T) {
+func TestMigrationExistingEdgesUnrecorded(t *testing.T) {
 	t.Run("sqlite", func(t *testing.T) {
 		dsn := "file:" + filepath.Join(t.TempDir(), "test.db")
 		ctx := context.Background()
@@ -136,8 +136,8 @@ func TestB3_MigrationExistingEdgesUnrecorded(t *testing.T) {
 
 		// Return the table to its pre-provenance shape, then insert an
 		// edge the way the earlier schema wrote it.
-		drops := make([]string, len(b3EdgeColumns))
-		for i, c := range b3EdgeColumns {
+		drops := make([]string, len(provenanceEdgeColumns))
+		for i, c := range provenanceEdgeColumns {
 			drops[i] = "DROP COLUMN " + c
 		}
 		_, err = db.ExecContext(ctx, "ALTER TABLE delegation_edges "+strings.Join(drops, ", "))
@@ -157,10 +157,10 @@ func TestB3_MigrationExistingEdgesUnrecorded(t *testing.T) {
 	})
 }
 
-// TestB3_DelegationEdgeStoreRoundTripsProvenance checks that every recorded
+// TestDelegationEdgeStoreRoundTripsProvenance checks that every recorded
 // field survives a write and a read, and that the empty bounded list is
 // kept distinct from "no list".
-func TestB3_DelegationEdgeStoreRoundTripsProvenance(t *testing.T) {
+func TestDelegationEdgeStoreRoundTripsProvenance(t *testing.T) {
 	ctx := context.Background()
 	s := NewDelegationEdgeStore(enttest.NewClient(t))
 	expires := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
@@ -244,9 +244,9 @@ func TestB3_DelegationEdgeStoreRoundTripsProvenance(t *testing.T) {
 	assert.Equal(t, store.SourceCredentialDevLocal, got.SourceCredentialKind)
 }
 
-// TestB3_DelegationEdgeStoreRejectsMalformedCeiling checks that the store
+// TestDelegationEdgeStoreRejectsMalformedCeiling checks that the store
 // refuses a ceiling it cannot persist faithfully.
-func TestB3_DelegationEdgeStoreRejectsMalformedCeiling(t *testing.T) {
+func TestDelegationEdgeStoreRejectsMalformedCeiling(t *testing.T) {
 	ctx := context.Background()
 	s := NewDelegationEdgeStore(enttest.NewClient(t))
 	base := func(id string, c store.EffectCeiling) *store.DelegationEdge {

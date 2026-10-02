@@ -58,10 +58,10 @@ func activeEdgesFor(t *testing.T, s store.Store, agentID string) []*store.Delega
 
 // An edge write failure rolls back the whole create: no agent row, no
 // identity key, no edge.
-func TestB3_CreateEdgeFailureRollsBack(t *testing.T) {
+func TestCreateEdgeFailureRollsBack(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
-	project := setupProjectWithBroker(t, s, "b3-edge-rollback", "B3 Edge Rollback")
+	project := setupProjectWithBroker(t, s, "edge-rollback", "Edge Rollback")
 
 	srv.store = &edgeWriteErrStore{Store: s}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents",
@@ -89,10 +89,10 @@ func TestB3_CreateEdgeFailureRollsBack(t *testing.T) {
 // A create through DevAuthMiddleware records a principal edge with dev_local
 // provenance and delegator user:<DevUserID>; the edge role equals the stored
 // role.
-func TestB3_DevAuthCreateRecordsPrincipalCeiling(t *testing.T) {
+func TestDevAuthCreateRecordsPrincipalCeiling(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
-	project := setupProjectWithBroker(t, s, "b3-dev-edge", "B3 Dev Edge")
+	project := setupProjectWithBroker(t, s, "dev-edge", "Dev Edge")
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents",
 		CreateAgentRequest{Name: "dev-child"})

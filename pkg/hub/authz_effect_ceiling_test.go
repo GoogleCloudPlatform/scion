@@ -48,7 +48,7 @@ func allRegistryIDs() []string {
 
 // knownCeilingVersion agrees with FrozenPermissionCeiling.Allows for every
 // version in [-1, 100].
-func TestB3_KnownCeilingVersionMatchesAllows(t *testing.T) {
+func TestKnownCeilingVersionMatchesAllows(t *testing.T) {
 	for v := -1; v <= 100; v++ {
 		version := permissions.CeilingVersion(v)
 		f := permissions.FrozenPermissionCeiling{Version: version, PermissionIDs: []string{"agent.create"}}
@@ -59,7 +59,7 @@ func TestB3_KnownCeilingVersionMatchesAllows(t *testing.T) {
 // A scope with no registry coverage and no reviewed mapping is withheld
 // under every bounded ceiling, including an empty one and one holding the
 // whole registry.
-func TestB3_ZeroCoverageScopeDenied(t *testing.T) {
+func TestZeroCoverageScopeDenied(t *testing.T) {
 	synthetic := []AgentTokenScope{"project:agent:not_a_scope", AgentTokenScope(ScopeGCPTokenPrefix)}
 	for _, scope := range synthetic {
 		require.Empty(t, agentScopeCoverage([]AgentTokenScope{scope}), "scope %q must have zero coverage", scope)
@@ -72,7 +72,7 @@ func TestB3_ZeroCoverageScopeDenied(t *testing.T) {
 // project:gcp:token:<sa> is issued under bounded only when the ceiling allows
 // gcp_service_account.assign; always under principal; unchanged under
 // unrecorded.
-func TestB3_GCPTokenScopeRequiresSAAssignInCeiling(t *testing.T) {
+func TestGCPTokenScopeRequiresSAAssignInCeiling(t *testing.T) {
 	scope := GCPTokenScopeForSA("sa-1")
 	assert.True(t, ceilingAllowsScope(boundedCeiling("gcp_service_account.assign"), scope))
 	assert.False(t, ceilingAllowsScope(boundedCeiling("gcp_service_account.use", "project.read"), scope))
@@ -86,7 +86,7 @@ func TestB3_GCPTokenScopeRequiresSAAssignInCeiling(t *testing.T) {
 
 // Every agent-token scope constant and prefix has registry coverage or a
 // reviewed zero-coverage mapping.
-func TestB3_EveryAgentScopeHasCoverageOrReviewedMapping(t *testing.T) {
+func TestEveryAgentScopeHasCoverageOrReviewedMapping(t *testing.T) {
 	scopes := []AgentTokenScope{
 		ScopeProjectRead, ScopeAgentStatusUpdate, ScopeAgentTokenRefresh, ScopeAgentNotify,
 		ScopeAgentPortForward, ScopeAgentCreate, ScopeAgentSAAssign, ScopeAgentLifecycle,
@@ -112,7 +112,7 @@ func TestB3_EveryAgentScopeHasCoverageOrReviewedMapping(t *testing.T) {
 // Every registry permission with an empty UATScope and non-empty AgentScopes
 // is in exactly one of the self and non-self lists, and every list entry is
 // such a permission. Self operations target the agent resource.
-func TestB3_SelfOperationTableMatchesRegistry(t *testing.T) {
+func TestSelfOperationTableMatchesRegistry(t *testing.T) {
 	listed := map[string]int{}
 	for _, id := range selfOperationPermissionIDs {
 		listed[id]++
@@ -178,7 +178,7 @@ func readonlyRoleUATSelectors(t *testing.T) []string {
 // operations are free); a readonly default stays readonly; an explicit role
 // over the ceiling denies; explicit none is allowed; a defaulted role that
 // fits nothing above none denies.
-func TestB3_UATChildRoleCappedWithinCeiling(t *testing.T) {
+func TestUATChildRoleCappedWithinCeiling(t *testing.T) {
 	readSelectors := readonlyRoleUATSelectors(t)
 	createP, _ := registryPermission("agent.create")
 	minimal := uatCeilingFromSelectors(t, append([]string{createP.UATScope}, readSelectors...)...)
@@ -221,7 +221,7 @@ func TestB3_UATChildRoleCappedWithinCeiling(t *testing.T) {
 }
 
 // EffectCeilingAllows over every kind.
-func TestB3_EffectCeilingAllows(t *testing.T) {
+func TestEffectCeilingAllows(t *testing.T) {
 	principal := store.EffectCeiling{Kind: store.EffectCeilingPrincipal}
 	unrecorded := store.EffectCeiling{}
 	b := boundedCeiling("agent.create")
@@ -239,7 +239,7 @@ func TestB3_EffectCeilingAllows(t *testing.T) {
 // The pure intersection step of parentDeliverEligibility: for every subset
 // of the three delivery IDs held by a bounded chain, exactly that subset is
 // returned; principal returns all; any unrecorded hop or kind returns none.
-func TestB3_AgentCreateDeliverIDs_BoundedParentSubset(t *testing.T) {
+func TestAgentCreateDeliverIDs_BoundedParentSubset(t *testing.T) {
 	t.Run("pure deliverIDsAllowedByChain table", func(t *testing.T) {
 		for mask := 0; mask < 1<<len(hubDeliveryPermissionIDs); mask++ {
 			var subset []string
@@ -265,7 +265,7 @@ func TestB3_AgentCreateDeliverIDs_BoundedParentSubset(t *testing.T) {
 
 // childEffectCeiling: bounded V1, sorted and de-duplicated; a bounded source
 // narrows the coverage; deliver IDs outside the fixed set are dropped.
-func TestB3_ChildEffectCeiling(t *testing.T) {
+func TestChildEffectCeiling(t *testing.T) {
 	cov := []string{"project.read", "agent.create", "agent.create"}
 	got := childEffectCeiling(store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, cov, []string{"secret.deliver", "agent.delete"})
 	assert.Equal(t, store.EffectCeilingBounded, got.Kind)
@@ -281,7 +281,7 @@ func TestB3_ChildEffectCeiling(t *testing.T) {
 }
 
 // Every new ceiling error maps to a DenyCause; lookup faults map to none.
-func TestB3_CeilingErrorsMapToDenyCause(t *testing.T) {
+func TestCeilingErrorsMapToDenyCause(t *testing.T) {
 	cases := map[error]DenyCause{
 		errSourceNotAllowed:        DenyCauseCeilingSourceNotAllowed,
 		errSourceCeilingUnrecorded: DenyCauseCeilingUnrecorded,
@@ -377,7 +377,7 @@ var (
 	ceilPrincip  = store.EffectCeiling{Kind: store.EffectCeilingPrincipal}
 )
 
-func TestB3_ChainEffectCeilingFold(t *testing.T) {
+func TestChainEffectCeilingFold(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("principal user edge", func(t *testing.T) {
@@ -509,7 +509,7 @@ func TestB3_ChainEffectCeilingFold(t *testing.T) {
 	})
 }
 
-func TestB3_ChainEffectCeilingDevLocalHop(t *testing.T) {
+func TestChainEffectCeilingDevLocalHop(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("dev auth enabled and dev user active", func(t *testing.T) {
@@ -561,7 +561,7 @@ func TestB3_ChainEffectCeilingDevLocalHop(t *testing.T) {
 
 // A structural chain outcome gives no delivery IDs and no error; a lookup
 // fault is returned.
-func TestB3_ParentDeliverEligibilityStructuralGivesNone(t *testing.T) {
+func TestParentDeliverEligibilityStructuralGivesNone(t *testing.T) {
 	ctx := context.Background()
 	f := newCeilingFixture(t, "pde")
 	p := f.agent(t, "pde-p", AgentRoleFull)
@@ -590,7 +590,7 @@ func TestB3_ParentDeliverEligibilityStructuralGivesNone(t *testing.T) {
 
 // The mint candidate scopes follow the role, the config-derived GCP scope,
 // and the dev-auth override; the ceiling filter narrows them.
-func TestB3_MintCandidateScopesAndFilter(t *testing.T) {
+func TestMintCandidateScopesAndFilter(t *testing.T) {
 	ctx := context.Background()
 	f := newCeilingFixture(t, "mint")
 	a := f.agent(t, "mint", AgentRoleNone)
@@ -615,7 +615,7 @@ func TestB3_MintCandidateScopesAndFilter(t *testing.T) {
 }
 
 // sourceEffectCeiling rows at the unit level.
-func TestB3_SourceEffectCeilingRows(t *testing.T) {
+func TestSourceEffectCeilingRows(t *testing.T) {
 	ctx := context.Background()
 	f := newCeilingFixture(t, "src")
 	authz := f.authz(f.store, true, false)

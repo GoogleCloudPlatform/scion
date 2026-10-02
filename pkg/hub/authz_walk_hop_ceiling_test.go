@@ -51,7 +51,7 @@ func newAdminDelegatorFixture(t *testing.T, name string) ceilingFixture {
 // A permission outside a bounded hop's ceiling is denied by the walk, at the
 // agent's own hop and at an ancestor's hop, with DeniedBy delegation_ceiling
 // and cause ceiling_effect_exceeded through Decide.
-func TestB3_WalkDeniesPermissionOutsideHopCeiling(t *testing.T) {
+func TestWalkDeniesPermissionOutsideHopCeiling(t *testing.T) {
 	readCoverage := agentScopeCoverage([]AgentTokenScope{ScopeProjectRead})
 
 	t.Run("own hop through Decide", func(t *testing.T) {
@@ -120,7 +120,7 @@ func TestB3_WalkDeniesPermissionOutsideHopCeiling(t *testing.T) {
 
 // A dev_local hop needs dev auth and the delegator user:DevUserID. A
 // suspended dev user is denied by the existing non-live-delegator check.
-func TestB3_WalkDevLocalHopCheck2(t *testing.T) {
+func TestWalkDevLocalHopRequiresDevUserDelegator(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("delegator is not the dev user", func(t *testing.T) {
@@ -159,7 +159,7 @@ func TestB3_WalkDevLocalHopCheck2(t *testing.T) {
 
 // The self-operation exception applies only when the resource is the
 // acting agent.
-func TestB3_WalkSelfOpAllowedOnlyOnSelf(t *testing.T) {
+func TestWalkSelfOpAllowedOnlyOnSelf(t *testing.T) {
 	f := newAdminDelegatorFixture(t, "wself")
 	a := f.agent(t, "wself-a", AgentRoleFull)
 	b := f.agent(t, "wself-b", AgentRoleFull)
@@ -183,7 +183,7 @@ func TestB3_WalkSelfOpAllowedOnlyOnSelf(t *testing.T) {
 
 // Every permission in recordedProvenanceRequired is denied on an unrecorded
 // hop, and on a hop whose provenance version is not understood.
-func TestB3_WalkUnrecordedEdgeSensitivePermissionDenied(t *testing.T) {
+func TestWalkUnrecordedEdgeSensitivePermissionDenied(t *testing.T) {
 	f := newAdminDelegatorFixture(t, "wunrec")
 	a := f.agent(t, "wunrec-a", AgentRoleFull)
 	f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, store.EffectCeiling{}, store.AuthorityProvenance{})
@@ -208,10 +208,10 @@ func TestB3_WalkUnrecordedEdgeSensitivePermissionDenied(t *testing.T) {
 	}
 }
 
-// Permissions outside recordedProvenanceRequired keep the B.2 outcome on an
-// unrecorded hop: the walk decides exactly as for a principal hop with the
-// same delegator.
-func TestB3_WalkUnrecordedEdgeLegacyCharacterization(t *testing.T) {
+// Permissions outside recordedProvenanceRequired are decided by the role
+// grant alone on an unrecorded hop (frozen legacy characterization): the walk
+// decides exactly as for a principal hop with the same delegator.
+func TestWalkUnrecordedEdgeLegacyCharacterization(t *testing.T) {
 	f := newCeilingFixture(t, "wlegacy")
 	unrec := f.agent(t, "wlegacy-u", AgentRoleFull)
 	princ := f.agent(t, "wlegacy-p", AgentRoleFull)
@@ -237,7 +237,7 @@ func TestB3_WalkUnrecordedEdgeLegacyCharacterization(t *testing.T) {
 // The delivery permissions walk the target agent's chain with no
 // self-operation exception: a bounded hop passes exactly when it carries the
 // delivery ID.
-func TestB3_WalkHubDeliveryUsesDeliverPermission(t *testing.T) {
+func TestWalkHubDeliveryUsesDeliverPermission(t *testing.T) {
 	f := newAdminDelegatorFixture(t, "wdeliver")
 	with := f.agent(t, "wdeliver-with", AgentRoleFull)
 	without := f.agent(t, "wdeliver-without", AgentRoleFull)
@@ -265,7 +265,7 @@ func TestB3_WalkHubDeliveryUsesDeliverPermission(t *testing.T) {
 }
 
 // hopEffectCeilingDeny's order of checks.
-func TestB3_HopEffectCeilingDenyOrder(t *testing.T) {
+func TestHopEffectCeilingDenyOrder(t *testing.T) {
 	self := Resource{Type: "agent", ID: "a1"}
 	other := Resource{Type: "agent", ID: "a2"}
 	devEdge := &store.DelegationEdge{DelegatorType: store.DelegationPrincipalUser, DelegatorID: DevUserID,

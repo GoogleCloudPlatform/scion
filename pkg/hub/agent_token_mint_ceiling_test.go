@@ -182,10 +182,10 @@ func readonlyCoverageCeiling() store.EffectCeiling {
 
 // Every mint site issues the same ceiled scope set, and no production caller
 // of the role-only GenerateAgentToken remains.
-func TestB3_AllMintSitesUseCeiledHelper(t *testing.T) {
-	f := newMintFixture(t, "b3-allsites")
+func TestAllMintSitesUseCeiledHelper(t *testing.T) {
+	f := newMintFixture(t, "allsites")
 	ctx := context.Background()
-	a := f.agent(t, "b3-allsites-agent", AgentRoleFull, state.PhaseRunning)
+	a := f.agent(t, "allsites-agent", AgentRoleFull, state.PhaseRunning)
 	ceiling := readonlyCoverageCeiling()
 	f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, ceiling, provSession)
 	want := filterScopes(f.srv.authzService.mintCandidateScopes(a), ceiling, ScopeCeilings{})
@@ -242,10 +242,10 @@ func TestB3_AllMintSitesUseCeiledHelper(t *testing.T) {
 
 // Start of an agent with no edge after the backfill: 403 at the delegation
 // ceiling, no broker request, and an agent_token_issue_denied record.
-func TestB3_DispatcherStartAbortsOnCeilingOrphaned(t *testing.T) {
-	f := newMintFixture(t, "b3-start-orphan")
+func TestDispatcherStartAbortsOnCeilingOrphaned(t *testing.T) {
+	f := newMintFixture(t, "start-orphan")
 	setBackfillCompleted(t, f.store)
-	a := f.agent(t, "b3-start-orphan-agent", AgentRoleFull, state.PhaseStopped)
+	a := f.agent(t, "start-orphan-agent", AgentRoleFull, state.PhaseStopped)
 
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
 	assertCeilingDenied(t, rec)
@@ -254,8 +254,8 @@ func TestB3_DispatcherStartAbortsOnCeilingOrphaned(t *testing.T) {
 }
 
 // A lookup fault at the create mint: 503, no broker create, no agent row.
-func TestB3_DispatcherCreateAbortsOnCeilingLookupError(t *testing.T) {
-	f := newMintFixture(t, "b3-create-lookup")
+func TestDispatcherCreateAbortsOnCeilingLookupError(t *testing.T) {
+	f := newMintFixture(t, "create-lookup")
 	f.srv.authzService.store = &edgeReadErrStore{Store: f.store}
 
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/"+f.projectID+"/agents",
@@ -276,10 +276,10 @@ func TestB3_DispatcherCreateAbortsOnCeilingLookupError(t *testing.T) {
 
 // Restart with no edge after the backfill returns the mapped error before
 // any broker request.
-func TestB3_DispatcherRestartAbortsOnMintError(t *testing.T) {
-	f := newMintFixture(t, "b3-restart-orphan")
+func TestDispatcherRestartAbortsOnMintError(t *testing.T) {
+	f := newMintFixture(t, "restart-orphan")
 	setBackfillCompleted(t, f.store)
-	a := f.agent(t, "b3-restart-orphan-agent", AgentRoleFull, state.PhaseRunning)
+	a := f.agent(t, "restart-orphan-agent", AgentRoleFull, state.PhaseRunning)
 
 	err := f.disp.DispatchAgentRestart(context.Background(), a)
 	require.ErrorIs(t, err, ErrProvenanceMissing)
@@ -294,22 +294,22 @@ func TestB3_DispatcherRestartAbortsOnMintError(t *testing.T) {
 }
 
 // Refresh mints with the stored ancestry, not the presented token's.
-func TestB3_RefreshUsesStoredAncestry(t *testing.T) {
-	f := newMintFixture(t, "b3-refresh-anc")
-	a := f.agent(t, "b3-refresh-anc-agent", AgentRoleFull, state.PhaseRunning)
+func TestRefreshUsesStoredAncestry(t *testing.T) {
+	f := newMintFixture(t, "refresh-anc")
+	a := f.agent(t, "refresh-anc-agent", AgentRoleFull, state.PhaseRunning)
 	f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, ceilPrincip, provSession)
 
-	tok := refreshedToken(t, f.refresh(t, a, []string{f.userID, tid("b3-refresh-anc-other")}))
+	tok := refreshedToken(t, f.refresh(t, a, []string{f.userID, tid("refresh-anc-other")}))
 	assert.Equal(t, a.Ancestry, f.tokenClaims(t, tok).Ancestry)
 }
 
 // After a stored role raise, the refreshed scopes stay within the edge
 // ceiling.
-func TestB3_RefreshRespectsEdgeCeiling(t *testing.T) {
-	f := newMintFixture(t, "b3-refresh-ceil")
+func TestRefreshRespectsEdgeCeiling(t *testing.T) {
+	f := newMintFixture(t, "refresh-ceil")
 	ctx := context.Background()
 	f.srv.authzService.mintDevAuthOverride = false
-	a := f.agent(t, "b3-refresh-ceil-agent", AgentRoleReadOnly, state.PhaseRunning)
+	a := f.agent(t, "refresh-ceil-agent", AgentRoleReadOnly, state.PhaseRunning)
 	ceiling := readonlyCoverageCeiling()
 	f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, ceiling, provSession)
 
@@ -326,10 +326,10 @@ func TestB3_RefreshRespectsEdgeCeiling(t *testing.T) {
 
 // Refresh with no edge after the backfill is 403; an edge lookup fault is
 // 503. Neither issues a token.
-func TestB3_RefreshNoEdgeDenies(t *testing.T) {
-	f := newMintFixture(t, "b3-refresh-noedge")
+func TestRefreshNoEdgeDenies(t *testing.T) {
+	f := newMintFixture(t, "refresh-noedge")
 	setBackfillCompleted(t, f.store)
-	a := f.agent(t, "b3-refresh-noedge-agent", AgentRoleFull, state.PhaseRunning)
+	a := f.agent(t, "refresh-noedge-agent", AgentRoleFull, state.PhaseRunning)
 
 	rec := f.refresh(t, a, a.Ancestry)
 	assertCeilingDenied(t, rec)
@@ -337,9 +337,9 @@ func TestB3_RefreshNoEdgeDenies(t *testing.T) {
 	assertIssueDeniedAudit(t, f.store, a.ID, mintSiteRefresh, string(DenyCauseCeilingOrphaned))
 }
 
-func TestB3_RefreshEdgeLookupError503(t *testing.T) {
-	f := newMintFixture(t, "b3-refresh-lookup")
-	a := f.agent(t, "b3-refresh-lookup-agent", AgentRoleFull, state.PhaseRunning)
+func TestRefreshEdgeLookupError503(t *testing.T) {
+	f := newMintFixture(t, "refresh-lookup")
+	a := f.agent(t, "refresh-lookup-agent", AgentRoleFull, state.PhaseRunning)
 	f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, ceilPrincip, provSession)
 	f.srv.authzService.store = &edgeReadErrStore{Store: f.store}
 
@@ -350,10 +350,10 @@ func TestB3_RefreshEdgeLookupError503(t *testing.T) {
 }
 
 // The dev-auth full override is narrowed by a bounded ceiling.
-func TestB3_DevAuthOverrideDoesNotExceedCeiling(t *testing.T) {
-	f := newMintFixture(t, "b3-devauth-ceil")
+func TestDevAuthOverrideDoesNotExceedCeiling(t *testing.T) {
+	f := newMintFixture(t, "devauth-ceil")
 	require.True(t, f.srv.authzService.mintDevAuthOverride, "test server runs with dev auth")
-	a := f.agent(t, "b3-devauth-ceil-agent", AgentRoleReadOnly, state.PhaseRunning)
+	a := f.agent(t, "devauth-ceil-agent", AgentRoleReadOnly, state.PhaseRunning)
 	ceiling := readonlyCoverageCeiling()
 	f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, ceiling, provSession)
 
@@ -366,10 +366,10 @@ func TestB3_DevAuthOverrideDoesNotExceedCeiling(t *testing.T) {
 // An explicit role-none agent is minted a token: without dev auth it holds
 // no role scopes; with dev auth it is raised to full and bounded by the
 // chain ceiling.
-func TestB3_RoleNoneMintMatchesToday(t *testing.T) {
-	f := newMintFixture(t, "b3-none-mint")
+func TestRoleNoneMintIssuesRoleDerivedScopes(t *testing.T) {
+	f := newMintFixture(t, "none-mint")
 	ctx := context.Background()
-	a := f.agent(t, "b3-none-mint-agent", AgentRoleNone, state.PhaseRunning)
+	a := f.agent(t, "none-mint-agent", AgentRoleNone, state.PhaseRunning)
 	ceiling := readonlyCoverageCeiling()
 	f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, ceiling, provSession)
 
@@ -388,14 +388,14 @@ func TestB3_RoleNoneMintMatchesToday(t *testing.T) {
 
 // A grandchild mints within its parent's current edge ceiling after that
 // edge is replaced by a narrower one; the GCP token scope follows the chain.
-func TestB3_MintUsesChainCeiling(t *testing.T) {
-	f := newMintFixture(t, "b3-chain-mint")
+func TestMintUsesChainCeiling(t *testing.T) {
+	f := newMintFixture(t, "chain-mint")
 	ctx := context.Background()
 	f.srv.authzService.mintDevAuthOverride = false
-	saID := tid("b3-chain-mint-sa")
+	saID := tid("chain-mint-sa")
 
-	parent := f.agent(t, "b3-chain-mint-parent", AgentRoleFull, state.PhaseRunning)
-	child := f.agent(t, "b3-chain-mint-child", AgentRoleFull, state.PhaseRunning)
+	parent := f.agent(t, "chain-mint-parent", AgentRoleFull, state.PhaseRunning)
+	child := f.agent(t, "chain-mint-child", AgentRoleFull, state.PhaseRunning)
 	child.Ancestry = []string{f.userID, parent.ID}
 	child.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: saID}
 	require.NoError(t, f.store.UpdateAgent(ctx, child))
@@ -431,8 +431,8 @@ func TestB3_MintUsesChainCeiling(t *testing.T) {
 
 // A child created through DevAuthMiddleware: the create mint and a refresh
 // both yield the dev-auth full scope set.
-func TestB3_DevAuthChildMintAndRefresh(t *testing.T) {
-	f := newMintFixture(t, "b3-dev-mint")
+func TestDevAuthChildMintAndRefresh(t *testing.T) {
+	f := newMintFixture(t, "dev-mint")
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/"+f.projectID+"/agents",
 		CreateAgentRequest{Name: "dev-mint-child"})
 	require.True(t, rec.Code == http.StatusCreated || rec.Code == http.StatusAccepted, "create: %d %s", rec.Code, rec.Body.String())
@@ -467,8 +467,8 @@ func devCreatedChild(t *testing.T, f *mintFixture, name string) *store.Agent {
 
 // With dev-local authority disabled, a dev-created child gets no token at
 // start or refresh, and the walk denies with the same cause.
-func TestB3_DevLocalEdgeDeniedWhenDevAuthDisabled(t *testing.T) {
-	f := newMintFixture(t, "b3-dev-off")
+func TestDevLocalEdgeDeniedWhenDevAuthDisabled(t *testing.T) {
+	f := newMintFixture(t, "dev-off")
 	child := devCreatedChild(t, f, "dev-off-child")
 	f.srv.authzService.setDevLocalAuthorityEnabled(false)
 
@@ -500,12 +500,12 @@ func TestB3_DevLocalEdgeDeniedWhenDevAuthDisabled(t *testing.T) {
 // With dev auth enabled, a dev_local edge whose delegator is not the dev
 // user, or whose dev user is suspended, gets no token at mint or refresh; a
 // dev user lookup fault is 503.
-func TestB3_DevLocalEdgeDeniedWhenDevUserInactive(t *testing.T) {
+func TestDevLocalEdgeDeniedWhenDevUserInactive(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("delegator is not the dev user", func(t *testing.T) {
-		f := newMintFixture(t, "b3-devu-other")
-		a := f.agent(t, "b3-devu-other-agent", AgentRoleFull, state.PhaseStopped)
+		f := newMintFixture(t, "devu-other")
+		a := f.agent(t, "devu-other-agent", AgentRoleFull, state.PhaseStopped)
 		f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, ceilPrincip, provDevLocal)
 
 		err := f.disp.DispatchAgentStart(ctx, a, "", false)
@@ -516,8 +516,8 @@ func TestB3_DevLocalEdgeDeniedWhenDevUserInactive(t *testing.T) {
 	})
 
 	t.Run("dev user suspended", func(t *testing.T) {
-		f := newMintFixture(t, "b3-devu-susp")
-		a := f.agent(t, "b3-devu-susp-agent", AgentRoleFull, state.PhaseStopped)
+		f := newMintFixture(t, "devu-susp")
+		a := f.agent(t, "devu-susp-agent", AgentRoleFull, state.PhaseStopped)
 		f.edge(t, store.DelegationPrincipalUser, DevUserID, a.ID, ceilPrincip, provDevLocal)
 		_, err := f.srv.GenerateAgentTokenForAgent(ctx, a)
 		require.NoError(t, err, "control: active dev user")
@@ -537,8 +537,8 @@ func TestB3_DevLocalEdgeDeniedWhenDevUserInactive(t *testing.T) {
 	})
 
 	t.Run("dev user lookup fault", func(t *testing.T) {
-		f := newMintFixture(t, "b3-devu-fault")
-		a := f.agent(t, "b3-devu-fault-agent", AgentRoleFull, state.PhaseRunning)
+		f := newMintFixture(t, "devu-fault")
+		a := f.agent(t, "devu-fault-agent", AgentRoleFull, state.PhaseRunning)
 		f.edge(t, store.DelegationPrincipalUser, DevUserID, a.ID, ceilPrincip, provDevLocal)
 		f.srv.authzService.store = &getUserErrStore{Store: f.store, failID: DevUserID}
 

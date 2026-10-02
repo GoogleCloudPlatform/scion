@@ -146,8 +146,8 @@ func assertAgentCreateWroteNothing(t *testing.T, s store.Store, projectID, slug,
 // A principal parent (session-created) creating a child: the child's edge
 // is bounded V1 over the parent's row-five IDs plus every delivery
 // permission.
-func TestB3_AgentCreateDeliverIDs_PrincipalParent(t *testing.T) {
-	f := newChainFixture(t, "b3-chain-deliver")
+func TestAgentCreateDeliverIDs_PrincipalParent(t *testing.T) {
+	f := newChainFixture(t, "chain-deliver")
 	parent, pEdge := f.sessionParent(t, "chain-deliver-p")
 	require.Equal(t, store.EffectCeilingPrincipal, pEdge.Kind)
 
@@ -166,8 +166,8 @@ func TestB3_AgentCreateDeliverIDs_PrincipalParent(t *testing.T) {
 // Every non-delivery permission is in the child's ceiling exactly when the
 // row-five computation puts it there; and a lookup fault at the parent's
 // delivery-eligibility read fails the create with nothing written.
-func TestB3_AgentCreateDeliverIDs_NonDeliverControl(t *testing.T) {
-	f := newChainFixture(t, "b3-chain-control")
+func TestAgentCreateDeliverIDs_NonDeliverControl(t *testing.T) {
+	f := newChainFixture(t, "chain-control")
 	parent, _ := f.sessionParent(t, "chain-control-p")
 	_, cEdge := f.childOf(t, parent, "chain-control-c")
 
@@ -269,8 +269,8 @@ func edgeReadCaller() string {
 // The delivery permissions on a child's edge change no token scope: the
 // create mint and the refresh both equal the candidates filtered by the
 // edge ceiling less the delivery permissions.
-func TestB3_DeliverIDsDoNotChangeMintScopes(t *testing.T) {
-	f := newChainFixture(t, "b3-chain-mint")
+func TestDeliverIDsDoNotChangeMintScopes(t *testing.T) {
+	f := newChainFixture(t, "chain-mint")
 	parent, _ := f.sessionParent(t, "chain-mint-p")
 	child, cEdge := f.childOf(t, parent, "chain-mint-c")
 	require.NotEmpty(t, deliverOf(cEdge.PermissionIDs))
@@ -289,9 +289,9 @@ func TestB3_DeliverIDsDoNotChangeMintScopes(t *testing.T) {
 // create is 403 ceiling_orphaned with no agent row and an audit record, and
 // the edge written for the child carries the parent's coverage only. After
 // the backfill completes the create is 403 with nothing written.
-func TestB3_AgentCreateDeliverIDs_MissingParentEdge(t *testing.T) {
+func TestAgentCreateDeliverIDs_MissingParentEdge(t *testing.T) {
 	t.Run("backfill not complete", func(t *testing.T) {
-		f := newChainFixture(t, "b3-chain-missing")
+		f := newChainFixture(t, "chain-missing")
 		parent := createFixtureAgent(t, f.bypassAgentsFixture, "chain-missing-p", []string{f.creator.ID}, AgentRoleFull)
 		require.Empty(t, activeEdgesFor(t, f.store, parent.ID))
 
@@ -310,7 +310,7 @@ func TestB3_AgentCreateDeliverIDs_MissingParentEdge(t *testing.T) {
 	})
 
 	t.Run("backfill complete", func(t *testing.T) {
-		f := newChainFixture(t, "b3-chain-missing-bf")
+		f := newChainFixture(t, "chain-missing-bf")
 		parent := createFixtureAgent(t, f.bypassAgentsFixture, "chain-missing-bf-p", []string{f.creator.ID}, AgentRoleFull)
 		token := f.agentToken(t, parent.ID)
 		markEdgeBackfillComplete(t, f.store)
@@ -339,9 +339,9 @@ func TestB3_AgentCreateDeliverIDs_MissingParentEdge(t *testing.T) {
 
 // A parent whose chain carries an unrecorded hop gives its child no
 // delivery permission, directly or one hop further down.
-func TestB3_AgentCreateDeliverIDs_UnrecordedOrUnknownParent(t *testing.T) {
+func TestAgentCreateDeliverIDs_UnrecordedOrUnknownParent(t *testing.T) {
 	t.Run("unrecorded parent edge", func(t *testing.T) {
-		f := newChainFixture(t, "b3-chain-unrec")
+		f := newChainFixture(t, "chain-unrec")
 		parent := createFixtureAgent(t, f.bypassAgentsFixture, "chain-unrec-p", []string{f.creator.ID}, AgentRoleFull)
 		addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.creator.ID, parent.ID, f.proj.ID)
 
@@ -352,7 +352,7 @@ func TestB3_AgentCreateDeliverIDs_UnrecordedOrUnknownParent(t *testing.T) {
 	})
 
 	t.Run("unrecorded grandparent edge", func(t *testing.T) {
-		f := newChainFixture(t, "b3-chain-unrec-g")
+		f := newChainFixture(t, "chain-unrec-g")
 		grand := createFixtureAgent(t, f.bypassAgentsFixture, "chain-unrec-g", []string{f.creator.ID}, AgentRoleFull)
 		addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.creator.ID, grand.ID, f.proj.ID)
 
@@ -369,8 +369,8 @@ func TestB3_AgentCreateDeliverIDs_UnrecordedOrUnknownParent(t *testing.T) {
 
 // A three-hop chain from a session user: each agent-created edge carries
 // every delivery permission, and every hop's ceiling allows each.
-func TestB3_AgentCreateDeliverIDs_MultiHop(t *testing.T) {
-	f := newChainFixture(t, "b3-chain-multi")
+func TestAgentCreateDeliverIDs_MultiHop(t *testing.T) {
+	f := newChainFixture(t, "chain-multi")
 	p, pEdge := f.sessionParent(t, "chain-multi-p")
 	c, cEdge := f.childOf(t, p, "chain-multi-c")
 	d, dEdge := f.childOf(t, c, "chain-multi-d")
@@ -390,7 +390,7 @@ func TestB3_AgentCreateDeliverIDs_MultiHop(t *testing.T) {
 	_ = c
 
 	t.Run("dev-local parent with dev authority off", func(t *testing.T) {
-		mf := newMintFixture(t, "b3-chain-multi-dev")
+		mf := newMintFixture(t, "chain-multi-dev")
 		parent := devCreatedChild(t, mf, "chain-multi-dev-p")
 		token, err := mf.srv.GenerateAgentTokenForAgent(context.Background(), parent)
 		require.NoError(t, err)
@@ -415,8 +415,8 @@ func TestB3_AgentCreateDeliverIDs_MultiHop(t *testing.T) {
 
 // A dev-local parent's delivery eligibility is none while dev-local
 // authority is off, and every delivery permission while it is on.
-func TestB3_ParentDeliverEligibility_SourceNotAllowedGivesNone(t *testing.T) {
-	mf := newMintFixture(t, "b3-chain-dev-deliver")
+func TestParentDeliverEligibility_SourceNotAllowedGivesNone(t *testing.T) {
+	mf := newMintFixture(t, "chain-dev-deliver")
 	parent := devCreatedChild(t, mf, "chain-dev-deliver-p")
 	ctx := context.Background()
 
@@ -433,8 +433,8 @@ func TestB3_ParentDeliverEligibility_SourceNotAllowedGivesNone(t *testing.T) {
 // A grandchild's non-delivery ceiling is within its parent's ceiling and
 // coverage; a child of an unrecorded-edge parent is bounded by that parent's
 // coverage.
-func TestB3_GrandchildCeilingSubsetOfChild(t *testing.T) {
-	f := newChainFixture(t, "b3-chain-subset")
+func TestGrandchildCeilingSubsetOfChild(t *testing.T) {
+	f := newChainFixture(t, "chain-subset")
 	p, _ := f.sessionParent(t, "chain-subset-p")
 	c, cEdge := f.childOf(t, p, "chain-subset-c")
 	_, dEdge := f.childOf(t, c, "chain-subset-d")
@@ -462,8 +462,8 @@ func TestB3_GrandchildCeilingSubsetOfChild(t *testing.T) {
 
 // A child created by a dev-local parent is bounded by that parent's
 // coverage.
-func TestB3_DevAuthGrandchildBoundedByParent(t *testing.T) {
-	mf := newMintFixture(t, "b3-chain-dev-gc")
+func TestDevAuthGrandchildBoundedByParent(t *testing.T) {
+	mf := newMintFixture(t, "chain-dev-gc")
 	parent := devCreatedChild(t, mf, "chain-dev-gc-p")
 	token, err := mf.srv.GenerateAgentTokenForAgent(context.Background(), parent)
 	require.NoError(t, err)
@@ -483,8 +483,8 @@ func TestB3_DevAuthGrandchildBoundedByParent(t *testing.T) {
 // A create whose broker dispatch fails leaves the child's edge in place but
 // no usable authority: the token sent to the broker creates nothing and
 // refreshes nothing, and the child is not a valid ceiling source.
-func TestB3_P1DispatchFailureLeavesNoUsableAuthority(t *testing.T) {
-	f := newChainFixture(t, "b3-chain-dispatch")
+func TestDispatchFailureLeavesNoUsableAuthority(t *testing.T) {
+	f := newChainFixture(t, "chain-dispatch")
 	parent, _ := f.sessionParent(t, "chain-dispatch-p")
 	f.client.returnErr = errors.New("broker unavailable")
 
@@ -522,8 +522,8 @@ func TestB3_P1DispatchFailureLeavesNoUsableAuthority(t *testing.T) {
 // Authority from a relationship is checked at use, not frozen: a child of
 // an access token holding agent:attach carries exactly the token's ceiling,
 // and the walk allows attach only on agents the owner descends to.
-func TestB3_RelationshipAuthorityNotFrozen(t *testing.T) {
-	f := newChainFixture(t, "b3-chain-rel")
+func TestRelationshipAuthorityNotFrozen(t *testing.T) {
+	f := newChainFixture(t, "chain-rel")
 	ctx := context.Background()
 	f.srv.createProjectMembersGroup(ctx, f.proj)
 	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
@@ -617,8 +617,8 @@ func (f *legacyFixture) assertGateUnrecorded(t *testing.T, token, surface string
 
 // An agent whose only edge is unrecorded: a create that takes the project
 // default service account is denied by the SA gate with nothing written.
-func TestB3_LegacyAgentChildWithDefaultSADenied(t *testing.T) {
-	f := newLegacyFixture(t, "b3-legacy-dsa")
+func TestLegacyAgentChildWithDefaultSADenied(t *testing.T) {
+	f := newLegacyFixture(t, "legacy-dsa")
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentityMode, store.GCPMetadataModeAssign)
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentitySAID, f.sa.ID)
 	token := f.agentToken(t, f.legacy.ID)
@@ -629,8 +629,8 @@ func TestB3_LegacyAgentChildWithDefaultSADenied(t *testing.T) {
 
 // The same agent naming a service account explicitly is denied the same
 // way.
-func TestB3_LegacyAgentChildWithExplicitSADenied(t *testing.T) {
-	f := newLegacyFixture(t, "b3-legacy-esa")
+func TestLegacyAgentChildWithExplicitSADenied(t *testing.T) {
+	f := newLegacyFixture(t, "legacy-esa")
 	token := f.agentToken(t, f.legacy.ID)
 	assertSAGateDenied(t, f.createAsParent(t, token, f.assignBody("legacy-esa-c")))
 	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-esa-c", f.legacy.ID, 0)
@@ -641,8 +641,8 @@ func TestB3_LegacyAgentChildWithExplicitSADenied(t *testing.T) {
 // tokens carry no scope for agent.update, so the PATCH request is refused
 // before the SA gate; the SA gate at the PATCH surface is exercised
 // directly.
-func TestB3_LegacyAgentSAPatchDenied(t *testing.T) {
-	f := newLegacyFixture(t, "b3-legacy-patch")
+func TestLegacyAgentSAPatchDenied(t *testing.T) {
+	f := newLegacyFixture(t, "legacy-patch")
 	token := f.agentToken(t, f.legacy.ID)
 	child, _ := f.createdAgent(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-patch-c"}), "legacy-patch-c")
 
@@ -657,8 +657,8 @@ func TestB3_LegacyAgentSAPatchDenied(t *testing.T) {
 }
 
 // A child created by the legacy agent is denied the same three operations.
-func TestB3_LegacyParentDescendantInheritsUnrecordedDenial(t *testing.T) {
-	f := newLegacyFixture(t, "b3-legacy-desc")
+func TestLegacyParentDescendantInheritsUnrecordedDenial(t *testing.T) {
+	f := newLegacyFixture(t, "legacy-desc")
 	child, _ := f.childOf(t, f.legacy, "legacy-desc-c")
 	token := f.agentToken(t, child.ID)
 
@@ -679,8 +679,8 @@ func TestB3_LegacyParentDescendantInheritsUnrecordedDenial(t *testing.T) {
 }
 
 // The legacy agent creates a child with no service account.
-func TestB3_LegacyAgentChildWithoutSAAllowed(t *testing.T) {
-	f := newLegacyFixture(t, "b3-legacy-nosa")
+func TestLegacyAgentChildWithoutSAAllowed(t *testing.T) {
+	f := newLegacyFixture(t, "legacy-nosa")
 	_, edge := f.childOf(t, f.legacy, "legacy-nosa-c")
 	assert.Equal(t, f.legacy.ID, edge.DelegatorID)
 	assert.Equal(t, store.EffectCeilingBounded, edge.Kind)
@@ -690,8 +690,8 @@ func TestB3_LegacyAgentChildWithoutSAAllowed(t *testing.T) {
 // An agent whose only edge is unrecorded reads no project secret at
 // runtime: both fetch endpoints answer not_found. An agent with a recorded
 // edge reads it.
-func TestB3_LegacyAgentRuntimeSecretFetchNotFound(t *testing.T) {
-	mf := newMaterialFixture(t, "b3-legacy-fetch")
+func TestLegacyAgentRuntimeSecretFetchNotFound(t *testing.T) {
+	mf := newMaterialFixture(t, "legacy-fetch")
 	ctx := context.Background()
 	seedSecret(t, mf.Server.secretBackend, "LEGACY_KEY", "legacy-value", store.SecretTypeEnvironment, "LEGACY_KEY", mf.ProjectID)
 
@@ -709,7 +709,7 @@ func TestB3_LegacyAgentRuntimeSecretFetchNotFound(t *testing.T) {
 		store.RoleScopeProject, mf.ProjectID, string(AgentRoleFull))
 	assertProjectDenied(t, mf, mf.AgentID, tokenFor(mf.AgentID), "LEGACY_KEY")
 
-	recordedID := tid("agent-b3-legacy-fetch-recorded")
+	recordedID := tid("agent-legacy-fetch-recorded")
 	createDCAgent(t, mf.Store, recordedID, mf.ProjectID, mf.UserID, AgentRoleFull)
 	seedRecordedDelegationEdge(t, mf.Store, store.DelegationPrincipalUser, mf.UserID, store.DelegationPrincipalAgent, recordedID,
 		store.RoleScopeProject, mf.ProjectID, string(AgentRoleFull))
@@ -721,8 +721,8 @@ func TestB3_LegacyAgentRuntimeSecretFetchNotFound(t *testing.T) {
 
 // A child created by the legacy agent launches without the root user's
 // progeny secret; a child of a recorded chain launches with it.
-func TestB3_LegacyAgentCreatedChildLaunchOmitsSecrets(t *testing.T) {
-	f := newLegacyFixture(t, "b3-legacy-launch")
+func TestLegacyAgentCreatedChildLaunchOmitsSecrets(t *testing.T) {
+	f := newLegacyFixture(t, "legacy-launch")
 	ctx := context.Background()
 	backend := secret.NewLocalBackend(f.store, "test-hub-id", "test-secret")
 	f.srv.SetSecretBackend(backend)

@@ -3467,7 +3467,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 //
 // It applies no delegation ceiling and has no production caller: every mint
 // and refresh site calls GenerateAgentTokenForAgent. It serves test helpers
-// (TestB3_AllMintSitesUseCeiledHelper pins this).
+// (TestAllMintSitesUseCeiledHelper pins this).
 func (s *Server) GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (string, error) {
 	s.mu.RLock()
 	tokenService := s.agentTokenService

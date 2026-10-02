@@ -42,15 +42,15 @@ func assertUnrecordedDeny(t *testing.T, d Decision) {
 }
 
 // gcp_service_account.assign: the SA-assign gate's Layer 1 CheckAccess.
-func TestB3_UnrecordedEdgeDeniesSAAssign(t *testing.T) {
+func TestUnrecordedEdgeDeniesSAAssign(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
-	projectID, userID := tid("b3u-assign-proj"), tid("b3u-assign-user")
-	createDCProject(t, s, projectID, "b3u-assign-project")
-	createDCUser(t, s, userID, "b3u-assign-user@example.com", projectID, store.ProjectRoleOwner)
+	projectID, userID := tid("unrec-assign-proj"), tid("unrec-assign-user")
+	createDCProject(t, s, projectID, "unrec-assign-project")
+	createDCUser(t, s, userID, "unrec-assign-user@example.com", projectID, store.ProjectRoleOwner)
 	sa := scaCreateSA(t, s, projectID)
 
-	recorded, unrecorded := tid("b3u-assign-recorded"), tid("b3u-assign-unrecorded")
+	recorded, unrecorded := tid("unrec-assign-recorded"), tid("unrec-assign-unrecorded")
 	createDCAgent(t, s, recorded, projectID, userID, AgentRoleFull)
 	createDCAgent(t, s, unrecorded, projectID, userID, AgentRoleFull)
 	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, userID, store.DelegationPrincipalAgent, recorded,
@@ -68,13 +68,13 @@ func TestB3_UnrecordedEdgeDeniesSAAssign(t *testing.T) {
 }
 
 // gcp_service_account.use: Decide for the exact SA token scope.
-func TestB3_UnrecordedEdgeDeniesGCPServiceAccountUse(t *testing.T) {
+func TestUnrecordedEdgeDeniesGCPServiceAccountUse(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
-	saX := tid("b3u-use-sa")
-	agentID, projectID := tid("b3u-use-agent"), tid("b3u-use-project")
+	saX := tid("unrec-use-sa")
+	agentID, projectID := tid("unrec-use-agent"), tid("unrec-use-project")
 	setBackfillCompleted(t, s)
-	adminID := tid("b3u-use-admin")
+	adminID := tid("unrec-use-admin")
 	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
 	createDCEdge(t, s, store.DelegationPrincipalUser, adminID, store.DelegationPrincipalAgent, agentID,
 		store.RoleScopeProject, projectID, store.ProjectRoleOwner)
@@ -91,19 +91,19 @@ func TestB3_UnrecordedEdgeDeniesGCPServiceAccountUse(t *testing.T) {
 
 // secret.use and project.secret_read: Decide, and the runtime project-secret
 // fetch, which reports the item as not found.
-func TestB3_UnrecordedEdgeDeniesSecretUseAndProjectSecretRead(t *testing.T) {
-	f := newMaterialFixture(t, "b3u-secret")
+func TestUnrecordedEdgeDeniesSecretUseAndProjectSecretRead(t *testing.T) {
+	f := newMaterialFixture(t, "unrec-secret")
 	ctx := context.Background()
 	setBackfillCompleted(t, f.Store)
-	seedSecret(t, f.Server.secretBackend, "B3U_KEY", "v", "", "", f.ProjectID)
+	seedSecret(t, f.Server.secretBackend, "UNRECORDED_KEY", "v", "", "", f.ProjectID)
 
-	delegator := tid("b3u-secret-owner")
+	delegator := tid("unrec-secret-owner")
 	// A super-admin delegator holds both permissions (allPermissionIDs), as in
 	// the recorded-edge consumer tests, so the deny comes from the hop alone.
-	createTestUserWithRole(t, f.Store, delegator, "b3u-secret-owner@test.com", "member", store.SystemRoleSuperAdmin)
-	agentID := tid("b3u-secret-agent")
+	createTestUserWithRole(t, f.Store, delegator, "unrec-secret-owner@test.com", "member", store.SystemRoleSuperAdmin)
+	agentID := tid("unrec-secret-agent")
 	require.NoError(t, f.Store.CreateAgent(ctx, &store.Agent{
-		ID: agentID, Slug: "b3u-secret-agent", Name: "b3u", ProjectID: f.ProjectID,
+		ID: agentID, Slug: "unrec-secret-agent", Name: "unrec", ProjectID: f.ProjectID,
 		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{delegator},
 		Created: time.Now(), Updated: time.Now(),
 	}))
@@ -132,5 +132,5 @@ func TestB3_UnrecordedEdgeDeniesSecretUseAndProjectSecretRead(t *testing.T) {
 
 	token, err := f.Server.agentTokenService.GenerateAgentToken(agentID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{delegator})
 	require.NoError(t, err)
-	assertProjectDenied(t, f, agentID, token, "B3U_KEY")
+	assertProjectDenied(t, f, agentID, token, "UNRECORDED_KEY")
 }

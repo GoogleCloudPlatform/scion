@@ -133,8 +133,8 @@ func assertCeilingDenial(t *testing.T, rec *httptest.ResponseRecorder) string {
 // A UAT holding agent:create and project:read, no role requested: the
 // defaulted role fits nothing above none, so the create is denied and
 // nothing is written.
-func TestB3_UATDefaultedRoleCapsToNoneDenied(t *testing.T) {
-	f := newUATCreateFixture(t, "b3-uat-none-deny")
+func TestUATDefaultedRoleWithNoFittingRoleDenied(t *testing.T) {
+	f := newUATCreateFixture(t, "uat-none-deny")
 	rec := f.create(t, f.uat(t, "agent:create", "project:read"), CreateAgentRequest{Name: "uat-none-deny"})
 	assert.Equal(t, reasonNoUsableRole, assertCeilingDenial(t, rec))
 	assertCreateWroteNothing(t, f.store, f.proj.ID, "uat-none-deny", f.creator.ID)
@@ -143,8 +143,8 @@ func TestB3_UATDefaultedRoleCapsToNoneDenied(t *testing.T) {
 // The same UAT with role=none explicit: created as none with NoAuth; the
 // launch request carries no LLM credentials and no project secret except
 // GITHUB_TOKEN.
-func TestB3_UATExplicitRoleNoneAllowedNoAuth(t *testing.T) {
-	f := newUATCreateFixture(t, "b3-uat-none-ok")
+func TestUATExplicitRoleNoneAllowedNoAuth(t *testing.T) {
+	f := newUATCreateFixture(t, "uat-none-ok")
 	client := f.withDispatcher(t)
 	disp := f.srv.GetDispatcher().(*HTTPAgentDispatcher)
 	disp.SetSecretBackend(&mockGitTokenSecretBackend{
@@ -177,8 +177,8 @@ func TestB3_UATExplicitRoleNoneAllowedNoAuth(t *testing.T) {
 // agent:create plus the seven read selectors, project default full, no
 // role requested: created as baseline; the edge role equals the stored role;
 // not NoAuth.
-func TestB3_UATMinimalCeilingCapsToBaseline(t *testing.T) {
-	f := newUATCreateFixture(t, "b3-uat-baseline")
+func TestUATMinimalCeilingCapsToBaseline(t *testing.T) {
+	f := newUATCreateFixture(t, "uat-baseline")
 	f.setProjectAnnotation(t, projectSettingDefaultAgentRole, string(AgentRoleFull))
 	rec := f.create(t, f.uat(t, minimalSelectors(t)...), CreateAgentRequest{Name: "uat-baseline"})
 	agent, edge := f.createdAgent(t, rec, "uat-baseline")
@@ -229,10 +229,10 @@ func TestB3_UATMinimalCeilingCapsToBaseline(t *testing.T) {
 
 // The same UAT with a readonly project default, and with a readonly project
 // maximum: created as readonly; the cap does not raise it.
-func TestB3_UATMinimalCeilingKeepsReadonlyDefault(t *testing.T) {
+func TestUATMinimalCeilingKeepsReadonlyDefault(t *testing.T) {
 	for _, key := range []string{projectSettingDefaultAgentRole, projectSettingMaxAgentRole} {
 		t.Run(key, func(t *testing.T) {
-			f := newUATCreateFixture(t, "b3-uat-readonly")
+			f := newUATCreateFixture(t, "uat-readonly")
 			f.setProjectAnnotation(t, key, string(AgentRoleReadOnly))
 			rec := f.create(t, f.uat(t, minimalSelectors(t)...), CreateAgentRequest{Name: "uat-readonly"})
 			agent, edge := f.createdAgent(t, rec, "uat-readonly")
@@ -247,8 +247,8 @@ func TestB3_UATMinimalCeilingKeepsReadonlyDefault(t *testing.T) {
 // mapping: a defaulted full capped to baseline, and a readonly default kept
 // at readonly by the cap, are not NoAuth, and the stored, edge and launch
 // values agree.
-func TestB3_RoleCapRunsBeforeNoAuthMapping(t *testing.T) {
-	f := newUATCreateFixture(t, "b3-uat-noauth-order")
+func TestRoleCapRunsBeforeNoAuthMapping(t *testing.T) {
+	f := newUATCreateFixture(t, "uat-noauth-order")
 	client := f.withDispatcher(t)
 
 	rec := f.create(t, f.uat(t, minimalSelectors(t)...), CreateAgentRequest{Name: "uat-noauth-capped"})
@@ -270,8 +270,8 @@ func TestB3_RoleCapRunsBeforeNoAuthMapping(t *testing.T) {
 
 // An explicit role over the UAT ceiling: 403 at the delegation ceiling, no
 // agent row, no edge.
-func TestB3_UATExplicitRoleOverCeilingForbidden(t *testing.T) {
-	f := newUATCreateFixture(t, "b3-uat-over")
+func TestUATExplicitRoleOverCeilingForbidden(t *testing.T) {
+	f := newUATCreateFixture(t, "uat-over")
 	rec := f.create(t, f.uat(t, minimalSelectors(t)...), CreateAgentRequest{Name: "uat-over", AgentRole: string(AgentRoleFull)})
 	assert.Contains(t, assertCeilingDenial(t, rec), `agent role "full"`)
 	assertCreateWroteNothing(t, f.store, f.proj.ID, "uat-over", f.creator.ID)
@@ -280,8 +280,8 @@ func TestB3_UATExplicitRoleOverCeilingForbidden(t *testing.T) {
 // A UAT without gcp_service_account:assign, with the project default
 // ladder selecting an assign-mode SA: 403 from evaluateSAAssignment with its
 // existing body; nothing written.
-func TestB3_UATChildDefaultSAWithoutAssignDeniedAtCreate(t *testing.T) {
-	f := newUATCreateFixture(t, "b3-uat-default-sa")
+func TestUATChildDefaultSAWithoutAssignDeniedAtCreate(t *testing.T) {
+	f := newUATCreateFixture(t, "uat-default-sa")
 	sa := bypassAgentsCreateSA(t, f.bypassAgentsFixture, f.proj.ID, true)
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentityMode, store.GCPMetadataModeAssign)
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentitySAID, sa.ID)
@@ -297,8 +297,8 @@ func TestB3_UATChildDefaultSAWithoutAssignDeniedAtCreate(t *testing.T) {
 // A child created by a UAT without gcp_service_account:assign, then given an
 // assign-mode SA by a session user who holds assign: the PATCH succeeds and
 // the child's next token omits the SA's GCP token scope.
-func TestB3_UATChildPatchedSAOmitsGCPScope(t *testing.T) {
-	f := newUATCreateFixture(t, "b3-uat-patch-sa")
+func TestUATChildPatchedSAOmitsGCPScope(t *testing.T) {
+	f := newUATCreateFixture(t, "uat-patch-sa")
 	rec := f.create(t, f.uat(t, minimalSelectors(t)...), CreateAgentRequest{Name: "uat-patch-sa"})
 	agent, _ := f.createdAgent(t, rec, "uat-patch-sa")
 
@@ -328,10 +328,10 @@ func TestB3_UATChildPatchedSAOmitsGCPScope(t *testing.T) {
 // A child created by the same UAT with passthrough on a cloudrun-sandbox
 // broker with a host SA: translated to assign mode, and the token omits the
 // host SA's GCP token scope.
-func TestB3_UATChildHostPassthroughSAOmitsGCPScope(t *testing.T) {
-	hostSAEmail := "broker-host@b3-sandbox.iam.gserviceaccount.com"
-	owner := ptUser(tid("b3-uat-pt-owner"), "b3-uat-pt-owner@test.com", store.UserRoleMember)
-	srv, s, project, broker := setupPassthroughSandboxServer(t, owner, hostSAEmail, "b3-sandbox")
+func TestUATChildHostPassthroughSAOmitsGCPScope(t *testing.T) {
+	hostSAEmail := "broker-host@ceiling-sandbox.iam.gserviceaccount.com"
+	owner := ptUser(tid("uat-pt-owner"), "uat-pt-owner@test.com", store.UserRoleMember)
+	srv, s, project, broker := setupPassthroughSandboxServer(t, owner, hostSAEmail, "ceiling-sandbox")
 	// The UAT holds no broker selector; an auto-provide broker admits it.
 	broker.AutoProvide = true
 	require.NoError(t, s.UpdateRuntimeBroker(context.Background(), broker))
@@ -363,8 +363,8 @@ func TestB3_UATChildHostPassthroughSAOmitsGCPScope(t *testing.T) {
 
 // A session-created child: role, scopes and walk as for a child with no
 // frozen ceiling.
-func TestB3_SessionChildUnchanged(t *testing.T) {
-	f := newUATCreateFixture(t, "b3-session-child")
+func TestSessionChildGetsPrincipalCeiling(t *testing.T) {
+	f := newUATCreateFixture(t, "session-child")
 	rec := f.create(t, authUser(f.creator), CreateAgentRequest{Name: "session-child"})
 	agent, edge := f.createdAgent(t, rec, "session-child")
 	assert.Equal(t, string(AgentRoleFull), agent.AppliedConfig.AgentRole)
@@ -393,8 +393,8 @@ func TestB3_SessionChildUnchanged(t *testing.T) {
 // source ceiling is ceiling_unrecorded, and the create is 403 with nothing
 // written. Through the handler the UAT scope gate denies first, because the
 // frozen ceiling allows no permission at an unknown version.
-func TestB3_UATUnknownCeilingVersionDeniesCreate(t *testing.T) {
-	f := newUATCreateFixture(t, "b3-uat-v99")
+func TestUATUnknownCeilingVersionDeniesCreate(t *testing.T) {
+	f := newUATCreateFixture(t, "uat-v99")
 	uat := NewScopedUserIdentityWithCeiling(authUser(f.creator), f.proj.ID, minimalSelectors(t), "uat-v99",
 		permissions.FrozenPermissionCeiling{Version: 99, PermissionIDs: uatCeilingFromSelectors(t, minimalSelectors(t)...).PermissionIDs})
 	_, _, err := f.srv.authzService.sourceEffectCeiling(context.Background(), uat)
@@ -409,8 +409,8 @@ func TestB3_UATUnknownCeilingVersionDeniesCreate(t *testing.T) {
 
 // A UAT with an unspecified ceiling version and backfill-normalized IDs
 // creates a child; the edge is bounded with the same version and IDs.
-func TestB3_LegacyBackfilledUATCreatesBoundedChild(t *testing.T) {
-	f := newUATCreateFixture(t, "b3-uat-legacy")
+func TestLegacyBackfilledUATCreatesBoundedChild(t *testing.T) {
+	f := newUATCreateFixture(t, "uat-legacy")
 	selectors := minimalSelectors(t)
 	uat := NewScopedUserIdentity(authUser(f.creator), f.proj.ID, selectors)
 	require.Equal(t, permissions.CeilingVersionUnspecified, uat.Ceiling().Version)
@@ -434,8 +434,8 @@ func (f fakeIdentity) Type() string { return f.typ }
 
 // An identity reporting Type()=="dev" that is not the concrete *DevUser with
 // DevUserID is not an authority source.
-func TestB3_DevTypeNotRecognizedDeniesCreate(t *testing.T) {
-	f := newUATCreateFixture(t, "b3-dev-type")
+func TestDevTypeNotRecognizedDeniesCreate(t *testing.T) {
+	f := newUATCreateFixture(t, "dev-type")
 	for name, id := range map[string]Identity{
 		"dev type string":        fakeIdentity{id: DevUserID, typ: "dev"},
 		"dev user with other id": &DevUser{id: f.creator.ID},
@@ -460,8 +460,8 @@ func TestB3_DevTypeNotRecognizedDeniesCreate(t *testing.T) {
 // Identity kinds that are not authority sources: sourceEffectCeiling
 // returns errSourceNotAllowed (403 ceiling_source_not_allowed), and the
 // create handler writes nothing.
-func TestB3_UnknownIdentityKindDeniesCreate(t *testing.T) {
-	f := newUATCreateFixture(t, "b3-unknown-kind")
+func TestUnknownIdentityKindDeniesCreate(t *testing.T) {
+	f := newUATCreateFixture(t, "unknown-kind")
 	var nilUser *AuthenticatedUser
 	cases := map[string]Identity{
 		"broker":            NewBrokerIdentity(f.broker.ID),
@@ -509,8 +509,8 @@ func TestB3_UnknownIdentityKindDeniesCreate(t *testing.T) {
 // ceiling_unrecorded is reached at mint: at create the UAT scope gate
 // denies an unknown ceiling version first. ceiling_resource_missing has no
 // producer in this phase.
-func TestB3_AllNewCeilingDenialsCarryDeniedBy(t *testing.T) {
-	f := newUATCreateFixture(t, "b3-denied-by")
+func TestAllNewCeilingDenialsCarryDeniedBy(t *testing.T) {
+	f := newUATCreateFixture(t, "denied-by")
 	cases := []struct {
 		cause    DenyCause
 		identity Identity
@@ -535,5 +535,5 @@ func TestB3_AllNewCeilingDenialsCarryDeniedBy(t *testing.T) {
 	}
 
 	// Decide sets Decision.DeniedBy for a ceiling deny: see
-	// TestB3_WalkDeniesPermissionOutsideHopCeiling and assertUnrecordedDeny.
+	// TestWalkDeniesPermissionOutsideHopCeiling and assertUnrecordedDeny.
 }
