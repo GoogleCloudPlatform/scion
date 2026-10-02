@@ -1545,6 +1545,14 @@ type ScheduleStore interface {
 	// ListSchedules returns schedules matching the filter criteria.
 	ListSchedules(ctx context.Context, filter ScheduleFilter, opts ListOptions) (*ListResult[Schedule], error)
 
+	// ListActiveZonePrefixedSchedules returns up to limit active schedules,
+	// across all projects, whose cron expression starts with a zone prefix
+	// (CRON_TZ= or TZ=), ordered by ID and skipping the IDs in excludeIDs.
+	// It does not page on created, so it is unaffected by how timestamps are
+	// stored. The prefix match may be case-insensitive on some backends;
+	// callers must re-check the prefix exactly.
+	ListActiveZonePrefixedSchedules(ctx context.Context, limit int, excludeIDs []string) ([]Schedule, error)
+
 	// UpdateSchedule writes the schedule's mutable fields named by `fields`
 	// (name, cron_expr, event_type, payload, status, next_run_at) from
 	// `schedule`; a field not named in `fields` is left completely untouched

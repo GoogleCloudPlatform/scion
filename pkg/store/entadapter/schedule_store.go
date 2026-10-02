@@ -275,8 +275,13 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 	// no lookup of that row is needed: paging is unaffected if the row was
 	// deleted or no longer matches the filter (for example it was paused
 	// while listing active schedules).
+	var (
+		cursorCreated time.Time
+		cursorID      uuid.UUID
+	)
 	if opts.Cursor != "" {
-		cursorCreated, cursorID, err := decodeCursor(opts.Cursor)
+		var err error
+		cursorCreated, cursorID, err = decodeCursor(opts.Cursor)
 		if err != nil {
 			return nil, fmt.Errorf("invalid cursor: %w", store.ErrInvalidInput)
 		}
@@ -309,11 +314,68 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 	if len(schedules) > limit {
 		result.Items = schedules[:limit]
 		last := schedules[limit-1]
-		result.NextCursor = encodeCursor(last.CreatedAt.UTC(), last.ID)
+		// No-progress guard: a next cursor is returned only if it is
+		// strictly after the input cursor in (created DESC, id DESC)
+		// order. That always holds for canonical timestamps. On SQLite,
+		// created is compared as stored text, so rows written in a
+		// non-UTC zone before timestamps were normalized can break the
+		// keyset until the utc-timestamp-normalize maintenance operation
+		// has run. Ending the listing here means no client can page
+		// forever.
+		if opts.Cursor == "" || cursorAdvances(last, cursorCreated, cursorID) {
+			result.NextCursor = encodeCursor(last.CreatedAt.UTC(), last.ID)
+		}
 	} else {
 		result.Items = schedules
 	}
 	return result, nil
+}
+
+// cursorAdvances reports whether row sorts strictly after the cursor position
+// (created, id) in the (created DESC, id DESC) listing order.
+func cursorAdvances(row store.Schedule, created time.Time, id uuid.UUID) bool {
+	rc := row.CreatedAt.UTC()
+	if !rc.Equal(created) {
+		return rc.Before(created)
+	}
+	return row.ID < id.String()
+}
+
+// ListActiveZonePrefixedSchedules returns up to limit active schedules whose
+// cron expression starts with CRON_TZ= or TZ=, ordered by ID, skipping
+// excludeIDs. ent's HasPrefix compiles to LIKE, which SQLite matches
+// case-insensitively for ASCII, so callers re-check the prefix exactly.
+func (s *ScheduleStore) ListActiveZonePrefixedSchedules(ctx context.Context, limit int, excludeIDs []string) ([]store.Schedule, error) {
+	query := s.client.Schedule.Query().Where(
+		schedule.StatusEQ(store.ScheduleStatusActive),
+		schedule.Or(
+			schedule.CronExprHasPrefix("CRON_TZ="),
+			schedule.CronExprHasPrefix("TZ="),
+		),
+	)
+	if len(excludeIDs) > 0 {
+		ids := make([]uuid.UUID, 0, len(excludeIDs))
+		for _, raw := range excludeIDs {
+			id, err := parseUUID(raw)
+			if err != nil {
+				return nil, err
+			}
+			ids = append(ids, id)
+		}
+		query.Where(schedule.IDNotIn(ids...))
+	}
+	entities, err := query.
+		Order(schedule.ByID()).
+		Limit(clampLimit(limit)).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]store.Schedule, 0, len(entities))
+	for _, e := range entities {
+		out = append(out, *entScheduleToStore(e))
+	}
+	return out, nil
 }
 
 // UpdateSchedule writes the schedule's mutable fields named by `fields` from
