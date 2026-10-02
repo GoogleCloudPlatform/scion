@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 )
 
 func TestCappedWriter_UnderLimitNotTruncated(t *testing.T) {
@@ -268,6 +270,28 @@ func TestRunExec_TimeoutKillsProcess(t *testing.T) {
 	}
 	if resp.ExitCode == 0 {
 		t.Errorf("exit_code = 0, want non-zero for a timed-out command")
+	}
+}
+
+// TestRunExec_SucceedsUnderActiveReaper is the regression test for running
+// the exec child through procreap.RunManaged rather than a bare cmd.Run():
+// with the PID 1 SIGCHLD reaper goroutine actually running (StartReaper),
+// an unrelated reap pass racing this call's own cmd.Wait must never steal
+// its exit status out from under it (see procreap's package doc for the
+// "waitid: no child processes" failure this registration prevents). A
+// command that runs to completion must still report exit code 0 while that
+// reaper is live.
+func TestRunExec_SucceedsUnderActiveReaper(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a real subprocess and a real signal-handling goroutine")
+	}
+	fakeWhoamiAsScion(t)
+	procreap.StartReaper()
+
+	resp := runExec(context.Background(), "scion", []string{"true"}, nil, 5*time.Second)
+
+	if resp.ExitCode != 0 {
+		t.Errorf("exit_code = %d, want 0 (stderr=%q)", resp.ExitCode, resp.Stderr)
 	}
 }
 

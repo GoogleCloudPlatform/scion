@@ -663,23 +663,49 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	if execUser == "" {
 		execUser = "scion"
 	}
-	if execUser != "scion" && execUser != "root" {
-		http.Error(w, `user must be "scion" or "root"`, http.StatusBadRequest)
+	if execUser != "scion" {
+		// root is refused server-side: /exec exists to run the agent
+		// workload, which always runs as the unprivileged scion user, and
+		// this control server already runs as root itself to perform the
+		// drop — there is no legitimate caller need for a root-level
+		// command here, only additional blast radius if a caller or this
+		// handler is ever compromised.
+		http.Error(w, `user must be "scion"`, http.StatusBadRequest)
 		return
 	}
 
-	timeout := defaultExecTimeout
-	if req.TimeoutS > 0 {
-		if d := time.Duration(req.TimeoutS) * time.Second; d < maxExecTimeout {
-			timeout = d
-		} else {
-			timeout = maxExecTimeout
-		}
-	}
+	timeout := clampExecTimeout(req.TimeoutS)
 
 	resp := runExec(r.Context(), execUser, req.Argv, req.Stdin, timeout)
 	resp.StdinSupported = true
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// maxExecTimeoutSeconds is maxExecTimeout expressed in whole seconds, the
+// same unit as ExecRequest.TimeoutS, so clampExecTimeout can bound the
+// caller-supplied value *before* multiplying it by time.Second.
+const maxExecTimeoutSeconds = int(maxExecTimeout / time.Second)
+
+// clampExecTimeout converts a caller-supplied ExecRequest.TimeoutS into a
+// bounded time.Duration: timeoutS <= 0 means "unspecified", using
+// defaultExecTimeout; otherwise the result is timeoutS seconds, clamped to
+// maxExecTimeout.
+//
+// The clamp is a comparison against maxExecTimeoutSeconds, in seconds,
+// strictly before any multiplication by time.Second: timeoutS is
+// caller-supplied and, multiplied first, can overflow time.Duration's int64
+// range (e.g. a TimeoutS near math.MaxInt64) and wrap into a small or
+// negative value. Left unguarded, a wrapped-negative duration would fail
+// runExec's "timeout > 0" check and silently run with NO timeout at all —
+// removing the maxExecTimeout cap entirely rather than clamping to it.
+func clampExecTimeout(timeoutS int) time.Duration {
+	if timeoutS <= 0 {
+		return defaultExecTimeout
+	}
+	if timeoutS > maxExecTimeoutSeconds {
+		return maxExecTimeout
+	}
+	return time.Duration(timeoutS) * time.Second
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>"

@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1309,6 +1310,63 @@ func TestExec_RejectsUnknownUser(t *testing.T) {
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for an unsupported user", rec.Code)
+	}
+}
+
+// TestExec_RejectsRootUser is the regression test for refusing "root" as an
+// exec user server-side: /exec exists to run the agent workload, which
+// always runs as the unprivileged scion user, so a caller asking for root
+// must be refused the same way an unknown user already is, not silently
+// honored.
+func TestExec_RejectsRootUser(t *testing.T) {
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
+	)
+	doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		StartCmd: "true", ControlToken: "tok",
+	})
+
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/exec", "tok", ExecRequest{
+		Argv: []string{"echo", "hi"},
+		User: "root",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for user \"root\"", rec.Code)
+	}
+}
+
+// TestClampExecTimeout_OverflowClampsRatherThanRemovingCap is the regression
+// test for bounding ExecRequest.TimeoutS before multiplying it by
+// time.Second: a caller-supplied TimeoutS large enough to overflow
+// time.Duration's int64 range, if multiplied first, wraps into a small or
+// negative duration that would slip past runExec's "timeout > 0" check and
+// run with no timeout at all. clampExecTimeout must instead clamp any such
+// value to maxExecTimeout, the same as any other too-large value — proven
+// here by comparing against math.MaxInt (the overflow case) directly,
+// rather than only through the HTTP handler.
+func TestClampExecTimeout_OverflowClampsRatherThanRemovingCap(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		timeoutS int
+		want     time.Duration
+	}{
+		{"unspecified", 0, defaultExecTimeout},
+		{"negative", -1, defaultExecTimeout},
+		{"normal", 5, 5 * time.Second},
+		{"exactly at cap", maxExecTimeoutSeconds, maxExecTimeout},
+		{"over cap but no overflow", maxExecTimeoutSeconds + 1, maxExecTimeout},
+		{"overflow (MaxInt)", math.MaxInt, maxExecTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := clampExecTimeout(tc.timeoutS)
+			if got != tc.want {
+				t.Errorf("clampExecTimeout(%d) = %v, want %v", tc.timeoutS, got, tc.want)
+			}
+			if got <= 0 {
+				t.Errorf("clampExecTimeout(%d) = %v, want a positive duration (timeout removed entirely)", tc.timeoutS, got)
+			}
+		})
 	}
 }
 

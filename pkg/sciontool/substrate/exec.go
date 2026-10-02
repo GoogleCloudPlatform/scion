@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
 
@@ -116,7 +117,14 @@ func runExec(ctx context.Context, user string, argv []string, stdin []byte, time
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 
-	runErr := cmd.Run()
+	// Run under the SIGCHLD reaper's bookkeeping rather than a bare
+	// cmd.Run(): without it, a concurrent reap elsewhere in this process
+	// (procreap runs one process-wide) can race os/exec's own wait4 call
+	// and report a successful command as if it had been reaped out from
+	// under it. RunManaged registers this child's PID for the duration of
+	// the call so the reaper skips it, then behaves exactly like
+	// cmd.Run() otherwise.
+	runErr := procreap.RunManaged(cmd)
 
 	exitCode := 0
 	if runErr != nil {
