@@ -353,14 +353,17 @@ const (
 	// role-definition resolution (Step 4), and access-constraint load
 	// failure (Step 7c, detected after Step 9 because the failure there
 	// is folded into a deny-all restriction rather than an early return).
+	// enforceUATConstraints also sets it when the live project-access
+	// lookup for a user access token fails on a store fault.
 	DenyCauseResolutionError DenyCause = "resolution_error"
 )
 
 // IsIndeterminate reports whether this deny was caused by a store or
 // resolution fault on the tagged paths, rather than a policy fact — the
 // access check could not be decided. Tagged: principal, role-binding,
-// role-definition and access-constraint resolution in decide(), and the
-// delegation-ceiling error. Not yet tagged: relationship-fact and
+// role-definition and access-constraint resolution in decide(), the
+// user-access-token live project-access lookup (enforceUATConstraints), and
+// the delegation-ceiling error. Not yet tagged: relationship-fact and
 // source-active lookup failures (isCurrentHubMember, relationshipSourceActive,
 // progenySourceFor). A false result for those candidates does not prove a
 // policy deny.
@@ -2220,8 +2223,20 @@ func (a *AuthzService) enforceUATConstraints(ctx context.Context, principal Prin
 	// ErrUnsupportedPrincipalKind for a non-local-user principal, which
 	// cannot occur for a ScopedUserIdentity today but is handled the same
 	// as any other denial rather than panicking or special-cased here).
+	// A store or resolution fault during the lookup still denies, but is
+	// tagged DenyCauseResolutionError (so Decision.IsIndeterminate reports
+	// true), matching the other store-error denies in decide(). Policy-fact
+	// errors (inactive user, project mismatch, unsupported principal kind,
+	// class mismatch) stay plain denies.
 	admission, err := a.ProjectTargetAdmission(ctx, principal, projectID, permissionID, resource, nil)
-	if err != nil || !admission.Admitted {
+	if err != nil {
+		d := &Decision{Allowed: false, Reason: "token holder lacks active access to the target project"}
+		if isProjectAccessLookupFault(err) {
+			d.DenyCause = DenyCauseResolutionError
+		}
+		return d
+	}
+	if !admission.Admitted {
 		return &Decision{Allowed: false, Reason: "token holder lacks active access to the target project"}
 	}
 

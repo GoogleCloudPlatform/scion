@@ -1365,6 +1365,8 @@ func TestProjectUAT_EnforceUATConstraintsFailsClosedOnUnsupportedPrincipal(t *te
 	require.NotNil(t, decision, "an unsupported principal kind must deny, not pass through as nil")
 	assert.False(t, decision.Allowed)
 	assert.Equal(t, "token holder lacks active access to the target project", decision.Reason)
+	assert.False(t, decision.IsIndeterminate(),
+		"an unsupported principal kind is a policy fact, not a store fault, so it must not be tagged as a resolution error")
 }
 
 // TestProjectUAT_EnforceUATConstraintsFailsClosedOnConstraintLoadError pins
@@ -1411,14 +1413,46 @@ func TestProjectUAT_EnforceUATConstraintsFailsClosedOnConstraintLoadError(t *tes
 
 	// The HTTP assertion above is satisfied by the kernel's own constraint
 	// load hitting the same injected failure independently, so it alone does
-	// not pin enforceUATConstraints's own ProjectTargetAdmission-error branch
-	// (authz.go's "if err != nil || !admission.Admitted" check). Call the
-	// gate directly, with the failing store still installed, to pin that
-	// specific branch.
+	// not pin enforceUATConstraints's own ProjectTargetAdmission-error branch.
+	// Call the gate directly, with the failing store still installed, to pin
+	// that specific branch: it denies, and because the error is a store
+	// fault the deny is tagged as a resolution error (IsIndeterminate).
 	scoped := NewScopedUserIdentity(NewAuthenticatedUser(superAdminID, superAdminID+"@test.com", "Admin", "admin", "api"), projectID, []string{"agent:attach"})
 	decision := srv.authzService.enforceUATConstraints(context.Background(), principalContextForIdentity(scoped), scoped, agentResource(agent), ActionAttach, "agent.attach")
 	require.NotNil(t, decision, "step-1 gate must deny on a ProjectTargetAdmission error")
+	assert.False(t, decision.Allowed)
 	assert.Equal(t, "token holder lacks active access to the target project", decision.Reason)
+	assert.Equal(t, DenyCauseResolutionError, decision.DenyCause)
+	assert.True(t, decision.IsIndeterminate(), "a store fault in the live project-access lookup must be reported as indeterminate")
+}
+
+// TestProjectUAT_EnforceUATConstraintsBindingLookupErrorIsIndeterminate pins
+// the resolution-error tag on the membership path: a project member's UAT,
+// with the role-binding lookup failing inside ProjectMembershipEvidence,
+// denies (fail closed) and the deny is tagged DenyCauseResolutionError.
+func TestProjectUAT_EnforceUATConstraintsBindingLookupErrorIsIndeterminate(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := tid("uatp-bindfail-project")
+	ownerID := tid("uatp-bindfail-owner")
+	createRS1Project(t, s, projectID, ownerID)
+	agent := uatpAgent(t, s, projectID, ownerID, t.Name(), ownerID)
+
+	scoped := NewScopedUserIdentity(NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "api"), projectID, []string{"agent:attach"})
+	principal := principalContextForIdentity(scoped)
+
+	// Sanity: without an injected failure the gate admits.
+	require.Nil(t, srv.authzService.enforceUATConstraints(context.Background(), principal, scoped, agentResource(agent), ActionAttach, "agent.attach"),
+		"sanity: a project owner's attach-scoped UAT should pass the gate")
+
+	failing := &r2FailingStore{failListBindings: fmt.Errorf("injected: binding lookup failure")}
+	restore := installFailStore(srv, failing)
+	defer restore()
+
+	decision := srv.authzService.enforceUATConstraints(context.Background(), principal, scoped, agentResource(agent), ActionAttach, "agent.attach")
+	require.NotNil(t, decision, "a binding lookup failure must deny")
+	assert.False(t, decision.Allowed)
+	assert.Equal(t, DenyCauseResolutionError, decision.DenyCause)
+	assert.True(t, decision.IsIndeterminate())
 }
 
 // TestProjectUAT_CreateTokenMapsCanMintSelectorErrorToForbidden pins the
