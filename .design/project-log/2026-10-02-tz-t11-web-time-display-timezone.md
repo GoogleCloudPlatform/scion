@@ -1,7 +1,7 @@
 # Project Log: tz-refactor task 11 — web `time.ts`, effective zone, "Display timezone" card, 24-hour clock
 
 **Date:** 2026-10-02 (updated after review round 6, final)
-**Branch:** `scion/tz-t11`, rebased onto `scion/tz-t12` (ptone/scion#2533) at `81fd42a4` (wording-only commit on top of `aa4bfc1f`, the SHA round 1's rebase used)
+**Branch:** `scion/tz-t11`, rebased onto `scion/tz-t12` (ptone/scion#2533) at `318ffc7f` (the upstream Gemini review follow-up on top of `81fd42a4`)
 **Fork issue:** ptone/scion#2504 (closes). Refs ptone/scion#2457. Refs ptone/scion#1056 (narrowed to its display-timezone half; never closed by this issue).
 **Design:** `design.md` §2.4 ("[decided, D4] Clock and locale", "Enforcement"), §3 A (a), "Fate of the card"; decisions D1, D4; AC4, AC5, AC17 (partial).
 
