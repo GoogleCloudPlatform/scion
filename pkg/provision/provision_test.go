@@ -4381,6 +4381,161 @@ func TestProvision_WorktreePerAgent_OutOfTreeMarker_CreatesFreshWorktree(t *test
 	assert.NotEqual(t, outside, wtPath)
 }
 
+// TestProvision_WorktreePerAgent_RegistryDecoy_CreatesFreshWorktree covers
+// Phase 3 acceptance: a registry marker whose WorktreePath is in-tree
+// (base/worktrees/<name>, passing the lexical read-boundary check from Phase
+// 1) but is not a genuine git worktree of base — a plain directory with no
+// gitfile, or a gitfile that doesn't round-trip to base's admin dir — must
+// not be joined. ValidateWorktreeForBase catches this even though the
+// lexical shape is correct; ensureWorktree falls through to create a fresh
+// worktree instead.
+func TestProvision_WorktreePerAgent_RegistryDecoy_CreatesFreshWorktree(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	// Establish the shared base checkout.
+	err := ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-decoy-1",
+		AgentID:   "agent-setup",
+		AgentName: "setup-branch",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	})
+	require.NoError(t, err)
+
+	branch := "shared-branch"
+
+	// Plant a decoy: a plain directory at the canonical in-tree shape with no
+	// git metadata at all, and register it directly as the branch's marker
+	// (bypassing the fresh-worktree creation path that would normally put a
+	// real worktree there).
+	decoy := WorktreePath(hostPath, "decoy")
+	require.NoError(t, os.MkdirAll(decoy, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(decoy, "README.md"), []byte("not a worktree"), 0o644))
+	require.NoError(t, RegisterSharer(hostPath, branch, decoy, "agent-c"))
+
+	// Sanity: the decoy passes the Phase 1 lexical read boundary (it IS
+	// in-tree), so it is visible via ListSharers — the point of this test is
+	// that ensureWorktree's full relationship check catches what the lexical
+	// check alone does not.
+	_, wtPath, err := ListSharers(hostPath, branch)
+	require.NoError(t, err)
+	require.Equal(t, decoy, wtPath, "setup: decoy should pass the lexical read boundary")
+
+	// The joining agent provisions on the same branch. It must NOT be
+	// attached to the decoy; it must get a fresh, genuine worktree.
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-decoy-1",
+		AgentID:   "agent-b",
+		AgentName: branch,
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	})
+	require.NoError(t, err)
+
+	wtB := WorktreePath(hostPath, "agent-b")
+	require.FileExists(t, filepath.Join(wtB, ".git"), "provisioning must create a fresh, genuine worktree when the registry points at a decoy")
+
+	_, wtPath, err = ListSharers(hostPath, branch)
+	require.NoError(t, err)
+	assert.Equal(t, wtB, wtPath, "registry must record the fresh genuine worktree, not the decoy")
+}
+
+// TestProvision_WorktreePerAgent_FakeBackLink_RejectsGitDiscoveredPath covers
+// Phase 3 acceptance criterion 7: git's own worktree list — not just the
+// sharer marker — is a JOIN discovery source, and it can be steered by
+// rewriting the admin back-link file (base/.git/worktrees/<name>/gitdir).
+// That file is what "git worktree list" derives a worktree's reported path
+// from, so pointing it at an existing external directory makes git itself
+// report the branch as checked out there. The registry is cleared first so
+// ensureWorktree falls through to the git-worktree-list discovery path
+// (findWorktreeForBranch), which is the source this criterion targets.
+func TestProvision_WorktreePerAgent_FakeBackLink_RejectsGitDiscoveredPath(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+	branch := "shared-branch"
+
+	// Agent A creates a genuine worktree for the branch.
+	err := ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-backlink-1",
+		AgentID:   "agent-a",
+		AgentName: branch,
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	})
+	require.NoError(t, err)
+	wtA := WorktreePath(hostPath, "agent-a")
+	require.DirExists(t, wtA)
+
+	// Clear the registry so ensureWorktree's JOIN check falls through to the
+	// git-worktree-list discovery path (findWorktreeForBranch) rather than
+	// short-circuiting on the marker.
+	_, _, err = UnregisterSharer(hostPath, branch, "agent-a")
+	require.NoError(t, err)
+	sharers, _, err := ListSharers(hostPath, branch)
+	require.NoError(t, err)
+	require.Empty(t, sharers, "setup: registry must be empty so JOIN falls through to git discovery")
+
+	// Rewrite the admin back-link (base/.git/worktrees/agent-a/gitdir) to
+	// point at an existing external directory with its own (unrelated) .git
+	// file. This is exactly what "git worktree list" reads to report a
+	// worktree's path — after this, git itself reports the branch as checked
+	// out at the external location, not at wtA.
+	external := t.TempDir()
+	externalGitFile := filepath.Join(external, ".git")
+	require.NoError(t, os.WriteFile(externalGitFile, []byte("gitdir: /nonexistent\n"), 0o644))
+	backLink := filepath.Join(hostPath, ".git", "worktrees", "agent-a", "gitdir")
+	require.NoError(t, os.WriteFile(backLink, []byte(externalGitFile+"\n"), 0o644))
+
+	// Sanity: confirm git itself now reports the external path for this branch.
+	discovered, findErr := findWorktreeForBranch(context.Background(), hostPath, branch)
+	require.NoError(t, findErr)
+	require.Equal(t, external, discovered, "setup: git worktree list should now report the corrupted external path")
+
+	// The joining agent provisions on the same branch. It must NOT be
+	// attached to the git-discovered external path. Because the corrupted
+	// admin metadata also makes git itself believe the branch is checked out
+	// there, git refuses a fresh checkout of the same branch too (its own
+	// collision guard) — so the safe, observable outcome here is a loud
+	// provisioning error, not a silent join or a silent redirect. Either
+	// way, the external path must never be touched or registered.
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-backlink-1",
+		AgentID:   "agent-b",
+		AgentName: branch,
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	})
+	require.Error(t, err, "provisioning must fail loudly rather than join or redirect to the git-discovered external path")
+	assert.Contains(t, err.Error(), "already checked out")
+
+	// The external path was never touched or claimed by the registry.
+	entries, readErr := os.ReadDir(external)
+	require.NoError(t, readErr)
+	require.Len(t, entries, 1, "external dir must contain only its original unrelated .git file")
+	assert.Equal(t, ".git", entries[0].Name())
+
+	_, wtPath, err := ListSharers(hostPath, branch)
+	require.NoError(t, err)
+	assert.NotEqual(t, external, wtPath, "registry must never record the git-discovered external path")
+}
+
 func TestProvision_WorktreePerAgent_UniqueBranches_SoleSharers(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	locker := newTestLocker()
