@@ -748,8 +748,8 @@ func TestSetMemberRoles_Eligibility_CustomForAgentRejected_HubOverride(t *testin
 	assert.Equal(t, http.StatusBadRequest, decision.HTTPStatus)
 }
 
-// TestSetMemberRoles_Eligibility_KeepingCustomOnAgentAllowed is design-d3-
-// addendum.md acceptance A3's second half: a PUT that merely KEEPS a custom
+// TestSetMemberRoles_Eligibility_KeepingCustomOnAgentAllowed is acceptance
+// A3's second half (ptone/scion#2529): a PUT that merely KEEPS a custom
 // role an agent already holds (seeded directly, bypassing eligibility) is
 // accepted — only creating a new custom binding on an agent is blocked.
 func TestSetMemberRoles_Eligibility_KeepingCustomOnAgentAllowed(t *testing.T) {
@@ -868,6 +868,33 @@ func TestSetMemberRoles_CredentialGate_RejectsAgentToken(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), ErrCodeMembershipCredentialInsufficient, "an agent token must be refused with the same code as a UAT")
+}
+
+// TestSetMemberRoles_CredentialGate_DeleteRejectsAgentToken is R4-7 (review
+// r4): deleteProjectMemberPrincipal has the same L3 credential-kind-before-
+// authorize reorder as putProjectMemberPrincipal (handlers_project_members.go,
+// mirroring TestSetMemberRoles_CredentialGate_RejectsAgentToken above), but
+// only the PUT side had a test — probe M8 in review r4 showed DELETE's
+// reorder would surface the generic authorize denial instead of
+// credential_insufficient on a revert, with every existing test still green.
+func TestSetMemberRoles_CredentialGate_DeleteRejectsAgentToken(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+	agentID := tid(t.Name() + "-agent")
+	require.NoError(t, f.store.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: agentID, Name: "mmr-agent", ProjectID: f.projectID,
+		Phase: "running", CreatedBy: f.owner.ID, OwnerID: f.owner.ID, Ancestry: []string{f.owner.ID},
+	}))
+	agentToken, err := f.srv.GenerateAgentToken(agentID, f.projectID, []string{f.owner.ID}, AgentRoleFull, nil)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodDelete, mmrPrincipalPath(f.projectID, "user", f.member.ID), nil)
+	req.Header.Set("Authorization", "Bearer "+agentToken)
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeMembershipCredentialInsufficient, "an agent token must be refused with the same code as a UAT, on DELETE as on PUT")
 }
 
 // ---------------------------------------------------------------------------
@@ -1119,6 +1146,103 @@ func TestSetMemberRoles_Escalation_TOCTOU_AuthoritySourceChangeRefused(t *testin
 	assert.Empty(t, mmrAuditRows(t, realStore, f.projectID), "a refused request must write no audit rows")
 }
 
+// TestSetMemberRoles_TOCTOU_PrincipalChangedBetweenPhases is R4-1 (review
+// r4): unlike the actor-authority TOCTOU test above, this drives the OTHER
+// in-tx 409 path — current1 != roleDefIDs(current0) at set.go:918-920 — by
+// having a concurrent write (mmrAuthoritySwapStore) land on the PRINCIPAL's
+// own bindings, not the actor's, between Phase P and the lock. No
+// ExpectedRoleIDs is set, so the pre-tx precondition at :784 does not apply
+// and the only thing that can catch the change is the unconditional
+// current1-vs-current0 re-check. Before R3-1 this returned the right 409 but
+// the wrong discriminator was indistinguishable from the actor-authority
+// case; this test pins `cause: "principal_roles_changed"` so a regression
+// that routed this path through actorAuthorityChangedError (review r4 probe
+// P1) is caught.
+func TestSetMemberRoles_TOCTOU_PrincipalChangedBetweenPhases(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+
+	realStore := f.srv.membershipService.store
+	sw := &mmrAuthoritySwapStore{Store: realStore}
+	sw.swap = func() {
+		_, err := realStore.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: f.withinCeiling.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      f.member.ID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          f.projectID,
+			CreatedBy:        "test",
+		})
+		require.NoError(t, err)
+	}
+	f.srv.membershipService.store = sw
+	defer func() { f.srv.membershipService.store = realStore }()
+
+	svcCtx := mmrServiceCtx(f.owner.ID, f.owner.Email)
+	_, decision := f.srv.membershipService.SetMemberRoles(svcCtx, SetMemberRolesRequest{
+		ProjectID: f.projectID, PrincipalType: "user", PrincipalID: f.member.ID,
+		Actor:          mmrServiceIdentity(f.owner.ID, f.owner.Email),
+		DesiredRoleIDs: []string{f.adminRD.ID},
+	})
+
+	require.NotNil(t, decision, "the swapped-in binding must be caught before commit")
+	assert.Equal(t, ErrCodeMembershipChanged, decision.DenialCode, "%+v", decision)
+	assert.Equal(t, http.StatusConflict, decision.HTTPStatus)
+	require.NotNil(t, decision.Details, "%+v", decision)
+	assert.Equal(t, causePrincipalRolesChanged, decision.Details["cause"], "%+v", decision)
+	assert.ElementsMatch(t, []string{f.memberRD.ID, f.withinCeiling.ID}, decision.Details["currentRoleDefinitionIds"], "%+v", decision)
+
+	bindings := mmrBindingsFor(t, realStore, "user", f.member.ID, f.projectID)
+	for _, b := range bindings {
+		assert.NotEqual(t, f.adminRD.ID, b.RoleDefinitionID, "the admin swap must not have committed")
+	}
+	assert.Empty(t, mmrAuditRows(t, realStore, f.projectID), "a refused request must write no audit rows")
+}
+
+// TestSetMemberRoles_TOCTOU_PrincipalChangedBetweenPhases_ExpectedRoleIDs is
+// the R4-1 companion that drives the OTHER in-tx principal-changed branch,
+// set.go:915-917 (the ExpectedRoleIDs re-check), rather than the unconditional
+// current1-vs-current0 check above. ExpectedRoleIDs is set to current0's
+// role set, which is still true when Phase P's precondition at :784 runs; the
+// swapped-in binding only appears once Phase T re-reads under the lock.
+func TestSetMemberRoles_TOCTOU_PrincipalChangedBetweenPhases_ExpectedRoleIDs(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+
+	realStore := f.srv.membershipService.store
+	sw := &mmrAuthoritySwapStore{Store: realStore}
+	sw.swap = func() {
+		_, err := realStore.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: f.withinCeiling.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      f.member.ID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          f.projectID,
+			CreatedBy:        "test",
+		})
+		require.NoError(t, err)
+	}
+	f.srv.membershipService.store = sw
+	defer func() { f.srv.membershipService.store = realStore }()
+
+	expected := []string{f.memberRD.ID}
+	svcCtx := mmrServiceCtx(f.owner.ID, f.owner.Email)
+	_, decision := f.srv.membershipService.SetMemberRoles(svcCtx, SetMemberRolesRequest{
+		ProjectID: f.projectID, PrincipalType: "user", PrincipalID: f.member.ID,
+		Actor:           mmrServiceIdentity(f.owner.ID, f.owner.Email),
+		DesiredRoleIDs:  []string{f.adminRD.ID},
+		ExpectedRoleIDs: &expected,
+	})
+
+	require.NotNil(t, decision, "the swapped-in binding must be caught before commit")
+	assert.Equal(t, ErrCodeMembershipChanged, decision.DenialCode, "%+v", decision)
+	assert.Equal(t, http.StatusConflict, decision.HTTPStatus)
+	require.NotNil(t, decision.Details, "%+v", decision)
+	assert.Equal(t, causePrincipalRolesChanged, decision.Details["cause"], "%+v", decision)
+	assert.ElementsMatch(t, []string{f.memberRD.ID, f.withinCeiling.ID}, decision.Details["currentRoleDefinitionIds"], "%+v", decision)
+	assert.Empty(t, mmrAuditRows(t, realStore, f.projectID), "a refused request must write no audit rows")
+}
+
 // ---------------------------------------------------------------------------
 // Principal addressing
 // ---------------------------------------------------------------------------
@@ -1244,10 +1368,10 @@ func TestSetMemberRoles_Concurrency_ConflictingPUTs(t *testing.T) {
 		assert.True(t, code == http.StatusOK || code == http.StatusConflict,
 			"expected 200 (serialized winner) or 409 membership_changed, got %d", code)
 	}
-	// R2-8 (review r2): §12 P1 requires that one of the two conflicting
-	// requests succeeds, not merely that neither returns an unexpected code —
-	// the lock must serialize them, not reject both.
-	assert.Contains(t, codes, http.StatusOK, "at least one of the two conflicting PUTs must succeed (§12 P1); got %v", codes)
+	// R2-8 (review r2): ptone/scion#2529 P1 requires that one of the two
+	// conflicting requests succeeds, not merely that neither returns an
+	// unexpected code — the lock must serialize them, not reject both.
+	assert.Contains(t, codes, http.StatusOK, "at least one of the two conflicting PUTs must succeed (ptone/scion#2529 P1); got %v", codes)
 
 	// Whatever the final state, the D4 invariant (at most one built-in
 	// binding per principal per project) must hold.

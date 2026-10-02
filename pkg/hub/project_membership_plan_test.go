@@ -225,6 +225,30 @@ func TestActorAuthorityChanged(t *testing.T) {
 			want: true,
 		},
 		{
+			// R4-2 (review r4): the "role changed" case above also changes
+			// hubOverride in the same step, so the hubOverride sub-check alone
+			// already makes it return true — probe P4 (removing the
+			// `pre.role != post.role` comparison) left every existing case
+			// green. role is the only one of the three components reachable
+			// in production (see the doc comment on actorAuthorityChanged),
+			// so it needs its own case that changes role ALONE, holding
+			// hubOverride equal.
+			name: "role changed alone, hubOverride held equal (the only component reachable in production)",
+			pre:  actorAuthoritySnapshot{role: store.ProjectRoleOwner, hubOverride: false},
+			post: actorAuthoritySnapshot{role: store.ProjectRoleAdmin, hubOverride: false},
+			want: true,
+		},
+		{
+			// Same idea, with equal non-empty customAuth maps on both sides,
+			// so only the role comparison can be responsible for `want: true`.
+			name: "role changed alone, hubOverride and customAuth held equal",
+			pre: actorAuthoritySnapshot{role: store.ProjectRoleOwner, hubOverride: false,
+				customAuth: map[string]customRoleAuthority{PermRoleBindingCreate: owner}},
+			post: actorAuthoritySnapshot{role: store.ProjectRoleAdmin, hubOverride: false,
+				customAuth: map[string]customRoleAuthority{PermRoleBindingCreate: owner}},
+			want: true,
+		},
+		{
 			name: "hubOverride changed with role held equal (unreachable in production; defence in depth)",
 			pre:  actorAuthoritySnapshot{role: "", hubOverride: false},
 			post: actorAuthoritySnapshot{role: "", hubOverride: true},
