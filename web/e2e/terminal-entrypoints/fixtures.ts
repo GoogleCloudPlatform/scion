@@ -43,6 +43,7 @@ export interface AgentFixture {
   slug?: string;
   canAttach?: boolean;
   activity?: string;
+  ancestry?: string[];
 }
 
 export const defaultAgents: Record<string, AgentFixture> = {
