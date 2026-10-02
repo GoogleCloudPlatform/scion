@@ -3846,7 +3846,15 @@ export class ScionChatThread extends LitElement {
     }
   }
 
-  /** /stop <agent> — Stop a running agent. */
+  /**
+   * /stop <agent> — Stop a running agent.
+   *
+   * In a chat-page DM, `this.projectId` is only the inherited project
+   * (whatever the user was viewing before opening the DM), so DMs
+   * resolve the agent's project via `peerAgentProjectId()` instead.
+   * Non-DM threads use `this.projectId`, which is the thread's real
+   * project.
+   */
   private async handleSlashStop(args: string): Promise<void> {
     const agentSlug = args.trim();
     if (!agentSlug) {
@@ -3854,10 +3862,17 @@ export class ScionChatThread extends LitElement {
       return;
     }
 
+    const projectId = this.isDM ? this.peerAgentProjectId() : this.projectId;
+    if (!projectId) {
+      this.insertLocalSystemMessage('No project context available.');
+      return;
+    }
+
     try {
-      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(agentSlug)}`, {
-        method: 'DELETE',
-      });
+      const res = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentSlug)}/stop`,
+        { method: 'POST' }
+      );
 
       if (!res.ok) {
         const errMsg = await extractApiError(res, 'Failed to stop agent');
