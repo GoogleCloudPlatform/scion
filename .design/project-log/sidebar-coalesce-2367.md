@@ -208,3 +208,63 @@ tracked as ptone/scion#2564; out of scope here.
 - A walk stops requesting further pages once a conversation opens mid-walk.
 - `paginateAll` stops before fetching a page once `shouldContinue` returns
   false, returning what it already fetched rather than throwing.
+
+## Open-then-close mid-walk publishing a truncated list (2026-10-02)
+
+A further gap in the previous pass's `shouldContinue`/publish-time guard: both
+only read the *current* value of `v2Conversation`. If a conversation opened
+mid-walk (stopping that walk's users leg, say, at a genuine page boundary —
+the users leg resolves with only the pages fetched so far, by design) and the
+user then returned to the hub-wide `/chat` view before the walk's slower
+agents leg settled, `v2Conversation` was clear again by the time the walk's
+`Promise.allSettled` resolved. The publish guard saw no open conversation and
+no generation change (the generation only moved on `disconnectedCallback`,
+not on opening a conversation) and published the truncated users list as the
+full hub roster. Returning to `/chat` also called `loadHubMembers` again, but
+since the stale walk was still (wrongly) considered current for that
+generation, the call joined it instead of starting a fresh one, so nothing
+corrected the truncated result until the next periodic poll.
+
+Fix: `_hubMembersGeneration` is now also bumped whenever a conversation opens,
+from the single centralized `updated()` handler for `v2Conversation` changes
+(the same spot that already reports conversation changes for desktop
+notifications) rather than from each of the roughly twenty places
+`v2Conversation` is assigned. A walk started before that bump is now stale by
+generation the moment a conversation opens, regardless of what
+`v2Conversation` reads by the time the walk's promises settle — so the
+publish guard discards its result, and `loadHubMembers`'s in-flight check
+(already generation-aware from the previous pass's reconnect fix) starts a
+fresh walk instead of joining the stale one, which then publishes the
+complete list.
+
+The existing `this.v2Conversation` checks in `shouldContinue` and the publish
+guard were kept rather than removed in favor of the generation alone: they
+are a synchronous field read that reflects a conversation opening the instant
+it is assigned, stopping a page fetch or a publish immediately, whereas the
+generation bump runs from `updated()`, deferred to Lit's own update cycle.
+Relying on the generation alone would make the "stop immediately" behavior
+depend on the relative ordering of two independent microtask queues (Lit's
+scheduler and the fetch promise chain) instead of a direct state check. Both
+checks are necessary; neither subsumes the other.
+
+**Known limitation, still tracked separately:** `loadV2Members` has no
+equivalent view guard at all (see ptone/scion#2564, noted above) — unchanged
+by this pass.
+
+### Files changed (this pass)
+
+| File | Change |
+| --- | --- |
+| `web/src/components/pages/chat.ts` | `updated()` now bumps `_hubMembersGeneration` when a conversation opens; doc comments on `_hubMembersGeneration`, the coalescing gate, `loadHubMembers`, and `_fetchHubMembersOnce` updated to describe the fix and why the existing `v2Conversation` checks were kept alongside it. |
+| `web/src/components/pages/chat-hub-members-coalesce.test.ts` | New regression test driving the real `loadHubMembers` path for open-then-close mid-walk; new test strengthening `_runHubMembersLoad`'s `finally` ownership check (a stale walk settling after reconnect must not clear the in-flight flag out from under a still-running fresh walk). |
+
+### Scenarios covered (tests, this pass)
+
+- Opening then closing a conversation mid-walk does not publish a truncated
+  list; a fresh walk started on return to `/chat` publishes the full one, with
+  no extra requests beyond the stale walk's partial fetch and the fresh
+  walk's full one.
+- A stale walk settling after a disconnect/reconnect, while the fresh walk it
+  was superseded by is still in flight, does not clear the shared in-flight
+  flag out from under that fresh walk — a later call joins the fresh walk
+  rather than starting a redundant third one.

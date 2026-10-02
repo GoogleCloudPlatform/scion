@@ -345,11 +345,13 @@ export class ScionPageChat extends LitElement {
    *   during that trailing walk re-set the same flag (or simply join it, if
    *   they're join calls) rather than queuing a second one.
    *
-   * A call arriving while a walk is in flight for a *stale* generation (the
-   * element disconnected and reconnected while that walk was still running)
-   * does not join it — that walk's result is for a view that no longer
-   * exists and may never publish anything the caller's view can see, so the
-   * caller schedules a fresh walk for its own generation instead of waiting.
+   * A call arriving while a walk is in flight for a *stale* generation — the
+   * element disconnected and reconnected while that walk was still running,
+   * or a conversation opened and the view returned to the hub-wide /chat
+   * view before the walk settled — does not join it: that walk's result is
+   * for a view that no longer exists and may never publish anything the
+   * caller's view can see, so the caller schedules a fresh walk for its own
+   * generation instead of waiting.
    */
   private _hubMembersScheduled = false;
   private _hubMembersInFlight = false;
@@ -357,10 +359,17 @@ export class ScionPageChat extends LitElement {
   private _hubMembersInFlightGeneration = 0;
   private _hubMembersReloadQueued = false;
   /**
-   * Bumped on `disconnectedCallback`, same pattern as `_unreadDMRequestId`
-   * below. A walk captures this at the start and compares it before looping
-   * again or publishing, so a walk that outlives the element's connection to
-   * the document can't write into a detached page after the fact.
+   * Bumped on `disconnectedCallback` (same pattern as `_unreadDMRequestId`
+   * below) and whenever a conversation opens (see `updated()`'s
+   * `v2Conversation` branch) — both retire any hub-members walk started
+   * before them. The conversation-open bump exists because a walk's own
+   * `this.v2Conversation` check only prevents it from publishing *while* a
+   * conversation is open; it says nothing once the user has since returned
+   * to the hub-wide view and a stale walk settles after that, by which time
+   * `this.v2Conversation` reads clear again. A walk captures this generation
+   * at the start and compares it before looping again or publishing, so a
+   * walk superseded either way can't write stale data into a view it no
+   * longer belongs to.
    */
   private _hubMembersGeneration = 0;
   private _onDMPromoted = this.handleDMPromoted.bind(this);
@@ -1167,6 +1176,16 @@ export class ScionPageChat extends LitElement {
       if (projectId !== this._chimeProjectId) {
         this._chimeProjectId = projectId;
         this.projectChimeOn = projectId ? isProjectChimeEnabled(projectId) : true;
+      }
+
+      // Opening a conversation retires any hub-members walk started before
+      // it, by generation rather than by the (racy) current value of
+      // v2Conversation at publish time — see _hubMembersGeneration's doc
+      // comment. Reported from updated(), the same centralized spot as the
+      // notification handling above, rather than from each of the twenty
+      // places v2Conversation is assigned.
+      if (this.v2Conversation) {
+        ++this._hubMembersGeneration;
       }
     }
   }
@@ -2277,11 +2296,13 @@ export class ScionPageChat extends LitElement {
    *
    * `options.refresh` distinguishes the two kinds of caller: route/view
    * re-parses (the default) just want the current hub-wide view and are
-   * content to join a walk already in flight, since nothing they know of
-   * could have changed since it started. Only the fallback poll — the one
-   * caller that exists specifically because something *might* have changed
-   * since the last load — passes `{ refresh: true }` to queue a trailing
-   * walk when one is already running.
+   * content to join a walk already in flight *for the current generation* —
+   * a walk still running from before the last conversation opened is for a
+   * view that's since moved on, so "join" only ever means the former, never
+   * that one. Only the fallback poll — the one caller that exists
+   * specifically because something *might* have changed since the last
+   * load — passes `{ refresh: true }` to queue a trailing walk when one is
+   * already running.
    */
   private loadHubMembers(options?: { refresh?: boolean }): void {
     const inFlightForThisGeneration =
@@ -2362,6 +2383,17 @@ export class ScionPageChat extends LitElement {
    * `generation` is passed in by {@link _runHubMembersLoad} rather than
    * re-read from `_hubMembersGeneration` here, so both always agree on which
    * walk this is.
+   *
+   * Both `this.v2Conversation` and the generation are checked below, and
+   * neither subsumes the other: `this.v2Conversation` is a plain field read,
+   * so it reflects a conversation opening the instant it's assigned — it
+   * stops a page fetch (via `shouldContinue`) the moment one is open,
+   * without waiting on anything. The generation instead catches the case
+   * `this.v2Conversation` cannot: a conversation that opened *and closed
+   * again* before this walk settled reads clear here even though the walk is
+   * for a hub view that's already been superseded once — see
+   * `_hubMembersGeneration`'s doc comment for that failure mode. Dropping
+   * either check reopens the gap the other one covers.
    */
   private async _fetchHubMembersOnce(generation: number): Promise<void> {
     const shouldContinue = (): boolean =>

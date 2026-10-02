@@ -409,6 +409,97 @@ describe('loadHubMembers view-change race', () => {
     // conversation was open.
     expect(usersCalls.length).toBe(1);
   });
+
+  it('opening then closing a conversation mid-walk does not publish a truncated list — a fresh walk publishes the full one', async () => {
+    // Regression test for: a walk in flight when a project opens stops its
+    // users leg at the next page boundary (a real, intentional truncation —
+    // see the "walk cancellation" describe block below); if the user then
+    // returns to /chat before the slower agents leg settles, the stale walk
+    // must not publish that truncated users list as the full hub roster.
+    // This uses a real mount (`document.body.appendChild`) rather than
+    // `createPage()`, since the fix depends on `updated()` actually running
+    // to bump the hub-members generation when `v2Conversation` is assigned.
+    window.history.pushState({}, '', '/chat');
+
+    let userCall = 0;
+    let resolveUsersPage1!: (r: Response) => void;
+    const usersPage1Promise = new Promise<Response>((resolve) => {
+      resolveUsersPage1 = resolve;
+    });
+    let agentCall = 0;
+    let resolveStaleAgents!: (r: Response) => void;
+    const staleAgentsPromise = new Promise<Response>((resolve) => {
+      resolveStaleAgents = resolve;
+    });
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => {
+          userCall++;
+          // Call 1: the stale walk's only page, held until resolved below.
+          // Call 2+: a fresh walk's own full (single-page) result.
+          return userCall === 1 ? usersPage1Promise : usersPage(['u1', 'u2']);
+        },
+        () => {
+          agentCall++;
+          // Call 1: the stale walk's pending leg, held until resolved below.
+          // Call 2+: a fresh walk's own result.
+          return agentCall === 1 ? staleAgentsPromise : agentsPage(['a1']);
+        }
+      )
+    );
+
+    const page = document.createElement('scion-page-chat') as any;
+    page.pageData = { user: { id: 'user-me' } };
+    document.body.appendChild(page);
+    // Cold mount starts the initial walk (generation 0): both legs' first
+    // requests are now in flight.
+    await flush();
+
+    try {
+      // The user opens a project. Setting v2Conversation is a plain field
+      // write, so shouldContinue sees it immediately; the generation bump
+      // that invalidates this walk for good runs on the next microtask via
+      // updated() — flush() below gives it room to do so.
+      page.v2Conversation = { projectId: 'p1' };
+      // The users leg's only page lands with a cursor; shouldContinue is now
+      // false, so it stops there instead of fetching page 2 — a genuine,
+      // intentional truncation to ['u1'].
+      resolveUsersPage1(usersPage(['u1'], 'u-cursor'));
+      await flush();
+
+      // Before the agents leg settles, the user returns to the global view —
+      // exactly what handleResetView and the bare-/chat branch of
+      // parseV2Route do.
+      page.v2Conversation = null;
+      page.loadHubMembers();
+      await flush();
+
+      // The stale walk's agents leg finally lands late.
+      resolveStaleAgents(agentsPage(['a-stale']));
+      await flush();
+
+      // The fresh walk (started when loadHubMembers saw the stale walk
+      // belonged to a superseded generation) published the full lists; the
+      // stale walk's truncated ['u1']/['a-stale'] must never have been
+      // published, including transiently.
+      expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u1', 'u2']);
+      expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a1']);
+
+      const usersCalls = vi
+        .mocked(apiFetch)
+        .mock.calls.filter((c) => (c[0] as string).startsWith('/api/v1/users'));
+      const agentsCalls = vi
+        .mocked(apiFetch)
+        .mock.calls.filter((c) => (c[0] as string).startsWith('/api/v1/agents'));
+      // The stale walk's one users request (page 1 only — it stopped before
+      // page 2) plus the fresh walk's one full-page request.
+      expect(usersCalls.length).toBe(2);
+      // The stale walk's one agents request plus the fresh walk's one.
+      expect(agentsCalls.length).toBe(2);
+    } finally {
+      document.body.removeChild(page);
+    }
+  });
 });
 
 describe('loadHubMembers full pagination', () => {
@@ -554,6 +645,76 @@ describe('loadHubMembers reconnect handling', () => {
     try {
       expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u-fresh']);
       expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a-fresh']);
+    } finally {
+      document.body.removeChild(page);
+    }
+  });
+
+  it('a stale walk settling after reconnect does not clear the in-flight flag out from under the still-running fresh walk', async () => {
+    // Regression test for _runHubMembersLoad's generation-ownership check in
+    // its `finally` block: it must only clear `_hubMembersInFlight` if it is
+    // still that flag's owner. If that check were made unconditional, the
+    // stale walk's completion below would wrongly clear the flag while the
+    // fresh walk (the true owner) is still running, and the loadHubMembers
+    // call below would then start a redundant third walk instead of joining
+    // the fresh one.
+    window.history.pushState({}, '', '/chat');
+
+    let userCall = 0;
+    let resolveStaleUsers!: (r: Response) => void;
+    const staleUsers = new Promise<Response>((resolve) => {
+      resolveStaleUsers = resolve;
+    });
+    const freshUsers = new Promise<Response>(() => {
+      // Deliberately never resolved — the fresh walk must still be in
+      // flight for the rest of this test.
+    });
+    let agentCall = 0;
+    const freshAgents = new Promise<Response>(() => {
+      // Also deliberately never resolved, same reason as freshUsers.
+    });
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => {
+          userCall++;
+          return userCall === 1 ? staleUsers : freshUsers;
+        },
+        () => {
+          agentCall++;
+          return agentCall === 1 ? agentsPage(['a-stale']) : freshAgents;
+        }
+      )
+    );
+
+    const page = document.createElement('scion-page-chat') as any;
+    page.pageData = { user: { id: 'user-me' } };
+    document.body.appendChild(page);
+    // Cold-mount walk (generation 0): users pending on staleUsers; agents
+    // resolves immediately to ['a-stale'], so only the users leg is
+    // outstanding by the time this settles.
+    await flush();
+
+    // Disconnect and reconnect bumps the generation and starts a fresh walk
+    // (generation 1); both its legs are left pending throughout this test.
+    document.body.removeChild(page);
+    document.body.appendChild(page);
+    await flush();
+
+    try {
+      // The stale (generation 0) walk's users leg finally resolves. Its own
+      // publish guard discards the result (superseded generation) — already
+      // covered by the test above — but its `finally` block also runs here.
+      resolveStaleUsers(usersPage(['u-stale']));
+      await flush();
+
+      // A later call (e.g. a route re-parse) arrives while the fresh walk is
+      // still the only thing in flight. It must join that walk rather than
+      // start a third one.
+      page.loadHubMembers();
+      await flush();
+
+      expect(userCall).toBe(2);
+      expect(agentCall).toBe(2);
     } finally {
       document.body.removeChild(page);
     }
