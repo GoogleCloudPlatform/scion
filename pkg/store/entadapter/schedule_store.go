@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -262,14 +263,37 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 		query.Where(schedule.NameEQ(filter.Name))
 	}
 
+	// TotalCount covers the whole filtered set, not the rows after the
+	// cursor, so it is taken before the keyset predicate is added.
 	totalCount, err := query.Clone().Count(ctx)
 	if err != nil {
 		return nil, err
 	}
 
+	// Keyset pagination on (created DESC, id DESC). The cursor is the opaque
+	// token produced by encodeCursor from the previous page's last row, so
+	// no lookup of that row is needed: paging is unaffected if the row was
+	// deleted or no longer matches the filter (for example it was paused
+	// while listing active schedules).
+	if opts.Cursor != "" {
+		cursorCreated, cursorID, err := decodeCursor(opts.Cursor)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cursor: %w", store.ErrInvalidInput)
+		}
+		cursorCreated = cursorCreated.UTC()
+		query.Where(schedule.Or(
+			schedule.CreatedLT(cursorCreated),
+			schedule.And(
+				schedule.CreatedEQ(cursorCreated),
+				schedule.IDLT(cursorID),
+			),
+		))
+	}
+
 	limit := clampLimit(opts.Limit)
 	entities, err := query.
 		Order(schedule.ByCreated(entsql.OrderDesc())).
+		Order(schedule.ByID(entsql.OrderDesc())).
 		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
@@ -284,7 +308,8 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 	result := &store.ListResult[store.Schedule]{TotalCount: totalCount}
 	if len(schedules) > limit {
 		result.Items = schedules[:limit]
-		result.NextCursor = schedules[limit-1].ID
+		last := schedules[limit-1]
+		result.NextCursor = encodeCursor(last.CreatedAt.UTC(), last.ID)
 	} else {
 		result.Items = schedules
 	}
