@@ -254,7 +254,7 @@ func (s *MessageStore) GetMessagesByIDs(ctx context.Context, ids []string) (map[
 // both the created timestamp and the message ID. Format: base64(RFC3339Nano + "," + uuid).
 // This avoids a DB round-trip on decode and makes pagination resilient to message deletion.
 func encodeCursor(created time.Time, id string) string {
-	raw := created.Format(time.RFC3339Nano) + "," + id
+	raw := created.UTC().Format(time.RFC3339Nano) + "," + id
 	return base64.URLEncoding.EncodeToString([]byte(raw))
 }
 
@@ -284,7 +284,7 @@ func decodeCursor(cursor string) (time.Time, uuid.UUID, error) {
 // A binding is supplied by endpoint callers that must reject cursors reused
 // across different resources or filters.
 func encodeListCursor(created time.Time, id, binding string) string {
-	raw := created.Format(time.RFC3339Nano) + "," + id
+	raw := created.UTC().Format(time.RFC3339Nano) + "," + id
 	if binding != "" {
 		raw += "," + binding
 	}
