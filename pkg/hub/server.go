@@ -37,6 +37,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4/jwt"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
@@ -1231,6 +1232,19 @@ type Server struct {
 
 	// ghResolutionStore is the DB-backed GitHub skill resolution cache (nil when entClient is nil).
 	ghResolutionStore *GitHubResolutionStore
+
+	// ghResolveFlight coalesces concurrent resolveGitHubSkill calls that
+	// share a cache key (see resolveGitHubSkill), so a burst of creates
+	// hitting a cold or just-expired entry for the same ref makes one
+	// mint+commits+contents+Put sequence instead of one per caller. Zero
+	// value is ready to use.
+	ghResolveFlight singleflight.Group
+
+	// ghRefreshFailMu guards ghLastRefreshFailure, which records the last
+	// time a background stale-refresh failed for a given cache key (see
+	// refreshGitHubSkillInBackground and ghRefreshFailureBackoff).
+	ghRefreshFailMu      sync.Mutex
+	ghLastRefreshFailure map[string]time.Time
 
 	// nonceCacheStore is the DB-backed HMAC nonce replay cache (nil when entClient is nil).
 	// When set, it replaces the in-memory NonceCache in BrokerAuthService for
@@ -5903,9 +5917,13 @@ func isWebSocketUpgrade(r *http.Request) bool {
 		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
 }
 
-// githubResolutionCacheEvictionHandler returns a recurring handler function that
-// purges expired GitHub skill resolution cache entries. This prevents the cache
-// table from growing unbounded and keeps queries fast.
+// githubResolutionCacheEvictionHandler returns a recurring handler function
+// that purges GitHub skill resolution cache entries once they are too old to
+// ever be served stale again (see GitHubResolutionStore.PurgeExpired and
+// staleCutoff) — not merely once their own TTL has passed, so a branch-ref
+// row survives long enough for resolveGitHubSkill's stale-serve path to still
+// use it. This prevents the cache table from growing unbounded and keeps
+// queries fast.
 func (s *Server) githubResolutionCacheEvictionHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
