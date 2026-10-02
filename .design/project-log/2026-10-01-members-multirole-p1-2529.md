@@ -583,7 +583,7 @@ Review r5 (ptone/scion#2529 P1, mmr-em dispositions): every finding fixed.
 
 Mutation-sensitivity was proven for R5-1 (each branch disabled in turn),
 R5-2 (the not-found mapping disabled) and R5-3 (two probe references in a
-temporary file); details are in the scratchpad closure table. The same
+temporary file). The same
 throttled gate set as round 5 passes on the rebased head. The full
 `make test-hub-sqlite` and `make ci` run in the PR's GitHub CI.
 
@@ -596,8 +596,7 @@ throttled gate set as round 5 passes on the rebased head. The full
   TOCTOU test comments are replaced with symbol references (the
   unconditional `sameRoleDefSet(current1, roleDefIDs(current0))` re-check,
   Phase P's ExpectedRoleIDs precondition, the in-tx ExpectedRoleIDs re-check).
-- **A r2 item 3**: round-relative wording ("Before this round", "Before
-  R3-1", "no live escalation was found") is replaced with timeless
-  statements of what each test pins.
+- **A r2 item 3**: round-relative wording in the test comments and this
+  log is replaced with timeless statements of what each test pins.
 
 No code, logic or assertion changes.
