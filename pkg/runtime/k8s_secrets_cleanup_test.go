@@ -511,6 +511,12 @@ func TestRun_InitContainerFailure_ThenHubDelete_CleansUpSecrets(t *testing.T) {
 	}()
 
 	_, runErr := rt.Run(ctx, config)
+	// Cancel ctx now rather than waiting on the deferred cancel: if Run
+	// returned early (e.g. before the pod ever exists), the poller goroutine
+	// above is only watching ctx.Done() to exit, and ctx's own 5s
+	// context.WithTimeout would otherwise make it run out the clock before
+	// closing done, racing the select's own 5s timeout below.
+	cancel()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
