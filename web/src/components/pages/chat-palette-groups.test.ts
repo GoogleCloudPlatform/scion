@@ -1270,6 +1270,75 @@ describe('_loadPalettePeople', () => {
       await Promise.all([load1, load2]);
       expect(el.v2PaletteGroups.people.status).toBe('ready');
     });
+
+    it("a superseded load's own finally does not null out a newer load's live controller (owner guard)", async () => {
+      // Two hanging /auth/me loads, each resolving only via its own abort
+      // signal. load2's predecessor-abort step fires load1's abort
+      // synchronously, but load1's own `await`-continuation (where its
+      // `finally` actually runs) is deferred to a microtask — by the time it
+      // runs, `_selfUserAbortController` already holds load2's controller,
+      // not load1's own. Without the `=== timeoutController` owner guard in
+      // that `finally`, load1 would null the *shared* field out from under
+      // load2, and the close below would find nothing to abort: load2 would
+      // keep running until the idle timeout instead of being stopped here.
+      const el = createPage();
+      el.pageData = {};
+      el.v2PaletteOpen = true;
+      const abortedOrder: number[] = [];
+      let authMeCalls = 0;
+      vi.mocked(apiFetch).mockImplementation((url: string, options?: { signal?: AbortSignal }) => {
+        if (url === '/api/v1/auth/me') {
+          authMeCalls++;
+          const n = authMeCalls;
+          return new Promise<Response>((_resolve, reject) => {
+            options?.signal?.addEventListener('abort', () => {
+              abortedOrder.push(n);
+              reject(new DOMException('aborted', 'AbortError'));
+            });
+          });
+        }
+        return Promise.resolve(jsonResponse({ users: [], dms: [] }));
+      });
+
+      const load1 = el._loadPalettePeople();
+      await vi.waitFor(() => expect(authMeCalls).toBe(1));
+
+      // Starting load2 synchronously aborts load1's controller (call #1) —
+      // awaiting load1 here lets its (now-rejected) `_resolveSelfUserId` run
+      // to completion, including its `finally`, before the close below.
+      const load2 = el._loadPalettePeople();
+      await load1;
+      expect(abortedOrder).toEqual([1]);
+
+      el._closePaletteAndCancelLoad();
+
+      // Close must still reach load2's controller (call #2) — it would not
+      // if load1's finally had already nulled the shared field.
+      expect(abortedOrder).toEqual([1, 2]);
+      await load2;
+      // The abort resolves `_resolveSelfUserId` to '', but `_peopleLoadSeq`
+      // (bumped by the close above) supersedes load2 before it can publish
+      // that as an error.
+      expect(el.v2PaletteGroups.people.status).not.toBe('error');
+
+      // Deleting the guarded clear entirely (rather than making it
+      // unconditional) is invisible to every assertion above: the supersede
+      // path above only ever exercises the guard's *false* (skip) branch,
+      // which "always skip" (no clear at all) satisfies by accident just as
+      // well as "skip only when superseded" does. Only a later, uncontested
+      // call — nothing pending, nothing closing — exercises the guard's
+      // *true* (actually clear) branch, which a deleted clear fails: the
+      // field would be left holding this call's own, by-then-dead
+      // controller instead of null.
+      authMeCalls = 0;
+      vi.mocked(apiFetch).mockImplementation((url: string) =>
+        url === '/api/v1/auth/me'
+          ? Promise.resolve(jsonResponse({ id: 'resolved-self' }))
+          : Promise.resolve(jsonResponse({ users: [], dms: [] }))
+      );
+      await el._resolveSelfUserId();
+      expect(el._selfUserAbortController).toBeNull();
+    });
   });
 
   describe('unknown identity — connected element: no route side effects from resolving it', () => {

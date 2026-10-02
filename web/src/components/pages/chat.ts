@@ -973,6 +973,12 @@ export class ScionPageChat extends LitElement {
     this._paletteDocumentsUnsubscribe?.();
     this._paletteDocumentsUnsubscribe = null;
     this._paletteDataController.cancel();
+    // Same resource-usage reasoning as `_closePaletteAndCancelLoad`'s own
+    // abort: a disconnect while People's identity fetch is still pending
+    // should not leave it running for up to AGENTS_IDLE_TIMEOUT_MS on a
+    // detached page.
+    this._selfUserAbortController?.abort();
+    this._selfUserAbortController = null;
     this._stopPaletteVisibilityWatchdog();
     this._stopPaletteDebouncedRefresh();
     // Without this, a disconnect landing while a first-open lazy import is
@@ -3396,23 +3402,31 @@ export class ScionPageChat extends LitElement {
    * People dirty if it wants a still-open palette to retry.
    *
    * Bounded by {@link AGENTS_IDLE_TIMEOUT_MS} (shared with the Agents
-   * group's own idle bound): this fetch carries no abort signal of its own
-   * otherwise, so a hung `/api/v1/auth/me` would never let this function
-   * return at all, which would in turn hold {@link _loadPalettePeople}'s
-   * load token forever — its `finally` can't run until this `await` settles
-   * one way or another. A timeout here settles it with the same
-   * `''`-means-unresolved outcome as any other failure.
+   * group's own idle bound): a hung `/api/v1/auth/me` would otherwise never
+   * let this function return at all, which would in turn hold
+   * {@link _loadPalettePeople}'s load token forever — its `finally` can't run
+   * until this `await` settles one way or another. A timeout here settles it
+   * with the same `''`-means-unresolved outcome as any other failure.
    *
-   * Aborts any previous call's still-pending fetch first — same
-   * abort-the-predecessor pattern as {@link ChatPaletteDataController}'s own
-   * per-group loaders — so a close or a newer People load stops the old
-   * request immediately via {@link _selfUserAbortController} rather than
-   * leaving it running for up to {@link AGENTS_IDLE_TIMEOUT_MS}.
+   * Also aborted directly — not only by the idle timeout — on close
+   * ({@link _closePaletteAndCancelLoad}) and on a newer People load, which
+   * aborts the previous call's still-pending fetch first via
+   * {@link _selfUserAbortController}, same abort-the-predecessor pattern as
+   * {@link ChatPaletteDataController}'s own per-group loaders, so the old
+   * request doesn't keep running for up to {@link AGENTS_IDLE_TIMEOUT_MS}
+   * after nothing can use its result. That abort is a resource-usage measure
+   * only, not the correctness guard — a stale resolution (abort-triggered or
+   * not) can still only return `''`, and {@link _peopleLoadSeq} is what
+   * actually keeps a stale result from publishing, with or without it.
+   *
+   * The predecessor abort runs even when this call resolves synchronously
+   * from `known` below, since a previous call's own fetch may still be
+   * in flight regardless of whether this one needs to make one of its own.
    */
   private async _resolveSelfUserId(): Promise<string> {
+    this._selfUserAbortController?.abort();
     const known = this.pageData?.user?.id;
     if (known) return known;
-    this._selfUserAbortController?.abort();
     const timeoutController = new AbortController();
     this._selfUserAbortController = timeoutController;
     const timeoutId = setTimeout(() => timeoutController.abort(), AGENTS_IDLE_TIMEOUT_MS);
@@ -3443,8 +3457,9 @@ export class ScionPageChat extends LitElement {
         }
       }
     } catch {
-      // Identity truly unavailable right now (including a timeout abort) —
-      // caller treats '' as failure.
+      // Identity truly unavailable right now — a timeout abort, a
+      // close/supersede abort, or a genuine fetch failure are all treated
+      // alike: the caller gets '' and treats it as failure.
     } finally {
       clearTimeout(timeoutId);
       // Only clear the field if it's still this call's own controller — a
@@ -3477,13 +3492,13 @@ export class ScionPageChat extends LitElement {
     try {
       const mySeq = ++this._peopleLoadSeq;
       const selfId = await this._resolveSelfUserId();
-      // The identity fetch above is bounded by its own idle-timeout signal,
-      // but is not cancelled by `_closePaletteAndCancelLoad`'s `cancel()` the
-      // way the group loaders' own fetches are. Guard manually with this
-      // load's own sequence token — not `v2PaletteOpen` — since closing and
-      // reopening sets `v2PaletteOpen` back to `true`, which would let a
-      // stale load's identity resolution overwrite a newer, already-`ready`
-      // People state.
+      // The identity fetch above is now aborted directly on close/supersede
+      // (not only bounded by its own idle-timeout signal), but that abort is
+      // a resource-usage measure, not what keeps a stale result from
+      // publishing — this manual guard, keyed on this load's own sequence
+      // token, is. Not `v2PaletteOpen`: closing and reopening sets
+      // `v2PaletteOpen` back to `true`, which would let a stale load's
+      // identity resolution overwrite a newer, already-`ready` People state.
       // A newer People load (from a reopen, a refresh, or another call) or a
       // close in the meantime bumps `_peopleLoadSeq`, superseding this one.
       // This return still runs the `finally` below, which is exactly why
