@@ -51,21 +51,6 @@ func stripAgentEnvTZ(ac *store.AgentAppliedConfig) bool {
 	return had
 }
 
-// agentEnvTZ returns the first non-empty TZ held in the agent's env records,
-// AppliedConfig.Env first, then AppliedConfig.InlineConfig.Env.
-func agentEnvTZ(ac *store.AgentAppliedConfig) string {
-	if ac == nil {
-		return ""
-	}
-	if v := ac.Env[agentTZEnvKey]; v != "" {
-		return v
-	}
-	if ac.InlineConfig != nil {
-		return ac.InlineConfig.Env[agentTZEnvKey]
-	}
-	return ""
-}
-
 // adoptLegacyTZ classifies an agent written before ExplicitTimezone existed.
 // Such an agent may hold a TZ in AppliedConfig.Env, or only in
 // AppliedConfig.InlineConfig.Env when the two copies diverged. When
@@ -86,7 +71,7 @@ func adoptLegacyTZ(ac *store.AgentAppliedConfig) bool {
 	if ac == nil {
 		return false
 	}
-	value := agentEnvTZ(ac)
+	value := legacyEnvTZ(ac)
 	if !stripAgentEnvTZ(ac) {
 		return false
 	}
@@ -109,7 +94,7 @@ func captureCreateTZ(ac *store.AgentAppliedConfig, harnessConfigTZ string) {
 	if ac == nil {
 		return
 	}
-	value := agentEnvTZ(ac)
+	value := legacyEnvTZ(ac)
 	if value == "" {
 		value = harnessConfigTZ
 	}
@@ -131,7 +116,7 @@ func (s *Server) captureCreateTimezone(ctx context.Context, agent *store.Agent, 
 		return
 	}
 	hcTZ := ""
-	if agentEnvTZ(ac) == "" && ac.ExplicitTimezone == "" && !ac.ExplicitTimezoneUnpinned {
+	if legacyEnvTZ(ac) == "" && ac.ExplicitTimezone == "" && !ac.ExplicitTimezoneUnpinned {
 		if hc == nil && ac.HarnessConfigID != "" {
 			loaded, err := s.store.GetHarnessConfig(ctx, ac.HarnessConfigID)
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
