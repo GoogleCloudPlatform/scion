@@ -4114,6 +4114,395 @@ func TestStartResolvesRepoRootWhenPersistedRootIsResolvedAndWorkspaceIsSymlinked
 	}
 }
 
+// repoRootMatrixShape builds one of three root spellings for the matrix
+// test below: "plain" (no symlink anywhere), "ancestor-alias" (reached
+// through a symlinked ancestor directory, with its own final path element a
+// real directory), and "leaf-alias" (its own final path element is itself a
+// symlink). Returns the root path to use and the worktrees directory under
+// it (a real directory in all three cases).
+func repoRootMatrixShape(t *testing.T, shape string) (root, worktreesDir string) {
+	t.Helper()
+	switch shape {
+	case "plain":
+		root = t.TempDir()
+		setupGitRepo(t, root)
+	case "ancestor-alias":
+		realParent := t.TempDir()
+		linkParent := t.TempDir()
+		linkDir := filepath.Join(linkParent, "link")
+		if err := os.Symlink(realParent, linkDir); err != nil {
+			t.Fatal(err)
+		}
+		root = filepath.Join(linkDir, "base")
+		if err := os.MkdirAll(root, 0755); err != nil {
+			t.Fatal(err)
+		}
+		setupGitRepo(t, root)
+	case "leaf-alias":
+		realDisk := t.TempDir()
+		projectDir := t.TempDir()
+		root = filepath.Join(projectDir, "workspace")
+		if err := os.Symlink(realDisk, root); err != nil {
+			t.Fatal(err)
+		}
+		setupGitRepo(t, root)
+	default:
+		t.Fatalf("unknown root shape %q", shape)
+	}
+	worktreesDir = filepath.Join(root, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	return root, worktreesDir
+}
+
+// repoRootMatrixWorkspace builds one of three workspace spellings under
+// worktreesDir for the matrix test below: "as-given" (a genuine worktree,
+// spelled exactly as root's own shape implies), "resolved" (the identical
+// genuine worktree, but with every symlink on the path to it already
+// resolved), and "negative" (the target agent's own path is a symlink to a
+// different, independently genuine worktree, rather than being a genuine
+// worktree itself).
+func repoRootMatrixWorkspace(t *testing.T, worktreesDir, shape string) string {
+	t.Helper()
+	asGiven := filepath.Join(worktreesDir, "agent-a")
+	switch shape {
+	case "as-given":
+		if err := util.CreateWorktree(asGiven, "agent-a"); err != nil {
+			t.Fatalf("failed to create worktree: %v", err)
+		}
+		return asGiven
+	case "resolved":
+		if err := util.CreateWorktree(asGiven, "agent-a"); err != nil {
+			t.Fatalf("failed to create worktree: %v", err)
+		}
+		resolved, err := filepath.EvalSymlinks(asGiven)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%q): %v", asGiven, err)
+		}
+		return resolved
+	case "negative":
+		other := filepath.Join(worktreesDir, "agent-b")
+		if err := util.CreateWorktree(other, "agent-b"); err != nil {
+			t.Fatalf("failed to create worktree: %v", err)
+		}
+		if err := os.Symlink(other, asGiven); err != nil {
+			t.Fatal(err)
+		}
+		return asGiven
+	default:
+		t.Fatalf("unknown workspace shape %q", shape)
+		return ""
+	}
+}
+
+// TestRepoRootComparisonMatrix is the required matrix covering every root
+// spelling against every workspace spelling, for a first dispatch and for
+// both resume orderings. Every case asserts both Start's RunConfig.RepoRoot
+// and the value persistProvisionedWorktreeRepoRootIfValid writes, since the
+// two share the same comparison and are required to reach the same outcome
+// for it, whichever source supplies the pair (a fresh ctx signal or
+// recovered state).
+//
+// Expected-value rule, the same across every root shape: when the workspace
+// is a genuine worktree (as-given or resolved), RepoRoot resolves to the
+// real root regardless of root's own spelling, and the persisted value is
+// root exactly as it was given to this dispatch, never a resolved form.
+// When the workspace is the negative shape (its own final path element
+// resolves to a different worktree), RepoRoot is empty and nothing is
+// persisted, regardless of root's own spelling.
+//
+// Resume orderings: order A recovers the workspace in the same spelling the
+// root was persisted in; order B recovers the workspace fully resolved
+// regardless of root's persisted spelling. Only the two worktree-genuine
+// workspace shapes apply to resume (nothing is ever persisted for the
+// negative shape, so there is nothing to resume from).
+func TestRepoRootComparisonMatrix(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	type matrixCase struct {
+		name          string
+		rootShape     string
+		workspace     string // "first", "resumeA", "resumeB"
+		workspaceKind string // "as-given", "resolved", "negative"
+	}
+
+	var cases []matrixCase
+	for _, rootShape := range []string{"plain", "ancestor-alias", "leaf-alias"} {
+		for _, wsKind := range []string{"as-given", "resolved", "negative"} {
+			cases = append(cases, matrixCase{
+				name:          rootShape + "/first-dispatch/" + wsKind,
+				rootShape:     rootShape,
+				workspace:     "first",
+				workspaceKind: wsKind,
+			})
+		}
+		cases = append(cases,
+			matrixCase{name: rootShape + "/resume-order-A", rootShape: rootShape, workspace: "resumeA", workspaceKind: "as-given"},
+			matrixCase{name: rootShape + "/resume-order-B", rootShape: rootShape, workspace: "resumeB", workspaceKind: "resolved"},
+		)
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+			root, worktreesDir := repoRootMatrixShape(t, tc.rootShape)
+			resolvedRoot, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				t.Fatalf("EvalSymlinks(root): %v", err)
+			}
+
+			var capturedConfig runtime.RunConfig
+			mockRT := &runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{}, nil
+				},
+				RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+					capturedConfig = config
+					return "mock-id", nil
+				},
+			}
+			mgr := NewManager(mockRT)
+			env := map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"}
+			agentDir := config.GetAgentDir(projectScionDir, "agent-a", false)
+
+			var wantRepoRootEmpty bool
+			var wantPersisted string
+
+			switch tc.workspace {
+			case "first":
+				workspace := repoRootMatrixWorkspace(t, worktreesDir, tc.workspaceKind)
+				ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), root)
+				if _, err := mgr.Start(ctx, api.StartOptions{
+					Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: workspace, Env: env,
+				}); err != nil {
+					t.Fatalf("Start failed: %v", err)
+				}
+				wantRepoRootEmpty = tc.workspaceKind == "negative"
+				if !wantRepoRootEmpty {
+					wantPersisted = root
+				}
+
+			case "resumeA", "resumeB":
+				// A genuine worktree must exist to resume onto regardless of
+				// ordering; which spelling recovery uses is set directly
+				// below.
+				asGivenWorkspace := repoRootMatrixWorkspace(t, worktreesDir, "as-given")
+				resolvedWorkspace, err := filepath.EvalSymlinks(asGivenWorkspace)
+				if err != nil {
+					t.Fatalf("EvalSymlinks(workspace): %v", err)
+				}
+
+				// Materialize the agent directory, then set both persisted
+				// values directly, independent of whichever path a prior
+				// dispatch would have used to get them there.
+				if _, err := mgr.Start(context.Background(), api.StartOptions{
+					Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: asGivenWorkspace, Env: env,
+				}); err != nil {
+					t.Fatalf("initial Start failed: %v", err)
+				}
+				if err := writeProvisionedWorktreeRepoRoot(agentDir, root); err != nil {
+					t.Fatalf("writeProvisionedWorktreeRepoRoot: %v", err)
+				}
+				if tc.workspace == "resumeB" {
+					setPersistedWorkspaceVolumeSource(t, agentDir, resolvedWorkspace)
+				}
+				// resumeA needs no rewrite: the initial Start above already
+				// persisted the as-given spelling.
+
+				if _, err := mgr.Start(context.Background(), api.StartOptions{
+					Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Env: env,
+				}); err != nil {
+					t.Fatalf("resume Start failed: %v", err)
+				}
+				wantRepoRootEmpty = false
+				wantPersisted = root
+
+			default:
+				t.Fatalf("unknown dispatch shape %q", tc.workspace)
+			}
+
+			if wantRepoRootEmpty {
+				if capturedConfig.RepoRoot != "" {
+					t.Errorf("RunConfig.RepoRoot = %q, want empty", capturedConfig.RepoRoot)
+				}
+			} else {
+				if capturedConfig.RepoRoot == "" {
+					t.Error("RunConfig.RepoRoot is empty, want the resolved root")
+				} else if gotRoot, err := filepath.EvalSymlinks(capturedConfig.RepoRoot); err != nil {
+					t.Errorf("EvalSymlinks(RunConfig.RepoRoot): %v", err)
+				} else if gotRoot != resolvedRoot {
+					t.Errorf("RunConfig.RepoRoot resolves to %q, want %q", gotRoot, resolvedRoot)
+				}
+			}
+
+			gotPersisted := readProvisionedWorktreeRepoRoot(agentDir)
+			if gotPersisted != wantPersisted {
+				t.Errorf("persisted repo root = %q, want %q", gotPersisted, wantPersisted)
+			}
+		})
+	}
+}
+
+// TestStartRepoRootSurvivesResumeAfterAMismatchedFirstDispatch is R3-N1: a
+// single dispatch whose root and workspace values arrive in two different
+// spellings (root reached through a symlinked ancestor, workspace already
+// resolved) still agrees between RunConfig.RepoRoot and the persisted value,
+// and a later, ordinary resume recovers the same root from that persisted
+// value.
+func TestStartRepoRootSurvivesResumeAfterAMismatchedFirstDispatch(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+
+	root, worktreesDir := repoRootMatrixShape(t, "ancestor-alias")
+	asGiven := filepath.Join(worktreesDir, "agent-a")
+	if err := util.CreateWorktree(asGiven, "agent-a"); err != nil {
+		t.Fatalf("failed to create worktree: %v", err)
+	}
+	resolvedWorkspace, err := filepath.EvalSymlinks(asGiven)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(asGiven): %v", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(root): %v", err)
+	}
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+	env := map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"}
+
+	// First dispatch: root through its ancestor alias, workspace already
+	// resolved — the two values arrive in different spellings.
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), root)
+	if _, err := mgr.Start(ctx, api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: resolvedWorkspace, Env: env,
+	}); err != nil {
+		t.Fatalf("first Start failed: %v", err)
+	}
+	if capturedConfig.RepoRoot == "" {
+		t.Fatal("first dispatch: RunConfig.RepoRoot is empty")
+	}
+	agentDir := config.GetAgentDir(projectScionDir, "agent-a", false)
+	persisted := readProvisionedWorktreeRepoRoot(agentDir)
+	if persisted != root {
+		t.Fatalf("first dispatch: persisted repo root = %q, want %q (root as given)", persisted, root)
+	}
+
+	// Resume: no ctx signal, no explicit workspace — RepoRoot must come from
+	// the persisted state alone.
+	capturedConfig = runtime.RunConfig{}
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Env: env,
+	}); err != nil {
+		t.Fatalf("resume Start failed: %v", err)
+	}
+	if capturedConfig.RepoRoot == "" {
+		t.Fatal("resume: RunConfig.RepoRoot is empty")
+	}
+	gotRoot, err := filepath.EvalSymlinks(capturedConfig.RepoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(resume RepoRoot): %v", err)
+	}
+	if gotRoot != resolvedRoot {
+		t.Fatalf("resume: RunConfig.RepoRoot resolves to %q, want %q", gotRoot, resolvedRoot)
+	}
+}
+
+// TestStartPersistsLeafAliasRootAsGiven is R3-N2: the leaf-alias analogue of
+// TestStartPersistsTheAliasNotTheResolvedBase. See that test's own comment
+// for why an ancestor-alias root does not discriminate against persisting a
+// resolved form (every real version of the persistence gate in this
+// package's history has always written its root argument exactly as given,
+// so a root reached through an ancestor alias was never actually at risk of
+// being persisted resolved). A root whose OWN final path element is a
+// symlink exercises the identical property against the fuller fix this
+// round adds (resolving the root for comparison purposes only): this test
+// would fail if the comparison's resolved form were ever written instead of
+// the original.
+func TestStartPersistsLeafAliasRootAsGiven(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+
+	root, worktreesDir := repoRootMatrixShape(t, "leaf-alias")
+	userWorkspace := filepath.Join(worktreesDir, "agent-a")
+	if err := util.CreateWorktree(userWorkspace, "agent-a"); err != nil {
+		t.Fatalf("failed to create worktree: %v", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(root): %v", err)
+	}
+
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+	env := map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"}
+
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), root)
+	if _, err := mgr.Start(ctx, api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: userWorkspace, Env: env,
+	}); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	agentDir := config.GetAgentDir(projectScionDir, "agent-a", false)
+	got := readProvisionedWorktreeRepoRoot(agentDir)
+	if got != root {
+		t.Fatalf("persisted repo root = %q, want %q (the value as given, not its resolved form)", got, root)
+	}
+	if got == resolvedRoot {
+		t.Fatalf("test setup broken: root's as-given and resolved forms are identical (%q)", root)
+	}
+}
+
+// TestValidatedWorktreeRepoRootAcceptsAliasedRootAgainstResolvedWorkspace is
+// R3-Nit1: the workspace-storage-backend re-validation in Start (triggered
+// when a non-local backend replaces effectiveWorkspace with its own mount
+// host path, already fully resolved) calls the exact same shared comparison
+// as every other call site in this file. This exercises that comparison
+// directly for the shape a non-local backend produces: an ancestor-aliased
+// root against an already-resolved workspace. The NFS backend's own
+// end-to-end test (TestStartInvalidatesProvisionedRepoRootWhenNFSBackendReplacesWorkspace)
+// covers the case where the backend's path has no relationship to the prior
+// root at all; this covers the case where it is still the same worktree,
+// just already resolved.
+func TestValidatedWorktreeRepoRootAcceptsAliasedRootAgainstResolvedWorkspace(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	root, worktreesDir := repoRootMatrixShape(t, "ancestor-alias")
+	asGiven := filepath.Join(worktreesDir, "agent-a")
+	if err := util.CreateWorktree(asGiven, "agent-a"); err != nil {
+		t.Fatalf("failed to create worktree: %v", err)
+	}
+	resolvedWorkspace, err := filepath.EvalSymlinks(asGiven)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(asGiven): %v", err)
+	}
+
+	got := validatedWorktreeRepoRoot(root, resolvedWorkspace)
+	if got != root {
+		t.Fatalf("validatedWorktreeRepoRoot(%q, %q) = %q, want %q", root, resolvedWorkspace, got, root)
+	}
+}
+
 // TestStartResumeDoesNotAdoptRepoRootFromAgentInfoFile is a regression test
 // for the storage boundary that keeps the persisted repo root out of
 // container-writable storage: a user --workspace agent on a directory shaped

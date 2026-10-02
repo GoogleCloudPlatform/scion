@@ -1090,13 +1090,8 @@ authDone:
 	// is honored only if it re-validates against that workspace, so it
 	// otherwise falls through to detectRepoRoot and stays "".
 	//
-	// candidateRepoRoot and effectiveWorkspace can each independently arrive
-	// here already resolved or not — one dispatch's stored state and a later
-	// dispatch's freshly recovered value do not always agree on which. Compare
-	// each pair's parent directories resolved, with each one's own final path
-	// element left exactly as given: this way the comparison tolerates either
-	// side reaching this point through a different ancestor spelling, while
-	// still telling two differently-named final elements apart.
+	// validatedWorktreeRepoRoot is the one, shared comparison; see its own
+	// doc comment for how it treats candidateRepoRoot and effectiveWorkspace.
 	//
 	// This first pass validates against the pre-workspace-backend
 	// effectiveWorkspace, only because containerWorkspace (computed below)
@@ -1114,7 +1109,7 @@ authDone:
 		candidateRepoRoot = persistedRepoRoot
 	}
 	preValidationWorkspace := effectiveWorkspace
-	repoRoot := validatedWorktreeRepoRoot(resolveParentDir(candidateRepoRoot), resolveParentDir(effectiveWorkspace))
+	repoRoot := validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
 	if repoRoot == "" {
 		repoRoot = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
 	}
@@ -1809,13 +1804,30 @@ func workspaceSharesProjectRepo(projectDir, workspace string) bool {
 // validatedWorktreeRepoRoot returns candidateRoot unchanged if
 // provision.ValidateWorktreeForBase confirms it is a genuine worktree base
 // for effectiveWorkspace, or "" otherwise (including when either argument is
-// empty). A thin wrapper so Start's repoRoot resolution reads as a single
-// value lookup rather than an error check at each of its two call sites.
+// empty). This is the one, shared comparison every caller in this package
+// uses to decide what counts as a valid (root, workspace) pair — Start's own
+// RunConfig.RepoRoot resolution, the persistence gate, and the
+// workspace-storage-backend re-validation all call this function directly,
+// so the three always agree on the same pair.
+//
+// candidateRoot is compared fully resolved; effectiveWorkspace is compared
+// with its parent directory resolved and its own final path element left
+// exactly as given (see resolveParentDir). This combination tolerates an
+// ancestor directory of either value being reached through a different
+// spelling on different calls — one dispatch's stored state and another
+// dispatch's freshly recovered value do not always agree on which — while
+// still distinguishing two final path elements that are not themselves the
+// same name. The return value is candidateRoot exactly as given, never a
+// resolved form, independent of how the comparison itself was performed.
 func validatedWorktreeRepoRoot(candidateRoot, effectiveWorkspace string) string {
 	if candidateRoot == "" || effectiveWorkspace == "" {
 		return ""
 	}
-	if err := provision.ValidateWorktreeForBase(candidateRoot, effectiveWorkspace); err != nil {
+	resolvedRoot, err := filepath.EvalSymlinks(candidateRoot)
+	if err != nil {
+		return ""
+	}
+	if err := provision.ValidateWorktreeForBase(resolvedRoot, resolveParentDir(effectiveWorkspace)); err != nil {
 		return ""
 	}
 	return candidateRoot

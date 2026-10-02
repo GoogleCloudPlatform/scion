@@ -2383,14 +2383,12 @@ func readProvisionedWorktreeRepoRoot(agentDir string) string {
 //
 // workspace must be passed in its original, as-given form — the same
 // spelling the caller received it in, not a form resolved ahead of this
-// call. validatedWorktreeRepoRoot's comparison is only meaningful when both
-// of its arguments are given in a consistent, as-provided spelling: that is
-// what lets it confirm the pair names the same worktree before resolving
-// anything, rather than comparing two paths that, once resolved, trivially
-// agree with each other regardless of how the pair actually relates.
+// call; validatedWorktreeRepoRoot applies its own resolution internally.
 // run.go's Start must pass the value effectiveWorkspace held before calling
 // runtime.ValidateWorkspaceSource, not the resolved value that call
-// produces.
+// produces — the two calls run.go makes to validatedWorktreeRepoRoot (its
+// own RunConfig.RepoRoot resolution and this persistence gate) only agree
+// with each other when both are given the same pre-resolution spelling.
 //
 // This is the single persistence gate shared by every call site that can be
 // the first to see a fresh ctx signal for a given dispatch:
