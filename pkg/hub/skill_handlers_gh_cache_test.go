@@ -413,8 +413,8 @@ func TestResolveGitHubSkill_ConcurrentMissesCoalesce(t *testing.T) {
 // Fixed two ways, both exercised here: resolveGitHubSkill now refuses to
 // start a new flight once its own ctx is already done (so URI b below starts
 // no flight and reaches GitHub zero times), and refSHAMemo (*ghSHAMemo) is
-// mutex-guarded regardless, as defense in depth against any future call site
-// that might not have that guard. Run with -race.
+// mutex-guarded regardless, so it stays safe even at a future call site that
+// lands on it without that guard. Run with -race.
 func TestResolveGitHubSkill_CancelledRequestStartsNoNewFlights(t *testing.T) {
 	const (
 		owner = "acme"

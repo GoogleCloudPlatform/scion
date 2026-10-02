@@ -431,7 +431,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCapIsolatedAcrossPr
 // TestGitHubResolutionCache_ResolveWithFetch_CancelledLeaderDoesNotFailWaiter
 // is the acceptance test for "a cancelled waiter does not cancel the shared
 // flight", specifically for the case that matters most: the single-flight
-// *leader* itself is cancelled, not an arbitrary later waiter.
+// *leader* itself is cancelled, not some later waiter.
 //
 // It uses flightJoinHook to know, deterministically and without sleeping or
 // polling, that the waiter has actually reached the point of joining the
