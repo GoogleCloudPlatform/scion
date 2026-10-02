@@ -157,10 +157,10 @@ func runSubstrateAgentForProject(t *testing.T, mgr agent.Manager, agentSlug, pro
 // never call DeleteActor on it.
 func TestSubstrateBroker_RecordlessActorNotResolvableAcrossProjects(t *testing.T) {
 	const (
-		atespaceA = "scion-aaaaaaaaaaaa"
-		actorA    = "projA--dev"
-		projBID   = "bbbbbbbbbbbb"
+		actorA  = "projA--dev"
+		projBID = "bbbbbbbbbbbb"
 	)
+	var atespaceA = runtime.SubstrateAtespaceNameForTest("aaaaaaaaaaaa")
 
 	t.Run("LookupContainerID scoped to project B returns nothing", func(t *testing.T) {
 		srv, fc := newTestSubstrateBrokerServer(t)
@@ -222,10 +222,10 @@ func TestSubstrateBroker_RecordlessActorNotResolvableAcrossProjects(t *testing.T
 // covered by the dedicated identity-unknown tests below.
 func TestSubstrateBroker_RecordlessActorNoOpEvenInItsOwnProject(t *testing.T) {
 	const (
-		atespaceA = "scion-aaaaaaaaaaaa"
-		actorA    = "projA--dev"
-		projAID   = "aaaaaaaaaaaa"
+		actorA  = "projA--dev"
+		projAID = "aaaaaaaaaaaa"
 	)
+	var atespaceA = runtime.SubstrateAtespaceNameForTest("aaaaaaaaaaaa")
 
 	t.Run("LookupContainerID scoped to project A also returns nothing", func(t *testing.T) {
 		srv, fc := newTestSubstrateBrokerServer(t)
@@ -295,13 +295,13 @@ func TestSubstrateBroker_RecordlessActorNoOpEvenInItsOwnProject(t *testing.T) {
 // request directed at each project in turn.
 func TestSubstrateBroker_SameSlugDifferentProjects_DeleteScopedToOwnProject(t *testing.T) {
 	const (
-		atespaceA = "scion-aaaaaaaaaaaa"
-		actorA    = "proja--dev"
-		projAID   = "aaaaaaaaaaaa"
-		atespaceB = "scion-bbbbbbbbbbbb"
-		actorB    = "projb--dev"
-		projBID   = "bbbbbbbbbbbb"
+		actorA  = "proja--dev"
+		projAID = "aaaaaaaaaaaa"
+		actorB  = "projb--dev"
+		projBID = "bbbbbbbbbbbb"
 	)
+	var atespaceA = runtime.SubstrateAtespaceNameForTest("aaaaaaaaaaaa")
+	var atespaceB = runtime.SubstrateAtespaceNameForTest("bbbbbbbbbbbb")
 
 	tests := []struct {
 		name              string
@@ -370,11 +370,11 @@ func TestSubstrateBroker_SameSlugDifferentProjects_DeleteScopedToOwnProject(t *t
 // that project's own actor.
 func TestSubstrateBroker_SameSlugDifferentProjects_LookupContainerIDResolvesOwnProject(t *testing.T) {
 	const (
-		projAID      = "aaaaaaaaaaaa"
-		wantAContain = "scion-aaaaaaaaaaaa/proja--dev"
-		projBID      = "bbbbbbbbbbbb"
-		wantBContain = "scion-bbbbbbbbbbbb/projb--dev"
+		projAID = "aaaaaaaaaaaa"
+		projBID = "bbbbbbbbbbbb"
 	)
+	wantAContain := runtime.SubstrateAtespaceNameForTest(projAID) + "/proja--dev"
+	wantBContain := runtime.SubstrateAtespaceNameForTest(projBID) + "/projb--dev"
 
 	srv, _ := newTestSubstrateBrokerServer(t)
 	runSubstrateAgentForProject(t, srv.manager, "dev", "proja", projAID, testProjectScionDir(t, "proja"))
@@ -394,10 +394,10 @@ func TestSubstrateBroker_SameSlugDifferentProjects_LookupContainerIDResolvesOwnP
 // DeleteTarget.
 func TestSubstrateBroker_UniqueSlugDeleteStillSucceeds(t *testing.T) {
 	const (
-		atespaceA = "scion-aaaaaaaaaaaa"
-		actorA    = "proja--dev"
-		projAID   = "aaaaaaaaaaaa"
+		actorA  = "proja--dev"
+		projAID = "aaaaaaaaaaaa"
 	)
+	var atespaceA = runtime.SubstrateAtespaceNameForTest("aaaaaaaaaaaa")
 
 	srv, fc := newTestSubstrateBrokerServer(t)
 	runSubstrateAgentForProject(t, srv.manager, "dev", "proja", projAID, testProjectScionDir(t, "proja"))
@@ -431,11 +431,11 @@ func TestSubstrateBroker_UniqueSlugDeleteStillSucceeds(t *testing.T) {
 // nothing.
 func TestSubstrateBroker_DeleteAbsentSlugInProject_NotFound(t *testing.T) {
 	const (
-		atespaceA = "scion-aaaaaaaaaaaa"
-		actorA    = "proja--dev"
-		projAID   = "aaaaaaaaaaaa"
-		projBID   = "bbbbbbbbbbbb"
+		actorA  = "proja--dev"
+		projAID = "aaaaaaaaaaaa"
+		projBID = "bbbbbbbbbbbb"
 	)
+	var atespaceA = runtime.SubstrateAtespaceNameForTest("aaaaaaaaaaaa")
 
 	srv, fc := newTestSubstrateBrokerServer(t)
 	runSubstrateAgentForProject(t, srv.manager, "dev", "proja", projAID, testProjectScionDir(t, "proja"))
@@ -480,10 +480,10 @@ func decodeBrokerAPIError(t *testing.T, w *httptest.ResponseRecorder) string {
 // never be called.
 func TestSubstrateBroker_DeleteAbsentSlugInProject_RecordlessOwnAtespace_IdentityUnknown(t *testing.T) {
 	const (
-		atespaceB = "scion-bbbbbbbbbbbb"
-		actorB    = "projb--dev"
-		projBID   = "bbbbbbbbbbbb"
+		actorB  = "projb--dev"
+		projBID = "bbbbbbbbbbbb"
 	)
+	var atespaceB = runtime.SubstrateAtespaceNameForTest("bbbbbbbbbbbb")
 
 	srv, fc := newTestSubstrateBrokerServer(t)
 	// projB's actor is injected directly (never through this runtime's own
@@ -521,10 +521,10 @@ func TestSubstrateBroker_DeleteAbsentSlugInProject_RecordlessOwnAtespace_Identit
 // holds a record-less actor, and must never call Stop/DeleteActor.
 func TestSubstrateBroker_StopAbsentSlugInProject_RecordlessOwnAtespace_IdentityUnknown(t *testing.T) {
 	const (
-		atespaceB = "scion-bbbbbbbbbbbb"
-		actorB    = "projb--dev"
-		projBID   = "bbbbbbbbbbbb"
+		actorB  = "projb--dev"
+		projBID = "bbbbbbbbbbbb"
 	)
+	var atespaceB = runtime.SubstrateAtespaceNameForTest("bbbbbbbbbbbb")
 
 	srv, fc := newTestSubstrateBrokerServer(t)
 	fc.putActor(atespaceB, actorB, "uid-projb-recordless")
@@ -590,11 +590,11 @@ func TestSubstrateBroker_DeleteProbeError_ExplicitFailureNot404(t *testing.T) {
 // record-less actor could be the very thing meant.
 func TestSubstrateBroker_MixedAtespace_RecordedDeletesRecordlessTriggersIdentityUnknown(t *testing.T) {
 	const (
-		atespaceB    = "scion-bbbbbbbbbbbb"
 		recordedName = "projb--dev"
 		ghostName    = "projb--ghost"
 		projBID      = "bbbbbbbbbbbb"
 	)
+	var atespaceB = runtime.SubstrateAtespaceNameForTest("bbbbbbbbbbbb")
 
 	t.Run("deleting the recorded agent succeeds and touches only it", func(t *testing.T) {
 		srv, fc := newTestSubstrateBrokerServer(t)
@@ -652,10 +652,10 @@ func TestSubstrateBroker_MixedAtespace_RecordedDeletesRecordlessTriggersIdentity
 // invariant forbids.
 func TestSubstrateBroker_LogsForRecordlessAgent_ExplicitNotFound(t *testing.T) {
 	const (
-		atespaceB = "scion-bbbbbbbbbbbb"
-		actorB    = "projb--dev"
-		projBID   = "bbbbbbbbbbbb"
+		actorB  = "projb--dev"
+		projBID = "bbbbbbbbbbbb"
 	)
+	var atespaceB = runtime.SubstrateAtespaceNameForTest("bbbbbbbbbbbb")
 
 	srv, fc := newTestSubstrateBrokerServer(t)
 	fc.putActor(atespaceB, actorB, "uid-projb-recordless")
@@ -675,10 +675,10 @@ func TestSubstrateBroker_LogsForRecordlessAgent_ExplicitNotFound(t *testing.T) {
 // the delete proceeds and succeeds normally.
 func TestSubstrateBroker_ScopedDeleteMatchesOwnProject(t *testing.T) {
 	const (
-		atespaceB = "scion-bbbbbbbbbbbb"
-		actorB    = "projb--dev"
-		projBID   = "bbbbbbbbbbbb"
+		actorB  = "projb--dev"
+		projBID = "bbbbbbbbbbbb"
 	)
+	var atespaceB = runtime.SubstrateAtespaceNameForTest("bbbbbbbbbbbb")
 
 	srv, fc := newTestSubstrateBrokerServer(t)
 	runSubstrateAgentForProject(t, srv.manager, "dev", "projb", projBID, testProjectScionDir(t, "projb"))
@@ -781,11 +781,11 @@ func TestSubstrateBroker_NoMatchDelete_NeverMarksWrongProjectAgentInfo(t *testin
 	}
 
 	const (
-		atespaceA = "scion-aaaaaaaaaaaa"
-		actorA    = "proja--dev"
-		projAID   = "aaaaaaaaaaaa"
-		projBID   = "bbbbbbbbbbbb"
+		actorA  = "proja--dev"
+		projAID = "aaaaaaaaaaaa"
+		projBID = "bbbbbbbbbbbb"
 	)
+	var atespaceA = runtime.SubstrateAtespaceNameForTest("aaaaaaaaaaaa")
 	srv, fc := newTestSubstrateBrokerServer(t)
 	runSubstrateAgentForProject(t, srv.manager, "dev", "proja", projAID, testProjectScionDir(t, "proja"))
 
@@ -890,13 +890,13 @@ func TestSubstrateBroker_NoMatchDelete_LogsAtInfo(t *testing.T) {
 // iteration order to catch a project-blind, pick-first stop regression.
 func TestSubstrateBroker_SameSlugDifferentProjects_StopScopedToOwnProject(t *testing.T) {
 	const (
-		atespaceA = "scion-aaaaaaaaaaaa"
-		actorA    = "proja--dev"
-		projAID   = "aaaaaaaaaaaa"
-		atespaceB = "scion-bbbbbbbbbbbb"
-		actorB    = "projb--dev"
-		projBID   = "bbbbbbbbbbbb"
+		actorA  = "proja--dev"
+		projAID = "aaaaaaaaaaaa"
+		actorB  = "projb--dev"
+		projBID = "bbbbbbbbbbbb"
 	)
+	var atespaceA = runtime.SubstrateAtespaceNameForTest("aaaaaaaaaaaa")
+	var atespaceB = runtime.SubstrateAtespaceNameForTest("bbbbbbbbbbbb")
 
 	tests := []struct {
 		name              string
@@ -964,11 +964,11 @@ func TestSubstrateBroker_SameSlugDifferentProjects_StopScopedToOwnProject(t *tes
 // Manager.Stop.
 func TestSubstrateBroker_StopAbsentSlugInProject_TouchesNothing(t *testing.T) {
 	const (
-		atespaceA = "scion-aaaaaaaaaaaa"
-		actorA    = "proja--dev"
-		projAID   = "aaaaaaaaaaaa"
-		projBID   = "bbbbbbbbbbbb"
+		actorA  = "proja--dev"
+		projAID = "aaaaaaaaaaaa"
+		projBID = "bbbbbbbbbbbb"
 	)
+	var atespaceA = runtime.SubstrateAtespaceNameForTest("aaaaaaaaaaaa")
 	srv, fc := newTestSubstrateBrokerServer(t)
 	runSubstrateAgentForProject(t, srv.manager, "dev", "proja", projAID, testProjectScionDir(t, "proja"))
 

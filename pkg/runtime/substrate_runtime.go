@@ -1211,6 +1211,18 @@ func substrateAtespaceName(projectID string) string {
 	return "scion-" + hex.EncodeToString(sum[:])[:substrateAtespaceNameHashLen]
 }
 
+// SubstrateAtespaceNameForTest exposes substrateAtespaceName to other
+// packages' tests (e.g. pkg/runtimebroker's substrate restart/lookup
+// fixtures) that need to compute the exact atespace name a given project ID
+// hashes to, rather than hardcoding a value that would silently drift from
+// substrateAtespaceName's own algorithm. A pure function of its input with
+// no side effects, so — unlike WipeSubstrateAgentStateForTest or
+// SetExecResolveForTest — this carries no production hazard if ever called
+// outside a test; exported directly rather than behind a call-site guard.
+func SubstrateAtespaceNameForTest(projectID string) string {
+	return substrateAtespaceName(projectID)
+}
+
 // splitSubstrateID splits a runtime ID of the form "<atespace>/<actor>",
 // the format Run returns (substrate-runtime.md §4).
 func splitSubstrateID(id string) (atespace, actorName string, err error) {

@@ -40,10 +40,11 @@ import (
 // path, the broker-level idempotence refinement against an atespace holding
 // only recorded actors, and the delete-path project-blind guard.
 
-const (
-	gapAtespaceB = "scion-bbbbbbbbbbbb"
-	gapProjBID   = "bbbbbbbbbbbb"
-)
+const gapProjBID = "bbbbbbbbbbbb"
+
+// gapAtespaceB is computed, not hardcoded, so it never drifts from
+// substrateAtespaceName's own hash algorithm (pkg/runtime/substrate_runtime.go).
+var gapAtespaceB = runtime.SubstrateAtespaceNameForTest(gapProjBID)
 
 // simulateBrokerRestart wipes the substrate runtime's in-memory agent
 // records AND control tokens mid-test, leaving the fake ateapi's actors in
@@ -223,7 +224,7 @@ func TestSubstrateBroker_StopLookupErrorNoRecordless_ExplicitErrorNot202(t *test
 // reaches the HTTP response body. The body must stay the fixed "Failed to
 // stop agent" message; the raw error is logged server-side only.
 func TestSubstrateBroker_StopLookupError_BodyNeverNamesRuntimeScope(t *testing.T) {
-	const leakyDetail = "rpc error: atespace=" + gapAtespaceB + " backend=10.1.2.3:9443 unreachable"
+	leakyDetail := "rpc error: atespace=" + gapAtespaceB + " backend=10.1.2.3:9443 unreachable"
 	srv, fc := newTestSubstrateBrokerServer(t)
 	runSubstrateAgentForProject(t, srv.manager, "dev", "projb", gapProjBID, testProjectScionDir(t, "projb"))
 	fc.mu.Lock()
