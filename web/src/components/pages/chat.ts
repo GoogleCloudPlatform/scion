@@ -63,6 +63,29 @@ import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-te
 import '../shared/chat/chat-thread.js';
 import '../shared/chat/chat-file-preview.js';
 import type { PreviewTarget } from '../shared/chat/chat-file-preview.js';
+import { touchMenuItemStyles } from '../shared/touch-styles.js';
+
+/**
+ * The comfy density token values. Defined once and interpolated into both
+ * the comfy-density selector and the mobile override (which forces comfy
+ * regardless of the density setting), so the two can never drift apart.
+ */
+const comfyDensityTokens = css`
+  --chat-fs-2xs: 0.6875rem;
+  --chat-fs-xs: 0.75rem;
+  --chat-fs-sm: 0.875rem;
+  --chat-fs-base: 0.9375rem;
+  --chat-fs-md: 1rem;
+  --chat-fs-lg: 1.0625rem;
+  --chat-fs-xl: 1.125rem;
+  --chat-fs-2xl: 1.25rem;
+  --chat-fs-3xl: 1.375rem;
+  --chat-fs-4xl: 1.5rem;
+  --chat-fs-5xl: 1.875rem;
+  --chat-fs-6xl: 2.5rem;
+  --chat-fs-7xl: 3.125rem;
+  --chat-lh-tight: 1.5rem;
+`;
 
 // Lazy-load the space rail only when v2 is active
 const loadSpaceRail = () => import('../shared/chat/chat-space-rail.js');
@@ -518,6 +541,8 @@ export class ScionPageChat extends LitElement {
   private _onMobileLayoutChange = this._handleMobileLayoutChange.bind(this);
 
   static override styles = css`
+    ${touchMenuItemStyles}
+
     :host {
       display: flex;
       height: 100%;
@@ -541,20 +566,18 @@ export class ScionPageChat extends LitElement {
     }
 
     :host([data-density='comfy']) {
-      --chat-fs-2xs: 0.6875rem;
-      --chat-fs-xs: 0.75rem;
-      --chat-fs-sm: 0.875rem;
-      --chat-fs-base: 0.9375rem;
-      --chat-fs-md: 1rem;
-      --chat-fs-lg: 1.0625rem;
-      --chat-fs-xl: 1.125rem;
-      --chat-fs-2xl: 1.25rem;
-      --chat-fs-3xl: 1.375rem;
-      --chat-fs-4xl: 1.5rem;
-      --chat-fs-5xl: 1.875rem;
-      --chat-fs-6xl: 2.5rem;
-      --chat-fs-7xl: 3.125rem;
-      --chat-lh-tight: 1.5rem;
+      ${comfyDensityTokens}
+    }
+
+    /* Mobile always gets the comfy token set, regardless of the density
+       setting, and the toggle below is hidden there. Shares its values
+       with the comfy block above via comfyDensityTokens, so it is
+       harmless that the comfy attribute selector otherwise outranks this
+       plain :host rule. */
+    @media (max-width: 768px) {
+      :host {
+        ${comfyDensityTokens}
+      }
     }
 
     /* ---- Shared layout ---- */
@@ -723,6 +746,40 @@ export class ScionPageChat extends LitElement {
       .mobile-back,
       .mobile-members {
         display: inline-flex;
+      }
+
+      /* Full 44px visible box: the members header has nothing else
+         competing for width, unlike the thread header's back/members
+         buttons, which share a crowded row and only get the ::before
+         hit-area treatment below. */
+      .v2-members-header .mobile-back::part(base) {
+        width: 44px;
+        height: 44px;
+      }
+
+      /* The density toggle has no effect on mobile: tokens are forced to
+         comfy above regardless of the density setting. */
+      .density-toggle {
+        display: none;
+      }
+
+      /* Thread-header icon buttons: the hit area grows via an invisible,
+         larger ::before box (still part of the button, so it still
+         receives the click), without growing the visible button itself —
+         at 320px wide, several of these sit in one row (search, members,
+         export, and more on a DM), and growing the visible boxes pushes
+         that row past the viewport. The horizontal inset is kept smaller
+         than the vertical one so neighbouring buttons' hit areas don't
+         overlap — the row packs them closer together than their own
+         height. */
+      .v2-thread-header sl-icon-button::part(base) {
+        position: relative;
+      }
+
+      .v2-thread-header sl-icon-button::part(base)::before {
+        content: '';
+        position: absolute;
+        inset: -6px -2px;
       }
 
       .desktop-members {
@@ -1169,6 +1226,26 @@ export class ScionPageChat extends LitElement {
     }
   }
 
+  /**
+   * Is a non-DM thread with this project and conversation key already the
+   * open conversation? `parseV2Route` calls this before rebuilding
+   * `v2Conversation` and resetting `mobilePanel` to 'center' for a thread
+   * route, because it runs on every re-parse of the current URL, not only
+   * on a real navigation — a swipe to a different mobile panel never
+   * changes the URL, so without this guard any later re-parse (the rail's
+   * `rail-loaded` event, dispatched again after every SSE-triggered
+   * reload) silently snaps the view back to the conversation the URL still
+   * names, overriding a manual swipe away from it.
+   */
+  private isAlreadyViewingThread(projectId: string, threadId: string): boolean {
+    return (
+      !!this.v2Conversation &&
+      !this.v2Conversation.isDM &&
+      this.v2Conversation.projectId === projectId &&
+      this.v2Conversation.conversationKey === threadId
+    );
+  }
+
   private parseV2Route(): void {
     // Always use the browser URL as the source of truth. pushState
     // navigations (handleThreadSelect, handleMemberClick) update the
@@ -1187,6 +1264,8 @@ export class ScionPageChat extends LitElement {
         navigateTo(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(topicId)}`);
         return;
       }
+      // See isAlreadyViewingThread's doc comment for why this guard matters.
+      if (this.isAlreadyViewingThread(projectId, topicId)) return;
       const known = this.knownThreadMeta(topicId);
       this.v2Conversation = {
         conversationKey: topicId,
@@ -1313,6 +1392,8 @@ export class ScionPageChat extends LitElement {
       // Resolve slug → projectId (may need async API call on cold load)
       const projectId = this._slugToProjectId.get(segment1);
       if (projectId) {
+        // See isAlreadyViewingThread's doc comment for why this guard matters.
+        if (this.isAlreadyViewingThread(projectId, threadId)) return;
         const known = this.knownThreadMeta(threadId);
         this.v2Conversation = {
           conversationKey: threadId,
@@ -4301,7 +4382,10 @@ export class ScionPageChat extends LitElement {
           ${!conv.isDM && conv.defaultAgent
             ? this.renderAgentToolbarButtons(this.resolveDefaultAgentId(conv.defaultAgent))
             : nothing}
-          <sl-tooltip content=${this.density === 'dense' ? 'Comfortable view' : 'Dense view'}>
+          <sl-tooltip
+            class="density-toggle"
+            content=${this.density === 'dense' ? 'Comfortable view' : 'Dense view'}
+          >
             <sl-icon-button
               name=${this.density === 'dense' ? 'arrows-angle-expand' : 'arrows-angle-contract'}
               label="Toggle density"

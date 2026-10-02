@@ -37,6 +37,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
 import { showConfirm } from '../confirm-dialog.js';
 import { showToast } from '../../../utils/toast.js';
+import { touchMenuItemStyles } from '../touch-styles.js';
 import './chat-avatar.js';
 
 /** A space (project) in the rail. */
@@ -365,6 +366,8 @@ export class ScionChatSpaceRail extends LitElement {
   private _createThreadGroupId: string | null = null;
 
   static override styles = css`
+    ${touchMenuItemStyles}
+
     :host {
       display: flex;
       flex-direction: column;
@@ -819,6 +822,74 @@ export class ScionChatSpaceRail extends LitElement {
     .emoji-grid button:hover {
       background: var(--scion-bg-subtle, #f1f5f9);
       border-color: var(--scion-border, #e2e8f0);
+    }
+
+    /* Stop iOS/Android focus-zoom on the rail's Shoelace inputs, whose
+       local ::part(base) font-size overrides bypass the app-wide
+       --sl-input-font-size-* variable, independent of layout density (an
+       iPad is coarse-pointer but wider than the mobile breakpoint, so it
+       still needs this). */
+    @media (pointer: coarse) {
+      .group-name-input sl-input::part(base),
+      .create-thread sl-input::part(base),
+      .rename-input::part(base) {
+        font-size: max(16px, var(--chat-fs-md));
+      }
+    }
+
+    @media (max-width: 768px) {
+      /* Beyond comfy: real-device feedback asked for rail text bigger than
+         the comfy token set gives, not just comfy-forced-on-mobile. */
+      .rail-header {
+        font-size: 18px;
+      }
+
+      .thread-item {
+        font-size: 17px;
+        min-height: 48px;
+      }
+
+      .thread-item .unread-dot,
+      .thread-item .mention-dot {
+        width: 8px;
+        height: 8px;
+      }
+
+      .space-header {
+        font-size: 14px;
+        min-height: 44px;
+      }
+
+      .space-header .unread-badge,
+      .space-header .mention-badge {
+        font-size: 12px;
+        min-width: 1.25rem;
+        padding: 0.125rem 0.375rem;
+      }
+
+      /* A real 44px-tall button, not a ::before-expanded hit area: the
+         rounded segmented border on .filter-toggle needs overflow: hidden,
+         which clips any pseudo-element that tries to extend past the
+         container's own edge — an invisible hit area here would never
+         actually be reachable. */
+      .filter-toggle button {
+        font-size: 15px;
+        min-height: 44px;
+      }
+
+      .sort-btn::part(base) {
+        width: 44px;
+        height: 44px;
+      }
+
+      .space-actions sl-icon-button::part(base) {
+        width: 44px;
+        height: 44px;
+      }
+
+      .space-actions sl-menu-item::part(base) {
+        font-size: 16px;
+      }
     }
   `;
 
