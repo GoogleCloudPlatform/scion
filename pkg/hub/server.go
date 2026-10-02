@@ -4699,9 +4699,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 
 	// Pause schedules whose cron expression carries an unsupported zone
 	// prefix before the evaluator's first tick, so it never runs them.
-	s.pauseZonePrefixedSchedules(ctx)
-
-	s.scheduler.Start(ctx)
+	s.startScheduler(ctx)
 
 	// Start the DB connection-pool stats sampler (P3-6 -> P0-5 gauges). It is a
 	// no-op unless an enabled recorder was wired via SetDBMetrics and the store
