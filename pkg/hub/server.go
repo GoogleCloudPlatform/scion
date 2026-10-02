@@ -5840,9 +5840,13 @@ func isWebSocketUpgrade(r *http.Request) bool {
 		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
 }
 
-// githubResolutionCacheEvictionHandler returns a recurring handler function that
-// purges expired GitHub skill resolution cache entries. This prevents the cache
-// table from growing unbounded and keeps queries fast.
+// githubResolutionCacheEvictionHandler returns a recurring handler function
+// that purges GitHub skill resolution cache entries once they are too old to
+// ever be served stale again (see GitHubResolutionStore.PurgeExpired and
+// staleCutoff) — not merely once their own TTL has passed, so a branch-ref
+// row survives long enough for resolveGitHubSkill's stale-serve path to still
+// use it. This prevents the cache table from growing unbounded and keeps
+// queries fast.
 func (s *Server) githubResolutionCacheEvictionHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)

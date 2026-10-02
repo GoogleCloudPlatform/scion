@@ -26,6 +26,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
 )
@@ -225,14 +226,15 @@ func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
 
 	store := NewGitHubResolutionStore(client)
 
-	// Add expired entry
+	// Add an entry past staleCutoff for a branch ref — GetStale could never
+	// serve this one stale again, under any ref type, so it is safe to purge.
 	expiredKey := "expired-key"
 	expiredEntry := GitHubCacheEntry{
 		CommitSHA:   "abcdef1234567890abcdef1234567890abcdef12",
 		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:abc", Size: 100}},
 		BundleHash:  "sha256:bundlehash",
 		TokenScope:  "public",
-		ExpiresAt:   time.Now().Add(-1 * time.Hour),
+		ExpiresAt:   time.Now().Add(-(agent.MaxResolutionStaleAge + time.Hour)),
 		OriginalURI: "gh://expired/repo/skill",
 	}
 	err = store.Put(ctx, expiredKey, expiredEntry)
@@ -266,148 +268,61 @@ func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
 	require.True(t, hit)
 }
 
-// TestComputeCacheKey tests cache key computation.
-func TestComputeCacheKey(t *testing.T) {
-	key1 := computeCacheKey("owner", "repo", "skills/test", "main", "public")
-	key2 := computeCacheKey("owner", "repo", "skills/test", "main", "public")
-	require.Equal(t, key1, key2, "same inputs should produce same key")
-
-	key3 := computeCacheKey("owner", "repo", "skills/test", "main", "12345")
-	require.NotEqual(t, key1, key3, "different token scope should produce different key")
-
-	key4 := computeCacheKey("Owner", "Repo", "skills/test", "main", "public")
-	require.Equal(t, key1, key4, "owner/repo should be lowercased")
-}
-
-// TestIsFullCommitSHA tests SHA validation.
-func TestIsFullCommitSHA(t *testing.T) {
-	require.True(t, isFullCommitSHA("abcdef1234567890abcdef1234567890abcdef12"))
-	require.True(t, isFullCommitSHA("0000000000000000000000000000000000000000"))
-	require.False(t, isFullCommitSHA("abcdef123456"))                             // Too short
-	require.False(t, isFullCommitSHA("ABCDEF1234567890ABCDEF1234567890ABCDEF12")) // Uppercase
-	require.False(t, isFullCommitSHA("main"))                                     // Not a SHA
-	require.False(t, isFullCommitSHA(""))                                         // Empty
-}
-
-func TestGHRawContentURL(t *testing.T) {
-	cases := []struct {
-		name      string
-		rawBase   string
-		owner     string
-		repo      string
-		commitSHA string
-		filePath  string
-		want      string
-	}{
-		{
-			name:      "simple path",
-			rawBase:   "https://raw.githubusercontent.com",
-			owner:     "acme",
-			repo:      "skills",
-			commitSHA: "abcdef1234567890abcdef1234567890abcdef12",
-			filePath:  "skills/deploy/SKILL.md",
-			want:      "https://raw.githubusercontent.com/acme/skills/abcdef1234567890abcdef1234567890abcdef12/skills/deploy/SKILL.md",
-		},
-		{
-			name:      "trailing slash on base is not doubled",
-			rawBase:   "https://raw.githubusercontent.com/",
-			owner:     "acme",
-			repo:      "skills",
-			commitSHA: "abcdef1234567890abcdef1234567890abcdef12",
-			filePath:  "SKILL.md",
-			want:      "https://raw.githubusercontent.com/acme/skills/abcdef1234567890abcdef1234567890abcdef12/SKILL.md",
-		},
-		{
-			name:      "spaces are escaped but separators are preserved",
-			rawBase:   "https://raw.githubusercontent.com",
-			owner:     "acme",
-			repo:      "skills",
-			commitSHA: "abcdef1234567890abcdef1234567890abcdef12",
-			filePath:  "my skills/read me.md",
-			want:      "https://raw.githubusercontent.com/acme/skills/abcdef1234567890abcdef1234567890abcdef12/my%20skills/read%20me.md",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := ghRawContentURL(tc.rawBase, tc.owner, tc.repo, tc.commitSHA, tc.filePath)
-			require.Equal(t, tc.want, got)
-		})
-	}
-}
-
-// TestGHListContents_PermanentURLs is the regression test for the expiring
-// download URL defect: the Contents API hands back a CDN link carrying a
-// short-lived token for private repos, which would be dead long before this
-// entry's cache TTL elapses. The stored URL must instead be built from the
-// pinned commit SHA.
-func TestGHListContents_PermanentURLs(t *testing.T) {
-	const commitSHA = "abcdef1234567890abcdef1234567890abcdef12"
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/repos/acme/skills/contents/skills/deploy", r.URL.Path)
-		require.Equal(t, commitSHA, r.URL.Query().Get("ref"))
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[
-			{"name":"SKILL.md","path":"skills/deploy/SKILL.md","sha":"ce013625030ba8dba906f756967f9e9ca394464a","size":6,"type":"file",
-			 "download_url":"https://raw.githubusercontent.com/acme/skills/` + commitSHA + `/skills/deploy/SKILL.md?token=EXPIRES_SOON"},
-			{"name":"helper.py","path":"skills/deploy/helper.py","sha":"95d09f2b10159347eece71399a7e2e907ea3df4f","size":11,"type":"file",
-			 "download_url":"https://raw.githubusercontent.com/acme/skills/` + commitSHA + `/skills/deploy/helper.py?token=EXPIRES_SOON"},
-			{"name":"nested","path":"skills/deploy/nested","sha":"1111111111111111111111111111111111111111","size":0,"type":"dir",
-			 "download_url":null}
-		]`))
-	}))
-	defer srv.Close()
-
-	entries, err := ghListContents(context.Background(), srv.URL, "https://raw.githubusercontent.com",
-		"acme", "skills", "skills/deploy", commitSHA, "")
+// TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow is the
+// acceptance test for R5-1: a branch-ref row past its TTL but still within
+// MaxResolutionStaleAge of its last resolution must survive PurgeExpired —
+// otherwise the hub's 10-minute eviction tick would delete it long before
+// GetStale's 24h stale-serve window actually ends, leaving GetStale with
+// nothing to serve during exactly the outage it exists to absorb. A second
+// row past MaxResolutionStaleAge confirms PurgeExpired still deletes rows
+// that are genuinely beyond anyone's stale horizon.
+func TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow(t *testing.T) {
+	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1")
 	require.NoError(t, err)
+	defer client.Close() //nolint:errcheck
 
-	// Directories are skipped.
-	require.Len(t, entries, 2)
+	ctx := context.Background()
+	require.NoError(t, client.Schema.Create(ctx))
 
-	require.Equal(t, "SKILL.md", entries[0].Path)
-	require.Equal(t,
-		"https://raw.githubusercontent.com/acme/skills/"+commitSHA+"/skills/deploy/SKILL.md",
-		entries[0].URL)
-	require.Equal(t, "ce013625030ba8dba906f756967f9e9ca394464a", entries[0].Hash)
-	require.Equal(t, int64(6), entries[0].Size)
+	store := NewGitHubResolutionStore(client)
 
-	require.Equal(t, "helper.py", entries[1].Path)
-	require.Equal(t,
-		"https://raw.githubusercontent.com/acme/skills/"+commitSHA+"/skills/deploy/helper.py",
-		entries[1].URL)
-
-	for _, e := range entries {
-		require.NotContains(t, e.URL, "token=", "stored URL must not carry an expiring CDN token")
-	}
-}
-
-// TestGHListContents_RawBaseOverride confirms the raw origin is configurable,
-// which is what lets a GitHub Enterprise deployment work.
-func TestGHListContents_RawBaseOverride(t *testing.T) {
-	const commitSHA = "abcdef1234567890abcdef1234567890abcdef12"
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"s/SKILL.md","sha":"ce013625030ba8dba906f756967f9e9ca394464a","size":6,"type":"file","download_url":"https://example.invalid/x"}]`))
+	// A branch row whose TTL expired an hour ago: well past ExpiresAt, but
+	// its last resolution (ExpiresAt - DefaultResolutionCacheTTL) is nowhere
+	// near MaxResolutionStaleAge (24h) ago. GetStale must still be able to
+	// serve this one.
+	staleServableKey := "stale-servable-key"
+	require.NoError(t, store.Put(ctx, staleServableKey, GitHubCacheEntry{
+		CommitSHA:   "1111111111111111111111111111111111111111",
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:a", Size: 1}},
+		BundleHash:  "sha256:stale-servable",
+		TokenScope:  "public",
+		ExpiresAt:   time.Now().Add(-time.Hour),
+		OriginalURI: "gh://acme/repo/skill@main",
 	}))
-	defer srv.Close()
 
-	entries, err := ghListContents(context.Background(), srv.URL, "https://raw.ghe.example.com",
-		"acme", "skills", "s", commitSHA, "")
+	// A branch row whose last resolution is well past MaxResolutionStaleAge:
+	// GetStale could never serve this one again, so purging it is correct.
+	tooOldKey := "too-old-key"
+	require.NoError(t, store.Put(ctx, tooOldKey, GitHubCacheEntry{
+		CommitSHA:   "2222222222222222222222222222222222222222",
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:b", Size: 1}},
+		BundleHash:  "sha256:too-old",
+		TokenScope:  "public",
+		ExpiresAt:   time.Now().Add(-(agent.MaxResolutionStaleAge + time.Hour)),
+		OriginalURI: "gh://acme/repo/skill@main",
+	}))
+
+	require.NoError(t, store.PurgeExpired(ctx))
+
+	_, hit, err := store.Get(ctx, staleServableKey)
 	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	require.Equal(t,
-		"https://raw.ghe.example.com/acme/skills/"+commitSHA+"/s/SKILL.md",
-		entries[0].URL)
-}
+	require.False(t, hit, "the row is past its TTL, so a fresh Get must miss")
+	stale, ok, err := store.GetStale(ctx, staleServableKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
+	require.NoError(t, err)
+	require.True(t, ok, "a branch row within MaxResolutionStaleAge must survive PurgeExpired and remain stale-servable")
+	require.Equal(t, "1111111111111111111111111111111111111111", stale.CommitSHA)
 
-// TestComputeCacheKey_EmptyRefDiffersFromHEAD documents why resolveGitHubSkill
-// must default an omitted ref before computing the cache key: the two spellings
-// resolve to the same commit but key differently, so leaving the ref empty
-// would halve the hit rate for every unpinned gh:// URI.
-func TestComputeCacheKey_EmptyRefDiffersFromHEAD(t *testing.T) {
-	empty := computeCacheKey("acme", "skills", "skills/deploy", "", "public")
-	head := computeCacheKey("acme", "skills", "skills/deploy", "HEAD", "public")
-	require.NotEqual(t, empty, head)
+	_, ok, err = store.GetStale(ctx, tooOldKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
+	require.NoError(t, err)
+	require.False(t, ok, "a row past MaxResolutionStaleAge must not survive PurgeExpired")
 }

@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
@@ -108,8 +109,7 @@ func (s *GitHubResolutionStore) GetStale(ctx context.Context, cacheKey string, l
 		return nil, false, err
 	}
 
-	lastResolvedAt := row.ExpiresAt.Add(-lastTTL)
-	if time.Since(lastResolvedAt) >= maxStaleAge {
+	if !row.ExpiresAt.After(staleCutoff(time.Now(), lastTTL, maxStaleAge)) {
 		return nil, false, nil
 	}
 
@@ -148,11 +148,33 @@ func (s *GitHubResolutionStore) Put(ctx context.Context, cacheKey string, entry 
 		Exec(ctx)
 }
 
-// PurgeExpired deletes all cache entries where expires_at < now.
+// staleCutoff returns the ExpiresAt threshold at or below which a row can no
+// longer be served stale by GetStale(ctx, cacheKey, lastTTL, maxStaleAge): a
+// row's last successful resolution time is ExpiresAt - lastTTL (see
+// GetStale's own comment), and GetStale keeps serving it stale while now is
+// before lastResolvedAt + maxStaleAge — equivalently, while ExpiresAt is
+// after this cutoff. GetStale and PurgeExpired both call this so the two
+// never disagree about where that line is.
+func staleCutoff(now time.Time, lastTTL, maxStaleAge time.Duration) time.Time {
+	return now.Add(lastTTL - maxStaleAge)
+}
+
+// PurgeExpired deletes cache entries that can no longer be served stale even
+// under a branch ref's own (longer) retention — agent.DefaultResolutionCacheTTL
+// and agent.MaxResolutionStaleAge, the only values resolveGitHubSkill ever
+// passes to GetStale — using the same staleCutoff GetStale itself checks
+// against, so a row GetStale could still have served is never purged out from
+// under it. The schema has no column recording whether a row is a branch or a
+// commit-SHA ref, so this one cutoff is applied to every row: a SHA-ref row
+// (whose own TTL is unrelated to staleness, since GetStale is never consulted
+// for one) may then survive somewhat longer than its own TTL before purge,
+// which is harmless — its content is immutable, so an unnecessarily long wait
+// before deletion costs only a little extra storage, never a wrong answer.
 func (s *GitHubResolutionStore) PurgeExpired(ctx context.Context) error {
+	cutoff := staleCutoff(time.Now(), agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
 	_, err := s.client.GitHubResolutionCache.
 		Delete().
-		Where(githubresolutioncache.ExpiresAtLT(time.Now())).
+		Where(githubresolutioncache.ExpiresAtLTE(cutoff)).
 		Exec(ctx)
 	return err
 }
