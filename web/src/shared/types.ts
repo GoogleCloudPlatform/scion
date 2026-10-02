@@ -24,6 +24,20 @@
 export type UserRole = 'admin' | 'member' | 'viewer';
 
 /**
+ * Personal, non-admin-controlled user preferences (tz-refactor task 11,
+ * design.md §3 A "Storage and API"). Present only on the authenticated
+ * caller's own user object — `GET /auth/me` / `GET /api/v1/auth/me` — never
+ * on a listing or another user's record.
+ */
+export interface UserPreferences {
+  /**
+   * IANA display-timezone name, or `''`/absent for Auto (follow the
+   * browser's zone). See `web/src/utils/time.ts`'s `effectiveTimeZone`.
+   */
+  timezone?: string | undefined;
+}
+
+/**
  * User information
  */
 export interface User {
@@ -32,6 +46,7 @@ export interface User {
   name: string;
   avatar?: string | undefined;
   role?: UserRole | undefined;
+  preferences?: UserPreferences | undefined;
 }
 
 /**

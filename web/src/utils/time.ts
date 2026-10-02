@@ -15,36 +15,41 @@
  */
 
 /**
- * Format a date string as a relative time description (e.g. "3 hours ago").
+ * Timezone-aware date/time formatting and parsing for the web client
+ * (tz-refactor task 11, design.md §2.4 "Edge formatting and parsing").
  *
- * Uses `Intl.RelativeTimeFormat` for locale-aware output.
- * Returns the original string on parse failure.
+ * This is the **only** module allowed to call `Intl.DateTimeFormat`,
+ * `Intl.RelativeTimeFormat`, `toLocaleString`/`toLocaleDateString`/
+ * `toLocaleTimeString` or `hour12`: a vitest source-scan test
+ * (`format-scan.test.ts`) enforces this across the rest of `web/src`
+ * (`Intl.supportedValuesOf` and `Intl.NumberFormat` are not banned there,
+ * but every zone check, zone list and clock/relative-time formatter in the
+ * web app should still import from here instead of constructing its own).
+ *
+ * **Clock and locale [decided, D4].** The locale is one fixed constant,
+ * `FORMAT_LOCALE`, and every clock time uses `hourCycle: 'h23'` — never
+ * `hour12: false`, which some engines map to `h24` for `en-US` (midnight
+ * would render as `24:00` instead of `00:00`). Locale and 12/24-hour
+ * *preference* are deferred (ptone/scion#1056, narrowed by this issue, never
+ * closed by it).
  */
-export function formatRelativeTime(dateString: string): string {
-  try {
-    const date = new Date(dateString);
-    if (isNaN(date.getTime())) return dateString;
-    const diffMs = Date.now() - date.getTime();
-    const diffSeconds = Math.round(diffMs / 1000);
-    const diffMinutes = Math.round(diffMs / (1000 * 60));
-    const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-    const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
 
-    const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
+// ---------------------------------------------------------------------------
+// Locale (D4: fixed; not read from `navigator.language`, deferred)
+// ---------------------------------------------------------------------------
 
-    if (Math.abs(diffSeconds) < 60) {
-      return rtf.format(-diffSeconds, 'second');
-    } else if (Math.abs(diffMinutes) < 60) {
-      return rtf.format(-diffMinutes, 'minute');
-    } else if (Math.abs(diffHours) < 24) {
-      return rtf.format(-diffHours, 'hour');
-    } else {
-      return rtf.format(-diffDays, 'day');
-    }
-  } catch {
-    return dateString;
-  }
-}
+/** The one locale constant every formatter in this module uses (D4). */
+export const FORMAT_LOCALE = 'en';
+
+// ---------------------------------------------------------------------------
+// Zone helpers
+//
+// `browserTimeZone`, `isValidTimeZone` and `listTimeZones` are owned by
+// tz-refactor task 12 (ptone/scion#2533): task 11 rebased onto it and
+// dropped its own (textually near-identical) copies in favour of these, per
+// review round 1 finding R1-2. Any future change to these three belongs in
+// task 12's lineage.
+// ---------------------------------------------------------------------------
 
 /**
  * Returns the browser's resolved IANA time zone (e.g. "America/New_York").
@@ -123,4 +128,396 @@ export function isValidTimeZone(zone: string): boolean {
 export function listTimeZones(): string[] {
   const zones = Intl.supportedValuesOf('timeZone');
   return zones.includes('UTC') ? zones : [...zones, 'UTC'];
+}
+
+// ---------------------------------------------------------------------------
+// Effective-zone store (design.md §3 A (a))
+//
+// Formatters in this module read the *effective zone* from here instead of
+// fixing it at module load. `setPreferredTimeZone` (called once from
+// `/auth/me` at startup, again on an SSE reconnect's live re-check, and
+// again locally after the user's own `preferences.timezone` PATCH) dispatches
+// `DISPLAY_TIMEZONE_CHANGED_EVENT` on `window` when the value actually
+// changes.
+//
+// That event does NOT re-render anything by itself (review R1-4): a
+// formatter call only ever reads the *current* zone at the moment it runs.
+// A long-lived Lit component that renders a time must listen for this event
+// itself and call `requestUpdate()` (or re-run the formatter into reactive
+// state) to reflect a later change — e.g.
+// `window.addEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, () => this.requestUpdate())`
+// in `connectedCallback`, removed in `disconnectedCallback`.
+// ---------------------------------------------------------------------------
+
+/** The user's `preferences.timezone`, or `''` for Auto. */
+let preferredTimeZone = '';
+
+/**
+ * Dispatched on `window` when `setPreferredTimeZone` actually changes the
+ * stored preference (not on a no-op set of the same value). Carries no
+ * detail; listeners call `effectiveTimeZone()`/`zoneLabel()` themselves.
+ */
+export const DISPLAY_TIMEZONE_CHANGED_EVENT = 'scion-display-timezone-changed';
+
+/**
+ * Sets the user's preferred display zone (`preferences.timezone`). Pass
+ * `''`, `null` or `undefined` for Auto. A value that fails `isValidTimeZone`
+ * — including one the hub rejected — falls back to Auto rather than
+ * throwing, matching the backend contract (tz-refactor task 10,
+ * ptone/scion#2526): "a value the hub rejects must make `isValidTimeZone`
+ * fall back to Auto, never throw."
+ *
+ * Dispatches `DISPLAY_TIMEZONE_CHANGED_EVENT` on `window` when the
+ * effective preference changes; a no-op set (including two different
+ * invalid values, which both resolve to `''`) dispatches nothing.
+ */
+export function setPreferredTimeZone(zone: string | null | undefined): void {
+  const next = zone && isValidTimeZone(zone) ? zone : '';
+  if (next === preferredTimeZone) return;
+  preferredTimeZone = next;
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(DISPLAY_TIMEZONE_CHANGED_EVENT));
+  }
+}
+
+/** Returns the raw preference (`''` means Auto), without the browser fallback. */
+export function getPreferredTimeZone(): string {
+  return preferredTimeZone;
+}
+
+/**
+ * Returns the *effective* display zone: `preferences.timezone` if set, else
+ * `browserTimeZone()` (design.md §3 A (a)). Every formatter in this module
+ * that renders an absolute time uses this.
+ */
+export function effectiveTimeZone(): string {
+  return preferredTimeZone || browserTimeZone();
+}
+
+/** Label for "Times in: <zone>" affordances next to clocks and date inputs. */
+export function zoneLabel(): string {
+  return effectiveTimeZone();
+}
+
+// ---------------------------------------------------------------------------
+// Absolute-time formatting
+// ---------------------------------------------------------------------------
+
+/**
+ * `formatInstant` rendering styles:
+ * - `'time'`: `18:00` (hour and minute only).
+ * - `'time-seconds'`: `18:00:05` (log viewers, task 21).
+ * - `'date'`: `Sep 23, 2026` (no time).
+ * - `'datetime'`: `Sep 23, 18:00` (no year — for compact UI like the
+ *   inter-agent message marker).
+ * - `'datetime-full'`: `Sep 23, 2026, 18:00` (with year — admin and
+ *   access-boundary pages, token/expiry columns, task 20).
+ *
+ * Additive only: a later P3 issue (tasks 19-21) may add further styles here,
+ * but must not change what an existing style renders, since that would
+ * silently reformat every current caller.
+ */
+export type InstantStyle = 'time' | 'time-seconds' | 'date' | 'datetime' | 'datetime-full';
+
+function instantFormatter(style: InstantStyle, zone: string): Intl.DateTimeFormat {
+  switch (style) {
+    case 'time':
+      return new Intl.DateTimeFormat(FORMAT_LOCALE, {
+        timeZone: zone,
+        hourCycle: 'h23',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    case 'time-seconds':
+      return new Intl.DateTimeFormat(FORMAT_LOCALE, {
+        timeZone: zone,
+        hourCycle: 'h23',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+    case 'date':
+      return new Intl.DateTimeFormat(FORMAT_LOCALE, {
+        timeZone: zone,
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      });
+    case 'datetime':
+      return new Intl.DateTimeFormat(FORMAT_LOCALE, {
+        timeZone: zone,
+        month: 'short',
+        day: 'numeric',
+        hourCycle: 'h23',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    case 'datetime-full':
+      return new Intl.DateTimeFormat(FORMAT_LOCALE, {
+        timeZone: zone,
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hourCycle: 'h23',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+  }
+}
+
+/**
+ * Formats an ISO instant in the effective display zone (D4: always 24-hour,
+ * `hourCycle: 'h23'`, never `hour12: false`). Returns `''` on an unparsable
+ * `iso`.
+ */
+export function formatInstant(iso: string, style: InstantStyle = 'datetime'): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  return instantFormatter(style, effectiveTimeZone()).format(date);
+}
+
+// ---------------------------------------------------------------------------
+// Relative-time formatting
+// ---------------------------------------------------------------------------
+
+/**
+ * Format a date string as a relative time description (e.g. "3 hours ago").
+ *
+ * Uses `Intl.RelativeTimeFormat` for locale-aware output. Past only (positive
+ * elapsed time); see `formatRelative` for a past-and-future version.
+ * Returns the original string on parse failure.
+ *
+ * Kept for its many existing call sites across `web/src`; new code should
+ * prefer `formatRelative`, which also handles future instants.
+ */
+export function formatRelativeTime(dateString: string): string {
+  try {
+    const date = new Date(dateString);
+    if (isNaN(date.getTime())) return dateString;
+    const diffMs = Date.now() - date.getTime();
+    const diffSeconds = Math.round(diffMs / 1000);
+    const diffMinutes = Math.round(diffMs / (1000 * 60));
+    const diffHours = Math.round(diffMs / (1000 * 60 * 60));
+    const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+
+    const rtf = new Intl.RelativeTimeFormat(FORMAT_LOCALE, { numeric: 'auto' });
+
+    if (Math.abs(diffSeconds) < 60) {
+      return rtf.format(-diffSeconds, 'second');
+    } else if (Math.abs(diffMinutes) < 60) {
+      return rtf.format(-diffMinutes, 'minute');
+    } else if (Math.abs(diffHours) < 24) {
+      return rtf.format(-diffHours, 'hour');
+    } else {
+      return rtf.format(-diffDays, 'day');
+    }
+  } catch {
+    return dateString;
+  }
+}
+
+/**
+ * Formats an ISO instant as a relative time description, for both past
+ * ("3 hours ago") and future ("in 3 hours") instants. Zone-independent
+ * (a duration, not a wall-clock time), so it uses only `FORMAT_LOCALE`.
+ * Returns the original string on parse failure.
+ */
+export function formatRelative(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+
+  const diffMs = date.getTime() - Date.now();
+  const diffSeconds = Math.round(diffMs / 1000);
+  const diffMinutes = Math.round(diffMs / (1000 * 60));
+  const diffHours = Math.round(diffMs / (1000 * 60 * 60));
+  const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+
+  const rtf = new Intl.RelativeTimeFormat(FORMAT_LOCALE, { numeric: 'auto' });
+
+  if (Math.abs(diffSeconds) < 60) return rtf.format(diffSeconds, 'second');
+  if (Math.abs(diffMinutes) < 60) return rtf.format(diffMinutes, 'minute');
+  if (Math.abs(diffHours) < 24) return rtf.format(diffHours, 'hour');
+  return rtf.format(diffDays, 'day');
+}
+
+// ---------------------------------------------------------------------------
+// Wall-clock parsing (`datetime-local` inputs)
+// ---------------------------------------------------------------------------
+
+interface WallClockParts {
+  year: number;
+  month: number; // 1-12
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+}
+
+/**
+ * Builds an epoch-ms timestamp from `parts`, treated as UTC fields. Unlike
+ * `Date.UTC`, this does **not** remap a two-digit year into 19xx (the
+ * `Date.UTC`/`new Date(y, ...)` two-digit-year special case in the spec) —
+ * `setUTCFullYear` takes the year literally.
+ */
+function utcMsFromParts(parts: WallClockParts): number {
+  const d = new Date(0);
+  d.setUTCFullYear(parts.year, parts.month - 1, parts.day);
+  d.setUTCHours(parts.hour, parts.minute, parts.second, 0);
+  return d.getTime();
+}
+
+/**
+ * Parses a `datetime-local` input value (`YYYY-MM-DDTHH:mm[:ss]`), rejecting
+ * both a malformed string and a malformed-but-parseable one — an
+ * out-of-range field (`"2026-13-40T25:00"`) that `Date`/`Date.UTC` would
+ * otherwise silently roll over into a different, unintended date. Valid
+ * fields round-trip exactly through `utcMsFromParts`; anything that doesn't
+ * is rejected.
+ */
+function parseWallClockValue(value: string): WallClockParts | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
+  if (!m) return null;
+  const parts: WallClockParts = {
+    year: Number(m[1]),
+    month: Number(m[2]),
+    day: Number(m[3]),
+    hour: Number(m[4]),
+    minute: Number(m[5]),
+    second: m[6] ? Number(m[6]) : 0,
+  };
+  const ms = utcMsFromParts(parts);
+  const d = new Date(ms);
+  const roundTrips =
+    d.getUTCFullYear() === parts.year &&
+    d.getUTCMonth() === parts.month - 1 &&
+    d.getUTCDate() === parts.day &&
+    d.getUTCHours() === parts.hour &&
+    d.getUTCMinutes() === parts.minute &&
+    d.getUTCSeconds() === parts.second;
+  return roundTrips ? parts : null;
+}
+
+/**
+ * Returns `zone`'s UTC offset, in minutes (local = utc + offset), at the
+ * instant `utcMs`. Implemented by formatting `utcMs` in `zone` and comparing
+ * the printed wall-clock fields against `utcMs` interpreted as UTC — this
+ * avoids relying on `timeZoneName: 'longOffset'`, whose support varies by
+ * engine, and never itself needs `hour12`/`hourCycle: 'h12'`.
+ */
+function offsetMinutesAt(zone: string, utcMs: number): number {
+  const parts = new Intl.DateTimeFormat(FORMAT_LOCALE, {
+    timeZone: zone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(new Date(utcMs));
+  const get = (type: Intl.DateTimeFormatPartTypes): number =>
+    Number(parts.find((p) => p.type === type)?.value ?? '0');
+  // formatToParts never reports hour "24" with hourCycle 'h23'.
+  const asUtc = Date.UTC(
+    get('year'),
+    get('month') - 1,
+    get('day'),
+    get('hour'),
+    get('minute'),
+    get('second')
+  );
+  return (asUtc - utcMs) / 60000;
+}
+
+/** One day in milliseconds, used to probe on either side of a wall-clock time. */
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Resolves wall-clock components in `zone` to a UTC instant (epoch ms),
+ * matching Temporal's `"compatible"` disambiguation (design.md §2.4):
+ * a time in a **gap** (spring-forward) moves forward by the gap length; a
+ * time in an **overlap** (fall-back) takes the earlier of the two possible
+ * instants.
+ *
+ * **Why probe a day on either side, not just seed-and-iterate (review R1-1).**
+ * An earlier version seeded a single offset guess from `localTs` itself (the
+ * wall-clock fields read as a UTC instant) and iterated from there. That
+ * finds the correct instant for a zone *behind* UTC (the seed falls before
+ * the real transition), but for a zone *ahead* of UTC the seed already falls
+ * *after* the transition, so the iteration only ever rediscovers the later
+ * (standard-time) candidate of an overlap and never the earlier
+ * (daylight-time) one "compatible" requires — wrong for all of Europe,
+ * Australia and New Zealand.
+ *
+ * Instead, probe the zone's offset a full day before and a full day after
+ * `localTs` (`oA`, `oB`) — far enough that a single DST transition can't
+ * separate both probes from the transition itself, so one of them always
+ * reflects the pre-transition offset and the other the post-transition one
+ * (or they're equal, when no transition is nearby). Build one UTC candidate
+ * from each, and check which candidate(s) actually format back to `parts`
+ * in `zone` (i.e. the offset at the candidate matches the offset used to
+ * build it):
+ * - **Both valid (overlap):** two real instants map to this wall-clock
+ *   time; return the earlier.
+ * - **One valid:** the ordinary, unambiguous case.
+ * - **Neither valid (gap):** the wall-clock time doesn't exist; shift
+ *   forward by the gap length by applying the smaller (pre-transition)
+ *   offset, which is what `candidateA`/`candidateB` would have done had it
+ *   existed.
+ */
+function wallClockToUtcMs(parts: WallClockParts, zone: string): number {
+  const localTs = utcMsFromParts(parts);
+
+  const oA = offsetMinutesAt(zone, localTs - ONE_DAY_MS);
+  const oB = offsetMinutesAt(zone, localTs + ONE_DAY_MS);
+
+  const candidateA = localTs - oA * 60000;
+  const candidateB = localTs - oB * 60000;
+
+  const validA = offsetMinutesAt(zone, candidateA) === oA;
+  const validB = offsetMinutesAt(zone, candidateB) === oB;
+
+  if (validA && validB) return Math.min(candidateA, candidateB);
+  if (validA) return candidateA;
+  if (validB) return candidateB;
+  return localTs - Math.min(oA, oB) * 60000;
+}
+
+/**
+ * Converts a `datetime-local` input value to a UTC ISO instant, interpreting
+ * it as wall-clock time **in `zone`** (not the browser's zone, which is what
+ * `new Date(value).toISOString()` does today). Returns `''` if `value`
+ * doesn't parse, has an out-of-range field, or `zone` is not a zone
+ * `isValidTimeZone` accepts (never throws, review R1-7).
+ */
+export function parseWallClock(value: string, zone: string): string {
+  if (!isValidTimeZone(zone)) return '';
+  const parts = parseWallClockValue(value);
+  if (!parts) return '';
+  const utcMs = wallClockToUtcMs(parts, zone);
+  if (!Number.isFinite(utcMs)) return '';
+  return new Date(utcMs).toISOString();
+}
+
+/**
+ * The inverse of `parseWallClock`: formats a UTC ISO instant as a
+ * `datetime-local` input value (`YYYY-MM-DDTHH:mm`) in `zone`. Returns `''`
+ * on an unparsable `iso` or an invalid `zone` (never throws, review R1-7).
+ */
+export function toWallClockInput(iso: string, zone: string): string {
+  if (!isValidTimeZone(zone)) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  const parts = new Intl.DateTimeFormat(FORMAT_LOCALE, {
+    timeZone: zone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(date);
+  const get = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((p) => p.type === type)?.value ?? '00';
+  return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
 }

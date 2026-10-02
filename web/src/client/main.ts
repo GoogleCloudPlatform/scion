@@ -38,6 +38,7 @@ import { parseLayoutUrl } from './terminal-layout.js';
 import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
 import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../utils/feature-flags.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
+import { setPreferredTimeZone } from '../utils/time.js';
 import {
   type AdminStatus,
   hasAnyPermission,
@@ -255,9 +256,31 @@ async function fetchCurrentUser(): Promise<User | null> {
       name: data.displayName || data.name || '',
       avatar: data.avatarUrl || data.avatar,
       role: data.role || undefined,
+      preferences: data.preferences || undefined,
     };
   } catch {
     return null;
+  }
+}
+
+/**
+ * Refreshes the display-timezone preference and applies it to the
+ * effective-zone store (`setPreferredTimeZone`). Used when the SSR-injected
+ * user (`prefetchPageData`, `pkg/hub/web.go`) already supplied `currentUser`
+ * without `preferences` — that field is deliberately never cached on the
+ * session (`webSessionUser.Preferences`) and so is absent from SSR data,
+ * only ever populated by a live `/auth/me` read. Runs after the first
+ * render is scheduled; a brief Auto-zone flash until it resolves is
+ * preferable to blocking paint on it.
+ */
+async function loadPreferredTimeZone(): Promise<void> {
+  try {
+    const res = await fetch('/auth/me', { credentials: 'include' });
+    if (!res.ok) return;
+    const data = await res.json();
+    setPreferredTimeZone(data.preferences?.timezone);
+  } catch {
+    // Non-critical — the effective zone falls back to the browser zone.
   }
 }
 
@@ -765,6 +788,13 @@ async function init(): Promise<void> {
   // Fetch current user from session if not provided by SSR
   if (!currentUser) {
     currentUser = await fetchCurrentUser();
+    if (currentUser) {
+      setPreferredTimeZone(currentUser.preferences?.timezone);
+    }
+  } else {
+    // SSR supplied the user without `preferences` (never cached on the
+    // session); refresh it from the live endpoint, non-blocking.
+    void loadPreferredTimeZone();
   }
 
   // Fetch admin status early so the route guard can use the cached result
