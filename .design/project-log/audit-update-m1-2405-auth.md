@@ -16,6 +16,15 @@ and ensures a downstream 401/403 is not rewritten as an authentication failure.
 Non-authentication failures such as credential-store unavailability also retain
 their existing status and body.
 
+Review round 1 found that unified authentication unwrapped the normalizer when
+it delegated a broker request, before `BrokerAuthMiddleware` or
+`AuditableBrokerAuthMiddleware` had validated the HMAC signature and optional
+on-behalf-of identity. The corrected handoff keeps the normalizer active through
+both broker middleware variants. Each variant now unwraps only after broker HMAC
+and OBO authentication succeeds, immediately before calling valid downstream
+code. Broker/OBO authentication rejections (400/401/403) use the canonical 404;
+infrastructure 5xx responses remain unchanged.
+
 ## Exact route matcher
 
 `isConstraintAuditAuthFailureRoute` matches only case-sensitive
@@ -39,6 +48,13 @@ Focused middleware tests pin:
 - valid dev credentials and identity/context propagation through both auth
   implementations;
 - unchanged downstream responses after valid authentication;
+- forged broker HMAC, unsupported/unknown/suspended OBO rejection, and valid
+  broker/OBO context through full unified-plus-broker chains for both ordinary
+  and auditable middleware;
+- original response-writer identity and unchanged downstream 401/403/404 after
+  successful broker/OBO authentication;
+- preservation of auditable broker failure/success events without exposing
+  their details in rejected HTTP responses;
 - exact query-insensitive route matching and rejection of neighboring routes,
   methods, encoded variants, extra segments, prefixes, suffixes, case variants,
   and path-cleaning forms.

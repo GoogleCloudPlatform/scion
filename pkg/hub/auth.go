@@ -156,8 +156,9 @@ func isConstraintAuditAuthFailureRoute(r *http.Request) bool {
 }
 
 // constraintAuditAuthFailureWriter preserves authentication's fail-closed
-// control flow while making its 401/403 response indistinguishable from the
-// endpoint's absent-resource response. It never forwards the rejected body.
+// control flow while making credential rejection responses indistinguishable
+// from the endpoint's absent-resource response. It never forwards the rejected
+// body. Infrastructure failures remain unchanged.
 type constraintAuditAuthFailureWriter struct {
 	http.ResponseWriter
 	normalized bool
@@ -167,7 +168,8 @@ func (w *constraintAuditAuthFailureWriter) WriteHeader(statusCode int) {
 	if w.normalized {
 		return
 	}
-	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+	switch statusCode {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
 		w.normalized = true
 		NotFound(w.ResponseWriter, "Access Constraint")
 		return
@@ -374,7 +376,10 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					log.Debug("Broker auth headers present, deferring to BrokerAuthMiddleware", "brokerID", brokerID)
 				}
 				ctx = contextWithAuthType(ctx, AuthTypeBroker)
-				serveAfterAuth(w, next, r.WithContext(ctx))
+				// Broker HMAC and on-behalf-of authentication run downstream.
+				// Keep the exact-route normalizer attached until that delegated
+				// authentication succeeds inside the broker middleware.
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 
