@@ -3379,6 +3379,92 @@ profiles:
 	}
 }
 
+// TestStartBackendReValidationAcceptsAliasedRootAgainstNFSWorktreeShapedPath
+// drives the real workspace-storage-backend re-validation end to end,
+// instead of calling the shared comparison directly: the NFS backend is
+// configured with a subpath_root and project ID chosen so its computed host
+// path happens to be a genuine worktree under the same base the
+// ctx-provisioned, aliased root names, exercising this call site's own
+// wiring to the shared comparison rather than just the comparison itself.
+func TestStartBackendReValidationAcceptsAliasedRootAgainstNFSWorktreeShapedPath(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+	nfsMountRoot := filepath.Join(tmpDir, "nfs")
+	settingsYAML := fmt.Sprintf(`schema_version: "1"
+active_profile: local
+server:
+  workspace_storage:
+    backend: nfs
+    nfs:
+      mount_root: %s
+      subpath_root: repo
+      shares:
+        - id: share-1
+          server: 10.0.0.2
+          export: /scion-workspaces
+harness_configs:
+  test-harness:
+    harness: gemini
+    user: scion
+    image: test-image:latest
+profiles:
+  local:
+    runtime: docker
+`, nfsMountRoot)
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The NFS backend computes <mount_root>/<share>/<subpath_root>/<project
+	// ID>/workspace. With subpath_root "repo" and a project ID of
+	// "worktrees", that computed path is <base>/worktrees/workspace — the
+	// same shape a genuine, scion-created worktree named "workspace" would
+	// have under base.
+	base := filepath.Join(nfsMountRoot, "share-1", "repo")
+	if err := os.MkdirAll(base, 0755); err != nil {
+		t.Fatal(err)
+	}
+	setupGitRepo(t, base)
+	localWorktree := createRealWorktree(t, base, "agent-a")
+	nfsWorktree := createRealWorktree(t, base, "workspace")
+	aliasedRoot := filepath.Join(tmpDir, "alias")
+	if err := os.Symlink(base, aliasedRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	var capturedConfig runtime.RunConfig
+	mgr := NewManager(&runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return nil, nil
+		},
+		RunFunc: func(ctx context.Context, c runtime.RunConfig) (string, error) {
+			capturedConfig = c
+			return "mock-id", nil
+		},
+	})
+
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), aliasedRoot)
+	if _, err := mgr.Start(ctx, api.StartOptions{
+		Name:        "agent-a",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		Workspace:   localWorktree,
+		Env:         map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "worktrees"},
+	}); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Confirm the backend actually fired and replaced the workspace with the
+	// worktree-shaped NFS path — otherwise this test would pass vacuously.
+	if capturedConfig.WorkspaceBackendName != "nfs" || capturedConfig.Workspace != nfsWorktree {
+		t.Fatalf("test setup broken: WorkspaceBackendName=%q Workspace=%q, want nfs / %q", capturedConfig.WorkspaceBackendName, capturedConfig.Workspace, nfsWorktree)
+	}
+	if capturedConfig.RepoRoot != aliasedRoot {
+		t.Fatalf("RunConfig.RepoRoot = %q, want %q", capturedConfig.RepoRoot, aliasedRoot)
+	}
+}
+
 // TestStartUserWorkspaceOverrideYieldsEmptyRepoRoot is the required
 // counterpart to the broker-provisioned-worktree RepoRoot stitching fix: a
 // user-supplied --workspace (opts.Workspace set with no

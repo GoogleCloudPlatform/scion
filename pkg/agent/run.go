@@ -1346,12 +1346,15 @@ authDone:
 	// The workspace backend above (NFS/cloudrun/gke) can replace
 	// effectiveWorkspace with a backend-managed path — real for
 	// worktree-per-agent when server.workspace_storage.backend is
-	// explicitly configured to something other than local. The repoRoot
-	// computed earlier was validated against the PRE-backend path, so if the
-	// backend actually changed it, re-resolve against the value RunConfig
-	// will use, through the same validatedWorktreeRepoRoot comparison used
-	// above and in the persistence gate — not a separate, inline comparison
-	// of this layout's own.
+	// explicitly configured to something other than local. Only the nfs
+	// backend sets a host path at all; its host path has worktree shape
+	// (base/worktrees/<name>) only when the configured subpath_root and
+	// project ID happen to produce that layout. The repoRoot computed
+	// earlier was validated against the PRE-backend path, so if the backend
+	// actually changed it, re-resolve against the value RunConfig will use,
+	// through the same validatedWorktreeRepoRoot comparison used above and
+	// in the persistence gate — not a separate, inline comparison of this
+	// layout's own.
 	if effectiveWorkspace != preBackendWorkspace {
 		repoRoot = validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
 		if repoRoot == "" {
@@ -1810,23 +1813,27 @@ func workspaceSharesProjectRepo(projectDir, workspace string) bool {
 // persistence gate, and the workspace-storage-backend re-validation all call
 // this function directly, so the three always agree on the same pair.
 //
-// candidateRoot is compared fully resolved; effectiveWorkspace is compared
-// with its parent directory resolved and its own final path element left
-// exactly as given (see resolveParentDir, which also cleans the value first
-// — a trailing separator otherwise changes what counts as its final
-// element). This combination tolerates an ancestor directory of either value
-// being reached through a different spelling on different calls — one
-// dispatch's stored state and another dispatch's freshly recovered value do
-// not always agree on which — while still distinguishing two final path
-// elements that are not themselves the same name. The return value is
-// candidateRoot exactly as given, never a resolved form, independent of how
-// the comparison itself was performed.
+// candidateRoot is compared fully resolved; effectiveWorkspace is Clean-ed
+// first by the caller (a trailing separator otherwise changes what
+// filepath.Dir treats as its final element) and then compared with its
+// parent directory resolved and its own final path element left exactly as
+// given (see resolveParentDir). This combination tolerates an ancestor
+// directory of either value being reached through a different spelling on
+// different calls — one dispatch's stored state and another dispatch's
+// freshly recovered value do not always agree on which — while still
+// distinguishing two final path elements that are not themselves the same
+// name. The return value is candidateRoot exactly as given, never a
+// resolved form, independent of how the comparison itself was performed.
 //
-// Start passes RunConfig.RepoRoot and RunConfig.Workspace on to the runtime
-// layer already resolved (see the EvalSymlinks pass after this function's
-// first call, further down); pkg/runtime/common.go's own mount-layout
-// computation resolves both again from there, independently of this
-// function and of what form either value arrived in here.
+// What Start passes on to RunConfig.RepoRoot varies by call site: the
+// EvalSymlinks pass after this function's first call, further down,
+// resolves the value that call produced before RunConfig ever sees it, but
+// the workspace-storage-backend re-validation's own reassignment of
+// repoRoot runs after that pass and reaches RunConfig in whatever form this
+// function returned it — candidateRoot exactly as given, same as always.
+// pkg/runtime/common.go's own mount-layout computation resolves
+// RunConfig.RepoRoot and RunConfig.Workspace again regardless, independently
+// of this function and of what form either value arrived in here.
 func validatedWorktreeRepoRoot(candidateRoot, effectiveWorkspace string) string {
 	if candidateRoot == "" || effectiveWorkspace == "" {
 		return ""
