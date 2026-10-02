@@ -2714,6 +2714,7 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/notifications/", Kind: ExemptionAuthenticationOnly, Reason: "Manage own notification by ID, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/messages", Kind: ExemptionAuthenticationOnly, Reason: "List own messages, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/messages/", Kind: ExemptionAuthenticationOnly, Reason: "Manage own message by ID, self-service", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/gcs/object", Kind: ExemptionAuthenticationOnly, Reason: "gs:// link fetch, inline message-visibility-based authorization", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/message-channels", Kind: ExemptionAuthenticationOnly, Reason: "List own message channels, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/chat/user-prefs", Kind: ExemptionAuthenticationOnly, Reason: "Chat preferences, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/chat/presence", Kind: ExemptionAuthenticationOnly, Reason: "Chat presence, self-service", Owner: "route_metadata.go"},
@@ -3087,6 +3088,11 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/gcp_token_cache.go", Function: "GenerateAccessToken", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "GCP token cache, delegates to IAM GenerateAccessToken", Scope: "pkg/hub/gcp_token_cache.go"}},
 	{File: "pkg/hub/gcp_token_iam.go", Function: "GenerateAccessToken", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "GCP IAM token generation, infrastructure implementation", Scope: "pkg/hub/gcp_token_iam.go"}},
 	{File: "pkg/hub/gcp_token_iam.go", Function: "VerifyImpersonation", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "GCP impersonation verification, infrastructure implementation", Scope: "pkg/hub/gcp_token_iam.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/gcs_link_source.go — gs:// link per-request storage client
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/gcs_link_source.go", Function: "gcsObjectSourceFor", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "gs:// link per-request token mint, reached only after the gcs endpoint's own authorization steps have passed", Scope: "pkg/hub/gcs_link_source.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/brokerauth.go — broker authentication infrastructure

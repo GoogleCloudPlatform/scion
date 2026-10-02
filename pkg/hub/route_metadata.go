@@ -374,6 +374,15 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "gcp_service_account.read", Resource: "gcp_service_account", Action: "read",
 	},
 
+	// gs:// link fetch: identity-only at the route level (any identity may
+	// reach the handler); the handler itself requires a user identity and
+	// derives every further check from the requested message, never from a
+	// registry permission — see handleGCSObject.
+	"/api/v1/gcs/object": {
+		Pattern: "/api/v1/gcs/object", RouteID: "gcs.object",
+		Classification: RouteAuthenticated,
+	},
+
 	// -------------------------------------------------------------------------
 	// Policy: Skills
 	// -------------------------------------------------------------------------
