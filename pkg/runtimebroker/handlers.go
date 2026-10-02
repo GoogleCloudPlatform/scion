@@ -1049,9 +1049,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to provision agent: "+err.Error(), nil)
 				return
 			}
-			// A required skill reference that could not be resolved (rate
-			// limited, timed out, or not found) within the create deadline is
-			// a 4xx the caller can act on, not a 500/502 (ptone/scion#2546).
+			// A required skill reference that could not be resolved is mapped
+			// to the status matching its cause (404 not found, 429 rate
+			// limited, 504 timeout, 502 upstream/unreachable) rather than a
+			// blanket 500/502, so the caller gets an actionable response (#2546).
 			var skillErr *agent.SkillResolutionError
 			if errors.As(err, &skillErr) {
 				markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to provision agent")
@@ -1113,9 +1114,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// the generic 502 the hub maps RuntimeError to (ptone/scion#1316
 		// fault 3).
 		notFoundErr := errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound)
-		// A required skill reference that could not be resolved (rate
-		// limited, timed out, or not found) within the create deadline is a
-		// 4xx the caller can act on, not a 500/502 (ptone/scion#2546).
+		// A required skill reference that could not be resolved is mapped to
+		// the status matching its cause (404 not found, 429 rate limited,
+		// 504 timeout, 502 upstream/unreachable) rather than a blanket
+		// 500/502, so the caller gets an actionable response (#2546).
 		var skillErr *agent.SkillResolutionError
 		isSkillErr := errors.As(err, &skillErr)
 		switch {
@@ -1134,9 +1136,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 		// Clean up provisioned agent files so they don't become orphans left
 		// behind in the "created" phase — this runs for every Start failure,
-		// including a skill resolution failure above (ptone/scion#2546): the
-		// agent directory ProvisionAgent created is removed here exactly as
-		// it is for any other mid-provision error.
+		// including a skill resolution failure above (#2546): the agent
+		// directory ProvisionAgent created is removed here exactly as it is
+		// for any other mid-provision error.
 		if opts.ProjectPath != "" {
 			if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
 				s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",

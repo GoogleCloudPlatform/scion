@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2242,6 +2244,69 @@ func TestProvisionAgent_RequiredGHSkillWithResolver_Provisions(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "deploy") {
 		t.Errorf("resolution record should contain skill name, got: %s", string(data))
+	}
+}
+
+// TestProvisionAgent_RequiredGHSkillRateLimited_YieldsSkillResolutionError
+// exercises provision.go's SkillResolutionError construction through the
+// actual ProvisionAgent entry point with a real GitHubSkillResolver, rather
+// than injecting the error directly into a runtimebroker mock as the broker
+// tests do — closing the O3 gap noted in review (#2546 O3). The test server
+// returns a 429 with a Retry-After far larger than the backoff cap, so the
+// resolver fails fast (O3) regardless of ctx having no explicit deadline,
+// keeping the test itself fast.
+func TestProvisionAgent_RequiredGHSkillRateLimited_YieldsSkillResolutionError(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	tplDir := filepath.Join(globalTemplatesDir, "gh-skill-ratelimit-tpl")
+	_ = os.MkdirAll(tplDir, 0755)
+	tplConfig := `{
+		"default_harness_config": "claude",
+		"skills": [
+			{"uri": "gh://owner/repo/my-skill@main"}
+		]
+	}`
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	server, mux := newTestGitHubServer(t)
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "120") // far larger than githubMaxBackoff
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	resolver := newTestGitHubResolver(server)
+
+	ctx := ContextWithSkillResolver(context.Background(), resolver)
+	_, _, _, err := ProvisionAgent(ctx, "gh-ratelimit-agent", "gh-skill-ratelimit-tpl", "", "", projectScionDir, "", "", "", "")
+	if err == nil {
+		t.Fatal("expected provisioning to fail when the required gh:// skill is rate limited")
+	}
+
+	var skillErr *SkillResolutionError
+	if !errors.As(err, &skillErr) {
+		t.Fatalf("expected a *SkillResolutionError, got %T: %v", err, err)
+	}
+	if skillErr.Code != SkillErrCodeRateLimited {
+		t.Errorf("expected code %s, got %s", SkillErrCodeRateLimited, skillErr.Code)
+	}
+	if skillErr.URI != "gh://owner/repo/my-skill@main" {
+		t.Errorf("expected URI to name the ref, got %s", skillErr.URI)
 	}
 }
 

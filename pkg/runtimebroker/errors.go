@@ -190,12 +190,19 @@ func Unprocessable(w http.ResponseWriter, message string) {
 }
 
 // skillResolutionHTTPStatus maps a SkillResolutionError.Code to an HTTP
-// status. Each cause gets the status whose standard semantics best fit it —
-// 429 for rate limiting, 408 for a budget/timeout failure, 404 for a skill
-// genuinely absent at the given ref — so clients and operators get more than
-// "something 4xx happened". An uncategorized cause falls back to 400: still a
-// 4xx (the create path should retry a different ref, not blindly retry the
-// same request), just without a more specific standard code to reach for.
+// status. Each cause gets the status whose standard semantics best fit it:
+//   - not_found: 404, a skill genuinely absent at the given ref.
+//   - rate_limited: 429, with a Retry-After header when the server sent one
+//     (see SkillResolutionFailed).
+//   - timeout: 504, no response from GitHub within the request deadline.
+//   - upstream_unavailable: 502, GitHub itself returned repeated 5xx.
+//   - unreachable: 502, a network-level failure (DNS, connection refused,
+//     TLS) rather than a response GitHub chose to send.
+//   - anything else — including an uncategorized local failure and the Hub's
+//     own per-URI codes for PreResolvedSkills (storage_error, internal_error,
+//     federation_error) — keeps the existing 500, not a client error: the
+//     caller did nothing wrong, so a 5xx is a more honest signal than a
+//     guessed 4xx (#2546 R3, O1).
 func skillResolutionHTTPStatus(code string) int {
 	switch code {
 	case agent.SkillErrCodeNotFound:
@@ -203,17 +210,23 @@ func skillResolutionHTTPStatus(code string) int {
 	case agent.SkillErrCodeRateLimited:
 		return http.StatusTooManyRequests
 	case agent.SkillErrCodeTimeout:
-		return http.StatusRequestTimeout
+		return http.StatusGatewayTimeout
+	case agent.SkillErrCodeUpstreamUnavailable, agent.SkillErrCodeUnreachable:
+		return http.StatusBadGateway
 	default:
-		return http.StatusBadRequest
+		return http.StatusInternalServerError
 	}
 }
 
-// SkillResolutionFailed writes a 4xx response for a required skill reference
-// that could not be resolved within the create deadline (rate limited, timed
-// out, or not found), naming the ref and the cause instead of folding the
-// failure into a generic 500/502 (ptone/scion#2546).
+// SkillResolutionFailed writes a response for a required skill reference that
+// could not be resolved within the create deadline, naming the ref and the
+// cause instead of folding the failure into a generic 500/502 (#2546). Every
+// mapped status gets the same {skill, cause} detail payload so the response
+// is actionable without broker logs, including the uncategorized/5xx default.
 func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionError) {
+	if err.Code == agent.SkillErrCodeRateLimited && err.RetryAfter != "" {
+		w.Header().Set("Retry-After", err.RetryAfter)
+	}
 	writeError(w, skillResolutionHTTPStatus(err.Code), ErrCodeSkillResolution,
 		"Failed to provision agent: "+err.Error(),
 		map[string]interface{}{"skill": err.URI, "cause": err.Code})

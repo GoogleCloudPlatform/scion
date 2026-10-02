@@ -1301,7 +1301,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				errorURIs[re.URI] = true
 				ref := requestedURIs[re.URI]
 				if ref == nil || !ref.Optional {
-					return "", "", nil, &SkillResolutionError{URI: re.URI, Code: re.Code, Message: re.Message}
+					return "", "", nil, &SkillResolutionError{URI: re.URI, Code: re.Code, Message: re.Message, RetryAfter: re.RetryAfter}
 				}
 				util.Debugf("provision: optional skill %q skipped: %s", re.URI, re.Message)
 			}

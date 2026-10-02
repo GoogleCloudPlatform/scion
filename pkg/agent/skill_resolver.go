@@ -61,32 +61,43 @@ type ResolveResult struct {
 }
 
 // ResolveError represents a single skill that failed resolution.
+// RetryAfter mirrors SkillResolutionError.RetryAfter (see its doc).
 type ResolveError struct {
-	URI     string
-	Code    string
-	Message string
+	URI        string
+	Code       string
+	Message    string
+	RetryAfter string
 }
 
 // Stable cause codes for ResolveError.Code and SkillResolutionError.Code.
 // Resolvers that can distinguish these failure modes (currently
 // GitHubSkillResolver) should set them so the create path can map a failure
-// to the right 4xx HTTP status without string-matching Message. An empty or
-// unrecognized code is treated as an uncategorized resolution failure.
+// to the right HTTP status without string-matching Message. An empty or
+// unrecognized code — including the Hub's own per-URI codes (storage_error,
+// internal_error, federation_error) for PreResolvedSkills — is treated as an
+// uncategorized resolution failure and kept on the existing 5xx path rather
+// than guessed at (#2546 R3).
 const (
-	SkillErrCodeNotFound    = "not_found"
-	SkillErrCodeRateLimited = "rate_limited"
-	SkillErrCodeTimeout     = "timeout"
+	SkillErrCodeNotFound            = "not_found"
+	SkillErrCodeRateLimited         = "rate_limited"
+	SkillErrCodeTimeout             = "timeout"
+	SkillErrCodeUpstreamUnavailable = "upstream_unavailable"
+	SkillErrCodeUnreachable         = "unreachable"
 )
 
 // SkillResolutionError is returned by ProvisionAgent when a required skill
 // reference could not be resolved. It carries the ref URI and a stable Code
 // (see the SkillErrCode* constants) alongside the human-readable Message, so
-// the HTTP boundary (runtimebroker) can map it to a 4xx response — naming the
-// ref and the cause — instead of folding it into a generic 500/502.
+// the HTTP boundary (runtimebroker) can map it to the right status — naming
+// the ref and the cause — instead of folding it into a generic 500/502.
+// RetryAfter carries the server's Retry-After value (raw header text, usually
+// an integer count of seconds) when the cause is SkillErrCodeRateLimited and
+// the upstream response named one; empty otherwise.
 type SkillResolutionError struct {
-	URI     string
-	Code    string
-	Message string
+	URI        string
+	Code       string
+	Message    string
+	RetryAfter string
 }
 
 func (e *SkillResolutionError) Error() string {

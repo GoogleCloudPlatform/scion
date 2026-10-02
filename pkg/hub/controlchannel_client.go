@@ -400,7 +400,12 @@ func (c *ControlChannelBrokerClient) CreateAgentWithGather(ctx context.Context, 
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, nil, fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(resp.Body))
+		// A plain error here used to drop every broker status, including the
+		// skill-resolution 4xx/5xx classification (404/429/504/502): the hub
+		// handler only has an isBrokerStatus(err, ...) type-assertion to work
+		// with, so a bare fmt.Errorf made it indistinguishable from any other
+		// control-channel failure (#2546 R2).
+		return nil, nil, &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body), RetryAfter: resp.Headers["Retry-After"]}
 	}
 
 	if resp.StatusCode == http.StatusAccepted {
@@ -615,10 +620,13 @@ func (c *ControlChannelBrokerClient) doRequest(ctx context.Context, brokerID, me
 
 // brokerStatusError is returned by doRequest when the broker answers with an
 // HTTP error status, so callers can react to specific codes (e.g. 404 on an
-// idempotent delete) instead of parsing the message.
+// idempotent delete) instead of parsing the message. RetryAfter carries the
+// broker's Retry-After response header verbatim, when it set one (e.g. for a
+// skill-resolution rate-limit relay, #2546 R3/O1); empty otherwise.
 type brokerStatusError struct {
 	StatusCode int
 	Body       string
+	RetryAfter string
 }
 
 func (e *brokerStatusError) Error() string {
@@ -643,6 +651,23 @@ func (e *brokerStatusError) brokerErrorMessage() string {
 		return body.Error.Message
 	}
 	return strings.TrimSpace(e.Body)
+}
+
+// brokerErrorCode returns the top-level error.code from a broker JSON error
+// body, or "" if the body is not in that form. Used to identify a
+// skill-resolution failure (ErrCodeSkillResolution) so its status and message
+// can be relayed verbatim instead of folded into the generic dispatch 502
+// (#2546 R2).
+func (e *brokerStatusError) brokerErrorCode() string {
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(e.Body), &body); err == nil {
+		return body.Error.Code
+	}
+	return ""
 }
 
 func (c *ControlChannelBrokerClient) buildRequestHeaders(ctx context.Context, brokerID, method, path, query string, body []byte) (map[string]string, error) {

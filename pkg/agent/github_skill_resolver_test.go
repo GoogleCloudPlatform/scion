@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -343,7 +344,7 @@ func TestGitHubSkillResolver_RetryOn5xx(t *testing.T) {
 
 // TestGitHubSkillResolver_StalledServer_FailsWithinBudget proves that a
 // connection that never responds no longer consumes the whole create-deadline
-// budget before failing (ptone/scion#2546): each attempt is bounded by
+// budget before failing (#2546): each attempt is bounded by
 // githubRequestTimeout independently of the per-request client timeout, and
 // doWithRetry fails fast once the next backoff would not fit the remaining
 // ctx budget, instead of sleeping into an opaque context cancellation.
@@ -393,7 +394,7 @@ func TestGitHubSkillResolver_StalledServer_FailsWithinBudget(t *testing.T) {
 // TestGitHubSkillResolver_RateLimit429_LargeRetryAfter_FailsWithinBudget
 // proves that a 429 carrying a Retry-After larger than the remaining ctx
 // budget fails immediately instead of sleeping through (and past) the
-// create deadline (ptone/scion#2546).
+// create deadline (#2546).
 func TestGitHubSkillResolver_RateLimit429_LargeRetryAfter_FailsWithinBudget(t *testing.T) {
 	server, mux := newTestGitHubServer(t)
 
@@ -481,6 +482,243 @@ func TestGitHubSkillResolver_RateLimit403_LargeRetryAfter_FailsWithinBudget(t *t
 	}
 }
 
+// TestGitHubSkillResolver_RateLimit429_LargeRetryAfter_NoDeadlineCtx proves
+// the exact production scenario from #2546: the broker's create ctx carries
+// no deadline at all (context.Background(), not context.WithTimeout), yet a
+// 429 with a Retry-After far larger than githubMaxBackoff still fails fast
+// and names the ref — instead of relying on ctx.Deadline() ever being set
+// (which it never was in production before the fix) to run the budget check.
+func TestGitHubSkillResolver_RateLimit429_LargeRetryAfter_NoDeadlineCtx(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	var attempts int32
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.Header().Set("Retry-After", "120") // far larger than githubMaxBackoff
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+
+	resolver := newTestGitHubResolver(server)
+
+	start := time.Now()
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(result.Errors))
+	}
+	// Well under the CLI's ~30s timeout and under githubResolveBudget.
+	if elapsed >= 5*time.Second {
+		t.Errorf("expected failure within a few seconds, took %s", elapsed)
+	}
+	if !strings.Contains(result.Errors[0].Message, "gh://owner/repo/my-skill@main") {
+		t.Errorf("expected error to name the skill ref, got %s", result.Errors[0].Message)
+	}
+	if result.Errors[0].Code != SkillErrCodeRateLimited {
+		t.Errorf("expected code %s, got %s", SkillErrCodeRateLimited, result.Errors[0].Code)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("expected exactly 1 attempt before failing fast, got %d", got)
+	}
+}
+
+// TestGitHubSkillResolver_StalledServer_NoDeadlineCtx is the stalled-server
+// counterpart of the test above: with no caller deadline at all, Resolve must
+// still impose its own budget (githubResolveBudget) so the ctx-deadline-based
+// fail-fast in doWithRetry actually runs, instead of ctx.Deadline() reporting
+// ok=false forever and leaving only the CLI's distant ~30s timeout to end the
+// request as an opaque "context canceled" (#2546 R1).
+func TestGitHubSkillResolver_StalledServer_NoDeadlineCtx(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	var attempts int32
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		<-r.Context().Done() // never respond
+	})
+
+	resolver := newTestGitHubResolver(server)
+
+	start := time.Now()
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(result.Errors))
+	}
+	if elapsed >= githubResolveBudget+5*time.Second {
+		t.Errorf("expected failure within roughly githubResolveBudget (%s), took %s", githubResolveBudget, elapsed)
+	}
+	if !strings.Contains(result.Errors[0].Message, "gh://owner/repo/my-skill@main") {
+		t.Errorf("expected error to name the skill ref, got %s", result.Errors[0].Message)
+	}
+	if result.Errors[0].Code != SkillErrCodeTimeout {
+		t.Errorf("expected code %s, got %s", SkillErrCodeTimeout, result.Errors[0].Code)
+	}
+	if atomic.LoadInt32(&attempts) < 1 {
+		t.Error("expected at least one attempt to reach the server")
+	}
+}
+
+// TestGitHubSkillResolver_Upstream5xxAfterRetries_ClassifiedUpstreamUnavailable
+// proves that GitHub returning 5xx on every attempt (retries exhausted) is
+// classified upstream_unavailable rather than falling into the generic
+// unclassified "resolve_failed" (#2546 R3).
+func TestGitHubSkillResolver_Upstream5xxAfterRetries_ClassifiedUpstreamUnavailable(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+
+	resolver := newTestGitHubResolver(server)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	result, err := resolver.Resolve(ctx, []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(result.Errors))
+	}
+	if result.Errors[0].Code != SkillErrCodeUpstreamUnavailable {
+		t.Errorf("expected code %s, got %s", SkillErrCodeUpstreamUnavailable, result.Errors[0].Code)
+	}
+}
+
+// TestGitHubSkillResolver_UnknownClientError_StaysUnclassified proves that a
+// non-retryable, non-404 status like 401 (bad or expired token) is left
+// unclassified ("resolve_failed") rather than guessed at — it used to default
+// to a client-facing 400 at the broker; after the fix the default stays on
+// the 500 path (#2546 R3).
+func TestGitHubSkillResolver_UnknownClientError_StaysUnclassified(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+
+	resolver := newTestGitHubResolver(server)
+
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(result.Errors))
+	}
+	if result.Errors[0].Code != "resolve_failed" {
+		t.Errorf("expected unclassified code resolve_failed, got %s", result.Errors[0].Code)
+	}
+}
+
+// TestGitHubSkillResolver_ConnectionRefused_ClassifiedUnreachable proves that
+// a network-level failure — here, a connection refused because nothing is
+// listening — is classified unreachable rather than the misleading generic
+// "timeout" (which is reserved for a context deadline actually expiring)
+// (#2546 N1).
+func TestGitHubSkillResolver_ConnectionRefused_ClassifiedUnreachable(t *testing.T) {
+	// Bind and immediately close a listener to get a port nothing is
+	// listening on, so the connection is refused quickly and deterministically.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to allocate a port: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	resolver := &GitHubSkillResolver{
+		httpClient: &http.Client{Timeout: githubAPITimeout},
+		apiBase:    "http://" + addr,
+		rawBase:    "http://" + addr + "/raw",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := resolver.Resolve(ctx, []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(result.Errors))
+	}
+	if result.Errors[0].Code != SkillErrCodeUnreachable {
+		t.Errorf("expected code %s, got %s", SkillErrCodeUnreachable, result.Errors[0].Code)
+	}
+}
+
+// TestGitHubSkillResolver_RawDownloadStall_FailsFast proves that a raw-file
+// download whose connection stalls after accepting the request still fails
+// fast (via the httpClient's ResponseHeaderTimeout), even though the ctx
+// timeout bounding the overall download attempt was widened to accommodate
+// large, legitimately slow transfers (#2546 O2).
+func TestGitHubSkillResolver_RawDownloadStall_FailsFast(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done() // accept the connection but never write a response
+	})
+
+	resolver := newTestGitHubResolver(server)
+	// Mirror NewGitHubSkillResolver's production wiring: a short
+	// ResponseHeaderTimeout catches the stall quickly, independent of the
+	// longer githubDownloadRequestTimeout ctx bound for the download attempt.
+	resolver.httpClient = &http.Client{
+		Timeout:   githubAPITimeout,
+		Transport: &http.Transport{ResponseHeaderTimeout: githubRequestTimeout},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	result, err := resolver.Resolve(ctx, []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(result.Errors))
+	}
+	if elapsed >= githubDownloadRequestTimeout {
+		t.Errorf("expected the stall to be caught by ResponseHeaderTimeout well before githubDownloadRequestTimeout (%s), took %s",
+			githubDownloadRequestTimeout, elapsed)
+	}
+}
+
 // TestGitHubSkillResolver_TransientThenSuccess_FitsWithinBudget proves the
 // budget-fit check does not interfere with a retry that legitimately fits:
 // a single transient 5xx followed by success still succeeds inside a
@@ -532,7 +770,7 @@ func TestGitHubSkillResolver_TransientThenSuccess_FitsWithinBudget(t *testing.T)
 // TestGitHubSkillResolver_BackoffLogsStatusAndRetryAfterAtWarn proves that
 // the HTTP status and Retry-After are logged at WARN before a backoff, so a
 // production incident shows more than the previous debug-only "context
-// canceled" (ptone/scion#2546).
+// canceled" (#2546).
 func TestGitHubSkillResolver_BackoffLogsStatusAndRetryAfterAtWarn(t *testing.T) {
 	server, mux := newTestGitHubServer(t)
 
