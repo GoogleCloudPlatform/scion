@@ -3464,6 +3464,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 // Dev-auth mode overrides to full if the role would be more restrictive,
 // preserving dev-mode behavior where all agents get full access.
 // Additional scopes are merged with the role-based defaults, deduplicated.
+//
+// It applies no delegation ceiling and has no production caller: every mint
+// and refresh site calls GenerateAgentTokenForAgent. It serves test helpers
+// (TestB3_AllMintSitesUseCeiledHelper pins this).
 func (s *Server) GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (string, error) {
 	s.mu.RLock()
 	tokenService := s.agentTokenService

@@ -1074,9 +1074,12 @@ func (s *Server) handleExistingAgent(
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
 			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
-			if isContainerNameConflict(err) {
+			switch {
+			case writeAgentTokenIssueError(w, err):
+				// Response written.
+			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-			} else {
+			default:
 				RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
 			}
 			return existingAgentErrored
@@ -1147,9 +1150,12 @@ func (s *Server) handleExistingAgent(
 			}
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
 				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
-				if isContainerNameConflict(err) {
+				switch {
+				case writeAgentTokenIssueError(w, err):
+					// Response written.
+				case isContainerNameConflict(err):
 					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-				} else {
+				default:
 					RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
 				}
 				return existingAgentErrored
@@ -1242,9 +1248,12 @@ func (s *Server) handleExistingAgent(
 		// response (status, container info) onto existingAgent in-place.
 		// A created/provisioning agent has no prior session to resume.
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
-			if isContainerNameConflict(err) {
+			switch {
+			case writeAgentTokenIssueError(w, err):
+				// Response written.
+			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-			} else {
+			default:
 				RuntimeError(w, "Failed to start agent: "+err.Error())
 			}
 			return existingAgentErrored

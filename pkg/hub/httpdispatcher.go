@@ -135,6 +135,9 @@ func (d *HTTPAgentDispatcher) GetClient() RuntimeBrokerClient {
 // AgentTokenGenerator generates JWT tokens for agents.
 type AgentTokenGenerator interface {
 	GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (string, error)
+	// GenerateAgentTokenForAgent issues a token for the stored agent record,
+	// bounded by its delegation chain. Every dispatcher mint site uses it.
+	GenerateAgentTokenForAgent(ctx context.Context, agent *store.Agent) (string, error)
 }
 
 // GitHubAppTokenMinter mints GitHub App installation tokens for projects.
@@ -599,20 +602,16 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		)
 	}
 
-	// Generate agent token if token generator is available
+	// Generate agent token if token generator is available. A mint error
+	// stops the dispatch before any broker request.
 	if d.tokenGenerator != nil {
-		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
+		token, err := mintAgentTokenAt(ctx, d.tokenGenerator, d.store, agent, mintSiteCreate)
 		if err != nil {
-			if d.debug {
-				d.log.Warn("Failed to generate agent token", "error", err)
-			}
-			// Continue without token - agent will operate in unauthenticated mode
-		} else {
-			req.AgentToken = token
-			if d.debug {
-				d.log.Debug("Generated agent token", "length", len(token))
-			}
+			return nil, fmt.Errorf("%s: %w", callerName, err)
+		}
+		req.AgentToken = token
+		if d.debug {
+			d.log.Debug("Generated agent token", "length", len(token))
 		}
 	} else if d.debug {
 		d.log.Debug("No token generator configured - agent will not have Hub credentials")
@@ -2197,8 +2196,13 @@ type startEnvResult struct {
 // "DispatchAgentRestart"); startedVerb is "start" or "restart", used only in
 // the secrets-resolution failure message, the one warning whose wording
 // differs (agent will <verb> without injected secrets) between the two
-// callers.
-func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller, startedVerb string) startEnvResult {
+// callers, and also names the mint site. It returns an error only when the
+// agent token is not issued.
+func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller, startedVerb string) (startEnvResult, error) {
+	mintSite := mintSiteStart
+	if startedVerb == "restart" {
+		mintSite = mintSiteRestart
+	}
 	resolvedEnv := make(map[string]string)
 	var envClassifications map[string]api.EnvKind
 
@@ -2359,15 +2363,14 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		}
 	}
 
-	// Generate a fresh agent token for Hub authentication.
+	// Generate a fresh agent token for Hub authentication. A mint error
+	// stops the start or restart before any broker request.
 	if d.tokenGenerator != nil {
-		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
+		token, err := mintAgentTokenAt(ctx, d.tokenGenerator, d.store, agent, mintSite)
 		if err != nil {
-			if d.debug {
-				d.log.Warn(caller+": failed to generate agent token", "error", err)
-			}
-		} else if token != "" {
+			return startEnvResult{}, fmt.Errorf("%s: %w", caller, err)
+		}
+		if token != "" {
 			resolvedEnv["SCION_AUTH_TOKEN"] = token
 			// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
 			// pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
@@ -2407,7 +2410,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		storageEnvCount: len(envFromStorage),
 		projectInfo:     projectInfo,
 		workspace:       wsSpec,
-	}
+	}, nil
 }
 
 // DispatchAgentStart starts an agent on the runtime broker. When resume is
@@ -2444,7 +2447,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 	// Assemble the resolved env (shared with DispatchAgentRestart; see
 	// buildStartEnv).
-	startEnv := d.buildStartEnv(ctx, agent, "DispatchAgentStart", "start")
+	startEnv, err := d.buildStartEnv(ctx, agent, "DispatchAgentStart", "start")
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
 	resolvedEnv := startEnv.env
 	envClassifications := startEnv.classifications
 	resolvedSecrets := startEnv.secrets
@@ -2575,7 +2582,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// so the restarted container has full credentials and Hub connectivity.
 	// This mirrors the resolution in DispatchAgentStart — without it, env vars
 	// like GOOGLE_CLOUD_PROJECT are missing and auth provisioning fails.
-	startEnv := d.buildStartEnv(ctx, agent, "DispatchAgentRestart", "restart")
+	startEnv, err := d.buildStartEnv(ctx, agent, "DispatchAgentRestart", "restart")
+	if err != nil {
+		return err
+	}
 	resolvedEnv := startEnv.env
 	envClassifications := startEnv.classifications
 
@@ -2620,8 +2630,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 
 	var token string
 	if d.tokenGenerator != nil {
-		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, err = d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
+		token, err = mintAgentTokenAt(ctx, d.tokenGenerator, d.store, agent, mintSiteResetAuth)
 		if err != nil {
 			return fmt.Errorf("DispatchAgentResetAuth: failed to generate agent token: %w", err)
 		}

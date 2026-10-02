@@ -3646,9 +3646,9 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 	// This is critical for backward compatibility: legacy agents created
 	// before the role system have tokens with old scope sets (missing
 	// ScopeProjectRead, etc.). Copying old scopes verbatim on refresh
-	// would perpetuate the gap. By re-deriving from the stored role via
-	// agentRoleAndScopes → Server.GenerateAgentToken → ScopesForRole,
-	// the refreshed token always reflects the current role definition.
+	// would perpetuate the gap. GenerateAgentTokenForAgent re-derives the
+	// scopes from the stored role and bounds them by the agent's chain
+	// ceiling, with the stored ancestry.
 	agent, err := s.store.GetAgent(r.Context(), id)
 	if err != nil {
 		slog.Warn("Token refresh: failed to look up agent for role-based scope derivation",
@@ -3672,12 +3672,11 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	agentRole, additionalScopes := agentRoleAndScopes(agent)
-	newToken, err := s.GenerateAgentToken(
-		agent.ID, agent.ProjectID, agentIdent.Ancestry(),
-		agentRole, additionalScopes,
-	)
+	newToken, err := mintAgentTokenAt(r.Context(), s, s.store, agent, mintSiteRefresh)
 	if err != nil {
+		if writeAgentTokenIssueError(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to generate refreshed token: "+err.Error(), nil)
 		return
@@ -3762,6 +3761,9 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 
 	if err := disp.DispatchAgentResetAuth(ctx, agent); err != nil {
 		slog.Error("Failed to reset agent auth", "agent_id", id, "error", err)
+		if writeAgentTokenIssueError(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"auth reset failed: "+err.Error(), nil)
 		return
@@ -3793,6 +3795,9 @@ func isContainerNameConflict(err error) bool {
 // checked here before falling back to the generic "runtime broker failed"
 // 502 every other failure still gets (ptone/scion#1316 fault 3).
 func dispatchCreateErrorResponse(w http.ResponseWriter, err error) {
+	if writeAgentTokenIssueError(w, err) {
+		return
+	}
 	switch {
 	case isContainerNameConflict(err):
 		Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
