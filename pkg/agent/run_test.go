@@ -7881,6 +7881,19 @@ profiles:
 				t.Fatalf("write agent scion-agent.json: %v", err)
 			}
 
+			candidatesPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json")
+			if tc.wantNoAuth {
+				// Seed a stale auth-candidates.json, as create leaves
+				// behind, so the test proves Start removes it on the
+				// no-auth path.
+				if err := os.MkdirAll(filepath.Dir(candidatesPath), 0755); err != nil {
+					t.Fatalf("mkdir harness inputs dir: %v", err)
+				}
+				if err := os.WriteFile(candidatesPath, []byte(`{"explicit_type":"none"}`), 0644); err != nil {
+					t.Fatalf("write stale auth-candidates.json: %v", err)
+				}
+			}
+
 			var capturedConfig runtime.RunConfig
 			mockRT := &runtime.MockRuntime{
 				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
@@ -7915,11 +7928,10 @@ profiles:
 				t.Errorf("SCION_HARNESS_SELECTED_AUTH = %q, want %q", selected, tc.wantSelected)
 			}
 
-			candidatesPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json")
 			data, err := os.ReadFile(candidatesPath)
 			if tc.wantNoAuth {
-				if err == nil {
-					t.Errorf("auth-candidates.json written in no-auth mode: %s", data)
+				if !os.IsNotExist(err) {
+					t.Errorf("auth-candidates.json present after no-auth Start (err=%v): %s", err, data)
 				}
 				return
 			}
