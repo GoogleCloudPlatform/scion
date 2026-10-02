@@ -83,10 +83,10 @@ var scheduleCreateCmd = &cobra.Command{
 var scheduleCreateRecurringCmd = &cobra.Command{
 	Use:   "create-recurring",
 	Short: "Create a recurring schedule",
-	Long:  `Create a recurring schedule with a cron expression. Requires --name, --cron, --agent, and --message.
+	Long: `Create a recurring schedule with a cron expression. Requires --name, --cron, --agent, and --message.
 
 Cron expressions are evaluated in UTC. Write the time in UTC, for example "0 14 * * 1-5" for 14:00 UTC on weekdays.`,
-	RunE:  runScheduleCreateRecurring,
+	RunE: runScheduleCreateRecurring,
 }
 
 // schedulePauseCmd pauses an active recurring schedule.
