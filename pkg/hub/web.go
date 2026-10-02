@@ -346,6 +346,10 @@ var spaShellTemplate = `<!DOCTYPE html>
             overscroll-behavior: none;
         }
 
+        html {
+            touch-action: manipulation;
+        }
+
         #app {
             height: 100%;
             min-height: 0;
@@ -358,6 +362,25 @@ var spaShellTemplate = `<!DOCTYPE html>
         html.scion-app-frame body {
             overflow: hidden;
             height: 100%;
+        }
+
+        /* Stop iOS/Android focus-zoom: the Shoelace input default is raised
+           to 16px on a coarse (touch) pointer. Components that set their own
+           input font-size (a local ::part override, or their own
+           --sl-input-font-size-* re-declaration) bypass this variable and
+           must floor it at 16px on coarse pointers themselves -- see e.g.
+           chat-space-rail.ts's own @media (pointer: coarse) block. Shoelace's
+           own theme sets these same custom properties on a selector list
+           that includes a bare ":root" (light.css/dark.css), at the exact
+           same specificity as a plain ":root" rule here -- whichever
+           stylesheet loads last would otherwise win. "html:root" raises
+           the specificity (adds the "html" type selector) so this rule
+           always wins, regardless of load order. */
+        @media (pointer: coarse) {
+            html:root {
+                --sl-input-font-size-small: 16px;
+                --sl-input-font-size-medium: 16px;
+            }
         }
         /* mobile-frame:end */
 
