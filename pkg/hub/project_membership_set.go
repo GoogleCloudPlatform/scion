@@ -843,9 +843,12 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 	// any created custom role carrying a role_binding.* permission before
 	// anything else — including before actor authority is even determined,
 	// so the hub role_binding.* override actor is refused exactly like
-	// everyone else.
-	if d := checkNoRoleBindingPermissionInCreatedCustomRoles(plan0.Create); d != nil {
-		return nil, d
+	// everyone else. memberRoleDecision reads no actor authority for this
+	// check.
+	for _, d := range plan0.Create {
+		if dec, _ := svc.memberRoleDecision(ctx, req.Actor, req.ProjectID, nil, planChange{}, d, memberRoleCheckStructural); dec != nil {
+			return nil, dec
+		}
 	}
 
 	// Principal eligibility applies only to NEW bindings (plan0.Create):
@@ -862,46 +865,17 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		}
 	}
 
-	actorRolePre := svc.projectEffectiveRole(ctx, req.Actor.ID(), req.ProjectID)
-	hubOverridePre := false
-	if actorRolePre == "" {
-		needCreate := len(plan0.Create) > 0
-		needDelete := len(plan0.Remove) > 0
-		authorized := true
-		if needCreate && !svc.actorHasHubRoleBindingAuthority(ctx, req.Actor.ID(), MembershipOpAdd) {
-			authorized = false
-		}
-		if needDelete && !svc.actorHasHubRoleBindingAuthority(ctx, req.Actor.ID(), MembershipOpRemove) {
-			authorized = false
-		}
-		if !authorized {
-			return nil, noProjectRoleDecision()
-		}
-		hubOverridePre = true
+	authPre, aErr := svc.memberActorAuthorityPreTx(ctx, req.Actor.ID(), req.ProjectID,
+		len(plan0.Create) > 0, len(plan0.Remove) > 0, plan0.hasCustomCreate(), plan0.hasCustomRemove(currentDefs0))
+	if aErr != nil {
+		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: aErr.Error(), HTTPStatus: 500}
 	}
-	isDirectOwnerPre := false
-	if !hubOverridePre {
-		isDirectOwnerPre = svc.isActorDirectOwner(ctx, req.Actor.ID(), req.ProjectID)
-	}
-
-	customAuthPre := make(map[string]customRoleAuthority, 2)
-	if plan0.hasCustomCreate() {
-		auth, aErr := svc.customRoleAuthorityFromStore(ctx, svc.store, req.Actor.ID(), req.ProjectID, PermRoleBindingCreate)
-		if aErr != nil {
-			return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: aErr.Error(), HTTPStatus: 500}
-		}
-		customAuthPre[PermRoleBindingCreate] = auth
-	}
-	if plan0.hasCustomRemove(currentDefs0) {
-		auth, aErr := svc.customRoleAuthorityFromStore(ctx, svc.store, req.Actor.ID(), req.ProjectID, PermRoleBindingDelete)
-		if aErr != nil {
-			return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: aErr.Error(), HTTPStatus: 500}
-		}
-		customAuthPre[PermRoleBindingDelete] = auth
+	if authPre.authorityDenial != nil {
+		return nil, authPre.authorityDenial
 	}
 
 	for _, ch := range plan0.changes(currentDefs0) {
-		if d := svc.governanceDecisionForChange(actorRolePre, isDirectOwnerPre, hubOverridePre, customAuthPre, ch); d != nil {
+		if d, _ := svc.memberRoleDecision(ctx, req.Actor, req.ProjectID, authPre, ch, nil, memberRoleCheckGovernance); d != nil {
 			return nil, d
 		}
 	}
@@ -924,16 +898,11 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			if !needsCanDelegate {
 				continue
 			}
-			delDecision := svc.authz.CanDelegate(ctx, req.Actor, GrantDescriptor{
-				Type:             GrantTypeRoleBinding,
-				RoleDefinitionID: d.ID,
-				ScopeType:        store.RoleScopeProject,
-				ScopeID:          req.ProjectID,
-			})
-			if !delDecision.Allowed {
-				return nil, canDelegateRefusal(d, delDecision.Reason)
+			dec, reason := svc.memberRoleDecision(ctx, req.Actor, req.ProjectID, authPre, planChange{}, d, memberRoleCheckCanDelegate)
+			if dec != nil {
+				return nil, dec
 			}
-			canDelegateReasons[d.ID] = delDecision.Reason
+			canDelegateReasons[d.ID] = reason
 		}
 	}
 
@@ -1002,29 +971,29 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			}
 			return fmt.Errorf("re-fetch created role definitions under lock: %w", err)
 		}
-		if d := checkNoRoleBindingPermissionInCreatedCustomRoles(refetchedCreates); d != nil {
-			return asGovernanceDenial(*d)
+		for _, d := range refetchedCreates {
+			if dec, _ := svc.memberRoleDecision(ctx, req.Actor, req.ProjectID, nil, planChange{}, d, memberRoleCheckStructural); dec != nil {
+				return asGovernanceDenial(*dec)
+			}
 		}
 
-		customAuthTx := make(map[string]customRoleAuthority, 2)
-		if plan1.hasCustomCreate() {
-			auth, aErr := svc.customRoleAuthorityFromStore(ctx, tx, req.Actor.ID(), req.ProjectID, PermRoleBindingCreate)
-			if aErr != nil {
-				return fmt.Errorf("custom role authority (create) under lock: %w", aErr)
+		customAuthTx, err := svc.customRoleAuthorities(ctx, tx, req.Actor.ID(), req.ProjectID, plan1.hasCustomCreate(), plan1.hasCustomRemove(currentDefs1))
+		if err != nil {
+			var caErr *customRoleAuthorityError
+			if errors.As(err, &caErr) {
+				op := "create"
+				if caErr.perm == PermRoleBindingDelete {
+					op = "delete"
+				}
+				return fmt.Errorf("custom role authority (%s) under lock: %w", op, caErr.err)
 			}
-			customAuthTx[PermRoleBindingCreate] = auth
+			return err
 		}
-		if plan1.hasCustomRemove(currentDefs1) {
-			auth, aErr := svc.customRoleAuthorityFromStore(ctx, tx, req.Actor.ID(), req.ProjectID, PermRoleBindingDelete)
-			if aErr != nil {
-				return fmt.Errorf("custom role authority (delete) under lock: %w", aErr)
-			}
-			customAuthTx[PermRoleBindingDelete] = auth
-		}
+		authTx := &memberActorAuthority{role: actorRole, isDirectOwner: isDirectOwner, hubOverride: hubOverride, customAuth: customAuthTx}
 
 		// R2-2 (review r2): Phase P's CanDelegate call ran once, before the
 		// lock, against the actor's authority SOURCE at that moment
-		// (actorRolePre/hubOverridePre/customAuthPre). It is not, and cannot
+		// (authPre: role, hubOverride, customAuth). It is not, and cannot
 		// be, re-run in-tx (accepted FYI-2 residual). But if that source
 		// itself changed between phases — e.g. a direct owner who also holds
 		// hub role_binding.* is demoted from owner by a concurrent request
@@ -1040,14 +1009,16 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		// was already checked above), so it gets its own error/discriminator
 		// rather than reusing membershipChangedError's "principal" wording.
 		if actorAuthorityChanged(
-			actorAuthoritySnapshot{role: actorRolePre, hubOverride: hubOverridePre, customAuth: customAuthPre},
+			actorAuthoritySnapshot{role: authPre.role, hubOverride: authPre.hubOverride, customAuth: authPre.customAuth},
 			actorAuthoritySnapshot{role: actorRole, hubOverride: hubOverride, customAuth: customAuthTx},
 		) {
 			return &actorAuthorityChangedError{currentRoleDefinitionIDs: roleDefIDs(current1)}
 		}
 
+		// Governance only: CanDelegate is never re-run under the lock (see
+		// R2-2 above, and memberRoleDecision on SQLite deadlocks).
 		for _, ch := range plan1.changes(currentDefs1) {
-			if d := svc.governanceDecisionForChange(actorRole, isDirectOwner, hubOverride, customAuthTx, ch); d != nil {
+			if d, _ := svc.memberRoleDecision(ctx, req.Actor, req.ProjectID, authTx, ch, nil, memberRoleCheckGovernance); d != nil {
 				return asGovernanceDenial(*d)
 			}
 		}
