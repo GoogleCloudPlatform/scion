@@ -131,6 +131,17 @@ var compiled = []Experiment{
 		Owner:       "web",
 		ReviewBy:    "2026-12-31",
 	},
+	{
+		Name:        "web.gcs_links",
+		Title:       "gs:// link previews",
+		Description: "Linkifies a gs://bucket/object URI an agent posts in chat and lets the viewer fetch and preview that object through the hub. Gates both the linkifier (LayerWeb) and the GET /api/v1/gcs/object endpoint itself (LayerServer): the endpoint also requires a configured GCP token generator, so this experiment alone does not make links fetchable on a hub without one.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2545",
+		Owner:       "native-chat",
+		ReviewBy:    "2026-12-30",
+	},
 }
 
 // compiledRetired lists names that PUT rejects true/false for, ignores and

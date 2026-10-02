@@ -66,6 +66,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/gcp-service-accounts":                   "policy:gcp-service-account",
 	"/api/v1/gcp-service-accounts/":                  "policy:gcp-service-account",
 	"/api/v1/gcp-service-accounts/mint":              "policy:gcp-service-account",
+	"/api/v1/gcs/object":                             "authenticated:gcs",
 	"/api/v1/messaging/capabilities":                 "authenticated:messaging",
 	"/api/v1/messaging/targets/resolve":              "authenticated:messaging",
 	"/api/v1/skills":                                 "policy:skill",

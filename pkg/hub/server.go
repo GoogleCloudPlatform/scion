@@ -1119,6 +1119,28 @@ type Server struct {
 	// GCP token metrics tracker (nil = disabled)
 	gcpTokenMetrics GCPTokenMetricsRecorder
 
+	// gs:// link fetch endpoint (/api/v1/gcs/object; no per-SA client cache —
+	// a fresh token and client are minted/built per request).
+	// gcsLinkBaseTransport is the one shared, credential-free base transport
+	// every per-request client's oauth2.Transport wraps.
+	// gcsLinkRateLimiter enforces the per-viewer rate limit; gcsLinkSem is
+	// the process-wide concurrency semaphore. gcsLinkSourceFactory overrides
+	// gcsObjectSourceFor in tests (nil in production).
+	// gcsLinkRequestDeadlineOverride shortens the whole-request deadline
+	// (gcsLinkRequestDeadline, which also bounds the mint and the response
+	// write — see handleGCSObject steps 10 and 13) in tests; zero in
+	// production, meaning "use the constant". gcsLinkEndpointOverride points
+	// gcsObjectSourceFor's *storage.Client at a fake GCS server in tests;
+	// empty in production, meaning "use the real GCS endpoint". The feature
+	// itself is gated on both the web.gcs_links experiment and
+	// gcpTokenGenerator != nil (step 1).
+	gcsLinkBaseTransport           *http.Transport
+	gcsLinkRateLimiter             *GCPTokenRateLimiter
+	gcsLinkSem                     chan struct{}
+	gcsLinkSourceFactory           gcsSourceFactory
+	gcsLinkRequestDeadlineOverride time.Duration
+	gcsLinkEndpointOverride        string
+
 	// Database connection-pool / notify metrics recorder (P0-5). Defaults to a
 	// disabled no-op recorder; SetDBMetrics wires a real exporter. Drives the
 	// connection-pool sampler started in StartBackgroundServices.
@@ -1377,6 +1399,18 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize GCP token metrics
 	srv.gcpTokenMetrics = NewGCPTokenMetrics()
+
+	// Initialize gs:// link fetch endpoint support (shared base transport,
+	// per-viewer rate limiter, global concurrency semaphore). The feature's
+	// own availability gate (step 1 of handleGCSObject) checks the
+	// web.gcs_links experiment and gcpTokenGenerator directly at request
+	// time, so these are safe to build unconditionally even when no
+	// generator is configured yet — exactly like the pre-existing GCP token
+	// rate limiter below, which is likewise built regardless and simply goes
+	// unused until SetGCPTokenGenerator is called.
+	srv.gcsLinkBaseTransport = newGCSLinkBaseTransport()
+	srv.gcsLinkRateLimiter = NewGCPTokenRateLimiter(float64(gcsLinkRateLimitPerMinute)/60.0, gcsLinkRateLimitPerMinute)
+	srv.gcsLinkSem = make(chan struct{}, gcsLinkGlobalConcurrency)
 
 	// Initialize quota enforcement service (Permissions Phase 2B).
 	// limitOverride wires in the ptone/scion#2061 P2 per-broker settings
@@ -4655,6 +4689,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if s.gcpTokenRateLimiter != nil {
 		s.gcpTokenRateLimiter.StartCleanup(ctx)
 	}
+	if s.gcsLinkRateLimiter != nil {
+		s.gcsLinkRateLimiter.StartCleanup(ctx)
+	}
 	if s.oidcTokenRateLimiter != nil {
 		s.oidcTokenRateLimiter.StartCleanup(ctx)
 	}
@@ -5025,6 +5062,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/gcp-service-accounts", s.guarded("/api/v1/gcp-service-accounts", s.handleGCPServiceAccounts))
 	s.mux.HandleFunc("/api/v1/gcp-service-accounts/mint", s.guarded("/api/v1/gcp-service-accounts/mint", s.handleGCPServiceAccountsMint))
 	s.mux.HandleFunc("/api/v1/gcp-service-accounts/", s.guarded("/api/v1/gcp-service-accounts/", s.handleGCPServiceAccountByID))
+
+	s.mux.HandleFunc("/api/v1/gcs/object", s.guarded("/api/v1/gcs/object", s.handleGCSObject))
 
 	s.mux.HandleFunc("/api/v1/skills", s.guarded("/api/v1/skills", s.handleSkills))
 	s.mux.HandleFunc("/api/v1/skills/", s.guarded("/api/v1/skills/", s.handleSkillByID))
@@ -5496,6 +5535,13 @@ func (rw *responseWriter) Flush() {
 	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Unwrap lets http.NewResponseController reach the underlying
+// ResponseWriter's own optional interfaces (e.g. SetWriteDeadline), through
+// this wrapper rather than stopping at it.
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
 }
 
 // logOAuthProviders logs which OAuth providers are configured for a client type.

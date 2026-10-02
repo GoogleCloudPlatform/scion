@@ -27,6 +27,12 @@ import {
   PROJECT_B,
   TEXT_ATTACHMENT_BODY,
   TEXT_ATTACHMENT_ID,
+  GCS_MESSAGES,
+  GCS_BUCKET,
+  GCS_XPROJECT_BUCKET,
+  GCS_XPROJECT_OBJECT,
+  GCS_MARKDOWN_BODY,
+  GCS_JSON_BODY,
 } from './data.js';
 
 export { ALPHA_NOTES_CONTENT, BETA_NOTES_CONTENT, TEXT_ATTACHMENT_BODY };
@@ -176,6 +182,113 @@ export async function setupApiMocks(page: Page): Promise<TrackedRequest[]> {
     }
     // Unnamed endpoint: empty object keeps the real component's defensive
     // parsing harmless without asserting it is called.
+    return route.fulfill({ json: {} });
+  });
+
+  return requests;
+}
+
+/**
+ * Self-contained mocks for the gs:// link spec: its own message list
+ * (GCS_MESSAGES), the gcs object fetch endpoint, /api/v1/settings/public,
+ * and /api/v1/experiments. Deliberately independent of {@link setupApiMocks}
+ * (a different message count/shape) so this suite's fixtures never perturb
+ * the extraction suite's `toHaveCount(5)` assertions.
+ *
+ * @param opts.gcsLinksExperimentEnabled - the `web.gcs_links` value served
+ * from `/api/v1/experiments` (ptone/scion#2545). Defaults to `true`, since
+ * most specs in this file exercise the linkifier; pass `false` for a case
+ * that drives the real experiments-fetch path instead of an
+ * `__SCION_FEATURES__` init-script pin.
+ */
+export async function setupGcsApiMocks(
+  page: Page,
+  opts: { gcsLinksExperimentEnabled?: boolean } = {}
+): Promise<TrackedRequest[]> {
+  const { gcsLinksExperimentEnabled = true } = opts;
+  const requests: TrackedRequest[] = [];
+  await stubMainClientModule(page);
+
+  await page.route('**/api/v1/**', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    const method = request.method();
+    requests.push({ method, url: request.url() });
+
+    if (path.endsWith('/messages') && method === 'GET') {
+      return route.fulfill({ json: { items: GCS_MESSAGES, messageAttachments: {} } });
+    }
+
+    if (path === '/api/v1/gcs/object' && method === 'GET') {
+      const bucket = url.searchParams.get('bucket');
+      const object = url.searchParams.get('object');
+
+      if (bucket === GCS_BUCKET && object === 'missing.txt') {
+        return route.fulfill({
+          status: 404,
+          contentType: 'application/json',
+          body: '{"error":{"code":"not_found","message":"Object not found"}}',
+        });
+      }
+      if (bucket === GCS_BUCKET && object === 'denied.txt') {
+        return route.fulfill({
+          status: 403,
+          contentType: 'application/json',
+          body: '{"error":{"code":"not_found","message":"Object not found"}}',
+        });
+      }
+      if (bucket === GCS_BUCKET && object === 'report.pdf') {
+        return route.fulfill({
+          status: 404,
+          contentType: 'application/json',
+          body: '{"error":{"code":"not_found","message":"Object not found"}}',
+        });
+      }
+      if (bucket === GCS_XPROJECT_BUCKET && object === GCS_XPROJECT_OBJECT) {
+        return route.fulfill({
+          status: 200,
+          contentType: 'text/plain; charset=utf-8',
+          headers: { 'Content-Disposition': `attachment; filename*=UTF-8''dev-brief.md` },
+          body: GCS_MARKDOWN_BODY,
+        });
+      }
+      if (bucket === GCS_BUCKET && object === 'data.json') {
+        return route.fulfill({
+          status: 200,
+          contentType: 'text/plain; charset=utf-8',
+          body: GCS_JSON_BODY,
+        });
+      }
+      // Every other in-fixture object (dir/file.md, start.txt, after.txt,
+      // workspace/collision.md, the hostile-name objects, o/r) resolves to
+      // generic text content — only the four cases above need distinct
+      // bodies for their assertions.
+      return route.fulfill({
+        status: 200,
+        contentType: 'text/plain; charset=utf-8',
+        body: `content of gs://${bucket}/${object}`,
+      });
+    }
+
+    if (path === '/api/v1/settings/public') {
+      return route.fulfill({ json: { nativeChatEnabled: true } });
+    }
+
+    if (path === '/api/v1/experiments') {
+      return route.fulfill({
+        json: { experiments: { 'web.gcs_links': gcsLinksExperimentEnabled } },
+      });
+    }
+
+    if (path === '/api/v1/auth/me') {
+      return route.fulfill({
+        json: { id: 'self-user', email: 'self@example.com', displayName: 'Self User' },
+      });
+    }
+    if (path.endsWith('/read') || path.endsWith('/typing') || path === '/api/v1/chat/presence') {
+      return route.fulfill({ json: {} });
+    }
     return route.fulfill({ json: {} });
   });
 
