@@ -626,13 +626,8 @@ func newResumePhaseTestFixture(t *testing.T, listFunc func(ctx context.Context, 
 
 	tmpDir := t.TempDir()
 
-	oldWd, _ := os.Getwd()
-	_ = os.Chdir(tmpDir)
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
-
-	originalHome := os.Getenv("HOME")
-	t.Cleanup(func() { _ = os.Setenv("HOME", originalHome) })
-	_ = os.Setenv("HOME", tmpDir)
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 
