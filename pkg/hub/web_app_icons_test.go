@@ -16,6 +16,7 @@ package hub
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -59,17 +60,19 @@ func newAppIconWebServer(t *testing.T, maintenance bool) *WebServer {
 
 func TestAppIcons_ServedWithoutSession(t *testing.T) {
 	for _, maintenance := range []bool{false, true} {
-		ws := newAppIconWebServer(t, maintenance)
-		handler := ws.Handler()
-		for p, wantCT := range appIconContentTypes {
-			req := httptest.NewRequest(http.MethodGet, p, nil)
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
+		t.Run(fmt.Sprintf("maintenance=%v", maintenance), func(t *testing.T) {
+			ws := newAppIconWebServer(t, maintenance)
+			handler := ws.Handler()
+			for p, wantCT := range appIconContentTypes {
+				req := httptest.NewRequest(http.MethodGet, p, nil)
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
 
-			assert.Equal(t, http.StatusOK, rec.Code, "GET %s (maintenance=%v)", p, maintenance)
-			assert.Equal(t, wantCT, strings.Split(rec.Header().Get("Content-Type"), ";")[0],
-				"Content-Type of %s (maintenance=%v)", p, maintenance)
-		}
+				assert.Equal(t, http.StatusOK, rec.Code, "GET %s", p)
+				assert.Equal(t, wantCT, strings.Split(rec.Header().Get("Content-Type"), ";")[0],
+					"Content-Type of %s", p)
+			}
+		})
 	}
 }
 
