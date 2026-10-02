@@ -361,7 +361,7 @@ export class ScionHeader extends LitElement {
     }
 
     /* Scoped to hover-capable devices, the same as .palette-option:hover in
-       chat-switcher.ts and for the same reason: on touch, :hover sticks
+       quick-palette.ts and for the same reason: on touch, :hover sticks
        after a tap until the next tap lands elsewhere — it would still be
        showing when the palette closes and focus returns to this button. */
     @media (hover: hover) {

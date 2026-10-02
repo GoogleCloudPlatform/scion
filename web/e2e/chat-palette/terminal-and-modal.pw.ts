@@ -74,7 +74,7 @@ async function gotoHiddenChatWithTerminal(page: Page, query = '') {
 }
 
 function paletteDialog(page: Page) {
-  return page.locator('scion-chat-switcher sl-dialog[label="Quick switcher"]');
+  return page.locator('scion-quick-palette sl-dialog[label="Quick switcher"]');
 }
 
 /**

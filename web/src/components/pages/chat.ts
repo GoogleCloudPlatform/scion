@@ -106,7 +106,7 @@ const MEMBERS_WIDTH_KEY = 'scion.chat.membersWidth';
 // Lazy-load the search component only when v2 is active
 const loadChatSearch = () => import('../shared/chat/chat-search.js');
 // Lazy-load the quick switcher component on first Cmd+K press
-const loadChatSwitcher = () => import('../shared/chat/chat-switcher.js');
+const loadQuickPalette = () => import('../shared/palette/quick-palette.js');
 
 /**
  * How long a successfully-loaded palette group stays fresh across a
@@ -459,7 +459,7 @@ export class ScionPageChat extends LitElement {
    * Whether the quick command palette component has been lazy-loaded.
    * `@state` (not a plain field) so togglePalette's `await
    * this.updateComplete` after setting it actually waits for a real,
-   * separate render: mount `<scion-chat-switcher>` with open=false first, so
+   * separate render: mount `<scion-quick-palette>` with open=false first, so
    * the following `v2PaletteOpen = true` is a genuine false->true transition
    * on an existing element rather than both happening in the same render
    * pass (which is indistinguishable from "born open" to Shoelace's dialog —
@@ -472,7 +472,7 @@ export class ScionPageChat extends LitElement {
    * True while an open is in flight but hasn't set `v2PaletteOpen` yet —
    * synchronous (set before the first `await`, unlike `v2PaletteOpen`) so a
    * second Ctrl+K press arriving during the first-open lazy import
-   * (`loadChatSwitcher()`) can be detected before that import resolves.
+   * (`loadQuickPalette()`) can be detected before that import resolves.
    * Without this, that second press would re-enter `togglePalette` while
    * `v2PaletteOpen` is still false and would either open a second time or
    * re-capture the invoker focus.
@@ -655,7 +655,7 @@ export class ScionPageChat extends LitElement {
   /** Bound handler: close the open palette if a route change navigates away from /chat. */
   private _onPopState = this._handlePopStateForPalette.bind(this);
   /** The mounted switcher/palette element, if any — excluded from the modal guard's live query. */
-  @query('scion-chat-switcher') private _switcherEl?: Element;
+  @query('scion-quick-palette') private _switcherEl?: Element;
   /** Whether the search panel is visible. */
   @state() private v2SearchActive = false;
   /** Whether the search component has been lazy-loaded. */
@@ -728,6 +728,14 @@ export class ScionPageChat extends LitElement {
       --chat-fs-6xl: 2rem;
       --chat-fs-7xl: 2.5rem;
       --chat-lh-tight: 1.25rem;
+    }
+
+    /* The quick palette follows this page's density. */
+    scion-quick-palette {
+      --palette-fs-xs: var(--chat-fs-xs);
+      --palette-fs-sm: var(--chat-fs-sm);
+      --palette-fs-base: var(--chat-fs-base);
+      --palette-fs-xl: var(--chat-fs-xl);
     }
 
     :host([data-density='comfy']) {
@@ -3574,9 +3582,9 @@ export class ScionPageChat extends LitElement {
     try {
       if (!options.skipInvokerCapture) this._capturePaletteInvokerFocus();
       if (!this.v2SwitcherLoaded) {
-        await loadChatSwitcher();
+        await loadQuickPalette();
         this.v2SwitcherLoaded = true;
-        // Let <scion-chat-switcher> mount and render with open=false first.
+        // Let <scion-quick-palette> mount and render with open=false first.
         // Shoelace's dialog reacts to `open` transitioning false -> true to
         // run its show animation and fire sl-initial-focus/sl-show; created
         // already-open, it skips that lifecycle entirely — a real Shoelace
@@ -4172,7 +4180,7 @@ export class ScionPageChat extends LitElement {
    */
   private _handlePaletteAfterHide(e: Event): void {
     // Focus/close handlers must be filtered to the owned dialog, not nested
-    // bubbling events. This listener sits on <scion-chat-switcher> itself,
+    // bubbling events. This listener sits on <scion-quick-palette> itself,
     // one shadow-root boundary away from the actual sl-dialog that emits
     // sl-after-hide — any *other* Shoelace modal a future change nests
     // inside the switcher would otherwise bubble through here and wrongly
@@ -4517,14 +4525,16 @@ export class ScionPageChat extends LitElement {
     return html`
       ${this.v2SwitcherLoaded
         ? html`
-            <scion-chat-switcher
+            <scion-quick-palette
+              label="Quick switcher"
+              placeholder="Search agents, threads, people, documents…"
               .open=${this.v2PaletteOpen}
               .groups=${this.v2PaletteGroups}
               @palette-select=${this._handlePaletteSelect}
               @palette-retry=${this._handlePaletteRetry}
               @palette-dismiss=${this._handlePaletteDismiss}
               @sl-after-hide=${this._onPaletteAfterHide}
-            ></scion-chat-switcher>
+            ></scion-quick-palette>
           `
         : nothing}
       <scion-chat-file-preview

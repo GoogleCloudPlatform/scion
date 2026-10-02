@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": { "noEmit": true, "types": ["vite/client"] },
+  // Type-checks the listed component test files, which the root project
+  // excludes. .eslintrc.cjs lints the lint-clean ones against this project.
+  // Files are listed one by one rather than by glob, so a test file is only
+  // checked once it has been made to pass.
+  "include": [
+    "shared/palette/quick-palette.test.ts",
+    "shared/palette/quick-palette-groups.test.ts",
+    "shared/palette/quick-palette-ranking-memo.test.ts",
+    "pages/chat-palette-shortcut.test.ts"
+  ],
+  "exclude": []
+}
