@@ -13,8 +13,10 @@ Stacked on tz-refactor task 3 (GoogleCloudPlatform/scion#2289).
   - `format-utc`: `R.Format(layout)` / `R.AppendFormat(b, layout)` needs a receiver that is
     provably UTC. That means `.UTC()` or `.AsTime()` (protobuf returns UTC), Add/Truncate/Round
     of such a value, or a local variable whose every assignment is one of those.
-  - `ent-bind-formatted`: no raw SQL naming an ent table, and no ent `sql.EQ/LT/...` predicate,
-    binds a formatted time string.
+  - `ent-bind-formatted`: no raw SQL naming an ent table, and no ent dialect predicate
+    (`EQ/LT/...`, `Field*`, `ExprP`/`Expr`, `Builder.Arg/Args` inside `P(func(b *Builder){...})`),
+    binds a formatted time string. The ent dialect package is matched by import path, so the
+    `entsql` alias used across `entadapter` is covered.
   - `webchat-bind-time`: no raw SQL naming a `webchat_*` table binds a `time.Time` in the SQLite
     store. `*_postgres.go` is exempt, because its webchat columns are `TIMESTAMPTZ`.
   - Binds are read from direct arguments and from `args...` slices built with `append` or a
@@ -39,11 +41,27 @@ Stacked on tz-refactor task 3 (GoogleCloudPlatform/scion#2289).
 These checks were run against the gate binary:
 - Each task-1 `.UTC()` removed in turn (events.go x4 including the literal-`Z` layout, the
   GitHub webhook, admin invites): fails, one finding each.
-- `webchannel_store.go` restored to its pre-task-3 version: 13 findings. They are the
+- `webchannel_store.go` restored to its pre-task-3 version: 9 findings. They are the
   TouchThread/RecordChannel time binds, the four `conversations` inserts that bind formatted
   text, and the attachment, edit and delete writers that lack `.UTC()`.
 - The `SearchChatMessages` cursor revert binds a split client string, which no syntactic rule can
   see. Task 3's regression test covers it, as design §2.1.7 says for non-literal fixes.
+
+## Review round 1
+
+- The ent predicate rule had matched only the identifier `sql`, but the stores import the
+  package as `entsql`, so on real code it never fired. It now resolves the import path, and it
+  also covers `Field*`, `ExprP`/`Expr` and `Builder.Arg/Args`. Probe: binding a formatted
+  `now` into `entsql.LTE` in `ListDueSchedules` now fails the gate (tried locally, then
+  reverted).
+- Before, a local SQL variable resolved to its first `:=` literal. Now it is resolved at the
+  call: the latest assignment that must have run, assignments in branches, and `+=`
+  fragments. The fixture `sqlvars.go` covers `+=` building, reassignment in both directions,
+  self-concatenation, a branch, and an unresolvable reassignment.
+- `var t time.Time` with no value now counts as UTC, because the zero value is UTC. The two
+  redundant `.UTC()` calls on `lastSyncedAt` in hubsync are dropped.
+- None of the fixed rules finds anything new in the tree; the allowlist is still empty. The
+  revert count above was corrected from 13 to 9, which matches the old checker too.
 
 ## Tests
 
@@ -54,6 +72,6 @@ These checks were run against the gate binary:
 
 ## Known limits / follow-ups
 
-- The checker is syntactic. It does not see layouts held in parameters, `%v`/`String()`
-  formatting, or SQL built from non-literal fragments; these are documented in the checker
-  header.
+- The checker is syntactic. It does not see layouts held in parameters or `%v`/`String()`
+  formatting. Its SQL resolution does not model loop back-edges, `strings.Builder` or SQL
+  returned by helpers. All of these are documented in the checker header.

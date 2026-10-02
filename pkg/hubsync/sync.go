@@ -768,7 +768,7 @@ func CompareAgents(ctx context.Context, hubCtx *HubContext) (*SyncResult, error)
 	if lastSyncedAtStr != "" {
 		if parsed, err := time.Parse(time.RFC3339Nano, lastSyncedAtStr); err == nil {
 			lastSyncedAt = parsed.UTC()
-			debugf("lastSyncedAt: %s", lastSyncedAt.UTC().Format(time.RFC3339))
+			debugf("lastSyncedAt: %s", lastSyncedAt.Format(time.RFC3339))
 		} else {
 			debugf("Warning: failed to parse lastSyncedAt %q: %v", lastSyncedAtStr, err)
 		}
@@ -801,7 +801,7 @@ func CompareAgents(ctx context.Context, hubCtx *HubContext) (*SyncResult, error)
 
 		result.StaleLocal = append(result.StaleLocal, name)
 		debugf("Agent %s local-only but stale (local=%s, watermark=%s), marking StaleLocal",
-			name, localTS.UTC().Format(time.RFC3339Nano), lastSyncedAt.UTC().Format(time.RFC3339Nano))
+			name, localTS.UTC().Format(time.RFC3339Nano), lastSyncedAt.Format(time.RFC3339Nano))
 	}
 
 	// Find agents on Hub but not locally present.

@@ -10,9 +10,13 @@
 //     an Add/AddDate/Truncate/Round of such a value, or a local variable
 //     whose every assignment in the enclosing function is one of those.
 //  2. ent-bind-formatted: no raw SQL statement that names an ent table binds
-//     a formatted time string, and no ent sql predicate (sql.EQ, sql.LT, ...)
-//     compares against one. Ent time columns store time.Time values; a
-//     formatted string sorts differently from them.
+//     a formatted time string, and no ent dialect predicate compares against
+//     one: EQ/NEQ/LT/LTE/GT/GTE/In/NotIn, their Field* variants, ExprP/Expr,
+//     and Builder.Arg/Args on a *Builder parameter of a closure (the
+//     sql.P(func(b *sql.Builder){...}) form). The ent dialect package is
+//     matched by its import path, entgo.io/ent/dialect/sql, under whatever
+//     name the file imports it (usually entsql). Ent time columns store
+//     time.Time values; a formatted string sorts differently from them.
 //  3. webchat-bind-time: no raw SQL statement that names a webchat_* table
 //     binds a time.Time value in the SQLite store. Those columns are TEXT
 //     holding RFC3339Nano UTC strings; modernc would store Time.String()
@@ -27,9 +31,17 @@
 //     recognised; layouts are time.<Const>, string literals containing Go
 //     layout tokens, and package-level constants with such values.
 //   - fmt verbs (%s/%v) and Time.String() are not checked.
-//   - SQL text is resolved only from string literals, package constants and
-//     local variables built from literals (including fmt.Sprintf formats and
-//     += appends). Statements built any other way are skipped.
+//   - SQL text is resolved only from string literals, constants, fmt.Sprintf
+//     formats, + concatenation and local variables built from those. A local
+//     variable is resolved at the call: the latest = / := that must have run
+//     (it is in a block enclosing the call), every assignment after it in a
+//     branch that may have run, and the += fragments in between; all of them
+//     are checked together. Not modelled: assignments later in a loop body
+//     that reach an earlier call on the next iteration, goto, pointers,
+//     strings.Builder, and statements returned from helper functions. A
+//     variable whose latest assignment is not resolvable is skipped.
+//   - Builder.Arg/Args is checked only on a closure parameter declared as
+//     <entsql>.Builder or *<entsql>.Builder, and on chains rooted at it.
 //   - A struct field counts as a time value when any struct in the scanned
 //     packages declares a field of that name with type time.Time.
 //
@@ -432,14 +444,40 @@ type checker struct {
 	postgres   bool
 	findings   []Finding
 
-	fn    string
-	vars  map[string]kind
-	sqls  map[string][]string   // local name -> literal fragments assigned to it
-	slice map[string][]ast.Expr // local name -> elements appended to an args slice
-	local map[string]string     // local string consts within the function
+	entsql string // local name of the entgo.io/ent/dialect/sql import ("" if absent)
+
+	fn       string
+	vars     map[string]kind
+	strs     map[string][]strEvent // local name -> its string assignments, in source order
+	layouts  map[string]bool       // local names ever assigned a layout literal
+	builders map[string]bool       // closure params typed *<entsql>.Builder
+	slice    map[string][]ast.Expr // local name -> elements appended to an args slice
+	local    map[string]string     // local string consts within the function
+	stack    []ast.Node            // pass-1 ancestors of the node being visited
 }
 
+// strEvent is one assignment to a local variable, recorded so that the SQL
+// text of the variable can be resolved at a given call position.
+type strEvent struct {
+	pos    token.Pos
+	append bool     // += rather than = / :=
+	text   string   // the string assigned, when known
+	ok     bool     // text is known
+	block  ast.Node // innermost block enclosing the assignment (nil at package level)
+}
+
+const entSQLPath = "entgo.io/ent/dialect/sql"
+
 func (c *checker) file(f *ast.File) {
+	c.entsql = ""
+	for _, imp := range f.Imports {
+		if p, err := strconv.Unquote(imp.Path.Value); err == nil && p == entSQLPath {
+			c.entsql = "sql"
+			if imp.Name != nil {
+				c.entsql = imp.Name.Name
+			}
+		}
+	}
 	for _, d := range f.Decls {
 		switch v := d.(type) {
 		case *ast.FuncDecl:
@@ -481,9 +519,12 @@ func funcName(fd *ast.FuncDecl) string {
 func (c *checker) begin(fn string) {
 	c.fn = fn
 	c.vars = map[string]kind{}
-	c.sqls = map[string][]string{}
+	c.strs = map[string][]strEvent{}
+	c.layouts = map[string]bool{}
+	c.builders = map[string]bool{}
 	c.local = map[string]string{}
 	c.slice = map[string][]ast.Expr{}
+	c.stack = nil
 }
 
 func (c *checker) params(ft *ast.FuncType) {
@@ -497,11 +538,24 @@ func (c *checker) params(ft *ast.FuncType) {
 			if isTimeTimeType(fld.Type) {
 				k = kTime
 			}
+			builder := c.isEntBuilderType(fld.Type)
 			for _, nm := range fld.Names {
 				c.vars[nm.Name] |= k
+				if builder {
+					c.builders[nm.Name] = true
+				}
 			}
 		}
 	}
+}
+
+// isEntBuilderType reports whether t is <entsql>.Builder or a pointer to it.
+func (c *checker) isEntBuilderType(t ast.Expr) bool {
+	if s, ok := t.(*ast.StarExpr); ok {
+		t = s.X
+	}
+	sel, ok := t.(*ast.SelectorExpr)
+	return ok && c.entsql != "" && isPkgIdent(sel.X, c.entsql) && sel.Sel.Name == "Builder"
 }
 
 // body runs two passes over a function: first it classifies every local
@@ -509,20 +563,39 @@ func (c *checker) params(ft *ast.FuncType) {
 // it checks every call.
 func (c *checker) body(n ast.Node) {
 	ast.Inspect(n, func(n ast.Node) bool {
+		if n == nil {
+			c.stack = c.stack[:len(c.stack)-1]
+			return true
+		}
+		c.stack = append(c.stack, n)
 		switch v := n.(type) {
 		case *ast.FuncLit:
 			c.params(v.Type)
+		case *ast.GenDecl:
+			if v.Tok == token.CONST {
+				for _, sp := range v.Specs {
+					vs := sp.(*ast.ValueSpec)
+					for i, nm := range vs.Names {
+						if i < len(vs.Values) {
+							if s, ok := literalString(vs.Values[i], c.mergedConsts()); ok {
+								c.local[nm.Name] = s
+							}
+						}
+					}
+				}
+			}
 		case *ast.AssignStmt:
 			if len(v.Lhs) == len(v.Rhs) {
 				for i := range v.Lhs {
 					if id, ok := v.Lhs[i].(*ast.Ident); ok {
-						c.assign(id.Name, v.Rhs[i], v.Tok)
+						c.assign(id.Name, v.Rhs[i], v.Tok, v.Pos())
 					}
 				}
 			} else {
 				for _, l := range v.Lhs {
 					if id, ok := l.(*ast.Ident); ok {
 						c.vars[id.Name] |= c.multiKind(v.Rhs)
+						c.record(id.Name, v.Pos(), false, "", false)
 					}
 				}
 			}
@@ -530,17 +603,25 @@ func (c *checker) body(n ast.Node) {
 			for i, nm := range v.Names {
 				switch {
 				case i < len(v.Values):
-					c.assign(nm.Name, v.Values[i], token.DEFINE)
+					c.assign(nm.Name, v.Values[i], token.DEFINE, v.Pos())
 				case v.Type != nil && isTimeTimeType(v.Type):
-					c.vars[nm.Name] |= kTime
+					// The zero time.Time is in UTC; a *time.Time is unknown.
+					if _, ptr := v.Type.(*ast.StarExpr); ptr {
+						c.vars[nm.Name] |= kTime
+					} else {
+						c.vars[nm.Name] |= kUTC
+					}
 				default:
 					c.vars[nm.Name] |= kUnknown
+					// var s string starts as "", so later += fragments resolve.
+					c.record(nm.Name, v.Pos(), false, "", true)
 				}
 			}
 		case *ast.RangeStmt:
 			for _, e := range []ast.Expr{v.Key, v.Value} {
 				if id, ok := e.(*ast.Ident); ok {
 					c.vars[id.Name] |= kUnknown
+					c.record(id.Name, v.Pos(), false, "", false)
 				}
 			}
 		}
@@ -567,31 +648,37 @@ func (c *checker) multiKind(rhs []ast.Expr) kind {
 	return kUnknown
 }
 
-func (c *checker) assign(name string, rhs ast.Expr, tok token.Token) {
+// record notes an assignment to a local variable for later SQL resolution.
+func (c *checker) record(name string, pos token.Pos, isAppend bool, text string, ok bool) {
+	var block ast.Node
+	for i := len(c.stack) - 1; i >= 0; i-- {
+		switch c.stack[i].(type) {
+		case *ast.BlockStmt, *ast.CaseClause, *ast.CommClause:
+			block = c.stack[i]
+		}
+		if block != nil {
+			break
+		}
+	}
+	c.strs[name] = append(c.strs[name], strEvent{pos: pos, append: isAppend, text: text, ok: ok, block: block})
+}
+
+func (c *checker) assign(name string, rhs ast.Expr, tok token.Token, pos token.Pos) {
 	if elems, ok := sliceElems(rhs, name); ok {
 		c.slice[name] = append(c.slice[name], elems...)
 		c.vars[name] |= kUnknown
+		c.record(name, pos, false, "", false)
 		return
 	}
-	if s, ok := literalString(rhs, c.mergedConsts()); ok {
-		if tok == token.ADD_ASSIGN {
-			c.sqls[name] = append(c.sqls[name], s)
-		} else {
-			c.sqls[name] = append(c.sqls[name], s)
-			if tok == token.DEFINE {
-				c.local[name] = s
-			}
-		}
+	if s, ok := literalString(rhs, c.mergedConsts()); ok && tok != token.ADD_ASSIGN && layoutTokenRE.MatchString(s) {
+		c.layouts[name] = true
+	}
+	if s, ok := c.sqlText(rhs, pos); ok {
+		c.record(name, pos, tok == token.ADD_ASSIGN, s, true)
 		c.vars[name] |= kSQL
 		return
 	}
-	if call, ok := rhs.(*ast.CallExpr); ok && pkgFunc(call, "fmt", "Sprintf") && len(call.Args) > 0 {
-		if s, ok := literalString(call.Args[0], c.mergedConsts()); ok {
-			c.sqls[name] = append(c.sqls[name], s)
-			c.vars[name] |= kSQL
-			return
-		}
-	}
+	c.record(name, pos, tok == token.ADD_ASSIGN, "", false)
 	if tok == token.ADD_ASSIGN {
 		return
 	}
@@ -712,6 +799,12 @@ func (c *checker) isLayout(e ast.Expr) bool {
 	if sel, ok := e.(*ast.SelectorExpr); ok {
 		return isPkgIdent(sel.X, "time") && layoutConsts[sel.Sel.Name]
 	}
+	if id, ok := e.(*ast.Ident); ok && c.layouts[id.Name] {
+		return true
+	}
+	if id, ok := e.(*ast.Ident); ok && c.local[id.Name] == "" && len(c.strs[id.Name]) > 0 {
+		return false // a local variable never assigned a layout literal
+	}
 	if s, ok := literalString(e, c.mergedConsts()); ok {
 		return layoutTokenRE.MatchString(s)
 	}
@@ -784,7 +877,7 @@ func (c *checker) call(call *ast.CallExpr) {
 		c.report(call, ruleFormatUTC, "time formatted without .UTC(); convert first, e.g. t.UTC().Format(...)")
 	}
 
-	if pkgFunc(call, "sql", "EQ", "NEQ", "LT", "LTE", "GT", "GTE", "In", "NotIn") {
+	if c.entsql != "" && pkgFunc(call, c.entsql, entPredicates...) {
 		for _, a := range call.Args[min(1, len(call.Args)):] {
 			if c.isFormatted(a) {
 				c.report(call, ruleEntBindFormatted, "ent predicate compares a time column against a formatted string; pass the time.Time (t.UTC())")
@@ -793,12 +886,20 @@ func (c *checker) call(call *ast.CallExpr) {
 		}
 		return
 	}
-	name, _ := methodName(call)
+	name, recv := methodName(call)
+	if (name == "Arg" || name == "Args") && c.builders[rootIdent(recv)] {
+		for _, a := range call.Args {
+			if c.isFormatted(a) {
+				c.reportArg(call, a, ruleEntBindFormatted, "ent sql.Builder binds a formatted time string; bind the time.Time (t.UTC())")
+			}
+		}
+		return
+	}
 	idx, ok := sqlMethods[name]
 	if !ok || len(call.Args) <= idx {
 		return
 	}
-	sqlText, ok := c.sqlText(call.Args[idx])
+	sqlText, ok := c.sqlText(call.Args[idx], call.Pos())
 	if !ok {
 		return
 	}
@@ -841,27 +942,91 @@ var sqlNonTable = map[string]bool{
 	"generate_series": true, "only": true,
 }
 
-func (c *checker) sqlText(e ast.Expr) (string, bool) {
-	e = unparen(e)
-	if s, ok := literalString(e, c.mergedConsts()); ok {
-		return s, true
-	}
-	if id, ok := e.(*ast.Ident); ok {
-		if frags, ok := c.sqls[id.Name]; ok {
-			return strings.Join(frags, "\n"), true
+// entPredicates are the entgo.io/ent/dialect/sql functions whose arguments
+// after the first (a column, field name or expression) are bound values.
+var entPredicates = []string{
+	"EQ", "NEQ", "LT", "LTE", "GT", "GTE", "In", "NotIn",
+	"FieldEQ", "FieldNEQ", "FieldLT", "FieldLTE", "FieldGT", "FieldGTE", "FieldIn", "FieldNotIn",
+	"ExprP", "Expr",
+}
+
+// rootIdent returns the name at the root of a method-call chain such as
+// b.WriteString(x).Arg(y), or "" if the root is not an identifier.
+func rootIdent(e ast.Expr) string {
+	for {
+		switch v := unparen(e).(type) {
+		case *ast.Ident:
+			return v.Name
+		case *ast.CallExpr:
+			e = v.Fun
+		case *ast.SelectorExpr:
+			e = v.X
+		default:
+			return ""
 		}
 	}
-	if call, ok := e.(*ast.CallExpr); ok && pkgFunc(call, "fmt", "Sprintf") && len(call.Args) > 0 {
-		return c.sqlText(call.Args[0])
-	}
-	if b, ok := e.(*ast.BinaryExpr); ok && b.Op == token.ADD {
-		l, ok1 := c.sqlText(b.X)
-		r, ok2 := c.sqlText(b.Y)
-		if ok1 || ok2 {
-			return l + " " + r, true
+}
+
+// sqlText resolves the string value of e as it stands at pos.
+func (c *checker) sqlText(e ast.Expr, pos token.Pos) (string, bool) {
+	switch v := unparen(e).(type) {
+	case *ast.BasicLit:
+		return literalString(v, nil)
+	case *ast.Ident:
+		if s, ok := c.local[v.Name]; ok {
+			return s, true
+		}
+		if evs, ok := c.strs[v.Name]; ok {
+			return resolveAt(evs, pos)
+		}
+		return literalString(v, c.consts)
+	case *ast.CallExpr:
+		if pkgFunc(v, "fmt", "Sprintf") && len(v.Args) > 0 {
+			return c.sqlText(v.Args[0], pos)
+		}
+	case *ast.BinaryExpr:
+		if v.Op == token.ADD {
+			l, ok1 := c.sqlText(v.X, pos)
+			r, ok2 := c.sqlText(v.Y, pos)
+			if ok1 && ok2 {
+				return l + r, true
+			}
+			if ok1 || ok2 {
+				return l + " " + r, true
+			}
 		}
 	}
 	return "", false
+}
+
+// resolveAt returns the possible text of a variable just before pos: the
+// latest assignment that must have run (one in a block enclosing pos), every
+// assignment after it in a branch that may have run, and the += fragments in
+// between. All candidates are joined, so a statement is checked against
+// every table it might name.
+func resolveAt(evs []strEvent, pos token.Pos) (string, bool) {
+	var parts []string
+	ok := false
+	for i := len(evs) - 1; i >= 0; i-- {
+		ev := evs[i]
+		if ev.pos >= pos {
+			continue
+		}
+		if ev.ok {
+			ok = true
+			parts = append(parts, ev.text)
+		}
+		if ev.append {
+			continue
+		}
+		if ev.block == nil || (ev.block.Pos() <= pos && pos < ev.block.End()) {
+			break
+		}
+	}
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	return strings.Join(parts, "\n"), ok
 }
 
 func (c *checker) report(n ast.Node, rule, msg string) {

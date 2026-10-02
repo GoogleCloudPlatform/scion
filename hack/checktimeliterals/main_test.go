@@ -62,10 +62,11 @@ func TestScanFixtures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// format.go, webchannel_store.go, webchannel_store_postgres.go and
-	// predicates.go; the generated file and the _test.go file are skipped.
-	if n != 4 {
-		t.Errorf("scanned %d files, want 4", n)
+	// format.go, sqlvars.go, webchannel_store.go, webchannel_store_postgres.go,
+	// predicates.go, entadapter/alias.go and entadapter/notent.go; the
+	// generated file and the _test.go file are skipped.
+	if n != 7 {
+		t.Errorf("scanned %d files, want 7", n)
 	}
 	want := wantFindings(t)
 	if len(want) < 10 {
