@@ -174,7 +174,7 @@ func (s *Server) handleAdminInvitesCreate(w http.ResponseWriter, r *http.Request
 	)
 	LogInviteAudit(r.Context(), s.auditLogger, InviteAuditInviteCreated, "", invite.ID, user.ID(), user.Email(), map[string]string{
 		"prefix":     invite.CodePrefix,
-		"expires_at": formatUTCTimestamp(invite.ExpiresAt, time.RFC3339),
+		"expires_at": invite.ExpiresAt.UTC().Format(time.RFC3339),
 		"max_uses":   fmt.Sprintf("%d", invite.MaxUses),
 	})
 
