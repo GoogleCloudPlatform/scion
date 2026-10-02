@@ -1768,7 +1768,7 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		// ptone/scion#2529 P1: …/members/principals/{principalType}/{principalId}
 		// sits above handleProjectMemberByID's binding-ID dispatch — binding
 		// IDs are UUIDs, so there is no collision with the literal
-		// "principals" segment (design.md §3.1).
+		// "principals" segment (ptone/scion#2529).
 		if strings.HasPrefix(memberPath, "principals/") {
 			principalPath := strings.TrimPrefix(memberPath, "principals/")
 			parts := strings.SplitN(principalPath, "/", 2)

@@ -2808,10 +2808,12 @@ var MutationClassifications = []MutationClassification{
 	// tx.CreateRoleBinding/tx.DeleteRoleBinding, keeping every direct
 	// role-binding mutation call enumerable in this one file per RS1 O-3
 	// (rs1_extended_test.go TestRS1_AST_BypassPathsDocumented). SetMemberRoles
-	// itself performs the credential gate, governance matrix / custom-role
-	// authority (including the F1 role_binding.* structural guard),
-	// CanDelegate and last-owner checks before ever reaching applyRolePlanTx,
-	// the same way AddMember/UpdateMemberRole/TransferOwnership govern
+	// runs the credential gate and CanDelegate pre-transaction, and
+	// re-evaluates governance / custom-role authority (including the F1
+	// role_binding.* structural guard) and the actor-authority-change check
+	// under the project lock before calling applyRolePlanTx; the last-owner
+	// guard runs on the post-state afterwards in the same transaction — the
+	// same way AddMember/UpdateMemberRole/TransferOwnership govern
 	// replaceBindingTx above. Review r1 F3: this replaces the earlier
 	// generic txCreateRoleBinding/txDeleteRoleBinding forwarders, which were
 	// reusable primitives that left the governed call site invisible to this

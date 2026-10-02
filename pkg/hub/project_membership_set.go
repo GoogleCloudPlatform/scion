@@ -603,9 +603,9 @@ type actorAuthoritySnapshot struct {
 //
 // Each sub-check is kept, rather than collapsed to "role != role", in case a
 // future authority source (e.g. a group-mediated hub override) decouples
-// hubOverride or Via from role — see the table test in
-// project_membership_set_test.go, which drives each branch independently so
-// a regression that reintroduces such coupling is caught even though no
+// hubOverride or Via from role — see TestActorAuthorityChanged
+// (project_membership_plan_test.go), which drives each branch independently
+// so a regression that reintroduces such coupling is caught even though no
 // production path can reach it today.
 func actorAuthorityChanged(pre, post actorAuthoritySnapshot) bool {
 	if pre.role != post.role {
@@ -1021,11 +1021,10 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 				oldName = rd.Name
 			}
 			// N5 (review r1): carry roleKind and principalType here too — the
-			// §13.6 contract is that every audit row carries roleKind for
-			// uniform filtering, and a built-in swap is always
-			// roleKind:"builtin" on both sides by construction
-			// (planRoleSet only populates BuiltInChange from built-in role
-			// names).
+			// contract is that every audit row carries roleKind for uniform
+			// filtering, and a built-in swap is always roleKind:"builtin" on
+			// both sides by construction (planRoleSet only populates
+			// BuiltInChange from built-in role names).
 			if aErr := svc.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
 				MutationType: "project_member_role_change",
 				TargetType:   "project_membership",
