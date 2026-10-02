@@ -380,7 +380,7 @@ type preResolvingDispatcher struct {
 	pre *ResolveSkillsResponse
 }
 
-func (d *preResolvingDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) error {
+func (d *preResolvingDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	d.pre = d.srv.preResolveAgentSkills(ctx, agent)
 	return d.createAgentDispatcher.DispatchAgentCreate(ctx, agent)
 }

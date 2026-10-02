@@ -282,10 +282,11 @@ func (s *Server) execDispatchFinalizeEnv(ctx context.Context, d store.BrokerDisp
 		}
 		env = args.Env
 	}
-	if err := dispatcher.DispatchFinalizeEnv(ctx, agent, env); err != nil {
+	finalized, err := dispatcher.DispatchFinalizeEnv(ctx, agent, env)
+	if err != nil {
 		return "", fmt.Errorf("dispatch finalize_env: %w", err)
 	}
-	result, err := json.Marshal(FinalizeEnvResult{Success: true})
+	result, err := json.Marshal(FinalizeEnvResult{Success: true, Launch: finalized.AcceptedLaunch()})
 	if err != nil {
 		return "", fmt.Errorf("marshal finalize_env result: %w", err)
 	}
@@ -301,11 +302,11 @@ func (s *Server) execDispatchCreate(ctx context.Context, d store.BrokerDispatch)
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")
 	}
-	envReqs, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
 	if err != nil {
 		return "", fmt.Errorf("dispatch create: %w", err)
 	}
-	cr := CreateWithGatherResult{EnvRequirements: envReqs}
+	cr := CreateWithGatherResult{EnvRequirements: created.EnvRequirements(), Launch: created.AcceptedLaunch()}
 	result, err := json.Marshal(cr)
 	if err != nil {
 		return "", fmt.Errorf("marshal create result: %w", err)

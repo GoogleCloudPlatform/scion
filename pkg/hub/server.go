@@ -468,8 +468,10 @@ func (s *Server) agentSecretsUserScopeOnly() bool {
 // Implementations may be local (co-located hub+broker) or remote (HTTP-based).
 type AgentDispatcher interface {
 	// DispatchAgentCreate creates and starts an agent on the runtime broker.
-	// Returns the updated agent info after creation/start.
-	DispatchAgentCreate(ctx context.Context, agent *store.Agent) error
+	// It updates agent in place from the broker's answer. A non-nil result
+	// with Launch set means the broker accepted the create for asynchronous
+	// launch (see CreateDispatchResult).
+	DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error)
 
 	// DispatchAgentProvision provisions an agent on the runtime broker without starting it.
 	// This sets up directories, worktree, templates, and settings but does not launch the container.
@@ -520,12 +522,15 @@ type AgentDispatcher interface {
 	DispatchCheckAgentPrompt(ctx context.Context, agent *store.Agent) (bool, error)
 
 	// DispatchAgentCreateWithGather creates an agent with env-gather support.
-	// If the broker returns 202 with env requirements, it returns the requirements
-	// instead of an error. The second return value is non-nil when gather is needed.
-	DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error)
+	// If the broker returns 202 with env requirements, the result carries them
+	// in EnvReqs instead of an error. Launch is set when the broker accepted
+	// the create for asynchronous launch.
+	DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error)
 
 	// DispatchFinalizeEnv sends gathered env vars to the broker to complete agent creation.
-	DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error
+	// Launch is set in the result when the broker accepted the create for
+	// asynchronous launch.
+	DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error)
 }
 
 // WorkspaceDispatchSpec carries the inputs a broker needs to recreate an
@@ -4462,7 +4467,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			return nil
 		}
 
-		if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
+		if _, err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
 			slog.Error("Scheduler: failed to dispatch agent creation",
 				"eventID", evt.ID,
 				"agent_id", agent.ID,

@@ -67,11 +67,17 @@ type CheckPromptResult struct {
 // FinalizeEnvResult is serialized into broker_dispatch.result by the owner.
 type FinalizeEnvResult struct {
 	Success bool `json:"success"`
+	// Launch is set when the owner's send was accepted for asynchronous
+	// launch (design t1-async-create-v11.md §3.4).
+	Launch *LaunchAccepted `json:"launch,omitempty"`
 }
 
 // CreateWithGatherResult is serialized into broker_dispatch.result by the owner.
 type CreateWithGatherResult struct {
 	EnvRequirements *RemoteEnvRequirementsResponse `json:"envRequirements,omitempty"`
+	// Launch is set when the owner's send was accepted for asynchronous
+	// launch (design t1-async-create-v11.md §3.4).
+	Launch *LaunchAccepted `json:"launch,omitempty"`
 }
 
 // MarshalDispatchArgs serializes a dispatch args struct to JSON for storage in

@@ -66,7 +66,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_RevokesCredentialOnFailure(t *t
 		RuntimeBrokerID: broker.ID,
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "broker boom", "the original dispatch error must not be masked by the revoke")
 
@@ -102,7 +102,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoTokenGeneratedSkipsRevoke(t *
 	}
 	insertTestAgentCredential(t, memStore, agent.ID, agent.ProjectID, "revoke-create-notoken-preexisting-jti")
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	require.Error(t, err)
 	assert.Empty(t, gen.jtis, "the generator failed, so no credential should have been minted")
 
@@ -128,7 +128,8 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_SuccessDoesNotRevokeCredential(
 		RuntimeBrokerID: broker.ID,
 	}
 
-	require.NoError(t, dispatcher.DispatchAgentCreate(ctx, agent))
+	_, createErr := dispatcher.DispatchAgentCreate(ctx, agent)
+	require.NoError(t, createErr)
 
 	require.Len(t, gen.jtis, 1)
 	cred := getTestAgentCredential(t, memStore, gen.lastJTI())
@@ -154,7 +155,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_RevokeStoreErrorDoesNotMaskDisp
 		RuntimeBrokerID: broker.ID,
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	require.Error(t, err, "a revoke-store failure must not turn a real dispatch failure into success")
 	assert.Contains(t, err.Error(), "broker boom", "the original dispatch error must survive a revoke-store error untouched")
 }
@@ -215,7 +216,8 @@ func TestHTTPAgentDispatcher_DispatchAgentCreateWithGather_NeedsMissingDoesNotRe
 		RuntimeBrokerID: broker.ID,
 	}
 
-	envReqs, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	createRes, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	envReqs := createRes.EnvRequirements()
 	require.NoError(t, err)
 	require.NotNil(t, envReqs)
 	require.Len(t, envReqs.Needs, 1)
@@ -276,7 +278,7 @@ func TestHTTPAgentDispatcher_DispatchFinalizeEnv_RevokesCredentialOnStillMissing
 		RuntimeBrokerID: broker.ID,
 	}
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, nil)
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, nil)
 	require.Error(t, err)
 	var stillMissing *ErrEnvStillMissing
 	require.ErrorAs(t, err, &stillMissing, "the revoke must not change the error type callers switch on")

@@ -110,7 +110,8 @@ func TestEnvGather_HubDispatch_AllSatisfied(t *testing.T) {
 		},
 	}
 
-	envReqs, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	createRes, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	envReqs := createRes.EnvRequirements()
 	if err != nil {
 		t.Fatalf("DispatchAgentCreateWithGather failed: %v", err)
 	}
@@ -167,7 +168,8 @@ func TestEnvGather_HubDispatch_NeedsGather(t *testing.T) {
 		},
 	}
 
-	envReqs, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	createRes, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	envReqs := createRes.EnvRequirements()
 	if err != nil {
 		t.Fatalf("DispatchAgentCreateWithGather failed: %v", err)
 	}
@@ -221,7 +223,7 @@ func TestEnvGather_HubDispatch_FinalizeEnv_Replay(t *testing.T) {
 		"API_KEY": "gathered-api-key",
 	}
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, gatheredEnv)
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, gatheredEnv)
 	if err != nil {
 		t.Fatalf("DispatchFinalizeEnv failed: %v", err)
 	}
@@ -286,7 +288,7 @@ func TestEnvGather_FinalizeReplay_EmptyPendingEnvGather(t *testing.T) {
 		"GEMINI_API_KEY": "gathered-key",
 	}
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, gatheredEnv)
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, gatheredEnv)
 	if err != nil {
 		t.Fatalf("DispatchFinalizeEnv on fresh broker instance should succeed, got: %v", err)
 	}
@@ -348,7 +350,7 @@ func TestEnvGather_FinalizeReplay_MergePrecedence(t *testing.T) {
 		"API_KEY": "cli-gathered-value",
 	}
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, gatheredEnv)
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, gatheredEnv)
 	if err != nil {
 		t.Fatalf("DispatchFinalizeEnv failed: %v", err)
 	}
@@ -399,7 +401,7 @@ func TestEnvGather_FinalizeReplay_StillMissing(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{"KEY_A": "val"})
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{"KEY_A": "val"})
 	if err == nil {
 		t.Fatal("expected ErrEnvStillMissing, got nil")
 	}

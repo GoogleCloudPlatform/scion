@@ -254,7 +254,7 @@ type tzWarningDispatcher struct {
 	createAgentDispatcher
 }
 
-func (d *tzWarningDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *tzWarningDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	addDispatchWarnings(ctx, "Warning: TZ dropped by broker")
 	return d.createAgentDispatcher.DispatchAgentCreateWithGather(ctx, agent)
 }

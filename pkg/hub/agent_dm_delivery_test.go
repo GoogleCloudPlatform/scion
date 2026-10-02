@@ -161,8 +161,8 @@ func (d *spyStateDispatcher) DispatchAgentMessage(_ context.Context, _ *store.Ag
 	return nil
 }
 
-func (d *spyStateDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) error {
-	return nil
+func (d *spyStateDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 func (d *spyStateDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
@@ -193,11 +193,11 @@ func (d *spyStateDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent
 func (d *spyStateDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *spyStateDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *spyStateDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
 	return nil, nil
 }
-func (d *spyStateDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
+func (d *spyStateDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 // ---------------------------------------------------------------------------

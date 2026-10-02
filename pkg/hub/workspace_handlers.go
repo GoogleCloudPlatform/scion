@@ -465,7 +465,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			RuntimeError(w, "No dispatcher available")
 			return
 		}
-		if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
+		if _, err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
 			RuntimeError(w, "Failed to dispatch agent: "+err.Error())
 			return
 		}

@@ -73,7 +73,9 @@ func (d *def135Dispatcher) getCalls() []def135DispatchCall {
 }
 
 // No-op implementations for the remaining AgentDispatcher methods.
-func (d *def135Dispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) error { return nil }
+func (d *def135Dispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
+}
 func (d *def135Dispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
 }
@@ -101,11 +103,11 @@ func (d *def135Dispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, 
 func (d *def135Dispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *def135Dispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *def135Dispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
 	return nil, nil
 }
-func (d *def135Dispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
+func (d *def135Dispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 // ---------------------------------------------------------------------------

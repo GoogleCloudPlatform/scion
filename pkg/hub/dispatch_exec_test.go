@@ -50,8 +50,8 @@ type lifecycleTestDispatcher struct {
 	lastFinalizeEnv   map[string]string
 }
 
-func (d *lifecycleTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) error {
-	return nil
+func (d *lifecycleTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 func (d *lifecycleTestDispatcher) DispatchAgentProvision(context.Context, *store.Agent) error {
 	return nil
@@ -94,14 +94,14 @@ func (d *lifecycleTestDispatcher) DispatchCheckAgentPrompt(context.Context, *sto
 	d.checkPromptCalled.Add(1)
 	return d.checkPromptResult, nil
 }
-func (d *lifecycleTestDispatcher) DispatchAgentCreateWithGather(context.Context, *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *lifecycleTestDispatcher) DispatchAgentCreateWithGather(context.Context, *store.Agent) (*CreateDispatchResult, error) {
 	d.createCalled.Add(1)
 	return nil, nil
 }
-func (d *lifecycleTestDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, env map[string]string) error {
+func (d *lifecycleTestDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
 	d.finalizeEnvCalled.Add(1)
 	d.lastFinalizeEnv = env
-	return nil
+	return nil, nil
 }
 
 func newLifecycleTestServer(t *testing.T) (*Server, *lifecycleTestDispatcher, store.Store) {

@@ -457,7 +457,8 @@ func TestDispatchAgentCreateWithGather_TwoPass_FullResolution(t *testing.T) {
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}
 
-	envReqs, err := d.DispatchAgentCreateWithGather(ctx, agent)
+	createRes, err := d.DispatchAgentCreateWithGather(ctx, agent)
+	envReqs := createRes.EnvRequirements()
 	if err != nil {
 		t.Fatalf("DispatchAgentCreateWithGather: %v", err)
 	}
@@ -531,7 +532,8 @@ func TestDispatchAgentCreateWithGather_TwoPass_PartialResolution(t *testing.T) {
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}
 
-	envReqs, err := d.DispatchAgentCreateWithGather(ctx, agent)
+	createRes, err := d.DispatchAgentCreateWithGather(ctx, agent)
+	envReqs := createRes.EnvRequirements()
 	if err != nil {
 		t.Fatalf("DispatchAgentCreateWithGather: %v", err)
 	}
@@ -585,7 +587,8 @@ func TestDispatchAgentCreateWithGather_TwoPass_NoMatch(t *testing.T) {
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}
 
-	envReqs, err := d.DispatchAgentCreateWithGather(ctx, agent)
+	createRes, err := d.DispatchAgentCreateWithGather(ctx, agent)
+	envReqs := createRes.EnvRequirements()
 	if err != nil {
 		t.Fatalf("DispatchAgentCreateWithGather: %v", err)
 	}
@@ -635,7 +638,8 @@ func TestDispatchAgentCreateWithGather_NoNeeds(t *testing.T) {
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}
 
-	envReqs, err := d.DispatchAgentCreateWithGather(ctx, agent)
+	createRes, err := d.DispatchAgentCreateWithGather(ctx, agent)
+	envReqs := createRes.EnvRequirements()
 	if err != nil {
 		t.Fatalf("DispatchAgentCreateWithGather: %v", err)
 	}

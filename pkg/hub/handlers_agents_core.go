@@ -2012,7 +2012,8 @@ func (s *Server) createAgentInProject(
 				s.agentLifecycleLog.Debug("Hub: env-gather requested, using DispatchAgentCreateWithGather",
 					"agent_id", agent.ID,
 					"agent", agent.Name, "broker", agent.RuntimeBrokerID)
-				envReqs, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+				created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+				envReqs := created.EnvRequirements()
 				if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
 					// and delete the agent record so orphaned local files don't
@@ -2050,7 +2051,8 @@ func (s *Server) createAgentInProject(
 					}
 				}
 			} else {
-				envReqs, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+				created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+				envReqs := created.EnvRequirements()
 				if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
 					// and delete the agent record so orphaned local files don't
@@ -2420,7 +2422,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	}
 
 	ctx, dispatchWarns := withDispatchWarnings(ctx)
-	if err := dispatcher.DispatchFinalizeEnv(ctx, agent, req.Env); err != nil {
+	if _, err := dispatcher.DispatchFinalizeEnv(ctx, agent, req.Env); err != nil {
 		var stillMissing *ErrEnvStillMissing
 		if errors.As(err, &stillMissing) {
 			MissingEnvVars(w, stillMissing.Requirements.Needs,

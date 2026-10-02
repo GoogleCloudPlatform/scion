@@ -156,13 +156,13 @@ type mockDispatcher struct {
 	returnErr        error
 }
 
-func (d *mockDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) error {
+func (d *mockDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	if d.returnErr != nil {
-		return d.returnErr
+		return nil, d.returnErr
 	}
 	d.dispatchedAgents = append(d.dispatchedAgents, agent)
 	agent.Phase = string(state.PhaseProvisioning)
-	return nil
+	return nil, nil
 }
 
 func (d *mockDispatcher) DispatchAgentProvision(_ context.Context, agent *store.Agent) error {
@@ -202,8 +202,8 @@ func (d *mockDispatcher) DispatchAgentMessage(_ context.Context, _ *store.Agent,
 func (d *mockDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *mockDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
-	return nil, d.DispatchAgentCreate(context.Background(), agent)
+func (d *mockDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	return d.DispatchAgentCreate(context.Background(), agent)
 }
 func (d *mockDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
 	return "", nil
@@ -211,8 +211,8 @@ func (d *mockDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ 
 func (d *mockDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
 	return "", 0, nil
 }
-func (d *mockDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
+func (d *mockDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 // testBootstrapServer creates a test server with storage and dispatcher configured.
