@@ -1943,7 +1943,7 @@ func effectiveProvisionID(t *testing.T, cmd []string, flag string) int64 {
 // container actually runs as: --uid follows the pod RunAsUser and --gid
 // follows the pod fsGroup. A configured NFS uid is not applied to the pod
 // RunAsUser, so it must not reach the init container either; otherwise the
-// cloned tree ends up owned by a uid the agent is not (ptone/scion#2605 R1).
+// cloned tree ends up owned by a uid the agent is not (ptone/scion#2566).
 func TestBuildPod_NFSInitOwnershipMatchesSecurityContext(t *testing.T) {
 	tests := []struct {
 		name    string
