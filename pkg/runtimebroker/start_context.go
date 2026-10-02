@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1378,11 +1377,22 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		// isStrictWorktreeChild additionally guards that the path is a real
 		// descendant of <base>/worktrees and never that directory itself, so
 		// a resolver bug can never turn this into a removal of every agent's
-		// worktree.
+		// worktree. Uses `git worktree remove --force` (via HardenedGitCommand)
+		// so the worktree's admin metadata in the base's .git/worktrees/<id> is
+		// unregistered too — a bare os.RemoveAll would leave a stale
+		// registration that makes git refuse to recreate the worktree at that
+		// path on retry. Falls back to os.RemoveAll + prune.
 		if shouldCleanupPartialWorktree(result.ProjectRoot, result.WorktreePath, preExisted) {
-			rm := exec.CommandContext(ctx, "git", "-C", result.ProjectRoot,
+			rm, rmCmdErr := provision.HardenedGitCommand(ctx, result.ProjectRoot,
 				"worktree", "remove", "--force", result.WorktreePath)
-			if out, rmErr := rm.CombinedOutput(); rmErr != nil {
+			var out []byte
+			var rmErr error
+			if rmCmdErr != nil {
+				rmErr = rmCmdErr
+			} else {
+				out, rmErr = rm.CombinedOutput()
+			}
+			if rmErr != nil {
 				slog.Warn("worktree-per-agent: git worktree remove failed, falling back to os.RemoveAll+prune",
 					"agent_id", in.AgentID, "path", result.WorktreePath,
 					"error", rmErr, "output", strings.TrimSpace(string(out)))
@@ -1391,7 +1401,9 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 						"agent_id", in.AgentID, "path", result.WorktreePath, "error", cleanErr)
 				}
 				// Prune the now-stale .git/worktrees/<id> registration so retries succeed.
-				_ = exec.CommandContext(ctx, "git", "-C", result.ProjectRoot, "worktree", "prune").Run()
+				if pruneCmd, pruneCmdErr := provision.HardenedGitCommand(ctx, result.ProjectRoot, "worktree", "prune"); pruneCmdErr == nil {
+					_ = pruneCmd.Run()
+				}
 			} else {
 				slog.Info("worktree-per-agent: cleaned up partial worktree and unregistered from git",
 					"agent_id", in.AgentID, "path", result.WorktreePath)

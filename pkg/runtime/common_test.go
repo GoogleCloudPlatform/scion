@@ -29,6 +29,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 )
@@ -1295,6 +1296,213 @@ func TestScionDirNotShadowedWhenWorkspaceInsideRepo(t *testing.T) {
 	// Should NOT have the tmpfs shadow
 	if strings.Contains(argStr, "tmpfs") {
 		t.Errorf("expected no tmpfs shadow mount, got: %s", argStr)
+	}
+}
+
+// setupHubManagedBaseRepo creates a fake shared base repo under
+// <home>/.scion/projects/<slug> (the hub-native worktree-per-agent
+// convention) with a .git admin dir (config, hooks/, info/) and an
+// agent worktree directory, and points $HOME at home so
+// isHubManagedWorktreeBase resolves it as hub-managed. Returns the repo
+// root and the worktree path.
+func setupHubManagedBaseRepo(t *testing.T, agentName string) (repoRoot, workspace string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot = filepath.Join(home, config.GlobalDir, config.ProjectsDir, "myproject")
+	gitDir := filepath.Join(repoRoot, ".git")
+	for _, d := range []string{filepath.Join(gitDir, "hooks"), filepath.Join(gitDir, "info")} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatalf("failed to create %s: %v", d, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte("[core]\n"), 0644); err != nil {
+		t.Fatalf("failed to write .git/config: %v", err)
+	}
+
+	workspace = filepath.Join(repoRoot, "worktrees", agentName)
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+	return repoRoot, workspace
+}
+
+func TestNarrowGitAdminMounts_HubNativeDocker(t *testing.T) {
+	// Part A: for a hub-native worktree-per-agent base repo, Docker runs must
+	// layer read-only mounts over the shared base's .git admin surface
+	// (config, hooks/, info/) on top of the rw .git mount, so the container
+	// can no longer write a hook/filter/config key the broker will later
+	// honor host-side.
+	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
+
+	args, err := buildCommonRunArgs(RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		RuntimeName:  "docker",
+		RepoRoot:     repoRoot,
+		Workspace:    workspace,
+	})
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+	argStr := strings.Join(args, " ")
+
+	// The rw base .git mount must remain (agents still need to commit).
+	wantRW := fmt.Sprintf("-v %s:/repo-root/.git ", filepath.Join(repoRoot, ".git"))
+	if !strings.Contains(argStr, wantRW) {
+		t.Errorf("expected rw base .git mount %q, got: %s", wantRW, argStr)
+	}
+
+	for _, sub := range []string{"config", "hooks", "info"} {
+		want := fmt.Sprintf("-v %s:/repo-root/.git/%s:ro", filepath.Join(repoRoot, ".git", sub), sub)
+		if !strings.Contains(argStr, want) {
+			t.Errorf("expected narrowed read-only mount %q, got: %s", want, argStr)
+		}
+	}
+
+	// config.worktree was never created for this agent, so it must not be
+	// mounted (mounting a nonexistent source would make Docker create an
+	// empty file on the host).
+	if strings.Contains(argStr, "config.worktree") {
+		t.Errorf("did not expect a config.worktree mount when the file does not exist, got: %s", argStr)
+	}
+}
+
+func TestNarrowGitAdminMounts_SkippedForLinkedProject(t *testing.T) {
+	// Part A must NOT engage for a linked project — its base is the user's
+	// own checkout (outside ~/.scion/projects), and their own hooks
+	// legitimately run today.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot := t.TempDir() // arbitrary path outside ~/.scion/projects
+	gitDir := filepath.Join(repoRoot, ".git")
+	if err := os.MkdirAll(filepath.Join(gitDir, "hooks"), 0755); err != nil {
+		t.Fatalf("failed to create hooks dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte("[core]\n"), 0644); err != nil {
+		t.Fatalf("failed to write .git/config: %v", err)
+	}
+	workspace := filepath.Join(repoRoot, "worktrees", "agent-1")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+
+	args, err := buildCommonRunArgs(RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		RuntimeName:  "docker",
+		RepoRoot:     repoRoot,
+		Workspace:    workspace,
+	})
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+	argStr := strings.Join(args, " ")
+
+	if strings.Contains(argStr, ":/repo-root/.git/config:ro") ||
+		strings.Contains(argStr, ":/repo-root/.git/hooks:ro") ||
+		strings.Contains(argStr, ":/repo-root/.git/info:ro") {
+		t.Errorf("linked project must not get the narrowed admin-dir mount, got: %s", argStr)
+	}
+}
+
+func TestNarrowGitAdminMounts_SkippedForNonDockerRuntime(t *testing.T) {
+	// Phase 1 gates the mount narrowing to Docker only; podman/apple (and any
+	// RuntimeName not yet extended) must fall through unchanged until their
+	// own phase lands.
+	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
+
+	for _, runtimeName := range []string{"", "podman", "apple"} {
+		args, err := buildCommonRunArgs(RunConfig{
+			Harness:      &harness.Generic{},
+			Name:         "test-agent",
+			UnixUsername: "scion",
+			Image:        "scion-agent:latest",
+			RuntimeName:  runtimeName,
+			RepoRoot:     repoRoot,
+			Workspace:    workspace,
+		})
+		if err != nil {
+			t.Fatalf("buildCommonRunArgs failed for runtime %q: %v", runtimeName, err)
+		}
+		argStr := strings.Join(args, " ")
+		if strings.Contains(argStr, ":/repo-root/.git/config:ro") {
+			t.Errorf("runtime %q must not get the narrowed admin-dir mount (Phase 1 is docker-only), got: %s", runtimeName, argStr)
+		}
+	}
+}
+
+func TestNarrowGitAdminMounts_CreatesMissingHooksAndInfoDirs(t *testing.T) {
+	// An empty/custom init.templateDir (or `git init --template=`) can
+	// produce a base without .git/hooks or .git/info. Skipping the mount in
+	// that case would fail open: the container could then create its own
+	// writable hooks/info directly in the rw .git root. narrowGitAdminMounts
+	// must create both on the host before mounting.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoRoot := filepath.Join(home, config.GlobalDir, config.ProjectsDir, "myproject")
+	gitDir := filepath.Join(repoRoot, ".git")
+	if err := os.MkdirAll(gitDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte("[core]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately do NOT create hooks/ or info/.
+	workspace := filepath.Join(repoRoot, "worktrees", "agent-1")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(gitDir, "hooks")); err == nil {
+		t.Fatal("test setup invariant broken: hooks/ should not exist yet")
+	}
+
+	args, err := buildCommonRunArgs(RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		RuntimeName:  "docker",
+		RepoRoot:     repoRoot,
+		Workspace:    workspace,
+	})
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+	argStr := strings.Join(args, " ")
+
+	for _, sub := range []string{"hooks", "info"} {
+		if _, statErr := os.Stat(filepath.Join(gitDir, sub)); statErr != nil {
+			t.Errorf("expected narrowGitAdminMounts to create %s on the host, got: %v", sub, statErr)
+		}
+		want := fmt.Sprintf("-v %s:/repo-root/.git/%s:ro", filepath.Join(gitDir, sub), sub)
+		if !strings.Contains(argStr, want) {
+			t.Errorf("expected read-only mount %q even though %s was initially missing, got: %s", want, sub, argStr)
+		}
+	}
+}
+
+func TestIsHubManagedWorktreeBase(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	hubNative := filepath.Join(home, config.GlobalDir, config.ProjectsDir, "myproject")
+	linked := filepath.Join(home, "dev", "myproject")
+
+	if !isHubManagedWorktreeBase(hubNative) {
+		t.Errorf("expected %q (under GlobalDir/ProjectsDir) to be hub-managed", hubNative)
+	}
+	if isHubManagedWorktreeBase(linked) {
+		t.Errorf("expected %q (outside GlobalDir) to NOT be hub-managed", linked)
+	}
+	if isHubManagedWorktreeBase("") {
+		t.Errorf("expected empty repoRoot to NOT be hub-managed")
 	}
 }
 

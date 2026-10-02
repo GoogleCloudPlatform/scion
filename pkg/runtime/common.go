@@ -33,6 +33,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	stagedsecrets "github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
@@ -269,6 +270,12 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// Worktree case: workspace is a subdirectory of repo root.
 			// Mount .git separately and workspace at its relative path.
 			registerMount(filepath.Join(config.RepoRoot, ".git"), "/repo-root/.git", false, true)
+			// Hardening (Phase 1, Docker + hub-native only): narrow the
+			// container's write access to the shared base repo's admin
+			// surface — see narrowGitAdminMounts.
+			if config.RuntimeName == "docker" && isHubManagedWorktreeBase(config.RepoRoot) {
+				narrowGitAdminMounts(registerMount, config.RepoRoot, config.Workspace)
+			}
 			containerWorkspace := filepath.Join("/repo-root", relWorkspace)
 			registerMount(config.Workspace, containerWorkspace, false, true)
 			addArg("--workdir", containerWorkspace)
@@ -550,6 +557,170 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 
 	return args, nil
+}
+
+// legacyProjectsDirName is the pre-rename name of the global
+// ~/.scion/projects directory (pkg/config's own legacyProjectsDirName,
+// unexported, is this same literal — duplicated here rather than imported so
+// this file's dependency surface stays unchanged; see
+// hack/check-project-compat-literals.sh's allowlist entry for this file).
+const legacyProjectsDirName = "groves"
+
+// isHubManagedWorktreeBase reports whether repoRoot is the broker-managed
+// shared base clone for a hub-native worktree-per-agent project, i.e. it
+// lives under the broker's conventional ~/.scion/projects/<slug> (or legacy
+// ~/.scion/groves/<slug>) path.
+//
+// This mirrors the hub's own linked-vs-hub-native distinction: per
+// pkg/hub/httpdispatcher.go (resolveDispatchProjectInfo), a project
+// provider's LocalPath — set when a project is linked to an existing local
+// checkout — takes precedence over hub-native slug resolution; only in its
+// absence does the broker (buildStartContext) resolve the project path via
+// the ~/.scion/projects/<slug> convention. A linked project's RepoRoot
+// therefore points at the user's own checkout, outside this tree, so this
+// check is false for it by construction. The narrowed .git admin-dir mount
+// (narrowGitAdminMounts) must apply only when this returns true — a linked
+// project's own hooks are host-trusted and must keep running unmodified.
+//
+// Any error resolving the broker's global dir (e.g. no home directory) fails
+// OPEN with respect to this mount narrowing — it is skipped for
+// that agent — rather than risk misclassifying a linked project as
+// hub-managed and breaking its legitimate hooks. This is a deliberate
+// trade-off given the two failure modes are asymmetric (a skipped mount
+// narrowing leaves the pre-existing exposure; a wrong positive breaks a
+// user's own repo), not a claim that it is the safer default in general.
+func isHubManagedWorktreeBase(repoRoot string) bool {
+	if repoRoot == "" {
+		return false
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil || globalDir == "" {
+		return false
+	}
+	repoAbs, err := filepath.Abs(repoRoot)
+	if err != nil {
+		return false
+	}
+	// `git rev-parse --git-common-dir` (how RepoRoot is ultimately derived,
+	// see pkg/agent/run.go's detectRepoRoot) returns a resolved (symlink-free)
+	// path, while os.UserHomeDir() may itself be reached through a symlink
+	// (e.g. /home -> /var/home). Resolve both sides the same way before
+	// comparing so a symlinked home directory doesn't cause a hub-native base
+	// to be misclassified as linked (and so miss the mount narrowing).
+	if resolved, evalErr := filepath.EvalSymlinks(repoAbs); evalErr == nil {
+		repoAbs = resolved
+	}
+	// Check both the canonical ~/.scion/projects/<slug> name and the
+	// pre-migration ~/.scion/groves/<slug> name: config.MigrateLegacyGlobalLayout
+	// renames the latter to the former, but runs separately from (and is not
+	// a precondition of) this check, so a not-yet-migrated hub-native base can
+	// still be live here. legacyProjectsDirName is a local literal, not
+	// imported from pkg/config's own (unexported) copy, mirroring
+	// pkg/config/paths.go's own ProjectsDir/legacy pairing — see
+	// hack/check-project-compat-literals.sh's allowlist entry for this file.
+	for _, sub := range []string{config.ProjectsDir, legacyProjectsDirName} {
+		base := filepath.Clean(filepath.Join(globalDir, sub))
+		if resolved, evalErr := filepath.EvalSymlinks(base); evalErr == nil {
+			base = resolved
+		}
+		if repoAbs == base || strings.HasPrefix(repoAbs, base+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// narrowGitAdminMounts layers read-only bind mounts over the shared base
+// repo's admin surface — .git/config, .git/hooks/, .git/info/, and (if
+// present) the per-worktree .git/worktrees/<name>/config.worktree — on top of
+// the already-registered read-write /repo-root/.git mount. This is Part A of
+// the broker-git worktree containment change: it removes a container's
+// ability to write the files host-side git later honors (hooks,
+// core.hooksPath/fsmonitor/sshCommand, smudge/clean filter selection via
+// info/attributes) when the broker runs git against this same base — see
+// pkg/provision/provision.go's HardenedGitCommand for the invocation-level
+// defense-in-depth layer.
+//
+// Objects, refs, packed-refs, and the per-worktree HEAD/index/logs/ORIG_HEAD
+// are deliberately left writable: a worktree shares the common object store,
+// so in-container `git commit` must still be able to write loose objects and
+// update refs. Only the admin subpaths above are narrowed — the container
+// never legitimately needs to write them (identity and credentials are
+// injected via $HOME/.gitconfig, not .git/config, and there is no
+// in-container `git config --local` write).
+//
+// Each subpath is mounted read-only only if it currently exists, so a
+// freshly-cloned base without a config.worktree (the common case —
+// extensions.worktreeConfig is opt-in) does not cause Docker to create an
+// empty file/dir on the host for a nonexistent bind-mount source.
+func narrowGitAdminMounts(registerMount func(string, string, bool, bool), repoRoot, workspace string) {
+	gitDir := filepath.Join(repoRoot, ".git")
+
+	// .git/hooks and .git/info are present after a default `git init`, but
+	// an empty/custom init.templateDir (or `git init --template=`) can
+	// produce a base without one or both. Skipping the mount in that case
+	// would fail OPEN: the container could then create its own writable
+	// hooks/ or info/ directly in the rw .git root. Create them on the host
+	// first (an empty read-only directory is harmless) so the mount always
+	// applies.
+	for _, dir := range []string{"hooks", "info"} {
+		src := filepath.Join(gitDir, dir)
+		if err := os.MkdirAll(src, 0755); err != nil {
+			// If the directory cannot even be created, mounting it read-only
+			// isn't possible either; leave this one subpath uncovered rather
+			// than fail agent startup over it.
+			continue
+		}
+		registerMount(src, filepath.Join("/repo-root/.git", dir), true, true)
+	}
+
+	// .git/config always exists after `git init`/`git clone` — it is not
+	// template-populated — so no analogous fail-open gap applies here.
+	if configSrc := filepath.Join(gitDir, "config"); fileExists(configSrc) {
+		registerMount(configSrc, "/repo-root/.git/config", true, true)
+	}
+
+	// extensions.worktreeConfig, when enabled on the base, lets a worktree
+	// carry its own config.worktree that git also honors — narrow it too.
+	// This one keeps skip-if-missing: it is opt-in (needs the extension
+	// enabled in the now-read-only base config) and harmless if absent,
+	// unlike hooks/info which git always consults.
+	worktreeName := resolveWorktreeAdminName(workspace)
+	if configWorktree := filepath.Join(gitDir, "worktrees", worktreeName, "config.worktree"); fileExists(configWorktree) {
+		registerMount(configWorktree, filepath.Join("/repo-root/.git/worktrees", worktreeName, "config.worktree"), true, true)
+	}
+}
+
+// fileExists reports whether path exists (file or directory).
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// resolveWorktreeAdminName returns the name git used for this worktree's
+// admin directory under <repoRoot>/.git/worktrees/. It defaults to
+// filepath.Base(workspace), but `git worktree add` appends a numeric suffix
+// to disambiguate a name collision, so the actual name is read from the
+// worktree's own gitfile (a file at <workspace>/.git containing "gitdir:
+// <repoRoot>/.git/worktrees/<name>") when available. Falling back to the
+// basename on any read/parse failure only risks missing the optional
+// config.worktree mount (harmless — see narrowGitAdminMounts).
+func resolveWorktreeAdminName(workspace string) string {
+	fallback := filepath.Base(workspace)
+	data, err := os.ReadFile(filepath.Join(workspace, ".git"))
+	if err != nil {
+		return fallback
+	}
+	line := strings.TrimSpace(string(data))
+	const prefix = "gitdir:"
+	if !strings.HasPrefix(line, prefix) {
+		return fallback
+	}
+	adminDir := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	if adminDir == "" {
+		return fallback
+	}
+	return filepath.Base(adminDir)
 }
 
 // resolveContainerID maps an agent identifier (slug, name, or partial

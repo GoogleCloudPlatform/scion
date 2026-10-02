@@ -1704,6 +1704,89 @@ func lockLooksAbandoned(dir, path string) bool {
 	return now.Sub(last) > provisionLockStaleAfter
 }
 
+// ErrCommondirPresent is returned by HardenedGitCommand when the target
+// base's .git/commondir file exists. A hub-native shared base is always the
+// main working copy of its own repository (never itself a linked worktree),
+// so it never legitimately has one; its presence means git's common-
+// directory resolution for this gitdir would be redirected somewhere other
+// than the mounted, host-managed .git. Rather than operate against an
+// unknown/unverified location, the broker refuses.
+var ErrCommondirPresent = errors.New("refusing git operation: base .git/commondir is present")
+
+// HardenedGitCommand builds an *exec.Cmd for a broker-side git invocation
+// against a project's shared hub-native worktree-per-agent base repo, with
+// the invocation-level hardening for the broker-git worktree containment
+// change applied. It ensures the broker's own git operations honor only the
+// host-managed config/hooks/refs for the base — never a redirected or
+// otherwise unexpected location — and returns an error instead of running if
+// it cannot establish that.
+//
+// Two mechanisms enforce this:
+//   - GIT_COMMON_DIR is pinned to <dir>/.git on every invocation. Git
+//     resolves config/hooks/refs through whatever "common directory" applies
+//     to the gitdir it operates on; without pinning it, a top-level
+//     <dir>/.git/commondir file (which git honors for the base's own gitdir,
+//     not only for linked worktrees) can redirect that resolution elsewhere.
+//     Pinning makes the common directory explicit and authoritative for
+//     every call through this wrapper, independent of what any commondir
+//     file says.
+//   - As defense in depth (and detection), the wrapper first checks whether
+//     <dir>/.git/commondir exists at all and refuses (ErrCommondirPresent)
+//     if so, since a hub-native base never legitimately has one.
+//
+// It deliberately does NOT disable hooks (core.hooksPath), filters, aliases,
+// or the global/system gitconfig — once the above holds, any hook/filter
+// still configured for the base is host-managed and must keep running (most
+// notably git-lfs: a post-checkout hook + filter.lfs.* smudge/clean driver).
+// Specifically:
+//   - GIT_CONFIG_NOSYSTEM=1 / GIT_CONFIG_GLOBAL=/dev/null were considered and
+//     REJECTED: `git lfs install` writes filter.lfs.* to the global or system
+//     gitconfig (not repo-local), so this would silently break LFS. It would
+//     also strip broker-host config the broker legitimately relies on
+//     (safe.directory, credential.helper, url.insteadOf, http.*,
+//     core.sshCommand for its own auth) for no corresponding benefit.
+//   - core.sshCommand is left alone for the same reason: this wrapper also
+//     covers the base clone/pull paths, which may legitimately depend on the
+//     broker's configured SSH transport.
+//   - Alias neutralization is unnecessary: every caller here invokes an
+//     explicit, hardcoded subcommand, never a user-suppliable one.
+//
+// What it does additionally clear:
+//   - core.fsmonitor (both boolean and hook-path forms): not used by git-lfs
+//     or any other broker operation, so clearing it costs nothing.
+//   - core.pager=cat: purely cosmetic — a pager must never block
+//     non-interactive broker output.
+//
+// dir is the working directory (cmd.Dir) and the base whose common directory
+// is pinned; it must be non-empty. args are the git subcommand and its
+// arguments, e.g. "worktree", "add", "--relative-paths", ... The returned
+// cmd.Env starts as a copy of the broker process's environment plus
+// GIT_COMMON_DIR; callers that need to layer additional env (e.g. the
+// GIT_CONFIG_COUNT/KEY_0/VALUE_0 credential-helper technique) must append to
+// cmd.Env rather than replace it, or the pin is lost.
+func HardenedGitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
+	if dir == "" {
+		return nil, fmt.Errorf("HardenedGitCommand: dir is required")
+	}
+	commondirFile := filepath.Join(dir, ".git", "commondir")
+	if _, err := os.Stat(commondirFile); err == nil {
+		slog.Error("HardenedGitCommand: refusing to operate, base .git/commondir is present",
+			"dir", dir, "commondir_file", commondirFile)
+		return nil, fmt.Errorf("%w: %s", ErrCommondirPresent, commondirFile)
+	}
+
+	hardened := []string{
+		"-c", "core.fsmonitor=false",
+		"-c", "core.fsmonitor=",
+		"-c", "core.pager=cat",
+	}
+	fullArgs := append(hardened, args...)
+	cmd := exec.CommandContext(ctx, "git", fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_COMMON_DIR="+filepath.Join(dir, ".git"))
+	return cmd, nil
+}
+
 // gitCloneWorkspace performs the git clone into the workspace directory.
 // It clones directly into in.Resolved.HostPath (gitCloneDirect) unless the
 // filesystem-fallback lock's own on-disk marker would sit inside that exact
@@ -2189,8 +2272,10 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 
 	// git worktree add --relative-paths -b <branch> <path>
 	// --relative-paths is mandatory for container path-identity (design §6).
-	cmd := exec.CommandContext(ctx, "git", "worktree", "add", "--relative-paths", "-b", branchName, worktreePath)
-	cmd.Dir = base
+	cmd, err := HardenedGitCommand(ctx, base, "worktree", "add", "--relative-paths", "-b", branchName, worktreePath)
+	if err != nil {
+		return fmt.Errorf("ProvisionShared: %w", err)
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		outputStr := strings.TrimSpace(string(output))
@@ -2214,8 +2299,10 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 
 		// If branch already exists (but not checked out), try without -b.
 		if strings.Contains(outputStr, "already exists") {
-			cmd = exec.CommandContext(ctx, "git", "worktree", "add", "--relative-paths", worktreePath, branchName)
-			cmd.Dir = base
+			cmd, err = HardenedGitCommand(ctx, base, "worktree", "add", "--relative-paths", worktreePath, branchName)
+			if err != nil {
+				return fmt.Errorf("ProvisionShared: %w", err)
+			}
 			output, err = cmd.CombinedOutput()
 			if err != nil {
 				reuse := strings.TrimSpace(string(output))
@@ -2245,8 +2332,13 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 func findWorktreeForBranch(ctx context.Context, repoDir, branch string) (string, error) {
 	// Prune first so a worktree dir removed on disk (but not unregistered in git)
 	// isn't returned as a stale join target pointing at a non-existent path.
-	_ = exec.CommandContext(ctx, "git", "-C", repoDir, "worktree", "prune").Run()
-	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "worktree", "list", "--porcelain")
+	if pruneCmd, err := HardenedGitCommand(ctx, repoDir, "worktree", "prune"); err == nil {
+		_ = pruneCmd.Run()
+	}
+	cmd, err := HardenedGitCommand(ctx, repoDir, "worktree", "list", "--porcelain")
+	if err != nil {
+		return "", fmt.Errorf("git worktree list: %w", err)
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git worktree list: %w", err)
@@ -2268,30 +2360,65 @@ func findWorktreeForBranch(ctx context.Context, repoDir, branch string) (string,
 
 // prepareBaseForWorktrees configures a freshly cloned base checkout for
 // worktree-per-agent use: detaches HEAD (so no branch is "owned" by the base),
-// disables auto-gc, and excludes worktrees/ from untracked file lists.
+// disables auto-gc, sets branch.autoSetupMerge=false, and excludes worktrees/
+// from untracked file lists.
+//
+// branch.autoSetupMerge=false is a mitigation for hub-native worktree mode,
+// where .git/config is mounted read-only into the agent container (see
+// pkg/runtime/common.go's narrowGitAdminMounts): with config unwritable,
+// commands that need to record a new tracking relationship (e.g. `checkout
+// -b <local> <remote>/<branch>`, DWIM `switch <remote-branch>`) would
+// otherwise fail outright because git cannot write the upstream it just
+// computed. Disabling automatic upstream setup means those commands create a
+// plain untracked local branch instead of failing. It does not help
+// operations that write config for other reasons (`push -u`, `branch -m`,
+// `branch --set-upstream-to`) — those still fail or partially apply with
+// config read-only; that is a documented limitation of hub-native worktree
+// mode, not a regression this setting is meant to cover.
 func prepareBaseForWorktrees(ctx context.Context, hostPath string) error {
 	if err := gitDetach(ctx, hostPath); err != nil {
 		return err
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "-C", hostPath, "config", "gc.auto", "0")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git config gc.auto 0: %s", strings.TrimSpace(string(output)))
+	if err := runHardenedGitConfig(ctx, hostPath, "gc.auto", "0"); err != nil {
+		return err
+	}
+	if err := runHardenedGitConfig(ctx, hostPath, "branch.autoSetupMerge", "false"); err != nil {
+		return err
 	}
 
 	return appendGitExclude(hostPath, "worktrees/")
+}
+
+// runHardenedGitConfig is a small helper for the legitimate broker-side
+// `git config <key> <value>` writes in prepareBaseForWorktrees.
+func runHardenedGitConfig(ctx context.Context, hostPath, key, value string) error {
+	cmd, err := HardenedGitCommand(ctx, hostPath, "config", key, value)
+	if err != nil {
+		return err
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git config %s %s: %s", key, value, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 // gitDetach detaches HEAD in the repo at hostPath so the base checkout owns
 // no branch. Tries 'git switch --detach' first, falls back to 'git checkout
 // --detach' for older git versions.
 func gitDetach(ctx context.Context, hostPath string) error {
-	cmd := exec.CommandContext(ctx, "git", "-C", hostPath, "switch", "--detach")
+	cmd, err := HardenedGitCommand(ctx, hostPath, "switch", "--detach")
+	if err != nil {
+		return err
+	}
 	if _, err := cmd.CombinedOutput(); err == nil {
 		return nil
 	}
-	cmd = exec.CommandContext(ctx, "git", "-C", hostPath, "checkout", "--detach")
+	cmd, err = HardenedGitCommand(ctx, hostPath, "checkout", "--detach")
+	if err != nil {
+		return err
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git detach: %s", strings.TrimSpace(string(output)))

@@ -60,6 +60,7 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	if err := prepareContainerSecretEnv(&config); err != nil {
 		return "", err
 	}
+	config.RuntimeName = r.Name()
 
 	args, err := buildCommonRunArgs(config)
 	if err != nil {

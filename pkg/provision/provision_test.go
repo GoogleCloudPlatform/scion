@@ -3870,6 +3870,398 @@ func TestIsValidJoinWorktree(t *testing.T) {
 	})
 }
 
+// --- HardenedGitCommand ---
+//
+// pkg/runtime/common.go's narrowGitAdminMounts (Part A) is the primary
+// control: a read-only bind mount over the shared base's .git
+// config/hooks/info means only host-managed hooks/config/filters are ever
+// honored when the broker runs git against the base. These tests exercise
+// what's testable without Docker/mount-namespace access (unavailable in this
+// sandbox): HardenedGitCommand's own behavior is exercised directly against
+// a real base repo. A real read-only bind mount's enforcement of writes to
+// the pre-existing .git/config file specifically (as opposed to creating a
+// new file, e.g. under .git/hooks/) is proven only at the "correct mount
+// args are generated" level (pkg/runtime/common_test.go's
+// TestNarrowGitAdminMounts_HubNativeDocker) and requires a real Docker
+// read-only bind mount to verify end to end (tracked acceptance item).
+
+func TestHardenedGitCommand_RefusesCommondirRedirect(t *testing.T) {
+	// A hub-native shared base is always the main working copy of its own
+	// repository, so a top-level .git/commondir file is never legitimate:
+	// git resolves config/hooks/refs through whatever commondir points to,
+	// for the base's own gitdir as much as for any linked worktree. Its
+	// presence would otherwise redirect every HardenedGitCommand
+	// invocation's config/hooks resolution away from the mounted,
+	// host-managed .git admin surface to an arbitrary writable location —
+	// this is exactly the gap narrowGitAdminMounts' read-only mount alone
+	// does not close, since it never inspects commondir.
+	base := t.TempDir()
+	run(t, "git", "init", "--initial-branch=main", base)
+	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
+		"commit", "--allow-empty", "-m", "root")
+
+	// A redirect target with its own hook, standing in for an unverified
+	// location outside the mounted admin surface.
+	redirect := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(redirect, "hooks"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "marker")
+	hookScript := fmt.Sprintf("#!/bin/sh\necho hook-ran >> %s\n", marker)
+	if err := os.WriteFile(filepath.Join(redirect, "hooks", "post-checkout"), []byte(hookScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(redirect, "config"), []byte("[core]\n\trepositoryformatversion = 0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(redirect, "objects"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(redirect, "refs", "heads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, ".git", "commondir"), []byte(redirect+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	_, err := HardenedGitCommand(context.Background(), base, "worktree", "add", "--relative-paths", "-b", "agent-x", wtPath)
+	if !errors.Is(err, ErrCommondirPresent) {
+		t.Fatalf("expected ErrCommondirPresent, got: %v", err)
+	}
+	if data, statErr := os.ReadFile(marker); statErr == nil {
+		t.Errorf("expected the redirected hook to never run, marker contents: %q", data)
+	}
+}
+
+func TestWorktreeUsage_UnaffectedByReadOnlyHooksAndInfo(t *testing.T) {
+	// AC2-style smoke test (git-level; no docker in this sandbox — see the
+	// disclosed environment limitation): with .git/hooks and .git/info
+	// read-only (real for these two paths, since creating a new file only
+	// needs directory write permission, which read-only expresses
+	// correctly), the broker's HardenedGitCommand-driven `worktree add`
+	// still succeeds, and ordinary commit + checkout in the resulting
+	// worktree are unaffected.
+	base := t.TempDir()
+	run(t, "git", "init", "--initial-branch=main", base)
+	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
+		"commit", "--allow-empty", "-m", "root")
+
+	hooksDir := filepath.Join(base, ".git", "hooks")
+	infoDir := filepath.Join(base, ".git", "info")
+	if err := os.Chmod(hooksDir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(infoDir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(hooksDir, 0755)
+		_ = os.Chmod(infoDir, 0755)
+	})
+
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	cmd, err := HardenedGitCommand(context.Background(), base, "worktree", "add", "--relative-paths", "-b", "agent-2", wtPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add failed: %v\n%s", err, out)
+	}
+
+	if err := os.WriteFile(filepath.Join(wtPath, "f.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runIn(t, wtPath, "git", "add", "f.txt")
+	runIn(t, wtPath, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "-m", "agent commit")
+	runIn(t, wtPath, "git", "checkout", "-b", "agent-2-work")
+}
+
+func TestHardenedGitCommand_NeutralizesFsmonitorRegardlessOfConfig(t *testing.T) {
+	// core.fsmonitor is a pure .git/config vector (no on-disk file creation
+	// needed), so unlike hooks/info above it cannot be blocked by directory
+	// permissions — this is exactly why HardenedGitCommand clears it at the
+	// invocation level (Part B) as belt-and-suspenders over Part A.
+	base := t.TempDir()
+	run(t, "git", "init", "--initial-branch=main", base)
+	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
+		"commit", "--allow-empty", "-m", "root")
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	fsmonScript := filepath.Join(t.TempDir(), "fsmonitor.sh")
+	if err := os.WriteFile(fsmonScript,
+		[]byte(fmt.Sprintf("#!/bin/sh\necho fsmonitor-ran >> %s\necho \"\"\n", marker)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// An unexpected core.fsmonitor, however it got there.
+	runIn(t, base, "git", "config", "core.fsmonitor", fsmonScript)
+
+	cmd, err := HardenedGitCommand(context.Background(), base, "status", "--porcelain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git status failed: %v\n%s", err, out)
+	}
+	if data, _ := os.ReadFile(marker); len(data) != 0 {
+		t.Errorf("expected core.fsmonitor to be neutralized by HardenedGitCommand, but it ran: %q", data)
+	}
+
+	// Revert-check: the identical config, invoked WITHOUT the wrapper, DOES
+	// fire — proving the wrapper (not something incidental) is what
+	// neutralizes it.
+	plain := exec.Command("git", "status", "--porcelain")
+	plain.Dir = base
+	if out, err := plain.CombinedOutput(); err != nil {
+		t.Fatalf("git status (unwrapped) failed: %v\n%s", err, out)
+	}
+	if data, _ := os.ReadFile(marker); len(data) == 0 {
+		t.Error("expected core.fsmonitor to fire without the wrapper (revert-check baseline), got no marker")
+	}
+}
+
+func TestHardenedGitCommand_TrustedHookAndGlobalFilterStillRun(t *testing.T) {
+	// Part A only prevents a CONTAINER from writing config/hooks/info; it
+	// does not and must not stop the HOST itself (e.g. `git lfs install`,
+	// run by the broker operator, not a container) from doing so, and
+	// HardenedGitCommand must not neutralize what it finds there. git-lfs
+	// isn't available in this environment, so this stands in for it exactly
+	// as instructed: filter.lfs.* configured via the GLOBAL gitconfig (the
+	// way `git lfs install` actually writes it — not repo-local, which would
+	// pass even with a wrongly-cleared GIT_CONFIG_GLOBAL) plus a trusted
+	// post-checkout hook already present in the base's .git/hooks (as
+	// git-lfs install also adds).
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	marker := filepath.Join(t.TempDir(), "marker")
+	t.Setenv("MARKER_FILE", marker)
+
+	// A script file (rather than an inline shell command) avoids nested-quote
+	// mangling once the command string round-trips through gitconfig.
+	smudgeScript := filepath.Join(t.TempDir(), "smudge.sh")
+	if err := os.WriteFile(smudgeScript, []byte("#!/bin/sh\ncat >/dev/null\necho smudge-ran >> \"$MARKER_FILE\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	globalConfig := filepath.Join(home, ".gitconfig")
+	globalConfigBody := fmt.Sprintf(
+		"[filter \"lfs\"]\n\tsmudge = %s\n\tclean = cat\n\trequired = false\n",
+		smudgeScript)
+	if err := os.WriteFile(globalConfig, []byte(globalConfigBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	base := t.TempDir()
+	run(t, "git", "init", "--initial-branch=main", base)
+	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
+		"commit", "--allow-empty", "-m", "root")
+
+	// A trusted, host-placed post-checkout hook (as `git lfs install` adds).
+	hookScript := fmt.Sprintf("#!/bin/sh\necho hook-ran >> %s\n", marker)
+	if err := os.WriteFile(filepath.Join(base, ".git", "hooks", "post-checkout"), []byte(hookScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(base, ".gitattributes"), []byte("data.bin filter=lfs -text\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "data.bin"), []byte("binary-content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runIn(t, base, "git", "add", ".")
+	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
+		"commit", "-m", "add lfs-tracked file")
+
+	// The exact broker trigger: HardenedGitCommand-driven `git worktree add`,
+	// which checks out the new worktree — running the post-checkout hook and
+	// the smudge filter for data.bin.
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	cmd, err := HardenedGitCommand(context.Background(), base, "worktree", "add", "--relative-paths", "-b", "agent-1", wtPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add failed: %v\n%s", err, out)
+	}
+
+	data, _ := os.ReadFile(marker)
+	if !strings.Contains(string(data), "hook-ran") {
+		t.Errorf("expected the trusted post-checkout hook to run, marker: %q", data)
+	}
+	if !strings.Contains(string(data), "smudge-ran") {
+		t.Errorf("expected the trusted global (LFS-style) smudge filter to run, marker: %q", data)
+	}
+}
+
+func TestHardenedGitCommand_DoesNotClobberCredentialHelperEnv(t *testing.T) {
+	// pkg/util/git.go's PullSharedWorkspace authenticates via a one-shot
+	// credential helper injected through GIT_CONFIG_COUNT/KEY_0/VALUE_0 env
+	// vars. A caller combining that technique with HardenedGitCommand must
+	// APPEND to cmd.Env (not replace it), or the GIT_COMMON_DIR pin would be
+	// lost along with the ambient environment.
+	base := t.TempDir()
+	run(t, "git", "init", "--initial-branch=main", base)
+
+	helper := "!f() { echo username=oauth2; echo password=test-token; }; f"
+	credEnv := []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=credential.helper",
+		"GIT_CONFIG_VALUE_0=" + helper,
+	}
+
+	credCmd, err := HardenedGitCommand(context.Background(), base, "config", "--get", "credential.helper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	credCmd.Env = append(credCmd.Env, credEnv...)
+	out, err := credCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git config --get credential.helper failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != helper {
+		t.Errorf("expected the credential-helper env to survive alongside the wrapper's env, got %q want %q", got, helper)
+	}
+
+	pagerCmd, err := HardenedGitCommand(context.Background(), base, "config", "--get", "core.pager")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pagerCmd.Env = append(pagerCmd.Env, credEnv...)
+	out, err = pagerCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git config --get core.pager failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "cat" {
+		t.Errorf("expected the wrapper's core.pager=cat to survive alongside the credential-helper env, got %q", got)
+	}
+
+	commonDirCmd, err := HardenedGitCommand(context.Background(), base, "rev-parse", "--git-common-dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commonDirCmd.Env = append(commonDirCmd.Env, credEnv...)
+	out, err = commonDirCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse --git-common-dir failed: %v\n%s", err, out)
+	}
+	wantCommonDir := filepath.Join(base, ".git")
+	if got := strings.TrimSpace(string(out)); got != wantCommonDir {
+		t.Errorf("expected the GIT_COMMON_DIR pin to survive alongside the credential-helper env, got %q want %q", got, wantCommonDir)
+	}
+}
+
+// --- documented in-container git workflow limitations under a
+// read-only .git/config, and the branch.autoSetupMerge=false mitigation ---
+
+// runInGetCode runs a command in dir and returns its exit code and combined
+// output without failing the test. Used where the point of the assertion is
+// a specific exit code (including nonzero), not bare success.
+func runInGetCode(t *testing.T, dir, name string, args ...string) (int, string) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return 0, string(out)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode(), string(out)
+	}
+	t.Fatalf("%s %v (in %s): %v\n%s", name, args, dir, err, out)
+	return -1, string(out)
+}
+
+// runInExpectCode runs a command in dir and fails the test if its exit code
+// does not match want.
+func runInExpectCode(t *testing.T, dir string, want int, name string, args ...string) {
+	t.Helper()
+	got, out := runInGetCode(t, dir, name, args...)
+	if got != want {
+		t.Errorf("%s %v (in %s): exit code = %d, want %d\n%s", name, args, dir, got, want, out)
+	}
+}
+
+func TestPrepareBaseForWorktrees_DocumentedWorkflowsWithConfigUnwritable(t *testing.T) {
+	// Part A mounts the shared base's .git/config read-only into the agent
+	// container. That does not block plain git usage, but it does block any
+	// command that needs to WRITE repo config — most notably setting up a
+	// new tracking relationship. prepareBaseForWorktrees sets
+	// branch.autoSetupMerge=false specifically so the single most common of
+	// those (`checkout -b <local> <remote>/<branch>`, and DWIM `switch
+	// <remote-branch>`) degrades to a plain untracked local branch instead
+	// of failing outright. This test forces config writes to fail the same
+	// way a read-only bind mount would (a pre-created .git/config.lock —
+	// real mount enforcement is EROFS/EBUSY, not exercised here; see the
+	// disclosed environment limitation) and asserts the resulting documented
+	// supported/unsupported command list.
+	ctx := context.Background()
+	work := t.TempDir()
+	bare := filepath.Join(work, "bare.git")
+	run(t, "git", "init", "--bare", "--initial-branch=main", bare)
+
+	remoteClone := filepath.Join(work, "remote-clone")
+	run(t, "git", "clone", bare, remoteClone)
+	runIn(t, remoteClone, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "--allow-empty", "-m", "root")
+	runIn(t, remoteClone, "git", "push", "origin", "main")
+	runIn(t, remoteClone, "git", "checkout", "-b", "feature-remote")
+	runIn(t, remoteClone, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "--allow-empty", "-m", "feature")
+	runIn(t, remoteClone, "git", "push", "origin", "feature-remote")
+
+	base := filepath.Join(work, "base")
+	run(t, "git", "clone", bare, base)
+	if err := prepareBaseForWorktrees(ctx, base); err != nil {
+		t.Fatalf("prepareBaseForWorktrees: %v", err)
+	}
+
+	wt := filepath.Join(work, "wt")
+	runIn(t, base, "git", "worktree", "add", wt, "-b", "agent-branch")
+
+	// Force config writes to fail the way a read-only-mounted .git/config
+	// would: git's config write is a lock-then-rename, so pre-creating the
+	// lock file makes that step fail the same way EBUSY/EROFS against a
+	// real read-only mount would.
+	configLock := filepath.Join(base, ".git", "config.lock")
+	if err := os.WriteFile(configLock, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(configLock) })
+
+	// Mitigated by branch.autoSetupMerge=false: succeed despite config being
+	// unwritable, by skipping the upstream-tracking config write entirely.
+	runInExpectCode(t, wt, 0, "git", "checkout", "-b", "tracked-checkout", "origin/feature-remote")
+	runInExpectCode(t, wt, 0, "git", "switch", "feature-remote") // DWIM
+
+	// Documented as broken with config unwritable; NOT fixed by the
+	// mitigation above (these all write config for reasons other than
+	// initial tracking setup).
+	runInExpectCode(t, wt, 1, "git", "branch", "--set-upstream-to=origin/main", "agent-branch")
+	runInExpectCode(t, wt, 128, "git", "branch", "-m", "agent-branch", "agent-branch-renamed")
+	// The push itself succeeds; its upstream is silently NOT recorded.
+	runInExpectCode(t, wt, 0, "git", "push", "-u", "origin", "agent-branch-renamed")
+	if code, _ := runInGetCode(t, wt, "git", "config", "--get", "branch.agent-branch-renamed.remote"); code == 0 {
+		t.Error("expected push -u's upstream to NOT be recorded when config is unwritable (documented limitation)")
+	}
+	runInExpectCode(t, wt, 128, "git", "remote", "add", "extra-remote", "https://example.invalid/x.git")
+	runInExpectCode(t, wt, 255, "git", "config", "local.test.key", "value")
+
+	// Unaffected by config being unwritable.
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runInExpectCode(t, wt, 0, "git", "add", "f.txt")
+	runInExpectCode(t, wt, 0, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "-m", "agent commit")
+	runInExpectCode(t, wt, 0, "git", "checkout", "-b", "untracked-local") // no tracking requested
+	runInExpectCode(t, wt, 0, "git", "status", "--porcelain")
+	runInExpectCode(t, wt, 0, "git", "fetch", "origin")
+	runInExpectCode(t, wt, 0, "git", "pull", "--ff-only", "origin", "main")
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("hi2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runInExpectCode(t, wt, 0, "git", "stash")
+}
+
 // --- Create-or-Attach + Sharer Registration ---
 
 func TestProvision_WorktreePerAgent_CreateAndJoin(t *testing.T) {
