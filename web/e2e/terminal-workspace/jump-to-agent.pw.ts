@@ -229,6 +229,27 @@ test('the header button opens the palette, labeled "Jump to agent"', async ({ pa
   );
 });
 
+test('a dismiss refocuses the header button that opened the palette', async ({ page }) => {
+  await setup(page, { [agentA]: fixture(agentA, 'Alice-bot') });
+  await page.goto(`/terminals/${agentA}`);
+  await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
+
+  await paletteButton(page).click();
+  await expect(paletteOption(page, 'Alice-bot')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(paletteDialog(page)).toBeHidden();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        let el: Element | null = document.activeElement;
+        while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+        return el?.classList.contains('palette-button') ?? false;
+      })
+    )
+    .toBe(true);
+});
+
 test('the palette uses the same type scale as the chat palette', async ({ page }) => {
   await setup(page, { [agentA]: { ...fixture(agentA, 'Alice-bot'), project: 'Fixture Project' } });
   await page.goto(`/terminals/${agentA}`);

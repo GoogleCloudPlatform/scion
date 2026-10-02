@@ -319,6 +319,22 @@ describe('QuickPaletteHost: open, close and focus', () => {
     expect(document.activeElement).toBe(invoker);
   });
 
+  it('refocuses an invoker inside a shadow root, not its shadow host', async () => {
+    const shadowHost = document.createElement('div');
+    document.body.append(shadowHost);
+    const invoker = document.createElement('button');
+    shadowHost.attachShadow({ mode: 'open' }).append(invoker);
+    invoker.focus();
+    const h = createHost();
+    const palette = await openReady(h);
+    invoker.blur();
+
+    palette.dispatchEvent(new CustomEvent('palette-dismiss', { detail: { reason: 'escape' } }));
+    fireFromDialog(palette, 'sl-after-hide');
+
+    expect(shadowHost.shadowRoot!.activeElement).toBe(invoker);
+  });
+
   it('hide() closes without refocusing the invoker, and leaves a closed palette closed', async () => {
     const invoker = document.createElement('button');
     document.body.append(invoker);

@@ -62,6 +62,7 @@ import type {
 } from '../../../client/chat-palette-types.js';
 import type { ScionQuickPalette } from './quick-palette.js';
 import { hasOpenModalDescendant } from '../open-modal.js';
+import { deepActiveElement } from '../deep-active-element.js';
 
 /** What {@link QuickPaletteHostOptions.load} receives for one load. */
 export interface QuickPaletteLoadContext {
@@ -179,7 +180,8 @@ export class QuickPaletteHost {
     // A reopen during the close animation keeps the invoker it already has:
     // focus is still inside the closing palette, or Shoelace has blurred it.
     if (!hiding) {
-      this.invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      const invoker = deepActiveElement();
+      this.invoker = invoker instanceof HTMLElement ? invoker : null;
     }
     this.closedBySelection = false;
     this.paletteOpen = true;
