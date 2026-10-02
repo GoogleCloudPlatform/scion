@@ -127,7 +127,7 @@ func TestTryProvisionWorktree_Start_StitchesRepoRoot(t *testing.T) {
 
 	srv := &Server{}
 	provisionOpts := &api.StartOptions{}
-	provisioned, repoRoot := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	provisioned, repoRoot, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name:          "agent-a",
 		AgentID:       "agent-a",
 		ProjectID:     "p1",
@@ -136,6 +136,9 @@ func TestTryProvisionWorktree_Start_StitchesRepoRoot(t *testing.T) {
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: gc},
 	}, provisionOpts, map[string]string{})
+	if err != nil {
+		t.Fatalf("tryProvisionWorktree: unexpected error: %v", err)
+	}
 	if !provisioned {
 		t.Fatal("tryProvisionWorktree: expected provisioning to succeed")
 	}
@@ -230,7 +233,7 @@ func TestTryProvisionWorktree_Start_RepoRootSurvivesResume(t *testing.T) {
 
 	srv := &Server{}
 	provisionOpts := &api.StartOptions{}
-	provisioned, repoRoot := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	provisioned, repoRoot, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name:          "agent-a",
 		AgentID:       "agent-a",
 		ProjectID:     "p1",
@@ -239,8 +242,8 @@ func TestTryProvisionWorktree_Start_RepoRootSurvivesResume(t *testing.T) {
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: gc},
 	}, provisionOpts, map[string]string{})
-	if !provisioned || repoRoot == "" || provisionOpts.Workspace == "" {
-		t.Fatalf("tryProvisionWorktree setup failed: provisioned=%v repoRoot=%q workspace=%q", provisioned, repoRoot, provisionOpts.Workspace)
+	if err != nil || !provisioned || repoRoot == "" || provisionOpts.Workspace == "" {
+		t.Fatalf("tryProvisionWorktree setup failed: err=%v provisioned=%v repoRoot=%q workspace=%q", err, provisioned, repoRoot, provisionOpts.Workspace)
 	}
 
 	projectScionDir := setupRepoRootProjectScaffold(t, t.TempDir())
@@ -462,7 +465,7 @@ func TestTryProvisionWorktree_Start_SymlinkedBase_ContainerWorkspaceStaysConsist
 
 	srv := &Server{}
 	provisionOpts := &api.StartOptions{}
-	provisioned, repoRoot := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	provisioned, repoRoot, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name:          "agent-a",
 		AgentID:       "agent-a",
 		ProjectID:     "p1",
@@ -471,8 +474,8 @@ func TestTryProvisionWorktree_Start_SymlinkedBase_ContainerWorkspaceStaysConsist
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: gc},
 	}, provisionOpts, map[string]string{})
-	if !provisioned || repoRoot == "" || provisionOpts.Workspace == "" {
-		t.Fatalf("tryProvisionWorktree setup failed: provisioned=%v repoRoot=%q workspace=%q", provisioned, repoRoot, provisionOpts.Workspace)
+	if err != nil || !provisioned || repoRoot == "" || provisionOpts.Workspace == "" {
+		t.Fatalf("tryProvisionWorktree setup failed: err=%v provisioned=%v repoRoot=%q workspace=%q", err, provisioned, repoRoot, provisionOpts.Workspace)
 	}
 	if !strings.Contains(repoRoot, linkDir) {
 		t.Fatalf("test setup broken: repoRoot %q does not contain the symlinked component %q", repoRoot, linkDir)

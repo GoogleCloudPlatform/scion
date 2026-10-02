@@ -772,7 +772,7 @@ func TestTryProvisionWorktree_FallbackFailureLogNeverContainsCredentials(t *test
 	defer slog.SetDefault(oldLogger)
 
 	opts := &api.StartOptions{}
-	_, _ = srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	_, _, _ = srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name:          "agent-a",
 		AgentID:       "agent-a",
 		ProjectID:     "p1",
@@ -967,7 +967,7 @@ func TestTryProvisionWorktree_InvalidAgentIDLeavesSharedBaseIntact(t *testing.T)
 			invalidGitClone := &api.GitCloneConfig{URL: filepath.Join(t.TempDir(), "does-not-exist.git")}
 
 			opts := &api.StartOptions{}
-			ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+			ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 				Name: "agent-x", AgentID: agentID,
 				ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 				WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -999,7 +999,7 @@ func TestTryProvisionWorktree_InvalidAgentIDLeavesSharedBaseIntact(t *testing.T)
 func setUpAgent1SharedBase(t *testing.T, srv *Server, projectPath, bare string) {
 	t.Helper()
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-1", AgentID: "agent-1",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1041,7 +1041,7 @@ func TestTryProvisionWorktree_SymlinkedOwnWorktreeRejected(t *testing.T) {
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-2", AgentID: "agent-2",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1094,7 +1094,7 @@ func TestTryProvisionWorktree_SymlinkedWorktreesDirRejected(t *testing.T) {
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-2", AgentID: "agent-2",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1142,7 +1142,7 @@ func TestTryProvisionWorktree_SharerRegistryOutsidePathRejected(t *testing.T) {
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-3", AgentID: "agent-3",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1199,7 +1199,7 @@ func TestTryProvisionWorktree_SharerRegistryFakeGitfileStillRejected(t *testing.
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-3", AgentID: "agent-3",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1354,7 +1354,7 @@ func TestTryProvisionWorktree_SharerRegistryNestedMarkerRejected(t *testing.T) {
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-4", AgentID: "agent-4",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1417,7 +1417,7 @@ func TestTryProvisionWorktree_SharerRegistryIntermediateSymlinkRejected(t *testi
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-5", AgentID: "agent-5",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1495,7 +1495,7 @@ func TestTryProvisionWorktree_SharerRegistryNonCanonicalPathRejected(t *testing.
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-9", AgentID: "agent-9",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1536,7 +1536,7 @@ func TestTryProvisionWorktree_SymlinkedProjectParentAccepted(t *testing.T) {
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-1", AgentID: "agent-1",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -3301,7 +3301,7 @@ func TestTryProvisionWorktree_MissingIdentityOnStart_FailsClosed(t *testing.T) {
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name:          "some-agent",
 		AgentID:       "", // missing
 		ProjectID:     "p1",
@@ -3323,7 +3323,7 @@ func TestTryProvisionWorktree_MissingIdentityOnStart_FailsClosed(t *testing.T) {
 
 	// The same missing-identity case on a create dispatch still falls back.
 	opts2 := &api.StartOptions{}
-	ok2, err2 := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok2, _, err2 := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name:          "some-agent",
 		AgentID:       "",
 		ProjectID:     "p1",
@@ -3688,7 +3688,7 @@ func TestTryProvisionWorktree_JoinTargetPreExisting_FailsInsteadOfFallback(t *te
 
 	// Agent-b attempts to JOIN branch "agent-a": must fail outright.
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-b", AgentID: "agent-b",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,

@@ -3812,15 +3812,23 @@ func TestGetAgent_RelativeWorkspaceResume(t *testing.T) {
 	}
 }
 
-// TestProvisionAgent_DoesNotPersistRepoRoot confirms ProvisionAgent never
-// writes the provisioned-worktree state file itself: run.go's Start is the
-// single write site for it (covering both the normal first-provision path
-// and the case where GetAgent skips ProvisionAgent entirely because the
-// agent directory already exists — see
+// TestProvisionAgent_PersistsValidatedRepoRoot confirms ProvisionAgent
+// itself persists a fresh, validated provisioned-worktree repo root, not
+// only run.go's Start. Start does not always run after ProvisionAgent: the
+// hub's provision-only flow (DispatchAgentProvision, via Manager.Provision)
+// and its reincarnate flow (DispatchAgentReprovision, via Reprovision, which
+// also calls ProvisionAgent directly) can both provision an agent without
+// starting it in the same dispatch. Without a persist here, a later
+// start/restart — which carries no ctx signal of its own, since the broker
+// does not re-run tryProvisionWorktree on that dispatch — would find nothing
+// on disk and fall back to detectRepoRoot, losing RepoRoot. Both call sites
+// share one gate, persistProvisionedWorktreeRepoRootIfValid: Start's own
+// call still covers the one case ProvisionAgent never runs at all — GetAgent
+// skipping it because the agent directory already exists (see
 // TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkipped
 // in run_test.go). ProvisionAgent still sets ExplicitWorkspace, needed
 // either way for GetAgent's managed-worktree recovery skip on resume.
-func TestProvisionAgent_DoesNotPersistRepoRoot(t *testing.T) {
+func TestProvisionAgent_PersistsValidatedRepoRoot(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	tmpDir := t.TempDir()
 
@@ -3869,14 +3877,22 @@ func TestProvisionAgent_DoesNotPersistRepoRoot(t *testing.T) {
 	}
 
 	agentDir := config.GetAgentDir(projectScionDir, agentName, false)
-	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
-		t.Errorf("readProvisionedWorktreeRepoRoot(agentDir) = %q, want \"\" (ProvisionAgent must not persist it; Start does)", got)
+	gotRoot, err := filepath.EvalSymlinks(readProvisionedWorktreeRepoRoot(agentDir))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(persisted repo root): %v", err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(repoRoot): %v", err)
+	}
+	if gotRoot != wantRoot {
+		t.Errorf("persisted repo root = %q, want %q (ProvisionAgent must persist a validated ctx signal itself)", gotRoot, wantRoot)
 	}
 }
 
 // TestProvisionAgent_UserWorkspaceOverrideLeavesRepoRootUnset confirms the
 // counterpart: a plain user --workspace (no ContextWithProvisionedWorktreeRepoRoot
-// on ctx) must NOT persist AgentInfo.ProvisionedWorktreeRepoRoot, so run.go's
+// on ctx) must not persist a provisioned-worktree repo root, so run.go's
 // Start falls through to detectRepoRoot and keeps RepoRoot "" for this case.
 func TestProvisionAgent_UserWorkspaceOverrideLeavesRepoRootUnset(t *testing.T) {
 	tmpDir := t.TempDir()

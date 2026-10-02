@@ -1352,21 +1352,17 @@ authDone:
 	}
 
 	// A fresh ctx signal always wins over whatever is already persisted, but
-	// GetAgent skips ProvisionAgent (and so never writes the state file) when
-	// the agent directory already exists on disk — e.g. a leftover from a
-	// deleted hub agent recreated under the same name. In that case this
-	// dispatch's signal would never be persisted, and a later resume/restart
-	// (which has no fresh ctx signal of its own) would fall back to
-	// detectRepoRoot and lose RepoRoot again. This is also the single write
-	// site for the value (ProvisionAgent's own first-provision call does not
-	// write it — see provision.go): persist it here whenever it actually
-	// validated (repoRoot == ctxRepoRoot, not a value detectRepoRoot produced
-	// on its own) and differs from what is already on disk.
-	if ctxRepoRoot != "" && repoRoot == ctxRepoRoot && ctxRepoRoot != persistedRepoRoot {
-		if err := writeProvisionedWorktreeRepoRoot(agentDir, ctxRepoRoot); err != nil {
-			util.Debugf("Start: failed to persist provisioned worktree repo root for %s: %v", opts.Name, err)
-		}
-	}
+	// GetAgent skips ProvisionAgent (and so never gets a chance to persist)
+	// when the agent directory already exists on disk — e.g. a leftover from
+	// a deleted hub agent recreated under the same name. In that case this
+	// dispatch's signal would never be persisted anywhere else, and a later
+	// resume/restart (which has no fresh ctx signal of its own) would fall
+	// back to detectRepoRoot and lose RepoRoot again. ProvisionAgent shares
+	// this same gate for the call sites Start never reaches on its own — the
+	// hub's provision-only and reincarnate flows, which provision without
+	// starting — so there is exactly one persistence gate even though there
+	// is more than one caller.
+	persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, effectiveWorkspace)
 
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),

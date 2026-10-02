@@ -498,7 +498,6 @@ func TestReprovision_ExplicitMount_CheckoutByteIdenticalAndSiblingUntouched(t *t
 	}); err != nil {
 		t.Fatalf("Reprovision: %v", err)
 	}
-
 	checkoutAfter := snapshotTree(t, sharedCheckout)
 	if !maps.Equal(checkoutBefore, checkoutAfter) {
 		t.Fatalf("shared checkout changed after Reprovision:\nbefore=%v\nafter=%v", checkoutBefore, checkoutAfter)
@@ -815,5 +814,42 @@ func TestReprovision_NeitherGitCloneNorWorkspace_Refused(t *testing.T) {
 	}
 	if !errors.Is(err, ErrReprovisionRefused) {
 		t.Fatalf("expected ErrReprovisionRefused, got %v", err)
+	}
+}
+
+// TestReprovision_IgnoresProvisionedWorktreeSignalForCloneWorkspace covers
+// Reprovision's path through persistProvisionedWorktreeRepoRootIfValid — the
+// same shared gate ProvisionAgent uses for the hub's provision-only flow
+// (see TestTryProvisionWorktree_ProvisionThenStart_RepoRootSurvives in
+// pkg/runtimebroker). Reprovision is clone-per-agent only (GitClone must be
+// set), so ProvisionAgent's workspace-resolution logic never assigns
+// workspaceSource for it — only the git-clone branch runs, which leaves
+// workspaceSource empty. A ctx signal on this path (never produced in
+// practice today, since tryProvisionWorktree and Reprovision's GitClone
+// precondition are mutually exclusive) must still be handled safely rather
+// than validated against an empty workspace and accidentally trusted: no
+// repo-root state file should end up on disk.
+func TestReprovision_IgnoresProvisionedWorktreeSignalForCloneWorkspace(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	agentName := "clone-agent-with-signal"
+	gc := &api.GitCloneConfig{URL: "https://example.com/repo.git"}
+	ctx := api.ContextWithGitClone(context.Background(), gc)
+	if _, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "created", "", ""); err != nil {
+		t.Fatalf("initial ProvisionAgent: %v", err)
+	}
+	ws := filepath.Join(scionDir, "agents", agentName, "workspace")
+	_ = os.MkdirAll(filepath.Join(ws, ".git"), 0755)
+
+	mgr := NewManager(&runtime.MockRuntime{})
+	reprovisionCtx := api.ContextWithProvisionedWorktreeRepoRoot(
+		api.ContextWithGitClone(context.Background(), gc), "/some/unrelated/base")
+	if _, err := mgr.Reprovision(reprovisionCtx, api.StartOptions{
+		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true, GitClone: gc,
+	}); err != nil {
+		t.Fatalf("Reprovision: %v", err)
+	}
+	agentDir := config.GetAgentDir(scionDir, agentName, false)
+	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
+		t.Fatalf("readProvisionedWorktreeRepoRoot(agentDir) = %q, want \"\" (a ctx signal must not be trusted against a clone-per-agent workspace)", got)
 	}
 }

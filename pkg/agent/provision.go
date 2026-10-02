@@ -1837,12 +1837,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		info.ExplicitImagePullPolicy = explicitPullPolicy
 	}
 
-	// The broker-provisioned worktree's repo root (when this is that case) is
-	// persisted only by run.go's Start, not here: that is the single write
-	// site, and it covers both this first-provision call (Start runs right
-	// after GetAgent returns) and the case where GetAgent skips ProvisionAgent
-	// entirely because the agent directory already exists. See
-	// readProvisionedWorktreeRepoRoot / writeProvisionedWorktreeRepoRoot.
+	// Persist the broker-provisioned worktree's repo root now, if the ctx
+	// signal validates against workspaceSource: run.go's Start does not
+	// always run after this call returns — the hub's provision-only flow
+	// (Manager.Provision, DispatchAgentProvision) and reincarnate flow
+	// (Reprovision, DispatchAgentReprovision, which calls ProvisionAgent
+	// directly rather than through Start) can both provision an agent
+	// without starting it in the same dispatch, and a later start/restart
+	// carries no ctx signal of its own. Start still carries its own call to
+	// the same gate, for the one case this function never runs at all:
+	// GetAgent skipping ProvisionAgent because the agent directory already
+	// exists. See persistProvisionedWorktreeRepoRootIfValid.
+	persistProvisionedWorktreeRepoRootIfValid(agentDir, api.ProvisionedWorktreeRepoRootFromContext(ctx), workspaceSource)
 
 	agentCfgData, err := json.MarshalIndent(finalScionCfg, "", "  ")
 	if err != nil {
@@ -2284,6 +2290,37 @@ func readProvisionedWorktreeRepoRoot(agentDir string) string {
 		return ""
 	}
 	return state.RepoRoot
+}
+
+// persistProvisionedWorktreeRepoRootIfValid validates ctxRepoRoot against
+// workspace (via validatedWorktreeRepoRoot) and, only if it validates and
+// differs from what is already on disk, persists it to agentDir's
+// broker-owned state file. A no-op when ctxRepoRoot is empty or fails to
+// validate.
+//
+// This is the single persistence gate shared by every call site that can be
+// the first to see a fresh ctx signal for a given dispatch:
+//   - ProvisionAgent, for a fresh create (reached directly by Reprovision,
+//     and via GetAgent for Manager.Provision/Manager.Start's normal
+//     first-provision path) — the hub's provision-only and reincarnate flows
+//     provision without ever calling Start in the same dispatch, so this is
+//     the only chance to record the value for those.
+//   - run.go's Start, for the case ProvisionAgent never runs at all: GetAgent
+//     skips it when the agent directory already exists on disk (e.g. a
+//     leftover from a deleted hub agent recreated under the same name).
+//
+// A write failure only means a later resume falls back to detectRepoRoot;
+// see writeProvisionedWorktreeRepoRoot.
+func persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, workspace string) {
+	if ctxRepoRoot == "" || validatedWorktreeRepoRoot(ctxRepoRoot, workspace) != ctxRepoRoot {
+		return
+	}
+	if readProvisionedWorktreeRepoRoot(agentDir) == ctxRepoRoot {
+		return
+	}
+	if err := writeProvisionedWorktreeRepoRoot(agentDir, ctxRepoRoot); err != nil {
+		util.Debugf("persistProvisionedWorktreeRepoRootIfValid: failed to persist for %s: %v", agentDir, err)
+	}
 }
 
 func UpdateAgentConfig(agentName string, projectPath string, status string, runtime string, profile string) error {
