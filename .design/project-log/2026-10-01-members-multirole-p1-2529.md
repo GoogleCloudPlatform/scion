@@ -366,9 +366,9 @@ escalation-guard mutation probe found a gap). No declines:
 - **R3-5** (Nit): this file's base SHA had gone stale again after the
   round-2 rebase; rephrased as "based on upstream main (see PR)" so a future
   rebase cannot make it stale again. The R2-6 bullet said "5 places"; the
-  closure table and code show 7 sites — corrected. The R2-4 bullet quoted a
-  bare `` `#127` `` to describe the finding it was closing, which itself
-  violated the qualified-refs-only rule; reworded to
+  closure table and code show 7 sites — corrected. The R2-4 bullet quoted an
+  unqualified issue number to describe the finding it was closing, which
+  itself violated the qualified-refs-only rule; reworded to a
   "`miller79/scion PR #127`-style issue reference".
 - **R3-6** (Nit): the catalog exemption reasons for `applyRolePlanTx`, and
   its doc comment, said "credential gate, governance/custom-role authority
@@ -388,5 +388,79 @@ PM1|ProjectMember|Catalog|Classif|AST'`, `go test ./pkg/hub/authzop/...`,
 --new-from-rev=upstream-main` on `./pkg/hub/...` and
 `./pkg/hub/authzop/...`) all pass on the fixed head, which was rebased onto
 a fresh `upstream-main` afterward. Per the P1 broker throttle, the full
+`make test-hub-sqlite`/`make ci` were not run locally for this round either;
+they run in the PR's GitHub CI.
+
+## Review round 4 fixes
+
+Closed every open finding from the fourth review round (0 Critical, 0 High,
+0 Medium, 2 Low, 5 Nit — every round-1, round-2 and round-3 finding was
+independently re-verified closed via 15 mutation probes, and no new
+High/Medium/Critical surfaced, and no live escalation was found). No
+declines:
+
+- **R4-1** (Low): the R3-1 discriminator was pinned for the pre-tx
+  precondition path and the actor-authority path, but the two in-tx
+  `membershipChangedError` paths (the unconditional current1-vs-current0
+  re-check and the `ExpectedRoleIDs` re-check under lock) were only
+  exercised indirectly, through a nondeterministic concurrency test that
+  never asserted `details.cause`. Added
+  `TestSetMemberRoles_TOCTOU_PrincipalChangedBetweenPhases` and its
+  `_ExpectedRoleIDs` companion, reusing the existing
+  `mmrAuthoritySwapStore` seam with a `swap` that adds a binding directly to
+  the **principal's** bindings on `realStore` (rather than the actor's, as
+  the round-2/3 TOCTOU test does) between Phase P and the lock; both assert
+  409 `membership_changed`, `cause: "principal_roles_changed"`, the
+  post-swap `currentRoleDefinitionIds`, and no audit rows.
+- **R4-2** (Low): `TestActorAuthorityChanged`'s "role changed" case changed
+  `role` and `hubOverride` together, so it passed even with the `role`
+  comparison deleted — the only one of the guard's three components
+  reachable in production. Added two cases that change `role` alone,
+  holding `hubOverride` (and, in the second, a non-empty `customAuth` map)
+  equal on both sides.
+- **R4-3** (Nit): the round-3 sweep's single-line grep missed a line-wrapped
+  `design-d3-addendum.md` reference and a `(design.md §3.1)` comment in a
+  file (`handlers_projects_core.go`) it hadn't listed, plus three bare `§`
+  section numbers pointing at a design not in this repo. Removed all five:
+  the two design-doc citations (one replaced with `(ptone/scion#2529)`, one
+  dropped since the sentence already stated the rule inline) and the three
+  bare `§` references, reworded in place or replaced with
+  `ptone/scion#2529 P1`. Re-verified with
+  `git diff upstream-main -U0 -- pkg/hub/ .design/ | grep -nE
+  '^\+.*(design|addendum|findings\.md|§)'`: the only remaining hits are this
+  file's own prose describing past fixes (already ruled acceptable by
+  review r3's R3-2 verdict), not citations.
+- **R4-4** (Nit): the R3-5 bullet above, while describing the fix that
+  removed an unqualified issue number, reintroduced one itself inside its
+  own backtick-quoted literal. Reworded to describe the violation without
+  repeating it.
+- **R4-5** (Nit): `actorAuthorityChanged`'s doc comment pointed at
+  `project_membership_set_test.go` for "the table test"; `TestActorAuthorityChanged`
+  is actually in `project_membership_plan_test.go`. Fixed the comment to
+  name the test function directly, which survives a future file move.
+- **R4-6** (Nit): the catalog comment block above the `applyRolePlanTx`
+  entries still said "SetMemberRoles itself performs the credential gate,
+  governance matrix / custom-role authority, CanDelegate and last-owner
+  checks before ever reaching applyRolePlanTx" — true for the credential
+  gate and CanDelegate, but the last-owner guard actually runs *after*
+  `applyRolePlanTx`, on the post-state, in the same transaction (the R2-1
+  inaccuracy, surviving in this comment after R3-6 fixed the `Reason`
+  strings next to it). Reworded to match the `Reason` strings' accurate
+  pre-tx/in-tx split.
+- **R4-7** (Nit): `TestSetMemberRoles_CredentialGate_RejectsAgentToken`
+  covered the L3 credential-kind-before-authorize reorder for PUT only;
+  `deleteProjectMemberPrincipal` has the identical reorder with no test.
+  Added `TestSetMemberRoles_CredentialGate_DeleteRejectsAgentToken`,
+  mirroring the PUT test against `DELETE …/principals/user/{id}`.
+
+A finding-by-finding closure table (ID → commit/file:line → how closed) was
+produced for this round and shared with the reviewing agents; it is not
+duplicated here (scratchpad only, per the containment rule). The same
+throttled gate set as rounds 1-3 (`go test ./pkg/hub/ -run
+'SetMemberRoles|RoleSet|Escalation|OwnerCustom|RS|D002|PM1|ProjectMember|
+Catalog|Classif|AST'`, `go test ./pkg/hub/authzop/...`, `gofmt -l`, `go vet`,
+and a scoped `golangci-lint run --new-from-rev=upstream-main` on
+`./pkg/hub/...`) all pass on the fixed head, which was rebased onto a fresh
+`upstream-main` afterward. Per the P1 broker throttle, the full
 `make test-hub-sqlite`/`make ci` were not run locally for this round either;
 they run in the PR's GitHub CI.
