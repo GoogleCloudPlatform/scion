@@ -20,10 +20,12 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -120,4 +122,50 @@ func TestFixtureDeterministic(t *testing.T) {
 	r2, err := Generate(ctx, filepath.Join(t.TempDir(), "b.db"))
 	require.NoError(t, err)
 	assert.Equal(t, r1.Counts, r2.Counts, "row counts should be identical across runs")
+}
+
+func TestAccessConstraintHistoryEventIDIsCanonical(t *testing.T) {
+	t.Parallel()
+
+	var history row
+	for _, fixture := range Spec() {
+		if fixture.Table == "access_constraint_history" {
+			require.Len(t, fixture.Rows, 1)
+			history = fixture.Rows[0]
+			break
+		}
+	}
+	require.NotNil(t, history, "fixture must include access_constraint_history")
+
+	event := auditevent.EnvelopeV1{
+		SchemaVersion: auditevent.SchemaVersion,
+		EventID:       history["event_id"].(string),
+		OccurredAt:    history["occurred_at"].(time.Time),
+		Family:        "access_boundary",
+		Action:        history["operation"].(string),
+		Phase:         auditevent.PhaseCommit,
+		Outcome:       auditevent.OutcomeSucceeded,
+		Severity:      auditevent.SeverityInfo,
+		CorrelationID: history["correlation_id"].(string),
+		Principal: &auditevent.IdentityRef{
+			Kind: auditevent.IdentityKind(history["actor_kind"].(string)),
+			ID:   history["actor_id"].(string),
+		},
+		Resource: &auditevent.ResourceRef{
+			Kind:  "access_constraint",
+			ID:    history["constraint_id"].(string),
+			Scope: auditevent.ResourceScopeSystem,
+		},
+		Payload: auditevent.AccessBoundaryPayload{
+			AfterRevision:  pointer(history["after_revision"].(int64)),
+			Classification: auditevent.BoundaryClassification(history["classification"].(string)),
+			ImpactCounts:   &auditevent.ImpactCounts{Agents: 1, Users: 1},
+			ChangedFields:  []string{"maximum_permissions"},
+		},
+	}
+	require.NoError(t, auditevent.Validate(event))
+}
+
+func pointer[T any](value T) *T {
+	return &value
 }

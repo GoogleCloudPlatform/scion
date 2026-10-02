@@ -165,7 +165,7 @@ func Spec() []TableFixture {
 		}},
 		{Table: "access_constraint_history", Rows: []row{
 			{
-				"event_id": "fixture-access-constraint-created", "constraint_id": constraintID,
+				"event_id": "ae100000-0000-4000-8000-000000000001", "constraint_id": constraintID,
 				"occurred_at": baseTime, "operation": "create",
 				"actor_kind": "user", "actor_id": userID,
 				"correlation_id": "fixture-access-constraint-create",

@@ -303,3 +303,36 @@ integrator must begin only after M1 review/acceptance, independently verify the
 then-current remote M1 and M2 heads, fetch authoritative upstream `main`, and
 rebase/revalidate M2 under a new exact lease. None of the M1 lease, local refs,
 or validation results in this report authorizes or substitutes for that work.
+
+## Independent review round 1 fixture event-ID correction
+
+Review round 1 found that the representative `access_constraint_history`
+fixture used the descriptive string `fixture-access-constraint-created` for
+`event_id`, while the production audit-envelope validator requires a canonical,
+non-nil UUID. The focused regression first reproduced the defect through
+`auditevent.Validate` with the exact error `invalid audit event field event_id:
+must be a canonical UUID`. The fixture now uses the stable canonical UUID
+`ae100000-0000-4000-8000-000000000001`. Its constraint foreign key and every
+other history payload field are unchanged.
+
+The following bounded checks pass:
+
+- fixture coverage, loadability/migration, determinism, and the new canonical
+  event-ID invariant;
+- focused access-constraint history endpoint, route-classification, and store
+  transaction/cap tests under `-p 2`;
+- the complete `pkg/hub/auditevent` package;
+- scoped `go vet -p 2`, single-concurrency golangci-lint (`0 issues`), gofmt,
+  and `git diff --check`.
+
+No production, authorization, timing, audit-schema, or M2 behavior changed.
+Publication and final evidence remain subject to an immediate authoritative
+upstream fetch, the established deterministic merge-tree gate if upstream has
+advanced, and an exact force-with-lease against
+`06dce97dfe2e42aae4e06dbce01cd1e34f7b606f`.
+
+The immediate pre-push fetch at `2026-10-02T16:49:06Z` resolved authoritative
+main unchanged at `ed14d2cc93539a7b5bdb983722b9057fa9bfbfe5`, so no
+merge-tree fallback was needed. Independent remote reads confirmed the exact
+M1 lease remained `06dce97dfe2e42aae4e06dbce01cd1e34f7b606f` and M2 remained
+`708455edafd6e86f6bccb7befc9a9773be0ad2c8`.
