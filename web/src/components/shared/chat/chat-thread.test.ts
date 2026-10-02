@@ -5946,3 +5946,171 @@ describe('scion-chat-thread gcs-link-click', () => {
     });
   });
 });
+
+describe('scion-chat-thread /spawn slash command', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    fakeStateManager.clearAgents();
+  });
+
+  type SpawnInternals = { handleSlashSpawn(args: string): Promise<void> };
+
+  function systemMessages(el: ScionChatThread): Array<string | null> {
+    return Array.from(el.shadowRoot?.querySelectorAll('scion-chat-system-line') ?? []).map((l) =>
+      l.getAttribute('message')
+    );
+  }
+
+  function createCalls(): Array<Record<string, unknown>> {
+    return apiFetch.mock.calls
+      .filter((c) => c[0] === '/api/v1/agents' && c[1]?.method === 'POST')
+      .map((c) => JSON.parse(String(c[1].body)) as Record<string, unknown>);
+  }
+
+  function created(agent: { slug: string; name: string }) {
+    return { ok: true, status: 201, json: () => Promise.resolve({ agent }) };
+  }
+
+  /**
+   * The hub's CreateAgentRequest (pkg/hub/handlers_agents_core.go) decodes
+   * `projectId` and `name`, and rejects the request when either is empty.
+   * A `project_id` key is silently ignored by the decoder.
+   */
+  it('posts name, projectId and template in the shape the hub decodes', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce(created({ slug: 'my-coder', name: 'my-coder' }));
+
+    await (el as unknown as SpawnInternals).handleSlashSpawn('coder my-coder');
+
+    expect(createCalls()).toEqual([{ name: 'my-coder', projectId: 'proj-1', template: 'coder' }]);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('Agent "my-coder" spawned successfully.');
+    });
+  });
+
+  it('defaults the name to the template plus a short random suffix', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce(created({ slug: 'coder-ab12', name: 'coder-ab12' }));
+
+    await (el as unknown as SpawnInternals).handleSlashSpawn('coder');
+
+    const calls = createCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.projectId).toBe('proj-1');
+    expect(calls[0]?.template).toBe('coder');
+    expect(String(calls[0]?.name)).toMatch(/^coder-[a-z0-9]{4}$/);
+  });
+
+  /**
+   * The hub rejects names over 63 runes. A long template is truncated so
+   * the default name fits, without leaving a hyphen before the suffix. A
+   * short base36 float still yields a 4-character suffix.
+   */
+  it('truncates a long template so the default name fits 63 runes', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce(created({ slug: 'x', name: 'x' }));
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const template = `${'a'.repeat(57)}-${'b'.repeat(12)}`;
+
+    try {
+      await (el as unknown as SpawnInternals).handleSlashSpawn(template);
+    } finally {
+      random.mockRestore();
+    }
+
+    const calls = createCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.template).toBe(template);
+    expect(calls[0]?.name).toBe(`${'a'.repeat(57)}-i000`);
+  });
+
+  /** The hub returns `{ agent }`; the reported name is the agent's slug. */
+  it('reports the slug from the wrapped agent in the response', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce(created({ slug: 'hub-slug', name: 'Hub Slug' }));
+
+    await (el as unknown as SpawnInternals).handleSlashSpawn('coder Hub-Slug');
+
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('Agent "hub-slug" spawned successfully.');
+    });
+  });
+
+  it('shows usage and sends nothing for missing or extra arguments', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+
+    await (el as unknown as SpawnInternals).handleSlashSpawn('  ');
+    await (el as unknown as SpawnInternals).handleSlashSpawn('coder a b');
+
+    expect(createCalls()).toEqual([]);
+    await vi.waitFor(() => {
+      expect(
+        systemMessages(el).filter((m) => m === 'Usage: /spawn <template> [name]')
+      ).toHaveLength(2);
+    });
+  });
+
+  it('shows a failure message and no success on a non-2xx response', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce({ ok: false, status: 409, json: () => Promise.resolve({}) });
+
+    await (el as unknown as SpawnInternals).handleSlashSpawn('coder x');
+
+    await vi.waitFor(() => {
+      expect(systemMessages(el).some((m) => m?.startsWith('Failed to spawn agent'))).toBe(true);
+    });
+    expect(systemMessages(el).some((m) => m?.includes('spawned successfully'))).toBe(false);
+  });
+
+  /**
+   * In a chat-page DM, `projectId` is only the inherited project (whatever
+   * the user viewed before opening the DM). Like /stop, /spawn must create
+   * the agent in the DM peer agent's own project instead.
+   */
+  it('in a DM, spawns into the peer agent project, not the inherited projectId', async () => {
+    fakeStateManager.setAgent('coder', 'proj-peer');
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'dm:agent:coder:user:u1';
+    el.isDM = true;
+    el.projectId = 'proj-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValueOnce(created({ slug: 'helper', name: 'helper' }));
+
+    await (el as unknown as SpawnInternals).handleSlashSpawn('coder helper');
+
+    expect(createCalls()).toEqual([{ name: 'helper', projectId: 'proj-peer', template: 'coder' }]);
+  });
+
+  it('in a DM with no peer project, sends nothing and shows the local message', async () => {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'dm:agent:unknown-agent:user:u1';
+    el.isDM = true;
+    el.projectId = 'proj-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+
+    await (el as unknown as SpawnInternals).handleSlashSpawn('coder helper');
+
+    expect(createCalls()).toEqual([]);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('No project context available.');
+    });
+  });
+});
