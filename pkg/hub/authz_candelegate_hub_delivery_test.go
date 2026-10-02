@@ -22,6 +22,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
@@ -298,4 +299,131 @@ func sortedIdentityNames(m map[string]Identity) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// hubDeliveryDelegationScopes returns every agent JWT scope the hub knows:
+// every scope referenced by the permissions registry, every scope of every
+// stock AgentRole, and the declared scopes that neither references.
+func hubDeliveryDelegationScopes() []AgentTokenScope {
+	seen := map[AgentTokenScope]bool{}
+	var out []AgentTokenScope
+	add := func(scopes ...AgentTokenScope) {
+		for _, s := range scopes {
+			if !seen[s] {
+				seen[s] = true
+				out = append(out, s)
+			}
+		}
+	}
+	add(allRegisteredAgentScopes()...)
+	for _, role := range []AgentRole{AgentRoleNone, AgentRoleReadOnly, AgentRoleBaseline, AgentRoleFull} {
+		add(ScopesForRole(role)...)
+	}
+	add(ScopeAgentLogAppend, ScopeIdentityToken)
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// TestCanDelegate_HubDeliveryActorDenied shows a hub_delivery actor cannot
+// delegate any permission. It covers all five GrantTypes: role binding and
+// custom role over every registry permission (and the empty permission
+// set), group membership, project membership, and agent delegation with
+// AgentRoleNone and no AgentScopes plus every AgentRole with every known
+// scope. Every case is denied with "delivery credential cannot delegate".
+func TestCanDelegate_HubDeliveryActorDenied(t *testing.T) {
+	authz, s := setupCanDelegateTest(t)
+	ctx := context.Background()
+	f := newCanDelegateParityFixture(t, s)
+
+	emptyGroupID := tid("candelegate-hd-empty-group")
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: emptyGroupID, Slug: "candelegate-hd-empty-group", Name: "CanDelegate HD Empty Group",
+	}))
+
+	agentID := tid("candelegate-hd-agent")
+	actor := &hubDeliveryIdentity{
+		agentID:      agentID,
+		projectID:    f.projectID,
+		ancestry:     []string{f.userID},
+		originUserID: f.userID,
+		boundAgentID: agentID,
+		evidence: &storedAgentIdentity{agent: &store.Agent{
+			ID: agentID, ProjectID: f.projectID, Ancestry: []string{f.userID},
+		}},
+	}
+
+	type deniedCase struct {
+		name  string
+		grant GrantDescriptor
+	}
+	var cases []deniedCase
+	seenGrantTypes := map[GrantType]bool{}
+	addCase := func(name string, grant GrantDescriptor) {
+		seenGrantTypes[grant.Type] = true
+		cases = append(cases, deniedCase{name: name, grant: grant})
+	}
+
+	addCase("role_binding/empty_permission_set", GrantDescriptor{
+		Type: GrantTypeRoleBinding, ScopeType: store.RoleScopeProject, ScopeID: f.projectID,
+	})
+	addCase("custom_role/empty_permission_set", GrantDescriptor{
+		Type: GrantTypeCustomRole, ScopeType: store.RoleScopeProject, ScopeID: f.projectID,
+	})
+	var allPermissionIDs []string
+	for _, p := range permissions.Registry {
+		allPermissionIDs = append(allPermissionIDs, p.ID)
+		addCase("role_binding/"+p.ID, GrantDescriptor{
+			Type: GrantTypeRoleBinding, RolePermissions: []string{p.ID},
+			ScopeType: store.RoleScopeProject, ScopeID: f.projectID,
+		})
+		addCase("custom_role/"+p.ID, GrantDescriptor{
+			Type: GrantTypeCustomRole, CustomRolePermissions: []string{p.ID},
+			ScopeType: store.RoleScopeProject, ScopeID: f.projectID,
+		})
+	}
+	require.NotEmpty(t, allPermissionIDs)
+	addCase("role_binding/all_permissions_system", GrantDescriptor{
+		Type: GrantTypeRoleBinding, RolePermissions: allPermissionIDs, ScopeType: store.RoleScopeSystem,
+	})
+	addCase("custom_role/all_permissions_system", GrantDescriptor{
+		Type: GrantTypeCustomRole, CustomRolePermissions: allPermissionIDs, ScopeType: store.RoleScopeSystem,
+	})
+
+	addCase("group_membership/no_group", GrantDescriptor{Type: GrantTypeGroupMembership})
+	addCase("group_membership/group_without_bindings", GrantDescriptor{Type: GrantTypeGroupMembership, GroupID: emptyGroupID})
+	addCase("group_membership/group_with_system_binding", GrantDescriptor{Type: GrantTypeGroupMembership, GroupID: f.groupID})
+
+	addCase("project_membership/own_project", GrantDescriptor{Type: GrantTypeProjectMembership, ProjectID: f.projectID})
+
+	addCase("agent_delegation/none_role_nil_scopes", GrantDescriptor{
+		Type: GrantTypeAgentDelegation, AgentRole: string(AgentRoleNone), ProjectID: f.projectID,
+	})
+	addCase("agent_delegation/empty_role_nil_scopes", GrantDescriptor{
+		Type: GrantTypeAgentDelegation, ProjectID: f.projectID,
+	})
+	scopes := hubDeliveryDelegationScopes()
+	require.NotEmpty(t, scopes)
+	for _, role := range []AgentRole{AgentRoleNone, AgentRoleReadOnly, AgentRoleBaseline, AgentRoleFull} {
+		addCase("agent_delegation/"+string(role)+"/role_only", GrantDescriptor{
+			Type: GrantTypeAgentDelegation, AgentRole: string(role), ProjectID: f.projectID,
+		})
+		for _, scope := range scopes {
+			addCase("agent_delegation/"+string(role)+"/"+string(scope), GrantDescriptor{
+				Type: GrantTypeAgentDelegation, AgentRole: string(role),
+				AgentScopes: []AgentTokenScope{scope}, ProjectID: f.projectID,
+			})
+		}
+	}
+
+	for _, gt := range allGrantTypes {
+		require.True(t, seenGrantTypes[gt], "no denied case for GrantType %q", gt)
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := authz.CanDelegate(ctx, actor, tc.grant)
+			assert.False(t, got.Allowed, "Allowed")
+			assert.Equal(t, "delivery credential cannot delegate", got.Reason, "Reason")
+		})
+	}
 }
