@@ -164,25 +164,34 @@ lint:
 vet-integration:
 	@go vet -tags 'integration volume_test' ./...
 
-## vet-integration-extras: Compile-check integration-tagged code in extras/ modules (fixes ptone/scion#2394)
+## vet-integration-extras: Compile-check integration-tagged code in every extras/ module that has it
 # vet-integration only covers the root module's ./... tree; extras/*
 # modules are separate go.mod trees it never reaches. Discovers modules
 # dynamically (grep for the build tag) so new ones are covered without
-# editing this target.
+# editing this target. Discovery uses a shell glob and POSIX grep -E so
+# it works on macOS too, and the target fails if it vets zero modules
+# (e.g. extras/ moved or the build tag was renamed).
 vet-integration-extras:
 	@echo "Vetting integration-tagged code in extras modules..."
-	@failed=0; \
-	for moddir in $$(find extras -maxdepth 2 -name go.mod -printf '%h\n' | sort); do \
-		if grep -rlq '^//go:build.*\bintegration\b' "$$moddir" --include='*.go' >/dev/null 2>&1; then \
+	@failed=0; vetted=0; \
+	for gomod in extras/*/go.mod; do \
+		[ -f "$$gomod" ] || continue; \
+		moddir=$$(dirname "$$gomod"); \
+		if grep -rqE '^//go:build.*[^A-Za-z0-9_]integration([^A-Za-z0-9_]|$$)' --include='*.go' "$$moddir" 2>/dev/null; then \
 			echo "  $$moddir"; \
+			vetted=$$((vetted + 1)); \
 			(cd "$$moddir" && go vet -tags integration ./...) || { echo "  FAILED: $$moddir"; failed=$$((failed + 1)); }; \
 		fi; \
 	done; \
-	if [ "$$failed" -gt 0 ]; then \
-		echo "$$failed extras module(s) failed integration vet."; \
+	if [ "$$vetted" -eq 0 ]; then \
+		echo "No extras modules with integration-tagged code found; expected at least one (check extras/ layout and the integration build tag)."; \
 		exit 1; \
 	fi; \
-	echo "All extras modules with integration-tagged code vetted."
+	if [ "$$failed" -gt 0 ]; then \
+		echo "$$failed of $$vetted extras module(s) failed integration vet."; \
+		exit 1; \
+	fi; \
+	echo "Vetted $$vetted extras module(s) with integration-tagged code."
 
 ## compat-literals: Check legacy grove literals stay in compatibility surfaces
 compat-literals:
