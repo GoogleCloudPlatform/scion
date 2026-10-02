@@ -160,8 +160,16 @@ func runProvision(ctx context.Context) error {
 		// invisibly — the sentinel would still get written, and every future
 		// pod for this project would see it and skip provisioning forever.
 		// Failing the init container (non-zero exit, pod doesn't start) is
-		// the correct, loud failure mode.
-		RequireChownSuccess: true,
+		// the correct, loud failure mode. The one exception is a workspace
+		// the broker prepared before the pod existed, by creating it or
+		// finding it with setgid and group write (see
+		// provision.ChownBestEffortEnv): agents reach it through its group,
+		// so a chown the export does not allow is logged and the sentinel is
+		// still written.
+		RequireChownSuccess: provisionRequireChownSuccess(os.Getenv),
+	}
+	if !in.RequireChownSuccess {
+		log.Info("Best-effort chown requested (workspace directory prepared by the broker); a failed chown is logged and provisioning continues")
 	}
 
 	log.Info("Provisioning workspace at %s (mode=%s, project=%s, shared_dirs=%d)",
@@ -171,6 +179,14 @@ func runProvision(ctx context.Context) error {
 	}
 	log.Info("Workspace provisioned successfully")
 	return nil
+}
+
+// provisionRequireChownSuccess keeps a chown failure fatal unless the
+// Kubernetes runtime marked the workspace directory as prepared by the
+// broker, created or found with setgid and group write
+// (provision.ChownBestEffortEnv set to exactly "1").
+func provisionRequireChownSuccess(getenv func(string) string) bool {
+	return !provision.ChownBestEffortRequested(getenv)
 }
 
 func runWaitForSentinel(ctx context.Context) error {

@@ -1252,6 +1252,7 @@ authDone:
 	nfsPVClaimName := ""
 	nfsSubPath := ""
 	nfsStorageClass := ""
+	nfsWorkspacePreCreated := false
 
 	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
 		sharingMode := store.SharingModeWorktreePerAgent
@@ -1281,6 +1282,19 @@ authDone:
 			})
 			if err != nil {
 				return nil, fmt.Errorf("realize workspace backend %q: %w", backend.Name(), err)
+			}
+			// Create the workspace subPath directory, and the directories of
+			// shared dirs served from the same claim, before the pod exists,
+			// so the kubelet does not have to (ptone/scion#2530). Shared dirs
+			// with their own storage (sharedDirStorage set) are not on this
+			// claim.
+			var claimSharedDirNames []string
+			if sharedDirStorage == nil {
+				claimSharedDirNames = sharedDirNames
+			}
+			nfsWorkspacePreCreated, err = ensureNFSWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames)
+			if err != nil {
+				return nil, err
 			}
 
 			workspaceBackendName = backend.Name()
@@ -1319,6 +1333,9 @@ authDone:
 		NFSPVClaimName:       nfsPVClaimName,
 		NFSSubPath:           nfsSubPath,
 		NFSStorageClass:      nfsStorageClass,
+		// Lets the provisioning init container treat a failed chown as a
+		// warning for a workspace directory the broker created.
+		NFSWorkspacePreCreated: nfsWorkspacePreCreated,
 		// F-111 (design §9): drives the k8s runtime's NFS init container's
 		// clone-vs-plain-provision choice (nfsProvisionCommand), not whether
 		// provisioning happens at all — the init container is now gated

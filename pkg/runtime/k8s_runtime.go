@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"golang.org/x/term"
@@ -1688,7 +1689,14 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// F-111 (design §9): this used to also require config.GitCloneForInit !=
 	// nil, which meant non-git projects got no init container at all and no
 	// mkdir/chown ever ran — the per-project subPath then didn't exist when
-	// the main container mounted it, and kubelet created it as root:root.
+	// the main container mounted it, and the kubelet had to create it.
+	// The kubelet's mkdir only yields a root:root directory on exports that
+	// allow root to create directories (no_root_squash); on exports that map
+	// root to an anonymous user it is denied and the pod never starts. When
+	// the broker has the export mounted, pkg/agent (ensureNFSWorkspaceLeaf)
+	// now creates the workspace subPath (and the subPaths of shared dirs
+	// served from the same claim) before the pod exists, so the
+	// kubelet only falls back to creating it when the broker has no mount.
 	// The gate now keys only on nfs backend + a bound PV claim, matching
 	// nfsProvisionCommand's own nil-safety (it already emits a plain
 	// `sciontool provision` when gc == nil); GitCloneForInit continues to
@@ -1765,6 +1773,20 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			initEnv = append(initEnv, corev1.EnvVar{
 				Name:  "SCION_SHARED_DIR_PATHS",
 				Value: strings.Join(sharedDirPairs, ","),
+			})
+		}
+		// When the broker created the workspace (and claim shared-dir)
+		// directories itself, or found them with setgid and group write,
+		// agents reach them through their group,
+		// so a chown the export does not allow (root mapped to an anonymous
+		// user) is logged instead of failing the pod. Only the provisioning
+		// (lock-winner) container runs the chown. An env var rather than a
+		// flag, so an older sciontool simply ignores it and keeps the strict
+		// behavior instead of rejecting an unknown flag.
+		if config.NFSWorkspacePreCreated && !config.nfsProvisionLockLost {
+			initEnv = append(initEnv, corev1.EnvVar{
+				Name:  provision.ChownBestEffortEnv,
+				Value: "1",
 			})
 		}
 
