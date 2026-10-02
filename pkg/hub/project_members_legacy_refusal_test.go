@@ -179,3 +179,70 @@ func TestUpdateMember_LegacyPATCH_NoProjectRoleUnderLockRefusal(t *testing.T) {
 	}, *decision)
 	assert.Equal(t, roleDefIDs(before), roleDefIDs(mmrBindingsFor(t, realStore, "user", coOwnerID, f.projectID)), "the co-owner binding is unchanged")
 }
+
+// mmrDeleteSystemSuperAdminBindings revokes the user's system-scope
+// super-admin binding directly in the store, modelling an already-committed
+// concurrent revocation.
+func mmrDeleteSystemSuperAdminBindings(t *testing.T, s store.Store, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	superAdmin, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+	deleted := 0
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == superAdmin.ID {
+			require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
+			deleted++
+		}
+	}
+	require.Equal(t, 1, deleted, "expected exactly one system super-admin binding to revoke")
+}
+
+// TestAddMember_LegacyPOST_NoProjectRoleUnderLockRefusal pins the
+// in-transaction "actor has no project role (re-evaluated under lock)"
+// refusal of AddMember (cleanup review r1 C1-1), the twin of
+// TestUpdateMember_LegacyPATCH_NoProjectRoleUnderLockRefusal. The actor is
+// a non-member super-admin: it passes the pre-transaction governance check
+// through the hub override and CanDelegate for project-member (super-admin
+// can delegate any authority), so the request reaches the lock. Between the
+// pre-transaction checks and the lock, mmrAuthoritySwapStore revokes the
+// actor's system super-admin binding, so the in-transaction hub-authority
+// revalidation fails and AddMember must refuse with the exact under-lock
+// decision before anything is written. A hub-admin actor cannot be used
+// here: CanDelegate refuses it pre-transaction (it lacks agent.create).
+func TestAddMember_LegacyPOST_NoProjectRoleUnderLockRefusal(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+	superID := tid(t.Name() + "-super")
+	createTestUserWithRole(t, f.store, superID, superID+"@test.com", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
+	ensureHubMembership(ctx, f.store, superID)
+	require.Empty(t, mmrBindingsFor(t, f.store, "user", superID, f.projectID), "the super-admin holds no project role")
+
+	target := grpUser(t, f.store, t.Name()+"-target", "Target")
+
+	realStore := f.srv.membershipService.store
+	sw := &mmrAuthoritySwapStore{Store: realStore}
+	sw.swap = func() { mmrDeleteSystemSuperAdminBindings(t, realStore, superID) }
+	f.srv.membershipService.store = sw
+	defer func() { f.srv.membershipService.store = realStore }()
+
+	_, decision := f.srv.membershipService.AddMember(mmrServiceCtx(superID, superID+"@test.com"), MembershipRequest{
+		Op:            MembershipOpAdd,
+		ProjectID:     f.projectID,
+		Actor:         mmrServiceIdentity(superID, superID+"@test.com"),
+		PrincipalType: "user",
+		PrincipalID:   target.ID,
+		RoleDefID:     f.memberRD.ID,
+	})
+	require.True(t, sw.didSwap, "the swap seam must have run: %+v", decision)
+	require.NotNil(t, decision)
+	assert.Equal(t, MembershipDecision{
+		Allowed:    false,
+		DenialCode: ErrCodeRoleAssignmentForbidden,
+		Reason:     "actor has no project role (re-evaluated under lock)",
+		HTTPStatus: http.StatusForbidden,
+	}, *decision)
+	assert.Empty(t, mmrBindingsFor(t, realStore, "user", target.ID, f.projectID), "no binding was created")
+}
