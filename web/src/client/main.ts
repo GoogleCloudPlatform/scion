@@ -40,13 +40,6 @@ import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../utils/feature-flag
 import { applyServerFeatureFlags } from './server-feature-flags.js';
 import { setPreferredTimeZone } from '../utils/time.js';
 import { withTimeout } from './with-timeout.js';
-
-/**
- * Milliseconds `init()` waits for the SSR-path display-timezone refresh
- * before proceeding with the first render in Auto and letting
- * `DisplayZoneController` correct it late (review R3-1).
- */
-const TZ_LOAD_BUDGET_MS = 1500;
 import {
   type AdminStatus,
   hasAnyPermission,
@@ -59,6 +52,13 @@ import {
   buildRecentFilesScope,
   shouldClearRecentFilesOnTeardown,
 } from './chat-recent-files-lifecycle.js';
+
+/**
+ * Milliseconds `init()` waits for the SSR-path display-timezone refresh
+ * before proceeding with the first render in Auto and letting
+ * `DisplayZoneController` correct it late (review R3-1).
+ */
+const TZ_LOAD_BUDGET_MS = 1500;
 
 /**
  * Strip the Vite base path prefix from a URL pathname so the client-side
@@ -285,9 +285,19 @@ async function fetchCurrentUser(): Promise<User | null> {
  * until the browser's own fetch timeout, which can be minutes. A timed-out
  * wait still lets this promise keep running in the background — when it
  * lands, `setPreferredTimeZone` fires `DISPLAY_TIMEZONE_CHANGED_EVENT`, and
- * every mounted `DisplayZoneController` subscriber (native chat) re-renders
- * in the correct zone. So a bounded wait costs nothing a subscriber can't
- * already fix.
+ * every mounted `DisplayZoneController` subscriber re-renders in the
+ * correct zone.
+ *
+ * That self-correction is **not universal** (review R4-1): it only helps a
+ * component that re-renders cleanly from a fresh formatter call. A
+ * component that *also* caches a wall-clock string derived from the zone
+ * (e.g. a `datetime-local` input pre-populated via `toWallClockInput`) needs
+ * its own re-derivation logic on top of the controller — see
+ * `access-boundary-schedule-editor.ts`'s `willUpdate` and `time.ts`'s
+ * "Effective-zone store" header — or a late arrival silently moves an
+ * untouched field's stored instant. A bounded wait is still strictly better
+ * than an unbounded one on every surface; it just isn't a complete fix by
+ * itself for every surface.
  */
 async function loadPreferredTimeZone(): Promise<void> {
   try {

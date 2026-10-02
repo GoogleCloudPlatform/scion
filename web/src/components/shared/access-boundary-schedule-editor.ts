@@ -24,11 +24,13 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { PropertyValues } from 'lit';
 import { srOnlyStyles } from './styles.js';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { Iso8601 } from '../../shared/access-boundaries.js';
 import { effectiveTimeZone, parseWallClock, toWallClockInput } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 export interface ScheduleChangeDetail {
   notBefore: Iso8601 | undefined;
@@ -37,6 +39,14 @@ export interface ScheduleChangeDetail {
 
 @customElement('scion-access-boundary-schedule-editor')
 export class ScionAccessBoundaryScheduleEditor extends LitElement {
+  /**
+   * Re-renders this editor when the effective display zone changes (review
+   * R4-1). By itself this only fixes the "Times in: <zone>" label — see
+   * `willUpdate` below for why the cached `notBeforeLocal`/`expiresAtLocal`
+   * strings also need to be re-derived, not just re-rendered.
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   /** ISO 8601 UTC string for activation start. */
   @property() notBefore: Iso8601 | undefined = undefined;
 
@@ -47,6 +57,13 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
   @state() private notBeforeLocal = '';
   @state() private expiresAtLocal = '';
   @state() private validationError = '';
+
+  /**
+   * The zone `notBeforeLocal`/`expiresAtLocal` were last derived for.
+   * `willUpdate` compares this against the current effective zone on every
+   * update to detect a change (review R4-1).
+   */
+  private _renderedZone = effectiveTimeZone();
 
   private get viewerTimeZone(): string {
     return effectiveTimeZone();
@@ -63,6 +80,44 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
       if (this.expiresAt) {
         this.expiresAtLocal = this.isoToLocalDatetime(this.expiresAt);
       }
+    }
+  }
+
+  /**
+   * Re-derives the cached `datetime-local` strings when the effective zone
+   * changes between updates (review R4-1).
+   *
+   * `notBeforeLocal`/`expiresAtLocal` are wall-clock strings cached in
+   * state — populated from the `notBefore`/`expiresAt` ISO props at mount,
+   * then overwritten directly by the user typing into the fields. Neither
+   * path re-runs when the zone later changes (e.g. a slow `/auth/me`
+   * resolving after this component already rendered, review R3-1), so
+   * without this, the *displayed* strings stay in the old zone while
+   * `localDatetimeToIso`/`emitChange` parse them in the *new* one on the
+   * next edit — silently shifting the instant of a field the user never
+   * touched, and interpreting a field they are actively editing under a
+   * zone label that no longer matches.
+   *
+   * The fix re-parses each non-empty cached string in the *previous* zone
+   * (recovering the instant it represented) and re-formats that instant in
+   * the *new* zone — a round trip that leaves the instant unchanged and
+   * only changes its displayed representation, for both an untouched field
+   * and one with an uncommitted edit in progress.
+   */
+  override willUpdate(changed: PropertyValues<this>): void {
+    super.willUpdate(changed);
+    const zone = this.viewerTimeZone;
+    if (zone === this._renderedZone) return;
+    const previousZone = this._renderedZone;
+    this._renderedZone = zone;
+
+    if (this.notBeforeLocal) {
+      const iso = parseWallClock(this.notBeforeLocal, previousZone);
+      if (iso) this.notBeforeLocal = toWallClockInput(iso, zone);
+    }
+    if (this.expiresAtLocal) {
+      const iso = parseWallClock(this.expiresAtLocal, previousZone);
+      if (iso) this.expiresAtLocal = toWallClockInput(iso, zone);
     }
   }
 

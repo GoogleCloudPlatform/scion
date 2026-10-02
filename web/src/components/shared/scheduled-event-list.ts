@@ -27,6 +27,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { effectiveTimeZone, parseWallClock } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface ScheduledEvent {
   id: string;
@@ -49,6 +50,17 @@ interface ListResponse {
 
 @customElement('scion-scheduled-event-list')
 export class ScionScheduledEventList extends LitElement {
+  /**
+   * Re-renders this list when the effective display zone changes (review
+   * R4-1), so the create dialog's "Times in: <zone>" label never shows a
+   * zone other than the one `handleCreate`'s `parseWallClock` call parses
+   * `dialogDatetime` in. Unlike `access-boundary-schedule-editor.ts`,
+   * `dialogDatetime` is raw typed text with no instant cached from it
+   * until submit, so there is no stale cached value to re-derive here —
+   * keeping the label in sync with the live parse zone is the whole fix.
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   @property() projectId = '';
   @property({ type: Boolean }) compact = false;
 

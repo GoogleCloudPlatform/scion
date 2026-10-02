@@ -46,6 +46,7 @@ import {
   getPrincipalIcon,
 } from '../shared/role-binding-utils.js';
 import { effectiveTimeZone, parseWallClock } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -88,6 +89,17 @@ const PAGE_SIZE = 25;
 
 @customElement('scion-page-admin-role-bindings')
 export class ScionPageAdminRoleBindings extends LitElement {
+  /**
+   * Re-renders this page when the effective display zone changes (review
+   * R4-1), so the create dialog's "Times in: <zone>" label never shows a
+   * zone other than the one `createBinding`'s `parseWallClock` calls parse
+   * `formNotBefore`/`formExpiresAt` in. Both are raw typed text with no
+   * instant cached from them until submit, so there is no stale cached
+   * value to re-derive here (contrast `access-boundary-schedule-editor.ts`,
+   * which pre-populates from committed ISO props and does need that).
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   @state() private loading = true;
   @state() private bindings: RoleBinding[] = [];
   @state() private roles: RoleDefinition[] = [];

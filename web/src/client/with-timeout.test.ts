@@ -28,6 +28,10 @@ describe('withTimeout (review R3-1)', () => {
     await vi.advanceTimersByTimeAsync(500);
 
     await expect(result).resolves.toBe('ok');
+    // Review R4-2: the budget timer must be cleared once `inner` settles,
+    // not left pending until it would have fired on its own — pins
+    // `clearTimeout(timer)` on the fulfil path.
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('resolves to undefined when the promise hangs past the budget', async () => {
@@ -72,6 +76,8 @@ describe('withTimeout (review R3-1)', () => {
 
     await vi.advanceTimersByTimeAsync(100);
     await assertion;
+    // Review R4-2: pins `clearTimeout(timer)` on the reject path too.
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('does not reject from a late failure after the budget already resolved undefined', async () => {

@@ -154,6 +154,22 @@ export function listTimeZones(): string[] {
 // For any absolute time that needs the zone label alongside it (not just a
 // live re-render), use `formatInstantWithZone` below instead of composing
 // `formatInstant`/`zoneLabel` yourself.
+//
+// `DisplayZoneController` is necessary but not sufficient for every
+// consumer (review R4-1). It re-renders a component that calls a formatter
+// fresh on every render — `requestUpdate()` is enough there, because the
+// next render reads the new zone. It is NOT enough for a component that
+// caches a *wall-clock string* derived from the effective zone in state —
+// for example a `datetime-local` input's value, pre-populated once via
+// `toWallClockInput` and then left alone. That cached string still shows
+// the old zone after the event fires, while a later edit parses it (or an
+// untouched sibling field) in the new one, silently shifting the instant a
+// cached-but-unedited field represents. Such a component must also
+// re-derive each cached string from the instant it represents — round-trip
+// it through the *previous* zone back to an ISO instant, then back to a
+// wall-clock string in the *new* zone — in `willUpdate`, not just call
+// `requestUpdate()`. See `access-boundary-schedule-editor.ts`'s `willUpdate`
+// for the reference implementation.
 // ---------------------------------------------------------------------------
 
 /** The user's `preferences.timezone`, or `''` for Auto. */
