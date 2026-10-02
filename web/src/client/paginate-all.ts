@@ -51,11 +51,15 @@ export interface PaginateAllOptions<T> {
   label?: string;
   /**
    * Checked before every page fetch, including the first. Once it returns
-   * false, the walk stops and resolves with whatever it has accumulated so
-   * far, instead of throwing or fetching another page — for a caller whose
-   * result will be discarded if the thing it was walking for (a view, a
-   * connected element) is gone before the walk finishes, so there is no
-   * point paying for the remaining pages.
+   * false, the walk stops fetching further pages and rejects with
+   * {@link PaginationStoppedError} (carrying whatever it had accumulated so
+   * far) rather than resolving — for a caller whose result will be discarded
+   * if the thing it was walking for (a view, a connected element) is gone
+   * before the walk finishes, so there is no point paying for the remaining
+   * pages. Rejecting rather than resolving with a partial list means a
+   * caller that only publishes on success (for example via
+   * `Promise.allSettled` and acting solely on `'fulfilled'` results) can't
+   * mistake a stopped walk's partial result for a complete one.
    */
   shouldContinue?: () => boolean;
 }
@@ -71,11 +75,36 @@ export class PaginationError extends Error {
 }
 
 /**
+ * Raised when `shouldContinue` returns false before the walk has followed
+ * every page's `nextCursor` to its end — deliberately a sibling of
+ * {@link PaginationError}, not a subclass, so callers that distinguish the
+ * two with `instanceof` (for example to decide whether a stopped walk should
+ * be retried, where a genuine request failure should not be) don't have to
+ * also exclude this case by hand. Carries whatever items were accumulated
+ * before the stop, for a caller that wants them anyway, but the walk itself
+ * is not considered to have completed — the caller must not treat `items` as
+ * the full list.
+ */
+export class PaginationStoppedError<T = unknown> extends Error {
+  readonly items: T[];
+
+  constructor(items: T[]) {
+    super('pagination stopped before completion');
+    this.name = 'PaginationStoppedError';
+    this.items = items;
+  }
+}
+
+/**
  * Fetch every page of `options.path`, following `nextCursor` until it is
  * empty. Throws {@link PaginationError} on the first page that fails —
  * callers that need to preserve previously loaded data on a failed walk
  * should keep their own copy until this resolves, rather than publishing
- * partial results.
+ * partial results. Throws {@link PaginationStoppedError} if `shouldContinue`
+ * returns false before the walk reaches its last page — this is distinct
+ * from a request failure, and is never resolved as a (possibly partial)
+ * success, so a caller can't mistake a stopped walk's incomplete result for
+ * a complete one.
  */
 export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[]> {
   const { path, pageSize, parsePage, shouldContinue } = options;
@@ -88,7 +117,7 @@ export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[
   let pages = 0;
 
   do {
-    if (shouldContinue && !shouldContinue()) break;
+    if (shouldContinue && !shouldContinue()) throw new PaginationStoppedError<T>(all);
     const separator = path.includes('?') ? '&' : '?';
     const url = cursor
       ? `${path}${separator}limit=${pageSize}&cursor=${encodeURIComponent(cursor)}`

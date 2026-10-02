@@ -18,7 +18,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { apiFetch } from './api.js';
-import { paginateAll, PaginationError } from './paginate-all.js';
+import { paginateAll, PaginationError, PaginationStoppedError } from './paginate-all.js';
 
 vi.mock('./api.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api.js')>();
@@ -121,33 +121,39 @@ describe('paginateAll', () => {
     expect(apiFetch).toHaveBeenCalledTimes(2);
   });
 
-  it('stops before fetching another page once shouldContinue returns false, without throwing', async () => {
+  it('stops before fetching another page once shouldContinue returns false, rejecting with the partial list attached', async () => {
     vi.mocked(apiFetch)
       .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'a' }], nextCursor: 'c1' }))
       .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'b' }], nextCursor: 'c2' }))
       .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'c' }] }));
 
     let pagesAllowed = 1;
-    const items = await paginateAll({
+    const promise = paginateAll({
       path: '/api/v1/things',
       pageSize: 100,
       parsePage,
       shouldContinue: () => pagesAllowed-- > 0,
     });
 
-    expect(items).toEqual([{ id: 'a' }]);
+    await expect(promise).rejects.toBeInstanceOf(PaginationStoppedError);
+    await promise.catch((err: PaginationStoppedError<Item>) => {
+      expect(err.items).toEqual([{ id: 'a' }]);
+    });
     expect(apiFetch).toHaveBeenCalledTimes(1);
   });
 
-  it('fetches nothing when shouldContinue is already false before the first page', async () => {
-    const items = await paginateAll({
+  it('rejects with an empty partial list when shouldContinue is already false before the first page', async () => {
+    const promise = paginateAll({
       path: '/api/v1/things',
       pageSize: 100,
       parsePage,
       shouldContinue: () => false,
     });
 
-    expect(items).toEqual([]);
+    await expect(promise).rejects.toBeInstanceOf(PaginationStoppedError);
+    await promise.catch((err: PaginationStoppedError<Item>) => {
+      expect(err.items).toEqual([]);
+    });
     expect(apiFetch).not.toHaveBeenCalled();
   });
 
