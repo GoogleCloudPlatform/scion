@@ -1023,11 +1023,13 @@ export class ScionProjectMembersEditor extends LitElement {
     this.resetDialogMessages();
   }
 
-  /** D2: picking a principal that is already a member switches to Edit. */
+  /** Picking a principal who is already a member switches to Edit. Picker
+   *  events that arrive once the dialog is in Edit mode (the picker's
+   *  debounced search can fire late) never change the Edit target. */
   private onPrincipalChange(detail: PrincipalChangeDetail): void {
+    if (this.dialogMode !== 'add') return;
     this.dlgPrincipalId = detail.principalId;
     this.dlgDisplayName = detail.displayLabel;
-    if (this.dialogMode !== 'add') return;
     const existing = findMemberGroup(this.groups, this.dlgPrincipalType, detail.principalId);
     if (existing) {
       this.openEditDialog(

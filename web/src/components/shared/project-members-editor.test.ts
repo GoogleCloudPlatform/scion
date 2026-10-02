@@ -196,6 +196,7 @@ interface EditorInternals {
   dialogMode: MemberDialogMode;
   dlgPrincipalType: string;
   dlgPrincipalId: string;
+  dlgDisplayName: string;
   dlgBuiltIn: string;
   dlgCustomIds: string[];
   dlgExpectedIds: string[];
@@ -872,6 +873,26 @@ describe('D2: Add mode for an existing member', () => {
     expect(el.dlgCustomIds).toEqual(['r-msg']);
     expect(el.dlgExpectedIds).toEqual(['r-member', 'r-msg']);
     expect(el.dlgInfo).toContain('already a member');
+  });
+
+  it('a late picker event in Edit mode does not change the Edit target', async () => {
+    const el = makeEditor(OWNER_CAPS);
+    el.openEditDialog(ERIN);
+    el.onPrincipalChange({ principalType: 'user', principalId: 'erin@exam', displayLabel: '' });
+    expect(el.dialogMode).toBe('edit');
+    expect(el.dlgPrincipalId).toBe('u-erin');
+    expect(el.dlgDisplayName).toBe('Erin Member');
+
+    el.dlgBuiltIn = NO_PROJECT_ROLE;
+    vi.mocked(apiFetch).mockResolvedValueOnce(jsonResponse(200, {}));
+    await el.handleSave();
+    expect(writes()).toEqual([
+      {
+        method: 'PUT',
+        url: '/api/v1/projects/p-1/members/principals/user/u-erin',
+        body: { roleDefinitionIds: ['r-msg'], expectedRoleDefinitionIds: ['r-member', 'r-msg'] },
+      },
+    ]);
   });
 
   it('matches on principal type too', () => {
