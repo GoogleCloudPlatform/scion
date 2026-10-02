@@ -78,6 +78,9 @@ import type { FileEditorDataSource } from '../shared/file-editor.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
+import { formatInstantWithZone } from '../../utils/time.js';
+import { formatNumber } from '../../utils/format-number.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 /** A request/refresh trigger, per design §4.3; `loadData`/`fetchAndMergeAgents` both funnel into `loadAgentsForView` (design §11). */
 type AgentsViewTrigger = 'page-load' | 'label-commit' | 'lifecycle-refresh' | 'view-change';
@@ -100,6 +103,9 @@ const PAGER_PAGE_SIZE_STORAGE_KEY = 'scion-pagesize-project-agents';
 
 @customElement('scion-page-project-detail')
 export class ScionPageProjectDetail extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /**
    * Page data from SSR
    */
@@ -1495,7 +1501,7 @@ export class ScionPageProjectDetail extends LitElement {
     if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
     if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-    return n.toLocaleString();
+    return formatNumber(n);
   }
 
   private backgroundRefresh(trigger: AgentsViewTrigger = 'lifecycle-refresh'): void {
@@ -1890,18 +1896,7 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private formatDate(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      return new Intl.DateTimeFormat('en', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      }).format(date);
-    } catch {
-      return dateString;
-    }
+    return formatInstantWithZone(dateString) || dateString;
   }
 
   private getTabDataSource(tabName: string): FileBrowserDataSource {

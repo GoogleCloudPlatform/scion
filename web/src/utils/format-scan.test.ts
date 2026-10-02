@@ -71,6 +71,15 @@ const BANNED_PATTERN =
  * `profile-settings.ts` stays listed for the "Agent timezone" section's
  * zone check, which tz-refactor task 13 removes along with the section.
  *
+ * tz-refactor task 19 removed the list pages, `components/shared/*list*`
+ * files and every file with a private relative-time helper outside the
+ * admin, access-boundary and chat views: `agent-detail.ts`,
+ * `project-detail.ts`, `brokers.ts`, `broker-detail.ts`, `home.ts`,
+ * `project-settings.ts`, `env-var-list.ts`, `gcp-service-account-list.ts`,
+ * `pre-start-hook-list.ts`, `project-template-list.ts`, `schedule-list.ts`,
+ * `scheduled-event-list.ts`, `secret-list.ts`, `subscription-manager.ts` and
+ * `token-list.ts`.
+ *
  * The end state (P3c, tz-refactor task 21) is an empty list and the test
  * below deletes itself along with it.
  */
@@ -87,14 +96,8 @@ const ALLOWLIST: readonly string[] = [
   'components/pages/admin-scheduler.ts',
   'components/pages/admin-server-config.ts',
   'components/pages/admin-users.ts',
-  'components/pages/agent-detail.ts',
-  'components/pages/broker-detail.ts',
-  'components/pages/brokers.ts',
-  'components/pages/home.ts',
   'components/pages/metrics-dashboard.ts',
   'components/pages/profile-settings.ts',
-  'components/pages/project-detail.ts',
-  'components/pages/project-settings.ts',
   'components/shared/access-boundary-audit-timeline.ts',
   'components/shared/access-boundary-definition-summary.ts',
   'components/shared/access-boundary-impact-summary.ts',
@@ -105,17 +108,8 @@ const ALLOWLIST: readonly string[] = [
   'components/shared/chat/chat-search.ts',
   'components/shared/chat/chat-space-rail.ts',
   'components/shared/chat/chat-thread.ts',
-  'components/shared/env-var-list.ts',
   'components/shared/file-browser.ts',
-  'components/shared/gcp-service-account-list.ts',
-  'components/shared/pre-start-hook-list.ts',
-  'components/shared/project-template-list.ts',
   'components/shared/role-binding-utils.ts',
-  'components/shared/schedule-list.ts',
-  'components/shared/scheduled-event-list.ts',
-  'components/shared/secret-list.ts',
-  'components/shared/subscription-manager.ts',
-  'components/shared/token-list.ts',
   'components/shared/unified-log-viewer.ts',
 ];
 

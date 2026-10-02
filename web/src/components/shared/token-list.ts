@@ -30,6 +30,8 @@ import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from './confirm-dialog.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface AccessToken {
   id: string;
@@ -513,6 +515,9 @@ function groupScopesByResource(scopes: ScopeOption[]): [string, ScopeOption[]][]
 
 @customElement('scion-token-list')
 export class ScionTokenList extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @state() private loading = true;
   @state() private tokens: AccessToken[] = [];
   @state() private projects: Project[] = [];
@@ -1160,44 +1165,6 @@ export class ScionTokenList extends LitElement {
 
   // ── Formatting ─────────────────────────────────────────────────────
 
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
-  }
-
-  private formatDate(dateString: string): string {
-    try {
-      return new Date(dateString).toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-      });
-    } catch {
-      return dateString;
-    }
-  }
-
   // ── Rendering ──────────────────────────────────────────────────────
 
   override render() {
@@ -1314,16 +1281,18 @@ export class ScionTokenList extends LitElement {
           </div>
         </td>
         <td class="hide-mobile">
-          <span class="meta-text">${this.formatRelativeTime(token.created)}</span>
+          <span class="meta-text">${formatRelative(token.created)}</span>
         </td>
         <td class="hide-mobile">
           <span class="meta-text">
-            ${token.lastUsed ? this.formatRelativeTime(token.lastUsed) : '\u2014'}
+            ${token.lastUsed ? formatRelative(token.lastUsed) : '\u2014'}
           </span>
         </td>
         <td>
           <span class="meta-text">
-            ${token.expiresAt ? this.formatDate(token.expiresAt) : '\u2014'}
+            ${token.expiresAt
+              ? formatInstantWithZone(token.expiresAt, 'date') || token.expiresAt
+              : '\u2014'}
           </span>
         </td>
         <td class="actions-cell">

@@ -32,6 +32,8 @@ import {
   fetchHubProjectCapabilities,
   seedHubProjectCapabilities,
 } from '../../client/hub-capabilities.js';
+import { formatInstantWithZone } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface InviteStats {
   pendingInvites: number;
@@ -50,6 +52,9 @@ interface InviteStats {
 
 @customElement('scion-page-home')
 export class ScionPageHome extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /**
    * Page data from SSR
    */
@@ -509,7 +514,7 @@ export class ScionPageHome extends LitElement {
     if (diffHours < 24) return `${diffHours}h ago`;
     const diffDays = Math.floor(diffHours / 24);
     if (diffDays < 30) return `${diffDays}d ago`;
-    return date.toLocaleDateString();
+    return formatInstantWithZone(dateStr, 'date') || dateStr;
   }
 }
 
