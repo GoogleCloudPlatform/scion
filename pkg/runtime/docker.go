@@ -114,8 +114,10 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
 	}
 
+	// Run returns the whole trimmed output, as before; only the launch
+	// handle is restricted to a well-formed container ID line.
 	id := strings.TrimSpace(out)
-	reportContainerCreated(hooks, config.Name, id)
+	reportContainerCreated(hooks, config.Name, out)
 	return id, nil
 }
 

@@ -119,7 +119,7 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 
 	// The output of 'container run -d' is the container ID
 	id := strings.TrimSpace(out)
-	reportContainerCreated(hooks, config.Name, id)
+	reportAppleContainerCreated(hooks, config.Name, id)
 	return id, nil
 }
 

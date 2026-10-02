@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -34,10 +35,39 @@ import (
 // never remove a same-named resource a newer launch has since recreated.
 // These methods satisfy agent.UIDPreconditionDeleter.
 
-// reportContainerCreated reports a container runtime's create (design
-// §3.8.4: "a Docker container ID"). The container ID is the handle's UID,
-// the identity DeleteResource removes by.
-func reportContainerCreated(hooks launchHooks, name, id string) {
+// containerIDPattern matches a Docker/Podman container ID: lowercase hex,
+// from the 12-character short form to the full 64 characters.
+var containerIDPattern = regexp.MustCompile(`^[0-9a-f]{12,64}$`)
+
+// reportContainerCreated reports a Docker or Podman create (design §3.8.4:
+// "a Docker container ID"). The container ID is the handle's UID, the
+// identity DeleteResource removes by. out is the run command's output,
+// which interleaves stdout and stderr, so a warning line may surround the
+// ID: the last line that is a well-formed ID is used. If no line is, no
+// handle is recorded (the launch's cleanup cannot remove this container by
+// ID) and a warning is logged. Run itself still returns the whole trimmed
+// output; only the handle is restricted.
+func reportContainerCreated(hooks launchHooks, name, out string) {
+	if !hooks.active() {
+		return
+	}
+	lines := strings.Split(out, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if id := strings.TrimSpace(lines[i]); containerIDPattern.MatchString(id) {
+			hooks.created(api.ResourceHandle{Kind: api.ResourceKindContainer, Name: name, UID: id})
+			return
+		}
+	}
+	runtimeLog.Warn("Container run output has no well-formed container ID; launch cleanup will not track this container",
+		"name", name, "output_lines", len(lines))
+}
+
+// reportAppleContainerCreated reports an Apple container create. Apple's
+// container CLI prints the container name as its ID, so the last non-empty
+// output line is used without a hex check.
+func reportAppleContainerCreated(hooks launchHooks, name, out string) {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	id := strings.TrimSpace(lines[len(lines)-1])
 	if id == "" {
 		return
 	}

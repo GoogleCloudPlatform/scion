@@ -39,19 +39,26 @@ const mockContainerID = "0123456789abcdef"
 // "rm" of an ID listed in missing prints a "no such container" error.
 func writeMockContainerCLI(t *testing.T, missing string) (cli, logPath string) {
 	t.Helper()
+	return writeMockContainerCLIRun(t, missing, "echo "+mockContainerID)
+}
+
+// writeMockContainerCLIRun is writeMockContainerCLI with runBody as the
+// shell commands "run" executes.
+func writeMockContainerCLIRun(t *testing.T, missing, runBody string) (cli, logPath string) {
+	t.Helper()
 	dir := t.TempDir()
 	cli = filepath.Join(dir, "mock-cli")
 	logPath = filepath.Join(dir, "calls.log")
 	script := fmt.Sprintf(`#!/bin/sh
 echo "$@" >> %q
 case "$1" in
-  run) echo %s ;;
+  run) %s ;;
   rm)
     for a in "$@"; do
       if [ "$a" = %q ]; then echo "Error response from daemon: No such container: $a" >&2; exit 1; fi
     done ;;
 esac
-`, logPath, mockContainerID, missing)
+`, logPath, runBody, missing)
 	if err := os.WriteFile(cli, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -240,5 +247,75 @@ func TestContainerDeleteResource_MissingAndInvalidHandles(t *testing.T) {
 				t.Fatalf("invalid handles reached the CLI (%d new calls)", after-before)
 			}
 		})
+	}
+}
+
+// TestContainerRun_HandleIDIgnoresWarningLines: the run output interleaves
+// stdout and stderr, so a warning line must not end up in the handle; with
+// no well-formed ID in the output no handle is recorded.
+func TestContainerRun_HandleIDIgnoresWarningLines(t *testing.T) {
+	const fullID = "a3f1c2d4e5b60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+	for _, tc := range []struct {
+		name    string
+		runBody string
+		wantUID string // "" means no handle
+	}{
+		{"warning before", `echo "WARNING: The requested image's platform does not match" >&2; echo ` + fullID, fullID},
+		{"warning after", `echo ` + fullID + `; echo "WARNING: memory limit ignored" >&2`, fullID},
+		{"short id", `echo abcdef012345`, "abcdef012345"},
+		{"no valid id", `echo "WARNING: something"; echo not-a-container-id`, ""},
+		{"too short", `echo abc123`, ""},
+		// The pattern is anchored at both ends of the trimmed line.
+		{"id with prefix", `echo x` + fullID, ""},
+		{"id with suffix", `echo ` + fullID + `x`, ""},
+		{"id inside a line", `echo "created ` + fullID + ` ok"`, ""},
+		{"65 hex characters", `echo ` + fullID + `0`, ""},
+		{"uppercase hex", `echo ABCDEF012345`, ""},
+		// Lines are trimmed before matching.
+		{"surrounding whitespace", `printf '  ` + fullID + ` \r\nWARNING: trailing\n'`, fullID},
+		// Lines are scanned from the end: the last well-formed ID wins.
+		{"two ids", `echo abcdef012345; echo ` + fullID, fullID},
+	} {
+		for _, rc := range containerRuntimeCases()[:2] { // docker, podman
+			t.Run(tc.name+"/"+rc.name, func(t *testing.T) {
+				cli, _ := writeMockContainerCLIRun(t, "", tc.runBody)
+				config := containerHookConfig()
+				var handles []api.ResourceHandle
+				config.OnResourceCreated = func(h api.ResourceHandle) { handles = append(handles, h) }
+				if _, err := rc.new(cli).Run(context.Background(), config); err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+				if tc.wantUID == "" {
+					if len(handles) != 0 {
+						t.Fatalf("handles = %+v, want none for output without a container ID", handles)
+					}
+					return
+				}
+				if len(handles) != 1 || handles[0].UID != tc.wantUID {
+					t.Fatalf("handles = %+v, want UID %q", handles, tc.wantUID)
+				}
+			})
+		}
+	}
+}
+
+// TestAppleContainerRun_HandleIsPrintedName: Apple's container CLI prints
+// the container name, not a hex ID; the handle carries that printed value
+// and Run returns it unchanged.
+func TestAppleContainerRun_HandleIsPrintedName(t *testing.T) {
+	cli, _ := writeMockContainerCLIRun(t, "", "echo hook-agent")
+	config := containerHookConfig()
+	var handles []api.ResourceHandle
+	config.OnResourceCreated = func(h api.ResourceHandle) { handles = append(handles, h) }
+	id, err := (&AppleContainerRuntime{Command: cli}).Run(context.Background(), config)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if id != "hook-agent" {
+		t.Fatalf("Run returned %q, want the printed name", id)
+	}
+	want := api.ResourceHandle{Kind: api.ResourceKindContainer, Name: "hook-agent", UID: "hook-agent"}
+	if len(handles) != 1 || handles[0] != want {
+		t.Fatalf("handles = %+v, want [%+v]", handles, want)
 	}
 }

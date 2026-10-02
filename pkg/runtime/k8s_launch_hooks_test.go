@@ -20,9 +20,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
@@ -33,6 +35,7 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
 
@@ -142,6 +145,15 @@ func (h *hookRecorder) recordCreates(c fakeWithReactors) {
 	})
 }
 
+func (h *hookRecorder) recordDeletes(c fakeWithReactors) {
+	c.PrependReactor("delete", "*", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		h.mu.Lock()
+		h.events = append(h.events, "delete:"+action.GetResource().Resource+"/"+action.(k8stesting.DeleteAction).GetName())
+		h.mu.Unlock()
+		return false, nil, nil
+	})
+}
+
 func (h *hookRecorder) snapshot() ([]string, []api.ResourceHandle) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -223,6 +235,7 @@ func TestK8sRun_LaunchHooks_CheckpointBeforeEachCreateAndHandlesCarryUIDs(t *tes
 
 	events, handles := rec.snapshot()
 	assertEvents(t, events, []string{
+		"checkpoint:pre_clean",
 		"checkpoint:secrets", "create:secrets/scion-agent-hooks-agent", "handle:secret/scion-agent-hooks-agent",
 		"checkpoint:secrets", "create:secrets/scion-auth-hooks-agent", "handle:secret/scion-auth-hooks-agent",
 		"checkpoint:pod_create", "create:pods/hooks-agent", "handle:pod/hooks-agent",
@@ -271,6 +284,7 @@ func TestK8sRun_LaunchHooks_GKESecretProviderClass(t *testing.T) {
 
 	events, handles := rec.snapshot()
 	assertEvents(t, events, []string{
+		"checkpoint:pre_clean",
 		"checkpoint:secrets", "create:secretproviderclasses/scion-agent-gke-agent", "handle:secretproviderclass/scion-agent-gke-agent",
 		"checkpoint:secrets", "create:secrets/scion-agent-gke-agent", "handle:secret/scion-agent-gke-agent",
 		"checkpoint:pod_create", "create:pods/gke-agent", "handle:pod/gke-agent",
@@ -292,11 +306,12 @@ func TestK8sRun_CheckpointErrorStopsTheCreate(t *testing.T) {
 		wantSecrets []string // secrets that must exist after Run
 		wantHandles int
 	}{
-		{name: "first secret", failAt: 1, wantSecrets: nil, wantHandles: 0},
-		{name: "auth secret", failAt: 2, wantSecrets: []string{"scion-agent-stop-agent"}, wantHandles: 1},
-		// The secrets this launch created are left for its UID-precondition
-		// cleanup, not deleted by name.
-		{name: "pod", failAt: 3, wantSecrets: []string{"scion-agent-stop-agent", "scion-auth-stop-agent"}, wantHandles: 2},
+		// failAt counts checkpoints: the pre_clean checkpoint comes first.
+		// The secrets this launch created are left for its launch cleanup
+		// (by recorded UID); Run's own start cleanup does not run.
+		{name: "first secret", failAt: 2, wantSecrets: nil, wantHandles: 0},
+		{name: "auth secret", failAt: 3, wantSecrets: []string{"scion-agent-stop-agent"}, wantHandles: 1},
+		{name: "pod", failAt: 4, wantSecrets: []string{"scion-agent-stop-agent", "scion-auth-stop-agent"}, wantHandles: 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -478,5 +493,290 @@ func TestK8sDeleteResource_RefusesUnconditionalAndUnknownKinds(t *testing.T) {
 	}
 	if err := rt.DeleteResource(ctx, api.ResourceHandle{Kind: "persistentvolumeclaim", Namespace: "default", Name: "s", UID: "u"}); err == nil {
 		t.Fatal("expected an error for an unsupported kind")
+	}
+}
+
+// --- Name-based deletes on the async path ---
+
+func countPrefix(events []string, prefix string) int {
+	n := 0
+	for _, e := range events {
+		if strings.HasPrefix(e, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestK8sRun_PreCleanCheckpointBeforeNameBasedDeletes: the stale-resource
+// pre-clean deletes by name, so one pre_clean checkpoint precedes both
+// deletes, and a checkpoint error means neither delete happens.
+func TestK8sRun_PreCleanCheckpointBeforeNameBasedDeletes(t *testing.T) {
+	errEnded := errors.New("launch ended at the hub")
+	for _, tc := range []struct {
+		name    string
+		failAt  int
+		deletes int
+	}{
+		{"checkpoint fails", 1, 0},
+		{"checkpoint passes", 0, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, clientset, _ := newTestK8sRuntime()
+			ctx := context.Background()
+			// Objects that hold the names (a newer launch's, if the
+			// checkpoint fails).
+			for _, n := range []string{"scion-agent-pc-agent", "scion-auth-pc-agent"} {
+				if _, err := clientset.CoreV1().Secrets("default").Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: "default"}}, metav1.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := clientset.CoreV1().Pods("default").Create(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pc-agent", Namespace: "default"}}, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			rec := &hookRecorder{failAt: tc.failAt, failErr: errEnded}
+			rec.recordDeletes(clientset)
+			config := hookTestConfig("pc-agent")
+			rec.apply(&config)
+
+			err := runWithHooks(t, rt, clientset, config)
+			events, _ := rec.snapshot()
+			if len(events) == 0 || events[0] != "checkpoint:pre_clean" {
+				t.Fatalf("events = %q, want pre_clean first", events)
+			}
+			if got := countPrefix(events, "checkpoint:pre_clean"); got != 1 {
+				t.Fatalf("pre_clean checkpoints = %d, want 1: %q", got, events)
+			}
+			if got := countPrefix(events, "delete:"); got != tc.deletes {
+				t.Fatalf("deletes = %d, want %d: %q", got, tc.deletes, events)
+			}
+			if tc.failAt == 0 {
+				for i, want := range []string{"delete:secrets/scion-agent-pc-agent", "delete:secrets/scion-auth-pc-agent", "delete:pods/pc-agent"} {
+					if events[1+i] != want {
+						t.Fatalf("event %d = %q, want %q: %q", 1+i, events[1+i], want, events)
+					}
+				}
+				return
+			}
+			if !errors.Is(err, errEnded) {
+				t.Fatalf("Run error = %v, want the checkpoint error", err)
+			}
+			if _, err := clientset.CoreV1().Pods("default").Get(ctx, "pc-agent", metav1.GetOptions{}); err != nil {
+				t.Fatalf("the existing pod was deleted after a failed checkpoint: %v", err)
+			}
+			secrets, _ := clientset.CoreV1().Secrets("default").List(ctx, metav1.ListOptions{})
+			if len(secrets.Items) != 2 {
+				t.Fatalf("existing secrets deleted after a failed checkpoint: %d left", len(secrets.Items))
+			}
+		})
+	}
+}
+
+// TestK8sRun_CancelledStart_AsyncPathLeavesObjectsForLaunchCleanup: a start
+// whose context ends after the pod is created is cleaned up by Run on the
+// synchronous path (by start label and UID); with launch hooks set Run
+// leaves every object it created, and reported, to the launch's cleanup.
+func TestK8sRun_CancelledStart_AsyncPathLeavesObjectsForLaunchCleanup(t *testing.T) {
+	for _, async := range []bool{true, false} {
+		t.Run(fmt.Sprintf("async=%v", async), func(t *testing.T) {
+			rt, clientset, _ := newTestK8sRuntime()
+			var fx uidFixture
+			fx.install(t, clientset)
+			rec := &hookRecorder{}
+			config := hookTestConfig("cx-agent")
+			config.ResolvedSecrets = envSecrets(1)
+			config.ResolvedAuth = authFiles(t)
+			if async {
+				rec.apply(&config)
+			}
+			// runWithHooks cancels ctx as the pod is created.
+			if err := runWithHooks(t, rt, clientset, config); err == nil {
+				t.Fatal("Run succeeded; want an error from the cancelled start")
+			}
+			ctx := context.Background()
+			secrets, _ := clientset.CoreV1().Secrets("default").List(ctx, metav1.ListOptions{})
+			pods, _ := clientset.CoreV1().Pods("default").List(ctx, metav1.ListOptions{})
+			wantSecrets, wantPods := 0, 0
+			if async {
+				wantSecrets, wantPods = 2, 1
+			}
+			if len(secrets.Items) != wantSecrets || len(pods.Items) != wantPods {
+				t.Fatalf("after the cancelled start: %d secrets, %d pods; want %d, %d",
+					len(secrets.Items), len(pods.Items), wantSecrets, wantPods)
+			}
+			if !async {
+				return
+			}
+			_, handles := rec.snapshot()
+			if len(handles) != 3 {
+				t.Fatalf("handles = %+v, want the 2 secrets and the pod", handles)
+			}
+			for _, h := range handles {
+				if err := rt.DeleteResource(ctx, h); err != nil {
+					t.Fatalf("DeleteResource(%+v): %v", h, err)
+				}
+			}
+			secrets, _ = clientset.CoreV1().Secrets("default").List(ctx, metav1.ListOptions{})
+			pods, _ = clientset.CoreV1().Pods("default").List(ctx, metav1.ListOptions{})
+			if len(secrets.Items) != 0 || len(pods.Items) != 0 {
+				t.Fatalf("launch cleanup left %d secrets, %d pods", len(secrets.Items), len(pods.Items))
+			}
+		})
+	}
+}
+
+// TestK8sRun_PodCreateFailure_AsyncPathKeepsSecretsForUIDCleanup: when the
+// pod create fails, the synchronous path's start cleanup deletes the
+// secrets this start created, while an async launch leaves them to its
+// launch cleanup (by recorded UID).
+func TestK8sRun_PodCreateFailure_AsyncPathKeepsSecretsForUIDCleanup(t *testing.T) {
+	for _, async := range []bool{true, false} {
+		t.Run(fmt.Sprintf("async=%v", async), func(t *testing.T) {
+			rt, clientset, _ := newTestK8sRuntime()
+			var fx uidFixture
+			fx.install(t, clientset)
+			clientset.PrependReactor("create", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+				return true, nil, errors.New("admission denied")
+			})
+			rec := &hookRecorder{}
+			config := hookTestConfig("pf-agent")
+			config.ResolvedSecrets = envSecrets(1)
+			config.ResolvedAuth = authFiles(t)
+			if async {
+				rec.apply(&config)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if _, err := rt.Run(ctx, config); err == nil || !strings.Contains(err.Error(), "failed to create pod") {
+				t.Fatalf("Run error = %v, want a pod create failure", err)
+			}
+			secrets, _ := clientset.CoreV1().Secrets("default").List(ctx, metav1.ListOptions{})
+			want := 0
+			if async {
+				want = 2
+			}
+			if len(secrets.Items) != want {
+				t.Fatalf("secrets after the failed pod create = %d, want %d", len(secrets.Items), want)
+			}
+			if async {
+				if _, handles := rec.snapshot(); len(handles) != 2 {
+					t.Fatalf("handles = %+v, want both secrets for UID cleanup", handles)
+				}
+			}
+		})
+	}
+}
+
+// --- Delete-and-recreate on AlreadyExists ---
+
+// assertRecreateHandle checks that a helper hitting AlreadyExists
+// checkpointed before its first create and reported the recreated
+// object's UID, not the pre-existing one's.
+func assertRecreateHandle(t *testing.T, rec *hookRecorder, wantCreate string, oldUID types.UID, stored metav1.Object) {
+	t.Helper()
+	events, handles := rec.snapshot()
+	if len(events) < 3 || events[0] != "checkpoint:secrets" || events[1] != wantCreate || events[2] != wantCreate {
+		t.Fatalf("events = %q, want a checkpoint then the create and its retry", events)
+	}
+	if countPrefix(events, "checkpoint:") != 1 {
+		t.Fatalf("events = %q, want one checkpoint", events)
+	}
+	if len(handles) != 1 {
+		t.Fatalf("handles = %+v, want one", handles)
+	}
+	if handles[0].UID == "" || handles[0].UID == string(oldUID) || handles[0].UID != string(stored.GetUID()) {
+		t.Fatalf("handle UID %q; pre-existing %q, stored %q", handles[0].UID, oldUID, stored.GetUID())
+	}
+}
+
+func TestK8sCreateAuthFileSecret_RecreateOnAlreadyExists(t *testing.T) {
+	rt, clientset, _ := newTestK8sRuntime()
+	var fx uidFixture
+	fx.install(t, clientset)
+	ctx := context.Background()
+	old, err := clientset.CoreV1().Secrets("default").Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "scion-auth-ra", Namespace: "default"}}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &hookRecorder{}
+	rec.recordCreates(clientset)
+	if err := rt.createAuthFileSecretWithHooks(ctx, "default", "ra", authFiles(t).Files, nil, launchHooks{checkpointFn: rec.checkpoint, createdFn: rec.created}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := clientset.CoreV1().Secrets("default").Get(ctx, "scion-auth-ra", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRecreateHandle(t, rec, "create:secrets/scion-auth-ra", old.UID, stored)
+}
+
+func TestK8sCreateSecretProviderClass_RecreateOnAlreadyExists(t *testing.T) {
+	rt, _, dynClient := newGKECleanupTestRuntime(t)
+	var fx uidFixture
+	fx.install(t, dynClient)
+	ctx := context.Background()
+	secrets := []api.ResolvedSecret{{Name: "K", Type: "environment", Target: "K", Value: "v", Ref: "projects/p/secrets/k"}}
+	if _, err := rt.createSecretProviderClassWithHooks(ctx, "default", "rs", secrets, nil, launchHooks{}); err != nil {
+		t.Fatal(err)
+	}
+	old, err := dynClient.Resource(k8s.SecretProviderClassGVR).Namespace("default").Get(ctx, "scion-agent-rs", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &hookRecorder{}
+	rec.recordCreates(dynClient)
+	if _, err := rt.createSecretProviderClassWithHooks(ctx, "default", "rs", secrets, nil, launchHooks{checkpointFn: rec.checkpoint, createdFn: rec.created}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := dynClient.Resource(k8s.SecretProviderClassGVR).Namespace("default").Get(ctx, "scion-agent-rs", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRecreateHandle(t, rec, "create:secretproviderclasses/scion-agent-rs", old.GetUID(), stored)
+}
+
+// TestRun_NFSWorktreeLockLost_AsyncPath: the lock-lost provisioning pod is
+// created the same way with launch hooks set, its handle is reported, and
+// a readiness failure (not a cancelled start) keeps the pod, as on the
+// synchronous path.
+func TestRun_NFSWorktreeLockLost_AsyncPath(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	cfg := nfsWorktreeConfig("scion-wt-lock-lost")
+	cfg.Locker = &alwaysLoseLocker{}
+	rec := &hookRecorder{}
+	rec.apply(&cfg)
+	failPodReadiness(r.Client.Clientset.(*k8sfake.Clientset))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := r.Run(ctx, cfg); err == nil {
+		t.Fatal("Run succeeded; want the readiness failure")
+	}
+
+	pods, err := r.Client.Clientset.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 1 || len(pods.Items[0].Spec.InitContainers) != 1 {
+		t.Fatalf("pods = %d, want 1 with one init container", len(pods.Items))
+	}
+	ic := pods.Items[0].Spec.InitContainers[0]
+	if hasFlag(ic.Command, "--wait-for-sentinel") {
+		t.Fatal("init container waits for the sentinel; want it to provision")
+	}
+	if v, _ := envValue(ic.Env, "SCION_WORKSPACE_MODE"); v != "worktree-per-agent" {
+		t.Fatalf("SCION_WORKSPACE_MODE = %q", v)
+	}
+	_, handles := rec.snapshot()
+	var podHandles int
+	for _, h := range handles {
+		if h.Kind == api.ResourceKindPod {
+			podHandles++
+			if h.Name != pods.Items[0].Name {
+				t.Fatalf("pod handle %+v does not name the created pod %q", h, pods.Items[0].Name)
+			}
+		}
+	}
+	if podHandles != 1 {
+		t.Fatalf("handles = %+v, want one pod handle", handles)
 	}
 }

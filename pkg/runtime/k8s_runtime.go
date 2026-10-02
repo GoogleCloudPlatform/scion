@@ -482,10 +482,22 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	// The cleanup runs on a fresh context because ctx may already be done.
 	// cleanupArmed is set just before the first object is created, so early
 	// validation failures make no API calls.
+	//
+	// An async launch (launch hooks set, design t1-async-create-v11.md
+	// §3.8.4) skips this cleanup: its objects are removed by the launch's
+	// own cleanup from the handles reported below, and only when the hub's
+	// answer calls for it (a superseded launch must not delete anything).
+	// Keeping one cleanup owner per path avoids this cleanup deleting
+	// objects the hub has assigned to a newer launch.
+	//
+	// The hooks are a checkpoint immediately before each resource-creating
+	// or name-based deleting call, and the created object's UID reported
+	// after each true create. They are no-ops on the synchronous path.
+	hooks := config.launchHooks()
 	cleanupArmed := false
 	podCreated := false
 	defer func() {
-		if err == nil || !cleanupArmed {
+		if err == nil || !cleanupArmed || hooks.active() {
 			return
 		}
 		abandoned := ctx.Err() != nil
@@ -566,7 +578,13 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 
 	// Pre-clean stale resources from a previous agent with the same name.
 	// This handles cases where the agent was force-deleted from the hub
-	// or the pod was evicted/GC'd by K8s without proper cleanup.
+	// or the pod was evicted/GC'd by K8s without proper cleanup. These
+	// deletes are by name, so an async launch checkpoints once before them:
+	// a launch the hub has already ended must not remove a newer launch's
+	// same-named objects.
+	if err := hooks.checkpoint(ctx, CheckpointStepPreClean); err != nil {
+		return "", err
+	}
 	r.cleanupAgentSecrets(ctx, namespace, config.Name)
 	r.cleanupStalePod(ctx, namespace, config.Name)
 	cleanupArmed = true
@@ -574,12 +592,6 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	// The hub transport credential is delivered through the per-agent Secret
 	// (secretKeyRef) rather than as a plain pod env value.
 	config.Env, config.ResolvedSecrets = divertTransportCredential(config.Env, config.ResolvedSecrets)
-
-	// Async-launch hooks (design t1-async-create-v11.md §3.8.3, §3.8.4): a
-	// checkpoint immediately before each resource-creating call, and the
-	// created object's UID reported after each true create. No-ops on the
-	// synchronous path.
-	hooks := config.launchHooks()
 
 	// Create K8s Secret or SecretProviderClass before the pod
 	if len(config.ResolvedSecrets) > 0 {
@@ -707,10 +719,11 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	}
 	createdPod, err := r.Client.Clientset.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
-		// The deferred cleanup removes this start's Secrets. If ctx was
-		// cancelled while the request was in flight, the pod may exist even
-		// though Create reported an error; the cleanup then removes it too,
-		// matched by this start's ID.
+		// The deferred cleanup removes this start's Secrets (an async
+		// launch leaves them to its launch cleanup, by recorded UID). If ctx
+		// was cancelled while the request was in flight, the pod may exist
+		// even though Create reported an error; the cleanup then removes it
+		// too, matched by this start's ID.
 		return "", fmt.Errorf("failed to create pod: %w", err)
 	}
 	podCreated = true

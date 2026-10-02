@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -360,5 +361,48 @@ func TestLaunchSender_Checkpoint_UnreachableUntilDeadline(t *testing.T) {
 	}
 	if s.IsAborted() {
 		t.Fatal("an unreachable hub is not an abort answer")
+	}
+}
+
+// TestLaunchRecord_HandlesConcurrentAddAndSnapshot: the runtime adds
+// handles from Manager.Start's goroutine while runLaunch may snapshot them
+// (run under -race).
+func TestLaunchRecord_HandlesConcurrentAddAndSnapshot(t *testing.T) {
+	rec := newLaunchRecord("L-c", "agent-c", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
+	const writers, perWriter = 4, 50
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < perWriter; i++ {
+				rec.AddHandle(agent.ResourceHandle{Kind: api.ResourceKindSecret, Name: fmt.Sprintf("s-%d-%d", w, i), UID: "u"})
+			}
+		}(w)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		prev := 0
+		for i := 0; i < 100; i++ {
+			snap := rec.HandlesSnapshot()
+			if len(snap) < prev {
+				t.Errorf("snapshot shrank from %d to %d", prev, len(snap))
+			}
+			prev = len(snap)
+			if len(snap) > 0 {
+				snap[0].Name = "mutated" // a copy: must not affect the record
+			}
+		}
+	}()
+	wg.Wait()
+	got := rec.HandlesSnapshot()
+	if len(got) != writers*perWriter {
+		t.Fatalf("handles = %d, want %d", len(got), writers*perWriter)
+	}
+	for _, h := range got {
+		if h.Name == "mutated" {
+			t.Fatal("a snapshot aliases the record's handles")
+		}
 	}
 }

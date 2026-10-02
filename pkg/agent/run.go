@@ -140,7 +140,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					return &a, nil
 				}
 			}
-			// If it exists but not running (or we have a new task), we delete it so we can recreate it
+			// If it exists but not running (or we have a new task), we delete it so we can recreate it.
+			// The delete is by name/ID found by name, so an async launch
+			// checkpoints first: a launch the hub has already ended must
+			// not remove a newer launch's agent.
+			if opts.Checkpoint != nil {
+				if err := opts.Checkpoint(ctx, runtime.CheckpointStepPreClean); err != nil {
+					return nil, err
+				}
+			}
 			if err := m.Runtime.Delete(ctx, a.ContainerID); err != nil {
 				return nil, fmt.Errorf("failed to cleanup existing container: %w", err)
 			}

@@ -158,6 +158,9 @@ const (
 	CheckpointStepSecrets   = "secrets"
 	CheckpointStepPodCreate = "pod_create"
 	CheckpointStepLaunching = "launching"
+	// CheckpointStepPreClean precedes a name-based delete of a stale
+	// resource left by an earlier agent of the same name.
+	CheckpointStepPreClean = "pre_clean"
 )
 
 // launchHooks carries RunConfig's async-launch hooks into the helpers that
@@ -181,6 +184,12 @@ func (h launchHooks) checkpoint(ctx context.Context, step string) error {
 		return nil
 	}
 	return h.checkpointFn(ctx, step)
+}
+
+// active reports whether these are an async launch's hooks (a resource
+// handle is being recorded), as opposed to the synchronous path.
+func (h launchHooks) active() bool {
+	return h.createdFn != nil
 }
 
 // created is called after a true create of a launch-owned resource.
