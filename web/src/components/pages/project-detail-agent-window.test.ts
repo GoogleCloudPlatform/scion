@@ -764,6 +764,55 @@ describe('project-detail — agent list window', () => {
       return createComponent(projectId);
     }
 
+    it('while paged, an SSE create and status for a project agent go through the window only: this.agents stays empty', async () => {
+      const projectId = 'p-paged-gate';
+      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      const el = await mountForcedPaged(projectId, agents, requests);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      expect((el as unknown as { agents: Agent[] }).agents.length).toBe(0);
+      expect(internals(el).agentStats.total).toBe(5);
+
+      // A brand-new SSE-created agent for this project.
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.created`,
+        data: {
+          agentId: 'a-gate',
+          id: 'a-gate',
+          name: 'a-gate',
+          projectId,
+          template: 't',
+          phase: 'running',
+          created: '2026-03-01T00:00:00Z',
+          updated: '2026-03-01T00:00:00Z',
+          messageMode: 'project',
+        },
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      // A status delta for an already-known project agent too.
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.status`,
+        data: { agentId: agents[0].id, phase: 'stopped' },
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      // `mergeAgentsChanged` (the small/held-state merge) must never run
+      // while paged — the window's own `applyChanges` is the only path.
+      // If the gate were skipped, `this.agents` would have picked up the
+      // new agent here instead of staying at its paged-state empty value.
+      expect((el as unknown as { agents: Agent[] }).agents.length).toBe(0);
+      // `agentStats` comes from the member index (paged state), not from
+      // `this.agents`: 5 original members plus the new create.
+      expect(internals(el).agentStats.total).toBe(6);
+    });
+
     it('an off-page phase change with no phase filter is counts-only — stats update live, no chip, no request', async () => {
       const projectId = 'p-paged-counts';
       const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
@@ -1079,6 +1128,53 @@ describe('project-detail — agent list window', () => {
 
       expect(internals(el).agentWindow.items.some((a) => a.id === 'a-new')).toBe(true);
       expect(requests.length).toBe(1); // still no request
+    });
+
+    it('a created event with a foreign projectId is not added (the project add rule)', async () => {
+      const projectId = 'p-small-foreign-create';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      localStorage.setItem(
+        `scion-sort-project-agents-${projectId}`,
+        JSON.stringify({ field: 'updated', dir: 'desc' })
+      );
+      const agents = Array.from({ length: 3 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
+        )
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('small');
+      const before = (el as unknown as { agents: Agent[] }).agents.length;
+
+      // Arrives on this project's own subject, but the payload names a
+      // different project — the add rule gates on the agent object's own
+      // `projectId`, not the subject it arrived on.
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.created`,
+        data: {
+          agentId: 'a-foreign',
+          id: 'a-foreign',
+          name: 'a-foreign',
+          projectId: 'some-other-project',
+          template: 't',
+          phase: 'running',
+          created: '2026-04-01T00:00:00Z',
+          updated: '2026-04-01T00:00:00Z',
+          messageMode: 'project',
+        },
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      const after = (el as unknown as { agents: Agent[] }).agents;
+      expect(after.length).toBe(before);
+      expect(after.some((a) => a.id === 'a-foreign')).toBe(false);
     });
 
     it('an SSE-created agent keeps its inherited capabilities across its next status delta', async () => {
