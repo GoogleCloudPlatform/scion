@@ -3731,6 +3731,185 @@ func TestStartDoesNotPersistUnvalidatedCtxRepoRoot(t *testing.T) {
 	}
 }
 
+// TestStartPersistsNothingWhenWorkspaceLeafResolvesOutsideItsOwnWorktree
+// covers persistProvisionedWorktreeRepoRootIfValid's own comparison
+// directly: the workspace value it receives must be compared in its
+// original, as-given form, not a form already resolved ahead of the call.
+// Resolving ahead of time would make this comparison accept a workspace leaf
+// whose own final path element resolves to a different worktree name than
+// the one it lexically presents — the same shape covered for
+// RunConfig.RepoRoot's own, separate comparison.
+func TestStartPersistsNothingWhenWorkspaceLeafResolvesOutsideItsOwnWorktree(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+
+	sharedBase := t.TempDir()
+	setupGitRepo(t, sharedBase)
+	worktreesDir := filepath.Join(sharedBase, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatalf("failed to create worktrees dir: %v", err)
+	}
+	otherWorktree := filepath.Join(worktreesDir, "agent-b")
+	if err := util.CreateWorktree(otherWorktree, "agent-b"); err != nil {
+		t.Fatalf("failed to create other worktree: %v", err)
+	}
+	// agent-a's own expected path is a symlink to agent-b's worktree rather
+	// than a worktree of its own.
+	leafPath := filepath.Join(worktreesDir, "agent-a")
+	if err := os.Symlink(otherWorktree, leafPath); err != nil {
+		t.Fatal(err)
+	}
+
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), sharedBase)
+	if _, err := mgr.Start(ctx, api.StartOptions{
+		Name:        "agent-a",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		Workspace:   leafPath,
+		Env:         map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"},
+	}); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	agentDir := config.GetAgentDir(projectScionDir, "agent-a", false)
+	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
+		t.Fatalf("persisted repo root = %q, want \"\"", got)
+	}
+	if _, err := os.Stat(filepath.Join(agentDir, provisionedWorktreeStateFile)); !os.IsNotExist(err) {
+		t.Fatalf("expected no persisted-worktree state file to exist, stat error = %v", err)
+	}
+}
+
+// TestStartPersistsTheAliasNotTheResolvedBase covers the other direction of
+// the same comparison: when the ctx-provided repo root itself is reached
+// through an ancestor symlink, and the workspace value given to this same
+// dispatch is reached through the identical, as-given ancestor spelling, the
+// comparison accepts the pair and persists the value exactly as given — not
+// a form resolved ahead of persisting it.
+func TestStartPersistsTheAliasNotTheResolvedBase(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+
+	realParent := t.TempDir()
+	linkParent := t.TempDir()
+	linkDir := filepath.Join(linkParent, "link")
+	if err := os.Symlink(realParent, linkDir); err != nil {
+		t.Fatal(err)
+	}
+	sharedBase := filepath.Join(linkDir, "shared-base")
+	if err := os.MkdirAll(sharedBase, 0755); err != nil {
+		t.Fatalf("failed to create shared base dir: %v", err)
+	}
+	setupGitRepo(t, sharedBase)
+	worktreesDir := filepath.Join(sharedBase, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatalf("failed to create worktrees dir: %v", err)
+	}
+	userWorkspace := filepath.Join(worktreesDir, "agent-a")
+	if err := util.CreateWorktree(userWorkspace, "agent-a"); err != nil {
+		t.Fatalf("failed to create real worktree: %v", err)
+	}
+
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), sharedBase)
+	if _, err := mgr.Start(ctx, api.StartOptions{
+		Name:        "agent-a",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		Workspace:   userWorkspace,
+		Env:         map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"},
+	}); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	agentDir := config.GetAgentDir(projectScionDir, "agent-a", false)
+	got := readProvisionedWorktreeRepoRoot(agentDir)
+	if got != sharedBase {
+		t.Fatalf("persisted repo root = %q, want %q (the value as given, not its resolved form)", got, sharedBase)
+	}
+	if resolvedBase, err := filepath.EvalSymlinks(sharedBase); err == nil && got == resolvedBase {
+		t.Fatalf("persisted repo root = %q, must not be the resolved form %q", got, resolvedBase)
+	}
+}
+
+// TestStartDoesNotPersistWhenRepoRootStaysEmpty ties persistProvisionedWorktreeRepoRootIfValid's
+// decision to Start's own: whenever Start's own comparison for
+// RunConfig.RepoRoot rejects a pair (leaving RepoRoot empty for this
+// dispatch), the persistence gate must reject the identical pair too, rather
+// than saving a value this same dispatch did not trust enough to use.
+func TestStartDoesNotPersistWhenRepoRootStaysEmpty(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+
+	sharedBase := t.TempDir()
+	setupGitRepo(t, sharedBase)
+	worktreesDir := filepath.Join(sharedBase, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatalf("failed to create worktrees dir: %v", err)
+	}
+	otherWorktree := filepath.Join(worktreesDir, "agent-b")
+	if err := util.CreateWorktree(otherWorktree, "agent-b"); err != nil {
+		t.Fatalf("failed to create other worktree: %v", err)
+	}
+	leafPath := filepath.Join(worktreesDir, "agent-a")
+	if err := os.Symlink(otherWorktree, leafPath); err != nil {
+		t.Fatal(err)
+	}
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), sharedBase)
+	if _, err := mgr.Start(ctx, api.StartOptions{
+		Name:        "agent-a",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		Workspace:   leafPath,
+		Env:         map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"},
+	}); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	if capturedConfig.RepoRoot != "" {
+		t.Fatalf("RunConfig.RepoRoot = %q, want empty for this pair", capturedConfig.RepoRoot)
+	}
+	agentDir := config.GetAgentDir(projectScionDir, "agent-a", false)
+	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
+		t.Fatalf("persisted repo root = %q, want \"\" — Start did not set RepoRoot for this pair, so it must not be persisted either", got)
+	}
+}
+
 // TestStartResumeDoesNotAdoptRepoRootFromAgentInfoFile is a regression test
 // for the storage boundary that keeps the persisted repo root out of
 // container-writable storage: a user --workspace agent on a directory shaped

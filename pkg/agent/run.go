@@ -1085,24 +1085,27 @@ authDone:
 	// broker-owned state file (recovered on resume/restart, when the broker
 	// does not re-run tryProvisionWorktree). Neither source is trusted as-is:
 	// provision.ValidateWorktreeForBase re-proves the pair against the real
-	// filesystem — both lexically and after resolving symlinks — before
-	// RunConfig.RepoRoot is allowed to name a host path. A user --workspace
-	// override normally supplies neither; a persisted value is honored only
-	// if it re-validates against that workspace, so it otherwise falls
-	// through to detectRepoRoot and stays "".
+	// filesystem before RunConfig.RepoRoot is allowed to name a host path. A
+	// user --workspace override normally supplies neither; a persisted value
+	// is honored only if it re-validates against that workspace, so it
+	// otherwise falls through to detectRepoRoot and stays "".
 	//
 	// This first pass validates against the pre-workspace-backend
 	// effectiveWorkspace, only because containerWorkspace (computed below)
 	// needs a repoRoot to feed the NFS/cloudrun/gke backend resolution that
 	// can still replace effectiveWorkspace. If that happens, the block after
 	// that resolution re-validates against the value RunConfig will actually
-	// use.
+	// use. persistProvisionedWorktreeRepoRootIfValid, below, runs its own,
+	// separate comparison against the workspace value as it stood before
+	// runtime.ValidateWorkspaceSource resolved it — see that function's own
+	// doc comment for why.
 	ctxRepoRoot := api.ProvisionedWorktreeRepoRootFromContext(ctx)
 	persistedRepoRoot := readProvisionedWorktreeRepoRoot(agentDir)
 	candidateRepoRoot := ctxRepoRoot
 	if candidateRepoRoot == "" {
 		candidateRepoRoot = persistedRepoRoot
 	}
+	preValidationWorkspace := effectiveWorkspace
 	repoRoot := validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
 	if repoRoot == "" {
 		repoRoot = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
@@ -1364,7 +1367,7 @@ authDone:
 	// provision-only dispatch, which provisions without starting — so there
 	// is exactly one persistence gate even though there is more than one
 	// caller.
-	persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, effectiveWorkspace)
+	persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, preValidationWorkspace)
 
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),

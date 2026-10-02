@@ -2381,29 +2381,16 @@ func readProvisionedWorktreeRepoRoot(agentDir string) string {
 // broker-owned state file. A no-op when ctxRepoRoot is empty or fails to
 // validate.
 //
-// The validation step resolves both arguments (EvalSymlinks) before
-// comparing them, rather than trusting the caller: by the time run.go's
-// Start calls this, effectiveWorkspace has already been reassigned to
-// ValidateWorkspaceSource's fully-resolved return value, but ctxRepoRoot is
-// still whatever the broker originally constructed it as (never resolved by
-// any caller). Comparing an unresolved candidate against a resolved
-// workspace fails validatedWorktreeRepoRoot's lexical containment check on
-// any host where the project path runs through a symlink, silently
-// discarding a value that is actually correct and leaving a later resume
-// with an empty RepoRoot.
-//
-// The persisted value, however, is the ORIGINAL, unresolved ctxRepoRoot —
-// not the resolved form used only to validate it. A resume/restart recovers
-// its own effectiveWorkspace from the agent's persisted Volumes (see Start's
-// extractWorkspaceFromVolumes), itself stored unresolved from whatever the
-// broker originally passed; persisting the resolved repo root here would
-// reintroduce the identical lexical mismatch one dispatch later, between a
-// resolved persistedRepoRoot and an unresolved recovered workspace, right
-// back at this same function's own validation step on the next resume.
-// Persisting the unresolved form keeps both sides of every future
-// comparison in the same, original spelling; the unconditional EvalSymlinks
-// pass in Start (after repoRoot is established) is what makes the resolved
-// form reach RunConfig, not this persistence gate.
+// workspace must be passed in its original, as-given form — the same
+// spelling the caller received it in, not a form resolved ahead of this
+// call. validatedWorktreeRepoRoot's comparison is only meaningful when both
+// of its arguments are given in a consistent, as-provided spelling: that is
+// what lets it confirm the pair names the same worktree before resolving
+// anything, rather than comparing two paths that, once resolved, trivially
+// agree with each other regardless of how the pair actually relates.
+// run.go's Start must pass the value effectiveWorkspace held before calling
+// runtime.ValidateWorkspaceSource, not the resolved value that call
+// produces.
 //
 // This is the single persistence gate shared by every call site that can be
 // the first to see a fresh ctx signal for a given dispatch:
@@ -2422,18 +2409,7 @@ func readProvisionedWorktreeRepoRoot(agentDir string) string {
 // A write failure only means a later resume falls back to detectRepoRoot;
 // see writeProvisionedWorktreeRepoRoot.
 func persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, workspace string) {
-	if ctxRepoRoot == "" || workspace == "" {
-		return
-	}
-	resolvedCtxRepoRoot, err := filepath.EvalSymlinks(ctxRepoRoot)
-	if err != nil {
-		return
-	}
-	resolvedWorkspace, err := filepath.EvalSymlinks(workspace)
-	if err != nil {
-		return
-	}
-	if validatedWorktreeRepoRoot(resolvedCtxRepoRoot, resolvedWorkspace) != resolvedCtxRepoRoot {
+	if ctxRepoRoot == "" || validatedWorktreeRepoRoot(ctxRepoRoot, workspace) != ctxRepoRoot {
 		return
 	}
 	if readProvisionedWorktreeRepoRoot(agentDir) == ctxRepoRoot {
