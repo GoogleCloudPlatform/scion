@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -224,15 +223,13 @@ func TestConstraintAuditHistory_PrivacySafeNotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, missing.Code)
 	wantBody := missing.Body.String()
 
-	// Exercise the endpoint without an identity at the owned handler boundary.
-	// The production auth middleware currently rejects this request before it
-	// reaches the route; that shared-layer dependency is tracked separately.
-	unauthenticatedRequest := httptest.NewRequest(http.MethodGet,
+	// The full production middleware chain keeps authentication fail-closed but
+	// normalizes its outward failure to the endpoint's absent-resource shape.
+	unauthenticated := doRequestNoAuth(t, srv, http.MethodGet,
 		"/api/v1/admin/access-constraints/"+constraint.ID+"/audit", nil)
-	unauthenticated := httptest.NewRecorder()
-	srv.mux.ServeHTTP(unauthenticated, unauthenticatedRequest)
 	assert.Equal(t, http.StatusNotFound, unauthenticated.Code)
 	assert.Equal(t, wantBody, unauthenticated.Body.String())
+	assert.Equal(t, missing.Header().Get("Content-Type"), unauthenticated.Header().Get("Content-Type"))
 
 	denied := setupNonAdminUser(t, s, []string{PermissionConstraintRead})
 	deniedResp := doRequestAsIdentity(t, srv, denied, http.MethodGet,
