@@ -190,6 +190,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	util.Debugf("Start: calling GetAgent name=%s template=%q image=%q harnessConfig=%q projectPath=%q profile=%q",
 		opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile)
+	if opts.TemplateName != "" && !config.IsContentHashName(opts.TemplateName) {
+		ctx = api.ContextWithTemplateSlug(ctx, opts.TemplateName)
+	}
 	agentDir, agentHome, agentWorkspace, finalScionCfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "", opts.Branch, opts.Workspace, startInlineConfig)
 	if err != nil {
 		return nil, err
@@ -802,8 +805,11 @@ authDone:
 		template = finalScionCfg.Info.Template
 	}
 	// Prefer human-friendly template slug over cache path or UUID
-	if opts.TemplateName != "" {
+	if opts.TemplateName != "" && !config.IsContentHashName(opts.TemplateName) {
 		template = opts.TemplateName
+	}
+	if config.IsContentHashName(template) {
+		template = ""
 	}
 
 	if opts.Env == nil {

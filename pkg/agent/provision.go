@@ -390,6 +390,9 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	if opts.HarnessConfigPath != "" {
 		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
 	}
+	if opts.TemplateName != "" && !config.IsContentHashName(opts.TemplateName) {
+		ctx = api.ContextWithTemplateSlug(ctx, opts.TemplateName)
+	}
 	inlineCfg := opts.InlineConfig
 	if opts.HarnessAuth != "" {
 		// Copy rather than mutate opts.InlineConfig in place: it is a
@@ -916,6 +919,29 @@ func checkAgentDirContained(projectDir, agentName string, sharedWorkspace bool) 
 // GetAgent already use within this package.
 func CheckAgentDirContained(projectDir, agentName string, sharedWorkspace bool) (string, error) {
 	return checkAgentDirContained(projectDir, agentName, sharedWorkspace)
+}
+
+// displayTemplateNameForInfo chooses the template name written to
+// agent-info.json. chainName wins for an ordinary directory. A
+// content-hash cache directory is not a name, so the slug the caller asked
+// for is kept instead, and a bare sha256:<hex> is never returned.
+func displayTemplateNameForInfo(requested, chainName, slug string) string {
+	if slug != "" && !config.IsContentHashName(slug) {
+		return slug
+	}
+	if chainName != "" && !config.IsContentHashName(chainName) {
+		return chainName
+	}
+	if config.IsContentHashName(requested) || (filepath.IsAbs(requested) && config.IsContentHashName(filepath.Base(requested))) {
+		return ""
+	}
+	if requested == "" {
+		return ""
+	}
+	if filepath.IsAbs(requested) {
+		return config.FriendlyTemplateName(requested)
+	}
+	return requested
 }
 
 func ProvisionAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, *api.ScionConfig, error) {
@@ -1807,10 +1833,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Create the Info object which will go into agent-info.json.
 	// Use the resolved template name from the chain (human-friendly) rather
 	// than the raw templateName which may be a cache path or remote URI.
-	displayTemplateName := templateName
+	// A content-hash cache directory is not that name: keep the slug the
+	// caller asked for, and never persist sha256:<hex> where a later start
+	// would copy it onto a Kubernetes label.
+	chainName := ""
 	if len(chain) > 0 {
-		displayTemplateName = chain[len(chain)-1].Name
+		chainName = chain[len(chain)-1].Name
 	}
+	displayTemplateName := displayTemplateNameForInfo(templateName, chainName, api.TemplateSlugFromContext(ctx))
 	projectID, _ := config.ReadProjectID(projectDir)
 	info := &api.AgentInfo{
 		Project:               projectName,
@@ -2404,9 +2434,24 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	var agentInfo *api.AgentInfo
 	effectiveTemplate := defaultTemplate
 
+	// storedHashWithoutSlug means agent-info.json names a content-hash cache
+	// directory and this dispatch did not bring a slug. Looking that string
+	// up fails, and substituting the default template would merge a different
+	// config than the unresolvable-name path already returns.
+	storedHashWithoutSlug := false
 	if infoData, err := os.ReadFile(agentInfoPath); err == nil {
 		if err := json.Unmarshal(infoData, &agentInfo); err == nil {
-			if agentInfo.Template != "" {
+			if config.IsContentHashName(agentInfo.Template) {
+				if slug := api.TemplateSlugFromContext(ctx); slug != "" && !config.IsContentHashName(slug) {
+					agentInfo.Template = slug
+					if data, mErr := json.MarshalIndent(agentInfo, "", "  "); mErr == nil {
+						_ = os.WriteFile(agentInfoPath, data, 0644)
+					}
+				} else {
+					storedHashWithoutSlug = true
+				}
+			}
+			if agentInfo.Template != "" && !config.IsContentHashName(agentInfo.Template) {
 				effectiveTemplate = agentInfo.Template
 			}
 		}
@@ -2420,10 +2465,16 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		return agentDir, agentHome, agentWorkspace, nil, fmt.Errorf("failed to load agent config: %w", err)
 	}
 
-	chain, err := config.GetTemplateChainInProject(effectiveTemplate, projectPath)
-	if err != nil {
+	var chain []*config.Template
+	var chainErr error
+	if storedHashWithoutSlug {
+		chainErr = fmt.Errorf("template name %q is a content hash", agentInfo.Template)
+	} else {
+		chain, chainErr = config.GetTemplateChainInProject(effectiveTemplate, projectPath)
+	}
+	if chainErr != nil {
 		util.Debugf("GetAgent: template chain for %q not found: %v, returning agentCfg only (harness=%q image=%q)",
-			effectiveTemplate, err, agentCfg.Harness, agentCfg.Image)
+			effectiveTemplate, chainErr, agentCfg.Harness, agentCfg.Image)
 		resolveModelAliasForExistingAgent(ctx, agentCfg, projectPath)
 		// Populate Info from agent-info.json here too, matching the
 		// successful-lookup path below. scion-agent.json never carries Info

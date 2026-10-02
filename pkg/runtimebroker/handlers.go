@@ -1929,6 +1929,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		GitClone      *api.GitCloneConfig `json:"gitClone,omitempty"`
 		Branch        string              `json:"branch,omitempty"`
 		WorkspaceMode string              `json:"workspaceMode,omitempty"`
+		// Template is the human slug. Create already sends it; start must
+		// too, or a restart resolves the content-hash cache directory name
+		// (sha256:<hex>) and copies that onto a Kubernetes label.
+		Template string `json:"template,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
@@ -1951,9 +1955,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 
 	// Build config for buildStartContext (startAgent uses a subset of CreateAgentConfig)
 	var cfg *CreateAgentConfig
-	if startReq.Task != "" || startReq.HarnessConfig != "" || startReq.HarnessConfigID != "" || startReq.HarnessConfigHash != "" || len(startReq.SharedDirs) > 0 || startReq.SharedWorkspace || startReq.GitClone != nil || startReq.Branch != "" {
+	if startReq.Task != "" || startReq.HarnessConfig != "" || startReq.HarnessConfigID != "" || startReq.HarnessConfigHash != "" || len(startReq.SharedDirs) > 0 || startReq.SharedWorkspace || startReq.GitClone != nil || startReq.Branch != "" || startReq.Template != "" {
 		cfg = &CreateAgentConfig{
 			Task:              startReq.Task,
+			Template:          startReq.Template,
 			HarnessConfig:     startReq.HarnessConfig,
 			HarnessConfigID:   startReq.HarnessConfigID,
 			HarnessConfigHash: startReq.HarnessConfigHash,
@@ -2345,6 +2350,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		UserID               string                           `json:"userId,omitempty"`
 		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
 		PreResolvedSkills    *hubclient.ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
+		// Template is the human slug, same as the start path. Without it the
+		// broker falls back to a content-hash cache directory name.
+		Template string `json:"template,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
@@ -2380,10 +2388,15 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		projectPath = match.entry.ProjectPath
 	}
 
+	var restartCfg *CreateAgentConfig
+	if restartReq.Template != "" {
+		restartCfg = &CreateAgentConfig{Template: restartReq.Template}
+	}
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:                     agentName,
 		ProjectPath:              projectPath,
 		ProjectPathFromContainer: projectPath != "",
+		Config:                   restartCfg,
 		HubEndpoint:              restartReq.HubEndpoint,
 		ResolvedEnv:              restartReq.ResolvedEnv,
 		EnvClassifications:       restartReq.EnvClassifications,

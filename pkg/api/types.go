@@ -908,6 +908,22 @@ func ReincarnateEligible(hasGitClone bool, workspace string) bool {
 	return hasGitClone || workspace != ""
 }
 
+type templateSlugContextKey struct{}
+
+// ContextWithTemplateSlug records the human template slug for a dispatch.
+// Provisioning keeps this name when the resolved template directory is a
+// content-addressed cache path (sha256:<hex>), which is not a legal
+// Kubernetes label value.
+func ContextWithTemplateSlug(ctx context.Context, slug string) context.Context {
+	return context.WithValue(ctx, templateSlugContextKey{}, slug)
+}
+
+// TemplateSlugFromContext returns the template slug recorded on ctx, or "".
+func TemplateSlugFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(templateSlugContextKey{}).(string)
+	return v
+}
+
 type harnessConfigPathContextKey struct{}
 
 // ContextWithHarnessConfigPath records a pre-resolved local directory for the

@@ -3811,3 +3811,17 @@ func TestGetAgent_RelativeWorkspaceResume(t *testing.T) {
 		}
 	}
 }
+
+func TestDisplayTemplateNameForInfoKeepsSlug(t *testing.T) {
+	hash := "sha256:" + strings.Repeat("a", 64)
+	cachePath := "/var/cache/templates/" + hash
+	if got := displayTemplateNameForInfo(cachePath, hash, "say-hi"); got != "say-hi" {
+		t.Fatalf("displayTemplateNameForInfo with slug = %q, want say-hi", got)
+	}
+	if got := displayTemplateNameForInfo(cachePath, hash, ""); got != "" {
+		t.Fatalf("displayTemplateNameForInfo without slug = %q, want empty", got)
+	}
+	if got := displayTemplateNameForInfo("claude", "claude", ""); got != "claude" {
+		t.Fatalf("displayTemplateNameForInfo ordinary name = %q, want claude", got)
+	}
+}

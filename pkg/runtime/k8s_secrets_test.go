@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -929,5 +930,49 @@ func TestCreateSecretProviderClass_NoRefs(t *testing.T) {
 	}
 	if name != "" {
 		t.Errorf("expected empty name when no refs present, got %s", name)
+	}
+}
+
+func TestCreateSecretProviderClassSkipsContentHashLabel(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+	scheme := k8sruntime.NewScheme()
+	scheme.AddKnownTypeWithName(
+		schema.GroupVersionKind{Group: "secrets-store.csi.x-k8s.io", Version: "v1", Kind: "SecretProviderClass"},
+		&k8sruntime.Unknown{},
+	)
+	scheme.AddKnownTypeWithName(
+		schema.GroupVersionKind{Group: "secrets-store.csi.x-k8s.io", Version: "v1", Kind: "SecretProviderClassList"},
+		&k8sruntime.Unknown{},
+	)
+	dynClient := fake.NewSimpleDynamicClient(scheme)
+	client := k8s.NewTestClient(dynClient, clientset)
+	rt := NewKubernetesRuntime(client)
+	rt.GKEMode = true
+	ctx := context.Background()
+
+	hash := "sha256:" + strings.Repeat("f", 64)
+	secrets := []api.ResolvedSecret{
+		{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "sk-123", Source: "user", Ref: "projects/my-project/secrets/api-key"},
+	}
+	labels := map[string]string{
+		"scion.name":     "test-agent",
+		"scion.template": hash,
+	}
+
+	name, err := rt.createSecretProviderClass(ctx, "default", "test-agent", secrets, labels)
+	if err != nil {
+		t.Fatalf("createSecretProviderClass failed: %v", err)
+	}
+	spc, err := dynClient.Resource(k8s.SecretProviderClassGVR).Namespace("default").Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed to get created SPC: %v", err)
+	}
+	meta, _ := spc.Object["metadata"].(map[string]interface{})
+	got, _ := meta["labels"].(map[string]interface{})
+	if got["scion.template"] != nil {
+		t.Fatalf("SecretProviderClass copied content-hash label scion.template=%v", got["scion.template"])
+	}
+	if got["scion.name"] != "test-agent" {
+		t.Fatalf("scion.name = %v, want test-agent", got["scion.name"])
 	}
 }
