@@ -870,6 +870,13 @@ type mintEligibilityCache struct {
 	constraintsErr    error
 }
 
+// Invariant (shared with authzInputMemo, see authz_request_inputs.go): never
+// install authzInputMemo inside CanMintSelector or its callees. The two
+// caches interact only at loadAllAccessConstraints, where the mint cache
+// always wins when both are present; getCachedDelegationEdges never
+// consults the mint cache at all. CanMintSelector defensively masks any
+// authzInputMemo at entry so that the loadAllAccessConstraints interaction
+// is never actually reached in production.
 func withMintEligibilityCache(ctx context.Context, c *mintEligibilityCache) context.Context {
 	return context.WithValue(ctx, mintEligibilityCacheKey{}, c)
 }
@@ -1494,6 +1501,13 @@ func (a *AuthzService) CanMintSelector(ctx context.Context, principal PrincipalC
 	// call evaluates below (see mintEligibilityCache) — resolving it once
 	// per CanMintSelector call rather than once per permission.
 	ctx = withMintEligibilityCache(ctx, &mintEligibilityCache{})
+
+	// Defensive: hide any authzInputMemo (and its edges slot) an outer
+	// caller may have installed, and make the mask sticky so nothing
+	// reached from here can re-enable one. No production install site is
+	// reachable from CanMintSelector today, but this keeps the two
+	// caches' semantics from ever being able to interact.
+	ctx = maskAllAuthzMemo(ctx)
 
 	var membershipOK bool
 	if boundary.Kind == BoundaryKindProject {
