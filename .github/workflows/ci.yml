@@ -274,7 +274,8 @@ jobs:
         run: make test-launch-store-postgres
 
       # tz-refactor design §2.2 / AC1: the real-binary timestamp contract
-      # test. It runs the SQLite and Postgres cases (about 80 s) and runs
+      # test. It runs the SQLite and Postgres cases (about 2-3 minutes,
+      # including the binary build) and runs
       # even when the launch store step fails, so its result is never hidden.
       - name: Run timestamp contract test (SQLite and Postgres)
         if: ${{ !cancelled() }}

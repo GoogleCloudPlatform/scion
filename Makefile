@@ -159,8 +159,8 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 
-## test-tz-contract: Run the real-binary timestamp contract test. It builds
-# cmd/scion, starts `scion server start --foreground` under non-UTC TZ values
+## test-tz-contract: Run the real-binary timestamp contract test (SQLite; Postgres too when SCION_TEST_POSTGRES_URL is set)
+# It builds cmd/scion, starts `scion server start --foreground` under non-UTC TZ values
 # and checks every timestamp on the wire is the written instant in UTC ("Z").
 # SQLite always runs; Postgres runs when SCION_TEST_POSTGRES_URL is set, and
 # the target then fails if the Postgres cases did not pass.
