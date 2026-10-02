@@ -690,7 +690,7 @@ const (
 // project-scoped role name, for the additive roleKind response field
 // (ptone/scion#2529 P1). N1 (review r1): this was previously inlined at four
 // call sites
-// (list/add/buildProjectMemberGroup in handlers_project_members.go, plus the
+// (list/add/projectMemberEnricher.group in handlers_project_members.go, plus the
 // audit code in project_membership_set.go); extracted here so there is
 // exactly one definition of "builtin" vs "custom" for display and audit
 // purposes.
