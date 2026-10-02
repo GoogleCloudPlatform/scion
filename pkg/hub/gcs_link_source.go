@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"time"
 
@@ -82,6 +83,25 @@ func (s *gcsClientSource) Open(ctx context.Context, bucket, object string, gener
 // and this call are both within the same request).
 var errGCSLinkNoTokenGenerator = errors.New("gcs link: no GCP token generator configured")
 
+// newDefaultHTTPTransport reproduces the settings of Go's own
+// http.DefaultTransport (net/http/transport.go), for use when
+// http.DefaultTransport itself is not a *http.Transport (see
+// newGCSLinkBaseTransport) and so cannot be cloned directly.
+func newDefaultHTTPTransport() *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+}
+
 // newGCSLinkBaseTransport builds the one shared, credential-free base
 // transport every per-request storage client's oauth2.Transport wraps.
 // Cloned from http.DefaultTransport, not reused directly, so this
@@ -96,8 +116,21 @@ var errGCSLinkNoTokenGenerator = errors.New("gcs link: no GCP token generator co
 // behavior, etc.) are the same ones Go's own http.DefaultTransport uses for
 // every other outbound call in this process, and request-level bounding
 // comes from the context passed to each call, not from the transport.
+//
+// http.DefaultTransport is a package-level var of type http.RoundTripper,
+// not *http.Transport, so a process that replaces or wraps it (e.g. an
+// otel/tracing instrumentation shim) means a bare, unconditional type
+// assertion to *http.Transport is not safe here. The comma-ok form below
+// falls back to newDefaultHTTPTransport() instead — a fresh, credential-free
+// transport with the same settings — rather than reusing the replaced
+// RoundTripper directly, which could be an arbitrary wrapper this package
+// has no control over (and, unlike a plain *http.Transport, cannot safely
+// Clone()).
 func newGCSLinkBaseTransport() *http.Transport {
-	return http.DefaultTransport.(*http.Transport).Clone()
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		return t.Clone()
+	}
+	return newDefaultHTTPTransport()
 }
 
 // gcsObjectSourceFor is the production gcsSourceFactory. Only ever

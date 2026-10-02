@@ -2537,3 +2537,50 @@ func TestGCSLink_CanReadGroupConversation(t *testing.T) {
 		require.False(t, allowed)
 	})
 }
+
+// ---------------------------------------------------------------------------
+// newGCSLinkBaseTransport must not panic if http.DefaultTransport has been
+// replaced or wrapped by something other than *http.Transport (e.g. an
+// otel/tracing instrumentation shim).
+// ---------------------------------------------------------------------------
+
+// fakeNonTransportRoundTripper is a http.RoundTripper that is deliberately
+// not a *http.Transport, standing in for an instrumentation wrapper that
+// replaces the package-level http.DefaultTransport var.
+type fakeNonTransportRoundTripper struct{}
+
+func (fakeNonTransportRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("fakeNonTransportRoundTripper: not implemented")
+}
+
+// TestGCSLink_NewBaseTransport_SurvivesReplacedDefaultTransport is not
+// t.Parallel: it mutates the package-level http.DefaultTransport var for its
+// duration and restores it via t.Cleanup.
+func TestGCSLink_NewBaseTransport_SurvivesReplacedDefaultTransport(t *testing.T) {
+	original := http.DefaultTransport
+	http.DefaultTransport = fakeNonTransportRoundTripper{}
+	t.Cleanup(func() { http.DefaultTransport = original })
+
+	transport := newGCSLinkBaseTransport()
+	require.NotNil(t, transport)
+	require.NotEqual(t, http.RoundTripper(fakeNonTransportRoundTripper{}), http.RoundTripper(transport))
+
+	// The fallback must reproduce Go's own http.DefaultTransport settings.
+	require.NotNil(t, transport.Proxy)
+	require.True(t, transport.ForceAttemptHTTP2)
+	require.Equal(t, 100, transport.MaxIdleConns)
+	require.Equal(t, 90*time.Second, transport.IdleConnTimeout)
+	require.Equal(t, 10*time.Second, transport.TLSHandshakeTimeout)
+	require.Equal(t, time.Second, transport.ExpectContinueTimeout)
+}
+
+// TestGCSLink_NewBaseTransport_ClonesRealDefaultTransport covers the
+// ordinary case (http.DefaultTransport is still a *http.Transport, as in
+// production) side by side with the fallback case above, so a future change
+// cannot satisfy one path while silently breaking the other.
+func TestGCSLink_NewBaseTransport_ClonesRealDefaultTransport(t *testing.T) {
+	require.IsType(t, &http.Transport{}, http.DefaultTransport)
+	transport := newGCSLinkBaseTransport()
+	require.NotNil(t, transport)
+	require.NotSame(t, http.DefaultTransport.(*http.Transport), transport, "must be a Clone(), never the shared DefaultTransport itself")
+}
