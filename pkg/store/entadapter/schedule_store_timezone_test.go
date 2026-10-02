@@ -96,54 +96,6 @@ func withLocal(t *testing.T, loc *time.Location) {
 	t.Cleanup(func() { time.Local = orig })
 }
 
-// TestListDueSchedules_NonUTCLocal exercises ListDueSchedules's due-query
-// predicate under two non-UTC time.Local settings: Asia/Kathmandu (whose
-// tzdata entry has no letter abbreviation — its Zone() name is the literal
-// numeric offset "+0545", the same shape that broke fire_at reads) and
-// Asia/Tokyo (a normally-abbreviated zone, "JST", included as a control that
-// that round-trips but must still compare correctly). Both must return
-// exactly the due, active schedules, which requires "now" to be bound into
-// the WHERE predicate as UTC text.
-func TestListDueSchedules_NonUTCLocal(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		zone string
-	}{
-		{name: "Asia/Kathmandu (numeric-abbreviation zone)", zone: "Asia/Kathmandu"},
-		{name: "Asia/Tokyo (named-abbreviation zone)", zone: "Asia/Tokyo"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			loc, err := time.LoadLocation(tc.zone)
-			require.NoError(t, err)
-			withLocal(t, loc)
-
-			s := newTestScheduleStore(t)
-			ctx := context.Background()
-			projectID := uuid.NewString()
-
-			// now is deliberately NOT normalised by the test — it is
-			// time.Now() under the replaced time.Local, mirroring a
-			// scheduler loop running on a host in this zone.
-			now := time.Now()
-
-			due := newTestSchedule(projectID, "due")
-			dueAt := now.Add(-time.Hour)
-			due.NextRunAt = &dueAt
-			require.NoError(t, s.CreateSchedule(ctx, due))
-
-			notDue := newTestSchedule(projectID, "not-due")
-			notDueAt := now.Add(time.Hour)
-			notDue.NextRunAt = &notDueAt
-			require.NoError(t, s.CreateSchedule(ctx, notDue))
-
-			result, err := s.ListDueSchedules(ctx, now)
-			require.NoError(t, err)
-			require.Len(t, result, 1, "exactly the one due schedule must be returned")
-			assert.Equal(t, due.ID, result[0].ID)
-		})
-	}
-}
-
 // nonUTCZones are the time.Local settings the timezone tests run under:
 // Asia/Kathmandu has no letter abbreviation (its Zone() name is the
 // numeric "+0545", which the SQLite driver cannot parse back), and
@@ -165,6 +117,37 @@ func forEachNonUTCZone(t *testing.T, fn func(t *testing.T)) {
 	}
 }
 
+// TestListDueSchedules_NonUTCLocal checks that ListDueSchedules returns
+// exactly the due, active schedules under non-UTC time.Local settings,
+// which requires "now" to be bound into the WHERE predicate as UTC text.
+func TestListDueSchedules_NonUTCLocal(t *testing.T) {
+	forEachNonUTCZone(t, func(t *testing.T) {
+		s := newTestScheduleStore(t)
+		ctx := context.Background()
+		projectID := uuid.NewString()
+
+		// now is deliberately NOT normalised by the test — it is
+		// time.Now() under the replaced time.Local, mirroring a
+		// scheduler loop running on a host in this zone.
+		now := time.Now()
+
+		due := newTestSchedule(projectID, "due")
+		dueAt := now.Add(-time.Hour)
+		due.NextRunAt = &dueAt
+		require.NoError(t, s.CreateSchedule(ctx, due))
+
+		notDue := newTestSchedule(projectID, "not-due")
+		notDueAt := now.Add(time.Hour)
+		notDue.NextRunAt = &notDueAt
+		require.NoError(t, s.CreateSchedule(ctx, notDue))
+
+		result, err := s.ListDueSchedules(ctx, now)
+		require.NoError(t, err)
+		require.Len(t, result, 1, "exactly the one due schedule must be returned")
+		assert.Equal(t, due.ID, result[0].ID)
+	})
+}
+
 // assertUTCColumn asserts that a time column holds UTC-normalised text.
 func assertUTCColumn(t *testing.T, s *ScheduleStore, table, column, id string) {
 	t.Helper()
@@ -181,8 +164,9 @@ func assertUTCColumn(t *testing.T, s *ScheduleStore, table, column, id string) {
 func TestScheduleStoreWritesUTC_NonUTCLocal(t *testing.T) {
 	ctx := context.Background()
 
-	// createSchedule stores a schedule with UTC inputs, so only the
-	// mutator under test can write a non-UTC value.
+	// createSchedule/createEvent use the fixtures' UTC next_run_at/fire_at;
+	// created/updated come from ent defaults, so each case asserts only the
+	// columns its mutator writes.
 	createSchedule := func(t *testing.T, s *ScheduleStore) *store.Schedule {
 		t.Helper()
 		sc := newTestSchedule(uuid.NewString(), "tz")
@@ -385,6 +369,9 @@ func TestPurgeOldScheduledEvents_NonUTCLocal(t *testing.T) {
 // mutating the process-global time.Local while a full hub test server is up
 // races its background goroutines (observed via `go test -race`: GCP/TLS
 // client init reads time.Local concurrently via time.Parse).
+//
+// The "CreateScheduledEvent local times" writer case above overlaps this;
+// it is kept as the documented home of the handler's fireIn path.
 func TestCreateScheduledEvent_FireInUnderNonUTCLocalRoundTrips(t *testing.T) {
 	loc, err := time.LoadLocation("Asia/Kathmandu")
 	require.NoError(t, err)
