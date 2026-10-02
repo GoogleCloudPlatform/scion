@@ -814,6 +814,16 @@ func TestWriteBootstrapFile_RefusesTargetOutsideAgentHome(t *testing.T) {
 		if pathErr.code != codeBootstrapPathOutsideHome {
 			t.Errorf("code = %q, want %q", pathErr.code, codeBootstrapPathOutsideHome)
 		}
+		// server.go's own comment on this check promises the error names
+		// only the target's own leaf component, never the full path —
+		// pinned here directly, since nothing else in this test file
+		// asserts pathErr.path's value for this code.
+		if pathErr.path != filepath.Base(targetPath) {
+			t.Errorf("pathErr.path = %q, want only the leaf component %q, not the full path", pathErr.path, filepath.Base(targetPath))
+		}
+		if strings.Contains(pathErr.Error(), root) {
+			t.Errorf("err = %q, must not include the full outside-home path", pathErr.Error())
+		}
 		if _, statErr := os.Stat(targetPath); statErr == nil {
 			t.Error("ld.so.preload was written despite being outside the agent home")
 		}
@@ -924,6 +934,53 @@ func TestBootstrap_SymlinkedFileRejectionSurfacesAs422WithStableCode(t *testing.
 	}
 	if _, statErr := os.Stat(filepath.Join(outsideTarget, "secret.json")); statErr == nil {
 		t.Error("the bootstrap file was written through the symlink into outsideTarget")
+	}
+}
+
+// TestBootstrap_OutsideHomeTargetSurfacesAs422WithStableCode is the
+// handler-level counterpart to TestWriteBootstrapFile_RefusesTargetOutsideAgentHome:
+// every other 422 path-rejection code (symlink, non-directory) already has
+// a test that drives it through a real /scion/v1/bootstrap request, but
+// codeBootstrapPathOutsideHome did not — only writeBootstrapFile's own
+// lower-level return value was ever checked for it.
+func TestBootstrap_OutsideHomeTargetSurfacesAs422WithStableCode(t *testing.T) {
+	root := realTempDir(t)
+	fakeHome := filepath.Join(root, "home", "scion")
+	withAgentHomeFixture(t, fakeHome)
+	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	targetPath := filepath.Join(root, "etc", "ld.so.preload")
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
+	)
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		Files: []BootstrapFile{
+			{
+				Path:       targetPath,
+				Mode:       0o644,
+				ContentB64: base64.StdEncoding.EncodeToString([]byte("/home/scion/evil.so\n")),
+			},
+		},
+		StartCmd:     "true",
+		ControlToken: "tok",
+	})
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	want := codeBootstrapPathOutsideHome + ": bootstrap file " + strconv.Quote(filepath.Base(targetPath)) + " rejected: target does not resolve inside the agent home\n"
+	if body != want {
+		t.Errorf("response body = %q, want exact golden body %q", body, want)
+	}
+	if strings.Contains(body, root) {
+		t.Errorf("response body = %q, must not include the full outside-home path", body)
+	}
+	if _, statErr := os.Stat(targetPath); statErr == nil {
+		t.Error("ld.so.preload was written despite being outside the agent home")
 	}
 }
 
