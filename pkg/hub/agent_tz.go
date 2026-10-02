@@ -268,7 +268,7 @@ func (d *HTTPAgentDispatcher) dropTZTargetedSecrets(ctx context.Context, agent *
 		if agent != nil {
 			agentName, agentID = agent.Name, agent.ID
 		}
-		d.log.Warn("ignoring secret that targets TZ; the agent timezone comes only from the TZ resolver",
+		d.warnTZ("ignoring secret that targets TZ; the agent timezone comes only from the TZ resolver",
 			"agent_id", agentID, "secret", s.Name, "source", s.Source)
 		addDispatchWarnings(ctx, fmt.Sprintf(
 			"Warning: ignoring secret %q (%s scope) targeting TZ for agent %s: set the agent timezone with explicitTimezone, a TZ environment variable or the hub default timezone",
@@ -325,7 +325,7 @@ func (d *HTTPAgentDispatcher) withoutCallerTZ(ctx context.Context, agent *store.
 		if agent != nil {
 			agentID = agent.ID
 		}
-		d.log.Warn("ignoring TZ in submitted env; the agent timezone comes only from the TZ resolver", "agent_id", agentID)
+		d.warnTZ("ignoring TZ in submitted env; the agent timezone comes only from the TZ resolver", "agent_id", agentID)
 		addDispatchWarnings(ctx, "TZ in submitted env is ignored; use explicitTimezone")
 	}
 	return out
