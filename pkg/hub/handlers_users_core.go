@@ -217,8 +217,7 @@ func stripPreferencesForViewer(ctx context.Context, u *store.User, cap *Capabili
 		return
 	}
 	// capabilityAllows already treats a nil cap as "no actions allowed", so
-	// this is a redundant, zero-risk guard, not a behavior change (Gemini
-	// review on GoogleCloudPlatform/scion#2241, G2).
+	// this is a redundant, zero-risk guard, not a behavior change.
 	if cap != nil && capabilityAllows(cap, ActionUpdate) {
 		return
 	}
@@ -423,8 +422,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 			// containing only unknown keys must all be true no-ops: they
 			// must not set prefsPatch, so they neither force a DB write nor
 			// initialize an empty store.UserPreferences record for a user
-			// that had none (Gemini review on
-			// GoogleCloudPlatform/scion#2241, G1).
+			// that had none.
 			patch := &userPreferencesPatch{}
 			var hasFields bool
 			for key, rv := range rawPrefs {
@@ -467,10 +465,9 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 					hasFields = true
 				default:
 					// Unknown preferences keys are silently ignored (200, no
-					// change); see the PR body contract. This keeps older
-					// hubs and newer clients compatible, unlike the
-					// top-level field switch above, which rejects unknown
-					// fields outright.
+					// change). This keeps older hubs and newer clients
+					// compatible, unlike the top-level field switch above,
+					// which rejects unknown fields outright.
 				}
 			}
 			if hasFields {
@@ -733,6 +730,16 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 				"user update failed: "+err.Error(), nil)
 		}
 		return
+	}
+
+	// Preferences follow the same per-viewer visibility rule on this response
+	// as on GET (stripPreferencesForViewer; used by getUser and listUsers).
+	// Computed independently here rather than reusing the
+	// needsCrossUserUpdate decision above, because that permission check
+	// does not run for every request shape that can reach this point.
+	if identity := GetIdentityFromContext(ctx); identity != nil {
+		cap := s.authzService.ComputeCapabilities(ctx, identity, userResource(user))
+		stripPreferencesForViewer(ctx, user, cap)
 	}
 
 	writeJSON(w, http.StatusOK, user)

@@ -176,10 +176,11 @@ func TestUpdateUser_Preferences_UnknownKeysOnlyIsNoop(t *testing.T) {
 // TestUpdateUser_Preferences_EmptyObjectCrossUserNoAuthzRequired verifies
 // that because {"preferences": {}} is a true no-op, a cross-user PATCH of it
 // does not require user.update permission: it returns 200, not 403, and
-// does not touch the target's stored preferences. This documents that the
-// G1 no-op fix does not change cross-user authorization for an actual
-// preference change (TestUpdateUser_Preferences_CrossUserPatchForbidden
-// above still asserts 403 for a real value).
+// does not touch the target's stored preferences. It also documents that
+// the 200 response body follows the same visibility rule as GET: a plain
+// member with no permission over the target must not see the target's
+// preferences in the PATCH response either (TestUpdateUser_Preferences_CrossUserPatchForbidden
+// above still asserts 403 for an actual preference change).
 func TestUpdateUser_Preferences_EmptyObjectCrossUserNoAuthzRequired(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -206,6 +207,11 @@ func TestUpdateUser_Preferences_EmptyObjectCrossUserNoAuthzRequired(t *testing.T
 	rec := doRequestAsUser(t, srv, actor, http.MethodPatch, "/api/v1/users/"+target.ID,
 		map[string]any{"preferences": map[string]any{}})
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var got store.User
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Nil(t, got.Preferences,
+		"a no-op cross-user PATCH response must follow the same visibility rule as GET: no permission, no preferences in the body")
 
 	updated, err := s.GetUser(ctx, target.ID)
 	require.NoError(t, err)
@@ -417,6 +423,117 @@ func TestUpdateUser_Preferences_CrossUserPatchForbidden(t *testing.T) {
 	require.NotNil(t, updated.Preferences)
 	assert.Equal(t, "Asia/Tokyo", updated.Preferences.Timezone,
 		"a forbidden cross-user PATCH must not change the target's stored value")
+}
+
+// TestUpdateUser_Preferences_ResponseVisibilityMatrix verifies that the
+// PATCH response body follows the same per-viewer preferences visibility
+// rule as GET (stripPreferencesForViewer), across every combination of
+// caller and request-body shape that can reach a 200 — including the
+// shapes that are a true no-op for every field needsCrossUserUpdate guards
+// (an empty object, {"preferences": {}}, a top-level preferences: null, and
+// an all-unknown-keys preferences object), where that permission check does
+// not run at all. A real preference change still requires user.update for
+// a cross-user caller, unchanged from TestUpdateUser_Preferences_CrossUserPatchForbidden.
+func TestUpdateUser_Preferences_ResponseVisibilityMatrix(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	target := &store.User{
+		ID:          tid("vis-matrix-target"),
+		Email:       "vis-matrix-target@example.com",
+		DisplayName: "Vis Matrix Target",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	otherMember := &store.User{
+		ID:          tid("vis-matrix-other-member"),
+		Email:       "vis-matrix-other-member@example.com",
+		DisplayName: "Vis Matrix Other Member",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, otherMember))
+
+	hubAdminID := tid("vis-matrix-hub-admin")
+	createTestUserWithRole(t, s, hubAdminID, "vis-matrix-hub-admin@example.com", "member", store.SystemRoleHubAdmin)
+	hubAdmin, err := s.GetUser(ctx, hubAdminID)
+	require.NoError(t, err)
+
+	superAdminID := tid("vis-matrix-super-admin")
+	createTestUserWithRole(t, s, superAdminID, "vis-matrix-super-admin@example.com", "member", store.SystemRoleSuperAdmin)
+	superAdmin, err := s.GetUser(ctx, superAdminID)
+	require.NoError(t, err)
+
+	bodies := []struct {
+		name       string
+		body       map[string]any
+		realChange bool // false: a no-op for needsCrossUserUpdate's fields.
+	}{
+		{"empty object", map[string]any{}, false},
+		{"preferences empty object", map[string]any{"preferences": map[string]any{}}, false},
+		{"preferences null", map[string]any{"preferences": nil}, false},
+		{"unknown preferences key", map[string]any{"preferences": map[string]any{"bogus": "x"}}, false},
+		{"real preferences change", map[string]any{"preferences": map[string]any{"timezone": "Europe/Paris"}}, true},
+	}
+
+	callers := []struct {
+		name            string
+		actor           *store.User
+		self            bool
+		holdsUserUpdate bool
+	}{
+		{"self", target, true, false},
+		{"other member, no permission", otherMember, false, false},
+		{"hub-admin (holds user.update)", hubAdmin, false, true},
+		{"super-admin (holds user.update)", superAdmin, false, true},
+	}
+
+	for _, caller := range callers {
+		for _, b := range bodies {
+			t.Run(caller.name+"/"+b.name, func(t *testing.T) {
+				// Reset the target's stored preferences before each case, so
+				// a prior subtest's write (or lack of one) never leaks in.
+				fresh, err := s.GetUser(ctx, target.ID)
+				require.NoError(t, err)
+				fresh.Preferences = &store.UserPreferences{Timezone: "Asia/Tokyo"}
+				require.NoError(t, s.UpdateUser(ctx, fresh))
+
+				rec := doRequestAsUser(t, srv, caller.actor, http.MethodPatch, "/api/v1/users/"+target.ID, b.body)
+
+				if !caller.self && b.realChange && !caller.holdsUserUpdate {
+					assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+					return
+				}
+
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+				var got store.User
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+
+				wantVisible := caller.self || caller.holdsUserUpdate
+				if wantVisible {
+					assert.NotNil(t, got.Preferences, "this caller should see the target's preferences in the response")
+				} else {
+					assert.Nil(t, got.Preferences, "this caller should not see the target's preferences in the response")
+				}
+
+				// GET visibility is unaffected by this response-shaping fix:
+				// re-check it alongside the PATCH response for the same
+				// caller/target pair.
+				getRec := doRequestAsUser(t, srv, caller.actor, http.MethodGet, "/api/v1/users/"+target.ID, nil)
+				require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+				var gotGet UserWithCapabilities
+				require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &gotGet))
+				if wantVisible {
+					assert.NotNil(t, gotGet.Preferences, "GET visibility must agree with the PATCH response")
+				} else {
+					assert.Nil(t, gotGet.Preferences, "GET visibility must agree with the PATCH response")
+				}
+			})
+		}
+	}
 }
 
 // TestUpdateUser_Preferences_NonStringTimezoneRejected verifies that a
