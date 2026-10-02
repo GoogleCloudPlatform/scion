@@ -42,6 +42,8 @@ import {
   buildGcsObjectApiUrl,
   buildCloudConsoleUrl,
   isImageFileName,
+  isGcsImageContentType,
+  isGcsImageExtension,
   isMarkdownFileName,
   isLikelyTextFileName,
   isLikelyTextMime,
@@ -102,7 +104,27 @@ interface LoadState {
   errorStatus?: number;
   /** Show the "Open in Cloud Console" fallback for this error (every gcs error except 400). */
   showConsoleLink?: boolean;
+  /**
+   * Overrides the generic `isBinary` placeholder text below — set only for a
+   * gcs target, which distinguishes "not a previewable type" from "too large
+   * to preview inline" (an attachment/path target has neither distinction:
+   * every one of its `isBinary` states uses the shared generic text).
+   */
+  binaryMessage?: string;
 }
+
+/** A gcs target whose response is application/octet-stream, or an image/* type that does not take the image path. */
+const GCS_CANNOT_PREVIEW_MESSAGE = "This file can't be previewed.";
+
+/**
+ * A gcs target whose Content-Length exceeds TEXT_PREVIEW_MAX_BYTES, aborted
+ * before the response body is read.
+ */
+const GCS_TOO_LARGE_INLINE_MESSAGE = 'This file is too large to preview inline.';
+
+/** The generic placeholder for every attachment/path `isBinary` state. */
+const GENERIC_CANNOT_PREVIEW_MESSAGE =
+  "This file can't be shown here — it's too large or not a previewable type. Use the Download button.";
 
 const IDLE_STATE: LoadState = {
   status: 'loading',
@@ -258,12 +280,14 @@ export class ScionChatFilePreview extends LitElement {
       return;
     }
 
-    // A gcs target is never classified as an image here: doing so correctly
-    // requires both the extension AND the response Content-Type to agree,
-    // which needs the response in hand — that classification, SVG-as-source
-    // and the octet-stream "can't preview" state are left for later. Until
-    // then a gcs target always falls through to the text/markdown/code path
-    // below.
+    // A gcs target is never classified as an image before the fetch: doing
+    // so correctly requires both the extension AND the response
+    // Content-Type to agree, which needs the response in hand — see the
+    // dedicated gcs branch inside the try block below, which fetches once
+    // and decides image vs. octet-stream vs. text from the real response.
+    // This `isImage` is only the pre-fetch candidate used for the initial
+    // loading-state placeholder and for an unsafe-target/network error,
+    // neither of which renders an image either way.
     const isImage =
       target.kind === 'attachment'
         ? IMAGE_MIMES.has(baseMimeType(target.mime))
@@ -354,8 +378,8 @@ export class ScionChatFilePreview extends LitElement {
       // Text/markdown/code path. Attachments serve the raw body directly;
       // container paths use the existing `?format=json` contract, which also
       // reports size so an oversized file can fall back to download-only;
-      // the gcs endpoint serves raw bytes directly, reporting size via
-      // Content-Length.
+      // the gcs endpoint serves raw bytes directly, classified from its own
+      // response headers (see the dedicated gcs branch just below).
       const url =
         target.kind === 'attachment' || target.kind === 'gcs' ? baseUrl : `${baseUrl}?format=json`;
       const res = await apiFetch(url, { signal: controller.signal });
@@ -384,15 +408,88 @@ export class ScionChatFilePreview extends LitElement {
         return;
       }
 
+      // A gcs target's real classification is only knowable from the
+      // response: the client only ever has the object's name (and so its
+      // extension) ahead of the fetch, never its bytes or stored metadata.
+      // An application/octet-stream, non-previewable image/*, or
+      // over-threshold-by-Content-Length response is never read past its
+      // headers: `controller.abort()` cancels the in-flight body download
+      // rather than reading it.
+      if (target.kind === 'gcs') {
+        const contentType = baseMimeType(res.headers.get('content-type') ?? '');
+
+        // Image only if the extension AND the response Content-Type are both
+        // one of the four supported raster types — an SVG's extension is
+        // never in GCS_IMAGE_EXTENSIONS, so it can never reach this branch
+        // regardless of its Content-Type, and a `.png` name whose sniffed
+        // bytes are anything else (HTML, BMP, …) falls through to the checks
+        // below instead.
+        if (isGcsImageContentType(contentType) && isGcsImageExtension(target.name)) {
+          const blob = await res.blob();
+          if (gen !== this.generation) return; // superseded while reading the body
+          this.loadState = {
+            status: 'ready',
+            isImage: true,
+            isMarkdown: false,
+            isBinary: false,
+            objectUrl: URL.createObjectURL(blob),
+          };
+          return;
+        }
+
+        // Any other image/* response is binary the hub positively
+        // identified, so it is never decoded as text.
+        if (contentType === 'application/octet-stream' || contentType.startsWith('image/')) {
+          controller.abort();
+          this.loadState = {
+            status: 'ready',
+            isImage: false,
+            isMarkdown: false,
+            isBinary: true,
+            binaryMessage: GCS_CANNOT_PREVIEW_MESSAGE,
+          };
+          return;
+        }
+
+        const contentLengthHeader = res.headers.get('content-length');
+        const contentLength =
+          contentLengthHeader !== null ? parseInt(contentLengthHeader, 10) : null;
+        if (contentLength !== null && contentLength > TEXT_PREVIEW_MAX_BYTES) {
+          controller.abort();
+          this.loadState = {
+            status: 'ready',
+            isImage: false,
+            isMarkdown: false,
+            isBinary: true,
+            binaryMessage: GCS_TOO_LARGE_INLINE_MESSAGE,
+          };
+          return;
+        }
+
+        const content = await res.text();
+        if (gen !== this.generation) return;
+        // A missing or unparsable Content-Length cannot be checked ahead of
+        // the read, so the decoded text is held to the same limit, measured
+        // in UTF-16 code units rather than bytes.
+        if (content.length > TEXT_PREVIEW_MAX_BYTES) {
+          this.loadState = {
+            status: 'ready',
+            isImage: false,
+            isMarkdown: false,
+            isBinary: true,
+            binaryMessage: GCS_TOO_LARGE_INLINE_MESSAGE,
+          };
+          return;
+        }
+        this.loadState = { status: 'ready', isImage: false, isMarkdown, isBinary: false, content };
+        return;
+      }
+
       let content: string;
       let size: number;
       if (target.kind === 'attachment') {
         content = await res.text();
         size = target.size;
-      } else if (target.kind === 'gcs') {
-        content = await res.text();
-        const contentLength = res.headers.get('content-length');
-        size = contentLength !== null ? parseInt(contentLength, 10) : content.length;
       } else {
         const data = (await res.json()) as { content: string; size: number };
         content = data.content;
@@ -497,8 +594,7 @@ export class ScionChatFilePreview extends LitElement {
     if (state.isBinary) {
       return html`
         <div class="file-preview-placeholder">
-          This file can't be shown here — it's too large or not a previewable type. Use the Download
-          button.
+          ${state.binaryMessage ?? GENERIC_CANNOT_PREVIEW_MESSAGE}
         </div>
       `;
     }
