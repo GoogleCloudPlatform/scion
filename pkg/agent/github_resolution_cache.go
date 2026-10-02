@@ -448,7 +448,9 @@ func (c *GitHubResolutionCache) save(entries map[string]*resolutionCacheEntry) {
 }
 
 func (c *GitHubResolutionCache) writeFileAtomic(data []byte) (err error) {
-	// os.CreateTemp creates the file with mode 0600 regardless of umask.
+	// os.CreateTemp creates the file with mode 0600 (resolutionCacheFileMode),
+	// and a umask can only narrow that, so no further chmod is needed. An
+	// existing cache file with a wider mode is tightened in load.
 	tmp, err := os.CreateTemp(c.dir, resolutionCacheFileName+".tmp-*")
 	if err != nil {
 		return err
@@ -460,9 +462,6 @@ func (c *GitHubResolutionCache) writeFileAtomic(data []byte) (err error) {
 			_ = os.Remove(tmpPath)
 		}
 	}()
-	if err = tmp.Chmod(resolutionCacheFileMode); err != nil {
-		return err
-	}
 	write := c.writeData
 	if write == nil {
 		write = func(w io.Writer, b []byte) error {
