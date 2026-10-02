@@ -48,19 +48,43 @@ type projectMemberInfo struct {
 }
 
 // projectMemberGroup is one principal's project membership: its built-in
-// role (if any) plus every custom role it holds, as returned by
-// PUT/DELETE …/members/principals/{type}/{id} (ptone/scion#2529 P1).
+// role (if any) plus every custom role it holds. It is the item type of
+// GET …/members?groupBy=principal and, wrapped in
+// projectMemberGroupMutationResponse, the body of PUT
+// …/members/principals/{type}/{id} (ptone/scion#2529).
 type projectMemberGroup struct {
 	PrincipalType        string              `json:"principalType"`
 	PrincipalID          string              `json:"principalId"`
 	PrincipalDisplayName string              `json:"principalDisplayName,omitempty"`
 	BuiltInRoleName      string              `json:"builtInRoleName"`
 	Bindings             []projectMemberInfo `json:"bindings"`
+}
+
+// projectMemberGroupMutationResponse is the PUT …/members/principals/{type}/{id}
+// response: the principal's post-state group plus whether anything changed.
+// Changed lives here rather than on projectMemberGroup so the grouped GET
+// does not carry a meaningless "changed":false on every row; the embedded
+// struct flattens, so the PUT body is the same JSON object either way.
+type projectMemberGroupMutationResponse struct {
+	projectMemberGroup
 	// Changed deliberately has no `omitempty`: the idempotent PUT response
 	// must show `"changed":false` explicitly, not omit the field, so clients
 	// can distinguish it from a response that never set it.
 	Changed bool `json:"changed"`
 }
+
+// listProjectMemberGroupsResponse is the GET …/members?groupBy=principal
+// response. TotalCount counts principals, not bindings, and limit/offset
+// page over principals, so one principal's bindings never straddle a page.
+type listProjectMemberGroupsResponse struct {
+	Items        []projectMemberGroup    `json:"items"`
+	TotalCount   int                     `json:"totalCount"`
+	Capabilities *MembershipCapabilities `json:"_capabilities,omitempty"`
+}
+
+// memberListGroupByPrincipal is the only supported value of the members
+// list's groupBy query parameter.
+const memberListGroupByPrincipal = "principal"
 
 // listProjectMembersResponse wraps the paginated result for project members.
 type listProjectMembersResponse struct {
@@ -148,6 +172,12 @@ func (s *Server) listProjectMembers(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
+	groupBy := r.URL.Query().Get("groupBy")
+	if groupBy != "" && groupBy != memberListGroupByPrincipal {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, `groupBy must be "principal" when set`, nil)
+		return
+	}
+
 	limit, offset := parsePaginationParams(r)
 
 	bindings, err := s.store.ListRoleBindingsForScope(ctx, store.RoleScopeProject, projectID)
@@ -157,6 +187,11 @@ func (s *Server) listProjectMembers(w http.ResponseWriter, r *http.Request, proj
 	}
 	if bindings == nil {
 		bindings = []*store.RoleBinding{}
+	}
+
+	if groupBy == memberListGroupByPrincipal {
+		s.writeProjectMemberGroups(w, r, projectID, bindings, limit, offset)
+		return
 	}
 
 	totalCount := len(bindings)
@@ -203,19 +238,151 @@ func (s *Server) listProjectMembers(w http.ResponseWriter, r *http.Request, proj
 		items = append(items, info)
 	}
 
-	// RS1: Server-derived operation/target capabilities replace C0 owner-only
-	// advisory capability. Capabilities are computed per the governance matrix.
-	var memberCaps *MembershipCapabilities
-	if identity := GetIdentityFromContext(ctx); identity != nil {
-		if user, ok := identity.(UserIdentity); ok {
-			memberCaps = s.membershipService.ComputeCapabilities(ctx, user.ID(), projectID)
-		}
-	}
-
 	writeJSON(w, http.StatusOK, listProjectMembersResponse{
 		Items:        items,
 		TotalCount:   totalCount,
-		Capabilities: memberCaps,
+		Capabilities: s.memberListCapabilities(ctx, projectID),
+	})
+}
+
+// memberListCapabilities returns the calling user's membership capabilities
+// for the members list responses, or nil for a non-user identity.
+//
+// RS1: Server-derived operation/target capabilities replace C0 owner-only
+// advisory capability. Capabilities are computed per the governance matrix.
+func (s *Server) memberListCapabilities(ctx context.Context, projectID string) *MembershipCapabilities {
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		return nil
+	}
+	user, ok := identity.(UserIdentity)
+	if !ok {
+		return nil
+	}
+	return s.membershipService.ComputeCapabilities(ctx, user.ID(), projectID)
+}
+
+// projectMemberGroupTier ranks a principal's built-in role for the grouped
+// list order: owner, admin, member, then principals with no built-in role
+// (custom roles only).
+func projectMemberGroupTier(builtInRoleName string) int {
+	switch builtInRoleName {
+	case store.ProjectRoleOwner:
+		return 0
+	case store.ProjectRoleAdmin:
+		return 1
+	case store.ProjectRoleMember:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// writeProjectMemberGroups writes GET …/members?groupBy=principal
+// (ptone/scion#2529): one projectMemberGroup per principal holding any
+// project-scope binding, paginated by principal.
+//
+// Order is deterministic so pages are stable: built-in tier (owner > admin >
+// member > none), then display name (case-insensitive, then exact), then
+// principal ID, then principal type. Within a group, bindings are built-in
+// first, then custom roles by name. Every binding carries the same
+// enrichment (roleName, source, display names, roleKind) as the flat list.
+func (s *Server) writeProjectMemberGroups(w http.ResponseWriter, r *http.Request, projectID string, bindings []*store.RoleBinding, limit, offset int) {
+	ctx := r.Context()
+
+	type principalKey struct{ principalType, principalID string }
+
+	roleNames := make(map[string]string)    // roleDefinitionID → roleName
+	displayNames := make(map[string]string) // principalType + ":" + principalID → display name
+	displayName := func(principalType, principalID string) string {
+		k := principalType + ":" + principalID
+		if name, ok := displayNames[k]; ok {
+			return name
+		}
+		name := s.resolveGroupMemberDisplayName(ctx, principalType, principalID)
+		displayNames[k] = name
+		return name
+	}
+
+	groups := make(map[principalKey]*projectMemberGroup)
+	for _, b := range bindings {
+		if b == nil {
+			continue
+		}
+		roleName, ok := roleNames[b.RoleDefinitionID]
+		if !ok {
+			if rd, rdErr := s.store.GetRoleDefinition(ctx, b.RoleDefinitionID); rdErr == nil && rd != nil {
+				roleName = rd.Name
+			}
+			roleNames[b.RoleDefinitionID] = roleName
+		}
+
+		key := principalKey{b.PrincipalType, b.PrincipalID}
+		g := groups[key]
+		if g == nil {
+			g = &projectMemberGroup{
+				PrincipalType:        b.PrincipalType,
+				PrincipalID:          b.PrincipalID,
+				PrincipalDisplayName: displayName(b.PrincipalType, b.PrincipalID),
+			}
+			groups[key] = g
+		}
+
+		info := projectMemberInfo{
+			RoleBinding:          *b,
+			RoleName:             roleName,
+			Source:               "direct",
+			RoleKind:             projectRoleKind(roleName),
+			PrincipalDisplayName: g.PrincipalDisplayName,
+			CreatedByDisplayName: displayName(store.GroupMemberTypeUser, b.CreatedBy),
+		}
+		// A principal holds at most one built-in role per project (the D4
+		// partial unique index); if legacy data ever carries more than one,
+		// the group reports the highest.
+		if info.RoleKind == roleKindBuiltIn && projectRoleLevel(roleName) > projectRoleLevel(g.BuiltInRoleName) {
+			g.BuiltInRoleName = roleName
+		}
+		g.Bindings = append(g.Bindings, info)
+	}
+
+	all := make([]projectMemberGroup, 0, len(groups))
+	for _, g := range groups {
+		sortProjectMemberBindings(g.Bindings)
+		all = append(all, *g)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		a, b := all[i], all[j]
+		if ta, tb := projectMemberGroupTier(a.BuiltInRoleName), projectMemberGroupTier(b.BuiltInRoleName); ta != tb {
+			return ta < tb
+		}
+		if la, lb := strings.ToLower(a.PrincipalDisplayName), strings.ToLower(b.PrincipalDisplayName); la != lb {
+			return la < lb
+		}
+		if a.PrincipalDisplayName != b.PrincipalDisplayName {
+			return a.PrincipalDisplayName < b.PrincipalDisplayName
+		}
+		if a.PrincipalID != b.PrincipalID {
+			return a.PrincipalID < b.PrincipalID
+		}
+		return a.PrincipalType < b.PrincipalType
+	})
+
+	totalCount := len(all)
+	if limit <= 0 {
+		limit = 100 // default, same as the per-binding list
+	}
+	if offset > totalCount {
+		offset = totalCount
+	}
+	end := offset + limit
+	if end > totalCount {
+		end = totalCount
+	}
+
+	writeJSON(w, http.StatusOK, listProjectMemberGroupsResponse{
+		Items:        all[offset:end],
+		TotalCount:   totalCount,
+		Capabilities: s.memberListCapabilities(ctx, projectID),
 	})
 }
 
@@ -728,13 +895,12 @@ func (s *Server) putProjectMemberPrincipal(w http.ResponseWriter, r *http.Reques
 	}
 
 	group := s.buildProjectMemberGroup(ctx, principalType, resolvedPrincipalID, result.After)
-	group.Changed = result.Changed
 
 	status := http.StatusOK
 	if result.Created {
 		status = http.StatusCreated
 	}
-	writeJSON(w, status, group)
+	writeJSON(w, status, projectMemberGroupMutationResponse{projectMemberGroup: *group, Changed: result.Changed})
 }
 
 func (s *Server) deleteProjectMemberPrincipal(w http.ResponseWriter, r *http.Request, projectID, principalType, principalID string) {
@@ -829,15 +995,25 @@ func (s *Server) buildProjectMemberGroup(ctx context.Context, principalType, pri
 		infos = append(infos, info)
 	}
 
-	sort.Slice(infos, func(i, j int) bool {
+	sortProjectMemberBindings(infos)
+
+	group.Bindings = infos
+	return group
+}
+
+// sortProjectMemberBindings orders one principal's bindings built-in first,
+// then custom roles alphabetically by name, with the binding ID as the final
+// tie-break so the order is fully deterministic.
+func sortProjectMemberBindings(infos []projectMemberInfo) {
+	sort.SliceStable(infos, func(i, j int) bool {
 		iBuiltIn := infos[i].RoleKind == roleKindBuiltIn
 		jBuiltIn := infos[j].RoleKind == roleKindBuiltIn
 		if iBuiltIn != jBuiltIn {
 			return iBuiltIn
 		}
-		return infos[i].RoleName < infos[j].RoleName
+		if infos[i].RoleName != infos[j].RoleName {
+			return infos[i].RoleName < infos[j].RoleName
+		}
+		return infos[i].ID < infos[j].ID
 	})
-
-	group.Bindings = infos
-	return group
 }

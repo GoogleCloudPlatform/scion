@@ -1530,6 +1530,13 @@ type MembershipCapabilities struct {
 	CanManageOwners  bool     `json:"canManageOwners"`
 	CanTransfer      bool     `json:"canTransfer"`
 	Actions          []string `json:"actions"` // backward compat
+
+	// CanManageCustomRoles reports whether the actor may grant custom
+	// project roles (ptone/scion#2529). Additive field. It is decided by
+	// customRoleAuthorityFromStore (role_binding.create), the same function
+	// the members PUT uses, so the UI never infers custom-role authority
+	// from owner authority.
+	CanManageCustomRoles bool `json:"canManageCustomRoles"`
 }
 
 // ComputeCapabilities returns the membership capabilities for the given actor.
@@ -1562,6 +1569,17 @@ func (svc *ProjectMembershipService) ComputeCapabilities(ctx context.Context, us
 		caps.Actions = []string{"manage_members"}
 	default:
 		// Member or no role: read-only.
+	}
+
+	// Custom-role authority is not a function of the built-in role switched
+	// on above: it is a direct owner, or an actor with no project role who
+	// holds hub role_binding.create. Fail closed on a lookup error.
+	customAuth, err := svc.customRoleAuthorityFromStore(ctx, svc.store, userID, projectID, PermRoleBindingCreate)
+	if err != nil {
+		svc.logger.Warn("custom role authority lookup failed for capabilities (fail-closed)",
+			"user_id", userID, "project_id", projectID, "error", err)
+	} else {
+		caps.CanManageCustomRoles = customAuth.Allowed
 	}
 
 	return caps
