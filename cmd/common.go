@@ -403,7 +403,32 @@ func wrapHubError(err error) error {
 //  3. Git remote lookup via Hub API
 //
 // Returns the project ID if found, or an error if the project is not registered.
+//
+// When several projects share the same git remote, this silently picks the
+// first one (resp.Projects[0]) — a pre-existing, deliberately unchanged
+// behavior for every caller of this function except the keys command (see
+// getProjectIDForKeys below: ambiguous resolution must fail rather than
+// guess for the keys path specifically). Widening that fail-closed behavior
+// to every command here would be a much larger, separately-scoped change.
 func GetProjectID(hubCtx *HubContext) (string, error) {
+	return resolveProjectIDByGitRemote(hubCtx, false)
+}
+
+// getProjectIDForKeys is GetProjectID's keys-path variant, scoped to the
+// keys CLI path only (ptone/scion#2200 contract C§3: "ambiguous resolution
+// fails rather than guessing"). It shares every step of GetProjectID's resolution order
+// except the final git-remote-ambiguity case, where it fails closed with a
+// message naming --project instead of silently picking the first match.
+func getProjectIDForKeys(hubCtx *HubContext) (string, error) {
+	return resolveProjectIDByGitRemote(hubCtx, true)
+}
+
+// resolveProjectIDByGitRemote implements GetProjectID's resolution order.
+// failOnAmbiguousGitRemote selects between the two callers' divergent
+// behavior for exactly one case: more than one project sharing the queried
+// git remote. Every other branch (context/settings short-circuit, missing
+// remote, zero matches) is identical for both callers.
+func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bool) (string, error) {
 	// First, check if ProjectID is already set in the context
 	if hubCtx.ProjectID != "" {
 		return hubCtx.ProjectID, nil
@@ -442,6 +467,10 @@ func GetProjectID(hubCtx *HubContext) (string, error) {
 
 	if len(resp.Projects) == 0 {
 		return "", fmt.Errorf("no project found for git remote: %s\n\nRun 'scion hub link' to link this project with the Hub", gitRemote)
+	}
+
+	if failOnAmbiguousGitRemote && len(resp.Projects) > 1 {
+		return "", fmt.Errorf("multiple projects match git remote %s; pass --project to disambiguate", gitRemote)
 	}
 
 	// Return the first matching project

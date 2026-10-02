@@ -136,7 +136,7 @@ func TestTryProvisionWorktree_Start_StitchesRepoRoot(t *testing.T) {
 		ProjectPath:   brokerProjectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: gc},
-	}, provisionOpts, map[string]string{})
+	}, provisionOpts, map[string]string{}, "")
 	if err != nil {
 		t.Fatalf("tryProvisionWorktree: unexpected error: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestTryProvisionWorktree_Start_RepoRootSurvivesResume(t *testing.T) {
 		ProjectPath:   brokerProjectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: gc},
-	}, provisionOpts, map[string]string{})
+	}, provisionOpts, map[string]string{}, "")
 	if err != nil || !provisioned || repoRoot == "" || provisionOpts.Workspace == "" {
 		t.Fatalf("tryProvisionWorktree setup failed: err=%v provisioned=%v repoRoot=%q workspace=%q", err, provisioned, repoRoot, provisionOpts.Workspace)
 	}
@@ -363,7 +363,7 @@ func TestTryProvisionWorktree_ProvisionThenStart_RepoRootSurvives(t *testing.T) 
 		ProjectPath:   brokerProjectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: gc},
-	}, provisionOpts, map[string]string{})
+	}, provisionOpts, map[string]string{}, "")
 	if err != nil || !provisioned || repoRoot == "" || provisionOpts.Workspace == "" {
 		t.Fatalf("tryProvisionWorktree setup failed: err=%v provisioned=%v repoRoot=%q workspace=%q", err, provisioned, repoRoot, provisionOpts.Workspace)
 	}
@@ -751,7 +751,7 @@ func TestTryProvisionWorktree_Start_SymlinkedBase_ContainerWorkspaceStaysConsist
 		ProjectPath:   brokerProjectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: gc},
-	}, provisionOpts, map[string]string{})
+	}, provisionOpts, map[string]string{}, "")
 	if err != nil || !provisioned || repoRoot == "" || provisionOpts.Workspace == "" {
 		t.Fatalf("tryProvisionWorktree setup failed: err=%v provisioned=%v repoRoot=%q workspace=%q", err, provisioned, repoRoot, provisionOpts.Workspace)
 	}
@@ -818,5 +818,136 @@ func TestTryProvisionWorktree_Start_SymlinkedBase_ContainerWorkspaceStaysConsist
 	}
 	if wantRel := filepath.Join("worktrees", "agent-a"); rel != wantRel {
 		t.Fatalf("filepath.Rel(RepoRoot, Workspace) = %q, want %q (RepoRoot and Workspace are not resolved-consistent)", rel, wantRel)
+	}
+}
+
+// TestTryProvisionWorktree_KubernetesRuntimeName_ProvisionsNothing pins that
+// passing a kubernetes runtimeName leaves no trace on disk: the shared base
+// directory tryProvisionWorktree would otherwise create is never created at
+// all, not merely left unmounted. ok=false and repoRoot="" are covered
+// elsewhere (TestResolveWorktreeProvision_KubernetesNodeLocal_Rejected); this
+// test instead exercises the real tryProvisionWorktree entry point with a
+// project path backed by a real filesystem, so a change that moved the
+// Kubernetes check past the point where ProvisionShared starts writing would
+// be caught here even if the boolean/string return values stayed correct.
+func TestTryProvisionWorktree_KubernetesRuntimeName_ProvisionsNothing(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
+		t.Skipf("git too old, worktree mode not eligible on this host: %s", reason)
+	}
+
+	bare := initBareRepoWithCommit(t)
+	brokerProjectPath := filepath.Join(t.TempDir(), "broker-project")
+	if err := os.MkdirAll(brokerProjectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{}
+	opts := &api.StartOptions{}
+	provisioned, repoRoot, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name:          "agent-a",
+		AgentID:       "agent-a",
+		ProjectID:     "p1",
+		ProjectSlug:   "proj",
+		ProjectPath:   brokerProjectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"}},
+	}, opts, map[string]string{}, "kubernetes")
+	if err != nil {
+		t.Fatalf("tryProvisionWorktree: unexpected error: %v", err)
+	}
+	if provisioned {
+		t.Fatal("expected provisioned=false for a kubernetes runtimeName")
+	}
+	if repoRoot != "" {
+		t.Errorf("expected repoRoot = \"\", got %q", repoRoot)
+	}
+	if opts.Workspace != "" {
+		t.Errorf("expected opts.Workspace to stay empty, got %q", opts.Workspace)
+	}
+	if opts.GitClone != nil {
+		t.Errorf("expected opts.GitClone to stay unset, got %+v", opts.GitClone)
+	}
+
+	// The shared base directory a host-side provision would create under
+	// ProjectPath/workspace must not exist at all: nothing was ever written,
+	// not merely left unmounted.
+	expectedBase := filepath.Join(brokerProjectPath, "workspace")
+	if _, statErr := os.Stat(expectedBase); !os.IsNotExist(statErr) {
+		t.Errorf("expected %s to not exist, stat returned: %v", expectedBase, statErr)
+	}
+}
+
+// TestBuildStartContext_KubernetesDispatchOnDockerDefaultBroker_SetsNoRepoRootCtxValue
+// pins the buildStartContext-level analogue of
+// TestTryProvisionWorktree_KubernetesRuntimeName_ProvisionsNothing for a
+// broker whose default runtime is docker but whose dispatch resolves to
+// kubernetes (a saved profile naming a different runtime): the resulting
+// startContext carries no provisioned-worktree repo-root value, so the ctx
+// wrap createAgent performs right before the async-launch branch
+// (api.ContextWithProvisionedWorktreeRepoRoot, handlers.go) is a no-op for
+// this dispatch. The wrap-then-WithoutCancel sequence beginAsyncLaunch
+// actually runs is replayed here directly, so a value that leaked in despite
+// an empty ProvisionedWorktreeRepoRoot would be caught on either side of
+// that boundary.
+func TestBuildStartContext_KubernetesDispatchOnDockerDefaultBroker_SetsNoRepoRootCtxValue(t *testing.T) {
+	requireWorktreeGit(t)
+	clearSCIONEnv(t)
+
+	const otherProfile = "k8s-profile"
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, "docker", otherProfile, "kubernetes")
+
+	bare := initBareRepoWithCommit(t)
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:          "agent-a",
+		AgentID:       "agent-a",
+		ProjectID:     "p1",
+		ProjectSlug:   "proj",
+		ProjectPath:   dotScion,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config: &CreateAgentConfig{
+			Profile:  otherProfile,
+			GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"},
+		},
+		HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
+		Operation:   opCreate,
+	})
+	if err != nil {
+		t.Fatalf("buildStartContext: %v", err)
+	}
+
+	if sc.Opts.Workspace != "" {
+		t.Errorf("expected no host worktree Workspace for a kubernetes dispatch, got %q", sc.Opts.Workspace)
+	}
+	if sc.ProvisionedWorktreeRepoRoot != "" {
+		t.Errorf("expected ProvisionedWorktreeRepoRoot = \"\", got %q", sc.ProvisionedWorktreeRepoRoot)
+	}
+	if got := sc.Opts.Env["SCION_GIT_CLONE_URL"]; got != bare {
+		t.Errorf("expected the in-container clone fallback, got SCION_GIT_CLONE_URL=%q", got)
+	}
+
+	// Replay the exact wrap handlers.go's createAgent performs ahead of the
+	// async-launch branch, then the WithoutCancel(ctx) + deadline
+	// beginAsyncLaunch derives its goroutine's ctx from, confirming no value
+	// surfaces on either side of that boundary.
+	ctx := context.Background()
+	if sc.ProvisionedWorktreeRepoRoot != "" {
+		ctx = api.ContextWithProvisionedWorktreeRepoRoot(ctx, sc.ProvisionedWorktreeRepoRoot)
+	}
+	if got := api.ProvisionedWorktreeRepoRootFromContext(ctx); got != "" {
+		t.Errorf("before WithoutCancel: expected no provisioned repo-root ctx value, got %q", got)
+	}
+	asyncCtx, cancel := context.WithDeadline(context.WithoutCancel(ctx), time.Now().Add(time.Minute))
+	defer cancel()
+	if got := api.ProvisionedWorktreeRepoRootFromContext(asyncCtx); got != "" {
+		t.Errorf("after WithoutCancel: expected no provisioned repo-root ctx value, got %q", got)
+	}
+
+	// Nothing was written to disk for this dispatch either.
+	expectedBase := filepath.Join(dotScion, "workspace")
+	if _, statErr := os.Stat(expectedBase); !os.IsNotExist(statErr) {
+		t.Errorf("expected %s to not exist, stat returned: %v", expectedBase, statErr)
 	}
 }

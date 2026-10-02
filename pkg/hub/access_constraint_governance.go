@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -37,13 +38,14 @@ import (
 //   - Server-classified relaxation authority
 //   - Atomic commit or full rollback
 type GovernanceService struct {
-	store   store.Store
-	preview *PreviewService
-	authz   *AuthzService
-	logger  *slog.Logger
+	store     store.Store
+	preview   *PreviewService
+	authz     *AuthzService
+	logger    *slog.Logger
+	auditSink auditevent.Sink
 
-	// auditWriter writes durable audit entries for every boundary mutation.
-	// If nil, audit logging is disabled (should only happen in legacy tests).
+	// auditWriter is the legacy update/delete audit path. CREATE uses the
+	// transactionally persisted typed event and auditSink below.
 	auditWriter *BoundaryAuditWriter
 
 	// eventBus publishes invalidation events after successful mutations.
@@ -56,11 +58,19 @@ type GovernanceService struct {
 
 // NewGovernanceService creates a new GovernanceService.
 func NewGovernanceService(s store.Store, preview *PreviewService, authz *AuthzService, logger *slog.Logger) *GovernanceService {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	auditSink, err := auditevent.NewSlogSink(logger)
+	if err != nil {
+		panic(fmt.Sprintf("initialize access-boundary audit sink: %v", err))
+	}
 	return &GovernanceService{
 		store:       s,
 		preview:     preview,
 		authz:       authz,
 		logger:      logger,
+		auditSink:   auditSink,
 		auditWriter: NewBoundaryAuditWriter(logger),
 		nowFunc:     time.Now,
 	}
@@ -78,6 +88,8 @@ var commitEventTypes = map[string]string{
 	"update": EventBoundaryUpdated,
 	"delete": EventBoundaryDeleted,
 }
+
+const accessBoundaryAuditSinkFailureCode = "audit_sink_emit_failed"
 
 // CommitRequest describes a boundary mutation to be committed after preview.
 type CommitRequest struct {
@@ -108,6 +120,11 @@ type CommitRequest struct {
 
 	// Actor is the principal requesting the mutation.
 	Actor PrincipalContext
+
+	// AuditRequest is trusted request metadata for the structured audit
+	// envelope. It is nil for non-HTTP operations and tests without request
+	// middleware.
+	AuditRequest *auditevent.RequestRef
 }
 
 // CommitResult is the outcome of a successful commit.
@@ -161,6 +178,7 @@ func (e *GovernanceError) Error() string {
 //	i. Apply the mutation (create/update/delete)
 //	j. Commit the transaction
 func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req CommitRequest) (*CommitResult, error) {
+	ctx = withAccessBoundaryAuditOperation(ctx)
 	now := gs.nowFunc()
 
 	// Step a: Validate the preview token.
@@ -205,52 +223,20 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 		}
 	}
 
-	// Steps b, i, j: Re-read, apply mutation, and commit.
-	//
-	// KNOWN LIMITATION — TOCTOU window between governance checks and store
-	// mutation:
-	//
-	// The checks above (token validation, re-authorization, lockout,
-	// relaxation authority) and the store mutation below are separate
-	// operations — there is no wrapping database transaction. The Store
-	// interface does not expose a RunInTx(ctx, func(tx Store) error) method,
-	// so a true atomic check-then-mutate is architecturally impossible
-	// without interface changes.
-	//
-	// What mitigates the window:
-	//   - The preview token's state fingerprint detects most concurrent
-	//     modifications (stale token → reject).
-	//   - For updates, the store-level revision check rejects concurrent
-	//     writes to the same constraint.
-	//
-	// What the mitigations do NOT catch:
-	//   - Concurrent creates: two goroutines can both pass the fingerprint
-	//     check before either commits, and both succeed.
-	//   - Adjacent state changes: admin role bindings removed concurrently
-	//     between the lockout check and the mutation.
-	//
-	// Under single-instance deployment the TOCTOU window is narrow. Under
-	// multi-instance deployment this gap must be closed.
-	//
-	// TODO: Add Store.RunInTx(ctx context.Context, fn func(tx Store) error)
-	// error so governance can wrap checks + mutation in one database
-	// transaction.
-	//
-	// beforeState captures the constraint state prior to mutation so that the
-	// compensating action below can restore it on audit failure.
+	// Steps b, i, j: apply the mutation. CREATE additionally persists its
+	// purpose-specific history from one typed envelope in the same transaction.
+	// Update/delete remain on their existing milestone path.
 	var beforeState *store.AccessConstraint
 	var result *CommitResult
+	var committedAuditEvent *auditevent.EnvelopeV1
 	switch req.Operation {
 	case "create":
-		created, err := gs.store.CreateAccessConstraint(ctx, req.Draft)
+		createResult, event, err := gs.createAccessConstraintWithAudit(ctx, req, classification)
 		if err != nil {
 			return nil, fmt.Errorf("create failed: %w", err)
 		}
-		result = &CommitResult{
-			Constraint:     created,
-			Operation:      "create",
-			Classification: classification,
-		}
+		result = createResult
+		committedAuditEvent = &event
 
 	case "update":
 		// Capture the before-state so we can restore on audit failure.
@@ -315,7 +301,7 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 	// TODO: Replace compensating actions with true atomic commit when
 	// Store.RunInTx is added — compensating actions have a second failure
 	// window (the compensating write itself can fail).
-	if gs.auditWriter != nil {
+	if req.Operation != "create" && gs.auditWriter != nil {
 		constraintID := req.ConstraintID
 		if result.Constraint != nil && constraintID == "" {
 			constraintID = result.Constraint.ID
@@ -345,6 +331,19 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 			return nil, fmt.Errorf("audit write failed: %w", auditErr)
 		}
 		result.AuditID = auditID
+	}
+
+	// The create event crosses the configured structured-log boundary only
+	// after the live row and history transaction commits. Dispatch failure is
+	// observable but cannot make the committed command untrue.
+	if committedAuditEvent != nil && gs.auditSink != nil {
+		if err := gs.auditSink.Emit(ctx, *committedAuditEvent); err != nil {
+			gs.logger.ErrorContext(ctx, "failed to dispatch committed access boundary audit event",
+				"event_id", committedAuditEvent.EventID,
+				"constraint_id", result.Constraint.ID,
+				"failure_code", accessBoundaryAuditSinkFailureCode,
+			)
+		}
 	}
 
 	// Publish invalidation event after successful commit (outside transaction).

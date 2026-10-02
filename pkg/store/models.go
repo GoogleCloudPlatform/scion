@@ -204,13 +204,20 @@ type ExposedPort struct {
 
 // AgentAppliedConfig stores the effective configuration of an agent.
 type AgentAppliedConfig struct {
-	Image         string              `json:"image,omitempty"`
-	HarnessConfig string              `json:"harnessConfig,omitempty"`
-	HarnessAuth   string              `json:"harnessAuth,omitempty"` // Late-binding override for auth_selected_type
-	Env           map[string]string   `json:"env,omitempty"`
-	Model         string              `json:"model,omitempty"`
-	ThinkingLevel *int                `json:"thinkingLevel,omitempty"`
-	Profile       string              `json:"profile,omitempty"`   // Settings profile for the runtime broker
+	Image         string            `json:"image,omitempty"`
+	HarnessConfig string            `json:"harnessConfig,omitempty"`
+	HarnessAuth   string            `json:"harnessAuth,omitempty"` // Late-binding override for auth_selected_type
+	Env           map[string]string `json:"env,omitempty"`
+	Model         string            `json:"model,omitempty"`
+	ThinkingLevel *int              `json:"thinkingLevel,omitempty"`
+	Profile       string            `json:"profile,omitempty"` // Settings profile for the runtime broker
+	// RuntimeTarget is the broker runtime target (runtime name, plus cluster
+	// context and namespace for Kubernetes) whose listing reported the agent.
+	// Recorded from heartbeats once two consecutive reports name the same
+	// target (see RuntimeTargetCandidate) and cleared when a create, start or
+	// restart is accepted; the missing-container reconcile only considers an
+	// agent whose recorded target a heartbeat lists as complete.
+	RuntimeTarget string              `json:"runtimeTarget,omitempty"`
 	Task          string              `json:"task,omitempty"`      // Initial task/prompt for the agent
 	Attach        bool                `json:"attach,omitempty"`    // If true, signals interactive attach mode to the broker/harness
 	Branch        string              `json:"branch,omitempty"`    // Git branch name (defaults to agent slug if empty)
@@ -220,6 +227,13 @@ type AgentAppliedConfig struct {
 	// Template info for Runtime Broker hydration
 	TemplateID   string `json:"templateId,omitempty"`   // Hub template ID for fetching
 	TemplateHash string `json:"templateHash,omitempty"` // Content hash for cache validation
+
+	// RuntimeTargetCandidate is a target reported by one heartbeat that
+	// differs from RuntimeTarget. It becomes RuntimeTarget only when the next
+	// heartbeat reports the same target, so a single heartbeat built before a
+	// start was accepted cannot record the agent's previous target. Cleared
+	// together with RuntimeTarget.
+	RuntimeTargetCandidate string `json:"runtimeTargetCandidate,omitempty"`
 
 	// Harness-config info for Runtime Broker hydration. When set, the broker
 	// fetches the harness-config from the Hub's storage backend instead of
@@ -273,10 +287,15 @@ type AgentAppliedConfig struct {
 	// into $HOME/.scion/hooks/pre-start.d/30-project-custom before container start.
 	ProjectPreStartHookScript string `json:"projectPreStartHookScript,omitempty"`
 
-	// CreateInputs snapshots the explicit request-level inputs captured at
-	// create time, before any template/harness-config/hub-default derivation
-	// ran. See AgentCreateInputs. Nil for agents created before this field
-	// existed (falls back to a heuristic reconstruction at reincarnate time).
+	// CreateInputs snapshots the explicit request-level inputs: the ones
+	// captured at create time, before any template/harness-config/hub-default
+	// derivation ran, PLUS any later PATCH /api/v1/agents/{id} edit that
+	// changed a field's live value (Option C, ptone/scion#2493; see
+	// recordExplicitEdits in pkg/hub). An echoed PATCH value -- one that
+	// merely reflects the live, derived config back unchanged, as the
+	// configure page's Save and Start both do -- is never recorded here. See
+	// AgentCreateInputs. Nil for agents created before this field existed
+	// (falls back to a heuristic reconstruction at reincarnate time).
 	CreateInputs *AgentCreateInputs `json:"createInputs,omitempty"`
 
 	// envResponseVisible gates whether MarshalJSON includes Env. It defaults
@@ -452,11 +471,17 @@ func (ac AgentAppliedConfig) MarshalJSON() ([]byte, error) {
 
 // AgentCreateInputs snapshots the explicit request-level inputs an agent was
 // created with, independent of anything the template/harness-config/hub
-// defaults later filled in on top of them. `scion reincarnate` (design
-// /scion-volumes/scratchpad/projects/agent-migrate/design.md §3.3 Amendment
-// A1) replays these — plus its own request overrides — through the same
-// derivation resolveDerivedConfig applies at create, against a freshly built
-// AgentAppliedConfig. It must never call resolveDerivedConfig on the
+// defaults later filled in on top of them -- PLUS any later PATCH
+// /api/v1/agents/{id} edit that changed one of these fields' (or an Env
+// key's) live value (Option C, ptone/scion#2493: see recordExplicitEdits in
+// pkg/hub, called from applyAgentUpdate). Invariant E: a PATCH changes a
+// field here if and only if it changed that field's live value, so a PATCH
+// that only echoes the live, derived config back (as the configure page's
+// Save and Start both do) never touches this struct. `scion reincarnate`
+// (design /scion-volumes/scratchpad/projects/agent-migrate/design.md §3.3
+// Amendment A1) replays these — plus its own request overrides — through the
+// same derivation resolveDerivedConfig applies at create, against a freshly
+// built AgentAppliedConfig. It must never call resolveDerivedConfig on the
 // existing (already-derived, possibly stale) AppliedConfig: several fields
 // (Image, Model, Env, HarnessAuth, Workspace, Branch) are dual-purpose —
 // resolveDerivedConfig and populateAgentConfig only fill them in when empty,
@@ -465,6 +490,9 @@ func (ac AgentAppliedConfig) MarshalJSON() ([]byte, error) {
 //
 // Deliberately excludes Task: reincarnate's hub-built preamble plus handoff
 // always replaces it, so the original create-time task is never replayed.
+// recordExplicitEdits excludes it too, for the same reason, along with
+// Harness/HarnessConfig/DefaultHarnessConfig (an unvalidated harness switch
+// must not take effect only at reincarnate).
 type AgentCreateInputs struct {
 	// InlineConfig is a deep copy of the request's Config (ScionConfig) as
 	// given at create time, before resolveDerivedConfig had a chance to stamp
@@ -3115,6 +3143,27 @@ type AccessConstraint struct {
 	CreatedBy            string     `json:"createdBy"`
 	CreatedAt            time.Time  `json:"createdAt"`
 	UpdatedAt            time.Time  `json:"updatedAt"`
+}
+
+// AccessConstraintHistory is the purpose-specific retained timeline for one
+// live access constraint. It mirrors the typed access-boundary audit payload;
+// it is not a generic serialized audit event.
+type AccessConstraintHistory struct {
+	EventID           string
+	ConstraintID      string
+	OccurredAt        time.Time
+	Operation         string
+	ActorKind         string
+	ActorID           string
+	CorrelationID     string
+	BatchOperationID  string
+	BeforeRevision    *int64
+	AfterRevision     *int64
+	Classification    string
+	PreviewID         string
+	DraftHash         string
+	ImpactCountsJSON  string
+	ChangedFieldsJSON string
 }
 
 // AccessConstraintListOptions defines filtering, sorting, and cursor-based

@@ -136,7 +136,7 @@ func setupRoutedTestEnv(t *testing.T) routedTestEnv {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
 	// Grant explicit agent.message send authority. Upstream removed

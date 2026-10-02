@@ -78,6 +78,16 @@ export function isRecognizedFilePath(path: string): boolean {
  * excluded even when its suffix matches a supported path shape, so a message
  * containing `https://example.com/workspace/a.md` never creates a local file
  * entry for `/workspace/a.md`.
+ *
+ * A path substring inside a `gs://bucket/object` reference is excluded the
+ * same way: an object name like `workspace/report.md` sits right after the
+ * bucket's own `/` separator, so the whole URI already contains the literal
+ * substring `/workspace/report.md` — a real, independently-matching
+ * container path that is not a local file at all. Linkify's own
+ * leftmost-wins HTML-entity pass already keeps that case from also becoming
+ * a clickable path link in rendered chat; this recorder runs as a separate
+ * scan over the raw text with no such dedup of its own, so it needs the same
+ * exclusion directly.
  */
 export function extractContainerPaths(text: string): string[] {
   if (!text) return [];
@@ -93,8 +103,21 @@ export function extractContainerPaths(text: string): string[] {
     urlRanges.push([um.index, um.index + um[0].length]);
   }
 
+  const gcsRanges: Array<[number, number]> = [];
+  const gcsRe = new RegExp(GCS_URI_PATTERN.source, GCS_URI_PATTERN.flags);
+  let gm: RegExpExecArray | null;
+  while ((gm = gcsRe.exec(text)) !== null) {
+    if (gm[0].length === 0) {
+      gcsRe.lastIndex++;
+      continue;
+    }
+    gcsRanges.push([gm.index, gm.index + gm[0].length]);
+  }
+
   const insideUrl = (index: number): boolean =>
     urlRanges.some(([start, end]) => index >= start && index < end);
+  const insideGcsUri = (index: number): boolean =>
+    gcsRanges.some(([start, end]) => index >= start && index < end);
 
   const pathRe = new RegExp(CONTAINER_PATH_PATTERN.source, CONTAINER_PATH_PATTERN.flags);
   const seen = new Set<string>();
@@ -106,7 +129,12 @@ export function extractContainerPaths(text: string): string[] {
       continue;
     }
     const path = pm[0];
-    if (!insideUrl(pm.index) && isRecognizedFilePath(path) && !seen.has(path)) {
+    if (
+      !insideUrl(pm.index) &&
+      !insideGcsUri(pm.index) &&
+      isRecognizedFilePath(path) &&
+      !seen.has(path)
+    ) {
       seen.add(path);
       out.push(path);
     }
@@ -578,6 +606,35 @@ export function extensionOf(name: string): string {
 /** True when a file name's extension is a known previewable image type. */
 export function isImageFileName(name: string): boolean {
   return IMAGE_EXTENSIONS.has(extensionOf(name));
+}
+
+/**
+ * Extensions a `gcs` preview target renders as `<img>` — narrower than
+ * {@link IMAGE_EXTENSIONS}: no `.svg` (always shown as source text, since an
+ * SVG document can embed script) and no `.bmp`/`.ico` (the hub serves only
+ * PNG, JPEG, GIF and WebP as image types, so the response `Content-Type`
+ * could never agree with those extensions anyway). Matched against the file
+ * name's extension only; the caller must also require the response
+ * `Content-Type` to pass {@link isGcsImageContentType}, so a gcs target
+ * renders as an image only when the hub itself sniffed its bytes as one of
+ * the supported raster types.
+ */
+const GCS_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
+
+/** True when a `gcs` preview target's extension is one of the four hub-sniffed raster image types. */
+export function isGcsImageExtension(name: string): boolean {
+  return GCS_IMAGE_EXTENSIONS.has(extensionOf(name));
+}
+
+/**
+ * The exact image Content-Types the hub's sniffer serves for a gcs object.
+ * Any other `image/*` value is never rendered as `<img>` for a gcs target.
+ */
+const GCS_IMAGE_CONTENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/** True when a base MIME type (no parameters, lowercase) is one of the four gcs raster image types. */
+export function isGcsImageContentType(mime: string): boolean {
+  return GCS_IMAGE_CONTENT_TYPES.has(mime);
 }
 
 /** True when a file name's extension marks it as Markdown. */

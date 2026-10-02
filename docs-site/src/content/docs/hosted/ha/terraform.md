@@ -66,6 +66,17 @@ teardown — lives in the repository, not duplicated here:
   a step-by-step runbook for an AI agent to run the deployment end to end,
   including the plan-review gates required before every apply or destroy.
 
+:::caution[Upgrading an existing hub]
+Current `terraform-ha` modules no longer create the legacy hub-scope Secret
+Manager grant or pre-create the hub's OIDC signing key: a fresh hub generates
+its own key on first boot, and an existing hub keeps its migrated key. Before
+applying this module version to an existing hub, finish the secret-name
+migration and check the expected plan delta in
+[`docs/deploy/migrate-names-cloudrun.md` §7](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/migrate-names-cloudrun.md#7-for-terraform-managed-hubs-what-can-be-removed-afterward).
+Applying it to a hub whose secrets have not been migrated deletes the only
+copy of its OIDC signing key.
+:::
+
 After a hub is up, the [hosted user guide](/scion/hosted/user/hosted-user/)
 covers connecting to it, and the rest of this Admin Guide
 ([Runtime Brokers & Profiles](/scion/hosted/ha/runtime-broker/),

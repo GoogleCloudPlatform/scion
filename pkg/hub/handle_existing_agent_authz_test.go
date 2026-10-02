@@ -71,7 +71,7 @@ func handleExistingAgentAuthzSetup(t *testing.T) *handleExistingAgentAuthzFixtur
 		OwnerID: f.owner.ID, CreatedBy: f.owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, f.project))
-	srv.createProjectMembersGroup(ctx, f.project)
+	srv.seedProjectCreatorMembership(ctx, f.project)
 	createTestUserWithProjectRole(t, s, f.member.ID, f.member.Email, f.project.ID, store.ProjectRoleMember)
 
 	// A runtime broker is required for createAgent to get past

@@ -426,6 +426,43 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Timezone data — the agent TZ (defaulted to UTC by sciontool's harness
+# provisioning, cmd/sciontool/commands/harness.go) only takes effect if the
+# zone files exist. glibc treats an unknown zone as UTC without any error, so
+# check the effect, not just the package: a known zone must resolve to its
+# real offset. The image must also not pin TZ itself (no `ENV TZ`): the agent
+# zone is set per agent when the container starts, and an image default would
+# stand in for it wherever that setting is absent.
+#
+# A TZ in the environment is only a defect during a build, where it can only
+# have come from an ENV line. Re-checking a running agent container (a
+# supported use, see the header) legitimately sees the agent's own TZ, so
+# there it is reported as a note rather than a failure.
+# ---------------------------------------------------------------------------
+if [ -f /usr/share/zoneinfo/Asia/Tokyo ]; then
+  ok "/usr/share/zoneinfo present"
+else
+  fail "/usr/share/zoneinfo/Asia/Tokyo missing — install tzdata, or a
+      configured agent TZ silently behaves as UTC"
+fi
+tz_offset="$(TZ=Asia/Tokyo date +%z 2>/dev/null || true)"
+if [ "$tz_offset" = "+0900" ]; then
+  ok "TZ=Asia/Tokyo resolves to +0900"
+else
+  fail "TZ=Asia/Tokyo resolves to '${tz_offset:-<error>}', expected +0900 —
+      zone data is missing or unreadable, so agent TZ settings are ignored"
+fi
+if [ -z "${TZ+set}" ]; then
+  ok "TZ unset in the image environment"
+elif [ -n "$BUILD_ARCH" ]; then
+  fail "TZ is set to '${TZ}' during the image build — remove the ENV TZ;
+      the agent zone is set per agent when the container starts"
+else
+  note "TZ is set to '${TZ}'; not a build (BUILDARCH unset), so this is taken
+      to be a running container's own zone, not an ENV TZ in the image"
+fi
+
+# ---------------------------------------------------------------------------
 # Toolchains. Both are floors, never equality: these images are used for far
 # more than building scion, so a base that ships something newer is fine and
 # must not be downgraded to match go.mod.

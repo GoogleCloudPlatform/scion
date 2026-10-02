@@ -101,6 +101,8 @@ const DisableAllConfirmPhrase = "I understand this disables all access constrain
 var recoverConfirmReader io.Reader = os.Stdin
 
 func runRecoverAuthz(cmd *cobra.Command, _ []string) error {
+	pinProcessUTC()
+
 	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
 	defer cancel()
 

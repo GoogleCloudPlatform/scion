@@ -5674,6 +5674,160 @@ describe('scion-chat-thread reply focuses the composer', () => {
   });
 });
 
+describe('scion-chat-thread /stop slash command', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    fakeStateManager.clearAgents();
+  });
+
+  /**
+   * Regression test for ptone/scion#2482: `/stop <agent>` must stop the
+   * agent, not delete it. It must hit the project-scoped stop endpoint the
+   * hub actually resolves slugs against (handleProjectAgentAction,
+   * pkg/hub/handlers_projects_core.go), not the unscoped
+   * `/api/v1/agents/{id}/stop` route, which only resolves UUIDs and always
+   * 404s for a slug.
+   */
+  it('sends POST to the project-scoped stop endpoint, not DELETE', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    const internals = el as unknown as {
+      handleSlashStop(args: string): Promise<void>;
+    };
+
+    apiFetch.mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({}) });
+
+    await internals.handleSlashStop('my-agent');
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/projects/proj-1/agents/my-agent/stop',
+      expect.objectContaining({ method: 'POST' })
+    );
+    expect(apiFetch).not.toHaveBeenCalledWith(
+      expect.stringMatching(/^\/api\/v1\/agents\/my-agent$/),
+      expect.objectContaining({ method: 'DELETE' })
+    );
+  });
+
+  it('shows "Failed to stop agent" on a non-2xx response', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    const internals = el as unknown as {
+      handleSlashStop(args: string): Promise<void>;
+    };
+
+    apiFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      json: () =>
+        Promise.resolve({
+          error: { code: 'agent_not_found', message: 'Agent "my-agent" not found in project' },
+        }),
+    });
+
+    await internals.handleSlashStop('my-agent');
+
+    await vi.waitFor(() => {
+      const lines = Array.from(el.shadowRoot?.querySelectorAll('scion-chat-system-line') ?? []);
+      const messages = lines.map((l) => l.getAttribute('message'));
+      expect(messages.some((m) => m?.includes('Failed to stop agent'))).toBe(true);
+    });
+  });
+
+  it('shows a local message and makes no request when there is no project context', async () => {
+    const el = await mount();
+    el.projectId = '';
+    const internals = el as unknown as {
+      handleSlashStop(args: string): Promise<void>;
+    };
+
+    await internals.handleSlashStop('my-agent');
+
+    // Scoped to POST/DELETE rather than just the no-request case, so this
+    // would also catch a DELETE regression (the on-mount mark-as-read fetch
+    // is a POST too, but it's debounced 1s behind a setTimeout — see
+    // maybeAdvanceReadWatermark — so it never fires within this synchronous
+    // assertion window).
+    expect(apiFetch).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ method: expect.stringMatching(/^(POST|DELETE)$/) })
+    );
+    await vi.waitFor(() => {
+      const lines = Array.from(el.shadowRoot?.querySelectorAll('scion-chat-system-line') ?? []);
+      const messages = lines.map((l) => l.getAttribute('message'));
+      expect(messages).toContain('No project context available.');
+    });
+  });
+
+  /**
+   * In a chat-page DM, `projectId` is only `inheritedProjectId()` — the
+   * previously viewed project, not one the DM belongs to (see
+   * `resolvePathLinkProjectId`). `/stop <slug>` must resolve against the DM
+   * peer agent's own project instead, the same fallback
+   * `resolvePathLinkProjectId` already uses for path links.
+   */
+  it('in a DM, targets the peer agent project, not the inherited thread projectId', async () => {
+    fakeStateManager.setAgent('coder', 'proj-peer');
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'dm:agent:coder:user:u1';
+    el.isDM = true;
+    // The previously viewed project — must never be used for a DM's /stop.
+    el.projectId = 'proj-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    const internals = el as unknown as {
+      handleSlashStop(args: string): Promise<void>;
+    };
+
+    await internals.handleSlashStop('my-agent');
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/projects/proj-peer/agents/my-agent/stop',
+      expect.objectContaining({ method: 'POST' })
+    );
+    expect(apiFetch).not.toHaveBeenCalledWith(
+      expect.stringContaining('proj-inherited'),
+      expect.anything()
+    );
+  });
+
+  it('in a DM with no peer project, sends no stop request and shows the local message', async () => {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'dm:agent:unknown-agent:user:u1';
+    el.isDM = true;
+    // Non-empty, to prove this is never used as a fallback in a DM.
+    el.projectId = 'proj-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+    const internals = el as unknown as {
+      handleSlashStop(args: string): Promise<void>;
+    };
+
+    await internals.handleSlashStop('my-agent');
+
+    expect(apiFetch).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ method: expect.stringMatching(/^(POST|DELETE)$/) })
+    );
+    await vi.waitFor(() => {
+      const lines = Array.from(el.shadowRoot?.querySelectorAll('scion-chat-system-line') ?? []);
+      const messages = lines.map((l) => l.getAttribute('message'));
+      expect(messages).toContain('No project context available.');
+    });
+  });
+});
+
 describe('scion-chat-thread gcs-link-click', () => {
   type GcsInternals = {
     filePreview: {

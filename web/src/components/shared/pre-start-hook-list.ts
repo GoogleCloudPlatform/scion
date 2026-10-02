@@ -220,6 +220,16 @@ export class ScionPreStartHookList extends LitElement {
         line-height: 1.5;
       }
 
+      /* This local override replaces the app-wide --sl-input-font-size-*
+         variable with a fixed value, which would otherwise defeat the
+         pointer:coarse 16px floor (see pkg/hub/web.go / web/index.html) on
+         touch — re-floor it here too, desktop unchanged. */
+      @media (pointer: coarse) {
+        .script-field sl-textarea::part(textarea) {
+          font-size: max(16px, 0.8125rem);
+        }
+      }
+
       .script-meta {
         display: flex;
         justify-content: space-between;

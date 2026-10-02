@@ -1168,4 +1168,61 @@ describe('scion-chat-message gs:// linkification', () => {
 
     expect(dispatched).toBe(false);
   });
+
+  function ghRefLinksIn(el: ScionChatMessage): HTMLAnchorElement[] {
+    return Array.from(
+      el.shadowRoot?.querySelectorAll('.md-content .gh-ref-link') ?? []
+    ) as HTMLAnchorElement[];
+  }
+
+  // Interplay with the separate GitHub shortform-ref pass (styleGithubRefs,
+  // applied after styleEntityLinks in renderContent): a fragment-shaped
+  // gs:// tail must not become a gcs-link AND then also feed a GitHub ref
+  // match, or vice versa.
+  //
+  // An extracted object immediately followed by `#` is VOID — no link at
+  // all, not a link truncated at the boundary — whenever a further
+  // non-whitespace character follows, exactly like the existing `a#frag`
+  // parity vector (chat-file-links.test.ts / pkg/hub/gcs_link_test.go, both
+  // `linked: false`). `o/r` followed by `#1` is that same shape, so the
+  // actual behaviour is zero `.gcs-link` elements here, not one truncated
+  // at `/r` with `#1` left as plain trailing text.
+  //
+  // With no gcs-link produced, styleGithubRefs runs on the entirely
+  // untouched raw text next. It does not match here either, independent of
+  // the gcs pass: GITHUB_REF_REGEX's leading boundary group rejects a
+  // preceding `/`, and both `o` (preceded by the bucket's own `/`) and `r`
+  // (preceded by `/` after `o`) are only ever reachable with a `/` right
+  // before them — the same rule already pinned by the "does not link the
+  // tail of a longer slash-separated path" case above for `a/b/c#12`.
+  //
+  // One further consequence worth noting: a cross-feature collision where
+  // the GitHub-ref pass reaches inside an existing gcs `<a>` and re-links
+  // its `#<number>` tail cannot arise from this vector shape at all — the
+  // continuation rule voids any gcs extraction at a `#` followed by a digit
+  // (or any other non-whitespace character), so a *successful* gcs-link can
+  // never itself display a trailing `#<number>` for GITHUB_REF_REGEX to even
+  // attempt matching against. The gh pass's existing `<a>`-skip
+  // (GITHUB_REF_SKIP_REGION) still exists as a general safeguard for other
+  // shapes (e.g. an object that merely resembles `owner/repo` with no `#` at
+  // all), but it is not what makes this particular case produce zero links
+  // — the void rule alone already does.
+  it('produces neither a gcs-link nor a GitHub-ref link for a gs:// URI with a fragment-continuation digit tail', async () => {
+    const el = await mountGcs('see gs://bkt/o/r#1 for details', true);
+    expect(gcsLinks(el)).toHaveLength(0);
+    expect(ghRefLinksIn(el)).toHaveLength(0);
+    // The raw, unlinked text survives verbatim — proof this is "no link
+    // produced", not "linked then silently dropped by some other guard".
+    expect(el.shadowRoot?.querySelector('.md-content')?.textContent).toContain(
+      'see gs://bkt/o/r#1 for details'
+    );
+  });
+
+  it('positive control: a GitHub ref elsewhere in the same body still becomes a link, proving the absence above is specific to the gs:// URI, not a global GitHub-ref failure', async () => {
+    const el = await mountGcs('see gs://bkt/o/r#1 and also ptone/scion#2217', true);
+    expect(gcsLinks(el)).toHaveLength(0);
+    const links = ghRefLinksIn(el);
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe('ptone/scion#2217');
+  });
 });

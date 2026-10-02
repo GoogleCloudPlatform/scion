@@ -33,6 +33,13 @@ type Section struct {
 	New        func() any
 }
 
+// dns1123SubdomainOrEmptyPattern mirrors the pattern used for
+// priority_class_name / priorityClassName in settings-v1.schema.json and
+// agent-v1.schema.json: a DNS-1123 subdomain (the Kubernetes PriorityClass
+// name format), or the empty string, which means unset to the runtime and
+// would otherwise fail the strict subdomain pattern.
+const dns1123SubdomainOrEmptyPattern = `^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+
 // Registry is the single source of truth for Layer-0 vs Layer-1 classification.
 // Every Layer-1 section is listed here; any koanf key not owned by a section is
 // Layer-0 (bootstrap) and must not be written via the admin API.
@@ -471,6 +478,7 @@ func compileSchemas() {
 					"sync":                map[string]interface{}{"type": "string"},
 					"gke":                 map[string]interface{}{"type": "boolean"},
 					"list_all_namespaces": map[string]interface{}{"type": "boolean"},
+					"priority_class_name": map[string]interface{}{"type": "string", "maxLength": 253, "pattern": dns1123SubdomainOrEmptyPattern},
 					"cloudrun":            map[string]interface{}{"type": "object"},
 				},
 			},

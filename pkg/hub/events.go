@@ -488,7 +488,7 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 		Launch:          store.ComputeAgentLaunch(agent, time.Now()),
 	}
 	if !agent.LastActivityEvent.IsZero() {
-		evt.LastActivityEvent = agent.LastActivityEvent.Format("2006-01-02T15:04:05Z07:00")
+		evt.LastActivityEvent = agent.LastActivityEvent.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 
 	detail := AgentDetail{
@@ -499,7 +499,7 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 		CurrentModelCalls: agent.CurrentModelCalls,
 	}
 	if !agent.StartedAt.IsZero() {
-		detail.StartedAt = agent.StartedAt.Format("2006-01-02T15:04:05Z07:00")
+		detail.StartedAt = agent.StartedAt.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 	if detail != (AgentDetail{}) {
 		evt.Detail = &detail
@@ -531,7 +531,7 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 		Launch:          store.ComputeAgentLaunch(agent, time.Now()),
 	}
 	if !agent.Created.IsZero() {
-		evt.Created = agent.Created.Format("2006-01-02T15:04:05Z07:00")
+		evt.Created = agent.Created.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 	p.sink("agent."+agent.ID+".created", evt)
 	if agent.ProjectID != "" {
@@ -722,7 +722,7 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 		Urgent:        msg.Urgent,
 		Broadcasted:   msg.Broadcasted,
 		AgentID:       msg.AgentID,
-		CreatedAt:     msg.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
+		CreatedAt:     msg.CreatedAt.UTC().Format(time.RFC3339Nano),
 		Channel:       msg.Channel,
 		ThreadID:      msg.ThreadID,
 		GroupID:       msg.GroupID,

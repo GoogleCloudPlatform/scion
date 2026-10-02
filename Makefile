@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite vet lint vet-integration compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-harness-coverage check-authorization-catalog check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-harness-coverage check-authorization-catalog check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -167,6 +167,40 @@ lint:
 vet-integration:
 	@go vet -tags 'integration volume_test' ./...
 
+## vet-integration-extras: Compile-check integration-tagged code in every extras/ module that has it
+# vet-integration only covers the root module's ./... tree; extras/*
+# modules are separate go.mod trees it never reaches. Discovers modules
+# dynamically (grep for the build tag) so new ones are covered without
+# editing this target. Discovery uses only POSIX find and grep options
+# (find -type f -name -exec ... \; -print, grep -qE), so it works with
+# GNU, BSD/macOS and BusyBox. grep read errors still print to stderr; a
+# find traversal error fails the target. The target also fails if it
+# vets zero modules (e.g. extras/ moved or the build tag was renamed).
+# A symlinked module dir is followed; symlinks inside a module are not.
+vet-integration-extras:
+	@echo "Vetting integration-tagged code in extras modules..."
+	@failed=0; vetted=0; \
+	for gomod in extras/*/go.mod; do \
+		[ -f "$$gomod" ] || continue; \
+		moddir=$$(dirname "$$gomod"); \
+		if ! hits=$$(find "$$moddir/" -type f -name '*.go' -exec grep -qE '^//go:build.*[^A-Za-z0-9_]integration([^A-Za-z0-9_]|$$)' {} \; -print); then \
+			echo "  FAILED: $$moddir (module discovery)"; failed=$$((failed + 1)); \
+		elif [ -n "$$hits" ]; then \
+			echo "  $$moddir"; \
+			vetted=$$((vetted + 1)); \
+			(cd "$$moddir" && go vet -tags integration ./...) || { echo "  FAILED: $$moddir"; failed=$$((failed + 1)); }; \
+		fi; \
+	done; \
+	if [ "$$failed" -gt 0 ]; then \
+		echo "$$failed extras module(s) failed discovery or integration vet ($$vetted vetted)."; \
+		exit 1; \
+	fi; \
+	if [ "$$vetted" -eq 0 ]; then \
+		echo "No extras modules with integration-tagged code found; expected at least one (check extras/ layout and the integration build tag)."; \
+		exit 1; \
+	fi; \
+	echo "Vetted $$vetted extras module(s) with integration-tagged code."
+
 ## compat-literals: Check legacy grove literals stay in compatibility surfaces
 compat-literals:
 	@./hack/check-project-compat-literals.sh
@@ -298,7 +332,7 @@ ci: fmt-check lint check-custom test-fast build
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-typecheck web-test lint vet-integration check-custom golangci-lint test-fast build
+ci-full: fmt-check web web-typecheck web-test lint vet-integration vet-integration-extras check-custom golangci-lint test-fast build
 	@echo ""
 	@echo "CI (full) passed."
 

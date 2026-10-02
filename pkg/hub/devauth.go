@@ -201,9 +201,10 @@ func DevAuthMiddlewareWithDebug(validToken string, userCfg DevUserConfig, debug 
 	devUser := NewDevUser(userCfg)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w = normalizeConstraintAuditAuthFailures(w, r)
 			// Skip auth for health endpoints
 			if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
-				next.ServeHTTP(w, r)
+				serveAfterAuth(w, next, r)
 				return
 			}
 
@@ -212,7 +213,7 @@ func DevAuthMiddlewareWithDebug(validToken string, userCfg DevUserConfig, debug 
 				if debug {
 					slog.Debug("Auth success: agent token already validated")
 				}
-				next.ServeHTTP(w, r)
+				serveAfterAuth(w, next, r)
 				return
 			}
 
@@ -282,7 +283,7 @@ func DevAuthMiddlewareWithDebug(validToken string, userCfg DevUserConfig, debug 
 
 			// Add dev user context
 			ctx := context.WithValue(r.Context(), userContextKey{}, devUser)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			serveAfterAuth(w, next, r.WithContext(ctx))
 		})
 	}
 }
