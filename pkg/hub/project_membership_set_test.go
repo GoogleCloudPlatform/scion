@@ -1042,6 +1042,102 @@ func TestSetMemberRoles_Ported_HubAdminCustomProjectRole_UnchangedCeilingBehavio
 	assert.Equal(t, ErrCodeTargetRoleProtected, decision.DenialCode, "a hub admin should reach the delegation ceiling, not the entry gate: %+v", decision)
 }
 
+// ---------------------------------------------------------------------------
+// Review r1 (A-path) A-R1: CanDelegate on the built-in-role paths.
+//
+// TestSetMemberRoles_Ported_HubAdminCustomProjectRole_UnchangedCeilingBehavior
+// above proves the hub-admin ceiling refuses a CUSTOM role grant. The two
+// tests below prove the same ceiling is actually evaluated — not skipped —
+// on the two built-in-role code paths in the Phase P CanDelegate loop
+// (project_membership_set.go, the needsCanDelegate guard): a brand-new
+// built-in grant (no BuiltInChange) and a built-in upgrade swap
+// (BuiltInChange set, new level > old level). Before this round neither path
+// had a test that could tell CanDelegate was actually called there: a
+// hub-admin actor holds role_binding.create/delete (so it passes the entry
+// gate) but none of the project-member permission set (agent.create/list/
+// read, gcp_service_account.assign, harness_config.*, template.*), so
+// CanDelegate's actorHoldsAllPermissions refuses delegating even the
+// project-member role — the hub-admin ceiling does NOT cover built-in
+// project roles, so no AccessConstraint-limited-owner fallback is needed.
+// ---------------------------------------------------------------------------
+
+// TestSetMemberRoles_HubAdminBuiltInGrant_CeilingRefused covers a new
+// built-in grant with no BuiltInChange (plan0.BuiltInChange == nil, so
+// needsCanDelegate stays at its default true): a hub admin with no project
+// role of their own on f.otherProjectID cannot grant the built-in member
+// role to a brand-new principal. Forcing needsCanDelegate = false for this
+// path (or skipping the CanDelegate call entirely) makes this test fail by
+// turning the 403 into a 200 with a persisted binding.
+func TestSetMemberRoles_HubAdminBuiltInGrant_CeilingRefused(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+	hubAdminID := tid(t.Name() + "-hubadmin")
+	require.NoError(t, f.store.CreateUser(ctx, &store.User{
+		ID: hubAdminID, Email: hubAdminID + "@test.com", DisplayName: "Hub Admin", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, f.store, hubAdminID)
+	mmrSeedHubAdmin(t, f.store, hubAdminID)
+
+	target := tid(t.Name() + "-target")
+	require.NoError(t, f.store.CreateUser(ctx, &store.User{
+		ID: target, Email: target + "@test.com", DisplayName: "Target", Role: "member", Status: "active",
+	}))
+
+	svcCtx := mmrServiceCtx(hubAdminID, hubAdminID+"@test.com")
+	_, decision := f.srv.membershipService.SetMemberRoles(svcCtx, SetMemberRolesRequest{
+		ProjectID: f.otherProjectID, PrincipalType: "user", PrincipalID: target,
+		Actor:          mmrServiceIdentity(hubAdminID, hubAdminID+"@test.com"),
+		DesiredRoleIDs: []string{f.memberRD.ID},
+	})
+	require.NotNil(t, decision)
+	assert.Equal(t, ErrCodeTargetRoleProtected, decision.DenialCode, "a hub admin should reach the delegation ceiling on a NEW built-in grant, not the entry gate: %+v", decision)
+	if assert.NotNil(t, decision.Details) {
+		assert.Equal(t, f.memberRD.ID, decision.Details["roleDefinitionId"])
+	}
+	assert.Empty(t, mmrBindingsFor(t, f.store, "user", target, f.otherProjectID), "nothing written on a refused new built-in grant")
+}
+
+// TestSetMemberRoles_HubAdminBuiltInUpgrade_CeilingRefused covers a built-in
+// upgrade swap (plan0.BuiltInChange set, new level > old level, so
+// needsCanDelegate is computed rather than defaulted): a hub admin with no
+// project role of their own on f.otherProjectID cannot upgrade an existing
+// member to admin. Forcing needsCanDelegate = false on this path makes this
+// test fail the same way.
+func TestSetMemberRoles_HubAdminBuiltInUpgrade_CeilingRefused(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+	hubAdminID := tid(t.Name() + "-hubadmin")
+	require.NoError(t, f.store.CreateUser(ctx, &store.User{
+		ID: hubAdminID, Email: hubAdminID + "@test.com", DisplayName: "Hub Admin", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, f.store, hubAdminID)
+	mmrSeedHubAdmin(t, f.store, hubAdminID)
+
+	target := tid(t.Name() + "-target")
+	createRS1UserWithRole(t, f.store, target, target+"@test.com", f.otherProjectID, store.ProjectRoleMember)
+	before := mmrBindingsFor(t, f.store, "user", target, f.otherProjectID)
+	require.Len(t, before, 1)
+	memberBindingID := before[0].ID
+
+	svcCtx := mmrServiceCtx(hubAdminID, hubAdminID+"@test.com")
+	_, decision := f.srv.membershipService.SetMemberRoles(svcCtx, SetMemberRolesRequest{
+		ProjectID: f.otherProjectID, PrincipalType: "user", PrincipalID: target,
+		Actor:          mmrServiceIdentity(hubAdminID, hubAdminID+"@test.com"),
+		DesiredRoleIDs: []string{f.adminRD.ID},
+	})
+	require.NotNil(t, decision)
+	assert.Equal(t, ErrCodeTargetRoleProtected, decision.DenialCode, "a hub admin should reach the delegation ceiling on a built-in UPGRADE swap, not the entry gate: %+v", decision)
+	if assert.NotNil(t, decision.Details) {
+		assert.Equal(t, f.adminRD.ID, decision.Details["roleDefinitionId"])
+	}
+
+	after := mmrBindingsFor(t, f.store, "user", target, f.otherProjectID)
+	require.Len(t, after, 1)
+	assert.Equal(t, memberBindingID, after[0].ID, "the member binding must survive a refused upgrade, unchanged")
+	assert.Equal(t, f.memberRD.ID, after[0].RoleDefinitionID)
+	assert.Empty(t, mmrAuditRows(t, f.store, f.otherProjectID), "no audit rows on a refused upgrade")
+}
+
 func TestSetMemberRoles_HubOverride_DemotionOwnerToMemberAllowed(t *testing.T) {
 	f := setupMMRFixture(t)
 	ctx := context.Background()
