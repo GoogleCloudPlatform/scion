@@ -482,6 +482,11 @@ func TestStopAllAgents_GroupProjectMember_StopsOnlyOwnAgents(t *testing.T) {
 	a, err := s.GetAgent(ctx, tid("alice-agent"))
 	require.NoError(t, err)
 	assert.Equal(t, string(state.PhaseRunning), a.Phase)
+
+	// The project agent list does not advertise stop_all to a member whose
+	// role comes from a group binding.
+	assert.NotContains(t, projectAgentListActions(t, srv, bob, project.ID), "stop_all",
+		"group-derived project member should not have stop_all in scope capabilities")
 }
 
 func TestStopAllAgents_InactiveMemberBinding_Forbidden(t *testing.T) {
@@ -583,6 +588,11 @@ func TestStopAllAgents_GroupProjectAdmin_StopsAllAgents(t *testing.T) {
 	assert.Equal(t, "all", resp.Scope)
 	assert.Equal(t, 2, resp.Stopped)
 	assertStopAllAgentPhase(t, s, state.PhaseStopped, alice, bob)
+
+	// The project agent list advertises stop_all to an admin whose role
+	// comes from a group binding.
+	assert.Contains(t, projectAgentListActions(t, srv, bob, project.ID), "stop_all",
+		"group-derived project admin should have stop_all in scope capabilities")
 }
 
 func TestStopAllAgents_CustomProjectRoleOnly_Forbidden(t *testing.T) {
