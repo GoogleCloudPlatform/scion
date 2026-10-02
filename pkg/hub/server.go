@@ -1654,6 +1654,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// gates whether this server currently admits dev_local authority at
 	// all. See devLocalAuthorityEnabled's doc comment (devauth.go).
 	srv.authzService.setDevLocalAuthorityEnabled(cfg.DevAuthToken != "")
+	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
 
 	// Wire decision audit emitter
 	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))

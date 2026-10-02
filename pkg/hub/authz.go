@@ -347,6 +347,23 @@ const (
 	// failure (Step 7c, detected after Step 9 because the failure there
 	// is folded into a deny-all restriction rather than an early return).
 	DenyCauseResolutionError DenyCause = "resolution_error"
+
+	// DenyCauseCeilingUnrecorded marks a deny where the provenance or
+	// ceiling version is not one this binary interprets, or an unrecorded
+	// hop meets a permission that requires recorded provenance.
+	DenyCauseCeilingUnrecorded DenyCause = "ceiling_unrecorded"
+
+	// DenyCauseCeilingEffectExceeded marks a deny where the permission or
+	// requested role lies outside a frozen effect ceiling on the chain.
+	DenyCauseCeilingEffectExceeded DenyCause = "ceiling_effect_exceeded"
+
+	// DenyCauseCeilingResourceMissing marks a deny where a resource a
+	// frozen ceiling refers to does not resolve.
+	DenyCauseCeilingResourceMissing DenyCause = "ceiling_resource_missing"
+
+	// DenyCauseCeilingSourceNotAllowed marks a deny where the source
+	// credential is not accepted as an authority source on this server.
+	DenyCauseCeilingSourceNotAllowed DenyCause = "ceiling_source_not_allowed"
 )
 
 // IsIndeterminate reports whether this deny was caused by a store or
@@ -408,6 +425,13 @@ type AuthzService struct {
 	// through that wiring (e.g. a bare &AuthzService{} in a test) fails
 	// closed.
 	devLocalEnabled bool
+
+	// mintDevAuthOverride mirrors the agent-token mint's dev-auth role
+	// override: when set, mintCandidateScopes raises a role below full to
+	// full before applying the ceiling filter. Set once at server
+	// construction from ServerConfig.DevAuthToken != "". It is separate
+	// from devLocalEnabled and is read only by mintCandidateScopes.
+	mintDevAuthOverride bool
 }
 
 // NewAuthzService creates a new AuthzService.
