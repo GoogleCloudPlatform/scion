@@ -1,21 +1,18 @@
 # Project Log: tz-refactor task 11 — web `time.ts`, effective zone, "Display timezone" card, 24-hour clock
 
-**Date:** 2026-10-02 (updated after review round 6, final)
-**Branch:** `scion/tz-t11`, rebased onto `scion/tz-t12` (ptone/scion#2533) at `318ffc7f` (the upstream Gemini review follow-up on top of `81fd42a4`)
+**Date:** 2026-10-02 (updated after review round 6, final; restacked onto upstream main after tz-refactor task 12 merged)
+**Branch:** `scion/tz-t11`, based on upstream main `28d83ede4e7c5969da4817a144d12adb672de324` (GoogleCloudPlatform/scion). No longer stacked on `scion/tz-t12`.
 **Fork issue:** ptone/scion#2504 (closes). Refs ptone/scion#2457. Refs ptone/scion#1056 (narrowed to its display-timezone half; never closed by this issue).
 **Design:** `design.md` §2.4 ("[decided, D4] Clock and locale", "Enforcement"), §3 A (a), "Fate of the card"; decisions D1, D4; AC4, AC5, AC17 (partial).
 
-## Sequencing: task 11 now depends on task 12 (merge order)
+## Sequencing with tz-refactor task 12 (resolved: task 12 merged upstream)
 
-**Depends on PR ptone/scion#2533 (tz-refactor task 12); that PR merges first.**
+Review round 1 (R1-2) found that task 11's original, independently-judged-small duplication of `browserTimeZone`/`isValidTimeZone`/`listTimeZones` understated the real overlap: both branches added a `<scion-timezone-picker>` at the same file path and custom-element tag, with **incompatible APIs** (`zone-change`/`{value}` vs task 12's `timezone-change`/`{timezone}`, `allow-auto`+`auto-label` vs `empty-label`). tz-em decided task 11 sequences after task 12:
 
-Review round 1 (R1-2) found that task 11's original, independently-judged-small duplication of `browserTimeZone`/`isValidTimeZone`/`listTimeZones` understated the real overlap: both branches add a `<scion-timezone-picker>` at the same file path and custom-element tag, with **incompatible APIs** (`zone-change`/`{value}` vs task 12's `timezone-change`/`{timezone}`, `allow-auto`+`auto-label` vs `empty-label`). That's an add/add conflict neither `tsc` nor the build would catch if resolved wrong. tz-em decided task 11 sequences after task 12 instead of the two proceeding independently:
+- Task 11's own `timezone-picker.ts`/`timezone-picker.test.ts` were deleted; the Display timezone card uses task 12's picker (`empty-label="Auto"`, listens for `timezone-change`, reads `e.detail.timezone`).
+- Task 11's duplicate `browserTimeZone`/`isValidTimeZone`/`listTimeZones` (and their test coverage) were dropped from `time.ts`/`time.test.ts` in favour of task 12's, which are the single source.
 
-- `scion/tz-t11` was rebased onto `origin/scion/tz-t12` at `aa4bfc1f5fddbaeb128a941415f44308ccc525cf`.
-- Task 11's own `timezone-picker.ts`/`timezone-picker.test.ts` were deleted; the Display timezone card now uses task 12's picker (`empty-label="Auto"`, listens for `timezone-change`, reads `e.detail.timezone`).
-- Task 11's duplicate `browserTimeZone`/`isValidTimeZone`/`listTimeZones` (and their test coverage) were dropped from `time.ts`/`time.test.ts` in favour of task 12's, which are now the single source — any future change to those three belongs in task 12's lineage.
-- A corrected PR body leads with the dependency line above, replacing the earlier (inaccurate) "Overlap with tz-refactor task 12" section, which understated the duplication as limited to three helper functions rather than including the picker itself.
-- If task 12 moves again before merge, task 11 rebases again: `git rebase --onto origin/scion/tz-t12 <new-sha>` and force-pushes only `scion/tz-t11` with `--force-with-lease`.
+Task 12 has since merged upstream (GoogleCloudPlatform/scion#2257, squash `26f7f09a`). The task 11 commits were rebased with `git rebase --onto <upstream main> 318ffc7f scion/tz-t11`, so task 12's pre-squash commits dropped out and the branch now sits directly on upstream main `28d83ede`. `git range-diff` against the accepted head `229b5242` shows every commit unchanged except for one test-file hunk position: the round-2 zone-label `describe` block in `chat-message.test.ts` now comes after upstream's new gs:// linkification block (GoogleCloudPlatform/scion#2250) at the end of the file. Its content is identical.
 
 ## What changed
 
@@ -77,6 +74,7 @@ Full review: `gs://scion-xproject-exchange/tz-refactor/out/t11/review-6.md`. Ful
 - `npm run typecheck`: clean.
 - `npx vitest run` (full suite): **128 files / 3569 tests passed**, both at ambient TZ and explicitly under `TZ=Asia/Tokyo` and `TZ=Asia/Kathmandu` — identical pass counts under all three, confirming the `vitest.config.ts` pin holds.
 - `npm run build`: clean.
+- After the restack onto upstream main `28d83ede`: `npm run typecheck` clean; `npx vitest run --maxWorkers=2` **137 files / 3995 tests passed** under both `TZ=Asia/Tokyo` and `TZ=Asia/Kathmandu` (with `SCION_PROJECT*`, `SCION_HUB_*` and `SCION_CREATOR` unset). The count is higher than above because it includes upstream's tests added since.
 - No Go files touched; `golangci-lint`/`go test` not applicable.
 - `npx prettier --check`/`--write` and `npx eslint` run on all files changed in round 6; both clean except 5 pre-existing `explicit-function-return-type` warnings in the editor's `render()` (untouched by this PR) and a pre-existing test-file tsconfig-inclusion parse note (not a new issue).
 - New: `components/shared/access-boundary-schedule-editor.test.ts` (the reviewer's exact late-zone-arrival + edit-the-other-field repro, a displayed-value re-derivation test, an in-progress-edit round-trip test, a detach/reconnect repro, a construct-before-first-connect repro, and — added in round 6 — a no-backing-prop-across-a-detach repro, all verified to fail without their respective fixes); `components/shared/scheduled-event-list.test.ts` (create-dialog label update); a label-update test added to `components/pages/admin-role-bindings.test.ts`. Each new/extended test file was verified to fail when its component's `DisplayZoneController` field (or, for the editor, the `rebaseCachedStrings` fix) is removed.
