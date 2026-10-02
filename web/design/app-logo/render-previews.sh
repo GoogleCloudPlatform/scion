@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Renders a PNG preview sheet for each logo direction in this folder.
+# Renders a PNG preview sheet for each logo SVG in this folder.
 # Each sheet shows 16 px (plus a 6x zoom of the 16 px raster), 32, 180
 # and 512 px on light and dark backgrounds.
 #
@@ -38,7 +38,6 @@ render() {
   echo "$out/$name.png"
 }
 
-render direction-a.svg "Direction A: green tile, white two-leaf sprout"
-render direction-b.svg "Direction B: Scion blue tile, green sprout growing from a branch node"
-render direction-b-small.svg "Direction B, 16/32 px variant: no ring, thicker stem, flat leaves"
-render direction-c.svg "Direction C: slate tile, single bold leaf on a curved stem"
+render logo.svg "logo.svg: app icon tile (direction C)"
+render logo-small.svg "logo-small.svg: 16-48 px variant used for the favicons"
+render logo-maskable.svg "logo-maskable.svg: full-bleed maskable variant"
