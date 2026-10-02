@@ -44,6 +44,7 @@ import {
   LAST_OWNER_REASON,
   NO_PROJECT_ROLE,
   OWNER_ONLY_REMOVE_REASON,
+  REMOVES_ALL_ROLES,
   ROW_LOCKED_REASON,
   TIER_REASON,
   builtInOptionState,
@@ -532,6 +533,7 @@ describe('dialog defaults and validation', () => {
     await el.handleRemoveFromDialog();
 
     expect(showConfirm).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(showConfirm).mock.calls[0][0]).toContain(REMOVES_ALL_ROLES);
     expect(calls()).toEqual([
       {
         method: 'DELETE',
@@ -1246,6 +1248,9 @@ describe('row delete', () => {
     vi.mocked(apiFetch).mockResolvedValueOnce(jsonResponse(204, null));
     await el.handleRemoveRow(BOB);
     expect(showConfirm).toHaveBeenCalledTimes(1);
+    expect(showConfirm).toHaveBeenCalledWith(
+      'Remove user "Bob Admin" from this project? This removes all of their project roles.'
+    );
     expect(calls()).toEqual([
       {
         method: 'DELETE',

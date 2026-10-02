@@ -88,6 +88,7 @@ export const CHANGED_WHILE_EDITING_MESSAGE =
   'This member changed while you were editing; review and save again.';
 export const AUTHORITY_CHANGED_MESSAGE =
   'Your permissions on this project changed while saving. The options were refreshed; review and save again.';
+export const REMOVES_ALL_ROLES = 'This removes all of their project roles.';
 export const CATALOG_REFRESHED_MESSAGE =
   'The list of roles was refreshed; review your selection and save again.';
 
@@ -1243,7 +1244,11 @@ export class ScionProjectMembersEditor extends LitElement {
       return;
     }
     const label = principalLabel(group);
-    if (!(await showConfirm(`Remove ${group.principalType} "${label}" from this project?`))) {
+    if (
+      !(await showConfirm(
+        `Remove ${group.principalType} "${label}" from this project? ${REMOVES_ALL_ROLES}`
+      ))
+    ) {
       return;
     }
 
@@ -1265,7 +1270,7 @@ export class ScionProjectMembersEditor extends LitElement {
     const label = this.dlgDisplayName || this.dlgPrincipalId;
     if (
       !(await showConfirm(
-        `Remove ${this.dlgPrincipalType} "${label}" from this project? This removes all of their project roles.`
+        `Remove ${this.dlgPrincipalType} "${label}" from this project? ${REMOVES_ALL_ROLES}`
       ))
     ) {
       return;
@@ -1561,7 +1566,7 @@ export class ScionProjectMembersEditor extends LitElement {
                       ></sl-icon-button>
                     `
                   : nothing}
-                ${editable || remove.disabled === false
+                ${editable
                   ? html`
                       <sl-tooltip content=${removeTip} ?disabled=${!removeTip}>
                         <sl-icon-button
