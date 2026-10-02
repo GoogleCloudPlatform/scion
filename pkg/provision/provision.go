@@ -2146,7 +2146,20 @@ func WorktreePath(hostPath, agentID string) string {
 //
 // Returns nil when candidate is a genuine worktree of base at the canonical
 // base/worktrees/<name> layout. Returns a descriptive error otherwise.
+//
+// candidate must already be in its exact, Clean-ed form (filepath.Clean(p)
+// == p); a non-canonical spelling (redundant separators, "." or ".."
+// segments, a trailing slash) is refused outright rather than silently
+// normalized. ValidateWorktreeForBase cleans both of its arguments
+// internally before computing the worktree relationship, but this function
+// is the shared JOIN/reuse gate every caller relies on to decide what is
+// actually safe to trust — it must not pass a candidate as valid when the
+// value callers go on to store, compare, or mount is not the identical
+// string that was just checked.
 func IsValidJoinWorktree(base, candidate string) error {
+	if filepath.Clean(candidate) != candidate {
+		return fmt.Errorf("worktree relationship: %q is not in canonical form", candidate)
+	}
 	gitPath := filepath.Join(candidate, ".git")
 	if fi, err := os.Lstat(gitPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("worktree relationship: %s is a symlink, not a regular gitfile", gitPath)

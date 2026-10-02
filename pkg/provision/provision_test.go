@@ -3868,6 +3868,36 @@ func TestIsValidJoinWorktree(t *testing.T) {
 			t.Error("expected a .git file naming the base's own .git directory (rel \"..\") to be rejected")
 		}
 	})
+
+	t.Run("a non-canonical path to an otherwise-real worktree", func(t *testing.T) {
+		// realWorktree itself is genuine and already passes (see "a real
+		// worktree" above). A spelling of the identical real path that is
+		// not already Clean — a trailing separator, or a redundant
+		// "worktrees/../worktrees/<name>" detour — must still be refused:
+		// this function is the shared gate every JOIN/reuse caller trusts,
+		// and the value a caller goes on to store or mount is whatever
+		// string was passed in, not whatever ValidateWorktreeForBase cleaned
+		// internally to compute the relationship.
+		nonCanonical := realWorktree + string(filepath.Separator)
+		if filepath.Clean(nonCanonical) == nonCanonical {
+			t.Fatalf("test setup broken: %q is already canonical", nonCanonical)
+		}
+		if err := IsValidJoinWorktree(base, nonCanonical); err == nil {
+			t.Error("expected a non-canonical (trailing-separator) path to a real worktree to be rejected")
+		}
+
+		// Built by string concatenation, not filepath.Join: Join cleans its
+		// result internally, which would collapse the ".." detour right back
+		// into realWorktree before IsValidJoinWorktree ever saw it.
+		sep := string(filepath.Separator)
+		detour := filepath.Join(base, "worktrees") + sep + ".." + sep + "worktrees" + sep + "agent-1"
+		if filepath.Clean(detour) == detour {
+			t.Fatalf("test setup broken: %q is already canonical", detour)
+		}
+		if err := IsValidJoinWorktree(base, detour); err == nil {
+			t.Error("expected a non-canonical (\"..\"-detour) path to a real worktree to be rejected")
+		}
+	})
 }
 
 // --- SafeGitCommand ---
