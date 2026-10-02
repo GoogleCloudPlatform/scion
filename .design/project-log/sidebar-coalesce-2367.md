@@ -152,7 +152,7 @@ Two further gaps found after the walk above landed:
 
 - **Stale walk on reconnect.** If the chat page disconnects and reconnects
   while a hub-members walk is still in flight, the reconnected view's own
-  `loadHubMembers` call used to just join the in-flight walk rather than
+  `loadHubMembers` call would just join the in-flight walk rather than
   starting its own — but that walk belongs to the old generation and fails
   its own generation check on completion without publishing anything,
   leaving the sidebar empty until the next fallback poll (latent today, since
@@ -173,7 +173,7 @@ Two further gaps found after the walk above landed:
   (no open conversation, same generation), so a stale walk stops requesting
   further pages as soon as the view it was for is gone, instead of running to
   completion for no reason. (A `signal`/abort option was removed from
-  `paginate-all.ts` in the previous pass as unused; this reintroduces an
+  `paginate-all.ts` earlier as unused; this reintroduces an
   equivalent `shouldContinue` option now that there is a real caller for it.)
 
 Also, as consistency/hygiene fixes: `_fetchHubMembersOnce` now takes its
@@ -190,7 +190,7 @@ member load) has no equivalent view guard — a late-arriving project walk can
 still overwrite a different, newer view. This already exists on `main` and is
 tracked as ptone/scion#2564; out of scope here.
 
-### Files changed (this pass)
+### Files changed
 
 | File | Change |
 | --- | --- |
@@ -199,7 +199,7 @@ tracked as ptone/scion#2564; out of scope here.
 | `web/src/components/pages/chat.ts` | Generation-owned in-flight tracking for reconnect; `shouldContinue` wired into both pagination walks; `_fetchHubMembersOnce` takes `generation` as a parameter; doc-comment reword. |
 | `web/src/components/pages/chat-hub-members-coalesce.test.ts` | New reconnect and mid-walk-cancellation tests; cold-mount test reordered to match the router's `pageData` timing. |
 
-### Scenarios covered (tests, this pass)
+### Scenarios covered (tests)
 
 - Reconnecting while a walk is in flight starts a fresh walk for the new view;
   the stale walk completing afterward does not publish over it.
@@ -211,7 +211,7 @@ tracked as ptone/scion#2564; out of scope here.
 
 ## Open-then-close mid-walk publishing a truncated list (2026-10-02)
 
-A further gap in the previous pass's `shouldContinue`/publish-time guard: both
+A further gap in the `shouldContinue`/publish-time guard: both
 only read the *current* value of `v2Conversation`. If a conversation opened
 mid-walk (stopping that walk's users leg, say, at a genuine page boundary —
 the users leg resolves with only the pages fetched so far, by design) and the
@@ -228,15 +228,15 @@ corrected the truncated result until the next periodic poll.
 Fix: `_hubMembersGeneration` is now also bumped whenever `v2Conversation` is
 assigned a truthy value, from the single centralized `updated()` handler for
 `v2Conversation` changes (the same spot that already reports conversation
-changes for desktop notifications) rather than from each of the roughly
-twenty assignment sites — including ones that are not "opening a
+changes for desktop notifications) rather than from each of the many
+assignment sites — including ones that are not "opening a
 conversation" in the user-facing sense, such as a mute toggle or a
 default-agent edit on the conversation already open. A walk started before
 that bump is stale by generation once `updated()` has run and observed the
 open, regardless of what `v2Conversation` itself reads by the time the
 walk's promises settle — so the publish guard discards its result, and
 `loadHubMembers`'s in-flight check (already generation-aware from the
-previous pass's reconnect fix) starts a fresh walk instead of joining the
+reconnect handling) starts a fresh walk instead of joining the
 stale one, which then publishes the complete list. This covers a
 conversation that opens and later closes in two separate Lit update
 batches; a conversation opened and closed again within one batch is a
@@ -255,16 +255,16 @@ checks are necessary; neither subsumes the other.
 
 **Known limitation, still tracked separately:** `loadV2Members` has no
 equivalent view guard at all (see ptone/scion#2564, noted above) — unchanged
-by this pass.
+by this change.
 
-### Files changed (this pass)
+### Files changed
 
 | File | Change |
 | --- | --- |
 | `web/src/components/pages/chat.ts` | `updated()` now bumps `_hubMembersGeneration` when a conversation opens; doc comments on `_hubMembersGeneration`, the coalescing gate, `loadHubMembers`, and `_fetchHubMembersOnce` updated to describe the fix and why the existing `v2Conversation` checks were kept alongside it. |
 | `web/src/components/pages/chat-hub-members-coalesce.test.ts` | New regression test driving the real `loadHubMembers` path for open-then-close mid-walk; new test strengthening `_runHubMembersLoad`'s `finally` ownership check (a stale walk settling after reconnect must not clear the in-flight flag out from under a still-running fresh walk). |
 
-### Scenarios covered (tests, this pass)
+### Scenarios covered (tests)
 
 - Opening then closing a conversation mid-walk does not publish a truncated
   list; a fresh walk started on return to `/chat` publishes the full one, with
@@ -277,7 +277,7 @@ by this pass.
 
 ## Open-then-close within one Lit update batch (2026-10-02)
 
-The previous pass's generation bump runs from `updated()`, which only sees
+The generation bump runs from `updated()`, which only sees
 the *final* value of a batch of `v2Conversation` writes. If a conversation
 is opened and then cleared again before Lit has run that update cycle —
 possible when both writes land in the same microtask drain — `updated()`
@@ -296,14 +296,15 @@ Fix: `paginateAll` now rejects with `PaginationStoppedError` when
 it had accumulated. `_fetchHubMembersOnce`'s publish logic already only acts
 on each leg's `Promise.allSettled` `'fulfilled'` result, so a stopped leg is
 never published, independent of the generation or `v2Conversation` at
-publish time. A new `_hubMembersInFlightStopped` flag records that a leg
-stopped this way; the publish guard also bails out on that flag for *both*
-legs of the attempt, not only the one that stopped — otherwise a single-page
+publish time. `_fetchHubMembersOnce` returns whether a leg of its attempt
+stopped this way (a per-attempt value, see "Per-attempt stopped result"
+below); the publish guard also bails out on it for *both* legs of the
+attempt, not only the one that stopped — otherwise a single-page
 leg whose own `shouldContinue` check had already passed before the
 conversation opened would complete normally and publish once
 `Promise.allSettled` resolves, even though it belongs to the same
 now-defunct attempt as the stopped leg. `_runHubMembersLoad`'s loop treats
-the flag the same as a queued refresh and runs the walk once more, so a
+that result the same as a queued refresh and runs the walk once more, so a
 caller that joined the walk still ends up with a complete list instead of a
 stale one that never gets corrected until the next periodic poll. This
 closes the gap without depending on the relative timing of Lit's update
@@ -317,9 +318,9 @@ does observe it, in either one batch or two.
 ### Disconnect racing a just-scheduled walk
 
 `loadHubMembers` coalesces same-turn callers behind a `queueMicrotask` before
-the actual walk starts. The walk used to read `_hubMembersGeneration` for the
-first time once that queued callback ran, rather than when `loadHubMembers`
-scheduled it. A `disconnectedCallback` landing in between — after the call
+the actual walk starts. If the walk read `_hubMembersGeneration` only once that
+queued callback ran, rather than when `loadHubMembers` scheduled it, a
+`disconnectedCallback` landing in between — after the call
 that scheduled the walk, before its queued callback runs — bumps the
 generation first, so the walk would read the *post-disconnect* value as its
 own, making it believe it was the legitimate walk for the current
@@ -328,16 +329,16 @@ connected. Fix: `loadHubMembers` now captures the generation at schedule
 time and passes it through to the walk, so a disconnect in that window
 correctly leaves the walk stale before it ever issues a request.
 
-### Files changed (this pass)
+### Files changed
 
 | File | Change |
 | --- | --- |
 | `web/src/client/paginate-all.ts` | `shouldContinue` returning false now rejects with a new `PaginationStoppedError` (carrying the partial list) instead of resolving with it. |
 | `web/src/client/paginate-all.test.ts` | Updated the two `shouldContinue`-stops-the-walk tests for the rejection; added coverage for the partial list attached to the rejection. |
-| `web/src/components/pages/chat.ts` | Added `_hubMembersInFlightStopped`; `_fetchHubMembersOnce` sets it when either leg rejects with `PaginationStoppedError`, and its publish guard now also bails out on it — for *both* legs, not only the one that stopped, so a single-page leg whose own `shouldContinue` check already passed before the conversation opened can't publish stale data for an attempt that is about to be re-run; `_runHubMembersLoad`'s loop re-runs on the flag the same as a queued refresh; `loadHubMembers` also forces that re-run on a join, and now captures the generation at schedule time rather than reading it inside the queued callback; doc comments on `_hubMembersGeneration`, `_hubMembersInFlightStopped`, `loadHubMembers`, `_runHubMembersLoad`, and `_fetchHubMembersOnce` updated to describe the fix and reworded to say the generation bumps on any truthy `v2Conversation` assignment, not only on "opening a conversation". |
+| `web/src/components/pages/chat.ts` | `_fetchHubMembersOnce` records when either leg rejects with `PaginationStoppedError`, and its publish guard also bails out on it — for *both* legs, not only the one that stopped, so a single-page leg whose own `shouldContinue` check already passed before the conversation opened can't publish stale data for an attempt that is about to be re-run; `_runHubMembersLoad`'s loop re-runs on it the same as a queued refresh; `loadHubMembers` captures the generation at schedule time rather than reading it inside the queued callback; doc comments on `_hubMembersGeneration`, `loadHubMembers`, `_runHubMembersLoad`, and `_fetchHubMembersOnce` updated to describe the fix and reworded to say the generation bumps on any truthy `v2Conversation` assignment, not only on "opening a conversation". |
 | `web/src/components/pages/chat-hub-members-coalesce.test.ts` | New regression test reproducing the same-Lit-batch open/close truncation and asserting the full list publishes with the expected request count; new regression test isolating the generation check from the stopped-leg handling (both legs single-page, so neither ever stops, yet a conversation opening and closing in two separate update batches must still discard the stale result); new regression test for a walk scheduled just before a disconnect in the same microtask drain, asserting it issues no requests. |
 
-### Scenarios covered (tests, this pass)
+### Scenarios covered (tests)
 
 - Opening and closing a conversation within one Lit update batch, while a
   page fetch is in flight, does not publish a truncated list — the walk
@@ -355,3 +356,55 @@ correctly leaves the walk stale before it ever issues a request.
 - A walk scheduled via `loadHubMembers` immediately before a disconnect in
   the same microtask drain issues no requests and publishes nothing into the
   disconnected page.
+
+## Per-attempt stopped result (2026-10-02)
+
+The stopped state is now a per-attempt value: `_fetchHubMembersOnce` returns
+whether either leg of its own attempt rejected with `PaginationStoppedError`,
+and `_runHubMembersLoad` uses that return value for its re-run decision. With
+a shared field instead, a superseded walk stopping at its next page boundary
+(after a conversation opened and closed, or a disconnect and reconnect) could
+set the field while a fresh walk for the current generation was in flight;
+the fresh walk then discarded its complete result at the publish guard and
+walked both lists again (three users and three agents requests instead of two
+and two in the single-page repro).
+
+- The join path in `loadHubMembers` only queues a trailing walk for
+  `{ refresh: true }`. A stopped attempt re-runs on its own, so a join does
+  not need to force one.
+- The publish guard still skips a completed leg from an attempt whose other
+  leg stopped. That leg's data is for the hub view still on screen, but the
+  attempt is re-run regardless; skipping it avoids publishing that list
+  twice, with the two lists coming from different attempts in between.
+- The `loadHubMembers` doc notes that, because the generation is captured at
+  schedule time, a synchronous call landing after a disconnect in the same
+  microtask drain coalesces into the already-scheduled (pre-disconnect) walk
+  and is dropped with it; the reconnect path reaches `loadHubMembers` only
+  after `initV2` awaits its lazy imports, so this window is not reachable as
+  the code stands.
+
+### Request counts per trigger
+
+Two-page users and agents lists, first users request held so the trigger lands
+mid-walk. Counts are users/agents requests; the same scenarios were run
+against 40a7abed for comparison.
+
+| Trigger | 40a7abed | Now | Published lists |
+| --- | --- | --- | --- |
+| Cold mount | 2/2 | 2/2 | full |
+| Open a conversation, return to `/chat` (separate update batches) | 3/4 | 3/4 | full |
+| Open and close within one update batch | 1/2 | 3/4 | full now; truncated users list at 40a7abed |
+| Disconnect and reconnect | 3/4 | 3/4 | full |
+| Fallback poll, three refresh calls | 4/4 | 4/4 | full (one trailing walk) |
+
+The one difference is the same-batch case: at 40a7abed the stopped users leg
+resolved with its partial list and was published; now it rejects, and the
+attempt re-runs once (one users page from the stopped attempt plus two pages
+each from the re-run).
+
+### Files changed
+
+| File | Change |
+| --- | --- |
+| `web/src/components/pages/chat.ts` | `_fetchHubMembersOnce` returns its attempt's stopped result; `_runHubMembersLoad` uses it; shared stopped field and the join-path clause removed; doc comments updated. |
+| `web/src/components/pages/chat-hub-members-coalesce.test.ts` | Tests for a superseded walk stopping after open/close and after disconnect/reconnect (fresh walk stays at one request per list and publishes); a completed leg is not published from a stopped attempt; a per-trigger request-count table; comments describe current behaviour. |
