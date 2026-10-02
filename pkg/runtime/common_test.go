@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 )
 
@@ -1606,6 +1607,82 @@ func TestNarrowSharerRegistryMounts_LocalDocker(t *testing.T) {
 	}
 }
 
+// TestNarrowSharerRegistryMounts_LocalRealAgentLayout pins the headline local
+// behavior against the REAL local worktree-mode layout, not just a
+// convenient stand-in: pkg/agent.ProvisionAgent's local path puts an agent's
+// worktree at <projectDir>/agents/<agentName>/workspace, and git's own admin
+// directory name for that worktree (the last path element of the gitdir
+// pointer in <workspace>/.git) does not have to match agentName — `git
+// worktree add` appends a numeric suffix on a name collision, so
+// resolveWorktreeAdminName reads the real name from that gitfile rather than
+// assuming filepath.Base(workspace). This test builds exactly that gitfile
+// (naming admin dir "workspace1", distinct from the agent name "agent-1")
+// and confirms the back-link mount follows the resolved name, not the agent
+// name, while the sharer-registry mount is unaffected by any of this.
+func TestNarrowSharerRegistryMounts_LocalRealAgentLayout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot := t.TempDir() // a local base, outside ~/.scion/projects
+	gitDir := filepath.Join(repoRoot, ".git")
+	if err := os.MkdirAll(gitDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The real local layout: <projectDir>/agents/<agentName>/workspace, where
+	// projectDir is <repoRoot>/.scion (config.SelectAgentsRoot's shape).
+	workspace := filepath.Join(repoRoot, ".scion", "agents", "agent-1", "workspace")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The admin dir's resolved name ("workspace1") intentionally differs from
+	// the agent name ("agent-1") — this is what forces resolveWorktreeAdminName
+	// to actually read the gitfile rather than fall back to filepath.Base.
+	adminDir := filepath.Join(gitDir, "worktrees", "workspace1")
+	if err := os.MkdirAll(adminDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(adminDir, "gitdir"), []byte(filepath.Join(workspace, ".git")+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".git"), []byte("gitdir: "+adminDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if isHubManagedWorktreeBase(repoRoot) {
+		t.Fatal("test setup invariant broken: repoRoot must be a local (non-hub-managed) base")
+	}
+
+	args, err := buildCommonRunArgs(RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		RuntimeName:  "docker",
+		RepoRoot:     repoRoot,
+		Workspace:    workspace,
+	})
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+	argStr := strings.Join(args, " ")
+
+	wantBackLink := fmt.Sprintf("-v %s:/repo-root/.git/worktrees/workspace1/gitdir:ro", filepath.Join(adminDir, "gitdir"))
+	if !strings.Contains(argStr, wantBackLink) {
+		t.Errorf("expected the back-link mount to use the resolved admin name %q, got: %s", wantBackLink, argStr)
+	}
+	if strings.Contains(argStr, "worktrees/agent-1/gitdir") {
+		t.Errorf("back-link mount must not use the agent name when the gitfile resolves to a different admin name, got: %s", argStr)
+	}
+
+	sharersDir := filepath.Join(gitDir, "scion-sharers")
+	wantSharers := fmt.Sprintf("-v %s:/repo-root/.git/scion-sharers:ro", sharersDir)
+	if !strings.Contains(argStr, wantSharers) {
+		t.Errorf("expected the sharer-registry mount independent of admin-name resolution, got: %s", argStr)
+	}
+}
+
 func TestNarrowSharerRegistryMounts_SkippedForNonDockerRuntime(t *testing.T) {
 	// Part B stays gated on the same Docker-only runtime check as Part A —
 	// only the isHubManagedWorktreeBase condition differs between them.
@@ -1660,6 +1737,39 @@ func TestNarrowSharerRegistryMounts_SkipsMissingBackLink(t *testing.T) {
 	wantSharers := fmt.Sprintf("-v %s:/repo-root/.git/scion-sharers:ro", filepath.Join(repoRoot, ".git", "scion-sharers"))
 	if !strings.Contains(argStr, wantSharers) {
 		t.Errorf("expected the sharer-registry mount regardless of the back-link file, got: %s", argStr)
+	}
+}
+
+// TestSharerRegistryDirName_MatchesProvisionRegistryLayout is a drift
+// tripwire, not a behavior test: sharerRegistryDirName is a literal
+// duplicating pkg/provision's own (unexported) registry directory name,
+// because that name isn't part of provision's public API. Duplicated
+// literals can silently drift — if provision ever renamed its registry
+// directory, this mount would fail open (silently narrowing nothing) rather
+// than failing loudly. Exercising the real registry write path and asserting
+// the marker lands under sharerRegistryDirName catches that drift here,
+// without changing provision's API.
+func TestSharerRegistryDirName_MatchesProvisionRegistryLayout(t *testing.T) {
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	branch := "shared-branch"
+	worktreePath := provision.WorktreePath(base, "agent-1")
+
+	if err := provision.RegisterSharer(base, "", branch, worktreePath, "agent-1"); err != nil {
+		t.Fatalf("RegisterSharer: %v", err)
+	}
+
+	markerDir := filepath.Join(base, ".git", sharerRegistryDirName)
+	entries, err := os.ReadDir(markerDir)
+	if err != nil {
+		t.Fatalf("expected the sharer registry to write its marker under .git/%s (the exact directory "+
+			"narrowSharerRegistryMounts narrows) — if this fails, pkg/provision's registry directory name "+
+			"and sharerRegistryDirName in this package have drifted apart: %v", sharerRegistryDirName, err)
+	}
+	if len(entries) == 0 {
+		t.Errorf("expected at least one marker file under %s, found none", markerDir)
 	}
 }
 
