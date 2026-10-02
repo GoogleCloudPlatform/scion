@@ -656,17 +656,19 @@ type brokerProjectHeartbeat struct {
 
 // brokerAgentHeartbeat is per-agent status in a heartbeat.
 type brokerAgentHeartbeat struct {
+	// RuntimeTarget is the inventory target that listed the agent.
+	RuntimeTarget string `json:"runtimeTarget,omitempty"`
+
 	Slug            string `json:"slug"`   // Agent's URL-safe identifier (name)
 	Status          string `json:"status"` // Session status (WORKING, THINKING, etc.)
 	Phase           string `json:"phase,omitempty"`
 	Activity        string `json:"activity,omitempty"`
 	ContainerStatus string `json:"containerStatus,omitempty"`
-	Message         string `json:"message,omitempty"`       // Error or status message from agent
-	HarnessAuth     string `json:"harnessAuth,omitempty"`   // Resolved auth method from container labels
-	Profile         string `json:"profile,omitempty"`       // Settings profile used
-	ExitCode        *int   `json:"exitCode,omitempty"`      // Structured exit code from runtime (nil = unknown)
-	ExitReason      string `json:"exitReason,omitempty"`    // Terminal reason: "crashed" or "limits_exceeded"
-	RuntimeTarget   string `json:"runtimeTarget,omitempty"` // Inventory target that listed the agent
+	Message         string `json:"message,omitempty"`     // Error or status message from agent
+	HarnessAuth     string `json:"harnessAuth,omitempty"` // Resolved auth method from container labels
+	Profile         string `json:"profile,omitempty"`     // Settings profile used
+	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
+	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed" or "limits_exceeded"
 }
 
 func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, id string) {
