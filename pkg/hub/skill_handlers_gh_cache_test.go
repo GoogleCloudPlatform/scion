@@ -399,6 +399,131 @@ func TestResolveGitHubSkill_ConcurrentMissesCoalesce(t *testing.T) {
 		"%d concurrent resolutions of the same ref must make exactly one contents lookup", n)
 }
 
+// TestResolveGitHubSkill_FollowerGetsItsOwnURI is the permanent regression
+// test for a flight follower receiving a response built from the leader's
+// raw URI text. computeCacheKey normalises owner/repo case and ref (an
+// omitted ref and "@HEAD" compute the same key), so two callers can share one
+// flight while having asked with different raw spellings. The shared value
+// behind that flight is a cache entry, not a response — each caller must
+// build its own response from its own parsed ghRef after the flight
+// resolves, or a caller gets back a URI it never requested and the broker's
+// router drops the result as "not requested" (and spends a redundant
+// resolution on its own fallback resolver).
+//
+// Covers both spelling differences named in the design: a bare ref vs an
+// explicit "@HEAD", and owner letter case.
+func TestResolveGitHubSkill_FollowerGetsItsOwnURI(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "uri-repo"
+		skillPath = "skills/widget"
+		leaderURI = "gh://" + owner + "/" + repo + "/widget" // bare ref, lowercase owner
+	)
+	followerURIs := []string{
+		"gh://" + owner + "/" + repo + "/widget@HEAD", // bare vs @HEAD
+		"gh://Acme/" + repo + "/widget",               // owner letter case
+	}
+
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	proceed := make(chan struct{})
+	var proceedOnce sync.Once
+	closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/HEAD", func(w http.ResponseWriter, r *http.Request) {
+		enterOnce.Do(func() { close(entered) })
+		select {
+		case <-proceed:
+			_, _ = w.Write([]byte("9999999999999999999999999999999999999999"))
+		case <-r.Context().Done():
+		}
+	})
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	t.Cleanup(closeProceed)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	ghRef, err := agent.ParseGitHubSkillURI(leaderURI)
+	require.NoError(t, err)
+	if ghRef.Ref == "" {
+		ghRef.Ref = "HEAD" // same default resolveGitHubSkill applies internally
+	}
+	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+
+	var joinCount int32
+	allJoined := make(chan struct{})
+	ghFlightJoinHook = func(key string) {
+		if key != cacheKey {
+			return
+		}
+		if atomic.AddInt32(&joinCount, 1) == int32(1+len(followerURIs)) {
+			close(allJoined)
+		}
+	}
+	t.Cleanup(func() { ghFlightJoinHook = nil })
+
+	doneLeader := make(chan struct{})
+	go func() {
+		_, _ = srv.resolveGitHubSkill(context.Background(), leaderURI, project.ID, nil)
+		close(doneLeader)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("leader never started")
+	}
+
+	type followerResult struct {
+		resp *ResolvedSkillResponse
+		err  error
+	}
+	results := make([]followerResult, len(followerURIs))
+	var wg sync.WaitGroup
+	for i, fURI := range followerURIs {
+		i, fURI := i, fURI
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := srv.resolveGitHubSkill(context.Background(), fURI, project.ID, nil)
+			results[i] = followerResult{resp, err}
+		}()
+	}
+
+	select {
+	case <-allJoined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("not every follower reached the leader's flight")
+	}
+
+	closeProceed()
+
+	wgDone := make(chan struct{})
+	go func() { wg.Wait(); close(wgDone) }()
+	select {
+	case <-wgDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("followers did not complete after the flight was released")
+	}
+	<-doneLeader
+
+	for i, fURI := range followerURIs {
+		require.NoError(t, results[i].err, "follower %d (%s)", i, fURI)
+		require.NotNil(t, results[i].resp, "follower %d (%s)", i, fURI)
+		assert.Equal(t, fURI, results[i].resp.URI,
+			"follower %d must get back the URI it asked for, not the leader's raw text", i)
+	}
+}
+
 // TestResolveGitHubSkill_CancelledRequestStartsNoNewFlights is the permanent
 // regression test for the refSHAMemo data race: a per-request memo shared
 // across every gh:// URI in one handleSkillsResolve call must never be
@@ -503,6 +628,39 @@ func TestResolveGitHubSkill_CancelledRequestStartsNoNewFlights(t *testing.T) {
 
 	assert.Equal(t, int64(1), commitCalls.Load(),
 		"URI b must never reach GitHub once its request context is already done")
+}
+
+// TestGHSHAMemo_ConcurrentAccessIsRaceFree drives a single *ghSHAMemo from
+// many goroutines directly, independently of resolveGitHubSkill's ctx guard
+// (see TestResolveGitHubSkill_CancelledRequestStartsNoNewFlights above): that
+// guard is what currently keeps a second flight from ever starting on a dead
+// request, but nothing before this test exercised the memo's own mutex on
+// its own. Several goroutines share each of a handful of keys, so get and
+// set on the same key happen concurrently; without the mutex this is a
+// textbook concurrent map access. Run with -race.
+func TestGHSHAMemo_ConcurrentAccessIsRaceFree(t *testing.T) {
+	memo := newGHSHAMemo()
+	keys := []string{
+		"acme/repo-a@main:public",
+		"acme/repo-b@main:public",
+		"acme/repo-c@main:public",
+		"acme/repo-d@main:public",
+	}
+	const goroutinesPerKey = 5
+
+	var wg sync.WaitGroup
+	for _, key := range keys {
+		key := key
+		for i := 0; i < goroutinesPerKey; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				memo.set(key, "sha-value")
+				_, _ = memo.get(key)
+			}()
+		}
+	}
+	wg.Wait()
 }
 
 // TestResolveGitHubSkill_CancelledLeaderDoesNotFailWaiters is the acceptance
@@ -651,6 +809,118 @@ func TestResolveGitHubSkill_CancelledLeaderDoesNotFailWaiters(t *testing.T) {
 	_, hit, err := srv.ghResolutionStore.Get(context.Background(), cacheKey)
 	require.NoError(t, err)
 	assert.True(t, hit, "the flight's cache write must not be skipped because the leader was cancelled")
+}
+
+// TestResolveGitHubSkill_ShortDeadlineLeaderDoesNotFailWaiter is the
+// acceptance test for bounding the hub's flight by the fixed ceiling only: a
+// leader with a short deadline must not fail a waiter that has none, once
+// that deadline passes. The commits handler honors the request's own
+// context — the flight's detached one, not any one caller's — and only
+// stops early if *that* is cancelled, which a correct bound never does from
+// the leader's deadline alone.
+func TestResolveGitHubSkill_ShortDeadlineLeaderDoesNotFailWaiter(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "short-deadline-repo"
+		skillPath = "skills/widget"
+		uri       = "gh://" + owner + "/" + repo + "/widget@main"
+		commitSHA = "8888888888888888888888888888888888888888"
+	)
+
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	proceed := make(chan struct{})
+	var proceedOnce sync.Once
+	closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
+	handlerCancelled := make(chan struct{}, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		enterOnce.Do(func() { close(entered) })
+		select {
+		case <-proceed:
+			_, _ = w.Write([]byte(commitSHA))
+		case <-r.Context().Done():
+			select {
+			case handlerCancelled <- struct{}{}:
+			default:
+			}
+		}
+	})
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	t.Cleanup(closeProceed)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	ghRef, err := agent.ParseGitHubSkillURI(uri)
+	require.NoError(t, err)
+	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+
+	var joinCount int32
+	waiterJoined := make(chan struct{})
+	ghFlightJoinHook = func(key string) {
+		if key != cacheKey {
+			return
+		}
+		if atomic.AddInt32(&joinCount, 1) == 2 {
+			close(waiterJoined)
+		}
+	}
+	t.Cleanup(func() { ghFlightJoinHook = nil })
+
+	leaderCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	go func() { _, _ = srv.resolveGitHubSkill(leaderCtx, uri, project.ID, nil) }()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("leader's fetch never started")
+	}
+
+	var werr error
+	done := make(chan struct{})
+	go func() {
+		_, werr = srv.resolveGitHubSkill(context.Background(), uri, project.ID, nil)
+		close(done)
+	}()
+
+	select {
+	case <-waiterJoined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter never joined")
+	}
+
+	<-leaderCtx.Done() // let the leader's own deadline pass
+
+	// Give a leader-bound flight (the regression this test targets) a moment
+	// to observe its own deadline and cancel the request, before releasing
+	// proceed — otherwise a short race could let the handler succeed via
+	// proceed before the wrongly-applied deadline had a chance to fire.
+	select {
+	case <-handlerCancelled:
+	case <-time.After(time.Second):
+	}
+
+	closeProceed()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter hung")
+	}
+
+	if werr != nil {
+		t.Fatalf("hub waiter with no deadline failed after the leader's deadline passed: %v", werr)
+	}
 }
 
 // TestResolveGitHubSkill_StaleServesImmediatelyAndRefreshesInBackground is the

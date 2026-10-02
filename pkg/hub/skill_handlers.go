@@ -1966,7 +1966,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		// landed while this call waited to become the flight leader.
 		if s.ghResolutionStore != nil {
 			if entry, hit, gerr := s.ghResolutionStore.Get(ctx, cacheKey); gerr == nil && hit {
-				return buildResolvedSkillResponse(ghRef, entry), nil
+				return entry, nil
 			}
 		}
 
@@ -1988,7 +1988,14 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		if res.Err != nil {
 			return nil, res.Err
 		}
-		return res.Val.(*ResolvedSkillResponse), nil
+		// Build the response from this caller's own ghRef, not whichever
+		// caller happened to lead or already have the result cached: the
+		// flight (and the cache re-check above) share one *GitHubCacheEntry
+		// across every caller keyed to cacheKey, but two callers can reach
+		// the same cacheKey with different raw URI text (a bare ref vs
+		// "@HEAD", or different owner/repo letter case) — the entry carries
+		// none of that, so each caller supplies it from its own parsed ghRef.
+		return buildResolvedSkillResponse(ghRef, res.Val.(*GitHubCacheEntry)), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -2016,7 +2023,7 @@ func (s *Server) refreshGitHubSkillInBackground(cacheKey, rawURI string, ghRef *
 			}
 		}()
 		if entry, hit, gerr := s.ghResolutionStore.Get(ctx, cacheKey); gerr == nil && hit {
-			return buildResolvedSkillResponse(ghRef, entry), nil
+			return entry, nil
 		}
 		return s.fetchAndCacheGitHubSkill(ctx, cacheKey, rawURI, ghRef, token, installID, isBranchRef, nil)
 	})
@@ -2039,11 +2046,18 @@ func (s *Server) refreshGitHubSkillInBackground(cacheKey, rawURI string, ghRef *
 
 // fetchAndCacheGitHubSkill resolves ghRef against the GitHub API (commit SHA,
 // then directory contents), stores the result in the resolution cache under
-// cacheKey, and returns the response. installID is recorded on the cache
+// cacheKey, and returns the stored entry. installID is recorded on the cache
 // entry's TokenScope and must be the same value the triggering request
 // resolved via resolveGitHubToken — both the synchronous path and a
 // background refresh pass it through explicitly, so a refresh can never
 // overwrite an existing row's TokenScope with an empty value.
+//
+// The return value is the cache entry, not a *ResolvedSkillResponse: a
+// response is built from a specific caller's own ghRef (see
+// buildResolvedSkillResponse and its callers), and this result is shared, via
+// the flight, by every caller sharing cacheKey — which can include callers
+// whose raw URI text differs (a bare ref vs "@HEAD", or owner/repo letter
+// case) even though they compute the same cacheKey.
 //
 // Called from within s.ghResolveFlight.DoChan, so concurrent callers sharing
 // cacheKey share one execution — but refSHAMemo is also shared by every
@@ -2059,7 +2073,7 @@ func (s *Server) fetchAndCacheGitHubSkill(
 	token, installID string,
 	isBranchRef bool,
 	refSHAMemo *ghSHAMemo,
-) (*ResolvedSkillResponse, error) {
+) (*GitHubCacheEntry, error) {
 	apiBase := githubAPIBase
 	if s.config.GitHubAppConfig.APIBaseURL != "" {
 		apiBase = s.config.GitHubAppConfig.APIBaseURL
@@ -2126,7 +2140,7 @@ func (s *Server) fetchAndCacheGitHubSkill(
 	slog.InfoContext(ctx, "github_resolution_cache: cache miss, resolved via API",
 		"uri", rawURI, "commit_sha", safeShortSHA(commitSHA), "files", len(fileEntries), "cache_hit", false)
 
-	return buildResolvedSkillResponse(ghRef, &entry), nil
+	return &entry, nil
 }
 
 // buildResolvedSkillResponse constructs a ResolvedSkillResponse from a cache entry.
