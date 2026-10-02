@@ -204,9 +204,11 @@ func (s *Server) listProjectMembers(w http.ResponseWriter, r *http.Request, proj
 	if offset > len(bindings) {
 		offset = len(bindings)
 	}
-	end := offset + limit
-	if end > len(bindings) {
-		end = len(bindings)
+	// Written so a huge limit cannot overflow offset+limit (ptone/scion#2529,
+	// review r2 L-OVF).
+	end := len(bindings)
+	if limit < len(bindings)-offset {
+		end = offset + limit
 	}
 	page := bindings[offset:end]
 

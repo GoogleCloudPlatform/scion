@@ -422,3 +422,27 @@ func TestProjectMembersGrouped_BindingsCarryFlatListEnrichment(t *testing.T) {
 		assert.Equal(t, "Owner", b.CreatedByDisplayName)
 	}
 }
+
+// TestProjectMembersFlat_HugeLimitDoesNotOverflow: on the flat (per-binding)
+// members list, a limit near math.MaxInt must not overflow offset+limit and
+// fail the request (ptone/scion#2529, review r2 L-OVF).
+func TestProjectMembersFlat_HugeLimitDoesNotOverflow(t *testing.T) {
+	f := setupMMRFixture(t)
+	path := "/api/v1/projects/" + f.projectID + "/members"
+	getFlat := func(query string) listProjectMembersResponse {
+		t.Helper()
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, path+query, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body listProjectMembersResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		return body
+	}
+
+	all := getFlat("")
+	require.Greater(t, all.TotalCount, 1)
+
+	body := getFlat("?limit=9223372036854775807&offset=1")
+	assert.Equal(t, all.TotalCount, body.TotalCount)
+	assert.Len(t, body.Items, all.TotalCount-1, "the page runs from offset to the end")
+	assert.Equal(t, all.Items[1:], body.Items)
+}
