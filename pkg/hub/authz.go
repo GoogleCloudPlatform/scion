@@ -348,9 +348,11 @@ const (
 	// is folded into a deny-all restriction rather than an early return).
 	DenyCauseResolutionError DenyCause = "resolution_error"
 
-	// DenyCauseCeilingUnrecorded marks a deny where the provenance or
-	// ceiling version is not one this binary interprets, or an unrecorded
-	// hop meets a permission that requires recorded provenance.
+	// DenyCauseCeilingUnrecorded marks a deny where the source credential's
+	// ceiling version is not one this binary interprets, or a hop whose
+	// provenance is unrecorded or of an unknown version meets a permission
+	// that requires recorded provenance. An unknown ceiling version on a
+	// bounded hop in the walk is reported as DenyCauseCeilingEffectExceeded.
 	DenyCauseCeilingUnrecorded DenyCause = "ceiling_unrecorded"
 
 	// DenyCauseCeilingEffectExceeded marks a deny where the permission or
@@ -358,7 +360,9 @@ const (
 	DenyCauseCeilingEffectExceeded DenyCause = "ceiling_effect_exceeded"
 
 	// DenyCauseCeilingResourceMissing marks a deny where a resource a
-	// frozen ceiling refers to does not resolve.
+	// frozen ceiling refers to does not resolve. Reserved for the
+	// service-account parent-ceiling evaluator: no code path in this
+	// package emits it.
 	DenyCauseCeilingResourceMissing DenyCause = "ceiling_resource_missing"
 
 	// DenyCauseCeilingSourceNotAllowed marks a deny where the source

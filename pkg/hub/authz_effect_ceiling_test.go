@@ -614,6 +614,49 @@ func TestMintCandidateScopesAndFilter(t *testing.T) {
 	assert.Empty(t, got, "a ceiling holding only part of a scope's coverage withholds the scope")
 }
 
+// The dev-auth mint override defaults to off: neither NewAuthzService nor a
+// bare AuthzService raises a role-none agent.
+func TestMintDevAuthOverrideDefaultsOff(t *testing.T) {
+	f := newCeilingFixture(t, "mint-default")
+	a := f.agent(t, "mint-default", AgentRoleNone)
+
+	svc := NewAuthzService(f.store, slog.Default())
+	assert.False(t, svc.mintDevAuthOverride)
+	assert.Empty(t, svc.mintCandidateScopes(a), "NewAuthzService")
+	assert.Empty(t, (&AuthzService{}).mintCandidateScopes(a), "bare AuthzService")
+}
+
+// New wires the dev-auth mint override from ServerConfig.DevAuthToken: off
+// when the token is empty, on when it is set.
+func TestNewWiresMintDevAuthOverrideFromDevAuthToken(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		token string
+		want  bool
+	}{
+		{name: "dev auth off", token: "", want: false},
+		{name: "dev auth on", token: "dev-token-value", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := newTestStore(":memory:")
+			require.NoError(t, err)
+			require.NoError(t, s.Migrate(context.Background()))
+			t.Cleanup(func() { _ = s.Close() })
+
+			srv, err := New(ServerConfig{DevAuthToken: tc.token}, s)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, srv.authzService.mintDevAuthOverride)
+
+			a := &store.Agent{ID: tid("wiring-agent"), AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleNone)}}
+			if tc.want {
+				assert.Equal(t, ScopesForRole(AgentRoleFull), srv.authzService.mintCandidateScopes(a))
+			} else {
+				assert.Empty(t, srv.authzService.mintCandidateScopes(a))
+			}
+		})
+	}
+}
+
 // sourceEffectCeiling rows at the unit level.
 func TestSourceEffectCeilingRows(t *testing.T) {
 	ctx := context.Background()

@@ -218,3 +218,20 @@ func TestDecision_IsIndeterminate_AllowedIsNeverError(t *testing.T) {
 	d := Decision{Allowed: true, DenyCause: DenyCauseResolutionError}
 	assert.False(t, d.IsIndeterminate())
 }
+
+// The delegation-ceiling policy causes are ordinary denies, not
+// indeterminate ones; only DenyCauseCeilingError marks a ceiling fault.
+func TestDecision_IsIndeterminate_CeilingPolicyCausesAreDenies(t *testing.T) {
+	for _, c := range []DenyCause{
+		DenyCauseCeilingUnrecorded,
+		DenyCauseCeilingEffectExceeded,
+		DenyCauseCeilingResourceMissing,
+		DenyCauseCeilingSourceNotAllowed,
+		DenyCauseCeilingOrphaned,
+		DenyCauseCeilingDelegatorLacksPermission,
+	} {
+		assert.False(t, Decision{Allowed: false, DenyCause: c}.IsIndeterminate(), string(c))
+	}
+	assert.True(t, Decision{Allowed: false, DenyCause: DenyCauseCeilingError}.IsIndeterminate(),
+		"control: a ceiling fault is indeterminate")
+}

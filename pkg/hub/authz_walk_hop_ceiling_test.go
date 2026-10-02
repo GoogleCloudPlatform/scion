@@ -295,4 +295,15 @@ func TestHopEffectCeilingDenyOrder(t *testing.T) {
 	unknownKind := &store.DelegationEdge{AuthorityProvenance: provSession, EffectCeiling: store.EffectCeiling{Kind: "other"}}
 	c, _ = hopEffectCeilingDeny(unknownKind, "project.read", other, "a1", false)
 	assert.Equal(t, DenyCauseCeilingEffectExceeded, c, "unknown kind fails closed")
+
+	// A recorded provenance version with an empty (unrecorded) ceiling kind:
+	// the kind switch alone denies the permissions that need recorded
+	// provenance.
+	v1unrec := &store.DelegationEdge{AuthorityProvenance: provSession, EffectCeiling: store.EffectCeiling{}}
+	for _, p := range recordedProvenanceRequiredIDs {
+		c, _ = hopEffectCeilingDeny(v1unrec, p, other, "a1", false)
+		assert.Equal(t, DenyCauseCeilingUnrecorded, c, p)
+	}
+	c, _ = hopEffectCeilingDeny(v1unrec, "project.read", other, "a1", false)
+	assert.Empty(t, c, "a permission outside recordedProvenanceRequired keeps the legacy outcome")
 }
