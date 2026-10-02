@@ -2049,31 +2049,31 @@ func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
 // "" and a nil manager — callers must treat that as "not found in this
 // project" rather than falling back to the bare slug, which would risk
 // acting on a same-slug agent in a different project. Only when no
-// projectID is supplied does it degrade to the original id (and the
-// manager resolveManagerForAgent picks) for backward compatibility
-// (solo/CLI mode, unlabeled containers).
+// projectID is supplied and the lookup genuinely found nothing does it
+// degrade to the original id (and the manager resolveManagerForAgent
+// picks) for backward compatibility (solo/CLI mode, unlabeled containers).
 //
-// In the project-scoped case, a lookup failure other than a genuine
+// With or without a projectID, a lookup failure other than a genuine
 // ErrAgentNotFound (a runtime listing error — including an auxiliary
 // runtime's, when no other runtime matched — or an ambiguous match) is
 // returned to the caller rather than silently treated as "not found" —
 // callers must surface it as a real error instead of reporting a successful
-// stop/restart. ErrAgentNotFound also covers a matching agent record with no
-// resolvable container id (e.g. a malformed or partial runtime entry that
-// carries no container id — nothing addressable to stop): that case is
-// folded into the same "not found in this project" outcome as a genuine
-// no-match. The solo/CLI fallback above predates project scoping and is
-// left unchanged: it already tolerates lookup failures by degrading to the
-// bare id.
+// stop/restart, and must never proceed with the bare slug, which a second,
+// independent lookup could resolve to a same-slug agent in another context
+// (ptone/scion#2549). This matches execCommand and resetAuth.
+// ErrAgentNotFound also covers a matching agent record with no resolvable
+// container id (e.g. a malformed or partial runtime entry that carries no
+// container id — nothing addressable to stop): that case is folded into
+// the same "not found" outcome as a genuine no-match.
 func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) (string, agent.Manager, error) {
 	containerID, mgr, _, err := s.lookupAgentTarget(ctx, id, projectID)
 	if err == nil && containerID != "" {
 		return containerID, mgr, nil
 	}
+	if err != nil && !errors.Is(err, ErrAgentNotFound) {
+		return "", nil, err
+	}
 	if projectID != "" {
-		if err != nil && !errors.Is(err, ErrAgentNotFound) {
-			return "", nil, err
-		}
 		return "", nil, nil
 	}
 	return id, s.resolveManagerForAgent(ctx, id, projectID), nil
