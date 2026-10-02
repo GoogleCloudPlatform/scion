@@ -173,13 +173,14 @@ vet-integration:
 # GNU, BSD/macOS and BusyBox. grep read errors still print to stderr; a
 # find traversal error fails the target. The target also fails if it
 # vets zero modules (e.g. extras/ moved or the build tag was renamed).
+# A symlinked module dir is followed; symlinks inside a module are not.
 vet-integration-extras:
 	@echo "Vetting integration-tagged code in extras modules..."
 	@failed=0; vetted=0; \
 	for gomod in extras/*/go.mod; do \
 		[ -f "$$gomod" ] || continue; \
 		moddir=$$(dirname "$$gomod"); \
-		if ! hits=$$(find "$$moddir" -type f -name '*.go' -exec grep -qE '^//go:build.*[^A-Za-z0-9_]integration([^A-Za-z0-9_]|$$)' {} \; -print); then \
+		if ! hits=$$(find "$$moddir/" -type f -name '*.go' -exec grep -qE '^//go:build.*[^A-Za-z0-9_]integration([^A-Za-z0-9_]|$$)' {} \; -print); then \
 			echo "  FAILED: $$moddir (module discovery)"; failed=$$((failed + 1)); \
 		elif [ -n "$$hits" ]; then \
 			echo "  $$moddir"; \
