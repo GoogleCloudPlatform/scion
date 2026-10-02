@@ -58,6 +58,23 @@ Merge it together with or after tz-refactor task 13 (ptone/scion#2506,
 profile retirement). Otherwise the profile timezone card has no effect for a
 short time.
 
+## Rebase onto upstream main (after part (a) merged)
+
+Part (a) merged upstream as c115304f6. Rebasing part (b) onto it
+conflicted in `pkg/hub/httpdispatcher.go` with upstream changes that landed
+in the meantime:
+- `applyBrokerResponse`: upstream had already added `ctx` (to call
+  `forgetRuntimeTarget`). It now forgets the runtime target first, as
+  upstream does, then returns on a nil response, then relays the broker
+  warnings. `DispatchAgentStart` keeps upstream's `else` branch, which
+  forgets the target when there is no response body.
+- `DispatchFinalizeEnv`: upstream gave it a named `err` return for the
+  credential-revoke `defer`. That named return moved to `finalizeEnv`, which
+  holds the body. `DispatchFinalizeEnv` stays a plain wrapper.
+
+In addition, the TZ-targeted secret drop and the caller-env TZ drop now log
+through `warnTZ` (nil-logger safe), matching the part (a) resolver warnings.
+
 ## Known limitations
 
 - `DispatchAgentRestart` discards the broker response. Its only caller is
