@@ -402,7 +402,7 @@ they run in the PR's GitHub CI.
 Closed every open finding from the fourth review round (0 Critical, 0 High,
 0 Medium, 2 Low, 5 Nit — every round-1, round-2 and round-3 finding was
 independently re-verified closed via 15 mutation probes, and no new
-High/Medium/Critical surfaced, and no live escalation was found). No
+High/Medium/Critical surfaced). No
 declines:
 
 - **R4-1** (Low): the R3-1 discriminator was pinned for the pre-tx
@@ -573,16 +573,31 @@ Review r5 (ptone/scion#2529 P1, mmr-em dispositions): every finding fixed.
 - **R5-3**: the applyRolePlanTx guard matches every identifier reference
   (calls, method values, method expressions), and the enclosing function
   must be the `SetMemberRoles` method on `*ProjectMembershipService`.
-- **R5-4, R5-5, R5-7**: comment accuracy. The PR #127 port header names
+- **R5-4, R5-5, R5-7**: comment accuracy. The miller79/scion PR #127 port header names
   the 9 owner / hub-admin scenarios and the 3 inverted project-admin ones.
   A double citation is removed. The refetch comments state that the
   project lock does not cover role definitions (FYI-2 residual).
 - **R5-6**: five commit messages that cited a design document not in this
   repo were reworded non-interactively over `upstream-main..HEAD`. The
-  PR #127 `Co-authored-by` trailer was preserved.
+  miller79/scion PR #127 `Co-authored-by` trailer was preserved.
 
 Mutation-sensitivity was proven for R5-1 (each branch disabled in turn),
 R5-2 (the not-found mapping disabled) and R5-3 (two probe references in a
 temporary file); details are in the scratchpad closure table. The same
 throttled gate set as round 5 passes on the rebased head. The full
 `make test-hub-sqlite` and `make ci` run in the PR's GitHub CI.
+
+### Final comment-only fixes (R6-1, A r2 items 2-3)
+
+- **R6-1**: every "PR #127" reference in this log and in the round-6 commit
+  message is qualified as "miller79/scion PR #127" (the commit message was
+  reworded in place; trees unchanged).
+- **A r2 item 2**: the `set.go:<n>` and bare `:<n>` line citations in the
+  TOCTOU test comments are replaced with symbol references (the
+  unconditional `sameRoleDefSet(current1, roleDefIDs(current0))` re-check,
+  Phase P's ExpectedRoleIDs precondition, the in-tx ExpectedRoleIDs re-check).
+- **A r2 item 3**: round-relative wording ("Before this round", "Before
+  R3-1", "no live escalation was found") is replaced with timeless
+  statements of what each test pins.
+
+No code, logic or assertion changes.

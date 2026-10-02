@@ -1053,8 +1053,8 @@ func TestSetMemberRoles_Ported_HubAdminCustomProjectRole_UnchangedCeilingBehavio
 // on the two built-in-role code paths in the Phase P CanDelegate loop
 // (project_membership_set.go, the needsCanDelegate guard): a brand-new
 // built-in grant (no BuiltInChange) and a built-in upgrade swap
-// (BuiltInChange set, new level > old level). Before this round neither path
-// had a test that could tell CanDelegate was actually called there: a
+// (BuiltInChange set, new level > old level). These tests pin that
+// CanDelegate runs on both built-in paths: a
 // hub-admin actor holds role_binding.create/delete (so it passes the entry
 // gate) but none of the project-member permission set (agent.create/list/
 // read, gcp_service_account.assign, harness_config.*, template.*), so
@@ -1246,14 +1246,15 @@ func TestSetMemberRoles_Escalation_TOCTOU_AuthoritySourceChangeRefused(t *testin
 
 // TestSetMemberRoles_TOCTOU_PrincipalChangedBetweenPhases is R4-1 (review
 // r4): unlike the actor-authority TOCTOU test above, this drives the OTHER
-// in-tx 409 path — current1 != roleDefIDs(current0) at set.go:918-920 — by
+// in-tx 409 path — the unconditional `sameRoleDefSet(current1,
+// roleDefIDs(current0))` re-check in Phase T — by
 // having a concurrent write (mmrAuthoritySwapStore) land on the PRINCIPAL's
 // own bindings, not the actor's, between Phase P and the lock. No
-// ExpectedRoleIDs is set, so the pre-tx precondition at :784 does not apply
+// ExpectedRoleIDs is set, so Phase P's ExpectedRoleIDs precondition does not apply
 // and the only thing that can catch the change is the unconditional
-// current1-vs-current0 re-check. Before R3-1 this returned the right 409 but
-// the wrong discriminator was indistinguishable from the actor-authority
-// case; this test pins `cause: "principal_roles_changed"` so a regression
+// current1-vs-current0 re-check. This pins
+// `cause: "principal_roles_changed"`, which distinguishes this 409 from the
+// actor-authority 409, so a regression
 // that routed this path through actorAuthorityChangedError (review r4 probe
 // P1) is caught.
 func TestSetMemberRoles_TOCTOU_PrincipalChangedBetweenPhases(t *testing.T) {
@@ -1299,9 +1300,9 @@ func TestSetMemberRoles_TOCTOU_PrincipalChangedBetweenPhases(t *testing.T) {
 
 // TestSetMemberRoles_TOCTOU_PrincipalChangedBetweenPhases_ExpectedRoleIDs is
 // the R4-1 companion that drives the OTHER in-tx principal-changed branch,
-// set.go:915-917 (the ExpectedRoleIDs re-check), rather than the unconditional
+// the in-tx ExpectedRoleIDs re-check in Phase T, rather than the unconditional
 // current1-vs-current0 check above. ExpectedRoleIDs is set to current0's
-// role set, which is still true when Phase P's precondition at :784 runs; the
+// role set, which is still true when Phase P's ExpectedRoleIDs precondition runs; the
 // swapped-in binding only appears once Phase T re-reads under the lock.
 func TestSetMemberRoles_TOCTOU_PrincipalChangedBetweenPhases_ExpectedRoleIDs(t *testing.T) {
 	f := setupMMRFixture(t)
