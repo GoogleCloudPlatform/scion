@@ -352,7 +352,13 @@ func TestGitHubResolutionCache_DelayedWriteFires(t *testing.T) {
 	cache.saveDelay = time.Millisecond
 
 	cache.putEntry("gh://o/r/s@main", ResolvedSkill{Name: "s"}, true)
-	<-flushed
+	// The timeout only turns a missing write into a failure instead of a
+	// hang; the test does not depend on timing to pass.
+	select {
+	case <-flushed:
+	case <-time.After(30 * time.Second):
+		t.Fatal("delayed write did not run")
+	}
 
 	if f := readCacheFile(t, dir); len(f.Entries) != 1 {
 		t.Fatalf("file has %d entries, want 1", len(f.Entries))
@@ -371,11 +377,11 @@ func TestGitHubSkillResolver_CredentialForURI(t *testing.T) {
 	cases := []struct {
 		uri, want string
 	}{
-		{"gh://acme/other/skills/s?token=NAMED", "named-value"},
-		{"gh://acme/other/skills/s?token=MISSING", ""},
-		{"gh://acme/private/skills/s", "repo-value"},
-		{"gh://acme/other/skills/s", "owner-value"},
-		{"gh://someone/repo/skills/s", "default-value"},
+		{"gh://acme/other/s?token=NAMED", "named-value"},
+		{"gh://acme/other/s?token=MISSING", ""},
+		{"gh://acme/private/s", "repo-value"},
+		{"gh://acme/other/s", "owner-value"},
+		{"gh://someone/repo/s", "default-value"},
 		{"not a uri", ""},
 	}
 	for _, tc := range cases {
@@ -388,14 +394,14 @@ func TestGitHubSkillResolver_CredentialForURI(t *testing.T) {
 func TestGitHubDownloadToken(t *testing.T) {
 	base := ContextWithGitHubToken(context.Background(), "default-value")
 	lookup := func(uri string) string {
-		if uri == "gh://acme/private/skills/s?token=NAMED" {
+		if uri == "gh://acme/private/s?token=NAMED" {
 			return "named-value"
 		}
 		return ""
 	}
 	withLookup := ContextWithGitHubCredentialLookup(base, lookup)
 
-	marked := ResolvedSkill{githubCredentialRef: "gh://acme/private/skills/s?token=NAMED"}
+	marked := ResolvedSkill{githubCredentialRef: "gh://acme/private/s?token=NAMED"}
 	if got := gitHubDownloadToken(withLookup, marked); got != "named-value" {
 		t.Errorf("marked skill with lookup: got %q, want named-value", got)
 	}
@@ -405,7 +411,7 @@ func TestGitHubDownloadToken(t *testing.T) {
 	if got := gitHubDownloadToken(withLookup, ResolvedSkill{}); got != "default-value" {
 		t.Errorf("unmarked skill: got %q, want default-value", got)
 	}
-	unknown := ResolvedSkill{githubCredentialRef: "gh://acme/other/skills/s"}
+	unknown := ResolvedSkill{githubCredentialRef: "gh://acme/other/s"}
 	if got := gitHubDownloadToken(withLookup, unknown); got != "default-value" {
 		t.Errorf("lookup with no credential: got %q, want default-value", got)
 	}
@@ -417,7 +423,7 @@ func TestGitHubDownloadToken(t *testing.T) {
 // and holds no credential value.
 func TestGitHubSkillResolver_MarksContentlessCacheHit(t *testing.T) {
 	dir := t.TempDir()
-	const uri = "gh://acme/private/skills/s?token=NAMED"
+	const uri = "gh://acme/private/s?token=NAMED"
 	const credential = "named-value-0123456789"
 	ghRef, err := ParseGitHubSkillURI(uri)
 	if err != nil {
