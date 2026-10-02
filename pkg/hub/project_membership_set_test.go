@@ -37,11 +37,11 @@ import (
 )
 
 // =============================================================================
-// SetMemberRoles hub tests (ptone/scion#2529 P1, design.md §12 P1).
+// SetMemberRoles hub tests (ptone/scion#2529 P1).
 //
 // Ports miller79/scion PR #127's handlers_roles_owner_custom_test.go fixture
 // and all 9 scenarios, re-targeted from POST /admin/role-bindings to
-// PUT/DELETE …/members/principals/{type}/{id} (design.md §7). The D1 ruling
+// PUT/DELETE …/members/principals/{type}/{id}. The D1 ruling
 // (2026-10-01) blocks custom roles for agent principals, so the ported
 // "agent" scenario now expects 400 principal_ineligible instead of 403.
 //
@@ -226,8 +226,7 @@ func TestSetMemberRoles_PutAddsBuiltInAndCustomAtomically(t *testing.T) {
 	assert.Contains(t, addRows[0].AfterSummary+addRows[1].AfterSummary, `"roleKind":"custom"`)
 
 	// F4: the custom-grant row records the CanDelegate result and the
-	// authority (Via) it was granted through (design.md §3.4, addendum §4
-	// item 5) — not just roleKind.
+	// authority (Via) it was granted through — not just roleKind.
 	var customRow *store.MutationAuditRecord
 	for _, r := range addRows {
 		if strings.Contains(r.AfterSummary, `"roleKind":"custom"`) {
@@ -360,7 +359,7 @@ func TestSetMemberRoles_PutChangesBuiltInKeepsCustom(t *testing.T) {
 }
 
 // TestSetMemberRoles_Escalation_BeyondCeilingLeavesOtherBindingsUnapplied is
-// both design.md §12 P1's "atomicity" test and escalation test (i): an owner
+// both an atomicity test and escalation test (i): an owner
 // PUT that creates a custom role beyond the owner's own ceiling must leave
 // EVERY binding in the request untouched, not just the offending one.
 func TestSetMemberRoles_Escalation_BeyondCeilingLeavesOtherBindingsUnapplied(t *testing.T) {
@@ -579,8 +578,8 @@ func TestSetMemberRoles_Escalation_CanDelegatePerBindingNotPerRequest(t *testing
 // system-scope-only (customRoleAuthorityFromStore / F2), so this test cannot
 // yet distinguish "the built-in matrix bypass is system-scope-only" from "no
 // bypass exists at all" — it will start doing real work once a later
-// authority model (design-d3-addendum.md §3 option (b)) gives custom roles a
-// project-scope path. It covers both halves of A2 ("set or remove"): setting
+// authority model gives custom roles a project-scope path. It covers both
+// halves of A2 ("set or remove"): setting
 // a built-in role, and removing one via DELETE-all.
 // ---------------------------------------------------------------------------
 
@@ -725,9 +724,8 @@ func TestSetMemberRoles_Eligibility_CustomForAgentRejected(t *testing.T) {
 // (review r1): D1 (new custom roles blocked for agent principals) applies to
 // EVERY actor, including the hub role_binding.* override — not just the
 // owner the sibling test above exercises. principalEligibleForRole runs
-// before any actor-authority check (design-d3-addendum.md D1 / §4 item 6),
-// so the hub-override actor gets the same 400 principal_ineligible, never a
-// 403.
+// before any actor-authority check (ptone/scion#2529 acceptance D1), so the
+// hub-override actor gets the same 400 principal_ineligible, never a 403.
 func TestSetMemberRoles_Eligibility_CustomForAgentRejected_HubOverride(t *testing.T) {
 	f := setupMMRFixture(t)
 	ctx := context.Background()
@@ -841,14 +839,14 @@ func TestSetMemberRoles_CredentialGate_RejectsUAT(t *testing.T) {
 }
 
 // TestSetMemberRoles_CredentialGate_RejectsAgentToken is L3 (review r1):
-// design.md §12 P1 / acceptance 7 list "UAT or agent token -> 403
-// credential_insufficient" for this endpoint, but only the UAT half was
-// tested. A real agent JWT authenticates to an AgentIdentity, which is not a
-// UserIdentity; the handler now checks that before calling s.authorize (no
-// permission in the registry maps project.manage to any agent scope, so an
-// agent could never pass that check anyway) and returns the same
-// credential_insufficient code a UAT gets, not a generic authorization
-// denial.
+// the acceptance criteria (ptone/scion#2529 acceptance 7) list "UAT or agent
+// token -> 403 credential_insufficient" for this endpoint, but only the UAT
+// half was tested. A real agent JWT authenticates to an AgentIdentity, which
+// is not a UserIdentity; the handler now checks that before calling
+// s.authorize (no permission in the registry maps project.manage to any
+// agent scope, so an agent could never pass that check anyway) and returns
+// the same credential_insufficient code a UAT gets, not a generic
+// authorization denial.
 func TestSetMemberRoles_CredentialGate_RejectsAgentToken(t *testing.T) {
 	f := setupMMRFixture(t)
 	ctx := context.Background()
@@ -900,6 +898,10 @@ func TestSetMemberRoles_Precondition_Mismatch(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), ErrCodeMembershipChanged)
 	assert.Contains(t, rec.Body.String(), "currentRoleDefinitionIds")
+	// R3-1 (review r3): this precondition path is a genuine principal-roles
+	// change, unlike the actor-authority-change path (see the TOCTOU test
+	// below), so it must carry the OTHER discriminator value.
+	assert.Contains(t, rec.Body.String(), `"cause":"`+causePrincipalRolesChanged+`"`)
 }
 
 func TestSetMemberRoles_Precondition_ExpectEmptyAgainstExistingMember(t *testing.T) {
@@ -932,8 +934,8 @@ func mmrSeedHubAdmin(t *testing.T, s store.Store, userID string) {
 // mmrServiceCtx builds a context carrying an interactive identity for a
 // DIRECT ProjectMembershipService.SetMemberRoles call. The hub-override
 // tests below call the service directly rather than through PUT, because the
-// HTTP entry gate on this endpoint is project.manage (design.md §3.1) and
-// hub-admin does NOT hold project.manage (seed.go hubAdminPermissionIDs) —
+// HTTP entry gate on this endpoint is project.manage and hub-admin does NOT
+// hold project.manage (seed.go hubAdminPermissionIDs) —
 // exactly like the existing AddMember/RemoveMember hub-override logic, whose
 // own tests (rs5_global_admin_governance_test.go, rs5_r2_hardening_test.go)
 // also call the service directly rather than through the project.manage-
@@ -1104,6 +1106,12 @@ func TestSetMemberRoles_Escalation_TOCTOU_AuthoritySourceChangeRefused(t *testin
 	require.NotNil(t, decision, "the grant must not silently commit under a changed authority source")
 	assert.Equal(t, ErrCodeMembershipChanged, decision.DenialCode, "%+v", decision)
 	assert.Equal(t, http.StatusConflict, decision.HTTPStatus)
+	// R3-1 (review r3): this is the ACTOR's authority changing, not the
+	// principal's role set (f.member's own bindings never changed), so the
+	// discriminator must say so — a P3 Add-mode client that saw
+	// "principal_roles_changed" here would wrongly report "already a member".
+	require.NotNil(t, decision.Details, "%+v", decision)
+	assert.Equal(t, causeActorAuthorityChanged, decision.Details["cause"], "%+v", decision)
 
 	for _, b := range mmrBindingsFor(t, realStore, "user", f.member.ID, f.projectID) {
 		assert.NotEqual(t, f.withinCeiling.ID, b.RoleDefinitionID, "the custom grant must not have committed")
@@ -1239,7 +1247,7 @@ func TestSetMemberRoles_Concurrency_ConflictingPUTs(t *testing.T) {
 	// R2-8 (review r2): §12 P1 requires that one of the two conflicting
 	// requests succeeds, not merely that neither returns an unexpected code —
 	// the lock must serialize them, not reject both.
-	assert.Contains(t, codes, http.StatusOK, "exactly one of the two conflicting PUTs must succeed (§12 P1), got codes %v", codes)
+	assert.Contains(t, codes, http.StatusOK, "at least one of the two conflicting PUTs must succeed (§12 P1); got %v", codes)
 
 	// Whatever the final state, the D4 invariant (at most one built-in
 	// binding per principal per project) must hold.

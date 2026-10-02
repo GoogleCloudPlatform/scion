@@ -23,7 +23,7 @@ import (
 )
 
 // =============================================================================
-// planRoleSet unit tests (ptone/scion#2529 P1, design.md §12 P1).
+// planRoleSet unit tests (ptone/scion#2529 P1).
 //
 // These are pure-function tests: no store, no transaction, no HTTP. They
 // cover the diff algorithm planRoleSet uses to turn (current bindings,
@@ -190,4 +190,89 @@ func TestPlanRoleSet_HasCustomCreateAndRemove(t *testing.T) {
 	plan2 := planRoleSet(current2, defs2, []*store.RoleDefinition{memberDef})
 	assert.False(t, plan2.hasCustomCreate())
 	assert.True(t, plan2.hasCustomRemove(defs2))
+}
+
+// =============================================================================
+// actorAuthorityChanged unit tests (review r3 R3-3).
+//
+// Pure-function table tests for the R2-2 TOCTOU guard's comparison, driving
+// each of the three components (role, hubOverride, per-perm Via)
+// independently so a regression that decouples them from role equality is
+// caught even though no production path can reach that combination today
+// (see the doc comment on actorAuthorityChanged in project_membership_set.go).
+// =============================================================================
+
+func TestActorAuthorityChanged(t *testing.T) {
+	owner := customRoleAuthority{Allowed: true, Via: customRoleAuthorityViaOwner}
+	hubBinding := customRoleAuthority{Allowed: true, Via: customRoleAuthorityViaHub}
+
+	cases := []struct {
+		name string
+		pre  actorAuthoritySnapshot
+		post actorAuthoritySnapshot
+		want bool
+	}{
+		{
+			name: "identical snapshots, no custom perms asked",
+			pre:  actorAuthoritySnapshot{role: store.ProjectRoleOwner, hubOverride: false},
+			post: actorAuthoritySnapshot{role: store.ProjectRoleOwner, hubOverride: false},
+			want: false,
+		},
+		{
+			name: "role changed",
+			pre:  actorAuthoritySnapshot{role: store.ProjectRoleOwner, hubOverride: false},
+			post: actorAuthoritySnapshot{role: "", hubOverride: true},
+			want: true,
+		},
+		{
+			name: "hubOverride changed with role held equal (unreachable in production; defence in depth)",
+			pre:  actorAuthoritySnapshot{role: "", hubOverride: false},
+			post: actorAuthoritySnapshot{role: "", hubOverride: true},
+			want: true,
+		},
+		{
+			name: "Via changed for an asked perm, role and hubOverride held equal (unreachable in production; defence in depth)",
+			pre: actorAuthoritySnapshot{role: "", hubOverride: true,
+				customAuth: map[string]customRoleAuthority{PermRoleBindingCreate: hubBinding}},
+			post: actorAuthoritySnapshot{role: "", hubOverride: true,
+				customAuth: map[string]customRoleAuthority{PermRoleBindingCreate: owner}},
+			want: true,
+		},
+		{
+			name: "same Via for an asked perm",
+			pre: actorAuthoritySnapshot{role: store.ProjectRoleOwner, hubOverride: false,
+				customAuth: map[string]customRoleAuthority{PermRoleBindingCreate: owner}},
+			post: actorAuthoritySnapshot{role: store.ProjectRoleOwner, hubOverride: false,
+				customAuth: map[string]customRoleAuthority{PermRoleBindingCreate: owner}},
+			want: false,
+		},
+		{
+			name: "perm asked pre but not post is skipped (plan1 == plan0 by construction)",
+			pre: actorAuthoritySnapshot{role: store.ProjectRoleOwner, hubOverride: false,
+				customAuth: map[string]customRoleAuthority{PermRoleBindingCreate: owner}},
+			post: actorAuthoritySnapshot{role: store.ProjectRoleOwner, hubOverride: false,
+				customAuth: map[string]customRoleAuthority{}},
+			want: false,
+		},
+		{
+			name: "two perms asked, only the second's Via changed",
+			pre: actorAuthoritySnapshot{role: store.ProjectRoleOwner, hubOverride: false,
+				customAuth: map[string]customRoleAuthority{
+					PermRoleBindingCreate: owner,
+					PermRoleBindingDelete: owner,
+				}},
+			post: actorAuthoritySnapshot{role: store.ProjectRoleOwner, hubOverride: false,
+				customAuth: map[string]customRoleAuthority{
+					PermRoleBindingCreate: owner,
+					PermRoleBindingDelete: hubBinding,
+				}},
+			want: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, actorAuthorityChanged(tc.pre, tc.post))
+		})
+	}
 }
