@@ -30,7 +30,7 @@ func wantFindings(t *testing.T) []string {
 			if err != nil {
 				return err
 			}
-			defer f.Close()
+			defer func() { _ = f.Close() }()
 			rel, _ := filepath.Rel(fixtureRoot, path)
 			sc := bufio.NewScanner(f)
 			for n := 1; sc.Scan(); n++ {
