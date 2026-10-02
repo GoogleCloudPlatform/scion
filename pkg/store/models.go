@@ -1326,8 +1326,22 @@ type ListOptions struct {
 	// Stores reject a cursor whose binding does not match.
 	CursorBinding string
 	Labels        map[string]string // Label selectors
-	SortBy        string            // Sort field (interpretation is store-specific)
-	SortDir       string            // Sort direction: "asc" or "desc" (default depends on field)
+	// SortBy and SortDir select the agent list's sorted mode: "created" or
+	// "updated", with "asc" or "desc". Empty SortBy is the legacy path
+	// (ORDER BY created DESC, id DESC), which AgentStore.ListAgents leaves
+	// byte-identical to today. Unknown non-empty values fail closed with
+	// ErrInvalidInput.
+	SortBy  string // Sort field (interpretation is store-specific)
+	SortDir string // Sort direction: "asc" or "desc" (default depends on field)
+	// SortCursor is the decoded v2 sorted-mode position, consulted only
+	// when SortBy is non-empty, in place of Cursor: the caller decodes and
+	// validates the opaque cursor itself via store.DecodeAgentCursor before
+	// any store call, so this carries the already-trusted position rather
+	// than requiring the store to decode an opaque string a second time.
+	// nil means page 0. A non-empty Cursor in sorted mode is rejected with
+	// ErrInvalidInput. CursorBinding above is still consulted in sorted
+	// mode, to mint NextCursor via store.EncodeAgentCursor.
+	SortCursor *AgentCursor
 }
 
 // ListResult is a generic result container for list operations.
