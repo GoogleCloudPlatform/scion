@@ -363,3 +363,62 @@ func TestProjectMembersGrouped_MatchesPutResponseGroup(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, string(want), string(gotJSON))
 }
+
+// TestProjectMembersGrouped_BindingsCarryFlatListEnrichment: every binding
+// in every grouped item, and every binding in the PUT principal response,
+// is the flat-list item with the same id. The flat list is pinned to the
+// legacy shape independently (NoGroupByIsByteCompatiblePlusRoleKind), so
+// this guards the shared group builder's per-binding enrichment
+// (principalDisplayName, createdByDisplayName, roleName, source, roleKind)
+// for both the grouped GET and the PUT.
+func TestProjectMembersGrouped_BindingsCarryFlatListEnrichment(t *testing.T) {
+	f := setupMMRFixture(t)
+	target := grpUser(t, f.store, t.Name()+"-target", "Target")
+	rec := putMemberRoles(t, f.srv, f.owner, f.projectID, "user", target.ID, []string{f.withinCeiling.ID, f.adminRD.ID}, &[]string{})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var put projectMemberGroupMutationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &put))
+
+	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodGet, "/api/v1/projects/"+f.projectID+"/members?limit=500", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var flat struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &flat))
+	flatByID := make(map[string]string, len(flat.Items))
+	for _, raw := range flat.Items {
+		var item struct {
+			ID string `json:"id"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &item))
+		flatByID[item.ID] = string(raw)
+	}
+
+	assertMatchesFlat := func(where string, bindings []projectMemberInfo) int {
+		for _, b := range bindings {
+			want, ok := flatByID[b.ID]
+			require.True(t, ok, "%s: binding %s is in the flat list", where, b.ID)
+			got, err := json.Marshal(b)
+			require.NoError(t, err)
+			assert.JSONEq(t, want, string(got), "%s: binding %s equals its flat-list item", where, b.ID)
+		}
+		return len(bindings)
+	}
+
+	grouped := getGroupedMembers(t, f, f.owner, "&limit=500")
+	seen := 0
+	for _, g := range grouped.Items {
+		seen += assertMatchesFlat("grouped "+g.PrincipalType+":"+g.PrincipalID, g.Bindings)
+	}
+	assert.Equal(t, len(flat.Items), seen, "grouped bindings cover the flat list exactly")
+
+	require.Len(t, put.Bindings, 2)
+	assertMatchesFlat("PUT response", put.Bindings)
+
+	// The enrichment under test is non-empty here, so a dropped field
+	// cannot pass as an omitted empty one.
+	for _, b := range put.Bindings {
+		assert.Equal(t, "Target", b.PrincipalDisplayName)
+		assert.Equal(t, "Owner", b.CreatedByDisplayName)
+	}
+}
