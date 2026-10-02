@@ -150,9 +150,12 @@ func (m *mockManager) List(ctx context.Context, filter map[string]string) ([]api
 	if m.listErr != nil {
 		return nil, m.listErr
 	}
-	// Honor a scion.name filter as real runtimes do (they filter on that
-	// label), so a slug lookup against a multi-agent fixture resolves to
-	// the one matching agent instead of an ambiguous match.
+	// Honor a scion.name filter so a slug lookup against a multi-agent
+	// fixture resolves to the one matching agent instead of an ambiguous
+	// match. Real docker and k8s runtimes filter on the scion.name label
+	// only; the Name match here stands in for that label on unlabelled
+	// fixtures (such as newTestServer's), where real runtimes would have
+	// filled Name from the label.
 	if name, ok := filter["scion.name"]; ok {
 		var out []api.AgentInfo
 		for _, a := range m.agents {

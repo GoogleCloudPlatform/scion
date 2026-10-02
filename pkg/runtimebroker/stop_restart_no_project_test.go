@@ -185,3 +185,24 @@ func TestRestartAgent_NoProjectID_SingleMatchStopsThenStarts(t *testing.T) {
 		t.Errorf("Start calls = %d, want 1", mgr.StartCalls())
 	}
 }
+
+func TestRestartAgent_NoProjectID_NotFoundStopsBareSlugThenStarts(t *testing.T) {
+	// A genuine not-found with no project ID keeps the solo/CLI behaviour:
+	// the restart stops the bare slug and then starts the agent.
+	mgr := &filteringMockManager{}
+	srv := newTestServerWithManager(t, mgr)
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d (%s)", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	if mgr.StopCalls() != 1 || mgr.LastStopAgentID() != "coordinator" {
+		t.Errorf("Stop calls = %d, target = %q; want 1 call on the bare slug", mgr.StopCalls(), mgr.LastStopAgentID())
+	}
+	if mgr.StartCalls() != 1 {
+		t.Errorf("Start calls = %d, want 1", mgr.StartCalls())
+	}
+}
