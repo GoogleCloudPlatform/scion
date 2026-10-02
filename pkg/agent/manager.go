@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -1023,15 +1024,44 @@ func (m *AgentManager) sendKeysCore(ctx context.Context, scope keysScope, agentS
 	script := sendKeysScript(keysTarget, keys)
 	cmd := []string{"tmux", "source-file", "-"}
 	if _, err := m.Runtime.ExecWithStdin(sendCtx, target.ContainerID, cmd, strings.NewReader(script)); err != nil {
-		// %v, not %w: once this call has been made, a failure is ambiguous
-		// (the tmux command may have partially run), never "proven not to
-		// have started" — see ErrKeysNotStarted's doc comment for why
-		// nothing this error wraps may be reachable via errors.Is from this
-		// return value, however the underlying backend built it.
-		return fmt.Errorf("failed to send keys to agent '%s': %v", target.Name, err)
+		// Not %w, and not %v of err itself: once this call has been made, a
+		// failure is ambiguous (the tmux command may have partially run),
+		// never "proven not to have started" — see ErrKeysNotStarted's doc
+		// comment for why nothing this error wraps may be reachable via
+		// errors.Is from this return value, however the underlying backend
+		// built it. Separately, err.Error() is never embedded here either:
+		// today's backends only wrap a process's exit status into it, but
+		// SendKeys must not rely on that — a backend whose error text ever
+		// carried caller-supplied content (the keys payload, contract §5)
+		// must not have it surface through this return value, which a
+		// local-mode caller (cmd/keys.go) prints to the user. Only a fixed
+		// message plus a sanitized, content-free error class is reported.
+		return fmt.Errorf("failed to send keys to agent '%s': delivery failed (%s)", target.Name, sendKeysDeliveryErrorClass(err))
 	}
 
 	return nil
+}
+
+// sendKeysDeliveryErrorClass classifies a keys delivery failure into a
+// fixed, content-free label for sendKeysCore's error message — never the
+// error's own text, which may carry caller-supplied content. It
+// distinguishes only the shapes useful for diagnostics without risking a
+// leak: a context cancellation or deadline (the admission window elapsing
+// mid-call), an *exec.ExitError's exit code (a process that ran and exited
+// non-zero — the status only, never its output), or a generic fallback for
+// anything else.
+func sendKeysDeliveryErrorClass(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "context_canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "context_deadline_exceeded"
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return fmt.Sprintf("exit_status_%d", exitErr.ExitCode())
+	}
+	return "delivery_failed"
 }
 
 // resolveKeysTarget resolves the single container sendKeysCore must act on

@@ -39,6 +39,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -989,6 +991,116 @@ func TestHandleProjectBroadcast_RawPlainConflict(t *testing.T) {
 	assert.Equal(t, string(MessageDenialRawPlainConflict), errResp.Error.Details["reason"])
 }
 
+// structTypeHasRawField reports whether t (a struct type) has any field
+// named "Raw" or carrying a JSON tag matching "raw" case-insensitively
+// (encoding/json's own matching rule — see
+// TestHandleBrokerInbound_RawCaseVariant_Rejected's doc comment). It does
+// not recurse into nested/embedded struct fields: every type this is used
+// on is a flat top-level request struct.
+func structTypeHasRawField(t reflect.Type) bool {
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if strings.EqualFold(f.Name, "raw") {
+			return true
+		}
+		tag := f.Tag.Get("json")
+		name := strings.Split(tag, ",")[0]
+		if name != "" && name != "-" && strings.EqualFold(name, "raw") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestOutboundMessageRequest_NoRawFieldDecoded covers
+// a cheap regression pin, by reflection, that OutboundMessageRequest (the
+// agent-to-user / agent-to-agent outbound path used for native web chat
+// delivery and notifications alike — handlers_agent_messaging.go's doc
+// comment on the type explains this is a deliberate decision, not an
+// oversight: raw keystroke delivery only has defined semantics for the
+// *inbound*, single-agent DM shape) has no "raw"-tagged or "Raw"-named
+// field at all, so a caller-supplied "raw" key is dropped by ordinary JSON
+// decoding as an unrecognized field rather than silently taking effect if a
+// future change ever added a differently-named field encoding.Raw/Keys.
+//
+// MessageRequest is checked too, as a negative control: it legitimately has
+// a Raw field (the inbound DM shape raw guards in this file protect), so
+// this reflection check must find it there — proving the helper actually
+// detects a Raw field when one exists, not just when it's absent.
+func TestOutboundMessageRequest_NoRawFieldDecoded(t *testing.T) {
+	if structTypeHasRawField(reflect.TypeOf(OutboundMessageRequest{})) {
+		t.Error("OutboundMessageRequest must have no Raw field or raw-tagged field (Phase 4 tombstone pin)")
+	}
+	if !structTypeHasRawField(reflect.TypeOf(MessageRequest{})) {
+		t.Fatal("negative control failed: MessageRequest is expected to have a Raw field; structTypeHasRawField did not find it")
+	}
+}
+
+// TestHandleProjectBroadcast_RawCaseVariantAndMergedDuplicate_Rejected covers
+// a gap: encoding/json's field matching is case-insensitive
+// (so "RAW"/"Raw" already match the StructuredMessage.Raw field's "raw" tag
+// — this locks that in rather than relying on it being incidental), and a
+// duplicate top-level "structured_message" key. StructuredMessage is a
+// pointer field on BroadcastMessageRequest: encoding/json reuses the
+// already-allocated pointee for a second occurrence of the same key rather
+// than allocating fresh, so fields set by the first object (here, Msg) and
+// fields set by the second (here, Raw) are merged into one value — a caller
+// cannot evade the raw guard by splitting a request across two
+// "structured_message" objects.
+func TestHandleProjectBroadcast_RawCaseVariantAndMergedDuplicate_Rejected(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			"uppercase_RAW",
+			`{"structured_message":{"version":1,"type":"instruction","msg":"hello","RAW":true}}`,
+		},
+		{
+			"titlecase_Raw",
+			`{"structured_message":{"version":1,"type":"instruction","msg":"hello","Raw":true}}`,
+		},
+		{
+			"merged_duplicate_structured_message",
+			`{"structured_message":{"version":1,"type":"instruction","msg":"hello"},"structured_message":{"raw":true}}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			owner := &store.User{
+				ID: tid("broadcast-case-owner-" + tc.name), Email: "broadcast-case-" + tc.name + "@example.com",
+				Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+			}
+			require.NoError(t, s.CreateUser(ctx, owner))
+			ensureHubMembership(ctx, s, owner.ID)
+
+			project := &store.Project{
+				ID: tid("broadcast-case-project-" + tc.name), Slug: "broadcast-case-project-" + tc.name,
+				Name: "Broadcast Case Project", OwnerID: owner.ID, CreatedBy: owner.ID,
+				Created: time.Now(), Updated: time.Now(),
+			}
+			require.NoError(t, s.CreateProject(ctx, project))
+			srv.createProjectMembersGroup(ctx, project)
+
+			httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+project.ID+"/broadcast", strings.NewReader(tc.body))
+			httpReq.Header.Set("Content-Type", "application/json")
+			httpReq = httpReq.WithContext(contextWithIdentity(httpReq.Context(), NewAuthenticatedUser(owner.ID, owner.Email, "Owner", "admin", "cli")))
+
+			rr := httptest.NewRecorder()
+			srv.handleProjectBroadcast(rr, httpReq, project.ID)
+
+			require.Equal(t, http.StatusUnprocessableEntity, rr.Code, "body: %s", rr.Body.String())
+			var errResp ErrorResponse
+			require.NoError(t, json.NewDecoder(rr.Body).Decode(&errResp))
+			assert.Equal(t, string(MessageDenialRawBroadcastUnsupported), errResp.Error.Details["reason"])
+		})
+	}
+}
+
 // TestCreateScheduledEvent_RawPayloadTombstoned proves the advanced scheduled
 // event payload cannot carry a "raw" key through to scheduled dispatch.
 // MessageEventPayload has no Raw field, so this key is rejected explicitly
@@ -1014,15 +1126,259 @@ func TestCreateScheduledEvent_RawPayloadTombstoned(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, events.Items, "rejected raw scheduled payload must not create a scheduled event")
 
-	// raw:false must be tombstoned too — permissive decoding must not treat
-	// an explicit false as "not present, safe to ignore".
-	reqFalse := CreateScheduledEventRequest{
-		EventType: "message",
-		FireIn:    "1h",
-		Payload:   `{"agentName":"test-agent","message":"hello","raw":false}`,
+	// raw:false and raw:null must be tombstoned too — permissive decoding
+	// must not treat an explicit false, or a present-but-null value, as
+	// "not present, safe to ignore".
+	for _, rawVal := range []string{"false", "null"} {
+		recOther := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events",
+			CreateScheduledEventRequest{
+				EventType: "message",
+				FireIn:    "1h",
+				Payload:   `{"agentName":"test-agent","message":"hello","raw":` + rawVal + `}`,
+			})
+		require.Equal(t, http.StatusUnprocessableEntity, recOther.Code, "raw:%s must also be tombstoned; body: %s", rawVal, recOther.Body.String())
 	}
-	recFalse := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", reqFalse)
-	require.Equal(t, http.StatusUnprocessableEntity, recFalse.Code, "raw:false must also be tombstoned; body: %s", recFalse.Body.String())
+}
+
+// TestCreateScheduledEvent_RawTombstone_DispatchAgent covers
+// ptone/scion#2200: the top-level payload "raw" tombstone
+// applies to the "dispatch_agent" event type too, not just "message" — the
+// advanced Payload field is accepted verbatim for dispatch_agent as well
+// (DispatchAgentEventPayload has no Raw field either), and before this fix
+// rejectRawScheduledPayload was only called inside the "message" branch.
+func TestCreateScheduledEvent_RawTombstone_DispatchAgent(t *testing.T) {
+	for _, rawVal := range []string{"true", "false", "null"} {
+		t.Run("raw:"+rawVal, func(t *testing.T) {
+			srv, s, projectID := setupScheduledEventTest(t)
+
+			req := CreateScheduledEventRequest{
+				EventType: "dispatch_agent",
+				FireIn:    "1h",
+				Payload:   `{"agentName":"scheduled-worker","raw":` + rawVal + `}`,
+			}
+			rec := doScheduledEventAgentRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate), projectID, req)
+			require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
+
+			var errResp ErrorResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+			assert.Equal(t, string(MessageDenialRawSchedulingUnsupported), errResp.Error.Details["reason"])
+
+			events, err := s.ListScheduledEvents(context.Background(), store.ScheduledEventFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			assert.Empty(t, events.Items, "rejected raw scheduled payload must not create a dispatch_agent scheduled event")
+		})
+	}
+}
+
+// TestCreateScheduledEvent_RawTombstone_CaseVariantsAndDuplicateKeys covers
+// additional pinned cases: case-insensitive "raw" key spellings
+// (encoding/json's own field matching is case-insensitive, so "RAW"/"Raw"
+// already match the "raw" tag — this locks that behaviour in rather than
+// relying on it being incidental), and a duplicate "raw" key (the decoder
+// keeps the last occurrence; either value still tombstones the payload).
+// Exercised for both supported event types.
+func TestCreateScheduledEvent_RawTombstone_CaseVariantsAndDuplicateKeys(t *testing.T) {
+	messageCases := []struct {
+		name    string
+		payload string
+	}{
+		{"RAW_uppercase", `{"agentName":"test-agent","message":"hi","RAW":true}`},
+		{"Raw_titlecase", `{"agentName":"test-agent","message":"hi","Raw":true}`},
+		{"duplicate_key_last_true", `{"agentName":"test-agent","message":"hi","raw":false,"raw":true}`},
+		{"duplicate_key_last_false", `{"agentName":"test-agent","message":"hi","raw":true,"raw":false}`},
+	}
+	for _, tc := range messageCases {
+		t.Run("message/"+tc.name, func(t *testing.T) {
+			srv, s, projectID := setupScheduledEventTest(t)
+			req := CreateScheduledEventRequest{EventType: "message", FireIn: "1h", Payload: tc.payload}
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", req)
+			require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
+
+			events, err := s.ListScheduledEvents(context.Background(), store.ScheduledEventFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			assert.Empty(t, events.Items)
+		})
+	}
+
+	dispatchAgentCases := []struct {
+		name    string
+		payload string
+	}{
+		{"RAW_uppercase", `{"agentName":"scheduled-worker","RAW":true}`},
+		{"Raw_titlecase", `{"agentName":"scheduled-worker","Raw":true}`},
+		{"duplicate_key_last_true", `{"agentName":"scheduled-worker","raw":false,"raw":true}`},
+	}
+	for _, tc := range dispatchAgentCases {
+		t.Run("dispatch_agent/"+tc.name, func(t *testing.T) {
+			srv, s, projectID := setupScheduledEventTest(t)
+			req := CreateScheduledEventRequest{EventType: "dispatch_agent", FireIn: "1h", Payload: tc.payload}
+			rec := doScheduledEventAgentRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate), projectID, req)
+			require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
+
+			events, err := s.ListScheduledEvents(context.Background(), store.ScheduledEventFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			assert.Empty(t, events.Items)
+		})
+	}
+}
+
+// TestCreateScheduledEvent_MalformedPayload_SanitizedBadRequest covers
+// a pinned case: a non-JSON advanced Payload must be rejected with a
+// sanitized 400 before persistence, for both event types — not silently
+// stored. Before this fix, authorizeScheduledMessageAuthoring's own decode
+// (used only for target resolution) tolerated a parse failure by falling
+// back to convenience fields, and rejectRawScheduledPayload likewise treated
+// a decode failure as "nothing to do here", so a malformed payload reached
+// storage unvalidated.
+func TestCreateScheduledEvent_MalformedPayload_SanitizedBadRequest(t *testing.T) {
+	// A prior version of this fix used only
+	// json.Valid, which accepts a bare array, a bare string, or an object
+	// whose fields don't match the event's payload type -- all three
+	// persisted (201) before this fix, failing only later at fire time.
+	// "non_object_array" and "mistyped_field" pin exactly those two shapes
+	// in addition to the pre-existing syntax-error case.
+	//
+	// A bare `null` payload is also its own shape, not
+	// a decode error -- encoding/json treats JSON null as a no-op for any
+	// destination type, so neither a struct decode nor json.Valid catches
+	// it. "null_payload" and "null_with_surrounding_whitespace" pin that a
+	// top-level null is rejected the same as any other non-object shape.
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{"syntax_error", `{not valid json`},
+		{"non_object_array", `[]`},
+		{"non_object_string", `"x"`},
+		{"mistyped_field", `{"agentName":5}`},
+		{"null_payload", `null`},
+		{"null_with_surrounding_whitespace", "  null  "},
+	}
+
+	for _, tc := range cases {
+		t.Run("message/"+tc.name, func(t *testing.T) {
+			srv, s, projectID := setupScheduledEventTest(t)
+			req := CreateScheduledEventRequest{EventType: "message", FireIn: "1h", Payload: tc.payload}
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", req)
+			require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+			// NotContains against the raw payload
+			// text is vacuous for a payload containing quotes or braces --
+			// any echo would appear JSON-escaped in the response body, so the
+			// literal payload text can never match. Assert against the
+			// JSON-escaped form too, which is what an actual echo would
+			// produce.
+			escaped, err := json.Marshal(tc.payload)
+			require.NoError(t, err)
+			assert.NotContains(t, rec.Body.String(), tc.payload, "the malformed body must not be echoed back")
+			assert.NotContains(t, rec.Body.String(), strings.Trim(string(escaped), `"`), "the malformed body must not be echoed back JSON-escaped either")
+
+			events, err := s.ListScheduledEvents(context.Background(), store.ScheduledEventFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			assert.Empty(t, events.Items, "a malformed payload must not be persisted")
+		})
+
+		t.Run("dispatch_agent/"+tc.name, func(t *testing.T) {
+			srv, s, projectID := setupScheduledEventTest(t)
+			req := CreateScheduledEventRequest{EventType: "dispatch_agent", FireIn: "1h", Payload: tc.payload}
+			rec := doScheduledEventAgentRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate), projectID, req)
+			require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+
+			events, err := s.ListScheduledEvents(context.Background(), store.ScheduledEventFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			assert.Empty(t, events.Items, "a malformed payload must not be persisted")
+		})
+	}
+}
+
+// TestCreateScheduledEvent_RawPlusMistypedField_Returns422NotBadRequest
+// covers: a valid JSON object carrying a "raw" key
+// alongside some unrelated mistyped field must still return 422 (the
+// dedicated raw-tombstone outcome), not 400 (the generic struct-decode
+// outcome) -- the ruling is "valid JSON carrying a raw key stays 422"
+// unconditionally, not only when every other field happens to be
+// well-typed. Before this fix, validateScheduledEventPayloadJSON's struct
+// decode ran before rejectRawScheduledPayload, so these cases collapsed into
+// 400.
+func TestCreateScheduledEvent_RawPlusMistypedField_Returns422NotBadRequest(t *testing.T) {
+	cases := []struct {
+		name      string
+		eventType string
+		payload   string
+	}{
+		{"message_raw_true_mistyped_agentName", "message", `{"raw":true,"agentName":5}`},
+		{"message_raw_true_mistyped_message", "message", `{"raw":true,"message":5,"agentName":"test-agent"}`},
+		{"message_raw_false_mistyped_interrupt", "message", `{"raw":false,"interrupt":"yes","agentName":"test-agent","message":"hi"}`},
+		{"dispatch_agent_raw_true_mistyped_task", "dispatch_agent", `{"raw":true,"agentName":"scheduled-worker","task":5}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, projectID := setupScheduledEventTest(t)
+			req := CreateScheduledEventRequest{EventType: tc.eventType, FireIn: "1h", Payload: tc.payload}
+			var rec *httptest.ResponseRecorder
+			if tc.eventType == "dispatch_agent" {
+				rec = doScheduledEventAgentRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate), projectID, req)
+			} else {
+				rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", req)
+			}
+			require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
+
+			events, err := s.ListScheduledEvents(context.Background(), store.ScheduledEventFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			assert.Empty(t, events.Items, "a raw-tombstoned payload must not be persisted")
+		})
+	}
+}
+
+// TestCreateScheduledEvent_RawProbe_NotRecursive_PlainUnaffected covers a
+// gap: the raw-tombstone controls before this
+// commit only ever used payloads with no "raw"/"plain" keys at all, so
+// nothing would have caught a future change that made the raw probe
+// recursive (rejecting "raw" anywhere in the JSON tree, not just the top
+// level) or that started treating a top-level "plain" key as somehow
+// related to raw scheduling. These are positive controls: production
+// already behaves correctly (confirmed by scratch testing in review), so
+// each case here asserts 201 plus a persisted row, for both event types.
+func TestCreateScheduledEvent_RawProbe_NotRecursive_PlainUnaffected(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{"nested_raw_key_not_top_level", `{"agentName":"test-agent","message":"hi","x":{"raw":true}}`},
+		{"raw_inside_string_value", `{"agentName":"test-agent","message":"use raw:true in your reply"}`},
+		{"top_level_plain_true", `{"agentName":"test-agent","message":"hi","plain":true}`},
+	}
+	for _, tc := range cases {
+		t.Run("message/"+tc.name, func(t *testing.T) {
+			srv, s, projectID := setupScheduledEventTest(t)
+			req := CreateScheduledEventRequest{EventType: "message", FireIn: "1h", Payload: tc.payload}
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", req)
+			require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+			events, err := s.ListScheduledEvents(context.Background(), store.ScheduledEventFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			require.Len(t, events.Items, 1, "a non-recursive, non-plain-colliding payload must be persisted")
+		})
+	}
+
+	dispatchAgentCases := []struct {
+		name    string
+		payload string
+	}{
+		{"nested_raw_key_not_top_level", `{"agentName":"scheduled-worker","x":{"raw":true}}`},
+		{"raw_inside_string_value", `{"agentName":"scheduled-worker","task":"mention raw:true in the PR"}`},
+	}
+	for _, tc := range dispatchAgentCases {
+		t.Run("dispatch_agent/"+tc.name, func(t *testing.T) {
+			srv, s, projectID := setupScheduledEventTest(t)
+			req := CreateScheduledEventRequest{EventType: "dispatch_agent", FireIn: "1h", Payload: tc.payload}
+			rec := doScheduledEventAgentRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate), projectID, req)
+			require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+			events, err := s.ListScheduledEvents(context.Background(), store.ScheduledEventFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			require.Len(t, events.Items, 1, "a non-recursive payload must be persisted")
+		})
+	}
 }
 
 // TestCreateScheduledEvent_NonRawPayloadStillWorks is a negative control: a
