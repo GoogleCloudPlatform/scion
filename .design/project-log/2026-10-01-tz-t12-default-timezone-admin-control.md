@@ -458,6 +458,15 @@ log for detail) at tz-em's instruction. Clean rebase, no conflicts.
   'TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected|TestValidateUserTimezone|TestHandlePutServerConfig_DefaultTimezone'`
   — all pass, including the new `right/`/`posix/` cases in both tables.
 
+## Upstream review follow-up (Gemini, GoogleCloudPlatform/scion#2257)
+
+- `handleSaveError` now shows "Failed to save settings" for a non-object
+  JSON error body (null, bare string, array), like a non-JSON body;
+  previously a bare string or array fell through to "An unexpected error
+  occurred". New vitest cases cover all three shapes. The file-mode
+  `default_timezone` check now reads `*req.DefaultTimezone` (no behaviour
+  change).
+
 ## Deferred / out of scope
 
 - The `ptone/scion#1878` file-mode stale-hint bug (resolved-settings
