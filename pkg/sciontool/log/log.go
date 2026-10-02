@@ -39,10 +39,13 @@ var (
 )
 
 // Timestamp formats t the way sciontool stamps the log files it writes for
-// the system (agent.log and the service lifecycle logs): UTC RFC 3339 with
-// nanoseconds. The agent process keeps its own TZ for the workload; only
-// the log written for the system is UTC, so lines from agents in different
-// zones sort and compare as written.
+// the system (agent.log and the service lifecycle logs): a UTC RFC 3339
+// instant with nanoseconds. The agent process keeps its own TZ for the
+// workload; only the log written for the system is UTC, so lines from
+// agents in different zones name the same instant the same way. The
+// fraction is variable width (time.RFC3339Nano trims trailing zeros), so
+// parse timestamps before comparing or ordering them; do not compare the
+// strings.
 func Timestamp(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
