@@ -3374,7 +3374,7 @@ func TestPutServerConfigDB_DefaultTimezone_Invalid(t *testing.T) {
 // the same denylist the per-user display-timezone preference uses (design
 // §3 A (d)).
 func TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected(t *testing.T) {
-	for _, tz := range []string{"Local", "localtime", "posixrules", "Factory"} {
+	for _, tz := range []string{"Local", "localtime", "posixrules", "Factory", "right/Asia/Tokyo", "posix/Asia/Tokyo"} {
 		t.Run(tz, func(t *testing.T) {
 			srv, _, ops := newTestDBServer(t)
 

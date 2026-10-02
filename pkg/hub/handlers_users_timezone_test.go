@@ -566,6 +566,8 @@ func TestValidateUserTimezone(t *testing.T) {
 		{"localtime is rejected", "localtime", true},
 		{"posixrules is rejected", "posixrules", true},
 		{"Factory is rejected", "Factory", true},
+		{"right/-prefixed name is rejected", "right/Asia/Tokyo", true},
+		{"posix/-prefixed name is rejected", "posix/Asia/Tokyo", true},
 		{"unknown zone is rejected", "Not/AZone", true},
 	}
 	for _, tc := range cases {

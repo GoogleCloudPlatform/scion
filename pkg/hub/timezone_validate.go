@@ -16,6 +16,7 @@ package hub
 
 import (
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -49,9 +50,20 @@ var nonPortableTimezoneNames = map[string]bool{
 var errNonPortableTimezone = errors.New("not an IANA time zone name")
 
 // validateIANATimezone reports whether tz is a real, portable IANA time
-// zone name: rejects nonPortableTimezoneNames (errNonPortableTimezone, since
-// time.LoadLocation itself accepts all four) and otherwise defers to
-// time.LoadLocation.
+// zone name: rejects nonPortableTimezoneNames and any "right/" or "posix/"
+// prefixed name (both errNonPortableTimezone, since time.LoadLocation
+// itself accepts all of them on a host whose zoneinfo tree has those
+// entries) and otherwise defers to time.LoadLocation.
+//
+// "right/" and "posix/" are whole-tree duplicates of the same zone data
+// under a path prefix (right/ with leap seconds baked in, posix/ without),
+// not zone names themselves, and whether they resolve is host-dependent:
+// time.LoadLocation reads the host's zoneinfo directory, so
+// LoadLocation("right/Asia/Tokyo") or LoadLocation("posix/Asia/Tokyo")
+// succeeds wherever that tree exists (review round 4, R4-2) and fails
+// where it doesn't — the same non-portability "Local" and "posixrules" are
+// already rejected for. "Asia/Tokyo" without the prefix is unaffected and
+// still accepted.
 //
 // Does not special-case the empty string: whether "" is valid, and what it
 // means (Auto for the per-user display preference, UTC for the hub-wide
@@ -59,6 +71,9 @@ var errNonPortableTimezone = errors.New("not an IANA time zone name")
 // names in general. Callers check that before calling this.
 func validateIANATimezone(tz string) error {
 	if nonPortableTimezoneNames[tz] {
+		return errNonPortableTimezone
+	}
+	if strings.HasPrefix(tz, "right/") || strings.HasPrefix(tz, "posix/") {
 		return errNonPortableTimezone
 	}
 	if _, err := time.LoadLocation(tz); err != nil {
