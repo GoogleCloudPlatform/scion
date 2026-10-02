@@ -1,6 +1,6 @@
 # Project Log: tz-refactor task 11 — web `time.ts`, effective zone, "Display timezone" card, 24-hour clock
 
-**Date:** 2026-10-02 (updated after review round 4)
+**Date:** 2026-10-02 (updated after review round 5)
 **Branch:** `scion/tz-t11`, rebased onto `scion/tz-t12` (ptone/scion#2533) at `81fd42a4` (wording-only commit on top of `aa4bfc1f`, the SHA round 1's rebase used)
 **Fork issue:** ptone/scion#2504 (closes). Refs ptone/scion#2457. Refs ptone/scion#1056 (narrowed to its display-timezone half; never closed by this issue).
 **Design:** `design.md` §2.4 ("[decided, D4] Clock and locale", "Enforcement"), §3 A (a), "Fate of the card"; decisions D1, D4; AC4, AC5, AC17 (partial).
@@ -60,13 +60,19 @@ Full review: `gs://scion-xproject-exchange/tz-refactor/out/t11/review-4.md`. Ful
 
 All three fixed; none declined.
 
+## Review round 5 — disposition
+
+Full review: `gs://scion-xproject-exchange/tz-refactor/out/t11/review-5.md`. Full per-finding response: `gs://scion-xproject-exchange/tz-refactor/out/t11/review-5-response.md`. One Medium finding, fixed; none declined.
+
+**R5-1:** the R4-1 fix's `_renderedZone` tracking field was captured once at construction and never refreshed in `connectedCallback`, even though `connectedCallback` re-derives `notBeforeLocal`/`expiresAtLocal` in the *current* zone on every (re)connect. `DisplayZoneController`'s listener is only active while connected, so a zone change while the editor is detached — or before it is ever connected — is invisible to `willUpdate` until reconnection; `willUpdate`'s first post-reconnect pass then treated the freshly-current strings as if they were still in the stale construction-time zone, shifting them a **second** time. Reproduced the reviewer's exact repro as a failing test first (`2026-09-24T09:00` instead of `2026-09-24T00:00`), then fixed by setting `this._renderedZone = this.viewerTimeZone;` as the first statement in `connectedCallback`. Two new regression tests (detach+reconnect, and construct-before-connect), both verified to fail without the fix. Added the tracking-invariant sentence to `time.ts`'s header. Audited the rest of the editor's lifecycle (`disconnectedCallback`, the toggle/clear handlers, a later prop update while already connected) for the same class of bug: no other instance found — the only other gap (a prop change while already connected is never re-derived at all) is a distinct, pre-existing, already out-of-scope issue unrelated to zone tracking.
+
 ## Test evidence
 
 - `npm run typecheck`: clean.
-- `npx vitest run` (full suite): **128 files / 3566 tests passed**, both at ambient TZ and explicitly under `TZ=Asia/Tokyo` and `TZ=Asia/Kathmandu` — identical pass counts under all three, confirming the `vitest.config.ts` pin holds.
+- `npx vitest run` (full suite): **128 files / 3568 tests passed**, both at ambient TZ and explicitly under `TZ=Asia/Tokyo` and `TZ=Asia/Kathmandu` — identical pass counts under all three, confirming the `vitest.config.ts` pin holds.
 - `npm run build`: clean.
 - No Go files touched; `golangci-lint`/`go test` not applicable.
-- New: `components/shared/access-boundary-schedule-editor.test.ts` (the reviewer's exact late-zone-arrival + edit-the-other-field repro, a displayed-value re-derivation test, and an in-progress-edit round-trip test — all three verified to fail without the R4-1 fix); `components/shared/scheduled-event-list.test.ts` (create-dialog label update); a label-update test added to `components/pages/admin-role-bindings.test.ts`. Each of the three new/extended test files was verified to fail when its component's `DisplayZoneController` field is removed.
+- New: `components/shared/access-boundary-schedule-editor.test.ts` (the reviewer's exact late-zone-arrival + edit-the-other-field repro, a displayed-value re-derivation test, an in-progress-edit round-trip test, and — added in round 5 — a detach/reconnect repro and a construct-before-first-connect repro, all verified to fail without their respective fixes); `components/shared/scheduled-event-list.test.ts` (create-dialog label update); a label-update test added to `components/pages/admin-role-bindings.test.ts`. Each new/extended test file was verified to fail when its component's `DisplayZoneController` field (or, for the editor, the `willUpdate`/`connectedCallback` fix) is removed.
 - New: `client/with-timeout.test.ts` (the hang-past-budget path, the late-arrival-after-timeout path applying its side effect once it lands, and rejection propagation); a re-render test each in `chat-interagent-marker.test.ts` and `chat-thread.test.ts`.
 - `utils/time.test.ts` covers: the `DISPLAY_TIMEZONE_CHANGED_EVENT` firing on change / not firing on a no-op or invalid-to-invalid set; DST overlap on `Europe/Berlin`, `Australia/Sydney` and the 30-minute `Australia/Lord_Howe`, plus a `Europe/Berlin` gap; invalid-zone and out-of-range-field/two-digit-year rejection for `parseWallClock`/`toWallClockInput`; the `datetime-full`/`time-seconds` `formatInstant` styles; `formatInstantWithZone`; the year-below-1000 `toWallClockInput` round trip. `browserTimeZone`/`isValidTimeZone`/`listTimeZones` tests are task 12's, carried over unchanged by the rebase. New: `utils/display-zone-controller.test.ts`; `components/shared/chat/chat-system-line.test.ts` and `chat-date-divider.test.ts` (both new files); a zone-label test (AC4) added to `chat-message.test.ts` and `chat-interagent-marker.test.ts`, plus a re-render-on-later-change test added to `chat-message.test.ts` (`chat-interagent-marker.test.ts` and `chat-thread.ts` had no equivalent re-render test yet at this point — review round 3's R3-3 added them; see below). `profile-settings.test.ts`'s picker tests now drive the picker's real UI (focus/type/click an option, or Enter to commit untracked text) instead of a synthetic event, and were verified to fail without the R2-2 fix and pass with it.
 
