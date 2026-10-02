@@ -51,7 +51,8 @@ func agentRouteCases() []agentRouteCase {
 		{post, "/api/v1/agents/stop-all", AgentSubRoute{RouteID: AgentRouteStopAll, OperationID: opAgentStopAll, Method: post}},
 		byID(get, "", AgentRouteRoot, opAgentRead, none),
 		byID(get, "/", AgentRouteRoot, opAgentRead, none),
-		byID(http.MethodPatch, "", AgentRouteRoot, "", none),
+		byID(http.MethodPatch, "", AgentRouteRoot, opAgentUpdate, none),
+		byID(http.MethodPatch, "/", AgentRouteRoot, opAgentUpdate, none),
 		byID(http.MethodDelete, "", AgentRouteRoot, opAgentDelete, none),
 		byID(http.MethodPut, "", AgentRouteRoot, "", none),
 		byID(get, "/pty", AgentRoutePTY, opAgentAttach, none),
@@ -68,6 +69,7 @@ func agentRouteCases() []agentRouteCase {
 		byID(http.MethodPut, "/ports/3000/proxy/", AgentRoutePortProxy, opAgentPortAccess, AgentSubRouteSuffix{Param: "3000", Opaque: "/"}),
 		byID(get, "/ports/3000/proxy/a/b%2Fc", AgentRoutePortProxy, opAgentPortAccess, AgentSubRouteSuffix{Param: "3000", Opaque: "/a/b%2Fc"}),
 		byID(get, "/logs", AgentRouteLogs, "", none),
+		byID(http.MethodPatch, "/logs", AgentRouteLogs, "", none),
 		byID(get, "/cloud-logs", AgentRouteCloudLogs, "", none),
 		byID(get, "/cloud-logs/stream", AgentRouteCloudLogsStream, "", none),
 		byID(get, "/message-logs", AgentRouteMessageLogs, "", none),
@@ -91,7 +93,9 @@ func agentRouteCases() []agentRouteCase {
 		byID(post, "/refresh-token", AgentRouteActionRefreshToken, "", none),
 		byID(post, "/outbound-message", AgentRouteActionOutbound, "", none),
 		byID(post, "/metrics", AgentRouteActionMetrics, "", none),
-		byID(post, "/set_message_mode", AgentRouteActionMessageMode, "", none),
+		byID(post, "/set_message_mode", AgentRouteActionMessageMode, opAgentSetMessageMode, none),
+		byID(get, "/set_message_mode", AgentRouteActionMessageMode, "", none),
+		byID(http.MethodPut, "/set_message_mode", AgentRouteActionMessageMode, "", none),
 		byID(post, "/reincarnate", AgentRouteActionReincarnate, opAgentReincarnate, none),
 		byID(post, "/reset-auth", AgentRouteActionResetAuth, opAgentResetAuth, none),
 		byID(post, "/keys", AgentRouteActionKeys, "", none),
@@ -116,7 +120,9 @@ func agentRouteCases() []agentRouteCase {
 		proj(post, "/restore", ProjectAgentRouteActionRestore, opAgentLifecycleRestore),
 		proj(post, "/env", ProjectAgentRouteActionEnv, opAgentEnv),
 		proj(post, "/outbound-message", ProjectAgentRouteActionOutbound, ""),
-		proj(post, "/set_message_mode", ProjectAgentRouteActionMessageMode, ""),
+		proj(post, "/set_message_mode", ProjectAgentRouteActionMessageMode, opAgentSetMessageMode),
+		proj(get, "/set_message_mode", ProjectAgentRouteActionMessageMode, ""),
+		proj(http.MethodPut, "/set_message_mode", ProjectAgentRouteActionMessageMode, ""),
 		proj(post, "/reincarnate", ProjectAgentRouteActionReincarnate, opAgentReincarnate),
 		proj(post, "/reset-auth", ProjectAgentRouteActionResetAuth, opAgentResetAuth),
 		proj(post, "/keys", ProjectAgentRouteActionKeys, ""),
@@ -367,9 +373,9 @@ func TestAgentSubRoute_CatalogDrift(t *testing.T) {
 	}
 	require.NotEmpty(t, discovered)
 	for _, op := range []authzop.OperationID{
-		opAgentRead, opAgentDelete, opAgentAttach, opAgentPortAccess, opAgentStopAll,
+		opAgentRead, opAgentUpdate, opAgentDelete, opAgentAttach, opAgentPortAccess, opAgentStopAll,
 		opAgentLifecycleControl, opAgentLifecycleRestore, opAgentExec, opAgentEnv,
-		opAgentResetAuth, opAgentReincarnate,
+		opAgentResetAuth, opAgentReincarnate, opAgentSetMessageMode,
 	} {
 		assert.NotEmpty(t, discovered[op], "operation %s has no resolver entry point", op)
 	}

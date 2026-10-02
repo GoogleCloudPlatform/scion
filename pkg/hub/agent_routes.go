@@ -163,6 +163,7 @@ func (row agentSubRouteRow) operation(method string) authzop.OperationID {
 // Catalog operation IDs used by agent sub-routes.
 const (
 	opAgentRead             authzop.OperationID = "agent.read"
+	opAgentUpdate           authzop.OperationID = "agent.update"
 	opAgentDelete           authzop.OperationID = "agent.lifecycle.delete"
 	opAgentAttach           authzop.OperationID = "agent.attach"
 	opAgentPortAccess       authzop.OperationID = "agent.portaccess"
@@ -173,6 +174,7 @@ const (
 	opAgentEnv              authzop.OperationID = "agent.lifecycle.env"
 	opAgentResetAuth        authzop.OperationID = "agent.lifecycle.resetauth"
 	opAgentReincarnate      authzop.OperationID = "agent.lifecycle.reincarnate"
+	opAgentSetMessageMode   authzop.OperationID = "agent.setmessagemode"
 )
 
 func postOp(op authzop.OperationID) map[string]authzop.OperationID {
@@ -187,6 +189,7 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRouteRoot, form: agentFormByID, trailingSlash: true, ops: map[string]authzop.OperationID{
 		http.MethodGet:    opAgentRead,
 		http.MethodDelete: opAgentDelete,
+		http.MethodPatch:  opAgentUpdate,
 	}},
 	{id: AgentRoutePTY, form: agentFormByID, segs: []string{"pty"}, ops: map[string]authzop.OperationID{http.MethodGet: opAgentAttach}, kind: authzop.EntryPointWebSocket},
 	{id: AgentRouteWorkspace, form: agentFormByID, segs: []string{"workspace"}, opaque: true},
@@ -217,7 +220,7 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRouteActionRefreshToken, form: agentFormByID, segs: []string{"refresh-token"}},
 	{id: AgentRouteActionOutbound, form: agentFormByID, segs: []string{"outbound-message"}},
 	{id: AgentRouteActionMetrics, form: agentFormByID, segs: []string{"metrics"}},
-	{id: AgentRouteActionMessageMode, form: agentFormByID, segs: []string{"set_message_mode"}},
+	{id: AgentRouteActionMessageMode, form: agentFormByID, segs: []string{"set_message_mode"}, ops: postOp(opAgentSetMessageMode)},
 	{id: AgentRouteActionReincarnate, form: agentFormByID, segs: []string{"reincarnate"}, ops: postOp(opAgentReincarnate)},
 	{id: AgentRouteActionResetAuth, form: agentFormByID, segs: []string{"reset-auth"}, ops: postOp(opAgentResetAuth)},
 	// AgentRouteActionKeys has no ops entry, like message above: the keys
@@ -245,7 +248,7 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: ProjectAgentRouteActionRestore, form: agentFormProject, segs: []string{"restore"}, ops: postOp(opAgentLifecycleRestore)},
 	{id: ProjectAgentRouteActionEnv, form: agentFormProject, segs: []string{"env"}, ops: postOp(opAgentEnv)},
 	{id: ProjectAgentRouteActionOutbound, form: agentFormProject, segs: []string{"outbound-message"}},
-	{id: ProjectAgentRouteActionMessageMode, form: agentFormProject, segs: []string{"set_message_mode"}},
+	{id: ProjectAgentRouteActionMessageMode, form: agentFormProject, segs: []string{"set_message_mode"}, ops: postOp(opAgentSetMessageMode)},
 	{id: ProjectAgentRouteActionReincarnate, form: agentFormProject, segs: []string{"reincarnate"}, ops: postOp(opAgentReincarnate)},
 	{id: ProjectAgentRouteActionResetAuth, form: agentFormProject, segs: []string{"reset-auth"}, ops: postOp(opAgentResetAuth)},
 	// See AgentRouteActionKeys above: same early-branch choke point

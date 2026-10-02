@@ -3311,14 +3311,15 @@ export class ScionPageAdminServerConfig extends LitElement {
                     >Hub-wide fallback GCP metadata mode for new agents, applied when neither the
                     agent create request nor the project's default GCP identity setting names one.
                     Passthrough set here applies only to agents on the hub's embedded broker; agents
-                    on any other broker get Block. Assign requires a verified hub-scoped service
-                    account and gcpIamCheckMode=enforce.</span
+                    on any other broker get Block, except on the Kubernetes runtime, which does not
+                    offer Block — those agents get Passthrough instead. Assign requires a verified
+                    hub-scoped service account and gcpIamCheckMode=enforce.</span
                   >
                   ${this.renderFieldValue(
                     'default_gcp_identity_mode',
-                    this.defaultGCPIdentityMode || 'Block (default)',
+                    this.defaultGCPIdentityMode || 'None (runtime default: Block; Passthrough on Kubernetes)',
                     html`${this.renderEnvBadge('default_gcp_identity_mode')}<sl-select
-                        placeholder="Block (default)"
+                        placeholder="None (runtime default: Block; Passthrough on Kubernetes)"
                         clearable
                         value=${this.defaultGCPIdentityMode}
                         @sl-change=${(e: Event) => {

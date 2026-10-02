@@ -4252,11 +4252,14 @@ func TestCreateAgent_GCPIdentityNoField(t *testing.T) {
 
 	var resp CreateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	// When no GCP identity is specified, default to "block" to prevent
-	// leaking the underlying compute identity.
-	require.NotNil(t, resp.Agent.AppliedConfig.GCPIdentity, "GCPIdentity should default to block when not specified")
-	assert.Equal(t, store.GCPMetadataModeBlock, resp.Agent.AppliedConfig.GCPIdentity.MetadataMode)
-	assert.Empty(t, resp.Agent.AppliedConfig.GCPIdentity.ServiceAccountID)
+	// When no GCP identity is specified anywhere (no request field, no
+	// project default, no hub default), AppliedConfig.GCPIdentity is left
+	// unset (nil) rather than an explicit "block" record, so the broker can
+	// apply its own runtime-aware default: "block" on every runtime except
+	// Kubernetes (unchanged, still keeping the underlying compute identity
+	// unavailable by default), "passthrough" on Kubernetes, since Kubernetes
+	// does not support "block" (ptone/scion#2328 phase 1).
+	assert.Nil(t, resp.Agent.AppliedConfig.GCPIdentity, "GCPIdentity should stay unset when not specified anywhere, letting the broker apply its runtime-aware default")
 }
 
 func TestCreateAgent_GCPIdentityInvalidMode(t *testing.T) {

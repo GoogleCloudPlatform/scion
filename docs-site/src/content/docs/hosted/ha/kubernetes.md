@@ -234,7 +234,7 @@ rules:
 3. **Ready**: Pod readiness is polled with detailed error classification (image pull, scheduling, config errors).
 4. **Attach**: `scion attach` connects to the tmux session inside the Pod via `pods/exec`.
 5. **Sync back**: `scion sync from <agent>` retrieves workspace changes via tar streaming.
-6. **Delete**: `scion rm <agent>` deletes the Pod and associated Secrets/SecretProviderClasses.
+6. **Delete**: `scion rm <agent>` deletes the Pod and associated Secrets/SecretProviderClasses. `scion stop` uses the same deletion path, so the per-agent Secret and, in GKE mode, the SecretProviderClass are deleted when the agent is stopped or deleted. If the Pod is removed outside scion, the objects are removed on the next stop/delete or start of that agent.
 
 ## Diagnostics
 

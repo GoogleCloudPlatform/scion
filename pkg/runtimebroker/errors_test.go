@@ -77,6 +77,47 @@ func TestAgentLookupUnavailable_MessageText(t *testing.T) {
 	}
 }
 
+// TestWriteStartContextError_Honors4xxStatus pins that writeStartContextError
+// (errors.go) writes the exact status a *startContextError carries, for any
+// 4xx value — not just the 400 the Kubernetes/"block" rejection happens to
+// use — and still falls back to a generic 500 for a status of 0 (e.g. an
+// older or incomplete *startContextError that never set Status).
+func TestWriteStartContextError_Honors4xxStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "409 conflict", status: http.StatusConflict, wantStatus: http.StatusConflict, wantCode: ErrCodeValidationError},
+		{name: "422 unprocessable", status: http.StatusUnprocessableEntity, wantStatus: http.StatusUnprocessableEntity, wantCode: ErrCodeValidationError},
+		{name: "zero status falls back to 500", status: 0, wantStatus: http.StatusInternalServerError, wantCode: ErrCodeRuntimeError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			sce := &startContextError{Status: tt.status, Message: "test message"}
+
+			gotStatus := writeStartContextError(w, sce)
+
+			if gotStatus != tt.wantStatus {
+				t.Errorf("writeStartContextError returned %d, want %d", gotStatus, tt.wantStatus)
+			}
+			if w.Code != tt.wantStatus {
+				t.Errorf("response status = %d, want %d (%s)", w.Code, tt.wantStatus, w.Body.String())
+			}
+			var resp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+			}
+			if resp.Error.Code != tt.wantCode {
+				t.Errorf("error code = %q, want %q", resp.Error.Code, tt.wantCode)
+			}
+		})
+	}
+}
+
 // TestSkillResolutionFailed_StatusMapping pins the decided cause→status
 // mapping (#2546 R3, O1): each classified cause gets the status whose
 // semantics fit it, the rate-limited cause also carries a Retry-After header

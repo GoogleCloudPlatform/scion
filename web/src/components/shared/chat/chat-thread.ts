@@ -3693,6 +3693,19 @@ export class ScionChatThread extends LitElement {
     };
   }
 
+  /**
+   * Handle gcs-link-click event from a chat message. Unlike a path-link
+   * click, there is no project resolution and no further validation here:
+   * chat-message already parsed and validated the URI, and the hub derives
+   * every authorization decision itself from the message id.
+   */
+  private handleGcsLinkClick(
+    e: CustomEvent<{ bucket: string; object: string; name: string; messageId: string }>
+  ): void {
+    const { bucket, object, name, messageId } = e.detail;
+    this.filePreview = { kind: 'gcs', messageId, bucket, object, name };
+  }
+
   /** Close the file preview dialog. */
   private closeFilePreview(): void {
     this.filePreview = null;
@@ -4320,11 +4333,13 @@ export class ScionChatThread extends LitElement {
             @contextmenu=${(e: MouseEvent) => this.handleMessageContextMenu(e, msg)}
             @click=${(e: MouseEvent) => this.handleMessageTap(e, msg)}
             id="msg-${msg.id}"
+            messageId=${msg.id}
             body=${msg.msg}
             sender=${msg.sender}
             senderId=${msg.senderId || ''}
             senderName=${senderDisplayName}
             ?fromAgent=${isFromAgent}
+            ?senderIsAgent=${isAgentSender}
             ?plain=${msg.plain ?? false}
             agentSlug=${isFromAgent ? senderDisplayName : ''}
             timestamp=${msg.createdAt}
@@ -4349,6 +4364,9 @@ export class ScionChatThread extends LitElement {
             @scroll-to-message=${this.handleScrollToMessage}
             @path-link-click=${(e: CustomEvent<{ path: string }>) =>
               this.handlePathLinkClick(e, msg)}
+            @gcs-link-click=${(
+              e: CustomEvent<{ bucket: string; object: string; name: string; messageId: string }>
+            ) => this.handleGcsLinkClick(e)}
           ></scion-chat-message>
         `,
       });

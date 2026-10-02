@@ -961,3 +961,249 @@ describe('scion-chat-file-preview', () => {
     expect(dialog(el)?.querySelector('scion-code-editor')).toBeNull();
   });
 });
+
+const GCS_MD_TARGET: PreviewTarget = {
+  kind: 'gcs',
+  messageId: '11111111-2222-4333-8444-555555555555',
+  bucket: 'scion-xproject-exchange',
+  object: 'workspace-volumes/dev-brief.md',
+  name: 'dev-brief.md',
+};
+
+const GCS_JSON_TARGET: PreviewTarget = {
+  kind: 'gcs',
+  messageId: '11111111-2222-4333-8444-555555555555',
+  bucket: 'bkt',
+  object: 'data.json',
+  name: 'data.json',
+};
+
+/** A minimal fetch Response-like object with a Content-Length header. */
+function gcsTextResponse(body: string, status = 200): unknown {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: {
+      get: (name: string) => (name.toLowerCase() === 'content-length' ? String(body.length) : null),
+    },
+    text: () => Promise.resolve(body),
+    json: () => Promise.resolve({}),
+  };
+}
+
+function gcsErrorResponse(status: number, details?: Record<string, unknown>): unknown {
+  return {
+    ok: false,
+    status,
+    headers: { get: () => null },
+    json: () => Promise.resolve({ error: { details } }),
+    text: () => Promise.resolve(''),
+  };
+}
+
+describe('scion-chat-file-preview gcs target', () => {
+  beforeEach(() => {
+    apiFetchMock.mockReset();
+    document.body.innerHTML = '';
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('requests the correct URL, carrying the message id', async () => {
+    apiFetchMock.mockResolvedValue(gcsTextResponse('# hi'));
+    const el = await mount();
+    el.target = GCS_MD_TARGET;
+    await settle(el);
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/v1/gcs/object?message=11111111-2222-4333-8444-555555555555&bucket=scion-xproject-exchange&object=workspace-volumes%2Fdev-brief.md',
+      expect.anything()
+    );
+  });
+
+  it('renders a .md object as markdown with the Source toggle', async () => {
+    apiFetchMock.mockResolvedValue(gcsTextResponse('# hi'));
+    const el = await mount();
+    el.target = GCS_MD_TARGET;
+    await settle(el);
+
+    expect(dialog(el)?.querySelector('scion-markdown-preview')).not.toBeNull();
+    expect(dialog(el)?.textContent).toContain('Source');
+  });
+
+  it('renders a .json object as code', async () => {
+    apiFetchMock.mockResolvedValue(gcsTextResponse('{"a":1}'));
+    const el = await mount();
+    el.target = GCS_JSON_TARGET;
+    await settle(el);
+
+    const editor = dialog(el)?.querySelector('scion-code-editor');
+    expect(editor).not.toBeNull();
+    expect((editor as unknown as { content: string })?.content).toBe('{"a":1}');
+  });
+
+  it('fetches a binary-looking gcs name instead of showing the download-only placeholder, and shows the uniform message and Console fallback on 404', async () => {
+    // A gcs target's content type is decided by the server response, not the
+    // object name: unlike an attachment or a path, a binary-looking gcs name
+    // (e.g. a .pdf) must still be fetched, so a denied/not-found/oversized
+    // result gets the uniform error state and the Cloud Console fallback
+    // instead of silently becoming a Download-only chip with no indication
+    // anything went wrong.
+    apiFetchMock.mockResolvedValue(gcsErrorResponse(404));
+    const el = await mount();
+    el.target = { ...GCS_MD_TARGET, object: 'report.pdf', name: 'report.pdf' };
+    await settle(el);
+
+    expect(apiFetchMock).toHaveBeenCalled();
+    expect(dialog(el)?.textContent).toContain("isn't available");
+    expect(dialog(el)?.querySelector('a.console-fallback-link')).not.toBeNull();
+  });
+
+  it('shows no Download for a 413 on a binary-looking gcs name', async () => {
+    apiFetchMock.mockResolvedValue(
+      gcsErrorResponse(413, { size: 12 * 1024 * 1024, limit: 10 * 1024 * 1024 })
+    );
+    const el = await mount();
+    el.target = { ...GCS_MD_TARGET, object: 'archive.zip', name: 'archive.zip' };
+    await settle(el);
+
+    expect(apiFetchMock).toHaveBeenCalled();
+    expect(
+      Array.from(dialog(el)?.querySelectorAll('sl-button') ?? []).some((b) =>
+        b.textContent?.includes('Download')
+      )
+    ).toBe(false);
+  });
+
+  it('never classifies a gcs target as an image, even with an image-like extension', async () => {
+    apiFetchMock.mockResolvedValue(gcsTextResponse('not actually png bytes'));
+    const el = await mount();
+    el.target = { ...GCS_JSON_TARGET, name: 'diagram.png', object: 'diagram.png' };
+    await settle(el);
+
+    expect(apiFetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('?view=true'),
+      expect.anything()
+    );
+    expect(dialog(el)?.querySelector('img.file-preview-image')).toBeNull();
+  });
+
+  for (const status of [403, 404]) {
+    it(`shows the uniform not-available message and the Cloud Console fallback for ${status}`, async () => {
+      apiFetchMock.mockResolvedValue(gcsErrorResponse(status));
+      const el = await mount();
+      el.target = GCS_MD_TARGET;
+      await settle(el);
+
+      expect(dialog(el)?.textContent).toContain("isn't available");
+      const link = dialog(el)?.querySelector('a.console-fallback-link') as HTMLAnchorElement | null;
+      expect(link).not.toBeNull();
+      expect(link?.getAttribute('href')).toBe(
+        'https://console.cloud.google.com/storage/browser/_details/scion-xproject-exchange/workspace-volumes/dev-brief.md'
+      );
+      expect(link?.getAttribute('target')).toBe('_blank');
+      expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
+    });
+  }
+
+  it('shows the rate-limit message and the console fallback for 429', async () => {
+    apiFetchMock.mockResolvedValue(gcsErrorResponse(429));
+    const el = await mount();
+    el.target = GCS_MD_TARGET;
+    await settle(el);
+
+    expect(dialog(el)?.textContent).toContain('Too many requests');
+    expect(dialog(el)?.querySelector('a.console-fallback-link')).not.toBeNull();
+  });
+
+  it('shows the upstream-error message and the console fallback for 502', async () => {
+    apiFetchMock.mockResolvedValue(gcsErrorResponse(502));
+    const el = await mount();
+    el.target = GCS_MD_TARGET;
+    await settle(el);
+
+    expect(dialog(el)?.textContent).toContain("Couldn't fetch this object");
+    expect(dialog(el)?.querySelector('a.console-fallback-link')).not.toBeNull();
+  });
+
+  it('shows the malformed-link message and NO console fallback for 400', async () => {
+    apiFetchMock.mockResolvedValue(gcsErrorResponse(400));
+    const el = await mount();
+    el.target = GCS_MD_TARGET;
+    await settle(el);
+
+    expect(dialog(el)?.textContent).toContain("isn't a valid gs:// URL");
+    expect(dialog(el)?.querySelector('a.console-fallback-link')).toBeNull();
+  });
+
+  it('shows the size-limit message with the console fallback and no Download for 413', async () => {
+    apiFetchMock.mockResolvedValue(
+      gcsErrorResponse(413, { size: 12 * 1024 * 1024, limit: 10 * 1024 * 1024 })
+    );
+    const el = await mount();
+    el.target = GCS_MD_TARGET;
+    await settle(el);
+
+    expect(dialog(el)?.textContent).toContain('too large to open here (12.0 MB, limit 10.0 MB)');
+    expect(dialog(el)?.querySelector('a.console-fallback-link')).not.toBeNull();
+    expect(
+      Array.from(dialog(el)?.querySelectorAll('sl-button') ?? []).some((b) =>
+        b.textContent?.includes('Download')
+      )
+    ).toBe(false);
+  });
+
+  it('shows a one-decimal size for a non-whole-MiB object, not a misleadingly rounded whole number', async () => {
+    // 10.4 MiB over a 10 MiB limit must not round down to "10 MB, limit 10 MB".
+    apiFetchMock.mockResolvedValue(
+      gcsErrorResponse(413, { size: Math.round(10.4 * 1024 * 1024), limit: 10 * 1024 * 1024 })
+    );
+    const el = await mount();
+    el.target = GCS_MD_TARGET;
+    await settle(el);
+
+    expect(dialog(el)?.textContent).toContain('too large to open here (10.4 MB, limit 10.0 MB)');
+  });
+
+  it('keeps Download for a non-413 gcs error', async () => {
+    apiFetchMock.mockResolvedValue(gcsErrorResponse(404));
+    const el = await mount();
+    el.target = GCS_MD_TARGET;
+    await settle(el);
+
+    expect(
+      Array.from(dialog(el)?.querySelectorAll('sl-button') ?? []).some((b) =>
+        b.textContent?.includes('Download')
+      )
+    ).toBe(true);
+  });
+
+  it('shows the console fallback for a status the hub is not documented to return', async () => {
+    apiFetchMock.mockResolvedValue(gcsErrorResponse(500));
+    const el = await mount();
+    el.target = GCS_MD_TARGET;
+    await settle(el);
+
+    expect(dialog(el)?.querySelector('a.console-fallback-link')).not.toBeNull();
+  });
+
+  it('Retry re-issues the same gcs request', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(gcsErrorResponse(502))
+      .mockResolvedValueOnce(gcsTextResponse('recovered'));
+    const el = await mount();
+    el.target = GCS_JSON_TARGET;
+    await settle(el);
+
+    const retryButton = Array.from(dialog(el)?.querySelectorAll('sl-button') ?? []).find((b) =>
+      b.textContent?.includes('Retry')
+    ) as HTMLElement;
+    retryButton.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await settle(el);
+
+    const editor = dialog(el)?.querySelector('scion-code-editor');
+    expect((editor as unknown as { content: string })?.content).toBe('recovered');
+  });
+});

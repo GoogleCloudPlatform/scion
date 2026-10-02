@@ -23,58 +23,10 @@
 
 import { test, expect, type Page } from '@playwright/test';
 import { setupApiMocks } from './mock-api.js';
+import { routeAgentPages } from './route-agent-pages.js';
 
 const PAGE_ONE_AGENT = { id: 'agent-page-one', name: 'Page One Agent', slug: 'page-one' };
 const PAGE_TWO_AGENT = { id: 'agent-page-two', name: 'Page Two Agent', slug: 'page-two' };
-
-/**
- * Serves `/api/v1/agents*` as a sequence of pages, keyed by the request's
- * own `cursor` query param (`''` for the first page) rather than by a
- * global call counter — a coalesced follow-up reload starts an entirely new
- * pagination run from `cursor=''` again, which a call-counter-indexed mock
- * would wrongly hand the *next* page in sequence instead of page one again.
- * `delaysMsByCursor[cursor]` is how long to wait before fulfilling the page
- * that cursor selects (0 if unspecified). An unrecognized cursor repeats the
- * last page, so a test is never surprised by an unmocked extra request.
- *
- * Returns both `callCount` (incremented when a request *starts*, i.e. before
- * its own artificial delay) and `fulfilledCount` (incremented only once
- * `route.fulfill()` has actually completed). A started-but-not-yet-fulfilled
- * request — the follow-up cycle's own page-2 request, still sitting in its
- * multi-second delay — must not read as "the follow-up has settled": only
- * `fulfilledCount` reaching the expected total means every request in that
- * cycle has actually finished, which is what the test below polls on.
- */
-function routeAgentPages(
-  page: Page,
-  pages: Array<{ agents: Array<{ id: string; name: string; slug: string }>; nextCursor?: string }>,
-  delaysMsByCursor: Record<string, number> = {}
-): { callCount: () => number; fulfilledCount: () => number } {
-  const pageByCursor = new Map<string, (typeof pages)[number]>();
-  pageByCursor.set('', pages[0]);
-  for (let i = 0; i + 1 < pages.length; i++) {
-    const nextCursor = pages[i].nextCursor;
-    if (nextCursor) pageByCursor.set(nextCursor, pages[i + 1]);
-  }
-
-  let started = 0;
-  let fulfilled = 0;
-  void page.route('**/api/v1/agents*', async (route) => {
-    started++;
-    const cursor = new URL(route.request().url()).searchParams.get('cursor') ?? '';
-    const body = pageByCursor.get(cursor) ?? pages[pages.length - 1];
-    const delayMs = delaysMsByCursor[cursor] ?? 0;
-    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
-    await route.fulfill({
-      json: {
-        agents: body.agents.map((a) => ({ ...a, _capabilities: { actions: ['attach'] } })),
-        ...(body.nextCursor ? { nextCursor: body.nextCursor } : {}),
-      },
-    });
-    fulfilled++;
-  });
-  return { callCount: () => started, fulfilledCount: () => fulfilled };
-}
 
 /**
  * Waits until `count()` has not changed for `quietMs`, up to `timeoutMs`
