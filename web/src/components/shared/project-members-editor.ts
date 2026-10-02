@@ -81,11 +81,13 @@ export const TIER_REASON = 'Only project owners can assign admin/owner';
 export const CUSTOM_TIER_CAPTION = 'Only project owners can change custom roles';
 export const OWNER_ONLY_REMOVE_REASON = 'Holds roles only an owner can remove';
 export const ROW_LOCKED_REASON = "Only project owners can change this member's roles.";
+export const CATALOG_UNAVAILABLE_REASON = "Couldn't load the list of roles; close and try again.";
 export const LAST_OWNER_REASON = 'Last direct owner. Transfer ownership before changing this role.';
 export const LAST_OWNER_REMOVE_REASON =
   'Last direct owner. Transfer ownership before removing this member.';
 export const CHANGED_WHILE_EDITING_MESSAGE =
   'This member changed while you were editing; review and save again.';
+export const CHANGED_WHILE_EDITING_LOCKED_MESSAGE = 'This member changed while you were editing.';
 export const AUTHORITY_CHANGED_MESSAGE =
   'Your permissions on this project changed while saving. The options were refreshed; review and save again.';
 export const REMOVES_ALL_ROLES = 'This removes all of their project roles.';
@@ -318,6 +320,64 @@ export function isLastOwnerByTier(
   return groups.filter(isDirectOwnerRow).length <= 1;
 }
 
+/**
+ * Whether a principal's role IDs can't be sorted into built-in and custom
+ * roles: the catalog failed to load, or an ID the catalog does not know
+ * might be the built-in role.
+ */
+export function roleIdsUnclassifiable(
+  roleIds: readonly string[],
+  assignable: readonly AssignableProjectRole[],
+  catalogUnavailable: boolean
+): boolean {
+  if (catalogUnavailable) return true;
+  if (builtInCatalog(assignable).some((r) => roleIds.includes(r.id))) return false;
+  const known = new Set(assignable.map((r) => r.id));
+  return roleIds.some((id) => !known.has(id));
+}
+
+export interface DialogLockInput {
+  principalType: string;
+  /** The loaded row for the target, when there is one. */
+  row: ProjectMemberGroup | undefined;
+  /** The target's current role IDs (used when there is no loaded row). */
+  roleIds: readonly string[];
+  caps: MembershipCapabilities | null;
+  groups: readonly ProjectMemberGroup[];
+  assignable: readonly AssignableProjectRole[];
+  catalogUnavailable: boolean;
+}
+
+export interface DialogLock {
+  /** Why every control is read-only, or null when the target is editable. */
+  lockedReason: string | null;
+  isLastOwner: boolean;
+}
+
+/**
+ * Lock and last-owner state of the Edit dialog. A loaded row follows the
+ * row pencil rule. A target known only by its role IDs takes its tier from
+ * the built-in role among them; when those IDs can't be classified, the
+ * dialog is locked for every actor and no last-owner status is inferred.
+ */
+export function deriveDialogLock(input: DialogLockInput): DialogLock {
+  const { row, caps, groups } = input;
+  if (row) {
+    return {
+      lockedReason: canEditRow(row, caps) ? null : ROW_LOCKED_REASON,
+      isLastOwner: isLastDirectOwner(row, groups),
+    };
+  }
+  if (roleIdsUnclassifiable(input.roleIds, input.assignable, input.catalogUnavailable)) {
+    return { lockedReason: CATALOG_UNAVAILABLE_REASON, isLastOwner: false };
+  }
+  const tier = tierFromRoleIds(input.roleIds, input.assignable);
+  return {
+    lockedReason: tierAllowed(tier, caps) ? null : ROW_LOCKED_REASON,
+    isLastOwner: isLastOwnerByTier(input.principalType, tier, groups),
+  };
+}
+
 /** Row Edit: the actor must manage the tier of the row's built-in role.
  *  Custom bindings on the row are carried as Keep when the actor cannot
  *  change them. */
@@ -410,6 +470,9 @@ export class ScionProjectMembersEditor extends LitElement {
   /** Set when the dialog switched to Edit for a member the actor may not
    *  edit (same tier rule as the row pencil): every control is read-only. */
   @state() private dlgLockedReason: string | null = null;
+  /** Info text shown in place of dlgInfo while the dialog is locked, so it
+   *  never invites an edit the locked controls forbid. */
+  @state() private dlgLockedInfo: string | null = null;
   @state() private dlgSaving = false;
   @state() private dlgError: string | null = null;
   @state() private dlgErrorRoleId: string | null = null;
@@ -991,14 +1054,38 @@ export class ScionProjectMembersEditor extends LitElement {
     this.dlgExpectedIds = [];
     this.dlgIsLastOwner = false;
     this.dlgLockedReason = null;
+    this.dlgLockedInfo = null;
     this.resetDialogMessages();
     this.dialogOpen = true;
   }
 
+  /** Recomputes the Edit dialog's lock and last-owner state from the loaded
+   *  rows, capabilities and catalog. While locked, the info text is the
+   *  locked variant. */
+  private applyDialogLock(row: ProjectMemberGroup | undefined): void {
+    const lock = deriveDialogLock({
+      principalType: this.dlgPrincipalType,
+      row,
+      roleIds: this.dlgExpectedIds,
+      caps: this.capabilities,
+      groups: this.groups,
+      assignable: this.assignableRoles,
+      catalogUnavailable: !!this.catalogError,
+    });
+    this.dlgLockedReason = lock.lockedReason;
+    this.dlgIsLastOwner = lock.isLastOwner;
+    if (lock.lockedReason) this.dlgInfo = this.dlgLockedInfo;
+  }
+
   /** Switches the dialog to Edit mode for a loaded row, pre-filled with the
    *  principal's current roles. Read-only when the actor may not edit the
-   *  row (reachable when Add mode lands on an existing member). */
-  private openEditDialog(group: ProjectMemberGroup, info: string | null = null): void {
+   *  row (reachable when Add mode lands on an existing member); lockedInfo
+   *  then replaces info. */
+  private openEditDialog(
+    group: ProjectMemberGroup,
+    info: string | null = null,
+    lockedInfo: string | null = null
+  ): void {
     const builtIn = builtInBinding(group);
     const held = customBindings(group);
     this.dialogMode = 'edit';
@@ -1011,25 +1098,29 @@ export class ScionProjectMembersEditor extends LitElement {
     this.dlgHeldCustom = held;
     this.dlgCustomIds = held.map((b) => b.roleDefinitionId);
     this.dlgExpectedIds = group.bindings.map((b) => b.roleDefinitionId);
-    this.dlgIsLastOwner = isLastDirectOwner(group, this.groups);
-    this.dlgLockedReason = canEditRow(group, this.capabilities) ? null : ROW_LOCKED_REASON;
     this.resetDialogMessages();
     this.dlgInfo = info;
+    this.dlgLockedInfo = lockedInfo;
+    this.applyDialogLock(group);
     this.dialogOpen = true;
   }
 
   /** Edit mode for a principal the loaded rows do not contain (e.g. it was
    *  addressed by email), built from the server's current role IDs. The tier
    *  and last-owner rules match openEditDialog, with the tier inferred from
-   *  the built-in role in roleIds. */
+   *  the built-in role in roleIds. IDs that can't be classified (no catalog,
+   *  or an unknown ID and no built-in role) are kept as the selection but
+   *  not shown, and the dialog is locked. */
   private openEditFromRoleIds(
     principalType: MemberPrincipalType,
     principalId: string,
     displayName: string,
     roleIds: string[],
-    info: string
+    info: string,
+    lockedInfo: string
   ): void {
-    const builtIn = roleIds.find((id) => this.roleIdKind(id) === 'builtin');
+    const classify = !roleIdsUnclassifiable(roleIds, this.assignableRoles, !!this.catalogError);
+    const builtIn = classify ? roleIds.find((id) => this.roleIdKind(id) === 'builtin') : undefined;
     const customIds = roleIds.filter((id) => id !== builtIn);
     this.dialogMode = 'edit';
     this.dlgPrincipalType = principalType;
@@ -1038,7 +1129,7 @@ export class ScionProjectMembersEditor extends LitElement {
     this.dlgCurrentBuiltIn = builtIn ?? NO_PROJECT_ROLE;
     this.dlgCurrentBuiltInName = this.assignableRoles.find((r) => r.id === builtIn)?.name ?? '';
     this.dlgBuiltIn = this.dlgCurrentBuiltIn;
-    this.dlgHeldCustom = customIds.map((id) => {
+    this.dlgHeldCustom = (classify ? customIds : []).map((id) => {
       const role = this.assignableRoles.find((r) => r.id === id);
       return {
         id: '',
@@ -1055,11 +1146,10 @@ export class ScionProjectMembersEditor extends LitElement {
     });
     this.dlgCustomIds = customIds;
     this.dlgExpectedIds = [...roleIds];
-    const tier = tierFromRoleIds(roleIds, this.assignableRoles);
-    this.dlgIsLastOwner = isLastOwnerByTier(principalType, tier, this.groups);
-    this.dlgLockedReason = tierAllowed(tier, this.capabilities) ? null : ROW_LOCKED_REASON;
     this.resetDialogMessages();
     this.dlgInfo = info;
+    this.dlgLockedInfo = lockedInfo;
+    this.applyDialogLock(undefined);
     this.dialogOpen = true;
   }
 
@@ -1086,9 +1176,11 @@ export class ScionProjectMembersEditor extends LitElement {
     this.dlgDisplayName = detail.displayLabel;
     const existing = findMemberGroup(this.groups, this.dlgPrincipalType, detail.principalId);
     if (existing) {
+      const label = principalLabel(existing);
       this.openEditDialog(
         existing,
-        `${principalLabel(existing)} is already a member. Editing their roles instead.`
+        `${label} is already a member. Editing their roles instead.`,
+        `${label} is already a member.`
       );
     }
   }
@@ -1169,20 +1261,30 @@ export class ScionProjectMembersEditor extends LitElement {
       // principal's role set differs from what this dialog started from.
       const displayName = this.dlgDisplayName;
       await this.loadData();
+      const name = displayName || principalId;
       const message =
         mode === 'add'
-          ? `${displayName || principalId} is already a member. Their current roles are shown; review and save again.`
+          ? `${name} is already a member. Their current roles are shown; review and save again.`
           : CHANGED_WHILE_EDITING_MESSAGE;
+      const lockedMessage =
+        mode === 'add' ? `${name} is already a member.` : CHANGED_WHILE_EDITING_LOCKED_MESSAGE;
       const row = findMemberGroup(this.groups, principalType, principalId);
       if (row) {
-        this.openEditDialog(row, message);
+        this.openEditDialog(row, message, lockedMessage);
       } else {
         const current = Array.isArray(details.currentRoleDefinitionIds)
           ? (details.currentRoleDefinitionIds as unknown[]).filter(
               (x): x is string => typeof x === 'string'
             )
           : [];
-        this.openEditFromRoleIds(principalType, principalId, displayName, current, message);
+        this.openEditFromRoleIds(
+          principalType,
+          principalId,
+          displayName,
+          current,
+          message,
+          lockedMessage
+        );
       }
       return;
     }

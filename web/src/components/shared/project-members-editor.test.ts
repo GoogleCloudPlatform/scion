@@ -37,7 +37,9 @@ import { showConfirm } from './confirm-dialog.js';
 import {
   ScionProjectMembersEditor,
   AUTHORITY_CHANGED_MESSAGE,
+  CATALOG_UNAVAILABLE_REASON,
   CATALOG_REFRESHED_MESSAGE,
+  CHANGED_WHILE_EDITING_LOCKED_MESSAGE,
   CHANGED_WHILE_EDITING_MESSAGE,
   CUSTOM_TIER_CAPTION,
   EMPTY_SELECTION_MESSAGE,
@@ -52,10 +54,12 @@ import {
   canRemoveRow,
   customRoleState,
   defaultBuiltInForAdd,
+  deriveDialogLock,
   describeCustomRoleError,
   isCustomProjectRole,
   isEmptySelection,
   isLastOwnerByTier,
+  roleIdsUnclassifiable,
   selectionToRoleIds,
   tierFromRoleIds,
   type MemberDialogMode,
@@ -1009,8 +1013,9 @@ describe('409 membership_changed', () => {
 // ---------------------------------------------------------------------------
 
 describe('automatic switch to Edit follows the row rules', () => {
-  /** Every radio, checkbox and Save is disabled and the reason is shown. */
-  function expectLocked(el: EditorInternals): void {
+  /** Every radio, checkbox and Save is disabled and the reason is shown;
+   *  the info text only says the principal is already a member. */
+  function expectLocked(el: EditorInternals, name: string): void {
     expect(el.dialogMode).toBe('edit');
     expect(el.dlgLockedReason).toBe(ROW_LOCKED_REASON);
     const radios = qa(el, 'sl-radio-group sl-radio');
@@ -1018,7 +1023,11 @@ describe('automatic switch to Edit follows the row rules', () => {
     for (const r of radios) expect(r.hasAttribute('disabled')).toBe(true);
     for (const c of qa(el, 'sl-checkbox')) expect(c.hasAttribute('disabled')).toBe(true);
     expect(q(el, 'sl-button.save-member')?.hasAttribute('disabled')).toBe(true);
-    expect(q(el, '.dialog-info')?.textContent).toContain('already a member');
+    expect(el.dlgInfo).toBe(`${name} is already a member.`);
+    const info = q(el, '.dialog-info')?.textContent ?? '';
+    expect(info).toContain(`${name} is already a member.`);
+    expect(info).not.toContain('Editing their roles');
+    expect(info).not.toContain('save again');
     expect(q(el, '.dialog-info .locked-reason')?.textContent).toBe(ROW_LOCKED_REASON);
   }
 
@@ -1042,12 +1051,101 @@ describe('automatic switch to Edit follows the row rules', () => {
     expect(isLastOwnerByTier('user', 'admin', [ALICE])).toBe(false);
   });
 
+  it('locks without classifying when role IDs cannot be sorted into built-in and custom', () => {
+    expect(roleIdsUnclassifiable(['r-member'], OWNER_CATALOG, true)).toBe(true);
+    expect(roleIdsUnclassifiable([], OWNER_CATALOG, true)).toBe(true);
+    expect(roleIdsUnclassifiable(['r-member'], [], false)).toBe(true);
+    expect(roleIdsUnclassifiable(['r-gone', 'r-msg'], OWNER_CATALOG, false)).toBe(true);
+    expect(roleIdsUnclassifiable(['r-member', 'r-gone'], OWNER_CATALOG, false)).toBe(false);
+    expect(roleIdsUnclassifiable(['r-msg'], OWNER_CATALOG, false)).toBe(false);
+
+    const base = {
+      principalType: 'user',
+      row: undefined,
+      caps: OWNER_CAPS,
+      groups: [ALICE, DAVE],
+      assignable: OWNER_CATALOG,
+      catalogUnavailable: false,
+    };
+    // An unknown ID and no built-in role: locked even for an owner, and no
+    // last-owner status is inferred from the fail-closed owner tier.
+    expect(deriveDialogLock({ ...base, roleIds: ['r-gone'] })).toEqual({
+      lockedReason: CATALOG_UNAVAILABLE_REASON,
+      isLastOwner: false,
+    });
+    expect(
+      deriveDialogLock({ ...base, roleIds: ['r-member'], assignable: [], catalogUnavailable: true })
+    ).toEqual({ lockedReason: CATALOG_UNAVAILABLE_REASON, isLastOwner: false });
+    // A loaded row follows the row rules even without a catalog.
+    expect(
+      deriveDialogLock({
+        ...base,
+        row: DAVE,
+        roleIds: [],
+        assignable: [],
+        catalogUnavailable: true,
+      })
+    ).toEqual({ lockedReason: null, isLastOwner: false });
+    expect(deriveDialogLock({ ...base, roleIds: ['r-owner'] })).toEqual({
+      lockedReason: null,
+      isLastOwner: true,
+    });
+    expect(deriveDialogLock({ ...base, caps: ADMIN_CAPS, row: BOB, roleIds: [] })).toEqual({
+      lockedReason: ROW_LOCKED_REASON,
+      isLastOwner: false,
+    });
+  });
+
+  it('owner reaching a member by email while the catalog fails gets a locked dialog, no raw IDs', async () => {
+    const el = await mountEditor([ALICE, DAVE], OWNER_CAPS);
+    el.openAddDialog();
+    el.onPrincipalChange({ principalType: 'user', principalId: 'dave@x.io', displayLabel: '' });
+    el.dlgBuiltIn = 'r-member';
+    routeApi(
+      (url, init) => (init?.method === 'PUT' ? changed409(['r-member', 'r-msg']) : undefined),
+      listRoute([ALICE, DAVE], OWNER_CAPS),
+      (url) =>
+        url.endsWith('/members/assignable-roles')
+          ? apiError(500, 'internal', 'catalog unavailable')
+          : undefined
+    );
+    await el.handleSave();
+    await el.updateComplete;
+
+    expect(el.dialogMode).toBe('edit');
+    expect(el.dlgLockedReason).toBe(CATALOG_UNAVAILABLE_REASON);
+    expect(el.dlgIsLastOwner).toBe(false);
+    expect(q(el, '.dialog-member sl-icon[name="shield-lock"]')).toBeNull();
+    expect(el.dlgExpectedIds).toEqual(['r-member', 'r-msg']);
+    expect(el.dlgInfo).toBe('dave@x.io is already a member.');
+    expect(q(el, '.dialog-info .locked-reason')?.textContent).toBe(CATALOG_UNAVAILABLE_REASON);
+    for (const c of qa(el, 'sl-checkbox')) {
+      expect(['r-member', 'r-msg']).not.toContain(c.textContent?.trim());
+    }
+    expect(qa(el, 'sl-checkbox')).toEqual([]);
+    expect(q(el, 'sl-button.save-member')?.hasAttribute('disabled')).toBe(true);
+    expect(q(el, 'sl-button.remove-member')).toBeNull();
+  });
+
+  it('a member promoted to admin mid-edit locks the dialog with the short changed message', async () => {
+    const el = makeEditor(ADMIN_CAPS, { catalog: ADMIN_CATALOG });
+    el.openEditDialog(DAVE);
+    const daveNow = group('user', 'u-dave', [R_ADMIN], 'Dave Member');
+    el.loadData = vi.fn(async () => {
+      el.groups = ALL_GROUPS.map((g) => (g === DAVE ? daveNow : g));
+    });
+    vi.mocked(apiFetch).mockResolvedValueOnce(changed409(['r-admin']));
+    await el.handleSave();
+    expect(el.dlgLockedReason).toBe(ROW_LOCKED_REASON);
+    expect(el.dlgInfo).toBe(CHANGED_WHILE_EDITING_LOCKED_MESSAGE);
+  });
+
   it('admin in Add mode picking an existing admin gets a read-only dialog with the reason', async () => {
     const el = await mountEditor(ALL_GROUPS, ADMIN_CAPS, ADMIN_CATALOG);
     el.openAddDialog();
     el.onPrincipalChange({ principalType: 'user', principalId: 'u-bob', displayLabel: 'Bob' });
     await el.updateComplete;
-    expectLocked(el);
+    expectLocked(el, 'Bob Admin');
 
     // Even a forced selection change cannot be saved.
     el.dlgBuiltIn = 'r-member';
@@ -1079,7 +1177,7 @@ describe('automatic switch to Edit follows the row rules', () => {
     await el.handleSave();
     await el.updateComplete;
     expect(el.dlgPrincipalId).toBe('bob@x.io');
-    expectLocked(el);
+    expectLocked(el, 'bob@x.io');
   });
 
   it('409 principal_roles_changed for a member typed by email stays editable for an admin', async () => {
