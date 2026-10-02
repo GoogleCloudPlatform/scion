@@ -261,7 +261,7 @@ func EnsureDirTrustedAncestorFollow(path string) (dirFd int, err error) {
 // it.
 func trustedAncestorSymlinkAt(dirFd int, name string) (bool, error) {
 	var linkSt unix.Stat_t
-	if err := unix.Fstatat(dirFd, name, &linkSt, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+	if err := fstatatTrustedAncestor(dirFd, name, &linkSt, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return false, fmt.Errorf("stat %s: %w", name, err)
 	}
 
@@ -272,6 +272,17 @@ func trustedAncestorSymlinkAt(dirFd int, name string) (bool, error) {
 
 	return symlinkTrustedByStat(linkSt.Uid, dirSt.Uid, uint32(dirSt.Mode), trustedAncestorOwnerUID), nil
 }
+
+// fstatatTrustedAncestor is trustedAncestorSymlinkAt's own call site for
+// stat'ing the symlink's directory entry, as a package var instead of a
+// direct unix.Fstatat call. Production always leaves this at its default;
+// a test overrides it to report a fabricated owner for the link while
+// leaving the containing directory's own, independently-fetched stat
+// genuinely real, exercising the "the link's own owner must also be
+// trusted" half of the decision — which an unprivileged test process
+// cannot otherwise produce, since it can only create a symlink owned by
+// its own uid, the same uid its containing directory is already owned by.
+var fstatatTrustedAncestor = unix.Fstatat
 
 // symlinkTrustedByStat is trustedAncestorSymlinkAt's decision, as a pure
 // function of already-fetched stat fields: true only when linkUID and

@@ -333,3 +333,51 @@ func TestSymlinkTrustedByStat(t *testing.T) {
 		})
 	}
 }
+
+// TestEnsureDirTrustedAncestorFollow_RefusesSymlinkWhoseOwnOwnerIsUntrusted
+// proves the call site actually uses the symlink's OWN owner, not its
+// containing directory's owner, as the link half of the trust decision.
+// An unprivileged test process can only ever create a symlink owned by its
+// own real uid, the same uid that already owns the directory it creates
+// the symlink in — so a real on-disk fixture alone can never exercise the
+// case where the link's own owner differs from an otherwise-trustworthy
+// containing directory. This overrides fstatatTrustedAncestor to report a
+// fabricated, untrusted owner for the link's own stat while leaving the
+// containing directory's independently-fetched stat genuinely real and
+// genuinely trusted, so the walk reaches a real symlink and a real
+// containing directory throughout — only the one stat field central to
+// this test's own question is fabricated.
+func TestEnsureDirTrustedAncestorFollow_RefusesSymlinkWhoseOwnOwnerIsUntrusted(t *testing.T) {
+	restoreUID := SetTrustedAncestorOwnerUIDForTest(os.Getuid())
+	defer restoreUID()
+
+	origFstatat := fstatatTrustedAncestor
+	fstatatTrustedAncestor = func(dirfd int, path string, stat *unix.Stat_t, flags int) error {
+		if err := origFstatat(dirfd, path, stat, flags); err != nil {
+			return err
+		}
+		stat.Uid = uint32(os.Getuid() + 1)
+		return nil
+	}
+	defer func() { fstatatTrustedAncestor = origFstatat }()
+
+	parent := t.TempDir()
+	real := filepath.Join(parent, "run")
+	if err := os.Mkdir(real, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(parent, "varrun")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(link, "secrets")
+
+	_, err := EnsureDirTrustedAncestorFollow(target)
+	if err == nil {
+		t.Fatal("EnsureDirTrustedAncestorFollow() = nil error, want a refusal when the symlink's own reported owner is untrusted, even though its containing directory is genuinely trusted")
+	}
+
+	if _, statErr := os.Stat(filepath.Join(real, "secrets")); !os.IsNotExist(statErr) {
+		t.Errorf("real/secrets exists after a refused untrusted-link-owner symlink (stat err=%v); nothing must be created past the refusal", statErr)
+	}
+}
