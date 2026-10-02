@@ -162,3 +162,16 @@ Pre-checkpoint evidence:
 - `npm run typecheck` — PASS.
 - `go test -count=1 -p 2 ./pkg/hub -run '^TestConstraintAuditHistory_(OmitsEmptyCorrelationID|CreateIdentityFlowsThroughEndpoint)$'` — PASS (package 1.462s).
 - Focused Prettier and Go formatting — clean.
+
+Post-checkpoint verification at `99f72331`:
+
+- `go test -count=1 -p 2 ./pkg/hub -run '^TestConstraintAuditHistory_'` — PASS (package 4.201s).
+- `npm test -- --run src/client/access-boundaries-api.test.ts src/components/shared/access-boundary-audit-timeline.test.ts src/shared/access-boundaries.test.ts` — PASS, 3 files / 67 tests.
+- `npm run typecheck` — PASS.
+- `npx eslint src/shared/access-boundaries.ts` — PASS with no output.
+- Focused `npx prettier --check` — PASS.
+- Go formatting and `git diff --check` — clean.
+
+Scoped Go lint was not rerun: the round-one fix changes one Go regression test
+but no production Go implementation, and the immediately preceding full-slice
+lint evidence remains recorded above. No long lint job was started.
