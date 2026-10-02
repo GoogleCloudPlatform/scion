@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -520,6 +521,81 @@ func TestCreateAgent_WiresProvisionedWorktreeRepoRootOntoStartContext(t *testing
 	// ContainerWorkspace, not just RepoRoot, must be asserted.
 	if wantContainerWorkspace := "/repo-root/worktrees/agent-a"; capturedConfig.ContainerWorkspace != wantContainerWorkspace {
 		t.Fatalf("RunConfig.ContainerWorkspace = %q, want %q", capturedConfig.ContainerWorkspace, wantContainerWorkspace)
+	}
+}
+
+// TestAsyncCreate_ProvisionedWorktreeRepoRootReachesStartViaWithoutCancel
+// covers the async-create path's analogue of
+// TestCreateAgent_WiresProvisionedWorktreeRepoRootOntoStartContext: a
+// worktree-per-agent, git-backed, AsyncLaunch request. createAgent's ctx
+// wrap (api.ContextWithProvisionedWorktreeRepoRoot) runs before the
+// AsyncLaunch branch, so the value must survive beginAsyncLaunch's
+// context.WithDeadline(context.WithoutCancel(ctx), ...) and reach
+// runLaunch's call to Manager.Start in its own goroutine. WithoutCancel only
+// detaches cancellation; it must not also lose the values the synchronous
+// admission path (buildStartContext, the ctx wrap) already attached.
+func TestAsyncCreate_ProvisionedWorktreeRepoRootReachesStartViaWithoutCancel(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
+		t.Skipf("git too old, worktree mode not eligible on this host: %s", reason)
+	}
+
+	bare := initBareRepoWithCommit(t)
+	brokerTmp := t.TempDir()
+	projectScionDir := setupRepoRootProjectScaffold(t, brokerTmp)
+	projectPath := projectScionDir
+
+	mgr := newAsyncManager()
+	srv, _ := newAsyncTestServer(t, mgr)
+
+	body := map[string]any{
+		"name":                 "agent-a",
+		"id":                   "agent-a",
+		"slug":                 "agent-a",
+		"projectPath":          projectPath,
+		"projectId":            "p1",
+		"projectSlug":          "proj",
+		"workspaceMode":        "worktree-per-agent",
+		"noAuth":               true,
+		"asyncLaunch":          true,
+		"launchId":             "L-worktree-1",
+		"launchTimeoutSeconds": 300,
+		"config": map[string]any{
+			"gitClone": map[string]any{"url": bare, "branch": "main"},
+		},
+	}
+	w := postCreate(t, srv, body)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	resp := decodeCreateResponse(t, w)
+	if !resp.LaunchPending {
+		t.Fatalf("expected an accepted (pending) response, got %+v", resp)
+	}
+
+	if !waitUntil(t, 2*time.Second, func() bool { return mgr.StartCallCount() >= 1 }) {
+		t.Fatal("expected Start to be called")
+	}
+
+	startCtx := mgr.LastStartCtx()
+	if startCtx == nil {
+		t.Fatal("Start was called with a nil ctx")
+	}
+	gotRepoRoot := api.ProvisionedWorktreeRepoRootFromContext(startCtx)
+	if gotRepoRoot == "" {
+		t.Fatal("the provisioned-worktree repo root did not reach Start's ctx on the async path — WithoutCancel must preserve ctx values, not just extend its deadline")
+	}
+	expectedBase := filepath.Join(projectPath, "workspace")
+	gotRoot, err := filepath.EvalSymlinks(gotRepoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(gotRepoRoot): %v", err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(expectedBase)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(expectedBase): %v", err)
+	}
+	if gotRoot != wantRoot {
+		t.Fatalf("Start ctx's provisioned repo root = %q, want %q (the shared base)", gotRoot, wantRoot)
 	}
 }
 
