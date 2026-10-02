@@ -3018,8 +3018,7 @@ func isClaude(childArgs []string) bool {
 // already resolved, never a path-based os.Chmod that could be redirected by
 // anything changed afterward. A refusal is logged (path only) and this
 // simply skips the chmod rather than failing init closed — a planted
-// symlink must not be able to stop the workload
-// from starting.
+// symlink must not be able to stop the workload from starting.
 func blockClaudeDebugSymlink(debugDir string, requirePrivilegeDrop bool) {
 	if !requirePrivilegeDrop {
 		if err := os.MkdirAll(debugDir, 0755); err != nil {
