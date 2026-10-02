@@ -528,3 +528,23 @@ func TestSetMemberRoles_MalformedUserPrincipalID400(t *testing.T) {
 	rec = putMemberRoles(t, f.srv, f.owner, f.projectID, "user", "nobody-l500@test.com", []string{f.memberRD.ID}, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 }
+
+// TestSetMemberRoles_MalformedAgentPrincipalID400: an agent principal
+// addressed by anything but a well-formed agent ID is a 400 invalid_request
+// on both PUT and DELETE, the same as a malformed user ID. It used to reach
+// the store and surface as a 500 (PUT) or a "no bindings" 404 (DELETE)
+// (ptone/scion#2529). Nothing is written.
+func TestSetMemberRoles_MalformedAgentPrincipalID400(t *testing.T) {
+	f := setupMMRFixture(t)
+	for _, malformed := range []string{"not-a-uuid", "agent@test.com"} {
+		rec := putMemberRoles(t, f.srv, f.owner, f.projectID, "agent", malformed, []string{f.memberRD.ID}, nil)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "PUT %s: %s", malformed, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), `"code":"`+ErrCodeInvalidRequest+`"`)
+
+		rec = deleteMemberRoles(t, f.srv, f.owner, f.projectID, "agent", malformed)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "DELETE %s: %s", malformed, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), `"code":"`+ErrCodeInvalidRequest+`"`)
+
+		assert.Empty(t, mmrBindingsFor(t, f.store, "agent", malformed, f.projectID))
+	}
+}

@@ -757,18 +757,27 @@ func validatePrincipalType(w http.ResponseWriter, principalType string) bool {
 }
 
 // validateMemberPrincipalAddress rejects a user principal addressed by
-// something that is neither an email nor a well-formed user ID, writing a
-// 400 invalid_request (the code P1 already uses for unresolvable principal
+// something that is neither an email nor a well-formed user ID, and an agent
+// principal addressed by anything but a well-formed agent ID, writing a 400
+// invalid_request (the code P1 already uses for unresolvable principal
 // addressing) and returning false. Without it the malformed ID reached the
 // store, whose validation error surfaced as a 500 on PUT (ptone/scion#2529,
 // review r2 L-500) and as "no bindings" 404 on DELETE.
 func validateMemberPrincipalAddress(w http.ResponseWriter, principalType, principalID string) bool {
-	if principalType != store.RoleBindingPrincipalUser || strings.Contains(principalID, "@") {
-		return true
-	}
-	if _, err := uuid.Parse(principalID); err != nil {
-		BadRequest(w, "user principal must be addressed by user ID or email: "+principalID)
-		return false
+	switch principalType {
+	case store.RoleBindingPrincipalUser:
+		if strings.Contains(principalID, "@") {
+			return true
+		}
+		if _, err := uuid.Parse(principalID); err != nil {
+			BadRequest(w, "user principal must be addressed by user ID or email: "+principalID)
+			return false
+		}
+	case store.RoleBindingPrincipalAgent:
+		if _, err := uuid.Parse(principalID); err != nil {
+			BadRequest(w, "agent principal must be addressed by agent ID: "+principalID)
+			return false
+		}
 	}
 	return true
 }
