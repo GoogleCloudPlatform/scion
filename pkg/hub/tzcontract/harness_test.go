@@ -48,7 +48,18 @@ var (
 	binOnce sync.Once
 	binPath string
 	binErr  error
+	// binDir is the temporary directory the binary was built into, or ""
+	// when SCION_TZ_CONTRACT_BIN supplied it. TestMain removes it.
+	binDir string
 )
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if binDir != "" {
+		_ = os.RemoveAll(binDir)
+	}
+	os.Exit(code)
+}
 
 // scionBinary returns the path of the scion binary under test. It uses
 // SCION_TZ_CONTRACT_BIN when set; otherwise it builds ./cmd/scion once per
@@ -70,6 +81,7 @@ func scionBinary(t *testing.T) string {
 			binErr = err
 			return
 		}
+		binDir = dir
 		binPath = filepath.Join(dir, "scion")
 		cmd := exec.Command("go", "build", "-buildvcs=false", "-o", binPath, "./cmd/scion")
 		cmd.Dir = root

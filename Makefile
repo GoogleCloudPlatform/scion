@@ -185,11 +185,11 @@ vet:
 lint:
 	@go vet -tags no_sqlite ./...
 
-## vet-integration: Compile-check integration-tagged code (go vet -tags 'integration volume_test')
+## vet-integration: Compile-check integration-tagged code (go vet -tags 'integration volume_test tzcontract')
 # Catches build breaks in integration-tagged files that other vet/lint
 # targets skip (ptone/scion#2348).
 vet-integration:
-	@go vet -tags 'integration volume_test' ./...
+	@go vet -tags 'integration volume_test tzcontract' ./...
 
 ## vet-integration-extras: Compile-check integration-tagged code in every extras/ module that has it
 # vet-integration only covers the root module's ./... tree; extras/*

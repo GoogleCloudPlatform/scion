@@ -267,13 +267,17 @@ jobs:
       # dialect parity. This job owns every Postgres-specific assertion in
       # P1a: the transaction-scoped advisory lock, SKIP LOCKED,
       # lock_timeout/idle-in-transaction SET LOCAL, and the per-row
-      # savepoints.
+      # savepoints. The job also runs the timestamp contract test (last step).
       - name: Run launch store tests (Postgres-enabled)
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-launch-store-postgres
 
+      # tz-refactor design §2.2 / AC1: the real-binary timestamp contract
+      # test. It runs the SQLite and Postgres cases (about 80 s) and runs
+      # even when the launch store step fails, so its result is never hidden.
       - name: Run timestamp contract test (SQLite and Postgres)
+        if: ${{ !cancelled() }}
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-tz-contract

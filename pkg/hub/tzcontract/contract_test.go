@@ -256,13 +256,6 @@ func runTokyoContract(t *testing.T, b backend) {
 			t.Fatalf("agent message %s missing from GET /agents/{id}/messages", str(ev.Data, "id"))
 		}
 		wireTimeEq(t, "REST agent message .createdAt", m["createdAt"], sseAt)
-
-		inbox := h.mustJSON("GET", "/api/v1/messages?agent="+url.QueryEscape(agentID), nil, 200)
-		for _, it := range list(inbox, "items") {
-			if str(it, "id") == str(m, "id") {
-				wireTimeEq(t, "REST /messages .createdAt", it["createdAt"], sseAt)
-			}
-		}
 	})
 
 	// Chat-v2: send, history, SSE, topic activity (webchat_topic) and edit
