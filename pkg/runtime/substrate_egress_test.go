@@ -358,6 +358,61 @@ func TestSubstrateEgressPolicy_EndToEndNoIPPatterns(t *testing.T) {
 // in-cluster suffix — each derived from a tenant-controllable source
 // (GitClone.URL or an OTEL endpoint env var) — never reach the actor's
 // EgressPolicy.
+// TestSubstrateEgressHostnames_ScpStyleGitURLSilentlyDropped proves an
+// scp-style git remote ("git@host:org/repo.git", no "://") — which
+// url.Parse does not accept as a URL at all, so hostFromURL returns "" —
+// fails closed: no host is added for it, specifically never the literal
+// "git@host:org/repo.git" string or any fragment of it, and no other
+// tenant-derived host added by the same call leaks it either.
+func TestSubstrateEgressHostnames_ScpStyleGitURLSilentlyDropped(t *testing.T) {
+	cfg := RunConfig{GitClone: &api.GitCloneConfig{URL: "git@github.com:acme/repo.git"}}
+	hosts, hostsErr := substrateEgressHostnames(cfg, map[string]string{}, config.V1SubstrateConfig{})
+	if hostsErr != nil {
+		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+	}
+	if containsHost(hosts, "github.com") {
+		t.Errorf("substrateEgressHostnames() = %v, must not extract a host from an scp-style git URL", hosts)
+	}
+	for _, h := range hosts {
+		if strings.Contains(h, "git@") || strings.Contains(h, "repo.git") {
+			t.Errorf("substrateEgressHostnames() = %v, leaked the raw scp-style URL", hosts)
+		}
+	}
+}
+
+// TestSubstrateEgressHostnames_TenantHostCannotWidenToArbitraryDomain
+// proves the coverage gate's actual purpose directly: a tenant-controlled
+// host (git clone, telemetry) that happens to be a well-formed public
+// hostname — not an IP, not an in-cluster suffix — is still refused unless
+// an operator's own egress_allow entry covers it. "*.example.com" in
+// egress_allow covers "ci.example.com" but never authorizes an unrelated
+// tenant domain the operator never listed.
+func TestSubstrateEgressHostnames_TenantHostCannotWidenToArbitraryDomain(t *testing.T) {
+	sc := config.V1SubstrateConfig{EgressAllow: []string{"*.example.com"}}
+
+	t.Run("covered subdomain is added", func(t *testing.T) {
+		cfg := RunConfig{GitClone: &api.GitCloneConfig{URL: "https://ci.example.com/acme/repo.git"}}
+		hosts, hostsErr := substrateEgressHostnames(cfg, map[string]string{}, sc)
+		if hostsErr != nil {
+			t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+		}
+		if !containsHost(hosts, "ci.example.com") {
+			t.Errorf("substrateEgressHostnames() = %v, want ci.example.com covered by *.example.com", hosts)
+		}
+	})
+
+	t.Run("unrelated tenant domain is refused despite being well-formed", func(t *testing.T) {
+		cfg := RunConfig{GitClone: &api.GitCloneConfig{URL: "https://attacker-controlled.net/acme/repo.git"}}
+		hosts, hostsErr := substrateEgressHostnames(cfg, map[string]string{}, sc)
+		if hostsErr != nil {
+			t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+		}
+		if containsHost(hosts, "attacker-controlled.net") {
+			t.Errorf("substrateEgressHostnames() = %v, a tenant-controlled public hostname must not widen egress beyond what egress_allow covers", hosts)
+		}
+	})
+}
+
 func TestSubstrateEgressHostnames_TenantSourcesDropInvalidHosts(t *testing.T) {
 	cases := []struct {
 		name    string

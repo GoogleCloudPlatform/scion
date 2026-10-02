@@ -262,6 +262,16 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 	if cfg.GitClone != nil && cfg.GitClone.URL != "" {
 		if h := hostFromURL(cfg.GitClone.URL); h != "" {
 			addTenantHost(h)
+		} else {
+			// hostFromURL returns "" for a URL it cannot extract a hostname
+			// from — notably an scp-style git remote ("git@host:org/r.git",
+			// no "://"), which url.Parse does not accept as a URL at all.
+			// This fails closed (no host is added, so the agent's own git
+			// clone may fail with egress-denied rather than being silently
+			// widened), but with no log line until now, that failure mode
+			// was indistinguishable from any other unrelated egress-denied
+			// outcome.
+			slog.Warn("substrate: could not extract a hostname from the configured git clone URL; no egress host added for it", "hint", "scp-style remotes (git@host:org/repo.git) are not supported here — use an https:// URL")
 		}
 	} else if h := hostFromURLEnv(env, "SCION_GIT_CLONE_URL"); h != "" {
 		addTenantHost(h)

@@ -860,7 +860,7 @@ func TestResolveEffectiveHubEndpoint_CloudrunLocalhostOverride(t *testing.T) {
 	})
 
 	t.Run("cloudrun runtime with a non-localhost result: override is skipped", func(t *testing.T) {
-		got, _, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+		got, trusted, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
 			Op: opCreate, BrokerHubEndpoint: "https://broker.example.com", RuntimeName: "cloudrun",
 		})
 		if err != nil {
@@ -869,10 +869,13 @@ func TestResolveEffectiveHubEndpoint_CloudrunLocalhostOverride(t *testing.T) {
 		if got != "https://broker.example.com" {
 			t.Errorf("got %q, want the broker endpoint as-is (no override applies to a non-localhost result)", got)
 		}
+		if !trusted {
+			t.Error("trusted = false, want true (BrokerHubEndpoint is an operator-derived tier)")
+		}
 	})
 
 	t.Run("non-cloudrun runtime with a localhost result: override is skipped", func(t *testing.T) {
-		got, _, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+		got, trusted, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
 			Op: opCreate, BrokerHubEndpoint: "http://localhost:8080", RuntimeName: "kubernetes",
 		})
 		if err != nil {
@@ -880,6 +883,9 @@ func TestResolveEffectiveHubEndpoint_CloudrunLocalhostOverride(t *testing.T) {
 		}
 		if got != "http://localhost:8080" {
 			t.Errorf("got %q, want the localhost endpoint left alone on a non-cloudrun runtime", got)
+		}
+		if !trusted {
+			t.Error("trusted = false, want true (BrokerHubEndpoint is an operator-derived tier)")
 		}
 	})
 }
@@ -917,7 +923,7 @@ func TestResolveEffectiveHubEndpoint_CloudrunLocalhostOverrideValue(t *testing.T
 		{"kubernetes, localhost: kept", "kubernetes", "http://localhost:8080", "http://localhost:8080"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, _, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+			got, trusted, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
 				Op: opCreate, BrokerHubEndpoint: tt.broker, RuntimeName: tt.runtime,
 			})
 			if err != nil {
@@ -925,6 +931,12 @@ func TestResolveEffectiveHubEndpoint_CloudrunLocalhostOverrideValue(t *testing.T
 			}
 			if got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
+			}
+			// Both the cloudrun-instance override (infra-derived) and the
+			// underlying BrokerHubEndpoint tier it may replace (an
+			// operator-derived tier) are always trusted.
+			if !trusted {
+				t.Error("trusted = false, want true")
 			}
 		})
 	}
