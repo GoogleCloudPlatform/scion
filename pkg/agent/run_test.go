@@ -16,7 +16,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -31,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 func TestExtractWorkspaceFromVolumes(t *testing.T) {
@@ -3230,6 +3230,138 @@ profiles:
 	}
 }
 
+// TestStartInvalidatesProvisionedRepoRootWhenNFSBackendReplacesWorkspace is
+// the round-2 review's N5 regression guard: server.workspace_storage.backend
+// == "nfs" applies to worktree-per-agent mode too (runtime.SelectWorkspaceBackend),
+// and when it fires it replaces effectiveWorkspace with the NFS-backed host
+// path — which can combine with a ctx-provisioned repo root from
+// tryProvisionWorktree's LOCAL host-side worktree in the same dispatch. The
+// repo root validated against the PRE-backend workspace no longer
+// corresponds to the FINAL workspace RunConfig actually uses, so it must be
+// re-validated (and here, correctly invalidated) rather than left stale.
+func TestStartInvalidatesProvisionedRepoRootWhenNFSBackendReplacesWorkspace(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir to tmpDir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatalf("failed to set HOME: %v", err)
+	}
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+		t.Fatalf("failed to create project .scion dir: %v", err)
+	}
+
+	nfsMountRoot := filepath.Join(tmpDir, "nfs")
+	settingsYAML := fmt.Sprintf(`schema_version: "1"
+active_profile: local
+server:
+  workspace_storage:
+    backend: nfs
+    nfs:
+      mount_root: %s
+      shares:
+        - id: share-1
+          server: 10.0.0.2
+          export: /scion-workspaces
+          pv_name: scion-workspaces-pv
+harness_configs:
+  test-harness:
+    harness: gemini
+    user: scion
+    image: test-image:latest
+profiles:
+  local:
+    runtime: docker
+`, nfsMountRoot)
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
+	if err := os.MkdirAll(hcDir, 0755); err != nil {
+		t.Fatalf("failed to create harness-config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644); err != nil {
+		t.Fatalf("failed to write harness config: %v", err)
+	}
+	tplDir := filepath.Join(projectScionDir, "templates", "default")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatalf("failed to create template dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644); err != nil {
+		t.Fatalf("failed to write template: %v", err)
+	}
+
+	// A REAL local worktree — this is what tryProvisionWorktree would have
+	// provisioned on the host before the NFS backend applies. The ctx signal
+	// below validates successfully against THIS workspace, on purpose: the
+	// point of the test is that the NFS backend then replaces it.
+	sharedBase := filepath.Join(tmpDir, "shared-base")
+	if err := os.MkdirAll(sharedBase, 0755); err != nil {
+		t.Fatalf("failed to create shared base dir: %v", err)
+	}
+	setupGitRepo(t, sharedBase)
+	localWorktree := createRealWorktree(t, sharedBase, "agent-a")
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), sharedBase)
+	_, err = mgr.Start(ctx, api.StartOptions{
+		Name:        "agent-a",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		Workspace:   localWorktree,
+		Env: map[string]string{
+			"SCION_AGENT_ID":   "agent-a",
+			"SCION_PROJECT_ID": "proj-123",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Confirm the NFS backend actually fired and replaced the workspace —
+	// otherwise this test would pass vacuously.
+	if capturedConfig.WorkspaceBackendName != "nfs" {
+		t.Fatalf("WorkspaceBackendName = %q, want nfs (test setup broken)", capturedConfig.WorkspaceBackendName)
+	}
+	wantWorkspace := filepath.Join(nfsMountRoot, "share-1", "projects", "proj-123", "workspace")
+	if capturedConfig.Workspace != wantWorkspace {
+		t.Fatalf("Workspace = %q, want %q (test setup broken)", capturedConfig.Workspace, wantWorkspace)
+	}
+
+	// The actual assertion: RepoRoot must NOT be the local sharedBase — that
+	// value was validated against localWorktree, not the NFS path RunConfig
+	// now actually uses. An explicit --workspace-shaped dispatch (opts.Workspace
+	// set) with no valid provisioned root falls through to detectRepoRoot,
+	// which stays "" for an explicit workspace.
+	if capturedConfig.RepoRoot != "" {
+		t.Fatalf("RunConfig.RepoRoot = %q, want \"\" — stale repo root from before the NFS backend replaced the workspace", capturedConfig.RepoRoot)
+	}
+}
+
 // TestStartUserWorkspaceOverrideYieldsEmptyRepoRoot is the required
 // counterpart to the broker-provisioned-worktree RepoRoot stitching fix: a
 // user-supplied --workspace (opts.Workspace set with no
@@ -3342,11 +3474,13 @@ profiles:
 // is the round-1 review's O1 regression guard: GetAgent skips ProvisionAgent
 // entirely once an agent directory already exists on disk (e.g. a leftover
 // from a deleted hub agent recreated under the same name), so a fresh ctx
-// signal on that dispatch would otherwise never reach agent-info.json —
-// stranding RepoRoot on the very next resume, which has no ctx signal of its
-// own. Start must persist the fresh value itself whenever it differs from
-// what's already on disk, independent of whether ProvisionAgent ran.
+// signal on that dispatch would otherwise never be persisted — stranding
+// RepoRoot on the very next resume, which has no ctx signal of its own.
+// Start must persist the fresh value itself whenever it validates and
+// differs from what's already on disk, independent of whether ProvisionAgent
+// ran.
 func TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkipped(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
 	tmpDir := t.TempDir()
 
 	oldWd, err := os.Getwd()
@@ -3398,6 +3532,132 @@ profiles:
 		t.Fatalf("failed to write template: %v", err)
 	}
 
+	// The workspace must be a REAL worktree of sharedBase (not just a plain
+	// directory) — the hardened validator (round-2 review finding C1) only
+	// persists a ctx signal that actually validates, and validation now
+	// requires a genuine git worktree relationship, not just a matching
+	// directory shape.
+	sharedBase := t.TempDir()
+	setupGitRepo(t, sharedBase)
+	worktreesDir := filepath.Join(sharedBase, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatalf("failed to create worktrees dir: %v", err)
+	}
+	userWorkspace := filepath.Join(worktreesDir, "agent-a")
+	if err := util.CreateWorktree(userWorkspace, "agent-a"); err != nil {
+		t.Fatalf("failed to create real worktree: %v", err)
+	}
+
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+	env := map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"}
+
+	// Step 1: create the agent normally as a plain --workspace agent (no ctx
+	// signal) — the exact provisioning shape doesn't matter here, only that
+	// the agent directory now exists on disk with no repo root persisted.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: userWorkspace, Env: env,
+	}); err != nil {
+		t.Fatalf("initial Start failed: %v", err)
+	}
+
+	// Step 2: a later dispatch for the SAME agent name whose ctx carries a
+	// fresh broker-provisioned-worktree signal (the real relationship: user
+	// Workspace is genuinely sharedBase's worktree). Because the agent
+	// directory already exists, GetAgent's "agent dir exists" branch skips
+	// ProvisionAgent entirely — the only way this value can reach disk is the
+	// persistence added to Start for exactly this case.
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), sharedBase)
+	if _, err := mgr.Start(ctx, api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: userWorkspace, Env: env,
+	}); err != nil {
+		t.Fatalf("second Start failed: %v", err)
+	}
+
+	agentDir := config.GetAgentDir(projectScionDir, "agent-a", false)
+	gotRoot, err := filepath.EvalSymlinks(readProvisionedWorktreeRepoRoot(agentDir))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(persisted repo root): %v", err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(sharedBase)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(sharedBase): %v", err)
+	}
+	if gotRoot != wantRoot {
+		t.Fatalf("persisted repo root = %q, want %q — the fresh ctx signal was not persisted when ProvisionAgent was skipped", gotRoot, wantRoot)
+	}
+}
+
+// TestStartDoesNotPersistUnvalidatedCtxRepoRoot is the round-2 review's N2
+// regression guard: the O1 persistence path must only ever write a repo root
+// that actually validated (repoRoot == ctxRepoRoot), never a bare ctx value
+// that the validator rejected and detectRepoRoot then fell back past.
+// Otherwise a bad value could reach disk even though it never reached
+// RunConfig on the dispatch that produced it.
+func TestStartDoesNotPersistUnvalidatedCtxRepoRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir to tmpDir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatalf("failed to set HOME: %v", err)
+	}
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+		t.Fatalf("failed to create project .scion dir: %v", err)
+	}
+	settingsYAML := `schema_version: "1"
+active_profile: local
+harness_configs:
+  test-harness:
+    harness: gemini
+    user: scion
+    image: test-image:latest
+profiles:
+  local:
+    runtime: docker
+`
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
+	if err := os.MkdirAll(hcDir, 0755); err != nil {
+		t.Fatalf("failed to create harness-config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644); err != nil {
+		t.Fatalf("failed to write harness config: %v", err)
+	}
+	tplDir := filepath.Join(projectScionDir, "templates", "default")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatalf("failed to create template dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644); err != nil {
+		t.Fatalf("failed to write template: %v", err)
+	}
+
+	// ctxRoot is a real git repo, but it has no relationship at all to
+	// userWorkspace (a plain, unrelated directory) — the validator must
+	// reject this pairing.
+	ctxRoot := t.TempDir()
+	setupGitRepo(t, ctxRoot)
 	userWorkspace := filepath.Join(tmpDir, "operators-own-dir")
 	if err := os.MkdirAll(userWorkspace, 0755); err != nil {
 		t.Fatalf("failed to create user workspace dir: %v", err)
@@ -3412,50 +3672,149 @@ profiles:
 		},
 	}
 	mgr := NewManager(mockRT)
+
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), ctxRoot)
+	if _, err := mgr.Start(ctx, api.StartOptions{
+		Name:        "agent-a",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		Workspace:   userWorkspace,
+		Env:         map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"},
+	}); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	agentDir := config.GetAgentDir(projectScionDir, "agent-a", false)
+	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
+		t.Fatalf("persisted repo root = %q, want \"\" — an unvalidated ctx value must never be persisted", got)
+	}
+}
+
+// TestStartResumeIgnoresForgedAgentInfoRepoRoot is the round-2 review's
+// required C1 regression test, shaped exactly like the reviewer's PoC: a
+// user --workspace agent on a directory shaped like
+// "<repo>/worktrees/<name>" (not a real git worktree — the PoC did not need
+// one, since round-1's validator only checked path shape). The first Start
+// correctly yields an empty RepoRoot. Simulating the container, this test
+// then forges agentHome/agent-info.json with the field name AgentInfo used
+// to carry the repo root under in round 1
+// ("provisionedWorktreeRepoRoot") — agentHome is bind-mounted read-write
+// into the container (pkg/runtime/common.go), so a compromised or
+// prompt-injected agent can write this file for real. A resume must still
+// yield an empty RepoRoot: run.go no longer reads agent-info.json for this
+// value at all (it moved to a broker-owned file under agentDir, which is
+// never bind-mounted), and even if it did, the hardened validator would
+// still reject this non-worktree directory.
+func TestStartResumeIgnoresForgedAgentInfoRepoRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir to tmpDir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatalf("failed to set HOME: %v", err)
+	}
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+		t.Fatalf("failed to create project .scion dir: %v", err)
+	}
+	settingsYAML := `schema_version: "1"
+active_profile: local
+harness_configs:
+  test-harness:
+    harness: gemini
+    user: scion
+    image: test-image:latest
+profiles:
+  local:
+    runtime: docker
+`
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
+	if err := os.MkdirAll(hcDir, 0755); err != nil {
+		t.Fatalf("failed to create harness-config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644); err != nil {
+		t.Fatalf("failed to write harness config: %v", err)
+	}
+	tplDir := filepath.Join(projectScionDir, "templates", "default")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatalf("failed to create template dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644); err != nil {
+		t.Fatalf("failed to write template: %v", err)
+	}
+
+	// The PoC precondition, strengthened to isolate the storage-boundary fix
+	// from the validator: a REAL git worktree, so the forged value below
+	// would validate successfully if run.go consulted agent-info.json for
+	// it. That isolates "is the container-writable file even consulted"
+	// (this test) from "does the validator reject a fake worktree shape"
+	// (TestValidateProvisionedWorktreeRepoRoot_RejectsPlainMkdirWorktree).
+	t.Setenv("SCION_HOST_UID", "")
+	userRepo := filepath.Join(tmpDir, "userrepo")
+	if err := os.MkdirAll(userRepo, 0755); err != nil {
+		t.Fatalf("failed to create user repo dir: %v", err)
+	}
+	setupGitRepo(t, userRepo)
+	userWorkspace := createRealWorktree(t, userRepo, "foo")
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
 	env := map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"}
 
-	// Step 1: create the agent normally (e.g. a plain --workspace agent —
-	// the exact provisioning shape doesn't matter here, only that the agent
-	// directory now exists on disk with no ProvisionedWorktreeRepoRoot set).
+	// First Start: plain user --workspace, no ctx signal. Correct baseline:
+	// RepoRoot is empty.
 	if _, err := mgr.Start(context.Background(), api.StartOptions{
 		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: userWorkspace, Env: env,
 	}); err != nil {
 		t.Fatalf("initial Start failed: %v", err)
 	}
-
-	// Step 2: a later dispatch for the SAME agent name whose ctx carries a
-	// fresh broker-provisioned-worktree signal. Because the agent directory
-	// already exists, GetAgent's "agent dir exists" branch skips
-	// ProvisionAgent entirely — the only way this value can reach disk is the
-	// persistence added to Start for exactly this case.
-	sharedBase := t.TempDir()
-	setupGitRepo(t, sharedBase)
-	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), sharedBase)
-	if _, err := mgr.Start(ctx, api.StartOptions{
-		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: userWorkspace, Env: env,
-	}); err != nil {
-		t.Fatalf("second Start failed: %v", err)
+	if capturedConfig.RepoRoot != "" {
+		t.Fatalf("baseline RunConfig.RepoRoot = %q, want \"\" before forging anything", capturedConfig.RepoRoot)
 	}
 
+	// Simulate the container: forge agent-info.json in agentHome (bind-mounted
+	// read-write into the container) with the field name AgentInfo carried
+	// this value under in round 1.
 	agentHome := config.GetAgentHomePath(projectScionDir, "agent-a")
-	data, err := os.ReadFile(filepath.Join(agentHome, "agent-info.json"))
-	if err != nil {
-		t.Fatalf("reading agent-info.json: %v", err)
+	forged := []byte(`{"provisionedWorktreeRepoRoot":"` + userRepo + `"}`)
+	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), forged, 0644); err != nil {
+		t.Fatalf("failed to forge agent-info.json: %v", err)
 	}
-	var info api.AgentInfo
-	if err := json.Unmarshal(data, &info); err != nil {
-		t.Fatalf("unmarshal agent-info.json: %v", err)
+
+	// Resume: no ctx signal, empty Workspace — exactly the shape the reviewer
+	// used to turn the forged file into a live RepoRoot in round 1.
+	capturedConfig = runtime.RunConfig{}
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Resume: true, Env: env,
+	}); err != nil {
+		t.Fatalf("resume Start failed: %v", err)
 	}
-	gotRoot, err := filepath.EvalSymlinks(info.ProvisionedWorktreeRepoRoot)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(persisted ProvisionedWorktreeRepoRoot=%q): %v", info.ProvisionedWorktreeRepoRoot, err)
-	}
-	wantRoot, err := filepath.EvalSymlinks(sharedBase)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(sharedBase): %v", err)
-	}
-	if gotRoot != wantRoot {
-		t.Fatalf("persisted AgentInfo.ProvisionedWorktreeRepoRoot = %q, want %q — the fresh ctx signal was not written to agent-info.json when ProvisionAgent was skipped", gotRoot, wantRoot)
+
+	if capturedConfig.RepoRoot != "" {
+		t.Fatalf("resume RunConfig.RepoRoot = %q, want \"\" — a forged agent-info.json (container-writable) must not be able to set RepoRoot", capturedConfig.RepoRoot)
 	}
 }
 

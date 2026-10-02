@@ -112,6 +112,9 @@ profiles:
 // the real /repo-root/.git mount never fired.
 func TestTryProvisionWorktree_Start_StitchesRepoRoot(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
+	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
+		t.Skipf("git too old, worktree mode not eligible on this host: %s", reason)
+	}
 
 	// --- Phase 1: broker side — the real tryProvisionWorktree call. ---
 	bare := initBareRepoWithCommit(t)
@@ -195,6 +198,14 @@ func TestTryProvisionWorktree_Start_StitchesRepoRoot(t *testing.T) {
 	if gotRoot != wantRoot {
 		t.Fatalf("RunConfig.RepoRoot = %q, want %q (the shared base)", gotRoot, wantRoot)
 	}
+	// ContainerWorkspace is what actually selects the mount branch in
+	// pkg/runtime/common.go — asserting only on
+	// RepoRoot after EvalSymlinks can hide a lexical mismatch that still
+	// misroutes the mount. Confirm it lands under /repo-root, not the
+	// full-root-fallback's /workspace.
+	if wantContainerWorkspace := "/repo-root/worktrees/agent-a"; capturedConfig.ContainerWorkspace != wantContainerWorkspace {
+		t.Fatalf("RunConfig.ContainerWorkspace = %q, want %q", capturedConfig.ContainerWorkspace, wantContainerWorkspace)
+	}
 }
 
 // TestTryProvisionWorktree_Start_RepoRootSurvivesResume is the required R2
@@ -206,6 +217,9 @@ func TestTryProvisionWorktree_Start_StitchesRepoRoot(t *testing.T) {
 // any value this test supplies directly.
 func TestTryProvisionWorktree_Start_RepoRootSurvivesResume(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
+	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
+		t.Skipf("git too old, worktree mode not eligible on this host: %s", reason)
+	}
 
 	bare := initBareRepoWithCommit(t)
 	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
@@ -306,6 +320,11 @@ func TestTryProvisionWorktree_Start_RepoRootSurvivesResume(t *testing.T) {
 	if gotWorkspace != wantWorkspace {
 		t.Fatalf("resume RunConfig.Workspace = %q, want %q (the worktree, recovered via the persisted Volumes mount)", gotWorkspace, wantWorkspace)
 	}
+	// See the StitchesRepoRoot test for why ContainerWorkspace, not just
+	// RepoRoot, must be asserted.
+	if wantContainerWorkspace := "/repo-root/worktrees/agent-a"; capturedConfig.ContainerWorkspace != wantContainerWorkspace {
+		t.Fatalf("resume RunConfig.ContainerWorkspace = %q, want %q", capturedConfig.ContainerWorkspace, wantContainerWorkspace)
+	}
 }
 
 // postCreateAgentExpectCreated drives the real HTTP handler, so the request
@@ -335,6 +354,9 @@ func postCreateAgentExpectCreated(t *testing.T, srv *Server, body string) {
 // green; this test is what catches it.
 func TestCreateAgent_WiresProvisionedWorktreeRepoRootOntoStartContext(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
+	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
+		t.Skipf("git too old, worktree mode not eligible on this host: %s", reason)
+	}
 
 	bare := initBareRepoWithCommit(t)
 	brokerTmp := t.TempDir()
@@ -391,10 +413,112 @@ func TestCreateAgent_WiresProvisionedWorktreeRepoRootOntoStartContext(t *testing
 	if gotRoot != wantRoot {
 		t.Fatalf("RunConfig.RepoRoot = %q, want %q (the shared base)", gotRoot, wantRoot)
 	}
+	// See TestTryProvisionWorktree_Start_StitchesRepoRoot for why
+	// ContainerWorkspace, not just RepoRoot, must be asserted.
+	if wantContainerWorkspace := "/repo-root/worktrees/agent-a"; capturedConfig.ContainerWorkspace != wantContainerWorkspace {
+		t.Fatalf("RunConfig.ContainerWorkspace = %q, want %q", capturedConfig.ContainerWorkspace, wantContainerWorkspace)
+	}
 }
 
 // jsonStr quotes s as a JSON string literal, for building request bodies
 // containing filesystem paths (which may need escaping on some platforms).
 func jsonStr(s string) string {
 	return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
+}
+
+// TestTryProvisionWorktree_Start_SymlinkedBase_ContainerWorkspaceStaysConsistent
+// is a regression guard: when the
+// broker's project path runs through a symlink (a symlinked $HOME, a
+// symlinked projects dir, or macOS's /var -> /private/var), the repo root
+// validateProvisionedWorktreeRepoRoot returns must stay lexically consistent
+// with the unresolved RunConfig.Workspace, or pkg/runtime/common.go's
+// filepath.Rel(RepoRoot, Workspace) breaks and misroutes the mount into the
+// full-root fallback branch (ContainerWorkspace == "/workspace" instead of
+// "/repo-root/worktrees/<id>", and in-container git breaks again).
+//
+// Before the fix, validateProvisionedWorktreeRepoRoot returned
+// EvalSymlinks(root) while effectiveWorkspace (and so RunConfig.Workspace)
+// stayed lexical, exactly reproducing this break.
+func TestTryProvisionWorktree_Start_SymlinkedBase_ContainerWorkspaceStaysConsistent(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
+		t.Skipf("git too old, worktree mode not eligible on this host: %s", reason)
+	}
+
+	realDir := t.TempDir()
+	linkParent := t.TempDir()
+	linkDir := filepath.Join(linkParent, "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatalf("os.Symlink: %v", err)
+	}
+
+	bare := initBareRepoWithCommit(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
+
+	// The broker project path runs through the symlink.
+	brokerProjectPath := filepath.Join(linkDir, "broker-project")
+	if err := os.MkdirAll(brokerProjectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{}
+	provisionOpts := &api.StartOptions{}
+	provisioned, repoRoot := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name:          "agent-a",
+		AgentID:       "agent-a",
+		ProjectID:     "p1",
+		ProjectSlug:   "proj",
+		ProjectPath:   brokerProjectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: gc},
+	}, provisionOpts, map[string]string{})
+	if !provisioned || repoRoot == "" || provisionOpts.Workspace == "" {
+		t.Fatalf("tryProvisionWorktree setup failed: provisioned=%v repoRoot=%q workspace=%q", provisioned, repoRoot, provisionOpts.Workspace)
+	}
+	if !strings.Contains(repoRoot, linkDir) {
+		t.Fatalf("test setup broken: repoRoot %q does not contain the symlinked component %q", repoRoot, linkDir)
+	}
+
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), repoRoot)
+	projectScionDir := setupRepoRootProjectScaffold(t, t.TempDir())
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := agent.NewManager(mockRT)
+
+	if _, err := mgr.Start(ctx, api.StartOptions{
+		Name:        "agent-a",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		Workspace:   provisionOpts.Workspace,
+		Env: map[string]string{
+			"SCION_AGENT_ID":   "agent-a",
+			"SCION_PROJECT_ID": "p1",
+		},
+	}); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// The core assertion: ContainerWorkspace must land under /repo-root, the
+	// worktree dual-mount branch — not /workspace, common.go's full-root
+	// fallback that fires when filepath.Rel(RepoRoot, Workspace) doesn't
+	// resolve to a clean "worktrees/<id>" subpath.
+	if wantContainerWorkspace := "/repo-root/worktrees/agent-a"; capturedConfig.ContainerWorkspace != wantContainerWorkspace {
+		t.Fatalf("RunConfig.ContainerWorkspace = %q, want %q — RepoRoot and Workspace are lexically inconsistent on a symlinked broker path", capturedConfig.ContainerWorkspace, wantContainerWorkspace)
+	}
+	// RepoRoot itself must stay lexically identical to the value
+	// tryProvisionWorktree produced (through the symlink), not
+	// EvalSymlinks'd — that lexical identity is exactly what keeps
+	// filepath.Rel(RepoRoot, Workspace) correct in common.go.
+	if capturedConfig.RepoRoot != repoRoot {
+		t.Fatalf("RunConfig.RepoRoot = %q, want the original (unresolved) %q", capturedConfig.RepoRoot, repoRoot)
+	}
 }

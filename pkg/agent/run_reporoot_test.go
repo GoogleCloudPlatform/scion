@@ -18,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // eval resolves symlinks so comparisons hold on platforms (e.g. macOS) where
@@ -130,10 +132,48 @@ func TestDetectRepoRoot_NoGitAnywhere(t *testing.T) {
 	}
 }
 
+// createRealWorktree creates root/worktrees/<name> as a genuine git worktree
+// of root (via util.CreateWorktree, the same helper production code uses),
+// and returns its path. root must already be a git repo (setupGitRepo).
+func createRealWorktree(t *testing.T, root, name string) string {
+	t.Helper()
+	worktreesDir := filepath.Join(root, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatalf("mkdir worktrees dir: %v", err)
+	}
+	worktree := filepath.Join(worktreesDir, name)
+	if err := util.CreateWorktree(worktree, name); err != nil {
+		t.Fatalf("CreateWorktree: %v", err)
+	}
+	return worktree
+}
+
 // TestValidateProvisionedWorktreeRepoRoot_ValidWorktree is the accept case: a
-// real git repo root with a workspace nested under root/worktrees/<id>, the
-// exact layout tryProvisionWorktree creates.
+// real git repo root with a workspace that is a genuine git worktree nested
+// under root/worktrees/<id> — the exact relationship tryProvisionWorktree
+// creates, not just a matching directory shape. Confirms the returned root is
+// the ORIGINAL argument (round-2 review finding R1: must stay lexically
+// consistent with the unresolved effectiveWorkspace the caller already has),
+// not an EvalSymlinks'd one.
 func TestValidateProvisionedWorktreeRepoRoot_ValidWorktree(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	root := t.TempDir()
+	setupGitRepo(t, root)
+	worktree := createRealWorktree(t, root, "agent-1")
+
+	got := validateProvisionedWorktreeRepoRoot(root, worktree)
+	if got != root {
+		t.Fatalf("validateProvisionedWorktreeRepoRoot(root, worktree) = %q, want the original root %q unchanged", got, root)
+	}
+}
+
+// TestValidateProvisionedWorktreeRepoRoot_RejectsPlainMkdirWorktree is the
+// round-2 review's required regression test: a plain mkdir'd
+// root/worktrees/<name> — the right directory shape but no actual git
+// worktree relationship — must be rejected. This is exactly what round-1's
+// validator missed (it accepted this shape) and what makes the deep gitfile
+// checks necessary rather than just the path-shape checks.
+func TestValidateProvisionedWorktreeRepoRoot_RejectsPlainMkdirWorktree(t *testing.T) {
 	root := t.TempDir()
 	setupGitRepo(t, root)
 	worktree := filepath.Join(root, "worktrees", "agent-1")
@@ -141,9 +181,79 @@ func TestValidateProvisionedWorktreeRepoRoot_ValidWorktree(t *testing.T) {
 		t.Fatalf("mkdir worktree: %v", err)
 	}
 
-	got := validateProvisionedWorktreeRepoRoot(root, worktree)
-	if want := eval(t, root); got != want {
-		t.Fatalf("validateProvisionedWorktreeRepoRoot(root, worktree) = %q, want %q", got, want)
+	if got := validateProvisionedWorktreeRepoRoot(root, worktree); got != "" {
+		t.Fatalf("plain mkdir'd worktree: got %q, want \"\" (not a real git worktree)", got)
+	}
+}
+
+// TestValidateProvisionedWorktreeRepoRoot_RejectsWorktreesRootExactly covers
+// N1: a workspace exactly AT root/worktrees (no name segment) is not the
+// layout tryProvisionWorktree creates and must be rejected.
+func TestValidateProvisionedWorktreeRepoRoot_RejectsWorktreesRootExactly(t *testing.T) {
+	root := t.TempDir()
+	setupGitRepo(t, root)
+	worktreesDir := filepath.Join(root, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatalf("mkdir worktrees dir: %v", err)
+	}
+
+	if got := validateProvisionedWorktreeRepoRoot(root, worktreesDir); got != "" {
+		t.Fatalf("workspace == root/worktrees exactly: got %q, want \"\"", got)
+	}
+}
+
+// TestValidateProvisionedWorktreeRepoRoot_RejectsNestedBeyondName covers a
+// workspace nested one level deeper than the exact layout, e.g.
+// root/worktrees/<name>/extra — must be rejected, not just anything "under"
+// worktrees/.
+func TestValidateProvisionedWorktreeRepoRoot_RejectsNestedBeyondName(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	root := t.TempDir()
+	setupGitRepo(t, root)
+	worktree := createRealWorktree(t, root, "agent-1")
+	nested := filepath.Join(worktree, "extra")
+	if err := os.MkdirAll(nested, 0755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+
+	if got := validateProvisionedWorktreeRepoRoot(root, nested); got != "" {
+		t.Fatalf("workspace nested beyond worktrees/<name>: got %q, want \"\"", got)
+	}
+}
+
+// TestValidateProvisionedWorktreeRepoRoot_RejectsForgedAdminDir covers a
+// forged pairing that gets past the path-shape and gitfile-presence checks: a
+// workspace whose .git gitfile points at a directory that exists and looks
+// like a worktree admin dir, but whose own back-link does not point back at
+// the workspace. This is what the back-link check (round-2 review C1 step 2,
+// "if cheap") catches that the gitdir-resolves-to-admin-dir check alone does
+// not.
+func TestValidateProvisionedWorktreeRepoRoot_RejectsForgedAdminDir(t *testing.T) {
+	root := t.TempDir()
+	setupGitRepo(t, root)
+
+	worktree := filepath.Join(root, "worktrees", "agent-1")
+	if err := os.MkdirAll(worktree, 0755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	// A gitfile pointing at a real, correctly-shaped admin dir under root...
+	adminDir := filepath.Join(root, ".git", "worktrees", "agent-1")
+	if err := os.MkdirAll(adminDir, 0755); err != nil {
+		t.Fatalf("mkdir admin dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+adminDir+"\n"), 0644); err != nil {
+		t.Fatalf("write workspace gitfile: %v", err)
+	}
+	// ...but whose back-link points somewhere else entirely, not back at
+	// worktree/.git — the tell that this admin dir was hand-crafted, not
+	// created by a real `git worktree add`.
+	elsewhere := t.TempDir()
+	if err := os.WriteFile(filepath.Join(adminDir, "gitdir"), []byte(elsewhere+"\n"), 0644); err != nil {
+		t.Fatalf("write forged back-link: %v", err)
+	}
+
+	if got := validateProvisionedWorktreeRepoRoot(root, worktree); got != "" {
+		t.Fatalf("forged admin dir with mismatched back-link: got %q, want \"\"", got)
 	}
 }
 

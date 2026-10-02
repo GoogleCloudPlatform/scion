@@ -487,16 +487,16 @@ type ScionConfig struct {
 	// path, bind-mounted directly with no git worktree/branch, even when inside a
 	// repo. Persisted so resume/restart honors the same contract as first start.
 	//
-	// ExplicitWorkspace is also true for a broker-provisioned worktree-per-agent
-	// workspace (tryProvisionWorktree sets opts.Workspace too, so it takes the
-	// same "explicit workspace" branch in ProvisionAgent) — that overload is
-	// intentional: both cases mount from a Volumes-derived path rather than the
-	// per-agent managed <agentDir>/workspace directory GetAgent recovers into on
-	// resume. It is RepoRoot resolution, not this flag, that must tell the two
-	// cases apart — see AgentInfo.ProvisionedWorktreeRepoRoot. That value is
-	// deliberately NOT a field on ScionConfig: this struct is populated by
-	// unmarshaling templates, hub inline config, and --config files, none of
-	// which may set the repo root Start trusts for a host bind-mount.
+	// Also true for a broker-provisioned worktree-per-agent workspace
+	// (tryProvisionWorktree sets opts.Workspace too, so it takes the same
+	// branch in ProvisionAgent): both cases mount from a Volumes-derived path
+	// rather than GetAgent's managed <agentDir>/workspace recovery. RepoRoot
+	// resolution, not this flag, is what tells the two cases apart — see
+	// pkg/agent's readProvisionedWorktreeRepoRoot. That value is deliberately
+	// not a field on ScionConfig (populated by unmarshaling templates, hub
+	// inline config, and --config files) nor on AgentInfo (persisted in
+	// agentHome, which the container can write) — see
+	// ContextWithProvisionedWorktreeRepoRoot below.
 	ExplicitWorkspace bool `json:"explicit_workspace,omitempty" yaml:"explicit_workspace,omitempty"`
 
 	// Info contains persisted metadata about the agent
@@ -644,21 +644,6 @@ type AgentInfo struct {
 
 	// Optimistic locking
 	StateVersion int64 `json:"stateVersion,omitempty"` // Version for concurrent update detection
-
-	// ProvisionedWorktreeRepoRoot is the git repo root for a broker-provisioned
-	// worktree-per-agent workspace. Set only by pkg/agent/provision.go's
-	// ProvisionAgent, from the broker-local ctx signal
-	// (ContextWithProvisionedWorktreeRepoRoot) — never from a template, a hub
-	// inline config, a --config file, or applyInlineConfigUpdate. This is what
-	// makes it safe: unlike ScionConfig, which every one of those sources can
-	// populate via JSON/YAML unmarshal, AgentInfo (ScionConfig.Info) carries
-	// `json:"-" yaml:"-"` on the field that would otherwise let it in, so no
-	// deserialization path can ever set this value. It round-trips to
-	// agent-info.json and back on resume/restart (see GetAgent), and
-	// pkg/agent/run.go's Start independently validates it (EvalSymlinks,
-	// requires <root>/.git to be a directory, requires the workspace strictly
-	// inside <root>) before trusting it for a host bind-mount.
-	ProvisionedWorktreeRepoRoot string `json:"provisionedWorktreeRepoRoot,omitempty"`
 }
 
 // AgentDetail provides freeform context about the current activity.
@@ -933,27 +918,23 @@ type provisionedWorktreeRepoRootContextKey struct{}
 // (opts.Workspace) is a broker-provisioned worktree-per-agent checkout —
 // created by runtimebroker's tryProvisionWorktree, not by a user's
 // --workspace override — whose git repo root is repoRoot. Modelled on
-// ContextWithGitClone / ContextWithSharedWorkspace: the signal is
-// broker-local and never crosses the wire.
+// ContextWithGitClone / ContextWithSharedWorkspace: broker-local, never on
+// the wire.
 //
-// pkg/agent/run.go's Start consumes it (see
-// ProvisionedWorktreeRepoRootFromContext) to set RunConfig.RepoRoot directly
-// to repoRoot, skipping detectRepoRoot entirely for this case.
-// detectRepoRoot's "an explicit workspace skips git detection" rule exists
-// for a user's own --workspace override and must not swallow the
-// broker's own worktree provisioning, which needs the repo root mounted for
-// in-container git to work at all.
+// pkg/agent/run.go's Start consumes it (ProvisionedWorktreeRepoRootFromContext)
+// to set RunConfig.RepoRoot directly, skipping detectRepoRoot's "an explicit
+// workspace skips git detection" rule — that rule exists for a user's own
+// --workspace override and must not swallow the broker's own
+// provisioning. This doc is the canonical statement of that rationale; other
+// call sites point back here.
 //
-// This is the canonical statement of that rationale; other call sites that
-// reference it point back here rather than repeating it.
-//
-// The value is never persisted as a plain ScionConfig field: that struct is
-// populated by unmarshaling templates, hub inline config, and --config
-// files, any of which could then set an attacker-chosen repo root. The
-// broker persists the repo root itself only via AgentInfo.ProvisionedWorktreeRepoRoot
-// (agent-info.json), which no template or inline config can write to — see
-// that field's doc. run.go additionally validates the value (ctx-sourced or
-// persisted) before trusting it; see run.go's repo-root resolution.
+// The value is never a ScionConfig field (populated by unmarshaling
+// templates, hub inline config, and --config files) or an AgentInfo field
+// (agent-info.json lives in agentHome, which the container can write). The
+// broker persists it in a broker-owned file under agentDir instead — see
+// pkg/agent's writeProvisionedWorktreeRepoRoot/readProvisionedWorktreeRepoRoot
+// — and run.go independently validates it against the real filesystem
+// (validateProvisionedWorktreeRepoRoot) before trusting it either way.
 func ContextWithProvisionedWorktreeRepoRoot(ctx context.Context, repoRoot string) context.Context {
 	return context.WithValue(ctx, provisionedWorktreeRepoRootContextKey{}, repoRoot)
 }

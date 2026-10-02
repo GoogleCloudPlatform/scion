@@ -1819,15 +1819,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	projectID, _ := config.ReadProjectID(projectDir)
 	info := &api.AgentInfo{
-		Project:                     projectName,
-		ProjectID:                   projectID,
-		ProjectPath:                 projectDir,
-		Name:                        agentName,
-		Template:                    displayTemplateName,
-		HarnessConfig:               harnessConfigName,
-		HarnessConfigRevision:       config.ComputeHarnessConfigRevision(hcDir.Path),
-		Profile:                     profileName,
-		ProvisionedWorktreeRepoRoot: provisionedWorktreeRepoRoot,
+		Project:               projectName,
+		ProjectID:             projectID,
+		ProjectPath:           projectDir,
+		Name:                  agentName,
+		Template:              displayTemplateName,
+		HarnessConfig:         harnessConfigName,
+		HarnessConfigRevision: config.ComputeHarnessConfigRevision(hcDir.Path),
+		Profile:               profileName,
 	}
 	if optionalStatus != "" {
 		info.Phase = optionalStatus
@@ -1842,6 +1841,26 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	if explicitPullPolicy != "" {
 		info.ExplicitImagePullPolicy = explicitPullPolicy
+	}
+
+	// Persisted to a broker-owned file in agentDir, never on AgentInfo
+	// (agent-info.json lives in agentHome, which the container can write).
+	// Validated first, applied consistently with run.go's own persistence
+	// path: ctx is broker-only so this value is already trusted more than a
+	// template or inline config ever could be, but persisting it unvalidated
+	// here would still let a broker-side bug (a wrong workspace/root pairing
+	// reaching tryProvisionWorktree) write a value to disk that outlives
+	// this dispatch. A write failure, or a value that fails validation, is
+	// non-fatal either way: it only means a later resume falls back to
+	// detectRepoRoot.
+	if provisionedWorktreeRepoRoot != "" {
+		if validateProvisionedWorktreeRepoRoot(provisionedWorktreeRepoRoot, workspaceSource) != "" {
+			if err := writeProvisionedWorktreeRepoRoot(agentDir, provisionedWorktreeRepoRoot); err != nil {
+				util.Debugf("ProvisionAgent: failed to persist provisioned worktree repo root: %v", err)
+			}
+		} else {
+			util.Debugf("ProvisionAgent: provisioned worktree repo root %q did not validate against workspace %q, not persisting", provisionedWorktreeRepoRoot, workspaceSource)
+		}
 	}
 
 	agentCfgData, err := json.MarshalIndent(finalScionCfg, "", "  ")
@@ -2236,6 +2255,52 @@ func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmpPath, path)
+}
+
+// provisionedWorktreeStateFile is the broker-owned file that persists the
+// broker-provisioned worktree's repo root (see
+// api.ContextWithProvisionedWorktreeRepoRoot). It lives directly in agentDir —
+// never in agentHome or the agent's workspace, the only two directories
+// bind-mounted read-write into the agent container
+// (pkg/runtime/common.go). A container that could write this file could
+// forge RunConfig.RepoRoot on its next resume;
+// agentDir itself, which holds this file, prompt.md, and scion-agent.json,
+// is never bind-mounted anywhere.
+const provisionedWorktreeStateFile = "provisioned-worktree.json"
+
+// provisionedWorktreeState is the on-disk shape of provisionedWorktreeStateFile.
+type provisionedWorktreeState struct {
+	RepoRoot string `json:"repoRoot"`
+}
+
+// writeProvisionedWorktreeRepoRoot persists repoRoot to agentDir's
+// broker-owned state file (atomic write via writeAgentInfoFile). A write
+// failure only means a later resume falls back to detectRepoRoot — a
+// functional regression, not a security issue — so callers may log and
+// continue rather than fail the whole dispatch.
+func writeProvisionedWorktreeRepoRoot(agentDir, repoRoot string) error {
+	data, err := json.Marshal(provisionedWorktreeState{RepoRoot: repoRoot})
+	if err != nil {
+		return err
+	}
+	return writeAgentInfoFile(filepath.Join(agentDir, provisionedWorktreeStateFile), data, 0o644)
+}
+
+// readProvisionedWorktreeRepoRoot reads the value written by
+// writeProvisionedWorktreeRepoRoot, or "" if the file is absent or doesn't
+// parse. Never returns an error: a missing or unreadable state file is
+// exactly equivalent to "no broker-provisioned worktree recorded", which is
+// the correct, common state for every agent that isn't one.
+func readProvisionedWorktreeRepoRoot(agentDir string) string {
+	data, err := os.ReadFile(filepath.Join(agentDir, provisionedWorktreeStateFile))
+	if err != nil {
+		return ""
+	}
+	var state provisionedWorktreeState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return ""
+	}
+	return state.RepoRoot
 }
 
 func UpdateAgentConfig(agentName string, projectPath string, status string, runtime string, profile string) error {

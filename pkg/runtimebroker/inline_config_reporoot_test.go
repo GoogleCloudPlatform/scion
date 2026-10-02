@@ -25,22 +25,23 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// TestApplyInlineConfigUpdate_RepoRootInjectionIsInert is the C1 regression
-// test for the "start-request inline path" the round-1 review called out
-// specifically: applyInlineConfigUpdate (handlers.go), which rewrites an
+// TestApplyInlineConfigUpdate_RepoRootInjectionIsInert is a regression
+// test for the "start-request inline path": applyInlineConfigUpdate (handlers.go), which rewrites an
 // existing agent's scion-agent.json from a start request's inline config,
-// must not be a channel for setting or overwriting the broker-authored
-// AgentInfo.ProvisionedWorktreeRepoRoot value.
+// must not be a channel for setting or overwriting the broker-provisioned
+// worktree's persisted repo root.
 //
 // It can't be, structurally: applyInlineConfigUpdate only ever reads and
-// writes scion-agent.json, never agent-info.json, and ScionConfig has no
-// field for either the old ("provisioned_worktree_repo_root") or new
-// ("provisionedWorktreeRepoRoot") key names. This test proves that in
-// practice: it calls the real handler method with an inline config built by
-// unmarshaling the review's PoC-shaped JSON (the same "/etc" example used
-// against the old, now-removed ScionConfig field), then confirms the
-// existing agent's persisted AgentInfo.ProvisionedWorktreeRepoRoot survives
-// unchanged.
+// writes scion-agent.json, never the broker-owned "provisioned-worktree.json"
+// file in agentDir (pkg/agent's writeProvisionedWorktreeRepoRoot /
+// readProvisionedWorktreeRepoRoot — this value moved
+// off agent-info.json specifically because agentHome, where that file lives,
+// is bind-mounted read-write into the container). ScionConfig also has no
+// field for either the old ("provisioned_worktree_repo_root") or
+// intermediate ("provisionedWorktreeRepoRoot") key names. This test proves
+// it in practice: it calls the real handler method with an inline config
+// built by unmarshaling the review's PoC-shaped JSON, then confirms the
+// existing agent's persisted state file survives unchanged.
 func TestApplyInlineConfigUpdate_RepoRootInjectionIsInert(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
@@ -61,25 +62,26 @@ func TestApplyInlineConfigUpdate_RepoRootInjectionIsInert(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{"harness":"claude"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	agentHome := config.GetAgentHomePath(projectScionDir, agentName)
-	if err := os.MkdirAll(agentHome, 0o755); err != nil {
-		t.Fatal(err)
-	}
+
 	// The legitimate, broker-authored value already on disk from a real
-	// worktree provisioning — must survive the inline update unchanged.
+	// worktree provisioning — must survive the inline update unchanged. The
+	// state file's shape (provisioned-worktree.json, {"repoRoot": "..."}) is
+	// owned by pkg/agent; reproduced here by hand since this test lives in a
+	// different package and the writer/reader are unexported.
 	legitimateRoot := filepath.Join(tmpDir, "legitimate-shared-base")
-	existingInfo := api.AgentInfo{ProvisionedWorktreeRepoRoot: legitimateRoot}
-	infoData, err := json.Marshal(existingInfo)
+	stateFile := filepath.Join(agentDir, "provisioned-worktree.json")
+	stateData, err := json.Marshal(map[string]string{"repoRoot": legitimateRoot})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), infoData, 0o644); err != nil {
+	if err := os.WriteFile(stateFile, stateData, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	// The review's PoC, replayed against applyInlineConfigUpdate: an inline
 	// config (as sent by the hub on the start path) unmarshaled from
-	// untrusted JSON trying both the old and new field names.
+	// untrusted JSON trying both field names ScionConfig/AgentInfo used to
+	// have.
 	var maliciousInline api.ScionConfig
 	rawInline := []byte(`{
 		"provisioned_worktree_repo_root": "/etc",
@@ -102,19 +104,21 @@ func TestApplyInlineConfigUpdate_RepoRootInjectionIsInert(t *testing.T) {
 		t.Fatalf("MaxTurns = %d, want 7 (the update should have applied the legitimate field)", updatedCfg.MaxTurns)
 	}
 
-	// The persisted AgentInfo — the only place ProvisionedWorktreeRepoRoot
-	// lives — must be completely untouched by applyInlineConfigUpdate, which
-	// never reads or writes agent-info.json.
-	rawInfo, err := os.ReadFile(filepath.Join(agentHome, "agent-info.json"))
+	// The persisted state file — the only place the repo root lives — must be
+	// completely untouched by applyInlineConfigUpdate, which never reads or
+	// writes it.
+	rawState, err := os.ReadFile(stateFile)
 	if err != nil {
-		t.Fatalf("reading agent-info.json: %v", err)
+		t.Fatalf("reading provisioned-worktree.json: %v", err)
 	}
-	var info api.AgentInfo
-	if err := json.Unmarshal(rawInfo, &info); err != nil {
-		t.Fatalf("unmarshal agent-info.json: %v", err)
+	var state struct {
+		RepoRoot string `json:"repoRoot"`
 	}
-	if info.ProvisionedWorktreeRepoRoot != legitimateRoot {
-		t.Fatalf("AgentInfo.ProvisionedWorktreeRepoRoot = %q, want unchanged %q — the inline config injection reached agent-info.json", info.ProvisionedWorktreeRepoRoot, legitimateRoot)
+	if err := json.Unmarshal(rawState, &state); err != nil {
+		t.Fatalf("unmarshal provisioned-worktree.json: %v", err)
+	}
+	if state.RepoRoot != legitimateRoot {
+		t.Fatalf("persisted repoRoot = %q, want unchanged %q — the inline config injection reached the state file", state.RepoRoot, legitimateRoot)
 	}
 
 	// Belt and suspenders: raw scion-agent.json bytes must never contain the
