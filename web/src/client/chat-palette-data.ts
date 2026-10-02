@@ -30,8 +30,10 @@
 import { apiFetch } from './api.js';
 import type { ApiFetchOptions } from './api.js';
 import type {
+  AgentActivity,
   AgentMessageability,
   AgentMessageabilityDetail,
+  AgentPhase,
   Capabilities,
 } from '../shared/types.js';
 import { canMessageAgent } from '../shared/types.js';
@@ -86,11 +88,23 @@ export const AGENTS_IDLE_TIMEOUT_MS = 90 * 1000;
  */
 const AGENTS_IDLE_TIMEOUT_REASON = Symbol('agents-group-idle-timeout');
 
-/** The subset of the agent-list response shape this module reads. */
+/**
+ * The subset of the agent-list response shape this module reads. Widened
+ * with `phase`/`activity`/`project` (all optional, all already
+ * present on every real `/api/v1/agents` row) so {@link fetchAllPaletteAgents}
+ * is reusable as-is by a non-chat caller that needs those fields too (the
+ * terminal view's own agents-only candidate source) without a parallel
+ * paginated fetch — this module's own candidate building
+ * ({@link buildAgentCandidates}, {@link isPaletteAgentViable}) reads none of
+ * the three.
+ */
 export interface RawPaletteAgent {
   id: string;
   name?: string;
   slug?: string;
+  project?: string;
+  phase?: AgentPhase;
+  activity?: AgentActivity;
   _capabilities?: Capabilities;
   _messageability?: AgentMessageability | AgentMessageabilityDetail;
 }
