@@ -793,15 +793,18 @@ func (m *ctxProbeResolver) Resolve(ctx context.Context, refs []api.SkillReferenc
 }
 
 // TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext covers I-4:
-// the fallback must not inherit the primary's cancellation. If a tight caller
-// deadline is consumed by the Hub call, passing the same context straight to
-// the fallback makes the fallback fail instantly and defeats its purpose.
-// context.WithoutCancel detaches the cancellation while keeping values.
+// the fallback must not inherit the primary's expired deadline. If a tight
+// caller deadline is consumed by the Hub call, passing the same context
+// straight to the fallback makes the fallback fail instantly and defeats its
+// purpose. context.WithoutCancel detaches the deadline while keeping values.
+// An explicit cancellation, by contrast, is honoured (see the "cancelled
+// caller" subtests).
 func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testing.T) {
 	t.Run("transport error with exhausted context", func(t *testing.T) {
-		// The primary "times out": it fails, and the caller's context is dead
-		// by the time the router reaches for the fallback.
-		ctx, cancel := context.WithCancel(context.WithValue(context.Background(), ctxProbeKey{}, "trace-abc"))
+		// The primary "times out": it fails, and the caller's deadline has
+		// passed by the time the router reaches for the fallback.
+		ctx, cancel := context.WithDeadline(context.WithValue(context.Background(), ctxProbeKey{}, "trace-abc"), time.Now().Add(-time.Second))
+		defer cancel()
 		hub := &mockSchemeResolver{name: "hub", hardErr: context.DeadlineExceeded}
 		local := &ctxProbeResolver{
 			name:     "github",
@@ -809,8 +812,6 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 		}
 		router := NewRoutingSkillResolver(hub)
 		router.RegisterFallback("gh", local)
-
-		cancel() // caller's deadline is gone before the fallback runs
 
 		result, err := router.Resolve(ctx, []api.SkillReference{
 			{URI: "gh://owner/repo/skill"},
@@ -840,7 +841,8 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 	})
 
 	t.Run("per-URI retry with exhausted context", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.WithValue(context.Background(), ctxProbeKey{}, "trace-xyz"))
+		ctx, cancel := context.WithDeadline(context.WithValue(context.Background(), ctxProbeKey{}, "trace-xyz"), time.Now().Add(-time.Second))
+		defer cancel()
 		hub := &mockSchemeResolver{
 			name: "hub",
 			errors: []ResolveError{
@@ -853,8 +855,6 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 		}
 		router := NewRoutingSkillResolver(hub)
 		router.RegisterFallback("gh", local)
-
-		cancel()
 
 		result, err := router.Resolve(ctx, []api.SkillReference{
 			{URI: "gh://owner/repo/bad"},
@@ -881,6 +881,70 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 		}
 		if len(result.Errors) != 0 {
 			t.Errorf("expected hub error to be superseded by fallback, got %+v", result.Errors)
+		}
+	})
+
+	// An explicitly cancelled caller (the agent was deleted or stopped, or the
+	// Hub abandoned the request) must not get a detached fallback: nobody is
+	// left to use the result, and a detached fallback kept the start running
+	// for up to fallbackTimeout after the agent was gone.
+	t.Run("transport error with cancelled caller is not detached", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		hub := &mockSchemeResolver{name: "hub", hardErr: context.Canceled}
+		local := &ctxProbeResolver{
+			name:     "github",
+			resolved: []ResolvedSkill{{Name: "gh-skill", URI: "gh://owner/repo/skill"}},
+		}
+		router := NewRoutingSkillResolver(hub)
+		router.RegisterFallback("gh", local)
+
+		cancel()
+
+		_, err := router.Resolve(ctx, []api.SkillReference{
+			{URI: "gh://owner/repo/skill"},
+		}, ResolveOpts{})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+		if local.callCtxOK {
+			t.Error("fallback was called with a live, detached context for a cancelled caller; want the caller's cancelled context")
+		}
+		if local.callHasDL {
+			t.Errorf("fallback context carries a fresh deadline %v; want the caller's context unchanged", local.callDeadline)
+		}
+	})
+
+	t.Run("per-URI retry with cancelled caller is not detached", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		hub := &mockSchemeResolver{
+			name: "hub",
+			errors: []ResolveError{
+				{URI: "gh://owner/repo/bad", Code: "resolve_failed", Message: "hub could not resolve"},
+			},
+		}
+		local := &ctxProbeResolver{
+			name:     "github",
+			resolved: []ResolvedSkill{{Name: "bad", URI: "gh://owner/repo/bad"}},
+		}
+		router := NewRoutingSkillResolver(hub)
+		router.RegisterFallback("gh", local)
+
+		cancel()
+
+		result, err := router.Resolve(ctx, []api.SkillReference{
+			{URI: "gh://owner/repo/bad"},
+		}, ResolveOpts{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if local.callCtxOK {
+			t.Error("fallback retry was called with a live, detached context for a cancelled caller")
+		}
+		if len(result.Resolved) != 0 {
+			t.Errorf("got %d resolved, want 0 (the fallback must not complete for a cancelled caller)", len(result.Resolved))
+		}
+		if len(result.Errors) != 1 || result.Errors[0].URI != "gh://owner/repo/bad" {
+			t.Errorf("want the primary's error kept, got %+v", result.Errors)
 		}
 	})
 

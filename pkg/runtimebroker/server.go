@@ -244,6 +244,10 @@ type Server struct {
 	// startup.
 	launchInstanceID string
 
+	// syncStartSupersedeWait overrides defaultSyncStartSupersedeWait when
+	// positive (see beginSyncStart). Zero in production.
+	syncStartSupersedeWait time.Duration
+
 	stateDir string
 
 	// auxiliaryRuntimes holds runtime+manager pairs for non-default runtimes
