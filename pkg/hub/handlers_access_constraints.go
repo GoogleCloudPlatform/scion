@@ -28,8 +28,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // ---------------------------------------------------------------------------
@@ -962,12 +964,21 @@ func (s *Server) createAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		ID:   user.ID(),
 	}
 
-	result, err := s.governanceService.CommitBoundaryChange(r.Context(), CommitRequest{
+	commitRequest := CommitRequest{
 		Operation:    "create",
 		Draft:        draft,
 		PreviewToken: req.PreviewToken,
 		Actor:        actor,
-	})
+	}
+	if requestID := logging.RequestIDFromContext(r.Context()); requestID != "" {
+		commitRequest.AuditRequest = &auditevent.RequestRef{
+			ID:      requestID,
+			Method:  r.Method,
+			Route:   "/api/v1/admin/access-constraints",
+			Surface: "api",
+		}
+	}
+	result, err := s.governanceService.CommitBoundaryChange(r.Context(), commitRequest)
 	if err != nil {
 		s.handleGovernanceError(w, err)
 		return
