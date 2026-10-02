@@ -2409,7 +2409,7 @@ func TestGitHubSkillResolver_RawDownloadBodyTimeout_ClassifiedAsTimeout(t *testi
 	if result.Errors[0].Code != SkillErrCodeTimeout {
 		t.Errorf("expected code %s, got %s (message: %s)", SkillErrCodeTimeout, result.Errors[0].Code, result.Errors[0].Message)
 	}
-	if !strings.Contains(result.Errors[0].Message, "skills/my-skill/SKILL.md") {
-		t.Errorf("expected error to name the file path, got %s", result.Errors[0].Message)
+	if !strings.Contains(result.Errors[0].Message, "failed to read skills/my-skill/SKILL.md") {
+		t.Errorf("expected error to name the file path in the read failure, got %s", result.Errors[0].Message)
 	}
 }

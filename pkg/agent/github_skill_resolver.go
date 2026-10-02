@@ -574,7 +574,7 @@ func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHub
 	content, err := io.ReadAll(io.LimitReader(resp.Body, int64(githubMaxFileSize)+1))
 	if err != nil {
 		// A transfer cut off by the per-attempt or resolve-budget deadline is
-		// a timeout, so classify it as such (mapping to 504/408) rather than
+		// a timeout, so classify it as such (mapping to 504) rather than
 		// leaving it as an unclassified resolve_failed; other read errors
 		// stay unclassified (#2546 O1).
 		if classifyNetworkError(err) == SkillErrCodeTimeout {
@@ -735,9 +735,9 @@ func (r *GitHubSkillResolver) doOnce(ctx context.Context, req *http.Request, att
 func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request, attemptTimeout time.Duration) (*http.Response, error) {
 	var lastResp *http.Response
 	var lastErr error
-	noun := "GitHub API request to"
+	noun, kind := "GitHub API request to", "api"
 	if r.rawBase != "" && strings.HasPrefix(req.URL.String(), r.rawBase) {
-		noun = "GitHub raw download of"
+		noun, kind = "GitHub raw download of", "raw"
 	}
 
 	for attempt := 0; attempt <= githubMaxRetries; attempt++ {
@@ -791,7 +791,7 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 			}
 
 			slog.Warn("github: retrying request after backoff",
-				"kind", noun, "method", req.Method, "path", req.URL.Path,
+				"kind", kind, "method", req.Method, "path", req.URL.Path,
 				"status", status, "retry_after", retryAfterHeader,
 				"backoff", delay, "attempt", attempt, "max_attempts", githubMaxRetries)
 
