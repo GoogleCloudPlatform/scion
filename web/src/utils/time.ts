@@ -354,16 +354,30 @@ interface WallClockParts {
 }
 
 /**
- * Builds an epoch-ms timestamp from `parts`, treated as UTC fields. Unlike
- * `Date.UTC`, this does **not** remap a two-digit year into 19xx (the
+ * Builds an epoch-ms timestamp from UTC field values. Unlike `Date.UTC`,
+ * this does **not** remap a two-digit year into 19xx (the
  * `Date.UTC`/`new Date(y, ...)` two-digit-year special case in the spec) —
- * `setUTCFullYear` takes the year literally.
+ * `setUTCFullYear` takes the year literally. Used everywhere this module
+ * would otherwise call `Date.UTC`, including inside `offsetMinutesAt`'s
+ * reconstruction from formatted parts — year 50 round-tripped through
+ * `Date.UTC` there is just as wrong as it would be in `parseWallClockValue`.
  */
-function utcMsFromParts(parts: WallClockParts): number {
+function utcMsFromFields(
+  year: number,
+  month0: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number
+): number {
   const d = new Date(0);
-  d.setUTCFullYear(parts.year, parts.month - 1, parts.day);
-  d.setUTCHours(parts.hour, parts.minute, parts.second, 0);
+  d.setUTCFullYear(year, month0, day);
+  d.setUTCHours(hour, minute, second, 0);
   return d.getTime();
+}
+
+function utcMsFromParts(parts: WallClockParts): number {
+  return utcMsFromFields(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
 }
 
 /**
@@ -418,7 +432,7 @@ function offsetMinutesAt(zone: string, utcMs: number): number {
   const get = (type: Intl.DateTimeFormatPartTypes): number =>
     Number(parts.find((p) => p.type === type)?.value ?? '0');
   // formatToParts never reports hour "24" with hourCycle 'h23'.
-  const asUtc = Date.UTC(
+  const asUtc = utcMsFromFields(
     get('year'),
     get('month') - 1,
     get('day'),

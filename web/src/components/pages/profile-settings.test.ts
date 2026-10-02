@@ -94,6 +94,16 @@ async function createComponent(
   return el;
 }
 
+/**
+ * Waits for a fire-and-forget async handler (e.g. a Lit event listener that
+ * calls `void this._handleZoneChange(e)` without awaiting it) to finish and
+ * for the resulting state change to render.
+ */
+async function settle(el: AnyEl): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await el.updateComplete;
+}
+
 function shadowText(el: HTMLElement): string {
   return el.shadowRoot?.textContent ?? '';
 }
@@ -238,6 +248,13 @@ describe('scion-page-profile-settings — display timezone', () => {
     ) as Array<[unknown, RequestInit]>;
   }
 
+  /** Dispatches task 12's real `timezone-change` event on the picker element. */
+  function selectZone(picker: AnyEl, timezone: string): void {
+    picker.dispatchEvent(
+      new CustomEvent('timezone-change', { detail: { timezone }, bubbles: true, composed: true })
+    );
+  }
+
   it('is visible to every signed-in user, independent of the Agent timezone section', async () => {
     element = await createComponent(
       createFetchHandler({ status: 403 }, undefined, { body: makeAuthMe() })
@@ -250,6 +267,7 @@ describe('scion-page-profile-settings — display timezone', () => {
     element = await createComponent(createFetchHandler({}, undefined, { body: makeAuthMe() }));
     const picker = element.shadowRoot.querySelector('scion-timezone-picker');
     expect(picker.value).toBe('');
+    expect(picker.getAttribute('empty-label')).toBe('Auto');
   });
 
   it('loads a configured preference', async () => {
@@ -258,6 +276,31 @@ describe('scion-page-profile-settings — display timezone', () => {
     );
     const picker = element.shadowRoot.querySelector('scion-timezone-picker');
     expect(picker.value).toBe('Asia/Tokyo');
+  });
+
+  // Review R1-2: the picker's event contract is `timezone-change` /
+  // `{ timezone }` (task 12's), not the `zone-change` / `{ value }` this
+  // page used before the task-11-onto-task-12 rebase. This test pins the
+  // binding by dispatching the picker's *real* event on the actual DOM
+  // element the template renders, through the component's own
+  // `@timezone-change` listener — not by calling `_handleZoneChange`
+  // directly — so a future rename of either the event or the handler's
+  // read of `e.detail` breaks a test instead of only failing silently at
+  // runtime (`tsc` cannot catch a mismatched Lit event-binding string).
+  it('is wired to the picker\'s real timezone-change event with e.detail.timezone (review R1-2)', async () => {
+    let captured: Record<string, unknown> | null = null;
+    element = await createComponent(
+      createFetchHandler({}, undefined, { body: makeAuthMe() }, (body) => {
+        captured = body;
+        return { status: 200, body: { id: 'u1' } };
+      })
+    );
+
+    const picker = element.shadowRoot.querySelector('scion-timezone-picker');
+    selectZone(picker, 'Asia/Kathmandu');
+    await settle(element);
+
+    expect(captured).toEqual({ preferences: { timezone: 'Asia/Kathmandu' } });
   });
 
   it('saves a selection with a per-key preferences merge and updates the store live', async () => {
@@ -270,7 +313,7 @@ describe('scion-page-profile-settings — display timezone', () => {
     );
 
     await element._handleZoneChange(
-      new CustomEvent('zone-change', { detail: { value: 'Asia/Kathmandu' } })
+      new CustomEvent('timezone-change', { detail: { timezone: 'Asia/Kathmandu' } })
     );
     await element.updateComplete;
 
@@ -288,14 +331,18 @@ describe('scion-page-profile-settings — display timezone', () => {
       })
     );
 
-    await element._handleZoneChange(new CustomEvent('zone-change', { detail: { value: '' } }));
+    await element._handleZoneChange(
+      new CustomEvent('timezone-change', { detail: { timezone: '' } })
+    );
     await element.updateComplete;
 
     expect(captured).toEqual({ preferences: { timezone: '' } });
     expect(getPreferredTimeZone()).toBe('');
   });
 
-  it('surfaces the backend error message on failure and does not update the store', async () => {
+  // Review R1-5: a failed PATCH must not leave the picker displaying the
+  // rejected zone next to the error banner.
+  it('reverts the picker display on a failed PATCH and does not update the store', async () => {
     element = await createComponent(
       createFetchHandler({}, undefined, { body: makeAuthMe() }, () => ({
         status: 400,
@@ -303,25 +350,23 @@ describe('scion-page-profile-settings — display timezone', () => {
       }))
     );
 
-    await element._handleZoneChange(
-      new CustomEvent('zone-change', { detail: { value: 'Not/AZone' } })
-    );
-    await element.updateComplete;
+    const picker = element.shadowRoot.querySelector('scion-timezone-picker');
+    selectZone(picker, 'Not/AZone');
+    await settle(element);
 
     expect(shadowText(element)).toContain('invalid timezone');
     expect(getPreferredTimeZone()).toBe('');
+    expect(picker.value).toBe('');
   });
 
-  it('does not PATCH when the user id has not loaded yet', async () => {
-    element = await createComponent(
-      createFetchHandler({}, undefined, { status: 500, body: {} })
-    );
+  it('reverts the picker display when the user id has not loaded yet, and does not PATCH', async () => {
+    element = await createComponent(createFetchHandler({}, undefined, { status: 500, body: {} }));
 
-    await element._handleZoneChange(
-      new CustomEvent('zone-change', { detail: { value: 'Asia/Tokyo' } })
-    );
-    await element.updateComplete;
+    const picker = element.shadowRoot.querySelector('scion-timezone-picker');
+    selectZone(picker, 'Asia/Tokyo');
+    await settle(element);
 
     expect(userPatchCalls()).toHaveLength(0);
+    expect(picker.value).toBe('');
   });
 });

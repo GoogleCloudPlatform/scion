@@ -23,7 +23,7 @@
 
 import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
-import { formatInstant } from '../../../utils/time.js';
+import { formatInstant, zoneLabel } from '../../../utils/time.js';
 
 @customElement('scion-chat-system-line')
 export class ScionChatSystemLine extends LitElement {
@@ -80,7 +80,9 @@ export class ScionChatSystemLine extends LitElement {
       <div class="system-line">
         ${iconName ? html`<sl-icon name=${iconName}></sl-icon>` : null}
         <span class="system-text">${this.message}</span>
-        ${timeStr ? html`<span class="system-time">${timeStr}</span>` : null}
+        ${timeStr
+          ? html`<span class="system-time" title=${this.formatTimeTitle()}>${timeStr}</span>`
+          : null}
       </div>
     `;
   }
@@ -101,6 +103,13 @@ export class ScionChatSystemLine extends LitElement {
   private formatTime(): string {
     if (!this.timestamp) return '';
     return formatInstant(this.timestamp, 'time');
+  }
+
+  /** Full instant plus zone label for the `.system-time` tooltip (review R1-3, AC4). */
+  private formatTimeTitle(): string {
+    if (!this.timestamp) return '';
+    const full = formatInstant(this.timestamp, 'datetime-full');
+    return full ? `${full} (${zoneLabel()})` : '';
   }
 }
 

@@ -710,12 +710,25 @@ export class ScionPageAdminRoleBindings extends LitElement {
       };
 
       // Include lifecycle fields only when set. Interpreted as wall-clock
-      // time in the effective display zone, not the browser's zone.
+      // time in the effective display zone, not the browser's zone. A
+      // parse failure must stop the request, not silently send '' (review
+      // R1-9 — mirrors scheduled-event-list.ts's handling of the same
+      // failure).
       if (this.formNotBefore) {
-        body.notBefore = parseWallClock(this.formNotBefore, effectiveTimeZone());
+        const iso = parseWallClock(this.formNotBefore, effectiveTimeZone());
+        if (!iso) {
+          this.actionFeedback = { message: 'Enter a valid activation date and time', variant: 'danger' };
+          return;
+        }
+        body.notBefore = iso;
       }
       if (this.formExpiresAt) {
-        body.expiresAt = parseWallClock(this.formExpiresAt, effectiveTimeZone());
+        const iso = parseWallClock(this.formExpiresAt, effectiveTimeZone());
+        if (!iso) {
+          this.actionFeedback = { message: 'Enter a valid expiration date and time', variant: 'danger' };
+          return;
+        }
+        body.expiresAt = iso;
       }
 
       const res = await apiFetch('/api/v1/admin/role-bindings', {

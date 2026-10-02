@@ -24,22 +24,30 @@
 
 import { html, css } from 'lit';
 import type { TemplateResult } from 'lit';
-import { formatInstant } from '../../../utils/time.js';
+import { formatInstant, zoneLabel } from '../../../utils/time.js';
 
 /**
  * Format an ISO timestamp into the shared date-separator label (the
  * effective display zone, e.g. "Sep 23, 2026"), or '' if the timestamp is
  * invalid.
+ *
+ * This is also used as a day-*grouping* key (chat-thread.ts, run-length
+ * comparison between consecutive messages), so it stays a pure date string —
+ * `renderDateDivider` is what adds the zone to the rendered row.
  */
 export function formatChatDate(iso: string): string {
   return formatInstant(iso, 'date');
 }
 
-/** Render the shared date-separator row for a given date label. */
+/**
+ * Render the shared date-separator row for a given date label, with the
+ * effective zone appended (review R1-3, AC4: "a zone label"), e.g.
+ * "Sep 23, 2026 · Asia/Tokyo".
+ */
 export function renderDateDivider(dateStr: string): TemplateResult {
   return html`
     <div class="date-divider">
-      <span class="date-label">${dateStr}</span>
+      <span class="date-label">${dateStr}${dateStr ? html` · ${zoneLabel()}` : ''}</span>
     </div>
   `;
 }

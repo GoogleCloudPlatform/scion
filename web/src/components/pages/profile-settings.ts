@@ -22,7 +22,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, query, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import {
@@ -37,7 +37,7 @@ import { isChimeEnabled, setChimeEnabled } from '../../utils/audio.js';
 import { setPreferredTimeZone, browserTimeZone } from '../../utils/time.js';
 import '../shared/subscription-manager.js';
 import '../shared/timezone-picker.js';
-import type { ZoneChangeDetail } from '../shared/timezone-picker.js';
+import type { TimezoneChangeDetail, ScionTimezonePicker } from '../shared/timezone-picker.js';
 
 /**
  * Minimal shape of a runtime profile as returned by
@@ -112,6 +112,16 @@ export class ScionPageProfileSettings extends LitElement {
 
   @state()
   private _displayTimezoneSaved = false;
+
+  /**
+   * Direct ref to the picker, used to force it back to `_displayTimezone`
+   * after a failed PATCH (review R1-5): the picker manages its own typed
+   * text internally, so rebinding `.value` to an *unchanged* `_displayTimezone`
+   * is a no-op for Lit's property-binding diff and never reaches the child.
+   * Setting the DOM property directly always invokes its setter.
+   */
+  @query('scion-timezone-picker')
+  private _picker?: ScionTimezonePicker;
 
   static override styles = css`
     :host {
@@ -406,11 +416,17 @@ export class ScionPageProfileSettings extends LitElement {
    * Saves the display-timezone preference via a per-key `preferences`
    * merge (backend contract: tz-refactor task 10, ptone/scion#2526) and
    * applies it to the effective-zone store immediately, with no reload
-   * (AC4/AC5).
+   * (AC4/AC5). On failure — including when `_userId` hasn't loaded yet —
+   * resets the picker's displayed value back to the last-saved preference
+   * (review R1-5), since the picker already updated its own typed/selected
+   * text before this handler ran.
    */
-  private async _handleZoneChange(e: CustomEvent<ZoneChangeDetail>): Promise<void> {
-    const value = e.detail.value;
-    if (!this._userId) return;
+  private async _handleZoneChange(e: CustomEvent<TimezoneChangeDetail>): Promise<void> {
+    const value = e.detail.timezone;
+    if (!this._userId) {
+      this._resetPickerDisplay();
+      return;
+    }
 
     this._displayTimezoneSaving = true;
     this._displayTimezoneError = null;
@@ -424,6 +440,7 @@ export class ScionPageProfileSettings extends LitElement {
       });
       if (!res.ok) {
         this._displayTimezoneError = await extractApiError(res, 'Failed to update timezone');
+        this._resetPickerDisplay();
         return;
       }
       this._displayTimezone = value;
@@ -431,8 +448,23 @@ export class ScionPageProfileSettings extends LitElement {
       this._displayTimezoneSaved = true;
     } catch {
       this._displayTimezoneError = 'Failed to update timezone';
+      this._resetPickerDisplay();
     } finally {
       this._displayTimezoneSaving = false;
+    }
+  }
+
+  /**
+   * Forces the picker's displayed value back to the last-saved
+   * `_displayTimezone`, bypassing Lit's property-binding diff (review
+   * R1-5): the picker already updated its own text from the user's
+   * selection before `_handleZoneChange` ran, and since `_displayTimezone`
+   * itself didn't change, re-rendering with `.value=${this._displayTimezone}`
+   * would be a no-op and never reach the child.
+   */
+  private _resetPickerDisplay(): void {
+    if (this._picker) {
+      this._picker.value = this._displayTimezone;
     }
   }
 
@@ -578,20 +610,19 @@ export class ScionPageProfileSettings extends LitElement {
           <div class="setting-info">
             <p class="setting-label">Times shown in</p>
             <p class="setting-description">
-              Controls how times are displayed and how date/time inputs are interpreted
-              throughout the web UI — chat, scheduling forms and logs. Choose "Auto" to follow
-              your browser's zone (currently ${browserTimeZone()}); this never changes how agent
-              containers are configured.
+              Controls how times are displayed and how date/time inputs are interpreted in
+              native chat and scheduling forms, and the rest of the UI follows over time. Choose
+              "Auto" to follow your browser's zone (currently ${browserTimeZone()}); this never
+              changes how agent containers are configured.
             </p>
           </div>
           <div class="setting-control">
             <scion-timezone-picker
-              allow-auto
-              auto-label="Auto"
+              empty-label="Auto"
               label="Display timezone"
               .value=${this._displayTimezone}
               ?disabled=${this._displayTimezoneSaving}
-              @zone-change=${(e: CustomEvent<ZoneChangeDetail>): void => {
+              @timezone-change=${(e: CustomEvent<TimezoneChangeDetail>): void => {
                 void this._handleZoneChange(e);
               }}
             ></scion-timezone-picker>

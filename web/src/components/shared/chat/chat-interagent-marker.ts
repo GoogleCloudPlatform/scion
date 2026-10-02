@@ -30,7 +30,7 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
 import { formatChatDate, renderDateDivider, chatDateDividerStyles } from './chat-date-divider.js';
-import { formatInstant } from '../../../utils/time.js';
+import { formatInstant, zoneLabel } from '../../../utils/time.js';
 import type { Message } from '../../../shared/types.js';
 
 @customElement('scion-chat-interagent-marker')
@@ -380,12 +380,20 @@ export class ScionChatInteragentMarker extends LitElement {
     return formatInstant(iso, 'datetime');
   }
 
+  /** Full instant plus zone label for the `.ia-time` tooltip (review R1-3, AC4). */
+  private formatTimeTitle(iso: string): string {
+    const full = formatInstant(iso, 'datetime-full');
+    return full ? `${full} (${zoneLabel()})` : '';
+  }
+
   /** Render a single expanded inter-agent message row (header + body). */
   private renderInteragentMessage(m: Message): TemplateResult {
     return html`
       <div class="ia-msg">
         <div class="ia-msg-header">
-          <span class="ia-time">${this.formatTime(m.createdAt)}</span>
+          <span class="ia-time" title=${this.formatTimeTitle(m.createdAt)}
+            >${this.formatTime(m.createdAt)}</span
+          >
           <span class="ia-sender">${this.formatParticipant(m.sender, m.senderProjectId)}</span>
           <span class="ia-arrow">&rarr;</span>
           <span class="ia-recipient"
@@ -426,7 +434,9 @@ export class ScionChatInteragentMarker extends LitElement {
         @sl-after-hide=${(e: Event) => this.closeMessagePreview(e)}
       >
         <div class="ia-full-header">
-          <span class="ia-time">${this.formatDateTime(msg.createdAt)}</span>
+          <span class="ia-time" title=${this.formatTimeTitle(msg.createdAt)}
+            >${this.formatDateTime(msg.createdAt)}</span
+          >
           <span class="ia-sender">${this.formatParticipant(msg.sender, msg.senderProjectId)}</span>
           <span class="ia-arrow">&rarr;</span>
           <span class="ia-recipient"

@@ -32,7 +32,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
-import { formatInstant } from '../../../utils/time.js';
+import { formatInstant, zoneLabel } from '../../../utils/time.js';
 import { getLanguageFromPath } from '../code-editor.js';
 import { hashColor, getInitials } from './chat-avatar.js';
 import {
@@ -2034,7 +2034,7 @@ export class ScionChatMessage extends LitElement {
                   ${this.routedTo
                     ? html`<span class="routed-to"> &rarr; ${this.routedTo}</span>`
                     : nothing}
-                  <span class="msg-time">${this.formatTime()}</span>
+                  <span class="msg-time" title=${this.formatTimeTitle()}>${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
                 </div>
               `
@@ -2047,7 +2047,7 @@ export class ScionChatMessage extends LitElement {
                     ? html`<span class="cross-project-label">${this.senderProjectSlug}</span>`
                     : nothing}
                   <span class="routed-to"> &rarr; ${this.routedTo}</span>
-                  <span class="msg-time">${this.formatTime()}</span>
+                  <span class="msg-time" title=${this.formatTimeTitle()}>${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
                 </div>
               `
@@ -2436,6 +2436,18 @@ export class ScionChatMessage extends LitElement {
     if (!this.timestamp) return '';
     const formatted = formatInstant(this.timestamp, 'time');
     return formatted || 'Invalid Date';
+  }
+
+  /**
+   * Full instant plus zone label for the `.msg-time` tooltip (review R1-3,
+   * AC4: "sees native chat timestamps in Tokyo time, with a zone label").
+   * Low-noise: surfaced as a `title`, not inline text, since every message
+   * in a thread shares the same effective zone.
+   */
+  private formatTimeTitle(): string {
+    if (!this.timestamp) return '';
+    const full = formatInstant(this.timestamp, 'datetime-full');
+    return full ? `${full} (${zoneLabel()})` : '';
   }
 
   /** Deterministic colour from the sender ID (preferred) or slug/name fallback. */
