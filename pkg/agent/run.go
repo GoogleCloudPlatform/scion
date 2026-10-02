@@ -613,7 +613,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// Inject settings-declared env into opts.Env and build the auth overlay.
 	// Extracted so the injection-then-overlay sequence is testable without
 	// standing up a full agent; see resolveAuthEnvOverlay.
-	authEnvOverlay := resolveAuthEnvOverlay(&opts, settings, profileName, harnessConfigName)
+	authEnvOverlay, droppedBrokerEnvVars := resolveAuthEnvOverlay(&opts, settings, profileName, harnessConfigName)
 
 	canFallbackToNoAuth := func() bool {
 		return opts.HarnessAuth == "" && noAuthConfig != nil &&
@@ -1045,7 +1045,9 @@ authDone:
 		}
 	}
 
-	agentEnv, envWarnings, missingEnvKeys := buildAgentEnv(finalScionCfg, opts.Env)
+	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(finalScionCfg, opts.Env, opts.BrokerMode)
+	droppedBrokerEnvVars = append(droppedBrokerEnvVars, droppedConfigEnv...)
+	warnings = append(warnings, warnDroppedBrokerEnv(agentID, opts.Env, droppedBrokerEnvVars)...)
 	if len(missingEnvKeys) > 0 {
 		sort.Strings(missingEnvKeys)
 		if opts.BrokerMode {
@@ -1785,10 +1787,17 @@ func containerName(projectName, agentName string) string {
 	return agentName
 }
 
-func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string) ([]string, []string, []string) {
+// buildAgentEnv merges the config layer (scionCfg.Env) with extraEnv
+// (opts.Env, which carries the hub's resolved env for a broker-mode start)
+// into the container environment. extraEnv wins on conflict.
+//
+// With brokerMode set, hub-only keys (see isHubOnlyEnvKey) are skipped while
+// iterating the config layer, matched on the post-expansion key, and each
+// skipped value is returned in dropped. scionCfg itself is never modified.
+// An empty hub-only key in extraEnv is omitted without being reported as
+// missing: for those keys empty means "unset", never "required".
+func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, brokerMode bool) (env []string, warnings []string, missingKeys []string, dropped []droppedBrokerEnv) {
 	combined := make(map[string]string)
-	var warnings []string
-	var missingKeys []string
 
 	if scionCfg != nil && scionCfg.Env != nil {
 		for k, v := range scionCfg.Env {
@@ -1797,6 +1806,12 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string) ([]str
 			expandedValue, warned := util.ExpandEnv(v)
 
 			if expandedKey == "" {
+				continue
+			}
+			if isHubOnlyEnvKey(brokerMode, expandedKey) {
+				// Checked before the host passthrough below, so an empty
+				// marker never pulls in the broker host's value.
+				dropped = append(dropped, droppedBrokerEnv{Key: expandedKey, Value: expandedValue, Layer: envLayerConfig})
 				continue
 			}
 			// If the value is empty and we warned about a missing variable,
@@ -1822,6 +1837,9 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string) ([]str
 
 	agentEnv := []string{}
 	for k, v := range combined {
+		if v == "" && isHubOnlyEnvKey(brokerMode, k) {
+			continue
+		}
 		if v == "" {
 			missingKeys = append(missingKeys, k)
 			warnings = append(warnings, fmt.Sprintf("Warning: Environment variable '%s' has no value and will be omitted.", k))
@@ -1829,14 +1847,18 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string) ([]str
 		}
 		agentEnv = append(agentEnv, fmt.Sprintf("%s=%s", k, v))
 	}
-	return agentEnv, warnings, missingKeys
+	sortDroppedBrokerEnv(dropped)
+	return agentEnv, warnings, missingKeys, dropped
 }
 
 // resolveAuthEnvOverlay injects settings-declared env vars into opts.Env and
 // returns the auth overlay that GatherAuthWithEnv consumes. It is the exact
 // sequence Start runs at the point auth resolution begins, extracted so it can
 // be exercised directly in tests.
-func resolveAuthEnvOverlay(opts *api.StartOptions, settings *config.VersionedSettings, profileName, harnessConfigName string) map[string]string {
+//
+// For a broker-mode start, hub-only keys (see isHubOnlyEnvKey) in the
+// harness-config entry are not merged; they are returned in dropped instead.
+func resolveAuthEnvOverlay(opts *api.StartOptions, settings *config.VersionedSettings, profileName, harnessConfigName string) (overlay map[string]string, dropped []droppedBrokerEnv) {
 	// Inject harness-config env into opts.Env BEFORE the auth overlay is built,
 	// so GatherAuthWithEnv can see credentials the harness config declares
 	// (GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION, ...).
@@ -1856,17 +1878,22 @@ func resolveAuthEnvOverlay(opts *api.StartOptions, settings *config.VersionedSet
 				opts.Env = make(map[string]string)
 			}
 			for k, v := range hcEntry.Env {
+				if isHubOnlyEnvKey(opts.BrokerMode, k) {
+					dropped = append(dropped, droppedBrokerEnv{Key: k, Value: v, Layer: envLayerHarnessConfigEntry})
+					continue
+				}
 				if _, exists := opts.Env[k]; !exists { // never clobber hub-supplied values
 					opts.Env[k] = v
 				}
 			}
 		}
 	}
+	sortDroppedBrokerEnv(dropped)
 
 	// Build a temporary auth overlay from resolved env-type secrets so auth
 	// resolution can detect credentials without mutating opts.Env (which is
 	// later projected into the container environment).
-	return buildAuthEnvOverlay(opts.Env, opts.ResolvedSecrets)
+	return buildAuthEnvOverlay(opts.Env, opts.ResolvedSecrets), dropped
 }
 
 // buildAuthEnvOverlay creates an auth-only view of the environment by layering

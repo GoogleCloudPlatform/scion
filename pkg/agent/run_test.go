@@ -159,7 +159,7 @@ func TestBuildAgentEnv(t *testing.T) {
 		"EMPTY_EXTRA_KEY": "", // Should be omitted
 	}
 
-	env, warnings, missingKeys := buildAgentEnv(scionCfg, extraEnv)
+	env, warnings, missingKeys, _ := buildAgentEnv(scionCfg, extraEnv, false)
 
 	expected := map[string]string{
 		"NORMAL_KEY":    "normal-value",
@@ -213,7 +213,7 @@ func TestBuildAgentEnv_MissingKeysReturned(t *testing.T) {
 		},
 	}
 
-	env, _, missingKeys := buildAgentEnv(scionCfg, nil)
+	env, _, missingKeys, _ := buildAgentEnv(scionCfg, nil, false)
 
 	if len(env) != 1 {
 		t.Errorf("expected 1 env var, got %d: %v", len(env), env)
@@ -2566,7 +2566,7 @@ func TestBuildAgentEnv_EmptyValuePassthrough(t *testing.T) {
 		},
 	}
 
-	env, warnings, missingKeys := buildAgentEnv(scionCfg, nil)
+	env, warnings, missingKeys, _ := buildAgentEnv(scionCfg, nil, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -2605,7 +2605,7 @@ func TestBuildAgentEnv_ScionExtraPath(t *testing.T) {
 		},
 	}
 
-	env, warnings, _ := buildAgentEnv(scionCfg, nil)
+	env, warnings, _, _ := buildAgentEnv(scionCfg, nil, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -2650,7 +2650,7 @@ func TestBuildAgentEnv_HubEndpointOverride(t *testing.T) {
 			extraEnv["SCION_HUB_URL"] = scionCfg.Hub.Endpoint
 		}
 
-		env, _, _ := buildAgentEnv(scionCfg, extraEnv)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {
@@ -2675,7 +2675,7 @@ func TestBuildAgentEnv_HubEndpointOverride(t *testing.T) {
 			"SCION_HUB_URL":      "https://hub.example.com",
 		}
 
-		env, _, _ := buildAgentEnv(scionCfg, extraEnv)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {
@@ -3400,7 +3400,7 @@ func TestBuildAgentEnv_TelemetryInjection(t *testing.T) {
 		}
 	}
 
-	env, _, _ := buildAgentEnv(scionCfg, opts)
+	env, _, _, _ := buildAgentEnv(scionCfg, opts, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -4136,7 +4136,7 @@ func TestBuildAgentEnv_TelemetryNoOverrideExplicit(t *testing.T) {
 		}
 	}
 
-	env, _, _ := buildAgentEnv(scionCfg, opts)
+	env, _, _, _ := buildAgentEnv(scionCfg, opts, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -4169,7 +4169,7 @@ func TestBuildAgentEnv_HubEnvVarsSurviveMerge(t *testing.T) {
 		"SCION_AGENT_NAME":   "test-agent",
 	}
 
-	env, _, _ := buildAgentEnv(scionCfg, extraEnv)
+	env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -4633,7 +4633,7 @@ func TestBuildAgentEnv_EnvKeyScionHubEndpointOverride(t *testing.T) {
 			}
 		}
 
-		env, _, _ := buildAgentEnv(scionCfg, extraEnv)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {
@@ -4681,7 +4681,7 @@ func TestBuildAgentEnv_EnvKeyScionHubEndpointOverride(t *testing.T) {
 			}
 		}
 
-		env, _, _ := buildAgentEnv(scionCfg, extraEnv)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {
@@ -6839,7 +6839,7 @@ func TestStart_BrokerMode_HarnessConfigEnv_VisibleToAuthOverlay(t *testing.T) {
 		Env:        map[string]string{"EXISTING": "val"},
 	}
 
-	overlay := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
+	overlay, _ := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
 
 	if got := overlay["GOOGLE_CLOUD_PROJECT"]; got != "hc-project" {
 		t.Errorf("auth overlay GOOGLE_CLOUD_PROJECT = %q, want %q "+
@@ -6870,7 +6870,7 @@ func TestStart_BrokerMode_HubEnvNotClobberedByHarnessConfigEnv(t *testing.T) {
 		Env: map[string]string{"GOOGLE_CLOUD_PROJECT": "hub-project"},
 	}
 
-	overlay := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
+	overlay, _ := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
 
 	if got := overlay["GOOGLE_CLOUD_PROJECT"]; got != "hub-project" {
 		t.Errorf("auth overlay GOOGLE_CLOUD_PROJECT = %q, want %q (hub value must win)",
@@ -6898,7 +6898,7 @@ func TestResolveAuthEnvOverlay_NoHarnessConfigMeansNoInjection(t *testing.T) {
 
 	opts := api.StartOptions{Name: "test-agent", BrokerMode: true}
 
-	overlay := resolveAuthEnvOverlay(&opts, settings, "vertex", "" /* no harness config */)
+	overlay, _ := resolveAuthEnvOverlay(&opts, settings, "vertex", "" /* no harness config */)
 
 	if len(overlay) != 0 {
 		t.Errorf("auth overlay = %v, want empty (with no harness config named, nothing should be injected)", overlay)
@@ -6913,7 +6913,7 @@ func TestResolveAuthEnvOverlay_OnlyHarnessConfigEnvArrives(t *testing.T) {
 
 	opts := api.StartOptions{Name: "test-agent", BrokerMode: true}
 
-	overlay := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
+	overlay, _ := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
 
 	if got := overlay["HC_ONLY"]; got != "hc-value" {
 		t.Fatalf("existence control failed: auth overlay HC_ONLY = %q, want %q — "+
@@ -6926,7 +6926,7 @@ func TestResolveAuthEnvOverlay_OnlyHarnessConfigEnvArrives(t *testing.T) {
 func TestResolveAuthEnvOverlay_NilSettings(t *testing.T) {
 	opts := api.StartOptions{Name: "test-agent", BrokerMode: true, Env: map[string]string{"A": "1"}}
 
-	overlay := resolveAuthEnvOverlay(&opts, nil, "vertex", "claude-cfg")
+	overlay, _ := resolveAuthEnvOverlay(&opts, nil, "vertex", "claude-cfg")
 
 	if got := overlay["A"]; got != "1" {
 		t.Errorf("auth overlay A = %q, want %q", got, "1")
@@ -7596,7 +7596,7 @@ func TestResolveAuthEnvOverlay_MutatesCallerOptsEnv(t *testing.T) {
 			Env:        map[string]string{"EXISTING": "val"},
 		}
 
-		_ = resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
+		_, _ = resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
 
 		if got := opts.Env["GOOGLE_CLOUD_PROJECT"]; got != "hc-project" {
 			t.Errorf("CALLER's opts.Env[GOOGLE_CLOUD_PROJECT] = %q, want %q — the pointer "+
@@ -7615,7 +7615,7 @@ func TestResolveAuthEnvOverlay_MutatesCallerOptsEnv(t *testing.T) {
 		// arrives with opts.Env == nil.
 		opts := api.StartOptions{Name: "test-agent", BrokerMode: true, Env: nil}
 
-		_ = resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
+		_, _ = resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
 
 		if opts.Env == nil {
 			t.Fatal("CALLER's opts.Env is still nil — the allocation inside " +
