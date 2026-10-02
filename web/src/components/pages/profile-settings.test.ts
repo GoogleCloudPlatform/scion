@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { getPreferredTimeZone, setPreferredTimeZone } from '../../utils/time.js';
 
 // ── Fetch mock ──
 
@@ -12,6 +13,11 @@ interface PatchResult {
   body: Record<string, unknown>;
 }
 
+interface AuthMeFixture {
+  status?: number;
+  body?: Record<string, unknown>;
+}
+
 function makeServerConfig(): Record<string, unknown> {
   return {
     schema_version: '1',
@@ -23,9 +29,20 @@ function makeServerConfig(): Record<string, unknown> {
   };
 }
 
+function makeAuthMe(timezone = ''): Record<string, unknown> {
+  return {
+    id: 'u1',
+    email: 'u1@example.com',
+    displayName: 'User One',
+    preferences: timezone ? { timezone } : {},
+  };
+}
+
 function createFetchHandler(
   config: ServerConfigFixture,
-  onPatch?: (body: Record<string, unknown>) => PatchResult
+  onPatch?: (body: Record<string, unknown>) => PatchResult,
+  authMe: AuthMeFixture = {},
+  onUserPatch?: (body: Record<string, unknown>) => PatchResult
 ) {
   return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
@@ -45,6 +62,15 @@ function createFetchHandler(
         return json(result.status, result.body);
       }
       return json(config.status ?? 200, config.body ?? makeServerConfig());
+    }
+    if (path.endsWith('/auth/me')) {
+      return json(authMe.status ?? 200, authMe.body ?? makeAuthMe());
+    }
+    if (/\/api\/v1\/users\/[^/]+$/.test(path) && init?.method === 'PATCH') {
+      const result = onUserPatch
+        ? onUserPatch(JSON.parse(init.body as string) as Record<string, unknown>)
+        : { status: 200, body: { id: 'u1' } };
+      return json(result.status, result.body);
     }
     return json(200, {});
   };
@@ -186,5 +212,116 @@ describe('scion-page-profile-settings — timezone', () => {
 
     expect(shadowText(element)).toContain('profile "local": invalid timezone');
     expect(shadowText(element)).not.toContain('Timezone updated.');
+  });
+});
+
+describe('scion-page-profile-settings — display timezone', () => {
+  let element: AnyEl = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler({})));
+    await import('./profile-settings.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    setPreferredTimeZone('');
+    vi.restoreAllMocks();
+  });
+
+  function userPatchCalls(): Array<[unknown, RequestInit]> {
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    return (fetchMock.mock.calls as Array<[unknown, RequestInit | undefined]>).filter(
+      ([url, init]) =>
+        init?.method === 'PATCH' && /\/api\/v1\/users\/[^/]+$/.test(String(url))
+    ) as Array<[unknown, RequestInit]>;
+  }
+
+  it('is visible to every signed-in user, independent of the Agent timezone section', async () => {
+    element = await createComponent(
+      createFetchHandler({ status: 403 }, undefined, { body: makeAuthMe() })
+    );
+    expect(shadowText(element)).toContain('Display timezone');
+    expect(shadowText(element)).not.toContain('Agent timezone');
+  });
+
+  it('loads the current preference (Auto when unset)', async () => {
+    element = await createComponent(createFetchHandler({}, undefined, { body: makeAuthMe() }));
+    const picker = element.shadowRoot.querySelector('scion-timezone-picker');
+    expect(picker.value).toBe('');
+  });
+
+  it('loads a configured preference', async () => {
+    element = await createComponent(
+      createFetchHandler({}, undefined, { body: makeAuthMe('Asia/Tokyo') })
+    );
+    const picker = element.shadowRoot.querySelector('scion-timezone-picker');
+    expect(picker.value).toBe('Asia/Tokyo');
+  });
+
+  it('saves a selection with a per-key preferences merge and updates the store live', async () => {
+    let captured: Record<string, unknown> | null = null;
+    element = await createComponent(
+      createFetchHandler({}, undefined, { body: makeAuthMe() }, (body) => {
+        captured = body;
+        return { status: 200, body: { id: 'u1' } };
+      })
+    );
+
+    await element._handleZoneChange(
+      new CustomEvent('zone-change', { detail: { value: 'Asia/Kathmandu' } })
+    );
+    await element.updateComplete;
+
+    expect(captured).toEqual({ preferences: { timezone: 'Asia/Kathmandu' } });
+    expect(getPreferredTimeZone()).toBe('Asia/Kathmandu');
+    expect(shadowText(element)).toContain('Display timezone updated.');
+  });
+
+  it('clearing to Auto sends an explicit empty string and updates the store with no reload', async () => {
+    let captured: Record<string, unknown> | null = null;
+    element = await createComponent(
+      createFetchHandler({}, undefined, { body: makeAuthMe('Asia/Tokyo') }, (body) => {
+        captured = body;
+        return { status: 200, body: { id: 'u1' } };
+      })
+    );
+
+    await element._handleZoneChange(new CustomEvent('zone-change', { detail: { value: '' } }));
+    await element.updateComplete;
+
+    expect(captured).toEqual({ preferences: { timezone: '' } });
+    expect(getPreferredTimeZone()).toBe('');
+  });
+
+  it('surfaces the backend error message on failure and does not update the store', async () => {
+    element = await createComponent(
+      createFetchHandler({}, undefined, { body: makeAuthMe() }, () => ({
+        status: 400,
+        body: { error: { message: 'invalid timezone' } },
+      }))
+    );
+
+    await element._handleZoneChange(
+      new CustomEvent('zone-change', { detail: { value: 'Not/AZone' } })
+    );
+    await element.updateComplete;
+
+    expect(shadowText(element)).toContain('invalid timezone');
+    expect(getPreferredTimeZone()).toBe('');
+  });
+
+  it('does not PATCH when the user id has not loaded yet', async () => {
+    element = await createComponent(
+      createFetchHandler({}, undefined, { status: 500, body: {} })
+    );
+
+    await element._handleZoneChange(
+      new CustomEvent('zone-change', { detail: { value: 'Asia/Tokyo' } })
+    );
+    await element.updateComplete;
+
+    expect(userPatchCalls()).toHaveLength(0);
   });
 });
