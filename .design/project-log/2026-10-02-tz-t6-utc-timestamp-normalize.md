@@ -30,11 +30,29 @@
   the startup probe, so the two cannot disagree. A fraction is canonical when it is digits ending
   in a non-zero digit, which is what Go writes. A first version needed two digits and flagged
   `.5`; the hub fixture caught it, and a direct predicate test now checks against Go's output.
-- **Startup check.** On SQLite, `StartBackgroundServices` runs one `EXISTS` probe per ent time
-  column before the scheduler starts. If any table holds a non-canonical value, it logs one error
-  naming `utc-timestamp-normalize` and the tables (never values).
+- **Boot-time repair of unreadable tables.** On SQLite, `initStore` probes every ent time column
+  for the four-digit numeric abbreviation (one `SELECT EXISTS` per column) on every boot. If a
+  table holds such a value, the repair takes a snapshot of the database next to its file
+  (`VACUUM INTO <db>.pre-utc-timestamp-normalize-<UTC time>.bak`), logs its path, and runs the
+  same normalizer limited to those tables. It refuses to write if the snapshot fails. It runs
+  **before** `migrateStore` because `Store.Migrate` reads agents, hub settings and user access
+  tokens through ent and fails, fatally, on such rows: the test shows an unrepaired copy failing
+  `Migrate` with a scan error on `user_access_tokens.created`. So the repair uses raw SQL only and
+  skips tables and columns that an older schema lacks. The marker (`utc_timestamp_repair` in the
+  `_migrations` hub setting) is written after `migrateStore`, only when a repair completed and a
+  re-probe finds nothing, and it only records completion. The repair never fails boot, recovers
+  from panics, caps per-value log lines at `maxBootLogErrors`, and has a 30-minute budget.
+  Postgres is skipped.
+- **Startup check.** On SQLite, `StartBackgroundServices` starts a background check with a
+  5-minute timeout, so its full scan per column does not delay start. It logs one error naming
+  `utc-timestamp-normalize` and the tables (never values) when a table has values the operation
+  will rewrite, with a separate `tables_unreadable` attribute, and a warning pointing at the run
+  log when the only leftovers are unparseable.
 - **Executor.** It is registered under `utc-timestamp-normalize` and seeded as a migration-category
   operation. `{"params":{"dryRun":true}}` reports without writing and leaves the status pending.
+  The key is exempt from the completed-migration guard, so it can run again after rows written
+  later (for example by an older binary) make the startup check fire again. The dialect comes
+  from the store (`CompositeStore.Dialect()`), and no probe statement is run against the database.
 - **CI.** The JSON rewrite tests (`TestUTCTimestampNormalizeJSON_`) are added to the `-run` filter
   of the existing Postgres store target. The workflow file is unchanged.
 
@@ -43,5 +61,11 @@
 - The scheduled-events handler and the schedule store `fire_at` binds are out of scope
   (ptone/scion#2476 owns them). The fixture test covers a stored `+0200 +0200` `fire_at`:
   `ListScheduledEvents` fails before the run and succeeds after it.
-- Operator action, for the release note: back up the database, then run the operation on this
-  release or later.
+- Operator action, for the release note: unreadable tables are repaired automatically at the
+  first start of this release, after a one-time snapshot next to the database file that needs
+  about the database size in free space. Other non-canonical values need the operation; back up
+  the database, then run it on this release or later.
+- Design decision (review round 1): one-time migration utilities do not go in the CLI, so there is
+  no offline subcommand. The boot repair runs ahead of `migrateStore`, not inside
+  `runBootDataMigrations` as first proposed, because that hook runs after `Migrate` has already
+  failed on the affected hubs. Splitting `Store.Migrate` was considered and rejected.
