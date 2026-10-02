@@ -273,7 +273,7 @@ func TestListSharers_OutOfTreeMarker_Rejected(t *testing.T) {
 			branch := "feature/out-of-tree"
 			bad := tc.makeInvalid(base)
 
-			// Write the marker directly (bypassing RegisterSharer's
+			// Write the marker directly (not via RegisterSharer's
 			// legitimate-path assumption) to simulate a peer that can write
 			// the marker file but not go through the registry API.
 			m := &sharerMarker{Branch: branch, WorktreePath: bad, Sharers: []string{"agent-c"}}

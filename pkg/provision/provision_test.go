@@ -4318,7 +4318,7 @@ func TestProvision_EnsureWorktree_FirstCollisionFallbackRefusesNonDirectChild(t 
 // worktreePath="", and ProvisionShared falls through to create a fresh
 // worktree for the joining agent instead of reusing the out-of-tree path.
 //
-// The out-of-tree marker is planted for a branch that has no real git worktree
+// The out-of-tree marker is written for a branch that has no real git worktree
 // backing it — the registry entry is the only place the (fake) association
 // lives, matching the actual exposure: a peer with RW access to the shared
 // .git can write a marker for a branch it never actually checked out.
@@ -4344,7 +4344,7 @@ func TestProvision_WorktreePerAgent_OutOfTreeMarker_CreatesFreshWorktree(t *test
 
 	branch := "shared-branch"
 
-	// A peer plants an out-of-tree marker directly (simulating a write
+	// A second agent writes an out-of-tree marker directly (simulating a write
 	// through the RW .git bind mount) for a branch that has no real git
 	// worktree, pointing WorktreePath at a host directory outside the base
 	// worktree tree.
@@ -4358,13 +4358,13 @@ func TestProvision_WorktreePerAgent_OutOfTreeMarker_CreatesFreshWorktree(t *test
 	assert.Empty(t, wtPath, "marker with an out-of-tree worktreePath must not surface it")
 	assert.Empty(t, sharers, "marker with an out-of-tree worktreePath must be discarded wholesale, not just its path")
 
-	// The victim agent provisions on the same branch. It must NOT be
+	// The second (joining) agent provisions on the same branch. It must NOT be
 	// redirected to the out-of-tree external directory; it must get a fresh
 	// in-tree worktree.
 	err = ProvisionShared(ProvisionInput{
 		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
 		ProjectID: "proj-outoftree-1",
-		AgentID:   "agent-victim",
+		AgentID:   "agent-b",
 		AgentName: branch,
 		Mode:      store.SharingModeWorktreePerAgent,
 		Locker:    locker,
@@ -4372,12 +4372,12 @@ func TestProvision_WorktreePerAgent_OutOfTreeMarker_CreatesFreshWorktree(t *test
 	})
 	require.NoError(t, err)
 
-	wtVictim := WorktreePath(hostPath, "agent-victim")
-	require.DirExists(t, wtVictim, "provisioning must create a fresh in-tree worktree when the marker's path is out-of-tree")
+	wtB := WorktreePath(hostPath, "agent-b")
+	require.DirExists(t, wtB, "provisioning must create a fresh in-tree worktree when the marker's path is out-of-tree")
 
 	_, wtPath, err = ListSharers(hostPath, branch)
 	require.NoError(t, err)
-	assert.Equal(t, wtVictim, wtPath, "registry must record the fresh in-tree worktree, not the out-of-tree path")
+	assert.Equal(t, wtB, wtPath, "registry must record the fresh in-tree worktree, not the out-of-tree path")
 	assert.NotEqual(t, outside, wtPath)
 }
 
