@@ -1,6 +1,6 @@
 # Project Log: tz-refactor task 11 — web `time.ts`, effective zone, "Display timezone" card, 24-hour clock
 
-**Date:** 2026-10-02 (updated after review round 3)
+**Date:** 2026-10-02 (updated after review round 4)
 **Branch:** `scion/tz-t11`, rebased onto `scion/tz-t12` (ptone/scion#2533) at `81fd42a4` (wording-only commit on top of `aa4bfc1f`, the SHA round 1's rebase used)
 **Fork issue:** ptone/scion#2504 (closes). Refs ptone/scion#2457. Refs ptone/scion#1056 (narrowed to its display-timezone half; never closed by this issue).
 **Design:** `design.md` §2.4 ("[decided, D4] Clock and locale", "Enforcement"), §3 A (a), "Fate of the card"; decisions D1, D4; AC4, AC5, AC17 (partial).
@@ -48,12 +48,25 @@ Full review: `gs://scion-xproject-exchange/tz-refactor/out/t11/review-3.md`. Ful
 - R3-3 (Low): `chat-interagent-marker.ts` and `chat-thread.ts` each have a `DisplayZoneController`, but no test pinned either — deleting both left every existing test green. Added a re-render-on-later-change test to each (`chat-interagent-marker.test.ts`; a new test in `chat-thread.test.ts`'s inter-agent day-split describe block, asserting the date divider's zone suffix updates). Verified both fail when their controller is removed and pass with it restored.
 - R3-4 (Low): corrected the stale `loadPreferredTimeZone` docstring (still described the pre-R2-1 fire-and-forget behaviour) and this log's "non-blocking" (line 25) and "All four components... subscribe" (line 27, `chat-date-divider.ts` is not itself a subscriber) claims, and the round-2 test-evidence bullet's inaccurate claim that `chat-interagent-marker.test.ts` already had a re-render test (it only had a label test until this round).
 
+## Review round 4 — disposition
+
+Full review: `gs://scion-xproject-exchange/tz-refactor/out/t11/review-4.md`. Full per-finding response: `gs://scion-xproject-exchange/tz-refactor/out/t11/review-4-response.md`. Round 4 found that R3-1's bounded wait opened a real bug (R4-1, High): native chat self-corrects on a late preference via `DisplayZoneController`, but the three datetime-input surfaces this issue migrated (`scheduled-event-list.ts`, `admin-role-bindings.ts`, `access-boundary-schedule-editor.ts`) did not subscribe, and the schedule editor additionally caches wall-clock strings derived from committed ISO props — so a late-arriving preference left the "Times in" label stale and could silently shift an **untouched** field's stored instant on the next edit. Fixed, with the reviewer's exact repro reproduced as a failing regression test first, then made to pass:
+- All three surfaces now have a `DisplayZoneController`.
+- `access-boundary-schedule-editor.ts` also gained a `willUpdate` that re-derives `notBeforeLocal`/`expiresAtLocal` by round-tripping each through the *previous* zone back to its instant, then to a wall-clock string in the *new* zone, on a detected zone change — leaving the instant unchanged for both an untouched field and one with an uncommitted edit in progress.
+- Audited every other `effectiveTimeZone`/`parseWallClock`/`toWallClockInput` call site in the branch (listed in the response): no other component caches a zone-derived wall-clock string in state — the four chat surfaces (and the two other datetime forms) call formatters fresh on every render, so `DisplayZoneController` alone is sufficient there.
+- Added guidance to `time.ts`'s header distinguishing "a controller's re-render is enough" from "must also re-derive a cached string", and qualified the `loadPreferredTimeZone` docstring's overclaim that a subscriber always fixes a late arrival.
+- R4-2 (Low): pinned `with-timeout.ts`'s `clearTimeout(timer)` on settle with `vi.getTimerCount()` assertions, verified to fail when both calls are removed.
+- R4-3 (Nit): moved `TZ_LOAD_BUDGET_MS` out of `main.ts`'s import block.
+
+All three fixed; none declined.
+
 ## Test evidence
 
 - `npm run typecheck`: clean.
-- `npx vitest run` (full suite): **126 files / 3560 tests passed**, both at ambient TZ and explicitly under `TZ=Asia/Tokyo` and `TZ=Asia/Kathmandu` — identical pass counts under all three, confirming the `vitest.config.ts` pin holds.
+- `npx vitest run` (full suite): **128 files / 3566 tests passed**, both at ambient TZ and explicitly under `TZ=Asia/Tokyo` and `TZ=Asia/Kathmandu` — identical pass counts under all three, confirming the `vitest.config.ts` pin holds.
 - `npm run build`: clean.
 - No Go files touched; `golangci-lint`/`go test` not applicable.
+- New: `components/shared/access-boundary-schedule-editor.test.ts` (the reviewer's exact late-zone-arrival + edit-the-other-field repro, a displayed-value re-derivation test, and an in-progress-edit round-trip test — all three verified to fail without the R4-1 fix); `components/shared/scheduled-event-list.test.ts` (create-dialog label update); a label-update test added to `components/pages/admin-role-bindings.test.ts`. Each of the three new/extended test files was verified to fail when its component's `DisplayZoneController` field is removed.
 - New: `client/with-timeout.test.ts` (the hang-past-budget path, the late-arrival-after-timeout path applying its side effect once it lands, and rejection propagation); a re-render test each in `chat-interagent-marker.test.ts` and `chat-thread.test.ts`.
 - `utils/time.test.ts` covers: the `DISPLAY_TIMEZONE_CHANGED_EVENT` firing on change / not firing on a no-op or invalid-to-invalid set; DST overlap on `Europe/Berlin`, `Australia/Sydney` and the 30-minute `Australia/Lord_Howe`, plus a `Europe/Berlin` gap; invalid-zone and out-of-range-field/two-digit-year rejection for `parseWallClock`/`toWallClockInput`; the `datetime-full`/`time-seconds` `formatInstant` styles; `formatInstantWithZone`; the year-below-1000 `toWallClockInput` round trip. `browserTimeZone`/`isValidTimeZone`/`listTimeZones` tests are task 12's, carried over unchanged by the rebase. New: `utils/display-zone-controller.test.ts`; `components/shared/chat/chat-system-line.test.ts` and `chat-date-divider.test.ts` (both new files); a zone-label test (AC4) added to `chat-message.test.ts` and `chat-interagent-marker.test.ts`, plus a re-render-on-later-change test added to `chat-message.test.ts` (`chat-interagent-marker.test.ts` and `chat-thread.ts` had no equivalent re-render test yet at this point — review round 3's R3-3 added them; see below). `profile-settings.test.ts`'s picker tests now drive the picker's real UI (focus/type/click an option, or Enter to commit untracked text) instead of a synthetic event, and were verified to fail without the R2-2 fix and pass with it.
 
