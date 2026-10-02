@@ -115,7 +115,7 @@ runtimes:
 | `priority_class_name` | string | (Kubernetes) Default `priorityClassName` applied to agent pods using this runtime entry. Must name a `PriorityClass` that already exists on the cluster — Scion does not create one. A template/agent `kubernetes.priorityClassName` overrides this. Unset means no priority class (pods schedule at priority 0). |
 | `list_all_namespaces` | bool | (Kubernetes) List agents across all namespaces. Default: `false`. |
 | `shared_dir_storage_class` | string | (Kubernetes) Default StorageClass for shared-dir PVCs. Must support `ReadWriteMany`. A profile's value wins over this, and a template or agent `kubernetes.shared_dir_storage_class` wins over both. Default: the cluster's default class. |
-| `shared_dir_size` | string | (Kubernetes) Default size for each shared-dir PVC (e.g. `10Gi`). Same precedence as `shared_dir_storage_class`. Default: `10Gi`. |
+| `shared_dir_size` | string | (Kubernetes) Default size for each shared-dir PVC, as a Kubernetes quantity (e.g. `10Gi`, `1Ti`). Same precedence as `shared_dir_storage_class`. Default: `10Gi`. |
 | `env` | map | Environment variables to set for the runtime. |
 
 :::note

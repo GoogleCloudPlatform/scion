@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/knadh/koanf/v2"
 	yamlv3 "gopkg.in/yaml.v3"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // ResolveHarnessConfig looks up a named harness config and merges profile-level overrides.
@@ -163,26 +165,73 @@ var missingSchemaVersionWarning = `settings.yaml contains v1 runtime fields (` +
 // (api.KubernetesConfig.SharedDirStorageClass / SharedDirSize) wins over
 // both; see ApplySharedDirDefaults.
 func (vs *VersionedSettings) ResolveSharedDirDefaults(profileName string) (storageClass, size string) {
+	storageClass, size, _ = vs.ResolveSharedDirDefaultsWithSource(profileName)
+	return storageClass, size
+}
+
+// ResolveSharedDirDefaultsWithSource is ResolveSharedDirDefaults that also
+// returns the settings key the size came from
+// ("profiles.NAME.shared_dir_size" or "runtimes.NAME.shared_dir_size"), so
+// an error about the value can name where it is set. sizeKey is empty when
+// size is empty.
+func (vs *VersionedSettings) ResolveSharedDirDefaultsWithSource(profileName string) (storageClass, size, sizeKey string) {
 	if vs == nil {
-		return "", ""
+		return "", "", ""
 	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile
 	}
 	profile, ok := vs.Profiles[profileName]
 	if !ok {
-		return "", ""
+		return "", "", ""
 	}
 	storageClass, size = profile.SharedDirStorageClass, profile.SharedDirSize
+	if size != "" {
+		sizeKey = "profiles." + profileName + ".shared_dir_size"
+	}
 	if rt, ok := vs.Runtimes[profile.Runtime]; ok {
 		if storageClass == "" {
 			storageClass = rt.SharedDirStorageClass
 		}
-		if size == "" {
+		if size == "" && rt.SharedDirSize != "" {
 			size = rt.SharedDirSize
+			sizeKey = "runtimes." + profile.Runtime + ".shared_dir_size"
 		}
 	}
-	return storageClass, size
+	return storageClass, size, sizeKey
+}
+
+// ValidateSharedDirSize checks that a shared_dir_size value parses as a
+// Kubernetes resource quantity (for example 10Gi or 1Ti). Empty is valid
+// and means "not set".
+func ValidateSharedDirSize(size string) error {
+	if size == "" {
+		return nil
+	}
+	if _, err := resource.ParseQuantity(size); err != nil {
+		return fmt.Errorf("invalid shared_dir_size %q: must be a Kubernetes quantity such as 10Gi or 1Ti", size)
+	}
+	return nil
+}
+
+// ValidateSharedDirSizes checks shared_dir_size on every runtime and
+// profile entry. Each error's Path names the settings key
+// ("runtimes.NAME.shared_dir_size" / "profiles.NAME.shared_dir_size").
+// Results are sorted by path.
+func ValidateSharedDirSizes(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []ValidationError {
+	var errs []ValidationError
+	for name, rt := range runtimes {
+		if err := ValidateSharedDirSize(rt.SharedDirSize); err != nil {
+			errs = append(errs, ValidationError{Path: "runtimes." + name + ".shared_dir_size", Message: err.Error()})
+		}
+	}
+	for name, p := range profiles {
+		if err := ValidateSharedDirSize(p.SharedDirSize); err != nil {
+			errs = append(errs, ValidationError{Path: "profiles." + name + ".shared_dir_size", Message: err.Error()})
+		}
+	}
+	sort.Slice(errs, func(i, j int) bool { return errs[i].Path < errs[j].Path })
+	return errs
 }
 
 // ApplySharedDirDefaults returns base with SharedDirStorageClass and

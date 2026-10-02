@@ -1371,6 +1371,31 @@ authDone:
 		}
 	}
 
+	// Kubernetes shared-dir PVC defaults from settings: the profile's value,
+	// else its runtime entry's (applied below under the template/agent
+	// kubernetes block). The profile is the one named for this start, else
+	// the one the agent was created with. When shared-dir PVCs will be
+	// needed, check the effective size here so a bad value fails with the
+	// place it is set rather than a bare parse error from the runtime.
+	var sdClass, sdSize string
+	if settings != nil && m.Runtime.Name() == "kubernetes" {
+		sdProfile := opts.Profile
+		if sdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
+			sdProfile = finalScionCfg.Info.Profile
+		}
+		var sdSizeKey string
+		sdClass, sdSize, sdSizeKey = settings.ResolveSharedDirDefaultsWithSource(sdProfile)
+		if len(effectiveSharedDirs) > 0 {
+			size, source := sdSize, "settings "+sdSizeKey
+			if finalScionCfg != nil && finalScionCfg.Kubernetes != nil && finalScionCfg.Kubernetes.SharedDirSize != "" {
+				size, source = finalScionCfg.Kubernetes.SharedDirSize, "kubernetes.shared_dir_size in the agent or template config"
+			}
+			if err := config.ValidateSharedDirSize(size); err != nil {
+				return nil, fmt.Errorf("%s: %w", source, err)
+			}
+		}
+	}
+
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),
 		Template:             template,
@@ -1504,12 +1529,7 @@ authDone:
 				}
 				k8sCfg.ImagePullPolicy = resolvedPullPolicy
 			}
-			if settings != nil && m.Runtime.Name() == "kubernetes" {
-				sdProfile := opts.Profile
-				if sdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-					sdProfile = finalScionCfg.Info.Profile
-				}
-				sdClass, sdSize := settings.ResolveSharedDirDefaults(sdProfile)
+			if sdClass != "" || sdSize != "" {
 				k8sCfg = config.ApplySharedDirDefaults(k8sCfg, sdClass, sdSize)
 			}
 			return k8sCfg

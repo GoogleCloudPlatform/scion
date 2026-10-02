@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -259,4 +260,52 @@ func TestApplySharedDirDefaults(t *testing.T) {
 		assert.Equal(t, "", base.SharedDirSize)
 		assert.NotSame(t, base, got)
 	})
+}
+
+// The settings key the size came from is reported with the resolved size.
+func TestResolveSharedDirDefaultsWithSource(t *testing.T) {
+	vs := &VersionedSettings{
+		Runtimes: map[string]V1RuntimeConfig{"k8s": {SharedDirSize: "1Gi"}},
+		Profiles: map[string]V1ProfileConfig{
+			"own":     {Runtime: "k8s", SharedDirSize: "2Gi"},
+			"inherit": {Runtime: "k8s", SharedDirStorageClass: "c"},
+			"none":    {Runtime: "missing"},
+		},
+	}
+	for profile, want := range map[string][2]string{
+		"own":     {"2Gi", "profiles.own.shared_dir_size"},
+		"inherit": {"1Gi", "runtimes.k8s.shared_dir_size"},
+		"none":    {"", ""},
+	} {
+		_, size, key := vs.ResolveSharedDirDefaultsWithSource(profile)
+		assert.Equal(t, want[0], size, profile)
+		assert.Equal(t, want[1], key, profile)
+	}
+}
+
+// shared_dir_size must be a Kubernetes quantity; errors name the key.
+func TestValidateSharedDirSizes(t *testing.T) {
+	assert.NoError(t, ValidateSharedDirSize(""))
+	assert.NoError(t, ValidateSharedDirSize("10Gi"))
+	assert.NoError(t, ValidateSharedDirSize("1Ti"))
+	assert.Error(t, ValidateSharedDirSize("1TB"))
+
+	errs := ValidateSharedDirSizes(
+		map[string]V1RuntimeConfig{"ok": {SharedDirSize: "1Ti"}, "bad": {SharedDirSize: "1TB"}},
+		map[string]V1ProfileConfig{"p": {SharedDirSize: "lots"}, "q": {}},
+	)
+	require.Len(t, errs, 2)
+	assert.Equal(t, "profiles.p.shared_dir_size", errs[0].Path)
+	assert.Equal(t, "runtimes.bad.shared_dir_size", errs[1].Path)
+	assert.Contains(t, errs[1].Error(), `"1TB"`)
+}
+
+// ValidateSettings (used by scion config validate) reports an invalid
+// shared_dir_size with its key.
+func TestSharedDirK8sSettings_ValidateSettingsRejectsBadSize(t *testing.T) {
+	data := strings.Replace(sharedDirK8sSettingsYAML, "shared_dir_size: 2Ti", "shared_dir_size: 2TB", 1)
+	errs, err := ValidateSettings([]byte(data), "1")
+	require.NoError(t, err)
+	require.Len(t, errs, 1)
+	assert.Equal(t, "profiles.gke.shared_dir_size", errs[0].Path)
 }

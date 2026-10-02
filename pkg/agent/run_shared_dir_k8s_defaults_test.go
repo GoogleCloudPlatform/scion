@@ -18,6 +18,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -44,6 +45,9 @@ profiles:
   gke-premium:
     runtime: gke-autopilot
     shared_dir_storage_class: prof-rwx
+  other:
+    runtime: gke-autopilot
+    shared_dir_storage_class: other-rwx
 `
 
 func startForSharedDirK8sDefaults(t *testing.T, runtimeName, templateJSON string, opts api.StartOptions) runtime.RunConfig {
@@ -117,4 +121,88 @@ func TestStartSharedDirK8sDefaults_InlineAgentConfigWins(t *testing.T) {
 func TestStartSharedDirK8sDefaults_NotAppliedOnOtherRuntimes(t *testing.T) {
 	cfg := startForSharedDirK8sDefaults(t, "docker", "", api.StartOptions{})
 	assert.Nil(t, cfg.Kubernetes)
+}
+
+// A restart without a profile uses the profile the agent was created with
+// (its saved profile), not active_profile, when resolving the defaults.
+func TestStartSharedDirK8sDefaults_RestartUsesSavedProfile(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	settings := strings.Replace(sharedDirK8sDefaultsSettings, "active_profile: gke", "active_profile: other", 1)
+	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"), []byte(settings), 0644))
+
+	var captured []runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "kubernetes" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			captured = append(captured, config)
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+	start := func(profile string) {
+		t.Helper()
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:        "sd-agent",
+			ProjectPath: f.projectScionDir,
+			Profile:     profile,
+			NoAuth:      true,
+			Env:         map[string]string{"SCION_AGENT_ID": "agent-sd", "SCION_PROJECT_ID": "pid-sd"},
+			SharedDirs:  []api.SharedDir{{Name: "scratchpad"}},
+		})
+		require.NoError(t, err)
+	}
+
+	start("gke-premium")
+	start("")
+	require.Len(t, captured, 2)
+	for i, cfg := range captured {
+		require.NotNil(t, cfg.Kubernetes, "start %d", i)
+		assert.Equal(t, "prof-rwx", cfg.Kubernetes.SharedDirStorageClass,
+			"start %d must use the saved profile gke-premium, not active_profile", i)
+	}
+}
+
+// An invalid shared_dir_size fails the start before the runtime is called,
+// and the error names where the value is set.
+func TestStartSharedDirK8sDefaults_InvalidSizeNamesSource(t *testing.T) {
+	tests := []struct {
+		name, settingsFrom, settingsTo string
+		inline                         *api.ScionConfig
+		profile, wantSource            string
+	}{
+		{"runtime entry", "shared_dir_size: 1Ti", "shared_dir_size: 1TB", nil, "", "runtimes.gke-autopilot.shared_dir_size"},
+		{"profile", "shared_dir_storage_class: prof-rwx", "shared_dir_storage_class: prof-rwx\n    shared_dir_size: lots", nil, "gke-premium", "profiles.gke-premium.shared_dir_size"},
+		{"agent config", "", "", &api.ScionConfig{Kubernetes: &api.KubernetesConfig{SharedDirSize: "5GB"}}, "", "kubernetes.shared_dir_size in the agent or template config"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newSharedDirStorageRunFixture(t)
+			settings := sharedDirK8sDefaultsSettings
+			if tt.settingsFrom != "" {
+				settings = strings.Replace(settings, tt.settingsFrom, tt.settingsTo, 1)
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"), []byte(settings), 0644))
+			ran := 0
+			mockRT := &runtime.MockRuntime{
+				NameFunc: func() string { return "kubernetes" },
+				RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+					ran++
+					return "mock-id", nil
+				},
+			}
+			_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+				Name:         "sd-agent",
+				ProjectPath:  f.projectScionDir,
+				Profile:      tt.profile,
+				InlineConfig: tt.inline,
+				NoAuth:       true,
+				Env:          map[string]string{"SCION_AGENT_ID": "agent-sd", "SCION_PROJECT_ID": "pid-sd"},
+				SharedDirs:   []api.SharedDir{{Name: "scratchpad"}},
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantSource)
+			assert.Contains(t, err.Error(), "invalid shared_dir_size")
+			assert.Equal(t, 0, ran, "the runtime must not be called")
+		})
+	}
 }

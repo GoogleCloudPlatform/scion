@@ -144,8 +144,24 @@ func hasV1RuntimeIndicators(raw map[string]interface{}) bool {
 //
 // Returns an error (not ValidationError) if the schema version is unsupported
 // or if the data cannot be parsed.
+//
+// For schema version "1" it also checks value formats the schema cannot
+// express, such as shared_dir_size being a Kubernetes quantity.
 func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, error) {
-	return validateAgainstSchema(data, schemaVersion, settingsSchemaFiles)
+	errs, err := validateAgainstSchema(data, schemaVersion, settingsSchemaFiles)
+	if err != nil || schemaVersion != "1" {
+		return errs, err
+	}
+	var vs struct {
+		Runtimes map[string]V1RuntimeConfig `yaml:"runtimes"`
+		Profiles map[string]V1ProfileConfig `yaml:"profiles"`
+	}
+	// A decode failure here (e.g. a wrongly typed field) is already
+	// reported by the schema pass above.
+	if yaml.Unmarshal(data, &vs) == nil {
+		errs = append(errs, ValidateSharedDirSizes(vs.Runtimes, vs.Profiles)...)
+	}
+	return errs, nil
 }
 
 // ValidateAgentConfig validates raw agent config data (YAML or JSON) against

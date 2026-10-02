@@ -15,7 +15,9 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -352,6 +354,68 @@ func TestCreateSharedDirPVCs_SettingsResolvedClassAndSize(t *testing.T) {
 			assert.Equal(t, tt.wantClass, *pvc.Spec.StorageClassName)
 			storageReq := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
 			assert.Equal(t, tt.wantSize, storageReq.String())
+		})
+	}
+}
+
+// Reusing an existing claim whose storage class differs from the requested
+// one logs a warning naming the claim, both classes and (when Pending) the
+// phase; a matching class or no requested class logs nothing.
+func TestCreateSharedDirPVCs_ReuseWarnsOnStorageClassMismatch(t *testing.T) {
+	oldLog := runtimeLog
+	defer func() { runtimeLog = oldLog }()
+
+	strPtr := func(s string) *string { return &s }
+	tests := []struct {
+		name          string
+		existingClass *string
+		phase         corev1.PersistentVolumeClaimPhase
+		requested     string
+		wantWarn      bool
+	}{
+		{"differs, pending", strPtr("standard"), corev1.ClaimPending, "standard-rwx", true},
+		{"differs, bound", strPtr("standard"), corev1.ClaimBound, "standard-rwx", true},
+		{"existing unset", nil, corev1.ClaimBound, "standard-rwx", true},
+		{"same class", strPtr("standard-rwx"), corev1.ClaimBound, "standard-rwx", false},
+		{"no class requested", strPtr("standard"), corev1.ClaimBound, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			runtimeLog = slog.New(slog.NewTextHandler(&buf, nil))
+
+			rt, clientset, _ := newTestK8sRuntime()
+			ctx := context.Background()
+			_, err := clientset.CoreV1().PersistentVolumeClaims("default").Create(ctx, &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "scion-shared-myproject-build-cache", Namespace: "default"},
+				Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: tt.existingClass},
+				Status:     corev1.PersistentVolumeClaimStatus{Phase: tt.phase},
+			}, metav1.CreateOptions{})
+			require.NoError(t, err)
+
+			cfg := RunConfig{
+				Labels:     map[string]string{"scion.project": "myproject"},
+				SharedDirs: []api.SharedDir{{Name: "build-cache"}},
+				Kubernetes: &api.KubernetesConfig{SharedDirStorageClass: tt.requested},
+			}
+			require.NoError(t, rt.createSharedDirPVCs(ctx, "default", cfg))
+
+			out := buf.String()
+			if !tt.wantWarn {
+				assert.NotContains(t, out, "level=WARN")
+				return
+			}
+			assert.Contains(t, out, "level=WARN")
+			assert.Contains(t, out, "pvc=scion-shared-myproject-build-cache")
+			assert.Contains(t, out, "requested_storage_class="+tt.requested)
+			if tt.existingClass != nil {
+				assert.Contains(t, out, "existing_storage_class="+*tt.existingClass)
+			}
+			if tt.phase == corev1.ClaimPending {
+				assert.Contains(t, out, "phase=Pending")
+			} else {
+				assert.NotContains(t, out, "phase=")
+			}
 		})
 	}
 }

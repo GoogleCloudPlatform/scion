@@ -618,6 +618,23 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			}
 		}
 	}
+	// Validate shared_dir_size on runtime and profile entries (beyond JSON
+	// schema — Kubernetes quantity check), naming the offending key so a bad
+	// value is rejected here instead of failing every agent start later.
+	{
+		var runtimes opsettings.RuntimesSettings
+		var profiles opsettings.ProfilesSettings
+		if doc, ok := sectionDocs["runtimes"]; ok {
+			_ = json.Unmarshal(doc, &runtimes)
+		}
+		if doc, ok := sectionDocs["profiles"]; ok {
+			_ = json.Unmarshal(doc, &profiles)
+		}
+		if errs := config.ValidateSharedDirSizes(runtimes, profiles); len(errs) > 0 {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
+			return
+		}
+	}
 	// Validate hub-level default_timezone (IANA name check; rejects "Local",
 	// same rule as the file-mode handler and as the per-user display
 	// preference — design §3 A (d)).

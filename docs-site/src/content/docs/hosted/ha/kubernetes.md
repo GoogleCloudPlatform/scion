@@ -79,7 +79,12 @@ You can set them in three places. Each key is resolved separately, and the first
 1. The agent's or template's `kubernetes:` block.
 2. The profile entry in `settings.yaml`.
 3. The profile's runtime entry in `settings.yaml`.
-4. Otherwise: the cluster's default StorageClass, and `10Gi`.
+
+If none of them sets a key, the cluster's default StorageClass and `10Gi` are used.
+
+An empty value means "not set", so it does not override a lower source. Once a runtime entry or profile sets a class, a template cannot reset it to the cluster default; name the class explicitly instead.
+
+`shared_dir_size` must be a Kubernetes quantity such as `10Gi` or `1Ti`. Settings validation and the admin settings API reject other values, and an agent start fails with an error naming the key that holds the bad value.
 
 The settings values are read every time an agent starts. They apply only on the Kubernetes runtime.
 
@@ -110,7 +115,7 @@ kubernetes:
 ```
 
 :::note
-Existing PVCs are reused as they are and never changed. A new class or size only applies to claims created after the change. To move an existing shared directory to a new class, delete its PVC (`scion-shared-…`, labelled `scion.shared-dir=<name>`) after copying out its data.
+Existing PVCs are reused as they are and never changed. A new class or size only applies to claims created after the change. To move an existing shared directory to a new class, delete its PVC (`scion-shared-…`, labelled `scion.shared-dir=<name>`) after copying out its data. When an agent reuses a claim whose class differs from the requested one, Scion logs a warning naming the claim and both classes.
 :::
 
 :::caution[Cost with many projects]

@@ -1699,3 +1699,28 @@ func TestKoanfKeyToEnvSuffix(t *testing.T) {
 		}
 	}
 }
+
+// TestSharedDirKeysSchemaValidation verifies the runtimes and profiles
+// section schemas accept shared_dir_storage_class / shared_dir_size as
+// strings and reject a non-string shared_dir_size.
+func TestSharedDirKeysSchemaValidation(t *testing.T) {
+	valid := map[string]string{
+		"runtimes": `{"gke": {"type": "kubernetes", "shared_dir_storage_class": "standard-rwx", "shared_dir_size": "10Gi"}}`,
+		"profiles": `{"gke": {"runtime": "gke", "shared_dir_storage_class": "standard-rwx", "shared_dir_size": "10Gi"}}`,
+	}
+	for sec, doc := range valid {
+		if errs := Validate(sec, json.RawMessage(doc)); len(errs) > 0 {
+			t.Errorf("%s: expected string shared_dir_* keys to be valid, got errors: %v", sec, errs)
+		}
+	}
+
+	invalid := map[string]string{
+		"runtimes": `{"gke": {"type": "kubernetes", "shared_dir_size": 10}}`,
+		"profiles": `{"gke": {"runtime": "gke", "shared_dir_size": 10}}`,
+	}
+	for sec, doc := range invalid {
+		if errs := Validate(sec, json.RawMessage(doc)); len(errs) == 0 {
+			t.Errorf("%s: expected a numeric shared_dir_size to be rejected", sec)
+		}
+	}
+}
