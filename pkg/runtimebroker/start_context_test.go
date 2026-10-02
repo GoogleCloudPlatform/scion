@@ -176,7 +176,7 @@ runtimes:
 	// non-default profile (otherProfile -> otherRuntimeName), so the
 	// resolver can report otherRuntimeName unconditionally rather than
 	// inspecting profileFlag.
-	srv.runtimeResolver = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return otherRuntimeName }}
 	}
 	return srv, dotScion

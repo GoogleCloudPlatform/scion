@@ -3400,12 +3400,13 @@ runtimes:
 }
 
 // TestResolveManagerForOpts_NilRuntimeResolverFallsBack proves that a nil
-// srv.runtimeResolver does not panic when settings resolve to a runtime
-// other than the broker's default. New() always sets runtimeResolver to
-// agent.ResolveRuntime, so this only matters for a Server built without
-// New() (e.g. a test literal, or some future construction path) — but
-// resolveManagerForOpts falls back to that exact same function rather than
-// a stand-in, so the fallback resolves identically to production.
+// srv.resolveAuxiliaryRuntime does not panic when settings resolve to a
+// runtime other than the broker's default. New() always sets
+// resolveAuxiliaryRuntime to agent.ResolveRuntime, so this only matters for
+// a Server built without New() (e.g. a test literal, or some future
+// construction path) — but resolveManagerForOpts falls back to that exact
+// same function rather than a stand-in, so the fallback resolves
+// identically to production.
 //
 // Isolated from ambient SCION_* env and HOME: without that isolation, an
 // ambient SCION_AUTO_EXPOSE_PORTS collides with the struct-typed
@@ -3436,7 +3437,7 @@ runtimes:
 
 	srv, _ := newTestServerWithProvisionCapture()
 	srv.config.ForceRuntime = ""
-	srv.runtimeResolver = nil
+	srv.resolveAuxiliaryRuntime = nil
 
 	opts := api.StartOptions{
 		Name:        "test-agent",

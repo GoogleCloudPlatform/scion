@@ -241,13 +241,17 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 
 // resolveLiveRuntimeInstance returns the already-built Runtime instance
 // backing a profile resolving to rtType, without constructing anything new:
-// s.runtime for the default type, or the auxiliary runtime some prior
-// request already built and cached under that type in s.auxiliaryRuntimes.
-// ok is false when no live instance exists yet for rtType — most commonly
-// an auxiliary runtime type no request has resolved yet — and callers must
-// leave the capability unknown in that case rather than guess from the type
-// string alone (a named profile on a broker with a different default type is
-// not "probably fine" just because it's not the default type).
+// s.runtime for the default type, or an auxiliary runtime some prior
+// request already built and cached for that type (findAuxiliaryRuntimeByType
+// — auxiliaryRuntimes is keyed by resolved IDENTITY, not type, so more than
+// one instance can share rtType; this picks the lexicographically smallest
+// identity, the same deterministic-but-coarse choice ForceRuntime's lookup
+// makes). ok is false when no live instance exists yet for rtType — most
+// commonly an auxiliary runtime type no request has resolved yet — and
+// callers must leave the capability unknown in that case rather than guess
+// from the type string alone (a named profile on a broker with a different
+// default type is not "probably fine" just because it's not the default
+// type).
 func (s *Server) resolveLiveRuntimeInstance(rtType, defaultRuntimeType string) (rt scionrt.Runtime, ok bool) {
 	if rtType == defaultRuntimeType {
 		if s.runtime == nil {
@@ -255,9 +259,7 @@ func (s *Server) resolveLiveRuntimeInstance(rtType, defaultRuntimeType string) (
 		}
 		return s.runtime, true
 	}
-	s.auxiliaryRuntimesMu.RLock()
-	aux, found := s.auxiliaryRuntimes[rtType]
-	s.auxiliaryRuntimesMu.RUnlock()
+	aux, found := s.findAuxiliaryRuntimeByType(rtType)
 	if !found || aux.Runtime == nil {
 		return nil, false
 	}
@@ -373,13 +375,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Also list agents from auxiliary runtimes (e.g. Kubernetes)
-	s.auxiliaryRuntimesMu.RLock()
-	auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
-	for k, v := range s.auxiliaryRuntimes {
-		auxRuntimes[k] = v
-	}
-	s.auxiliaryRuntimesMu.RUnlock()
+	// Also list agents from auxiliary runtimes (e.g. Kubernetes), in a
+	// deterministic (identity-sorted) order.
+	auxRuntimes := s.sortedAuxiliaryRuntimes()
 
 	// Dedup by name+projectID to prevent collision across projects while still
 	// deduplicating the same agent found on multiple runtimes.
@@ -3833,13 +3831,10 @@ func (s *Server) resolveAgentRuntimeTarget(ctx context.Context, id, projectID st
 		return s.manager, s.runtime
 	}
 
-	// Snapshot the auxiliary runtimes so manager calls happen without the lock.
-	s.auxiliaryRuntimesMu.RLock()
-	auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
-	for k, v := range s.auxiliaryRuntimes {
-		auxRuntimes[k] = v
-	}
-	s.auxiliaryRuntimesMu.RUnlock()
+	// Snapshot the auxiliary runtimes, sorted by identity, so manager calls
+	// happen without the lock and in a deterministic order — more than one
+	// auxiliary runtime can share a type (see auxiliaryRuntimeIdentity).
+	auxRuntimes := s.sortedAuxiliaryRuntimes()
 
 	for _, aux := range auxRuntimes {
 		auxAgents, auxErr := aux.Manager.List(ctx, filter)
@@ -3877,7 +3872,7 @@ func (s *Server) resolveManagerForAgent(ctx context.Context, id, projectID strin
 }
 
 // allManagers returns the default manager plus every distinct auxiliary
-// runtime's manager, in deterministic (sorted-by-name) order. Used by
+// runtime's manager, in deterministic (sorted-by-identity) order. Used by
 // resolveDeleteTarget to search every registered runtime rather than only
 // the one a slug-based lookup happens to resolve to first.
 func (s *Server) allManagers() []agent.Manager {
@@ -3908,7 +3903,7 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID strin
 // would resolve to (e.g. "docker", "kubernetes", "remote"), without
 // resolveManagerForOpts's side effects when the resolved runtime differs
 // from the broker's default: building a real runtime client (a Kubernetes or
-// Cloud Run client, for example, via runtimeResolver) and caching it in
+// Cloud Run client, for example, via resolveAuxiliaryRuntime) and caching it in
 // auxiliaryRuntimes. Callers that only need the name — currently just the
 // auth preflight (extractRequiredEnvKeys) — use this instead, so a create to
 // a non-default runtime does not build and cache a throwaway client purely
@@ -3942,10 +3937,7 @@ func (s *Server) resolveRuntimeNameForOpts(opts api.StartOptions) string {
 		if s.config.ForceRuntime == s.runtime.Name() {
 			return s.runtime.Name()
 		}
-		s.auxiliaryRuntimesMu.RLock()
-		aux, ok := s.auxiliaryRuntimes[s.config.ForceRuntime]
-		s.auxiliaryRuntimesMu.RUnlock()
-		if ok {
+		if aux, ok := s.findAuxiliaryRuntimeByType(s.config.ForceRuntime); ok {
 			return aux.Runtime.Name()
 		}
 		s.agentLifecycleLog.Warn("ForceRuntime does not match default runtime, falling back to settings resolution", "force", s.config.ForceRuntime, "default", s.runtime.Name())
@@ -4003,10 +3995,7 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 			// runtime config is not reachable under ForceRuntime.
 			return s.manager, s.runtime.Name()
 		}
-		s.auxiliaryRuntimesMu.RLock()
-		aux, ok := s.auxiliaryRuntimes[s.config.ForceRuntime]
-		s.auxiliaryRuntimesMu.RUnlock()
-		if ok {
+		if aux, ok := s.findAuxiliaryRuntimeByType(s.config.ForceRuntime); ok {
 			return aux.Manager, aux.Runtime.Name()
 		}
 		s.agentLifecycleLog.Warn("ForceRuntime does not match default runtime, falling back to settings resolution", "force", s.config.ForceRuntime, "default", s.runtime.Name())
@@ -4027,55 +4016,77 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 		return s.manager, s.runtime.Name()
 	}
 
-	// ResolveRuntime("") uses vs.ActiveProfile as the fallback.
-	_, runtimeType, err := vs.ResolveRuntime(opts.Profile)
+	// ResolveRuntime("") uses vs.ActiveProfile as the fallback. The
+	// settings-level type (plus, for Kubernetes, context/namespace) feeds
+	// the cheap pre-check just below, but that pre-check is a conservative
+	// shortcut: it can only PROVE a match, never a mismatch, and a false
+	// result falls through to full resolution rather than being treated as
+	// conclusive. The authoritative comparison is by resolved IDENTITY (see
+	// auxiliaryRuntimeIdentity) after that resolution, which is what
+	// actually handles aliased type spellings ("k8s" vs "kubernetes") and
+	// tells apart a profile of the SAME type but a genuinely different
+	// instance (e.g. a different Kubernetes cluster, when the broker's own
+	// default is also Kubernetes).
+	rtConfig, runtimeType, err := vs.ResolveRuntime(opts.Profile)
 	if err != nil {
 		// Profile or its runtime not found in settings; use default
 		return s.manager, s.runtime.Name()
 	}
 
-	// A profile resolving to the default runtime's type is normally served
-	// by the default manager: for most runtimes, the same type means the
-	// same backend. A runtime whose instances are bound to one profile's
-	// configuration (the optional PerProfileInstancesRuntime capability)
-	// can't be shared that way — a second profile of the same type may
+	// Cheap pre-check: a profile matching the broker's own default runtime
+	// (type, and for Kubernetes also context/namespace) returns the shared
+	// manager WITHOUT fully resolving the profile — in particular, without
+	// the live Client.Verify() API round trip runtime.GetRuntime makes for
+	// Kubernetes. Every agent start goes through this path, so paying that
+	// network cost unconditionally, and risking a transient Verify failure
+	// on a start that targets the broker's own healthy runtime, would be
+	// worse than the settings-string comparison this performs instead.
+	//
+	// A runtime whose instances are bound to one profile's configuration
+	// (the optional PerProfileInstancesRuntime capability) can't be shared
+	// that way even on an otherwise-provable match — a second profile of the
+	// same type (and, for Kubernetes, the same context/namespace) may still
 	// carry its own runtime config — so when the default runtime reports
-	// that capability, the type-only shortcut is skipped and the profile
-	// gets its own manager below (the ForceRuntime branch above still takes
-	// the type-only shortcut). The broker does not keep the default
-	// runtime's profile identity, so it cannot tell whether the requested
-	// profile is the one the default runtime was built from; it relies on
-	// the capability instead.
-	if runtimeType == s.runtime.Name() && !scionrt.HasPerProfileInstances(s.runtime) {
+	// that capability, this shortcut is skipped unconditionally and the
+	// profile is always fully resolved below (the ForceRuntime branch above
+	// still takes the type-only shortcut). The broker does not keep the
+	// default runtime's profile identity, so it cannot tell whether the
+	// requested profile is the one the default runtime was built from; it
+	// relies on the capability instead.
+	if s.defaultRuntimeMatchesProfile(runtimeType, rtConfig) && !scionrt.HasPerProfileInstances(s.runtime) {
 		return s.manager, s.runtime.Name()
 	}
 
-	// Settings specify a different runtime - resolve and create a manager.
-	// Cache it as an auxiliary manager so LookupContainerID can find agents
-	// created on non-default runtimes (e.g. K8s pods when default is docker).
-	// Always resolved fresh, not read back from that cache: a runtime is
-	// constructed from the profile's own config (context, namespace, GKE or
-	// Cloud Run settings — see runtime.GetRuntime), which differs by project
-	// and profile even when the runtime type is the same, so a type-keyed
-	// read would hand one project's or profile's client, cluster context and
-	// namespace to every other dispatch of that type.
+	// Resolve the profile's runtime so its true identity can be compared
+	// against the default's — a settings-level type-string comparison
+	// can't tell two distinct instances of one type apart (see the comment
+	// above). Cache it as an auxiliary manager so LookupContainerID can find
+	// agents created on non-default runtimes (e.g. K8s pods when default is
+	// docker).
+	//
+	// Always resolved fresh here, never read back from that cache: a
+	// runtime is constructed from the profile's own config (context,
+	// namespace, GKE or Cloud Run settings — see runtime.GetRuntime), which
+	// differs by project and profile even when the type is the same, so a
+	// cached read keyed on anything coarser than the fully resolved
+	// identity could hand one project's or profile's client to another.
 	//
 	// Use opts.Profile for ResolveRuntime so it picks up the same profile
 	// that was just checked. When empty, GetRuntime falls back to settings
 	// the same way ResolveRuntime does.
 	//
-	// runtimeResolver is set to agent.ResolveRuntime by New() and should
-	// never be nil in production; this falls back to the same function so a
-	// Server built without New() (e.g. a test literal) resolves identically
-	// to production instead of panicking.
-	resolver := s.runtimeResolver
+	// resolveAuxiliaryRuntime is set to agent.ResolveRuntime by New() and
+	// should never be nil in production; this falls back to the same
+	// function so a Server built without New() (e.g. a test literal)
+	// resolves identically to production instead of panicking.
+	resolver := s.resolveAuxiliaryRuntime
 	if resolver == nil {
 		resolver = agent.ResolveRuntime
 	}
 	resolved := resolver(opts.ProjectPath, opts.Name, opts.Profile)
 
 	if s.config.Debug {
-		s.agentLifecycleLog.Debug("Settings resolved to different runtime",
+		s.agentLifecycleLog.Debug("Resolved runtime for start options",
 			"agent", opts.Name, "profile", opts.Profile,
 			"activeProfile", vs.ActiveProfile,
 			"defaultRuntime", s.runtime.Name(),
@@ -4083,13 +4094,32 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 		)
 	}
 
-	mgr := agent.NewManager(resolved)
-
-	if resolved.Name() != "error" {
-		s.auxiliaryRuntimesMu.Lock()
-		s.auxiliaryRuntimes[resolved.Name()] = auxiliaryRuntime{Runtime: resolved, Manager: mgr}
-		s.auxiliaryRuntimesMu.Unlock()
+	if resolved.Name() == "error" {
+		// Resolution failed outright (e.g. cluster unreachable): there is no
+		// identity to compare or register. Wrap it in a manager so the
+		// caller's calls surface the underlying error, the same contract
+		// callers get for any other runtime construction failure.
+		return agent.NewManager(resolved), resolved.Name()
 	}
+
+	// A PerProfileInstancesRuntime default never short-circuits here either,
+	// for the same reason the pre-check above skips it: auxiliaryRuntimeIdentity
+	// has no generic per-profile-config field to compare (only Kubernetes
+	// carries context/namespace), so two distinct same-type instances of such
+	// a runtime would otherwise collapse to one identity and incorrectly
+	// share the default manager.
+	if !scionrt.HasPerProfileInstances(s.runtime) && auxiliaryRuntimeIdentity(resolved) == auxiliaryRuntimeIdentity(s.runtime) {
+		return s.manager, s.runtime.Name()
+	}
+
+	// Keyed by resolved IDENTITY, not type (see auxiliaryRuntimeIdentity):
+	// two profiles resolving to distinct runtimes of the same type (e.g.
+	// two Kubernetes clusters) must not overwrite each other's entry.
+	identity := auxiliaryRuntimeIdentity(resolved)
+	mgr := agent.NewManager(resolved)
+	s.auxiliaryRuntimesMu.Lock()
+	s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: resolved, Manager: mgr}
+	s.auxiliaryRuntimesMu.Unlock()
 
 	return mgr, resolved.Name()
 }
@@ -4106,6 +4136,33 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 func recheckHubDefaultPassthrough(env map[string]string, envCls map[string]api.EnvKind, resolvedRuntimeType string) {
 	downgradeUnverifiedHubDefaultPassthrough(env, envCls,
 		env["SCION_METADATA_MODE"], env["SCION_METADATA_REQUIRE_LOCAL_RUNTIME"] == "true", resolvedRuntimeType)
+}
+
+// findAuxiliaryRuntimeByType returns a registered auxiliary runtime whose
+// resolved type matches runtimeType. Auxiliary runtimes are keyed by
+// resolved IDENTITY (see auxiliaryRuntimeIdentity), not by type, since more
+// than one distinct runtime instance (e.g. two Kubernetes clusters) can
+// share a type. ForceRuntime, however, is a config surface that only names a
+// type, so when several auxiliary runtimes share the requested type this
+// picks the one with the lexicographically smallest identity key — a
+// deterministic, if coarse, choice rather than one dependent on map
+// iteration order. Extending ForceRuntime to name a specific instance,
+// rather than just a type, is a follow-up decision, not made here.
+func (s *Server) findAuxiliaryRuntimeByType(runtimeType string) (auxiliaryRuntime, bool) {
+	s.auxiliaryRuntimesMu.RLock()
+	defer s.auxiliaryRuntimesMu.RUnlock()
+
+	var matchKeys []string
+	for key, aux := range s.auxiliaryRuntimes {
+		if aux.Runtime != nil && aux.Runtime.Name() == runtimeType {
+			matchKeys = append(matchKeys, key)
+		}
+	}
+	if len(matchKeys) == 0 {
+		return auxiliaryRuntime{}, false
+	}
+	sort.Strings(matchKeys)
+	return s.auxiliaryRuntimes[matchKeys[0]], true
 }
 
 // Helper functions

@@ -84,6 +84,18 @@ func NewKubernetesRuntime(client *k8s.Client) *KubernetesRuntime {
 	}
 }
 
+// DefaultKubernetesNamespace returns the namespace a Kubernetes runtime
+// resolves to when a profile sets no explicit namespace: the same
+// cheap, local-only chain NewKubernetesRuntime uses (SCION_K8S_NAMESPACE,
+// POD_NAMESPACE, the in-cluster service account file, else "default").
+// Exported so callers that need this fallback without constructing a runtime
+// — e.g. runtimebroker comparing an unresolved profile's effective namespace
+// against the broker's own default before deciding whether to fully resolve
+// it — don't have to duplicate the chain.
+func DefaultKubernetesNamespace() string {
+	return defaultKubernetesNamespace()
+}
+
 func defaultKubernetesNamespace() string {
 	for _, envKey := range []string{"SCION_K8S_NAMESPACE", "POD_NAMESPACE"} {
 		if ns := strings.TrimSpace(os.Getenv(envKey)); ns != "" {

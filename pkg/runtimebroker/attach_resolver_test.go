@@ -40,11 +40,11 @@ import (
 // runtime whose own instance opts out. handlePTYStream must close the
 // stream with 4501/attach_unsupported and never invoke the runtime exec.
 //
-// The auxiliary runtime is registered under the path of a script that
-// records every invocation: LookupAgent reports the matched map key as
-// RuntimeName, which handlePTYStreamWithAgent would exec — so "never
-// invoked" proves the gate fired, not just that an exec failed with the
-// same close code.
+// The auxiliary runtime's Name() is the path of a script that records every
+// invocation: LookupAgent reports the matched runtime's own Name() as
+// RuntimeName (see auxiliaryRuntimeIdentity), which handlePTYStreamWithAgent
+// would exec — so "never invoked" proves the gate fired, not just that an
+// exec failed with the same close code.
 func TestHandlePTYStream_AuxRuntimeWithoutAttach_ClosesBeforeExec(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -66,12 +66,12 @@ func TestHandlePTYStream_AuxRuntimeWithoutAttach_ClosesBeforeExec(t *testing.T) 
 
 			srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
 			auxRT := &attachCapableTestRuntime{
-				MockRuntime:    &runtime.MockRuntime{NameFunc: func() string { return "aux-fake" }},
+				MockRuntime:    &runtime.MockRuntime{NameFunc: func() string { return fakeRuntime }},
 				supportsAttach: false,
 			}
 			auxMgr := &mockManager{agents: []api.AgentInfo{{Name: "some-agent", ID: "cid-1", Labels: tc.labels}}}
 			srv.auxiliaryRuntimesMu.Lock()
-			srv.auxiliaryRuntimes[fakeRuntime] = auxiliaryRuntime{Runtime: auxRT, Manager: auxMgr}
+			srv.auxiliaryRuntimes[auxiliaryRuntimeIdentity(auxRT)] = auxiliaryRuntime{Runtime: auxRT, Manager: auxMgr}
 			srv.auxiliaryRuntimesMu.Unlock()
 
 			// Precondition: the real lookup resolves to the opted-out aux instance.
@@ -172,6 +172,40 @@ profiles:
 	local, ok := byName["local"]
 	if !ok || local.Attach == nil || !*local.Attach {
 		t.Errorf("local (default type, attach-capable default runtime) = %+v, want Attach=&true", local)
+	}
+}
+
+// TestResolveLiveRuntimeInstance_IdentityKeyedKubernetesInstanceFoundByType
+// is the identity-keyed counterpart of
+// TestBuildInfoProfiles_AuxTypeProfile_AsksCachedAuxInstance: that test's
+// MockRuntime happens to be registered under the bare type name
+// "kubernetes", which is also what auxiliaryRuntimeIdentity computes for a
+// non-*runtime.KubernetesRuntime value, so it could not catch a lookup that
+// only works for bare type keys. A real *runtime.KubernetesRuntime is keyed
+// by auxiliaryRuntimeIdentity's context/namespace-qualified string instead
+// (e.g. "kubernetes|context=cluster-a|namespace=ns-a"), so
+// resolveLiveRuntimeInstance must go through findAuxiliaryRuntimeByType
+// rather than a direct s.auxiliaryRuntimes["kubernetes"] lookup, or every
+// real Kubernetes instance would be invisible to it and the capability
+// would silently read as unknown regardless of what the live instance
+// actually supports.
+func TestResolveLiveRuntimeInstance_IdentityKeyedKubernetesInstanceFoundByType(t *testing.T) {
+	rt := fakeKubernetesRuntime("cluster-a", "ns-a")
+	srv := &Server{
+		runtime:           &runtime.MockRuntime{NameFunc: func() string { return "docker" }},
+		auxiliaryRuntimes: map[string]auxiliaryRuntime{},
+	}
+	srv.auxiliaryRuntimes[auxiliaryRuntimeIdentity(rt)] = auxiliaryRuntime{
+		Runtime: rt,
+		Manager: &mockManager{},
+	}
+
+	got, ok := srv.resolveLiveRuntimeInstance("kubernetes", "docker")
+	if !ok {
+		t.Fatal("expected a live instance for type \"kubernetes\" even though it is registered under a context/namespace-qualified identity key, not the bare type name")
+	}
+	if got != runtime.Runtime(rt) {
+		t.Fatalf("expected the registered kubernetes runtime, got %#v", got)
 	}
 }
 
