@@ -1410,16 +1410,26 @@ authDone:
 	// (nfsWorktreeName/nfsWorktreeBranch, above) and mounts it in-container
 	// at /repo-root/worktrees/<name> alongside /repo-root/.git — entirely
 	// through containerWorkspace and the NFS* RunConfig fields below, not
-	// through effectiveWorkspace or repoRoot. candidateRepoRoot itself is
-	// also only ever non-empty for a broker-provisioned Docker worktree (the
-	// ctx signal and the persisted file are both written only by that path),
-	// so on Kubernetes this re-validation reliably yields an empty repoRoot,
-	// matching RunConfig.RepoRoot going unused by the Kubernetes runtime's
-	// own mount building. The repoRoot computed earlier was validated
-	// against the PRE-backend path, so if the backend actually changed it,
-	// re-resolve against the value RunConfig will use, through the same
-	// validatedWorktreeRepoRoot comparison used above and in the persistence
-	// gate — not a separate, inline comparison of this layout's own.
+	// through effectiveWorkspace or repoRoot.
+	//
+	// candidateRepoRoot itself is only ever non-empty for a broker-
+	// provisioned host worktree (non-Kubernetes runtimes: the ctx signal and
+	// the persisted file are both written only along that path), so no
+	// candidate is ever set for a Kubernetes dispatch and
+	// validatedWorktreeRepoRoot returns "" here. That does not mean repoRoot
+	// itself stays empty: the detectRepoRoot fallback right below runs
+	// unconditionally on an empty result, and effectiveWorkspace at this
+	// point is the nfs backend's real git checkout, so detectRepoRoot
+	// typically resolves it to a non-empty RepoRoot (the NFS shared base)
+	// exactly as it would for a plain, non-worktree git project.
+	// RunConfig.RepoRoot being set this way on Kubernetes does not change
+	// what gets mounted: the Kubernetes runtime builds its mounts from
+	// containerWorkspace and the NFS* fields above, never from RepoRoot. The
+	// repoRoot computed earlier was validated against the PRE-backend path,
+	// so if the backend actually changed it, re-resolve against the value
+	// RunConfig will use, through the same validatedWorktreeRepoRoot
+	// comparison used above and in the persistence gate — not a separate,
+	// inline comparison of this layout's own.
 	if effectiveWorkspace != preBackendWorkspace {
 		repoRoot = validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
 		if repoRoot == "" {
