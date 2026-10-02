@@ -171,7 +171,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			cleanupCancel()
 			return nil, &AgentDMError{
 				Code:       ErrCodeRuntimeError,
-				Message:    "Agent resumed but did not become ready: " + err.Error(),
+				Message:    "Agent resumed but did not become ready; message was not delivered: " + err.Error(),
 				HTTPStatus: http.StatusBadGateway,
 			}
 		}

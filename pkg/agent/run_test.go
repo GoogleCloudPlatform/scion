@@ -2778,6 +2778,125 @@ func TestStartResumeNonExistentAgent(t *testing.T) {
 	}
 }
 
+// newResumePhaseTestFixture seeds a minimal on-disk Scion installation plus
+// an already-provisioned "resume-test" agent (scion-agent.json present, and
+// agent-info.json recording phase "suspended", the state a resume starts
+// from), wired to a mock runtime via the given ListFunc. It returns the
+// Manager and the project .scion dir, ready for a Start() call with
+// Resume: true.
+func newResumePhaseTestFixture(t *testing.T, listFunc func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error)) (Manager, string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	agentDir := filepath.Join(projectScionDir, "agents", "resume-test")
+	agentHome := filepath.Join(agentDir, "home")
+	_ = os.MkdirAll(agentHome, 0755)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{"harness": "generic"}`), 0644)
+	_ = os.WriteFile(filepath.Join(agentHome, "agent-info.json"),
+		[]byte(`{"id":"resume-test","name":"resume-test","phase":"suspended"}`), 0644)
+
+	mockRT := &runtime.MockRuntime{
+		ListFunc: listFunc,
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			return "mock-id", nil
+		},
+	}
+
+	return NewManager(mockRT), projectScionDir
+}
+
+// TestStartResumeSetsRunningPhase is the regression guard for ptone/scion#1956:
+// a resumed agent's Phase must be the canonical state.PhaseRunning,
+// not the non-standard "resumed" string run.go used to write. The hub's
+// waitForAgentReady only understood starting/running, so "resumed" made a
+// healthy resume look like a failure. This exercises the normal return path,
+// where the started container is found again in the runtime's listing
+// (run.go's "Fetch fresh info" branch).
+func TestStartResumeSetsRunningPhase(t *testing.T) {
+	mgr, projectScionDir := newResumePhaseTestFixture(t, func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+		return []api.AgentInfo{
+			{
+				ContainerID:     "mock-id",
+				Name:            "resume-test",
+				ContainerStatus: "Up 2 seconds",
+				Phase:           string(state.PhaseStarting),
+			},
+		}, nil
+	})
+
+	result, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "resume-test",
+		ProjectPath: projectScionDir,
+		BrokerMode:  true,
+		NoAuth:      true,
+		Resume:      true,
+	})
+	if err != nil {
+		t.Fatalf("Start with Resume should succeed, got: %v", err)
+	}
+
+	if result.Phase != string(state.PhaseRunning) {
+		t.Errorf("returned AgentInfo.Phase = %q, want %q", result.Phase, state.PhaseRunning)
+	}
+	if saved := GetSavedPhase("resume-test", projectScionDir); saved != string(state.PhaseRunning) {
+		t.Errorf("persisted agent-info.json phase = %q, want %q", saved, state.PhaseRunning)
+	}
+}
+
+// TestStartResumeSetsRunningPhase_FallbackPath covers the other return path
+// in run.go: when the started container cannot be found again in the
+// runtime's listing (e.g. a transient listing delay), Start falls back to
+// constructing an AgentInfo directly from "status" without consulting the
+// listing. That branch must also carry state.PhaseRunning, not "resumed".
+func TestStartResumeSetsRunningPhase_FallbackPath(t *testing.T) {
+	mgr, projectScionDir := newResumePhaseTestFixture(t, func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+		return []api.AgentInfo{}, nil
+	})
+
+	result, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "resume-test",
+		ProjectPath: projectScionDir,
+		BrokerMode:  true,
+		NoAuth:      true,
+		Resume:      true,
+	})
+	if err != nil {
+		t.Fatalf("Start with Resume should succeed, got: %v", err)
+	}
+
+	if result.Phase != string(state.PhaseRunning) {
+		t.Errorf("returned AgentInfo.Phase = %q, want %q", result.Phase, state.PhaseRunning)
+	}
+	if saved := GetSavedPhase("resume-test", projectScionDir); saved != string(state.PhaseRunning) {
+		t.Errorf("persisted agent-info.json phase = %q, want %q", saved, state.PhaseRunning)
+	}
+}
+
 func TestStartResolvesHarnessConfigUser(t *testing.T) {
 	// Regression test: the container user (e.g. "scion") defined in the on-disk
 	// harness-config config.yaml must flow into RunConfig.UnixUsername.

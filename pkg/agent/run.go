@@ -1474,10 +1474,13 @@ authDone:
 	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
 		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
 
-	status := "running"
-	if opts.Resume {
-		status = "resumed"
-	}
+	// Phase is always "running" here, for both a fresh start and a resume:
+	// state.Phase has no "resumed" value, and a non-standard phase string
+	// confuses readers that only understand the canonical lifecycle phases
+	// (e.g. the hub's post-wake readiness wait). Resume-specific display
+	// text is derived independently at the CLI layer (see displayStatus in
+	// cmd/common.go), so it does not need to be encoded in Phase.
+	status := string(state.PhaseRunning)
 	if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, status, m.Runtime.Name(), profileName); updateErr != nil {
 		util.Debugf("Start: failed to update local agent status to %q: %v", status, updateErr)
 	}
