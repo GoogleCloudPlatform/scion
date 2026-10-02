@@ -239,3 +239,69 @@ Not run, per the task's resource limits: `make ci` and the full
   constructors.
 - **Flat-list enrichment.** The flat list still enriches bindings by hand
   rather than through `projectMemberEnricher`.
+
+## Review round 2 fixes
+
+Round 2 approved the round-1 head with one Low and one Nit finding. Both
+are fixed, along with the two adjacent issues noted in round 1 (bad user
+principal ID, flat-list overflow). The PUT/DELETE success JSON is
+unchanged.
+
+- **R2-1 (Low):** `TestProjectMembersGrouped_BindingsCarryFlatListEnrichment`
+  checks every binding in every grouped item, and every binding in a PUT
+  response, with `JSONEq` against the flat-list item that has the same
+  `id`. The flat list is pinned to the legacy shape separately, so this
+  covers the shared builder's per-binding `principalDisplayName` and
+  `createdByDisplayName` for both endpoints. In a throwaway detached
+  worktree, deleting either field from the builder now fails this test.
+  Both mutants survived before.
+- **R2-2 (Nit):** the builder is now `projectMemberEnricher.group`, so its
+  real dependency is explicit. The unused `*Server` receiver is gone, and
+  callers no longer pass the server twice.
+- **L-500, a correction to P1 behaviour:** a PUT or DELETE to
+  `members/principals/user/{id}`, where `{id}` is neither an email nor a
+  UUID, used to reach the store. The store's principal_id validation then
+  produced the wrong status:
+  - PUT returned 500 `internal_error`. It now returns 400 `invalid_request`.
+  - DELETE returned 404 `not_found` ("principal has no bindings"). It now
+    returns 400 `invalid_request`.
+
+  `invalid_request` is the code P1 already uses for unresolvable principal
+  addressing. Well-formed addressing is unchanged: a UUID with no bindings
+  still gets DELETE's 404, and an unknown email still gets PUT's 400.
+  Covered by `TestSetMemberRoles_MalformedUserPrincipalID400`.
+- **L-OVF:** the flat members list now computes its page end without
+  `offset+limit`, the same way the grouped list does. Before, a `limit`
+  near `math.MaxInt` overflowed and the request failed with 500. Covered by
+  `TestProjectMembersFlat_HugeLimitDoesNotOverflow`.
+
+In the throwaway worktree, reverting either the L-500 fix or the L-OVF fix
+makes its new test fail.
+
+### Gates run (round 2)
+
+All of these were run against the round-2 code head:
+
+- `gofmt -l pkg/hub/`: clean.
+- `go vet -buildvcs=false ./pkg/hub/...`: pass.
+- The targeted `go test -p 2 ./pkg/hub/ -run 'Assignable|Grouped|Capabilit|SetMemberRoles|ProjectMember|RS|D002|PM1|Catalog|Classif|AST|Rout|Principal'`,
+  with `SCION_PROJECT` unset: pass.
+- `go test ./pkg/hub/authzop/`: pass.
+- `golangci-lint --new-from-rev=<P1 head> ./pkg/hub/...`: 0 issues.
+- `go build -buildvcs=false ./...`: pass.
+
+Not run, per the task's resource limits: `make ci` and the full
+`make test-hub-sqlite`.
+
+### Adjacent issues noticed in round 2, not fixed
+
+- **Unknown well-formed user UUID returns 500 on PUT.** A PUT to
+  `principals/user/<uuid>` for a user who does not exist gets 500
+  `internal_error` ("not found: user …"). The store returns `ErrNotFound`
+  from inside SetMemberRoles, after address resolution. It should be the
+  same 400 as an unknown email. This is pre-existing P1 behaviour.
+- **Malformed agent principal IDs.** The store parses agent principal IDs
+  as UUIDs too. `principals/agent/not-a-uuid` gets 500 `internal_error` on
+  PUT and 404 `not_found` on DELETE, checked against the round-2 head.
+  L-500 was scoped to user principals only. Extending
+  `validateMemberPrincipalAddress` to agents would be a one-line change.
