@@ -1225,35 +1225,12 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		return opts, "", "", nil
 	}
 
-	// For hub-managed projects (ProjectSlug set), use the conventional path
-	// ~/.scion/projects/<slug>/ instead of the worktree-based path.
-	var workspaceDir string
-	var workspaceRoot string
-	if req.ProjectSlug != "" {
-		globalDir, gdErr := config.GetGlobalDir()
-		if gdErr != nil {
-			return opts, "failed to resolve global dir", "Failed to get global dir: " + gdErr.Error(),
-				fmt.Errorf("failed to get global dir: %w", gdErr)
-		}
-		workspaceRoot = filepath.Join(globalDir, "projects")
-		workspaceDir = filepath.Join(workspaceRoot, req.ProjectSlug)
-	} else {
-		workspaceRoot = s.config.WorktreeBase
-		workspaceDir = filepath.Join(workspaceRoot, req.Name, "workspace")
+	// Validate (inside resolveGCSWorkspaceDir) before anything below
+	// creates or writes under the directory.
+	workspaceDir, attemptMsg, httpMessage, err := s.resolveGCSWorkspaceDir(req)
+	if err != nil {
+		return opts, attemptMsg, httpMessage, err
 	}
-
-	// Validate before anything is created or written: req.ProjectSlug
-	// and req.Name are already constrained to a single path element by the
-	// caller, but this still runs independently, the same gate every other
-	// workspace source goes through, before MkdirAll/SyncFromGCS ever touch
-	// the filesystem. Use the resolved, symlink-free path it returns for
-	// everything below, not the original join.
-	resolvedWorkspaceDir, verr := scionrt.ValidateWorkspaceSource(workspaceDir, workspaceRoot)
-	if verr != nil {
-		return opts, "invalid workspace directory", "Invalid workspace directory: " + verr.Error(),
-			fmt.Errorf("%w: %w", errInvalidWorkspaceDir, verr)
-	}
-	workspaceDir = resolvedWorkspaceDir
 
 	if mkErr := os.MkdirAll(workspaceDir, 0755); mkErr != nil {
 		return opts, "failed to create workspace directory", "Failed to create workspace directory: " + mkErr.Error(),
@@ -1293,6 +1270,45 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		}
 	}
 	return opts, "", "", nil
+}
+
+// resolveGCSWorkspaceDir computes the directory a GCS workspace bootstrap
+// downloads into and validates it as a workspace source. It only reads the
+// filesystem (symlink resolution), so the async admission path can run it
+// before accepting a launch, and downloadWorkspaceFromGCS runs it again
+// right before creating the directory. Errors use the same three-part shape
+// as downloadWorkspaceFromGCS; a validation failure wraps
+// errInvalidWorkspaceDir.
+func (s *Server) resolveGCSWorkspaceDir(req CreateAgentRequest) (resolvedDir string, attemptMsg string, httpMessage string, err error) {
+	// For hub-managed projects (ProjectSlug set), use the conventional path
+	// ~/.scion/projects/<slug>/ instead of the worktree-based path.
+	var workspaceDir string
+	var workspaceRoot string
+	if req.ProjectSlug != "" {
+		globalDir, gdErr := config.GetGlobalDir()
+		if gdErr != nil {
+			return "", "failed to resolve global dir", "Failed to get global dir: " + gdErr.Error(),
+				fmt.Errorf("failed to get global dir: %w", gdErr)
+		}
+		workspaceRoot = filepath.Join(globalDir, "projects")
+		workspaceDir = filepath.Join(workspaceRoot, req.ProjectSlug)
+	} else {
+		workspaceRoot = s.config.WorktreeBase
+		workspaceDir = filepath.Join(workspaceRoot, req.Name, "workspace")
+	}
+
+	// Validate before anything is created or written: req.ProjectSlug
+	// and req.Name are already constrained to a single path element by the
+	// caller, but this still runs independently, the same gate every other
+	// workspace source goes through, before MkdirAll/SyncFromGCS ever touch
+	// the filesystem. Callers use the resolved, symlink-free path it
+	// returns, not the original join.
+	resolvedWorkspaceDir, verr := scionrt.ValidateWorkspaceSource(workspaceDir, workspaceRoot)
+	if verr != nil {
+		return "", "invalid workspace directory", "Invalid workspace directory: " + verr.Error(),
+			fmt.Errorf("%w: %w", errInvalidWorkspaceDir, verr)
+	}
+	return resolvedWorkspaceDir, "", "", nil
 }
 
 // hydrateTemplate resolves a Hub template to a local directory for provisioning.

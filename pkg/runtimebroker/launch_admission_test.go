@@ -689,6 +689,10 @@ func TestAsyncCreate_AbortRecordedBeforeClaimSucceeds_NoStart(t *testing.T) {
 func TestAsyncCreate_AbortRecordedDuringWaitSuperseded_NoMarkerNoStart(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, rtb := newAsyncTestServer(t, mgr)
+	// A real WorktreeBase, so the workspace directory passes validation
+	// (at admission and in the download) and a launch that wrongly reaches
+	// the download fails at the storage bucket check this test looks for.
+	srv.config.WorktreeBase = t.TempDir()
 
 	key := launchKey{Slug: "agent-guard-c"}
 	oldRec := newLaunchRecord("L-old-for-guard-c", "agent-old-for-guard-c", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
@@ -1266,15 +1270,38 @@ func TestCreateAgent_SyncGCSDownloadFailure_PinsOriginalErrorText(t *testing.T) 
 	}
 }
 
+// symlinkedWorktreeAgentDir points <WorktreeBase>/<name> at a directory
+// outside WorktreeBase, so the GCS bootstrap's workspace directory
+// (<WorktreeBase>/<name>/workspace) fails workspace-source validation, and
+// returns that outside directory. Creating the workspace directory before
+// validating it would follow the symlink and leave <outside>/workspace
+// behind, which the callers assert does not happen.
+func symlinkedWorktreeAgentDir(t *testing.T, srv *Server, name string) string {
+	t.Helper()
+	srv.config.WorktreeBase = t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(srv.config.WorktreeBase, name)); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	return outside
+}
+
+func assertNoOutsideWorkspace(t *testing.T, outside string) {
+	t.Helper()
+	if _, err := os.Lstat(filepath.Join(outside, "workspace")); !os.IsNotExist(err) {
+		t.Fatalf("expected nothing created through the symlink, got Lstat(%s/workspace) err = %v", outside, err)
+	}
+}
+
 // TestCreateAgent_SyncGCSDownloadInvalidWorkspaceDir_Returns400 covers the
 // synchronous path rejecting a GCS-bootstrap workspace directory that fails
-// workspace-source validation as a client error (400), before anything is
-// created or downloaded. The test server's WorktreeBase is empty, so the
-// joined workspace directory is not an allowed workspace path.
+// workspace-source validation as a client error (400), before the directory
+// is created: the agent directory under WorktreeBase is a symlink to a
+// directory outside it, and nothing may be created through that symlink.
 func TestCreateAgent_SyncGCSDownloadInvalidWorkspaceDir_Returns400(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, _ := newAsyncTestServer(t, mgr)
-	srv.config.WorktreeBase = ""
+	outside := symlinkedWorktreeAgentDir(t, srv, "agent-sync-gcs-invalid")
 
 	w := postCreate(t, srv, map[string]any{
 		"name": "agent-sync-gcs-invalid", "workspaceStoragePath": "some/path",
@@ -1290,9 +1317,52 @@ func TestCreateAgent_SyncGCSDownloadInvalidWorkspaceDir_Returns400(t *testing.T)
 	if !strings.HasPrefix(errResp.Error.Message, "Invalid workspace directory: ") {
 		t.Fatalf("message = %q, want the \"Invalid workspace directory: \" text", errResp.Error.Message)
 	}
+	assertNoOutsideWorkspace(t, outside)
 	if n := mgr.StartCallCount(); n != 0 {
 		t.Fatalf("Start must never be called for an invalid workspace directory, got %d calls", n)
 	}
+}
+
+// TestAsyncCreate_InvalidWorkspaceDir_Returns400BeforeAccept covers an async
+// create whose GCS-bootstrap workspace directory fails validation: it is
+// answered with the same 400 as the synchronous path, before the launch is
+// accepted, so no launch is registered, no launch report is sent, Start is
+// never called and nothing is created through the symlink.
+func TestAsyncCreate_InvalidWorkspaceDir_Returns400BeforeAccept(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	outside := symlinkedWorktreeAgentDir(t, srv, "agent-async-gcs-invalid")
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-async-gcs-invalid", "asyncLaunch": true, "launchId": "L-async-gcs-invalid",
+		"launchTimeoutSeconds": 300, "workspaceStoragePath": "some/path",
+		"config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var errResp ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if !strings.HasPrefix(errResp.Error.Message, "Invalid workspace directory: ") {
+		t.Fatalf("message = %q, want the \"Invalid workspace directory: \" text", errResp.Error.Message)
+	}
+	// Registration happens before the 201, so a record for the key would
+	// mean the launch had been accepted.
+	srv.launchRegistry.mu.Lock()
+	rec, registered := srv.launchRegistry.records[launchKey{Slug: "agent-async-gcs-invalid"}]
+	srv.launchRegistry.mu.Unlock()
+	if registered {
+		t.Fatalf("expected no launch registered for a launch rejected before the 201, got launch %q", rec.ID)
+	}
+	if reports := rtb.getLaunchReports(); len(reports) != 0 {
+		t.Fatalf("expected no launch reports for a launch rejected before the 201, got %d", len(reports))
+	}
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called for an invalid workspace directory, got %d calls", n)
+	}
+	assertNoOutsideWorkspace(t, outside)
 }
 
 // TestAsyncCreate_GCSDownloadRunsOnlyOnceInRunLaunch covers the GCS download

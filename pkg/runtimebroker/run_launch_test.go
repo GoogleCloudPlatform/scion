@@ -727,6 +727,67 @@ func TestRunLaunch_LocalCancelDuringDownload_SendsNoTerminal(t *testing.T) {
 	assertNoTerminal(t, rtb, "a local cancel during the download")
 }
 
+// TestRunLaunch_DownloadValidatesWorkspaceDirBeforeCreatingIt covers
+// runLaunch's own GCS download validating the workspace directory before it
+// creates it, for a directory that became invalid after admission: the
+// agent directory under WorktreeBase is a symlink to a directory outside it.
+// The launch fails under the launching step, Start is never called, and
+// nothing is created through the symlink.
+func TestRunLaunch_DownloadValidatesWorkspaceDirBeforeCreatingIt(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+	const name = "agent-download-invalid-dir"
+	outside := symlinkedWorktreeAgentDir(t, srv, name)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := newLaunchRecord("L-download-invalid-dir", name, store.LaunchKindCreate, "", time.Now().Add(time.Hour), cancel)
+	lc := launchCtx{
+		req:  CreateAgentRequest{Name: name, WorkspaceStoragePath: "some/path"},
+		opts: api.StartOptions{Name: name, ProjectPath: t.TempDir()},
+		mgr:  mgr,
+		key:  launchKey{Slug: name},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		srv.runLaunch(ctx, rec, lc)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runLaunch did not return after an invalid workspace directory")
+	}
+
+	assertNoOutsideWorkspace(t, outside)
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called for an invalid workspace directory, got %d calls", n)
+	}
+	var terminals []*hubclient.AgentLaunchReport
+	for _, r := range rtb.getLaunchReports() {
+		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded || r.Report.State == hubclient.AgentLaunchReportStateFailed {
+			terminals = append(terminals, r.Report)
+		}
+	}
+	if len(terminals) != 1 {
+		t.Fatalf("expected exactly one terminal, got %d: %+v", len(terminals), terminals)
+	}
+	got := terminals[0]
+	if got.State != hubclient.AgentLaunchReportStateFailed || got.Step != "launching" {
+		t.Fatalf("terminal = %+v, want failed under the launching step", got)
+	}
+	if got.ErrorCode != "runtime_error" {
+		t.Fatalf("terminal error code = %q, want runtime_error", got.ErrorCode)
+	}
+	if !strings.Contains(got.Message, "invalid workspace directory") {
+		t.Fatalf("terminal message = %q, want it to name the invalid workspace directory", got.Message)
+	}
+}
+
 // TestRunLaunch_DeadlineDuringWaitSuperseded_FailsLaunchingWithLaunchTimeout
 // covers ctx' reaching its deadline while the launch is still waiting on a
 // superseded predecessor that never finishes: exactly one failed terminal,

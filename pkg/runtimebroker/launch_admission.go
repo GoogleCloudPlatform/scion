@@ -48,6 +48,22 @@ const minAsyncLaunchTimeoutSeconds = 20
 // decoded into req) is plain data copied out here, in this synchronous
 // handler goroutine, before go runLaunch starts (design §7 P1b-1 B-6).
 func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx context.Context, req CreateAgentRequest, opts api.StartOptions, mgr agent.Manager, attempt *dispatchAttempt, markAttemptFailed func(int, string), span trace.Span, receivedAt time.Time) {
+	// The GCS download itself runs in runLaunch (design §3.1), but its
+	// directory check only reads the filesystem, so an invalid workspace
+	// directory is answered here with the same 400 the synchronous path
+	// gives, not reported as a failed launch after the 201. runLaunch's
+	// download validates again before it creates anything. Any other error
+	// from computing the directory is left to runLaunch's download step,
+	// which reports it as before.
+	if req.WorkspaceStoragePath != "" {
+		if _, attemptMsg, httpMessage, err := s.resolveGCSWorkspaceDir(req); errors.Is(err, errInvalidWorkspaceDir) {
+			span.SetStatus(codes.Error, err.Error())
+			markAttemptFailed(http.StatusBadRequest, attemptMsg)
+			BadRequest(w, httpMessage)
+			return
+		}
+	}
+
 	if err := mgr.Preflight(ctx, opts); err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
