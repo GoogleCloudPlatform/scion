@@ -1536,3 +1536,37 @@ func TestProjectUAT_CreateTokenMapsCanMintSelectorErrorToForbidden(t *testing.T)
 	assert.Nil(t, resp.Error.Details,
 		"a CanMintSelector-level error must produce the same detail-free body as any other admission failure")
 }
+
+// TestProjectUAT_CreateTokenMissingIdentityIsForbidden pins that minting
+// with an interactive credential but no usable identity in the context (nil
+// or typed-nil) returns ErrUATProjectForbidden rather than panicking or
+// reaching CanMintSelector with an empty principal. The session-credential
+// check rejects this first; CreateTokenWithParams also checks the identity
+// again right before the mint-eligibility call, so neither check depends on
+// the other's ordering.
+func TestProjectUAT_CreateTokenMissingIdentityIsForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := tid("uatp-nilident-project")
+	ownerID := tid("uatp-nilident-owner")
+	createRS1Project(t, s, projectID, ownerID)
+
+	cases := map[string]Identity{
+		"nil identity":       nil,
+		"typed-nil identity": (*AuthenticatedUser)(nil),
+	}
+	for name, identity := range cases {
+		t.Run(name, func(t *testing.T) {
+			ctx := contextWithIdentity(context.Background(), identity)
+			ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindInteractive, ID: "test-session"})
+			key, token, err := srv.uatService.CreateTokenWithParams(ctx, CreateTokenParams{
+				UserID:    ownerID,
+				Name:      "nil-identity",
+				ProjectID: projectID,
+				Scopes:    []string{"agent:attach"},
+			})
+			require.ErrorIs(t, err, ErrUATProjectForbidden)
+			assert.Empty(t, key)
+			assert.Nil(t, token)
+		})
+	}
+}

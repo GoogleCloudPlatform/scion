@@ -193,6 +193,16 @@ For headless environments (CI/CD, automation), Scion supports **user access toke
 - Only the SHA-256 hash of the token is stored in the database; the original value is never persisted.
 - Tokens can be scoped to specific permissions and projects, and revoked instantly via the dashboard or CLI.
 - Each token row records an explicit boundary (`boundary_kind`, default `project`). A project-boundary token must carry a `project_id`, and a database CHECK constraint enforces the pairing. At startup, the Hub logs the IDs (never the token or project) of any rows that break this rule, and such tokens are rejected when used, while valid tokens keep working. On SQLite, a hand-edited row whose `project_id` is not a UUID fails the schema migration, so correct or delete it before upgrading.
+- A token's selected scopes are a ceiling, not a grant: minting a token with a scope records it as
+  a restriction on what the token may do, and grants no access by itself. Every request the token
+  later makes is independently authorized against the holder's *current* authority on the specific
+  target, including active project access — this is re-checked on every request, not just at mint
+  time.
+- `agent:attach` and `agent:port_access` are resource-relative: they may be selected for a project
+  before the holder has created a single agent in it, but each later request against a specific
+  agent is authorized separately, and succeeds only for the holder's own agents and their
+  descendants. Losing project access denies every subsequent request against that project's
+  targets immediately, independent of the token's remaining validity period.
 
 ### 4.5 Credentials Propagation
 
