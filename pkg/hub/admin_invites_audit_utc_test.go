@@ -17,15 +17,19 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	_ "time/tzdata"
 )
 
 // TestAdminInvitesCreate_AuditLogExpiresAtIsUTC covers the invite audit-log
@@ -50,16 +54,39 @@ func TestAdminInvitesCreate_AuditLogExpiresAtIsUTC(t *testing.T) {
 	// pre-existing SQLite scan error (tz-refactor task 2) before this
 	// handler ever runs.
 	if os.Getenv("SCION_TZ_CHILD") == "" {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestAdminInvitesCreate_AuditLogExpiresAtIsUTC$", "-test.v", "-test.count=1")
+		pattern := "^" + regexp.QuoteMeta(t.Name()) + "$"
+		cmd := exec.Command(os.Args[0], "-test.run="+pattern, "-test.v", "-test.count=1")
 		cmd.Env = append(os.Environ(), "SCION_TZ_CHILD=1", "TZ=Asia/Tokyo")
 		out, err := cmd.CombinedOutput()
-		if err != nil {
+		switch {
+		case bytes.Contains(out, []byte("--- SKIP: "+t.Name())):
+			// Propagate a skip from the child (e.g. the sqlite driver isn't
+			// registered in this build) instead of masking it as either a
+			// pass or a failure.
+			t.Skip("child process skipped:\n" + string(out))
+		case err != nil:
 			t.Fatalf("child process (TZ=Asia/Tokyo) failed: %v\n%s", err, out)
+		case !bytes.Contains(out, []byte("--- PASS: "+t.Name())):
+			// The child exited 0 but never reported running this test --
+			// e.g. -test.run matched nothing, which "go test" treats as
+			// success. Without this check a renamed test (whose Name()
+			// still builds a now-nonmatching pattern against a non-renamed
+			// sibling) would pass vacuously.
+			t.Fatalf("child process did not report running %s (pattern %q matched nothing?):\n%s", t.Name(), pattern, out)
 		}
 		return
 	}
-	if time.Local == time.UTC {
-		t.Fatal("TZ=Asia/Tokyo did not change time.Local away from UTC; this test needs a non-UTC time.Local to be a real guard against a dropped .UTC() call")
+
+	// Sanity-check that TZ=Asia/Tokyo actually took effect, so a silent
+	// zone-lookup failure (e.g. no zoneinfo and no embedded tzdata) fails
+	// loudly instead of leaving expiresAt already UTC and passing
+	// vacuously. time.Local can't be compared to time.UTC by identity: when
+	// a TZ lookup fails, Go leaves time.Local as a *Location with no name
+	// clash, not time.UTC, so that comparison is always false -- check the
+	// actual UTC offset instead. The _ "time/tzdata" import above also
+	// means this child never depends on the host having system zoneinfo.
+	if _, off := time.Now().Zone(); off != 9*60*60 {
+		t.Fatalf("expected TZ=Asia/Tokyo (+09:00) in the child process, got time.Local=%q offset=%ds", time.Local, off)
 	}
 
 	s, err := newTestStore(":memory:")
