@@ -70,6 +70,19 @@ func TestB3_WalkDeniesPermissionOutsideHopCeiling(t *testing.T) {
 		assert.True(t, read.Allowed, "a permission inside the ceiling passes: %s", read.Reason)
 	})
 
+	t.Run("minimal UAT ceiling denies template.create", func(t *testing.T) {
+		f := newCeilingFixture(t, "walk-tmpl")
+		a := f.agent(t, "walk-tmpl", AgentRoleFull)
+		minimal := uatCeilingFromSelectors(t, minimalSelectors(t)...).PermissionIDs
+		require.NotContains(t, minimal, "template.create")
+		f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, boundedCeiling(minimal...), provSession)
+		d := decidePerm(f.authz(f.store, false, false), dcAgentIdentity(a.ID, f.projectID, AgentRoleFull),
+			Resource{Type: "template", ParentType: "project", ParentID: f.projectID}, ActionCreate, "template.create", false)
+		assert.False(t, d.Allowed)
+		assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy)
+		assert.Equal(t, DenyCauseCeilingEffectExceeded, d.DenyCause)
+	})
+
 	t.Run("control: permission inside the ceiling", func(t *testing.T) {
 		f := newCeilingFixture(t, "walk-ctl")
 		a := f.agent(t, "walk-ctl", AgentRoleFull)

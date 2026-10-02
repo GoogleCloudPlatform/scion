@@ -143,8 +143,47 @@ type materialFailingStore struct {
 	// principal's system-scope bindings.
 	listRoleBindingsForPrincipalsErr error
 	getDelegationEdgesForDelegateErr error
-	delegationEdgesOverride          []*store.DelegationEdge
-	listProgenySecretsErr            error
+	// getDelegationEdgesForDelegateErrAfterCalls, if > 0, makes
+	// getDelegationEdgesForDelegateErr apply starting with the call after
+	// that number (reads 1..N pass, later reads fail), as for
+	// getUserErrAfterCalls. 0 fails every call.
+	getDelegationEdgesForDelegateErrAfterCalls int
+	getDelegationEdgesForDelegateCalls         int
+	// getDelegationEdgesForDelegateResults records the error each
+	// GetDelegationEdgesForDelegate call returned, in call order.
+	getDelegationEdgesForDelegateResults []error
+	// getDelegationEdgesForDelegateHook, if set, is called before each
+	// GetDelegationEdgesForDelegate call with its 1-based call number.
+	getDelegationEdgesForDelegateHook func(call int)
+	delegationEdgesOverride           []*store.DelegationEdge
+	listProgenySecretsErr             error
+	// createAgentCalls counts CreateAgent calls, including those made on
+	// the transaction store inside WithTx.
+	createAgentCalls int
+}
+
+func (f *materialFailingStore) CreateAgent(ctx context.Context, agent *store.Agent) error {
+	f.createAgentCalls++
+	return f.Store.CreateAgent(ctx, agent)
+}
+
+// WithTx runs fn on the underlying transaction store, wrapped so CreateAgent
+// calls inside the transaction are counted.
+func (f *materialFailingStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return f.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&createAgentCountingStore{Store: tx, calls: &f.createAgentCalls})
+	})
+}
+
+// createAgentCountingStore counts CreateAgent calls into a shared counter.
+type createAgentCountingStore struct {
+	store.Store
+	calls *int
+}
+
+func (c *createAgentCountingStore) CreateAgent(ctx context.Context, agent *store.Agent) error {
+	*c.calls++
+	return c.Store.CreateAgent(ctx, agent)
 }
 
 func (f *materialFailingStore) ListProgenySecrets(ctx context.Context, ancestorIDs []string) ([]store.Secret, error) {
@@ -177,7 +216,18 @@ func (f *materialFailingStore) ListRoleBindingsForPrincipals(ctx context.Context
 }
 
 func (f *materialFailingStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
-	if f.getDelegationEdgesForDelegateErr != nil {
+	f.getDelegationEdgesForDelegateCalls++
+	if f.getDelegationEdgesForDelegateHook != nil {
+		f.getDelegationEdgesForDelegateHook(f.getDelegationEdgesForDelegateCalls)
+	}
+	edges, err := f.getDelegationEdgesForDelegate(ctx, delegateType, delegateID)
+	f.getDelegationEdgesForDelegateResults = append(f.getDelegationEdgesForDelegateResults, err)
+	return edges, err
+}
+
+func (f *materialFailingStore) getDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
+	if f.getDelegationEdgesForDelegateErr != nil &&
+		(f.getDelegationEdgesForDelegateErrAfterCalls == 0 || f.getDelegationEdgesForDelegateCalls > f.getDelegationEdgesForDelegateErrAfterCalls) {
 		return nil, f.getDelegationEdgesForDelegateErr
 	}
 	if f.delegationEdgesOverride != nil {

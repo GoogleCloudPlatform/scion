@@ -187,6 +187,44 @@ func TestB3_UATMinimalCeilingCapsToBaseline(t *testing.T) {
 	assert.False(t, agent.AppliedConfig.NoAuth)
 	assert.Equal(t, store.EffectCeilingBounded, edge.Kind)
 	assert.Equal(t, uatCeilingFromSelectors(t, minimalSelectors(t)...).PermissionIDs, edge.PermissionIDs)
+
+	// Without the dev-auth mint override, the child's first token carries
+	// exactly the baseline scopes: project:read and the four self operations.
+	m := &mintFixture{srv: f.srv, store: f.store, projectID: f.proj.ID}
+	f.srv.authzService.mintDevAuthOverride = false
+	token, err := f.srv.GenerateAgentTokenForAgent(context.Background(), agent)
+	require.NoError(t, err)
+	baseline := []AgentTokenScope{
+		ScopeProjectRead, ScopeAgentStatusUpdate, ScopeAgentTokenRefresh, ScopeAgentNotify, ScopeAgentPortForward,
+	}
+	assert.ElementsMatch(t, baseline, m.tokenClaims(t, token).Scopes)
+
+	// A refresh after the stored role is raised to full takes the full-role
+	// candidates filtered by the frozen ceiling: baseline plus
+	// project:agent:create, which the UAT's agent:create selector put in
+	// the ceiling. Every refreshed scope is within the frozen ceiling: the
+	// non-self scopes map into its IDs, the self operations are exempt.
+	withinCeiling := append(append([]AgentTokenScope{}, baseline...), ScopeAgentCreate)
+	agent.AppliedConfig.AgentRole = string(AgentRoleFull)
+	require.NoError(t, f.store.UpdateAgent(context.Background(), agent))
+	refreshed := m.tokenClaims(t, refreshedToken(t, m.refresh(t, agent, agent.Ancestry))).Scopes
+	assert.ElementsMatch(t, withinCeiling, refreshed)
+	assert.Subset(t, edge.PermissionIDs, agentScopeCoverage([]AgentTokenScope{ScopeProjectRead, ScopeAgentCreate}))
+	for _, scope := range refreshed {
+		assert.True(t, ceilingAllowsScope(edge.EffectCeiling, scope), "scope %s is outside the frozen ceiling", scope)
+	}
+	for _, scope := range []AgentTokenScope{ScopeAgentLifecycle, ScopeProjectSecretRead, ScopeProjectTemplateWrite} {
+		assert.NotContains(t, refreshed, scope)
+	}
+
+	// With the dev-auth mint override, the role is raised to full before the
+	// ceiling filter, so the first mint equals the refreshed set.
+	f.srv.authzService.mintDevAuthOverride = true
+	agent.AppliedConfig.AgentRole = string(AgentRoleBaseline)
+	require.NoError(t, f.store.UpdateAgent(context.Background(), agent))
+	devToken, err := f.srv.GenerateAgentTokenForAgent(context.Background(), agent)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, withinCeiling, m.tokenClaims(t, devToken).Scopes)
 }
 
 // The same UAT with a readonly project default, and with a readonly project
