@@ -20,7 +20,7 @@
  * design §2.4 and tz-refactor task 11 so task 11 can reuse them unchanged.
  */
 
-import { readdirSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readdirSync, readSync } from 'node:fs';
 
 import { describe, it, expect } from 'vitest';
 
@@ -149,49 +149,71 @@ describe('isValidTimeZone', () => {
   });
 });
 
+const ZONEINFO_DIR = '/usr/share/zoneinfo';
+
 /**
- * Non-zone entries under a typical /usr/share/zoneinfo tree: indices,
- * metadata and legacy-link bookkeeping files, plus the tzdata-own
- * non-portable names time.ts's isValidTimeZone correctly rejects (those
- * have their own dedicated test above; excluded here so this scan is only
- * about *false rejects*, not re-proving the denylist).
+ * "right" and "posix" are whole-tree duplicates of the same zone data
+ * (right/ with leap seconds baked in, posix/ without) under a path prefix
+ * that isn't itself part of any IANA name — not because the prefixed form
+ * is universally rejected. Go's `time.LoadLocation` resolves against the
+ * *host's* zoneinfo directory, so `LoadLocation("right/Africa/Abidjan")`
+ * actually succeeds on a host whose tree has it (review round 4, R4-2); the
+ * server denylists both prefixes explicitly for exactly that reason
+ * (`validateIANATimezone`, pkg/hub/timezone_validate.go). Excluded from
+ * this scan because "Africa/Abidjan" without the prefix already covers the
+ * same real zone via the main tree, so including the prefixed duplicate
+ * would only test path-prefix handling, not zone-name coverage. "localtime",
+ * "posixrules" and "Factory" are real TZif files but are tzdata's own
+ * non-portable entries, with their own dedicated rejection test above —
+ * excluded here so this scan is only about *false rejects* of real zone
+ * names, not re-proving the denylist.
  */
-const ZONEINFO_NON_ZONE_ENTRIES = new Set([
-  'iso3166.tab',
-  'leap-seconds.list',
-  'leapseconds',
-  'tzdata.zi',
-  'zone.tab',
-  'zone1970.tab',
-  'zonenow.tab',
-  'localtime',
-  'posixrules',
-  'Factory',
-  // "right" and "posix" are whole-tree duplicates of the same zone data
-  // (right/ with leap seconds baked in, posix/ without), not zone-name
-  // path components — "right/Africa/Abidjan" isn't itself an IANA name,
-  // Go's time.LoadLocation doesn't accept that prefixed form either, and
-  // "Africa/Abidjan" (without the prefix) is already covered via the main
-  // tree. A fuller tzdata package (e.g. GitHub Actions' ubuntu-latest
-  // runner, unlike this container's slimmer one) ships both trees.
-  'right',
-  'posix',
-]);
+const ZONEINFO_EXCLUDED_NAMES = new Set(['right', 'posix', 'localtime', 'posixrules', 'Factory']);
+
+const TZIF_MAGIC = Buffer.from('TZif');
+
+/**
+ * Reports whether `path` is a compiled zoneinfo entry: a file (or a symlink
+ * to one — `openSync`/`readSync` follow symlinks) whose first 4 bytes are
+ * the TZif magic (RFC 8536 §3.1). This is what tells a real zone file apart
+ * from the tree's metadata/index files (`zone.tab`, `zone1970.tab`,
+ * `zonenow.tab`, `iso3166.tab`, `leapseconds`, `leap-seconds.list`,
+ * `tzdata.zi`, macOS's `+VERSION`, `SECURITY`, ...) without having to name
+ * every one of them — the same "hand-picked list is always incomplete"
+ * failure mode R3-1 fixed for `isValidTimeZone` itself (review round 4,
+ * R4-1).
+ */
+function isTZifFile(path: string): boolean {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return false;
+  }
+  try {
+    const buf = Buffer.alloc(4);
+    const bytesRead = readSync(fd, buf, 0, 4, 0);
+    return bytesRead === 4 && buf.equals(TZIF_MAGIC);
+  } catch {
+    return false;
+  } finally {
+    closeSync(fd);
+  }
+}
 
 /** Recursively lists zone names under `dir` (e.g. "Asia/Tokyo", "CET"). */
 function listSystemZoneNames(dir: string, prefix = ''): string[] {
   const names: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (ZONEINFO_NON_ZONE_ENTRIES.has(entry.name)) continue;
+    if (ZONEINFO_EXCLUDED_NAMES.has(entry.name)) continue;
     const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const full = `${dir}/${entry.name}`;
     if (entry.isDirectory()) {
-      names.push(...listSystemZoneNames(`${dir}/${entry.name}`, rel));
-    } else {
-      // Regular files and symlinks (e.g. "UTC" -> "Etc/UTC") are both leaf
-      // zone entries; dirent.isDirectory() does not follow symlinks, so a
-      // symlinked zone name is correctly treated as a leaf here.
+      names.push(...listSystemZoneNames(full, rel));
+    } else if (isTZifFile(full)) {
       names.push(rel);
     }
+    // else: not a TZif file (an index/metadata entry) — skip.
   }
   return names;
 }
@@ -204,21 +226,19 @@ describe('isValidTimeZone against the system zone database', () => {
   // broad, not-hand-picked-by-this-PR source of real zone names — including
   // backward-compatibility links this container's tzdata package ships —
   // to check isValidTimeZone against in bulk.
-  it('accepts every name in the system zone database (0 false rejects)', () => {
-    let names: string[];
-    try {
-      names = listSystemZoneNames('/usr/share/zoneinfo');
-    } catch {
-      // No zoneinfo directory on this platform (e.g. some CI images, or a
-      // non-Linux dev machine running `npm test`). Skip rather than fail —
-      // the hand-picked-name tests above still cover the specific
-      // regression names explicitly, platform-independently.
-      return;
+  //
+  // skipIf (not a try/catch around a missing directory, review round 4,
+  // R4-1) makes a skip show up as a skip, not a silent pass: a CI image
+  // without tzdata would otherwise quietly lose this guard.
+  it.skipIf(!existsSync(ZONEINFO_DIR))(
+    'accepts every name in the system zone database (0 false rejects)',
+    () => {
+      const names = listSystemZoneNames(ZONEINFO_DIR);
+      expect(names.length).toBeGreaterThan(50);
+      const falseRejects = names.filter((n) => !isValidTimeZone(n));
+      expect(falseRejects).toEqual([]);
     }
-    expect(names.length).toBeGreaterThan(50);
-    const falseRejects = names.filter((n) => !isValidTimeZone(n));
-    expect(falseRejects).toEqual([]);
-  });
+  );
 });
 
 describe('listTimeZones', () => {
