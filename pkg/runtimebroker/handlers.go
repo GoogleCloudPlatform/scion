@@ -508,12 +508,13 @@ func (s *Server) attachSkillResolver(ctx context.Context, r *http.Request, in sk
 			resolver = agent.NewPreResolvedSkillResolver(in.PreResolvedSkills, resolver, preResolvedHubEndpoint(conn, in.HubEndpoint))
 		}
 		ctx = agent.ContextWithSkillResolver(ctx, resolver)
-		// Credential for install-phase downloads of gh:// skills resolved by
-		// the Hub, which returns raw.githubusercontent.com URLs but not the
-		// token behind them. Only ever sent to GitHub hosts.
-		if defaultGHToken != "" {
-			ctx = agent.ContextWithGitHubToken(ctx, defaultGHToken)
-		}
+		// Credentials for install-phase downloads, only ever sent to GitHub
+		// hosts: the default credential for gh:// skills resolved by the Hub,
+		// which returns raw.githubusercontent.com URLs but not the credential
+		// behind them; and, for gh:// skills the GitHub resolver served from
+		// its on-disk cache (no file content kept), a lookup of the same
+		// credential that resolver uses for the ref.
+		ctx = ghResolver.WithInstallCredentials(ctx, defaultGHToken)
 		if in.ProjectID != "" {
 			ctx = agent.ContextWithResolveProjectID(ctx, in.ProjectID)
 		}

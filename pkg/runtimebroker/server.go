@@ -1042,6 +1042,15 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Write any resolution cache entries still waiting for their delayed
+	// write. Deferred so it runs on every return path, and after the HTTP
+	// server has drained, when in-flight requests have finished adding to it.
+	defer func() {
+		if s.ghResolutionCache != nil {
+			s.ghResolutionCache.Flush()
+		}
+	}()
+
 	// Stop credential watcher
 	s.mu.RLock()
 	srv := s.httpServer
