@@ -1468,6 +1468,8 @@ export class ScionProjectMembersEditor extends LitElement {
     const lastOwner = isLastDirectOwner(group, this.groups);
     const editable = canEditRow(group, this.capabilities);
     const remove = canRemoveRow(group, this.capabilities, this.groups);
+    // The shield-lock icon already explains the last-owner case.
+    const removeTip = lastOwner ? '' : remove.reason;
 
     return html`
       <tr data-principal=${key}>
@@ -1506,7 +1508,7 @@ export class ScionProjectMembersEditor extends LitElement {
                   : nothing}
                 ${editable || remove.disabled === false
                   ? html`
-                      <sl-tooltip content=${remove.reason} ?disabled=${!remove.reason}>
+                      <sl-tooltip content=${removeTip} ?disabled=${!removeTip}>
                         <sl-icon-button
                           name="trash"
                           label="Remove member"
