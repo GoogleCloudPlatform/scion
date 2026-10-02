@@ -160,6 +160,15 @@ func (e *errNonDirComponent) Error() string {
 // could swap a path component between the Lstat and the Mkdir (a TOCTOU
 // window) — there is no such writer during bootstrap, so that window is not
 // a guarantee this function makes for callers outside that model.
+//
+// A future feature that re-bootstraps or resumes bootstrap over an
+// already-live home (the harness, or any other workload-owned process,
+// already running and able to race this walk) would break that
+// precondition and MUST NOT reuse this Lstat-then-Mkdir sequence as-is: it
+// would need to move to dirfd's openat/O_NOFOLLOW-based helpers (see
+// pkg/sciontool/dirfd), which make each step/create atomic against exactly
+// that kind of concurrent writer, instead of this package's own
+// bootstrap-is-the-sole-writer assumption.
 func mkdirAllTracked(dir string, perm os.FileMode) ([]string, error) {
 	prefixes := pathPrefixes(filepath.Clean(dir))
 
