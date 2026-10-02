@@ -46,6 +46,11 @@ import {
 import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import { TERMINAL_PALETTE_OPEN_REQUEST_EVENT } from '../../client/terminal-palette-events.js';
+import {
+  GRAPH_PALETTE_AVAILABILITY_EVENT,
+  GRAPH_PALETTE_OPEN_REQUEST_EVENT,
+  setGraphPaletteAvailable,
+} from '../../client/graph-palette-events.js';
 import type { User } from '../../shared/types.js';
 
 describe('projectIdFromDashboardPath', () => {
@@ -296,6 +301,98 @@ describe('palette button: render conditions (chat route x user)', () => {
   it('labels the chat route button "Quick switcher", not "Jump to agent"', async () => {
     const el = await mountHeader();
     expect(paletteButton(el)?.getAttribute('aria-label')).toBe('Open quick switcher');
+  });
+});
+
+describe('palette button: graph views', () => {
+  const graphOwner = {};
+
+  afterEach(() => {
+    setGraphPaletteAvailable(graphOwner, false);
+  });
+
+  it('is absent on a dashboard route while no graph offers the palette', async () => {
+    const el = await mountHeader({ currentPath: '/agents' });
+    expect(paletteButton(el)).toBeNull();
+  });
+
+  it('renders as "Jump to agent" while a graph offers the palette, and goes when it stops', async () => {
+    setGraphPaletteAvailable(graphOwner, true);
+    const el = await mountHeader({ currentPath: '/agents' });
+    const button = paletteButton(el);
+    expect(button?.getAttribute('aria-label')).toBe('Open Jump to agent');
+    expect(button?.getAttribute('aria-label')).not.toBe('Jump to agent');
+    expect(paletteTooltip(el)?.getAttribute('content')).toMatch(/^Jump to agent \((⌘K|Ctrl\+K)\)$/);
+
+    setGraphPaletteAvailable(graphOwner, false);
+    await el.updateComplete;
+    expect(paletteButton(el)).toBeNull();
+  });
+
+  it('appears when a graph starts offering the palette after the header mounted', async () => {
+    const el = await mountHeader({ currentPath: '/projects/abc' });
+    expect(paletteButton(el)).toBeNull();
+
+    setGraphPaletteAvailable(graphOwner, true);
+    await el.updateComplete;
+
+    expect(paletteButton(el)?.getAttribute('aria-label')).toBe('Open Jump to agent');
+  });
+
+  it('dispatches GRAPH_PALETTE_OPEN_REQUEST_EVENT, not the chat or terminal event, after focusing the button', async () => {
+    setGraphPaletteAvailable(graphOwner, true);
+    const el = await mountHeader({ currentPath: '/agents' });
+    const button = paletteButton(el) as HTMLElement;
+    const focusSpy = vi.spyOn(button, 'focus');
+    const received: string[] = [];
+    let graphEvent: CustomEvent | undefined;
+    el.addEventListener(CHAT_PALETTE_OPEN_REQUEST_EVENT, () => received.push('chat'));
+    el.addEventListener(TERMINAL_PALETTE_OPEN_REQUEST_EVENT, () => received.push('terminal'));
+    el.addEventListener(GRAPH_PALETTE_OPEN_REQUEST_EVENT, (e) => {
+      received.push('graph');
+      graphEvent = e as CustomEvent;
+    });
+
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+
+    expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true });
+    expect(received).toEqual(['graph']);
+    expect(graphEvent!.bubbles).toBe(true);
+    expect(graphEvent!.composed).toBe(true);
+  });
+
+  it('leaves chat and terminal routes to their own palettes', async () => {
+    setGraphPaletteAvailable(graphOwner, true);
+    let el = await mountHeader({ currentPath: '/chat' });
+    expect(paletteButton(el)?.getAttribute('aria-label')).toBe('Open quick switcher');
+    el.remove();
+
+    el = await mountHeader({ currentPath: '/terminals' });
+    const received: string[] = [];
+    el.addEventListener(TERMINAL_PALETTE_OPEN_REQUEST_EVENT, () => received.push('terminal'));
+    el.addEventListener(GRAPH_PALETTE_OPEN_REQUEST_EVENT, () => received.push('graph'));
+    (paletteButton(el) as HTMLElement).click();
+    expect(received).toEqual(['terminal']);
+  });
+
+  it('is absent when no user is signed in', async () => {
+    setGraphPaletteAvailable(graphOwner, true);
+    const el = await mountHeader({ user: null, currentPath: '/agents' });
+    expect(paletteButton(el)).toBeNull();
+  });
+
+  it('stops following availability once disconnected', async () => {
+    const el = await mountHeader({ currentPath: '/agents' });
+    const added = vi.spyOn(window, 'addEventListener');
+    const removed = vi.spyOn(window, 'removeEventListener');
+    el.remove();
+    document.body.append(el);
+    await el.updateComplete;
+    const handler = added.mock.calls.find(
+      ([type]) => type === GRAPH_PALETTE_AVAILABILITY_EVENT
+    )?.[1];
+    expect(handler).toBeDefined();
+    expect(removed).toHaveBeenCalledWith(GRAPH_PALETTE_AVAILABILITY_EVENT, handler);
   });
 });
 
