@@ -1704,7 +1704,7 @@ func lockLooksAbandoned(dir, path string) bool {
 	return now.Sub(last) > provisionLockStaleAfter
 }
 
-// ErrCommondirPresent is returned by HardenedGitCommand when the target
+// ErrCommondirPresent is returned by SafeGitCommand when the target
 // base's .git/commondir file exists. A hub-native shared base is always the
 // main working copy of its own repository (never itself a linked worktree),
 // so it never legitimately has one; its presence means git's common-
@@ -1713,7 +1713,7 @@ func lockLooksAbandoned(dir, path string) bool {
 // unknown/unverified location, the broker refuses.
 var ErrCommondirPresent = errors.New("refusing git operation: base .git/commondir is present")
 
-// HardenedGitCommand builds an *exec.Cmd for a broker-side git invocation
+// SafeGitCommand builds an *exec.Cmd for a broker-side git invocation
 // against a project's shared hub-native worktree-per-agent base repo, with
 // the invocation-level protections for the broker-git worktree containment
 // change applied. It ensures the broker's own git operations honor only the
@@ -1764,13 +1764,13 @@ var ErrCommondirPresent = errors.New("refusing git operation: base .git/commondi
 // GIT_COMMON_DIR; callers that need to layer additional env (e.g. the
 // GIT_CONFIG_COUNT/KEY_0/VALUE_0 credential-helper technique) must append to
 // cmd.Env rather than replace it, or the pin is lost.
-func HardenedGitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
+func SafeGitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
 	if dir == "" {
-		return nil, fmt.Errorf("HardenedGitCommand: dir is required")
+		return nil, fmt.Errorf("SafeGitCommand: dir is required")
 	}
 	commondirFile := filepath.Join(dir, ".git", "commondir")
 	if _, err := os.Stat(commondirFile); err == nil {
-		slog.Error("HardenedGitCommand: refusing to operate, base .git/commondir is present",
+		slog.Error("SafeGitCommand: refusing to operate, base .git/commondir is present",
 			"dir", dir, "commondir_file", commondirFile)
 		return nil, fmt.Errorf("%w: %s", ErrCommondirPresent, commondirFile)
 	}
@@ -2272,7 +2272,7 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 
 	// git worktree add --relative-paths -b <branch> <path>
 	// --relative-paths is mandatory for container path-identity (design §6).
-	cmd, err := HardenedGitCommand(ctx, base, "worktree", "add", "--relative-paths", "-b", branchName, worktreePath)
+	cmd, err := SafeGitCommand(ctx, base, "worktree", "add", "--relative-paths", "-b", branchName, worktreePath)
 	if err != nil {
 		return fmt.Errorf("ProvisionShared: %w", err)
 	}
@@ -2299,7 +2299,7 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 
 		// If branch already exists (but not checked out), try without -b.
 		if strings.Contains(outputStr, "already exists") {
-			cmd, err = HardenedGitCommand(ctx, base, "worktree", "add", "--relative-paths", worktreePath, branchName)
+			cmd, err = SafeGitCommand(ctx, base, "worktree", "add", "--relative-paths", worktreePath, branchName)
 			if err != nil {
 				return fmt.Errorf("ProvisionShared: %w", err)
 			}
@@ -2332,10 +2332,10 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 func findWorktreeForBranch(ctx context.Context, repoDir, branch string) (string, error) {
 	// Prune first so a worktree dir removed on disk (but not unregistered in git)
 	// isn't returned as a stale join target pointing at a non-existent path.
-	if pruneCmd, err := HardenedGitCommand(ctx, repoDir, "worktree", "prune"); err == nil {
+	if pruneCmd, err := SafeGitCommand(ctx, repoDir, "worktree", "prune"); err == nil {
 		_ = pruneCmd.Run()
 	}
-	cmd, err := HardenedGitCommand(ctx, repoDir, "worktree", "list", "--porcelain")
+	cmd, err := SafeGitCommand(ctx, repoDir, "worktree", "list", "--porcelain")
 	if err != nil {
 		return "", fmt.Errorf("git worktree list: %w", err)
 	}
@@ -2380,20 +2380,20 @@ func prepareBaseForWorktrees(ctx context.Context, hostPath string) error {
 		return err
 	}
 
-	if err := runHardenedGitConfig(ctx, hostPath, "gc.auto", "0"); err != nil {
+	if err := runSafeGitConfig(ctx, hostPath, "gc.auto", "0"); err != nil {
 		return err
 	}
-	if err := runHardenedGitConfig(ctx, hostPath, "branch.autoSetupMerge", "false"); err != nil {
+	if err := runSafeGitConfig(ctx, hostPath, "branch.autoSetupMerge", "false"); err != nil {
 		return err
 	}
 
 	return appendGitExclude(hostPath, "worktrees/")
 }
 
-// runHardenedGitConfig is a small helper for the legitimate broker-side
+// runSafeGitConfig is a small helper for the legitimate broker-side
 // `git config <key> <value>` writes in prepareBaseForWorktrees.
-func runHardenedGitConfig(ctx context.Context, hostPath, key, value string) error {
-	cmd, err := HardenedGitCommand(ctx, hostPath, "config", key, value)
+func runSafeGitConfig(ctx context.Context, hostPath, key, value string) error {
+	cmd, err := SafeGitCommand(ctx, hostPath, "config", key, value)
 	if err != nil {
 		return err
 	}
@@ -2408,14 +2408,14 @@ func runHardenedGitConfig(ctx context.Context, hostPath, key, value string) erro
 // no branch. Tries 'git switch --detach' first, falls back to 'git checkout
 // --detach' for older git versions.
 func gitDetach(ctx context.Context, hostPath string) error {
-	cmd, err := HardenedGitCommand(ctx, hostPath, "switch", "--detach")
+	cmd, err := SafeGitCommand(ctx, hostPath, "switch", "--detach")
 	if err != nil {
 		return err
 	}
 	if _, err := cmd.CombinedOutput(); err == nil {
 		return nil
 	}
-	cmd, err = HardenedGitCommand(ctx, hostPath, "checkout", "--detach")
+	cmd, err = SafeGitCommand(ctx, hostPath, "checkout", "--detach")
 	if err != nil {
 		return err
 	}

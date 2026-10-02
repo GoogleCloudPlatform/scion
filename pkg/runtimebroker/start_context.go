@@ -1378,13 +1378,13 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		// isStrictWorktreeChild additionally guards that the path is a real
 		// descendant of <base>/worktrees and never that directory itself, so
 		// a resolver bug can never turn this into a removal of every agent's
-		// worktree. Uses `git worktree remove --force` (via HardenedGitCommand)
+		// worktree. Uses `git worktree remove --force` (via SafeGitCommand)
 		// so the worktree's admin metadata in the base's .git/worktrees/<id> is
 		// unregistered too — a bare os.RemoveAll would leave a stale
 		// registration that makes git refuse to recreate the worktree at that
 		// path on retry. Falls back to os.RemoveAll + prune.
 		if shouldCleanupPartialWorktree(result.ProjectRoot, result.WorktreePath, preExisted) {
-			rm, rmCmdErr := provision.HardenedGitCommand(ctx, result.ProjectRoot,
+			rm, rmCmdErr := provision.SafeGitCommand(ctx, result.ProjectRoot,
 				"worktree", "remove", "--force", result.WorktreePath)
 			var out []byte
 			var rmErr error
@@ -1402,7 +1402,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 						"agent_id", in.AgentID, "path", result.WorktreePath, "error", cleanErr)
 				}
 				// Prune the now-stale .git/worktrees/<id> registration so retries succeed.
-				if pruneCmd, pruneCmdErr := provision.HardenedGitCommand(ctx, result.ProjectRoot, "worktree", "prune"); pruneCmdErr == nil {
+				if pruneCmd, pruneCmdErr := provision.SafeGitCommand(ctx, result.ProjectRoot, "worktree", "prune"); pruneCmdErr == nil {
 					_ = pruneCmd.Run()
 				}
 			} else {

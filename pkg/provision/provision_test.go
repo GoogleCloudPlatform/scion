@@ -3870,14 +3870,14 @@ func TestIsValidJoinWorktree(t *testing.T) {
 	})
 }
 
-// --- HardenedGitCommand ---
+// --- SafeGitCommand ---
 //
 // pkg/runtime/common.go's narrowGitAdminMounts (Part A) is the primary
 // control: a read-only bind mount over the shared base's .git
 // config/hooks/info means only host-managed hooks/config/filters are ever
 // honored when the broker runs git against the base. These tests exercise
 // what's testable without Docker/mount-namespace access (unavailable in this
-// sandbox): HardenedGitCommand's own behavior is exercised directly against
+// sandbox): SafeGitCommand's own behavior is exercised directly against
 // a real base repo. A real read-only bind mount's enforcement of writes to
 // the pre-existing .git/config file specifically (as opposed to creating a
 // new file, e.g. under .git/hooks/) is proven only at the "correct mount
@@ -3885,12 +3885,12 @@ func TestIsValidJoinWorktree(t *testing.T) {
 // TestNarrowGitAdminMounts_HubNativeDocker) and requires a real Docker
 // read-only bind mount to verify end to end (tracked acceptance item).
 
-func TestHardenedGitCommand_RefusesCommondirRedirect(t *testing.T) {
+func TestSafeGitCommand_RefusesCommondirRedirect(t *testing.T) {
 	// A hub-native shared base is always the main working copy of its own
 	// repository, so a top-level .git/commondir file is never legitimate:
 	// git resolves config/hooks/refs through whatever commondir points to,
 	// for the base's own gitdir as much as for any linked worktree. Its
-	// presence would otherwise redirect every HardenedGitCommand
+	// presence would otherwise redirect every SafeGitCommand
 	// invocation's config/hooks resolution away from the mounted,
 	// host-managed .git admin surface to a writable location outside the
 	// read-only mount —
@@ -3926,7 +3926,7 @@ func TestHardenedGitCommand_RefusesCommondirRedirect(t *testing.T) {
 	}
 
 	wtPath := filepath.Join(t.TempDir(), "wt")
-	_, err := HardenedGitCommand(context.Background(), base, "worktree", "add", "--relative-paths", "-b", "agent-x", wtPath)
+	_, err := SafeGitCommand(context.Background(), base, "worktree", "add", "--relative-paths", "-b", "agent-x", wtPath)
 	if !errors.Is(err, ErrCommondirPresent) {
 		t.Fatalf("expected ErrCommondirPresent, got: %v", err)
 	}
@@ -3940,7 +3940,7 @@ func TestWorktreeUsage_UnaffectedByReadOnlyHooksAndInfo(t *testing.T) {
 	// disclosed environment limitation): with .git/hooks and .git/info
 	// read-only (real for these two paths, since creating a new file only
 	// needs directory write permission, which read-only expresses
-	// correctly), the broker's HardenedGitCommand-driven `worktree add`
+	// correctly), the broker's SafeGitCommand-driven `worktree add`
 	// still succeeds, and ordinary commit + checkout in the resulting
 	// worktree are unaffected.
 	base := t.TempDir()
@@ -3962,7 +3962,7 @@ func TestWorktreeUsage_UnaffectedByReadOnlyHooksAndInfo(t *testing.T) {
 	})
 
 	wtPath := filepath.Join(t.TempDir(), "wt")
-	cmd, err := HardenedGitCommand(context.Background(), base, "worktree", "add", "--relative-paths", "-b", "agent-2", wtPath)
+	cmd, err := SafeGitCommand(context.Background(), base, "worktree", "add", "--relative-paths", "-b", "agent-2", wtPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3978,10 +3978,10 @@ func TestWorktreeUsage_UnaffectedByReadOnlyHooksAndInfo(t *testing.T) {
 	runIn(t, wtPath, "git", "checkout", "-b", "agent-2-work")
 }
 
-func TestHardenedGitCommand_NeutralizesFsmonitorRegardlessOfConfig(t *testing.T) {
+func TestSafeGitCommand_NeutralizesFsmonitorRegardlessOfConfig(t *testing.T) {
 	// core.fsmonitor is a pure .git/config vector (no on-disk file creation
 	// needed), so unlike hooks/info above it cannot be blocked by directory
-	// permissions — this is exactly why HardenedGitCommand clears it at the
+	// permissions — this is exactly why SafeGitCommand clears it at the
 	// invocation level (Part B) as belt-and-suspenders over Part A.
 	base := t.TempDir()
 	run(t, "git", "init", "--initial-branch=main", base)
@@ -3997,7 +3997,7 @@ func TestHardenedGitCommand_NeutralizesFsmonitorRegardlessOfConfig(t *testing.T)
 	// An unexpected core.fsmonitor, however it got there.
 	runIn(t, base, "git", "config", "core.fsmonitor", fsmonScript)
 
-	cmd, err := HardenedGitCommand(context.Background(), base, "status", "--porcelain")
+	cmd, err := SafeGitCommand(context.Background(), base, "status", "--porcelain")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4005,7 +4005,7 @@ func TestHardenedGitCommand_NeutralizesFsmonitorRegardlessOfConfig(t *testing.T)
 		t.Fatalf("git status failed: %v\n%s", err, out)
 	}
 	if data, _ := os.ReadFile(marker); len(data) != 0 {
-		t.Errorf("expected core.fsmonitor to be neutralized by HardenedGitCommand, but it ran: %q", data)
+		t.Errorf("expected core.fsmonitor to be neutralized by SafeGitCommand, but it ran: %q", data)
 	}
 
 	// Revert-check: the identical config, invoked WITHOUT the wrapper, DOES
@@ -4021,11 +4021,11 @@ func TestHardenedGitCommand_NeutralizesFsmonitorRegardlessOfConfig(t *testing.T)
 	}
 }
 
-func TestHardenedGitCommand_TrustedHookAndGlobalFilterStillRun(t *testing.T) {
+func TestSafeGitCommand_TrustedHookAndGlobalFilterStillRun(t *testing.T) {
 	// Part A only prevents a CONTAINER from writing config/hooks/info; it
 	// does not and must not stop the HOST itself (e.g. `git lfs install`,
 	// run by the broker operator, not a container) from doing so, and
-	// HardenedGitCommand must not neutralize what it finds there. git-lfs
+	// SafeGitCommand must not neutralize what it finds there. git-lfs
 	// isn't available in this environment, so this stands in for it exactly
 	// as instructed: filter.lfs.* configured via the GLOBAL gitconfig (the
 	// way `git lfs install` actually writes it — not repo-local, which would
@@ -4073,11 +4073,11 @@ func TestHardenedGitCommand_TrustedHookAndGlobalFilterStillRun(t *testing.T) {
 	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
 		"commit", "-m", "add lfs-tracked file")
 
-	// The exact broker trigger: HardenedGitCommand-driven `git worktree add`,
+	// The exact broker trigger: SafeGitCommand-driven `git worktree add`,
 	// which checks out the new worktree — running the post-checkout hook and
 	// the smudge filter for data.bin.
 	wtPath := filepath.Join(t.TempDir(), "wt")
-	cmd, err := HardenedGitCommand(context.Background(), base, "worktree", "add", "--relative-paths", "-b", "agent-1", wtPath)
+	cmd, err := SafeGitCommand(context.Background(), base, "worktree", "add", "--relative-paths", "-b", "agent-1", wtPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4094,10 +4094,10 @@ func TestHardenedGitCommand_TrustedHookAndGlobalFilterStillRun(t *testing.T) {
 	}
 }
 
-func TestHardenedGitCommand_DoesNotClobberCredentialHelperEnv(t *testing.T) {
+func TestSafeGitCommand_DoesNotClobberCredentialHelperEnv(t *testing.T) {
 	// pkg/util/git.go's PullSharedWorkspace authenticates via a one-shot
 	// credential helper supplied through GIT_CONFIG_COUNT/KEY_0/VALUE_0 env
-	// vars. A caller combining that technique with HardenedGitCommand must
+	// vars. A caller combining that technique with SafeGitCommand must
 	// APPEND to cmd.Env (not replace it), or the GIT_COMMON_DIR pin would be
 	// lost along with the ambient environment.
 	base := t.TempDir()
@@ -4110,7 +4110,7 @@ func TestHardenedGitCommand_DoesNotClobberCredentialHelperEnv(t *testing.T) {
 		"GIT_CONFIG_VALUE_0=" + helper,
 	}
 
-	credCmd, err := HardenedGitCommand(context.Background(), base, "config", "--get", "credential.helper")
+	credCmd, err := SafeGitCommand(context.Background(), base, "config", "--get", "credential.helper")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4123,7 +4123,7 @@ func TestHardenedGitCommand_DoesNotClobberCredentialHelperEnv(t *testing.T) {
 		t.Errorf("expected the credential-helper env to survive alongside the wrapper's env, got %q want %q", got, helper)
 	}
 
-	pagerCmd, err := HardenedGitCommand(context.Background(), base, "config", "--get", "core.pager")
+	pagerCmd, err := SafeGitCommand(context.Background(), base, "config", "--get", "core.pager")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4136,7 +4136,7 @@ func TestHardenedGitCommand_DoesNotClobberCredentialHelperEnv(t *testing.T) {
 		t.Errorf("expected the wrapper's core.pager=cat to survive alongside the credential-helper env, got %q", got)
 	}
 
-	commonDirCmd, err := HardenedGitCommand(context.Background(), base, "rev-parse", "--git-common-dir")
+	commonDirCmd, err := SafeGitCommand(context.Background(), base, "rev-parse", "--git-common-dir")
 	if err != nil {
 		t.Fatal(err)
 	}

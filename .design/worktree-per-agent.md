@@ -373,7 +373,7 @@ New work for the base repo:
    trade-off, not an oversight: making `.git/config`/`hooks`/`info`
    read-only in the container is what keeps a container from being able to
    change what the broker's own git operations do against the shared base;
-   see `pkg/provision/provision.go`'s `HardenedGitCommand` and
+   see `pkg/provision/provision.go`'s `SafeGitCommand` and
    `pkg/runtime/common.go`'s `narrowGitAdminMounts`.
 
 ---

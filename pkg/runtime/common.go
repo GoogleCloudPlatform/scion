@@ -653,7 +653,7 @@ func isHubManagedWorktreeBase(repoRoot string) bool {
 // ability to write the files host-side git later honors (hooks,
 // core.hooksPath/fsmonitor/sshCommand, smudge/clean filter selection via
 // info/attributes) when the broker runs git against this same base — see
-// pkg/provision/provision.go's HardenedGitCommand for the invocation-level
+// pkg/provision/provision.go's SafeGitCommand for the invocation-level
 // additional check.
 //
 // Objects, refs, packed-refs, and the per-worktree HEAD/index/logs/ORIG_HEAD
