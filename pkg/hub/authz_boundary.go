@@ -687,13 +687,9 @@ func (a *AuthzService) ProjectMembershipEvidence(ctx context.Context, principal 
 		return false, "", err
 	}
 
-	refs, directKey, groupKeys, err := a.principalClosure(ctx, principal)
+	directKey, groupKeys, bindings, err := a.projectMembershipInputs(ctx, principal)
 	if err != nil {
-		return false, "", projectAccessLookupFault(fmt.Errorf("%w: %v", ErrProjectAccessDenied, err))
-	}
-	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, refs, nil, nil)
-	if err != nil {
-		return false, "", projectAccessLookupFault(fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err))
+		return false, "", err
 	}
 
 	now := time.Now()
@@ -713,6 +709,60 @@ func (a *AuthzService) ProjectMembershipEvidence(ctx context.Context, principal 
 		}
 	}
 	return false, "", nil
+}
+
+// projectMembershipInputs loads the principal closure and its unscoped role
+// bindings for ProjectMembershipEvidence. Its query shape (full closure, then
+// ListRoleBindingsForPrincipals with nil scope filters) is exactly the one
+// the request-local authz input memo serves, so when a memo is installed
+// and the mint-eligibility cache is not, it reads through the memo instead
+// of reloading: a scoped UAT's live project-access check and decide's own
+// steps 2-3 for the same principal then share one memo entry. Without a
+// memo (or with the mint-eligibility cache present) it loads exactly as
+// before. Load failures are tagged as project-access lookup faults on both
+// paths.
+func (a *AuthzService) projectMembershipInputs(ctx context.Context, principal PrincipalContext) (directKey string, groupKeys map[string]bool, bindings []*store.RoleBinding, err error) {
+	if mintEligibilityCacheFromContext(ctx) == nil {
+		if h := a.inputsForPrincipal(ctx, principal); h != nil {
+			refs, err := h.Principals()
+			if err != nil {
+				return "", nil, nil, projectAccessLookupFault(fmt.Errorf("%w: group resolution failed (fail-closed): %v", ErrProjectAccessDenied, err))
+			}
+			bindings, err := h.Bindings()
+			if err != nil {
+				return "", nil, nil, projectAccessLookupFault(fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err))
+			}
+			directKey, groupKeys = closureKeys(refs)
+			return directKey, groupKeys, bindings, nil
+		}
+	}
+
+	refs, directKey, groupKeys, err := a.principalClosure(ctx, principal)
+	if err != nil {
+		return "", nil, nil, projectAccessLookupFault(fmt.Errorf("%w: %v", ErrProjectAccessDenied, err))
+	}
+	bindings, err = a.store.ListRoleBindingsForPrincipals(ctx, refs, nil, nil)
+	if err != nil {
+		return "", nil, nil, projectAccessLookupFault(fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err))
+	}
+	return directKey, groupKeys, bindings, nil
+}
+
+// closureKeys derives principalClosure's directKey and groupKeys from a
+// closure in authorizationPrincipals' shape: the direct principal first,
+// followed by its group refs.
+func closureKeys(refs []store.PrincipalRef) (directKey string, groupKeys map[string]bool) {
+	groupKeys = map[string]bool{}
+	for i, r := range refs {
+		if i == 0 {
+			directKey = r.Type + ":" + r.ID
+			continue
+		}
+		if r.Type == "group" {
+			groupKeys["group:"+r.ID] = true
+		}
+	}
+	return directKey, groupKeys
 }
 
 func (a *AuthzService) requireActiveUser(ctx context.Context, principal PrincipalContext) error {
