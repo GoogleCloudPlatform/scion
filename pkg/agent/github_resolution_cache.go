@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -90,7 +91,7 @@ type GitHubResolutionCache struct {
 	flight singleflight.Group
 
 	credMu    sync.Mutex
-	credSlots map[string]chan struct{}
+	credSlots map[string]*credSlot
 
 	// refreshMu guards lastRefreshFailure, which records the last time a
 	// background stale-refresh failed for a given flight key (see
@@ -163,13 +164,6 @@ func (c *GitHubResolutionCache) Get(uri string) (ResolvedSkill, bool) {
 		copy(skill.Files, entry.Skill.Files)
 	}
 	return skill, true
-}
-
-// Put stores a resolved skill in the cache as a non-branch (e.g. full-SHA)
-// entry — see putEntry for the branch-ref variant used internally by
-// ResolveWithFetch, and for the disk-persistence rules described below.
-func (c *GitHubResolutionCache) Put(uri string, skill ResolvedSkill) {
-	c.putEntry(uri, skill, false)
 }
 
 // putEntry stores a resolved skill in the cache, recording whether it is a
@@ -287,25 +281,60 @@ func (c *GitHubResolutionCache) getStale(uri string) (ResolvedSkill, bool) {
 	return skill, true
 }
 
+// credSlot is a per-credentialID semaphore plus a reference count of callers
+// currently holding or waiting on it, so acquireCredentialSlot can delete the
+// entry once nothing needs it anymore (see the map-growth comment there).
+type credSlot struct {
+	sem  chan struct{}
+	refs int // guarded by GitHubResolutionCache.credMu
+}
+
 // acquireCredentialSlot blocks until a slot is free for credentialID (see
 // maxInFlightPerCredential) or ctx is done, whichever comes first. The
 // returned release func must be called exactly once to free the slot.
+//
+// credSlots entries are reference-counted and deleted once nothing holds or
+// is waiting on them. Without this, the map would grow without bound:
+// credentialID includes a fingerprint of the credential's own value (see
+// flightIdentity), so a GitHub App token minted fresh for every create — one
+// of the credential sources flightIdentity documents — leaves a permanent
+// ~300B entry behind for the life of the process, one per fallback
+// resolution, since that credentialID is never seen again.
 func (c *GitHubResolutionCache) acquireCredentialSlot(ctx context.Context, credentialID string) (release func(), err error) {
 	c.credMu.Lock()
 	if c.credSlots == nil {
-		c.credSlots = make(map[string]chan struct{})
+		c.credSlots = make(map[string]*credSlot)
 	}
-	sem, ok := c.credSlots[credentialID]
+	slot, ok := c.credSlots[credentialID]
 	if !ok {
-		sem = make(chan struct{}, maxInFlightPerCredential)
-		c.credSlots[credentialID] = sem
+		slot = &credSlot{sem: make(chan struct{}, maxInFlightPerCredential)}
+		c.credSlots[credentialID] = slot
 	}
+	slot.refs++
 	c.credMu.Unlock()
 
+	// releaseRef drops this call's reservation on slot and deletes
+	// credSlots[credentialID] once nothing references it anymore. Called
+	// either way below: on a successful acquire (paired with releasing the
+	// semaphore itself) or on ctx.Done() (the reservation was never turned
+	// into a held slot).
+	releaseRef := func() {
+		c.credMu.Lock()
+		slot.refs--
+		if slot.refs == 0 && c.credSlots[credentialID] == slot {
+			delete(c.credSlots, credentialID)
+		}
+		c.credMu.Unlock()
+	}
+
 	select {
-	case sem <- struct{}{}:
-		return func() { <-sem }, nil
+	case slot.sem <- struct{}{}:
+		return func() {
+			<-slot.sem
+			releaseRef()
+		}, nil
 	case <-ctx.Done():
+		releaseRef()
 		return nil, ctx.Err()
 	}
 }
@@ -341,11 +370,20 @@ func (c *GitHubResolutionCache) clearRefreshFailure(flightKey string) {
 // invocation for a key is the caller that will become the flight leader; any
 // later invocation for the same key, made while that leader's call is still
 // outstanding, is a caller that will join it as a follower.
-var flightJoinHook func(flightKey string)
+//
+// Held in an atomic.Pointer, not a plain var: a background refresh goroutine
+// started by one test (see ResolveWithFetch's stale-serve path) can still be
+// running when that test returns and a later test installs its own hook —
+// reading and writing a plain var across those two goroutines with no
+// synchronization is a data race. The atomic load/store here makes that
+// interleaving race-free; it does not change which hook a given call
+// observes, which is still whichever one was most recently installed when
+// the call happened to run.
+var flightJoinHook atomic.Pointer[func(string)]
 
 func injectFlightJoin(flightKey string) {
-	if flightJoinHook != nil {
-		flightJoinHook(flightKey)
+	if hook := flightJoinHook.Load(); hook != nil {
+		(*hook)(flightKey)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sync"
@@ -43,7 +44,7 @@ func TestGitHubResolutionCache_PutAndGet(t *testing.T) {
 		},
 	}
 
-	cache.Put("gh://owner/repo/my-skill@main", skill)
+	cache.putEntry("gh://owner/repo/my-skill@main", skill, false)
 
 	got, ok := cache.Get("gh://owner/repo/my-skill@main")
 	if !ok {
@@ -84,7 +85,7 @@ func TestGitHubResolutionCache_Expiry(t *testing.T) {
 		Name: "expiring-skill",
 		URI:  "gh://owner/repo/expiring@main",
 	}
-	cache.Put("gh://owner/repo/expiring@main", skill)
+	cache.putEntry("gh://owner/repo/expiring@main", skill, false)
 
 	// Wait for expiry
 	time.Sleep(5 * time.Millisecond)
@@ -108,7 +109,7 @@ func TestGitHubResolutionCache_PersistAndReload(t *testing.T) {
 		Version: "abc123def456",
 		Hash:    "sha256:persist",
 	}
-	cache.Put("gh://owner/repo/persist@main", skill)
+	cache.putEntry("gh://owner/repo/persist@main", skill, false)
 
 	// Verify file exists on disk
 	cacheFile := filepath.Join(dir, resolutionCacheFileName)
@@ -159,7 +160,7 @@ func TestGitHubResolutionCache_CredentialEntryNotPersistedToDisk(t *testing.T) {
 			{Path: "SKILL.md", Content: []byte("private content")},
 		},
 	}
-	cache.Put(credKey, skill)
+	cache.putEntry(credKey, skill, false)
 
 	// In-memory Get must hit.
 	got, ok := cache.Get(credKey)
@@ -199,8 +200,8 @@ func TestGitHubResolutionCache_MixedPublicAndCredential(t *testing.T) {
 	publicKey := "gh://owner/repo/pub-skill@main"
 	credKey := "gh://owner/repo/priv-skill@main#deadbeef12345678"
 
-	cache.Put(publicKey, ResolvedSkill{Name: "pub-skill", URI: publicKey})
-	cache.Put(credKey, ResolvedSkill{Name: "priv-skill", URI: "gh://owner/repo/priv-skill@main"})
+	cache.putEntry(publicKey, ResolvedSkill{Name: "pub-skill", URI: publicKey}, false)
+	cache.putEntry(credKey, ResolvedSkill{Name: "priv-skill", URI: "gh://owner/repo/priv-skill@main"}, false)
 
 	// Both accessible in-memory.
 	if _, ok := cache.Get(publicKey); !ok {
@@ -231,7 +232,7 @@ func TestGitHubResolutionCache_ExpiredNotLoaded(t *testing.T) {
 	}
 
 	skill := ResolvedSkill{Name: "expired-skill", URI: "gh://o/r/s@main"}
-	cache.Put("gh://o/r/s@main", skill)
+	cache.putEntry("gh://o/r/s@main", skill, false)
 
 	time.Sleep(5 * time.Millisecond)
 
@@ -442,6 +443,55 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCapIsolatedAcrossPr
 	wg.Wait()
 }
 
+// TestGitHubResolutionCache_ResolveWithFetch_CredSlotsReturnsToEmpty is the
+// acceptance test for bounding credSlots' size: each credentialID (which
+// includes a fingerprint of the credential's own value, see flightIdentity)
+// is typically used for only one resolution when it comes from a per-mint
+// credential, such as a GitHub App installation token minted fresh for every
+// create on the broker fallback path — so every entry must be removed once
+// nothing still references it, or the map grows forever.
+func TestGitHubResolutionCache_ResolveWithFetch_CredSlotsReturnsToEmpty(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	const n = 20
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fetch := func(ctx context.Context) (ResolvedSkill, error) {
+				return ResolvedSkill{Name: fmt.Sprintf("skill-%d", i)}, nil
+			}
+			_, _ = cache.ResolveWithFetch(context.Background(),
+				fmt.Sprintf("credslot-cache-%d", i), fmt.Sprintf("credslot-flight-%d", i),
+				fmt.Sprintf("credslot-cred-%d", i), "test-ref", false, fetch)
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent resolutions did not complete")
+	}
+
+	cache.credMu.Lock()
+	got := len(cache.credSlots)
+	cache.credMu.Unlock()
+	if got != 0 {
+		t.Fatalf("expected credSlots to be empty once every resolution finished, got %d entries", got)
+	}
+}
+
 // TestGitHubResolutionCache_ResolveWithFetch_CancelledLeaderDoesNotFailWaiter
 // is the acceptance test for "a cancelled waiter does not cancel the shared
 // flight", specifically for the case that matters most: the single-flight
@@ -491,7 +541,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_CancelledLeaderDoesNotFailWaiter
 
 	var joinCount int32
 	waiterJoined := make(chan struct{})
-	flightJoinHook = func(key string) {
+	hook := func(key string) {
 		if key != flightKey {
 			return
 		}
@@ -499,7 +549,8 @@ func TestGitHubResolutionCache_ResolveWithFetch_CancelledLeaderDoesNotFailWaiter
 			close(waiterJoined)
 		}
 	}
-	t.Cleanup(func() { flightJoinHook = nil })
+	flightJoinHook.Store(&hook)
+	t.Cleanup(func() { flightJoinHook.Store(nil) })
 
 	ctxLeader, cancelLeader := context.WithCancel(context.Background())
 	defer cancelLeader()
@@ -611,7 +662,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_ShortDeadlineLeaderDoesNotFailWa
 
 	var joinCount int32
 	waiterJoined := make(chan struct{})
-	flightJoinHook = func(key string) {
+	hook := func(key string) {
 		if key != flightKey {
 			return
 		}
@@ -619,7 +670,8 @@ func TestGitHubResolutionCache_ResolveWithFetch_ShortDeadlineLeaderDoesNotFailWa
 			close(waiterJoined)
 		}
 	}
-	t.Cleanup(func() { flightJoinHook = nil })
+	flightJoinHook.Store(&hook)
+	t.Cleanup(func() { flightJoinHook.Store(nil) })
 
 	leaderCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
@@ -769,8 +821,30 @@ func TestGitHubResolutionCache_ResolveWithFetch_StaleRefreshesOnce(t *testing.T)
 		return ResolvedSkill{Name: "new", URI: key}, nil
 	}
 
-	skill1, err1 := cache.ResolveWithFetch(context.Background(), key, "refresh-once-flight", "refresh-once-cred", "test-ref", true, fetch)
-	skill2, err2 := cache.ResolveWithFetch(context.Background(), key, "refresh-once-flight", "refresh-once-cred", "test-ref", true, fetch)
+	// Each of the two ResolveWithFetch calls below independently sees the
+	// entry as stale (neither has refreshed it yet) and so spawns its own
+	// background refresh goroutine. Both goroutines call injectFlightJoin,
+	// an unsynchronized package-var read/write before this test's own
+	// atomic.Pointer fix — install a hook that waits for both before this
+	// test does anything that could race with a later test's own hook, so
+	// neither goroutine is ever still mid-read when that happens.
+	const flightKey = "refresh-once-flight"
+	var joinCount int32
+	bothJoined := make(chan struct{})
+	var joinedOnce sync.Once
+	hook := func(k string) {
+		if k != flightKey {
+			return
+		}
+		if atomic.AddInt32(&joinCount, 1) == 2 {
+			joinedOnce.Do(func() { close(bothJoined) })
+		}
+	}
+	flightJoinHook.Store(&hook)
+	t.Cleanup(func() { flightJoinHook.Store(nil) })
+
+	skill1, err1 := cache.ResolveWithFetch(context.Background(), key, flightKey, "refresh-once-cred", "test-ref", true, fetch)
+	skill2, err2 := cache.ResolveWithFetch(context.Background(), key, flightKey, "refresh-once-cred", "test-ref", true, fetch)
 	if err1 != nil || err2 != nil {
 		t.Fatalf("unexpected errors: %v, %v", err1, err2)
 	}
@@ -779,13 +853,20 @@ func TestGitHubResolutionCache_ResolveWithFetch_StaleRefreshesOnce(t *testing.T)
 	}
 
 	<-entered
+
+	select {
+	case <-bothJoined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("did not observe both background refresh goroutines joining the flight")
+	}
+
 	close(proceed)
 
 	// Deterministically wait for the (possibly still in-flight) refresh to
 	// land: calling coalesceFetch directly with the same flight key either
 	// joins the still-running flight or, if it already finished, hits the
 	// fresh-cache re-check — either way it must not invoke fetch again.
-	refreshed, err := cache.coalesceFetch(context.Background(), "refresh-once-flight", "refresh-once-cred", key, "test-ref", true, fetch)
+	refreshed, err := cache.coalesceFetch(context.Background(), flightKey, "refresh-once-cred", key, "test-ref", true, fetch)
 	if err != nil {
 		t.Fatalf("unexpected error joining the refresh flight: %v", err)
 	}
@@ -921,12 +1002,13 @@ func TestGitHubResolutionCache_ResolveWithFetch_RefreshFailureBackoffSkipsRetry(
 
 	flightStarted := make(chan struct{})
 	var startedOnce sync.Once
-	flightJoinHook = func(key string) {
+	hook := func(key string) {
 		if key == flightKey {
 			startedOnce.Do(func() { close(flightStarted) })
 		}
 	}
-	t.Cleanup(func() { flightJoinHook = nil })
+	flightJoinHook.Store(&hook)
+	t.Cleanup(func() { flightJoinHook.Store(nil) })
 
 	var fetchCount int32
 	fetch := func(ctx context.Context) (ResolvedSkill, error) {
@@ -950,5 +1032,41 @@ func TestGitHubResolutionCache_ResolveWithFetch_RefreshFailureBackoffSkipsRetry(
 
 	if got := atomic.LoadInt32(&fetchCount); got != 0 {
 		t.Fatalf("expected no fetch while within the refresh-failure backoff window, got %d", got)
+	}
+}
+
+// TestGitHubResolutionCache_ResolveWithFetch_FailureNeverCached is the
+// acceptance test that a failed fetch is never cached or served stale: a
+// regression here would store the zero ResolvedSkill as a successful result,
+// serving an empty skill for the full TTL instead of surfacing the error (or
+// retrying) on the next call.
+func TestGitHubResolutionCache_ResolveWithFetch_FailureNeverCached(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	const key = "gh://o/r/s@main"
+	wantErr := errors.New("boom")
+	var fetchCount int32
+	fetch := func(ctx context.Context) (ResolvedSkill, error) {
+		atomic.AddInt32(&fetchCount, 1)
+		return ResolvedSkill{}, wantErr
+	}
+
+	_, err1 := cache.ResolveWithFetch(context.Background(), key, "failure-flight", "failure-cred", "test-ref", true, fetch)
+	if !errors.Is(err1, wantErr) {
+		t.Fatalf("expected the first call to fail with %v, got %v", wantErr, err1)
+	}
+
+	// Nothing from the failed call should have been cached: a second call
+	// must run fetch again, not return a cached (zero-value) success.
+	_, err2 := cache.ResolveWithFetch(context.Background(), key, "failure-flight", "failure-cred", "test-ref", true, fetch)
+	if !errors.Is(err2, wantErr) {
+		t.Fatalf("expected the second call to fail again (a prior failure must never be cached), got %v", err2)
+	}
+	if got := atomic.LoadInt32(&fetchCount); got != 2 {
+		t.Fatalf("expected fetch to run on both calls (no cached failure or empty success), got %d calls", got)
 	}
 }
