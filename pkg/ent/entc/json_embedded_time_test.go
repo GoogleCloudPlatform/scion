@@ -100,8 +100,15 @@ func embeddedTimePaths(entity string, et reflect.Type) []string {
 	return paths
 }
 
+// isTimeType reports whether t is time.Time or a struct type defined from it
+// (e.g. "type Stamp time.Time"), which carries the same wall clock and
+// location and so the same offset hazard.
+func isTimeType(t reflect.Type) bool {
+	return t == timeType || (t.Kind() == reflect.Struct && t.ConvertibleTo(timeType))
+}
+
 func walkForTimes(t reflect.Type, path string, onStack map[reflect.Type]bool, paths *[]string) {
-	if t == timeType {
+	if isTimeType(t) {
 		*paths = append(*paths, path)
 		return
 	}
@@ -179,6 +186,7 @@ func TestEmbeddedTimePathsDetectsNewField(t *testing.T) {
 		AtPtr *time.Time
 		Name  string
 	}
+	type stamp time.Time
 	type recursive struct {
 		When time.Time
 		Next *recursive
@@ -191,6 +199,7 @@ func TestEmbeddedTimePathsDetectsNewField(t *testing.T) {
 		List      []inner
 		ByName    map[string]inner
 		Chain     recursive
+		Stamps    []stamp
 		Edges     struct{ Other *inner }
 		hidden    inner //nolint:unused // proves unexported fields are skipped
 	}
@@ -205,6 +214,7 @@ func TestEmbeddedTimePathsDetectsNewField(t *testing.T) {
 		"Fake.List[].AtPtr",
 		"Fake.Payload.At",
 		"Fake.Payload.AtPtr",
+		"Fake.Stamps[]",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("embeddedTimePaths = %v, want %v", got, want)
