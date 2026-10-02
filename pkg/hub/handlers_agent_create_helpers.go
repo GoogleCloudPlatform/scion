@@ -1061,7 +1061,7 @@ func (s *Server) handleExistingAgent(
 		cleanupMode = "strict"
 	}
 
-	// Start guard entry checks (design t1-async-create-v11.md §3.6), before
+	// Start guard entry checks, before
 	// Phase 1 and Phase 2: an incomplete create is refused, and an agent
 	// whose create is in flight is returned as it is, without applying the
 	// request.

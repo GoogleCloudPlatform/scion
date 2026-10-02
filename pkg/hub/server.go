@@ -733,8 +733,8 @@ type RemoteCreateAgentRequest struct {
 	// runtimebroker.CreateAgentRequest.Reprovision, the wire twin this maps to.
 	Reprovision bool `json:"reprovision,omitempty"`
 	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
-	// mirror runtimebroker.CreateAgentRequest's async launch fields (design
-	// t1-async-create-v11.md §3.2). They are set only by dispatchLaunching.
+	// mirror runtimebroker.CreateAgentRequest's async launch fields. They are set only by
+	// dispatchLaunching.
 	// LaunchTimeoutSeconds is the remaining launch budget at send time.
 	AsyncLaunch            bool   `json:"asyncLaunch,omitempty"`
 	LaunchID               string `json:"launchId,omitempty"`
@@ -917,8 +917,7 @@ type RemoteAgentResponse struct {
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
 
 	// LaunchPending, LaunchID and LaunchInstanceID mirror
-	// runtimebroker.CreateAgentResponse's async launch echo (design
-	// t1-async-create-v11.md §3.2). LaunchPending with a LaunchID equal to
+	// runtimebroker.CreateAgentResponse's async launch echo. LaunchPending with a LaunchID equal to
 	// the request's means the broker accepted the create for asynchronous
 	// launch; LaunchInstanceID is the broker process that owns it.
 	LaunchPending    bool   `json:"launchPending,omitempty"`
@@ -3498,8 +3497,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// is then omitted and broker behaviour is unchanged.
 	dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)
 
-	// Wire the async agent launch settings (design t1-async-create-v11.md
-	// §3.4). They are static after startup; the accessor reads them under
+	// Wire the async agent launch settings. They are static after startup; the accessor reads them under
 	// s.mu.
 	dispatcher.SetAsyncLaunchSettingsProvider(s.asyncLaunchSettings)
 
@@ -4417,8 +4415,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		s.deriveAgentConfig(ctx, agent, project, tmpl)
 
 		// Scheduled creates have no waiting client, so they opt in to
-		// asynchronous launch server-side (design t1-async-create-v11.md
-		// §3.2). It only takes effect when hub.asyncAgentLaunch is on.
+		// asynchronous launch server-side. It only takes effect when hub.asyncAgentLaunch is on.
 		agent.LaunchAsyncOptIn = true
 
 		if err := s.createAgentWithIdentityKey(ctx, agent, slug); err != nil {

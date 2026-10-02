@@ -374,7 +374,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// Start guard entry checks (design t1-async-create-v11.md §3.6). Restart
+	// Start guard entry checks. Restart
 	// is checked here, before its stop leg, so a launching agent is not
 	// stopped; the dispatcher guard is the backstop for the start leg.
 	if action == api.AgentActionStart || action == api.AgentActionRestart {
@@ -386,7 +386,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			var warnings []string
 			if action == api.AgentActionRestart {
 				warnings = []string{launchRestartNotPerformedWarning}
-			} else if r.ContentLength > 0 {
+			} else if lifecycleStartHasInputs(r) {
 				warnings = []string{launchInFlightInputsWarning}
 			}
 			s.writeLaunchingAgent(ctx, w, agent, warnings)

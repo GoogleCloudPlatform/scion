@@ -413,7 +413,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 	}
 
 	// A launch is already in flight (for example a duplicate finalize): do
-	// not dispatch again (design §3.5 row W).
+	// not dispatch again.
 	if agent.IsInFlight() {
 		writeJSON(w, http.StatusOK, SyncToFinalizeResponse{
 			Applied:  false,

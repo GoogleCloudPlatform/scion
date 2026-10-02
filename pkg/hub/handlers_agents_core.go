@@ -259,13 +259,11 @@ type CreateAgentRequest struct {
 	// GCPIdentity specifies the GCP identity assignment for the agent.
 	// Controls metadata server behavior and optional service account binding.
 	GCPIdentity *GCPIdentityAssignment `json:"gcp_identity,omitempty"`
-	// AcceptAsyncLaunch is the client's non-blocking-launch opt-in (design
-	// §3.2). Persisted as store.Agent.LaunchAsyncOptIn because env finalize
-	// and workspace finalize launch in later requests. This field is only
-	// accepted and persisted here: it has no effect until hub.asyncAgentLaunch
-	// and the dispatch path that reads it both exist. Scheduled creates do
-	// not set it today; when they adopt async launch, the scheduler will set
-	// it server-side rather than from client input.
+	// AcceptAsyncLaunch is the client's non-blocking-launch opt-in.
+	// Persisted as store.Agent.LaunchAsyncOptIn because env finalize and
+	// workspace finalize launch in later requests. It takes effect only when
+	// hub.asyncAgentLaunch is on (see dispatchLaunching). Scheduled creates
+	// set the opt-in server-side rather than from client input.
 	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
 }
 
@@ -2149,7 +2147,7 @@ func (s *Server) createAgentInProject(
 }
 
 // adoptAcceptedLaunch persists an accepted asynchronous launch's dispatched
-// copy (design §3.5 accepted branch) and replaces *agent with the persisted
+// copy (the accepted branch) and replaces *agent with the persisted
 // row, so callers respond with the provisioning phase and the launch. It
 // returns a warning when the write failed.
 func (s *Server) adoptAcceptedLaunch(ctx context.Context, agent *store.Agent) []string {
@@ -2455,7 +2453,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	}
 
 	// A launch is already in flight (for example a duplicate submit): answer
-	// with the current agent and do not dispatch again (design §3.5 row E).
+	// with the current agent and do not dispatch again.
 	if agent.IsInFlight() {
 		project, _ := s.store.GetProject(ctx, projectID)
 		s.enrichAgent(ctx, agent, project, nil)

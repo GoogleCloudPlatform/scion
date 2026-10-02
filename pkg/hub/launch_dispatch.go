@@ -25,7 +25,7 @@ import (
 )
 
 // LaunchAccepted records that a broker accepted a create for asynchronous
-// launch (design t1-async-create-v11.md §3.4): ID is the Hub launch ID the
+// launch: ID is the Hub launch ID the
 // broker echoed and Owner is the broker process instance that claimed it.
 type LaunchAccepted struct {
 	ID    string `json:"id"`
@@ -41,7 +41,7 @@ type LaunchAccepted struct {
 //   - Launch: the broker accepted the create for asynchronous launch; the
 //     agent row is in provisioning and the broker reports the outcome later.
 //     Callers must not merge phase or message from the in-memory agent copy
-//     in this case (the "accepted branch", design §3.5).
+//     in this case (the "accepted branch").
 type CreateDispatchResult struct {
 	EnvReqs *RemoteEnvRequirementsResponse `json:"envRequirements,omitempty"`
 	Launch  *LaunchAccepted                `json:"launch,omitempty"`
@@ -73,7 +73,7 @@ func envReqsResult(envReqs *RemoteEnvRequirementsResponse) *CreateDispatchResult
 }
 
 // AsyncLaunchSettings are the Hub settings that govern asynchronous agent
-// launch (design t1-async-create-v11.md §3.4, §3.10).
+// launch.
 type AsyncLaunchSettings struct {
 	// Enabled is the hub.asyncAgentLaunch flag.
 	Enabled bool
@@ -104,7 +104,7 @@ func (d *HTTPAgentDispatcher) SetAsyncLaunchSettingsProvider(fn func() AsyncLaun
 // ErrLaunchInvalidPhase is returned by a launching create dispatch when
 // BeginLaunch refused because the agent left the created/provisioning phases
 // (for example a stop landed first). Nothing was sent to the broker, and the
-// caller must not fall back to a synchronous send (design §3.4).
+// caller must not fall back to a synchronous send.
 var ErrLaunchInvalidPhase = errors.New("agent is no longer in a phase that can be launched")
 
 // errLaunchEchoMismatch is returned when the broker answered launchPending
@@ -137,7 +137,7 @@ func (c *HybridBrokerClient) createWithGatherWouldDefer(ctx context.Context, bro
 type createSendFunc func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
 
 // asyncLaunchEligible reports whether a create send for agent may request an
-// asynchronous launch (design §3.4): the flag is on, the agent opted in, the
+// asynchronous launch: the flag is on, the agent opted in, the
 // request launches (not provision-only or reprovision), and the broker is not
 // known to lack support. A broker with no recorded capabilities, or one that
 // cannot be read, is tried: its echo is authoritative.
@@ -159,7 +159,7 @@ func (d *HTTPAgentDispatcher) asyncLaunchEligible(ctx context.Context, agent *st
 }
 
 // remainingLaunchSeconds is ceil(timeout - elapsed) in whole seconds, at
-// least 1 (design §3.4 remaining(L)).
+// least 1.
 func remainingLaunchSeconds(timeout, elapsed time.Duration) int {
 	remaining := int(math.Ceil((timeout - elapsed).Seconds()))
 	if remaining < 1 {
@@ -168,10 +168,9 @@ func remainingLaunchSeconds(timeout, elapsed time.Duration) int {
 	return remaining
 }
 
-// dispatchLaunching wraps one transport send of a launching create request
-// (design §3.4). When the send is eligible for asynchronous launch it begins
-// a launch, sends the launch fields and resolves the launch from the broker's
-// answer:
+// dispatchLaunching wraps one transport send of a launching create request.
+// When the send is eligible for asynchronous launch it begins a launch,
+// sends the launch fields and resolves the launch from the broker's answer:
 //
 //   - ErrLifecycleDeferred: returned unchanged with no launch write here; the
 //     owner node runs dispatchLaunching itself.
@@ -240,7 +239,13 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 		d.endLaunchNotLaunched(ctx, agent, launchID)
 		return resp, envReqs, nil, nil
 	case resp != nil && resp.LaunchPending && resp.LaunchID == launchID:
-		if _, err := d.store.MarkLaunchAccepted(ctx, agent.ID, launchID, resp.LaunchInstanceID); err != nil {
+		// Detached from the request, like endLaunchNotLaunched: the broker
+		// is already launching, so a client disconnect must not drop this
+		// write.
+		markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		_, err := d.store.MarkLaunchAccepted(markCtx, agent.ID, launchID, resp.LaunchInstanceID)
+		cancel()
+		if err != nil {
 			// The broker is launching; its first claim records the owner
 			// if this write was lost.
 			d.log.Warn("Failed to record accepted launch",
@@ -280,7 +285,7 @@ func (d *HTTPAgentDispatcher) applyAcceptedLaunchResponse(ctx context.Context, a
 	}
 }
 
-// persistAcceptedLaunch is the accepted branch's write (design §3.5): it
+// persistAcceptedLaunch is the accepted branch's write: it
 // re-reads the row (which the launch already moved to provisioning), merges
 // the non-status fields from the dispatched copy, retries on a version
 // conflict, and returns the persisted row. On failure it returns the last

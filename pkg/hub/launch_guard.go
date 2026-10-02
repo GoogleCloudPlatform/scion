@@ -15,9 +15,12 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -26,7 +29,7 @@ import (
 )
 
 // Start guard for agents whose asynchronous create is in flight or did not
-// complete (design t1-async-create-v11.md §3.6).
+// complete.
 
 const (
 	// ErrCodeAgentLaunching is returned by entry points that refuse to act
@@ -90,7 +93,7 @@ func (r *launchRefusal) write(w http.ResponseWriter) {
 
 // launchInFlightBeforeDeadline reports whether a's create launch is in
 // flight and has not passed its deadline. Past the deadline the launch is
-// being reaped or superseded, so start may proceed (§3.6).
+// being reaped or superseded, so start may proceed.
 func launchInFlightBeforeDeadline(a *store.Agent, now time.Time) bool {
 	if a == nil || !a.IsInFlight() {
 		return false
@@ -106,14 +109,22 @@ func agentRecoveryName(a *store.Agent) string {
 	return a.Name
 }
 
+// incompleteCreateRecoveryHint tells the user how to recover an incomplete
+// create. A plain delete is soft while soft-delete retention is configured,
+// and a soft-deleted agent keeps its name reserved, so the hint does not
+// promise that a plain delete frees the name.
+const incompleteCreateRecoveryHint = "delete it and create it again; " +
+	"if soft-delete retention is enabled, the name stays reserved until the agent is " +
+	"deleted with force=true or purged"
+
 // incompleteCreateMessage is the user-facing message for an incomplete
 // create.
 func incompleteCreateMessage(a *store.Agent) string {
 	name := agentRecoveryName(a)
 	if a.LaunchState == store.LaunchStateActive {
-		return fmt.Sprintf("the agent's create is still stopping; run scion delete %s and create it again", name)
+		return fmt.Sprintf("agent %s cannot be started: its create is still stopping; %s", name, incompleteCreateRecoveryHint)
 	}
-	return fmt.Sprintf("the agent's create did not complete (%s); run scion delete %s and create it again", a.LaunchError, name)
+	return fmt.Sprintf("agent %s cannot be started: its create did not complete (%s); %s", name, a.LaunchError, incompleteCreateRecoveryHint)
 }
 
 // incompleteCreateRefusal returns the 409 agent_create_incomplete refusal
@@ -186,6 +197,25 @@ func (d *HTTPAgentDispatcher) launchGuardError(ctx context.Context, agent *store
 	return nil
 }
 
+// deferredLaunchGuardError maps a failed cross-node start or restart onto
+// the start guard's error when the guard now refuses. The owner node re-runs
+// the guard; if a launch began, or a create stopped, between this node's
+// check and the owner's, the owner refuses and this node's wait fails
+// without the reason. Re-checking here gives the caller the same answer it
+// would have had from a local dispatch. Any other failure is returned
+// unchanged. The re-read is detached from ctx, which may have expired.
+func (d *HTTPAgentDispatcher) deferredLaunchGuardError(ctx context.Context, agent *store.Agent, op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	guardCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if guardErr := d.launchGuardError(guardCtx, agent, op); guardErr != nil {
+		return guardErr
+	}
+	return err
+}
+
 // launchRefusalFromError maps a dispatcher guard error onto the HTTP
 // refusal, re-reading the agent for the incomplete-create details. It
 // returns nil for any other error.
@@ -242,6 +272,29 @@ func createRequestHasInputs(req CreateAgentRequest) bool {
 		req.Workspace != "" || len(req.Labels) > 0 || req.Config != nil ||
 		req.AgentRole != "" || req.MessageMode != "" || req.GCPIdentity != nil ||
 		len(req.WorkspaceFiles) > 0 || req.Resume || req.ForceResume
+}
+
+// lifecycleStartHasInputs reports whether a lifecycle start request body
+// carries inputs a launching agent will not apply. The body is decoded
+// rather than judged by its length, so an empty object or a chunked body is
+// classified by its fields. A body that cannot be decoded counts as inputs,
+// so the caller is still warned. It consumes the request body.
+func lifecycleStartHasInputs(r *http.Request) bool {
+	if r.Body == nil || r.Body == http.NoBody {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		return true
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return false
+	}
+	var req AgentLifecycleStartRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return true
+	}
+	return req != (AgentLifecycleStartRequest{})
 }
 
 // writeExistingAgentLaunching answers handleExistingAgent's 200 shape for an

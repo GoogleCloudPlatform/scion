@@ -291,7 +291,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Start guard entry check (design t1-async-create-v11.md §3.6), before
+	// Start guard entry check, before
 	// the reincarnation is claimed: the worker stops and reprovisions the
 	// agent, so an agent whose create is in flight or did not complete is
 	// refused here.

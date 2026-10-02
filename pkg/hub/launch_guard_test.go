@@ -117,7 +117,7 @@ func TestLaunchStartRefusal(t *testing.T) {
 		require.NotNil(t, r)
 		assert.False(t, r.InFlight)
 		assert.Equal(t, ErrCodeAgentCreateIncomplete, r.Code)
-		assert.Equal(t, "the agent's create is still stopping; run scion delete a1 and create it again", r.Message)
+		assert.Equal(t, "agent a1 cannot be started: its create is still stopping; "+incompleteCreateRecoveryHint, r.Message)
 		assert.Equal(t, "tmpl", r.Details["template"])
 		assert.Equal(t, "the task", r.Details["task"])
 	})
@@ -129,7 +129,7 @@ func TestLaunchStartRefusal(t *testing.T) {
 		r := launchStartRefusal(a, now)
 		require.NotNil(t, r)
 		assert.Equal(t, ErrCodeAgentCreateIncomplete, r.Code)
-		assert.Equal(t, "the agent's create did not complete (launch_timeout); run scion delete a1 and create it again", r.Message)
+		assert.Equal(t, "agent a1 cannot be started: its create did not complete (launch_timeout); "+incompleteCreateRecoveryHint, r.Message)
 	})
 }
 

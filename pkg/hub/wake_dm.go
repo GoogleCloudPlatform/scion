@@ -67,7 +67,7 @@ type WakeResult struct {
 // Returns (*WakeResult, nil) on success or (nil, *AgentDMError) on failure.
 // On failure, no message should be dispatched (AC-4).
 func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeResult, *AgentDMError) {
-	// Start guard entry check (design t1-async-create-v11.md §3.6): skip the
+	// Start guard entry check: skip the
 	// wake for an agent whose create is in flight or did not complete.
 	if refusal := launchStartRefusal(agent, time.Now()); refusal != nil {
 		s.messageLog.Info("wake: skipped, agent create is launching or incomplete",

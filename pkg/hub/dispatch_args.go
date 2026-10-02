@@ -68,7 +68,7 @@ type CheckPromptResult struct {
 type FinalizeEnvResult struct {
 	Success bool `json:"success"`
 	// Launch is set when the owner's send was accepted for asynchronous
-	// launch (design t1-async-create-v11.md §3.4).
+	// launch.
 	Launch *LaunchAccepted `json:"launch,omitempty"`
 }
 
@@ -76,7 +76,7 @@ type FinalizeEnvResult struct {
 type CreateWithGatherResult struct {
 	EnvRequirements *RemoteEnvRequirementsResponse `json:"envRequirements,omitempty"`
 	// Launch is set when the owner's send was accepted for asynchronous
-	// launch (design t1-async-create-v11.md §3.4).
+	// launch.
 	Launch *LaunchAccepted `json:"launch,omitempty"`
 }
 

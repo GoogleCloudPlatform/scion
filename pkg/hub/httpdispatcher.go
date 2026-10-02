@@ -1590,7 +1590,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		}
 		if deferred.AcceptedLaunch() != nil {
 			// The owner node accepted the create for asynchronous launch;
-			// return its result unchanged (design §3.4 layering).
+			// return its result unchanged.
 			return deferred, nil
 		}
 		envReqs = deferred.EnvRequirements()
@@ -2715,7 +2715,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		attribute.String("scion.broker.id", agent.RuntimeBrokerID),
 	)
 
-	// Start guard (design t1-async-create-v11.md §3.6): no broker call
+	// Start guard: no broker call
 	// while a create launch is in flight, or after one did not complete.
 	if err := d.launchGuardError(ctx, agent, "DispatchAgentStart"); err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -2941,7 +2941,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 // It generates a fresh auth token so the restarted container has valid
 // Hub credentials, preventing auth loss across container restarts.
 func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *store.Agent) error {
-	// Start guard (design t1-async-create-v11.md §3.6).
+	// Start guard.
 	if err := d.launchGuardError(ctx, agent, "DispatchAgentRestart"); err != nil {
 		return err
 	}
@@ -3284,7 +3284,8 @@ func isStopTerminal(phase string) bool { return phase == "stopped" || phase == "
 // signal → wait for the terminal phase. Called when client.StartAgent returns
 // ErrLifecycleDeferred (broker not locally connected).
 func (d *HTTPAgentDispatcher) deferredStart(ctx context.Context, agent *store.Agent, args *StartDispatchArgs) error {
-	return d.deferredLifecycle(ctx, agent, "start", args, isStartTerminal)
+	err := d.deferredLifecycle(ctx, agent, "start", args, isStartTerminal)
+	return d.deferredLaunchGuardError(ctx, agent, "deferredStart", err)
 }
 
 // deferredStop handles a cross-node agent stop.
@@ -3294,7 +3295,8 @@ func (d *HTTPAgentDispatcher) deferredStop(ctx context.Context, agent *store.Age
 
 // deferredRestart handles a cross-node agent restart.
 func (d *HTTPAgentDispatcher) deferredRestart(ctx context.Context, agent *store.Agent) error {
-	return d.deferredLifecycle(ctx, agent, "restart", &RestartDispatchArgs{}, isStartTerminal)
+	err := d.deferredLifecycle(ctx, agent, "restart", &RestartDispatchArgs{}, isStartTerminal)
+	return d.deferredLaunchGuardError(ctx, agent, "deferredRestart", err)
 }
 
 // deferredDelete handles a cross-node agent delete: subscribe → write intent →
