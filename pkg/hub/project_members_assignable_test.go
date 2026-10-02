@@ -50,24 +50,45 @@ func getAssignableRoles(t *testing.T, f *mmrFixture, actor *store.User) map[stri
 	return byID
 }
 
-// asgHubOverrideActor creates a user with NO built-in project role who still
-// passes the endpoint's project.manage gate (through a custom project role
-// carrying project.read and project.manage) and who holds the system
-// hub-admin role (system role_binding.*). That is the hub-override actor
-// reachable over HTTP; a plain hub admin is refused at the project.manage
-// gate (see TestAssignableRoles_HubAdminWithNoProjectRole).
-func asgHubOverrideActor(t *testing.T, f *mmrFixture) (*store.User, *store.RoleDefinition) {
+// asgManagerActor creates a user with NO built-in project role who still
+// passes the endpoint's project.manage gate, through a custom project role
+// carrying project.read and project.manage. With hubAdmin it also holds the
+// system hub-admin role (system role_binding.*): the hub-override actor
+// reachable over HTTP. Without it, the actor has neither a project role nor
+// hub authority, so the PUT refuses it before governance. A plain hub admin
+// is refused at the project.manage gate (see
+// TestAssignableRoles_HubAdminWithNoProjectRole).
+func asgManagerActor(t *testing.T, f *mmrFixture, suffix string, hubAdmin bool) (*store.User, *store.RoleDefinition) {
 	t.Helper()
 	ctx := context.Background()
 	manager, err := f.store.CreateRoleDefinition(ctx, &store.RoleDefinition{
-		Name: "asg-manager-" + tid(t.Name())[:8], ScopeType: store.RoleScopeProject,
+		Name: "asg-manager-" + tid(t.Name() + suffix)[:8], ScopeType: store.RoleScopeProject,
 		Permissions: []string{"project.read", "project.manage"},
 	})
 	require.NoError(t, err)
-	u := grpUser(t, f.store, t.Name()+"-huboverride", "Hub Override")
+	u := grpUser(t, f.store, t.Name()+"-"+suffix, "Manager "+suffix)
 	grpBind(t, f.store, "user", u.ID, manager.ID, f.projectID)
-	mmrSeedHubAdmin(t, f.store, u.ID)
+	if hubAdmin {
+		mmrSeedHubAdmin(t, f.store, u.ID)
+	}
 	return u, manager
+}
+
+// asgHubOverrideActor is asgManagerActor with the hub-admin seed.
+func asgHubOverrideActor(t *testing.T, f *mmrFixture) (*store.User, *store.RoleDefinition) {
+	t.Helper()
+	return asgManagerActor(t, f, "huboverride", true)
+}
+
+// asgJSONNormalize round-trips v through JSON so maps built with different
+// Go types compare equal when their JSON is equal.
+func asgJSONNormalize(t *testing.T, v interface{}) interface{} {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	var out interface{}
+	require.NoError(t, json.Unmarshal(b, &out))
+	return out
 }
 
 func TestAssignableRoles_Owner(t *testing.T) {
@@ -313,6 +334,9 @@ func TestCapabilities_CanManageCustomRolesOnFlatList(t *testing.T) {
 func TestAssignableRoles_ConsistentWithPut(t *testing.T) {
 	f := setupMMRFixture(t)
 	hubOverride, manager := asgHubOverrideActor(t, f)
+	// No built-in project role and no hub authority: passes the
+	// project.manage gate through a custom role only.
+	customManager, customManagerRole := asgManagerActor(t, f, "custommanager", false)
 
 	actors := []struct {
 		name string
@@ -321,10 +345,11 @@ func TestAssignableRoles_ConsistentWithPut(t *testing.T) {
 		{"owner", f.owner},
 		{"admin", f.admin},
 		{"hub-override", hubOverride},
+		{"custom-manager", customManager},
 	}
 	fixtureRoles := []*store.RoleDefinition{
 		f.ownerRD, f.adminRD, f.memberRD,
-		f.withinCeiling, f.beyondCeiling, f.roleBindingCustom, manager,
+		f.withinCeiling, f.beyondCeiling, f.roleBindingCustom, manager, customManagerRole,
 	}
 
 	sawGrantable, sawRefused := false, false
@@ -353,10 +378,35 @@ func TestAssignableRoles_ConsistentWithPut(t *testing.T) {
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errBody))
 				assert.Equal(t, r.DenialCode, errBody.Error.Code, "same denial code as the PUT (reason %q vs %q)", r.Reason, errBody.Error.Message)
 				assert.Equal(t, r.Reason, errBody.Error.Message, "same reason as the PUT")
+				assert.Equal(t, asgJSONNormalize(t, r.Details), asgJSONNormalize(t, errBody.Error.Details), "same details as the PUT")
 				assert.Empty(t, bindings, "a refused PUT writes nothing")
 			})
 		}
 	}
 	assert.True(t, sawGrantable, "fixture exercises grantable roles")
 	assert.True(t, sawRefused, "fixture exercises refused roles")
+}
+
+// TestAssignableRoles_CustomManagerWithNoProjectRole: an actor with no
+// built-in project role and no hub role_binding.* authority, who passes the
+// project.manage gate through a custom role, is refused every role. The
+// structural role_binding.* refusal comes first, as on the PUT; every other
+// role is refused because the actor has no project role.
+func TestAssignableRoles_CustomManagerWithNoProjectRole(t *testing.T) {
+	f := setupMMRFixture(t)
+	actor, managerRole := asgManagerActor(t, f, "custommanager", false)
+	roles := getAssignableRoles(t, f, actor)
+
+	for _, rd := range []*store.RoleDefinition{f.ownerRD, f.adminRD, f.memberRD, f.withinCeiling, f.beyondCeiling, managerRole} {
+		r := roles[rd.ID]
+		assert.False(t, r.Grantable, "%s", rd.Name)
+		assert.Equal(t, ErrCodeRoleAssignmentForbidden, r.DenialCode, "%s", rd.Name)
+		assert.Equal(t, "actor has no project role", r.Reason, "%s", rd.Name)
+		assert.Nil(t, r.Details, "%s", rd.Name)
+	}
+	rb := roles[f.roleBindingCustom.ID]
+	assert.False(t, rb.Grantable)
+	assert.Equal(t, ErrCodeRoleAssignmentForbidden, rb.DenialCode)
+	assert.Contains(t, rb.Reason, "role_binding.", "the structural refusal precedes the no-project-role refusal")
+	assert.Equal(t, f.roleBindingCustom.ID, rb.Details["roleDefinitionId"])
 }
