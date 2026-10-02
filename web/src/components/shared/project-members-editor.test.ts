@@ -1228,6 +1228,31 @@ describe('automatic switch to Edit follows the row rules', () => {
     expect(apiFetch).not.toHaveBeenCalled();
   });
 
+  it('a locked dialog disables every control even with custom-role authority', async () => {
+    // Forced state: today a locked actor never holds canManageCustomRoles,
+    // so this checks the lock itself rather than the capability.
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS, [...OWNER_CATALOG, R_OPS]);
+    el.openEditDialog(ERIN);
+    el.dlgLockedReason = ROW_LOCKED_REASON;
+    el.dlgBuiltIn = 'r-admin';
+    await el.updateComplete;
+    expect(qa(el, 'sl-checkbox').length).toBeGreaterThan(0);
+    for (const c of qa(el, 'sl-checkbox')) expect(c.hasAttribute('disabled')).toBe(true);
+    // A changed, non-empty selection: only the lock disables Save.
+    expect(q(el, 'sl-button.save-member')?.hasAttribute('disabled')).toBe(true);
+
+    el.dlgBuiltIn = NO_PROJECT_ROLE;
+    el.dlgCustomIds = [];
+    await el.updateComplete;
+    expect(q(el, 'sl-button.remove-member')?.hasAttribute('disabled')).toBe(true);
+    expect(q(el, 'sl-button.save-member')?.hasAttribute('disabled')).toBe(true);
+
+    vi.mocked(apiFetch).mockReset();
+    await el.handleRemoveFromDialog();
+    expect(showConfirm).not.toHaveBeenCalled();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
   it('admin in Add mode picking an existing member still gets an editable dialog', async () => {
     const el = await mountEditor(ALL_GROUPS, ADMIN_CAPS, ADMIN_CATALOG);
     el.openAddDialog();
