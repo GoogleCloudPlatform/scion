@@ -255,6 +255,23 @@ spec:
       containers:
         - name: scion-substrate-broker
           image: ${BROKER_IMAGE}
+          # runAsNonRoot/runAsUser are deliberately NOT set here: the
+          # branch-built broker image (Dockerfile.hub) has no USER
+          # directive, so it runs as root by design, and runAsNonRoot:
+          # true against a root-only image would just CrashLoopBackOff
+          # the container rather than harden it. Set these two once
+          # Dockerfile.hub gains a non-root USER. The rest of this
+          # securityContext holds regardless of that: the broker process
+          # itself never needs privilege escalation, Linux capabilities
+          # beyond the default set, or a syscall filter looser than the
+          # container runtime's own default.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           args:
             - "server"
             - "start"

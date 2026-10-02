@@ -390,6 +390,14 @@ this broker are:
 - **The broker's own CA/trust-bundle is read once, at dial time.** Rotating
   the CA or trust bundle a broker uses to reach ateapi/the router requires
   restarting the broker process — there is no live-reload path.
+- **The broker container runs as root.** `Dockerfile.hub` has no `USER`
+  directive, so `broker.yaml`'s pod spec deliberately does not set
+  `runAsNonRoot`/`runAsUser` (setting them against a root-only image would
+  just `CrashLoopBackOff` the container). It does set
+  `allowPrivilegeEscalation: false`, drops all Linux capabilities, and sets
+  `seccompProfile: RuntimeDefault` — the hardening that doesn't depend on
+  the image's own uid. Move to a non-root image and set `runAsNonRoot`/
+  `runAsUser` together in one change, not separately.
 - **The broker image is not required to be digest-pinned** the way agent
   images are (see `README.md`, "Pin the agent image by digest"); only the
   agent image is enforced. Recommend pinning `BROKER_IMAGE` by digest

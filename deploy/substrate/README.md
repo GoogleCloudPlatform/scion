@@ -394,13 +394,18 @@ Secret that is **missing entirely** never reaches that code at all — the
 non-optional Secret volume keeps the pod in `ContainerCreating` with a
 `FailedMount` event until the Secret exists.
 
-**Should there also be an ingress NetworkPolicy on the broker pod,
-restricting `:9800` to kubelet only?** Worth doing, but not added here. HMAC
-auth already means an unauthenticated caller can't actually perform broker
-RPCs, so binding to `0.0.0.0` widens the blast surface for probing/DoS/a
-future auth regression, not authorization itself. Expressing "kubelet only"
-as a `NetworkPolicy` peer needs cluster-specific input (the node CIDR) this
-manifest doesn't have — track as a hardening item once that's confirmed.
+**There is now a bare default-deny-ingress NetworkPolicy on the broker
+namespace** (`cluster/networkpolicy.yaml`'s `scion-broker-default-deny-ingress`),
+denying any in-cluster peer other than kubelet (whose own readiness/
+liveness probe traffic is exempt from NetworkPolicy enforcement, the same
+as the router's probes — see `cluster/README.md`). This closes the gap a
+previous version of this doc left open as "worth doing, but not added
+here": it does not need the node-CIDR-dependent "kubelet only" *allow* rule
+that question was stuck on, because a bare default-deny needs no peer list
+at all — kubelet's probe traffic was never subject to a NetworkPolicy
+denial in the first place. HMAC auth (above) is still the primary defense;
+this NetworkPolicy is defense in depth, same as the worker-namespace
+baseline.
 
 ## Bootstrap files: home delivery
 

@@ -134,3 +134,39 @@ spec:
   policyTypes:
     - Ingress
   # No `ingress` key: zero rules means zero allows from this policy specifically.
+---
+# Broker-namespace default-deny ingress baseline (README.md, "Should there
+# also be an ingress NetworkPolicy on the broker pod" — this is that policy,
+# at the bare default-deny level that question left open).
+#
+# The broker only ever DIALS OUT — to ateapi, the router, and the hub's own
+# control channel — and never needs another in-cluster peer to reach it: the
+# one inbound port it exposes, broker-api (9800), is called by kubelet's own
+# readiness/livenessProbe only, which (like the router's probes documented
+# above) is exempt from NetworkPolicy enforcement on GKE's supported CNIs,
+# not a peer this policy needs to name. A bare default-deny with no ingress
+# rules is therefore already complete: it does not need the
+# node-CIDR-dependent "kubelet only" allow rule the README's own
+# "Known limitations" discussion raises as unresolved, because kubelet's
+# probe traffic was never subject to this policy's denial in the first
+# place. Any other pod outside this namespace that attempts an actual
+# broker-api RPC call is denied at the network layer now, on top of the
+# HMAC auth that already refuses it at the application layer (README.md,
+# "Broker API exposure").
+#
+# Same reasoning as the worker-namespace policy above for why this is a
+# bare default-deny rather than a hand-written allow: nothing in this
+# namespace needs an allow rule to function, so there is nothing to widen
+# by getting an allow rule wrong.
+#
+# Rollback: kubectl delete networkpolicy scion-broker-default-deny-ingress -n "${BROKER_NAMESPACE}"
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scion-broker-default-deny-ingress
+  namespace: ${BROKER_NAMESPACE}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  # No `ingress` key: zero rules means zero allows from this policy specifically.

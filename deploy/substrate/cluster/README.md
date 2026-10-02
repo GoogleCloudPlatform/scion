@@ -11,7 +11,7 @@ own tooling (see "Install order" below).
 | File | What it is | When to apply |
 |---|---|---|
 | `workerpool.yaml` | A `WorkerPool` (Substrate CRD `ate.dev/v1alpha1`) dedicated to scion actors, sized for a Claude Code-class workload, tolerating the gVisor node taint. | After Substrate is installed (the CRD must already exist), before the broker's first `scion start`. |
-| `networkpolicy.yaml` | Two `NetworkPolicy` objects: the router ingress restriction (a cluster/`ate-system` prerequisite, not broker-specific — see `../broker.yaml`), and a default-deny ingress baseline for the worker namespace. See "NetworkPolicy objects" below. | After NetworkPolicy enforcement is enabled on the cluster (below), alongside the broker deploy. |
+| `networkpolicy.yaml` | Three `NetworkPolicy` objects: the router ingress restriction (a cluster/`ate-system` prerequisite, not broker-specific — see `../broker.yaml`), and a default-deny ingress baseline each for the worker namespace and the broker namespace. See "NetworkPolicy objects" below. | After NetworkPolicy enforcement is enabled on the cluster (below), alongside the broker deploy. |
 
 ## Cluster requirements (not manifests — cluster/project setup)
 
@@ -202,11 +202,11 @@ NetworkPolicy enforcement" above. On a cluster without one, both objects
 below apply cleanly and enforce nothing; confirm
 enforcement is actually on before trusting either.
 
-Neither object here creates the router→actor or bootstrap/exec allow
+None of the objects here create the router→actor or bootstrap/exec allow
 path — that traffic is permitted by NetworkPolicy objects Substrate's own
 `atecontroller` WorkerPool controller generates per `WorkerPool`, not by
-anything in this file. Both objects below are restrictions layered on top
-of that controller-generated baseline, not replacements for it.
+anything in this file. All three objects below are restrictions layered on
+top of that controller-generated baseline, not replacements for it.
 
 - **`atenet-router-restrict-ingress`** (`${ATE_SYSTEM_NAMESPACE}`) —
   restricts `atenet-router` ingress to the broker namespace
@@ -232,6 +232,15 @@ of that controller-generated baseline, not replacements for it.
   No egress policy is included: one risks breaking the egress gateway/DNS
   paths every actor depends on, and validating that is out of scope for this
   baseline. Rollback: `kubectl delete networkpolicy scion-worker-default-deny-ingress -n "${SUBSTRATE_WORKER_NAMESPACE}"`.
+- **`scion-broker-default-deny-ingress`** (`${BROKER_NAMESPACE}`) — the same
+  bare default-deny shape as the worker-namespace policy above, for the
+  broker's own namespace. The broker only ever dials out (to ateapi, the
+  router, and the hub); its one inbound port (broker-api, 9800) is called
+  by kubelet's readiness/livenessProbe only, which — like the router's own
+  probes — is exempt from NetworkPolicy enforcement, so a bare default-deny
+  needs no peer list to stay complete. See `../README.md`, "Broker API
+  exposure", for the HMAC auth layer this sits on top of. Rollback:
+  `kubectl delete networkpolicy scion-broker-default-deny-ingress -n "${BROKER_NAMESPACE}"`.
 
 ## `worker_selector`
 
