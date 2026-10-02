@@ -272,6 +272,8 @@ export class ScionChatMembers extends LitElement {
       min-height: 0;
       overflow-y: auto;
       overscroll-behavior: contain;
+      /* Set by the chat page's mobile panels; see chat.ts. */
+      touch-action: var(--chat-touch-action, auto);
     }
 
     .section-label {

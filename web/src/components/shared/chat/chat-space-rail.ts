@@ -442,6 +442,8 @@ export class ScionChatSpaceRail extends LitElement {
       flex: 1;
       overflow-y: auto;
       overscroll-behavior: contain;
+      /* Set by the chat page's mobile panels; see chat.ts. */
+      touch-action: var(--chat-touch-action, auto);
       padding: 0.25rem 0;
     }
 

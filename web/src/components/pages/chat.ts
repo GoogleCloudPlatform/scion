@@ -1048,6 +1048,18 @@ export class ScionPageChat extends LitElement {
            width and push content off the left edge on iOS Safari. */
         box-sizing: border-box;
         border: 0;
+        /* A horizontal drag here belongs to the swipe handler above, never
+           to the browser: Chromium turns a horizontal touch overscroll that
+           nothing consumed into history-back navigation, which rebuilds the
+           whole page. overscroll-behavior on the root does not stop it, so
+           horizontal panning is taken away from the browser instead. Touch
+           events still fire, so the swipe handler is unaffected, and
+           pinch-zoom is kept. touch-action does not carry into a scroll
+           container (each one starts over), so the panels' own scrollers
+           restate it through --chat-touch-action; scrollers that really
+           scroll sideways (code blocks, tables) do not, and keep panning. */
+        --chat-touch-action: pan-y pinch-zoom;
+        touch-action: var(--chat-touch-action);
       }
 
       /* Landscape: keep each full-width panel's content clear of the notch
