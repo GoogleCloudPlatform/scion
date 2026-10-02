@@ -1344,7 +1344,7 @@ describe('_loadPalettePeople', () => {
       // The predecessor-abort step in _resolveSelfUserId runs before the
       // `known` early return, specifically so this case (identity becomes
       // known elsewhere while a fetch is still in flight) still stops the
-      // old request. Moving the abort back below that check would make a
+      // old request. Moving the abort below that check would make a
       // known-id call skip it entirely.
       const el = createPage();
       el.pageData = {};

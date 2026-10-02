@@ -974,7 +974,7 @@ export class ScionPageChat extends LitElement {
     this._paletteDocumentsUnsubscribe = null;
     this._paletteDataController.cancel();
     // Same reasoning as `_closePaletteAndCancelLoad`'s own close-time
-    // handling, both parts: the seq bump first is the correctness guard (a
+    // handling, both parts: the seq bump is the correctness guard (a
     // disconnect-time abort resolves to '', and without this an in-flight
     // People load would still publish that as a visible identity error on
     // the now-detached page); the abort itself is the resource-usage
