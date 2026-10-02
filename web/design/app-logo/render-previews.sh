@@ -24,7 +24,11 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 out="${1:-/tmp/app-logo-previews}"
-chrome="${CHROME:-$(command -v chromium || command -v chromium-browser || command -v google-chrome)}"
+chrome="${CHROME:-$(command -v chromium || command -v chromium-browser || command -v google-chrome || true)}"
+if [ -z "$chrome" ]; then
+  echo "render-previews: no Chromium found; set CHROME" >&2
+  exit 1
+fi
 mkdir -p "$out"
 
 render() {
@@ -32,9 +36,20 @@ render() {
   local name="${svg%.svg}"
   local query
   query="s=${svg}&t=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$title")"
-  "$chrome" --headless --no-sandbox --disable-gpu --hide-scrollbars \
+  local log
+  log="$(mktemp)"
+  rm -f -- "$out/$name.png"
+  # Chromium is noisy on stderr even on success; show it only on failure.
+  if ! "$chrome" --headless --no-sandbox --disable-gpu --hide-scrollbars \
     --virtual-time-budget=2000 --window-size=1100,1200 \
-    --screenshot="$out/$name.png" "file://$here/preview-sheet.html?$query" 2>/dev/null
+    --screenshot="$out/$name.png" "file://$here/preview-sheet.html?$query" \
+    >"$log" 2>&1 || [ ! -s "$out/$name.png" ]; then
+    cat "$log" >&2
+    rm -f -- "$log"
+    echo "render-previews: render failed: $out/$name.png (CHROME=$chrome)" >&2
+    exit 1
+  fi
+  rm -f -- "$log"
   echo "$out/$name.png"
 }
 

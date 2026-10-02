@@ -23,10 +23,14 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 public="$(cd "$here/../../public" && pwd)"
-chrome="${CHROME:-$(command -v chromium || command -v chromium-browser || command -v google-chrome)}"
+chrome="${CHROME:-$(command -v chromium || command -v chromium-browser || command -v google-chrome || true)}"
+if [ -z "$chrome" ]; then
+  echo "generate-icons: no Chromium found; set CHROME" >&2
+  exit 1
+fi
 work="$(mktemp -d)"
 cleanup() {
-  rm -f -- "$work"/page.html "$work"/favicon-*.png
+  rm -f -- "$work"/page.html "$work"/chrome.log "$work"/favicon-*.png
   rmdir -- "$work"
 }
 trap cleanup EXIT
@@ -41,10 +45,17 @@ html,body{margin:0;background:transparent}
 img{display:block;width:${size}px;height:${size}px}
 </style></head><body><img src="file://$here/$svg"></body></html>
 EOF
-  "$chrome" --headless --no-sandbox --disable-gpu --hide-scrollbars \
+  rm -f -- "$out"
+  # Chromium is noisy on stderr even on success, so keep its output in a
+  # log and show it only when the render fails.
+  if ! "$chrome" --headless --no-sandbox --disable-gpu --hide-scrollbars \
     --force-device-scale-factor=1 --default-background-color=00000000 \
     --window-size="$size,$size" --screenshot="$out" \
-    "file://$work/page.html" >/dev/null 2>&1
+    "file://$work/page.html" >"$work/chrome.log" 2>&1 || [ ! -s "$out" ]; then
+    cat "$work/chrome.log" >&2
+    echo "generate-icons: render failed: $out (CHROME=$chrome)" >&2
+    exit 1
+  fi
   echo "$out"
 }
 
