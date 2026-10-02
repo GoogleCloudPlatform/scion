@@ -1588,8 +1588,23 @@ func (s *Server) findBrokerByIDOrSlug(ctx context.Context, identifier string) (*
 }
 
 // agentHasGCPIdentityAssigned returns true when the agent's own GCPIdentity
-// config has MetadataMode set to assign or passthrough, mirroring the broker's
-// check at pkg/runtimebroker/handlers.go:2186-2187.
+// config has MetadataMode set to assign or passthrough, mirroring the
+// broker's own preflight check (pkg/runtimebroker/handlers.go's
+// extractRequiredEnvKeys, via effectiveGCPMetadataMode in start_context.go).
+//
+// Known limitation (ptone/scion#2328): a nil GCPIdentity here returns false
+// ("no GCP credentials"), even though a Kubernetes dispatch with nothing
+// configured resolves to passthrough at the broker — a runtime this function
+// cannot see, because nothing upstream of it resolves a per-dispatch profile
+// to a concrete runtime type today (the broker-side profile/settings
+// resolution this mirrors, resolveManagerForOpts, has no Hub-side
+// equivalent; see ptone/scion#2009 for the closest related work). In
+// practice this only affects hub-side callers of this function — e.g.
+// auth-secret-requirement checks — for an agent whose stored GCPIdentity is
+// nil and that happens to land on Kubernetes; the broker's
+// own preflight (which does know the runtime) is not affected. Fix
+// properly once the Hub can resolve a dispatch's target runtime with
+// confidence; until then this is a documented gap, not a silent one.
 func agentHasGCPIdentityAssigned(agent *store.Agent) bool {
 	if agent == nil || agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil {
 		return false

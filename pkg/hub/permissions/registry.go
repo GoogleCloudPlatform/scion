@@ -79,6 +79,17 @@ const (
 	ActionDeliver = "deliver"
 	ActionUse     = "use"
 
+	// PermissionGCPServiceAccountUse is the gcp_service_account.use
+	// permission ID. Named so pkg/hub/authz.go's agent-scope handling for
+	// this one permission keys off a constant rather than a literal string.
+	// The Registry row below keeps its ID as the literal string, not this
+	// constant: pkg/hub/authzop/catalog_test.go reads registry.go as text
+	// and takes the first quoted string on each line starting with "{ID:"
+	// as that row's ID, so an identifier there would make it read the
+	// row's Description as the ID. TestMaterialPermissions_Registered pins
+	// the constant against the row.
+	PermissionGCPServiceAccountUse = "gcp_service_account.use"
+
 	UATScopeAgentManage         = "agent:manage"
 	UATScopeSkillManage         = "skill:manage"
 	UATScopeTemplateManage      = "template:manage"
@@ -139,7 +150,7 @@ var Registry = []Permission{
 	{ID: "agent.list", Resource: ResourceAgent, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "agent:list", Description: "List agents in the project", Enforcement: []string{"pkg/hub/handlers_agents_core.go", "pkg/hub/authz.go"}},
 	{ID: "agent.update", Resource: ResourceAgent, Action: ActionUpdate, CapabilityKind: CapabilityResource, Description: "Update agents", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
 	{ID: "agent.delete", Resource: ResourceAgent, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "agent:delete", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Delete agents", Enforcement: []string{"pkg/hub/handlers_agents_core.go", "pkg/hub/handlers_agent_delete_authz_test.go"}},
-	{ID: "agent.attach", Resource: ResourceAgent, Action: ActionAttach, CapabilityKind: CapabilityResource, UATScope: "agent:attach", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Attach to agent sessions (terminal, exec, env, reset-auth)", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/pty_handlers.go"}, ExcludeFromManageAlias: true},
+	{ID: "agent.attach", Resource: ResourceAgent, Action: ActionAttach, CapabilityKind: CapabilityResource, UATScope: "agent:attach", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Attach to agent sessions (terminal, exec, env, reset-auth)", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/pty_handlers.go", "pkg/hub/authorize_agentkeys.go:authorizeAgentKeys"}, ExcludeFromManageAlias: true},
 	{ID: "agent.lifecycle", Resource: ResourceAgent, Action: ActionLifecycle, CapabilityKind: CapabilityResource, UATScope: "agent:lifecycle", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Start, stop, suspend, restart, restore, and reincarnate agents", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/handlers_agents_core.go:handleAgentAction", "pkg/hub/handlers_agent_reincarnate.go:authorizeAgentReincarnate"}},
 	{ID: "agent.port_access", Resource: ResourceAgent, Action: ActionPortAccess, CapabilityKind: CapabilityResource, UATScope: "agent:port_access", Description: "Access agent forwarded ports", Enforcement: []string{"pkg/hub/port_forward_handlers.go"}, ExcludeFromManageAlias: true},
 	{ID: "agent.stop_all", Resource: ResourceAgent, Action: ActionStopAll, CapabilityKind: CapabilityScope, Description: "Stop all agents", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
@@ -214,7 +225,14 @@ var Registry = []Permission{
 	{ID: "gcp_service_account.list", Resource: ResourceGCPServiceAccount, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "gcp_service_account:list", Description: "List GCP service accounts", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},
 	{ID: "gcp_service_account.verify", Resource: ResourceGCPServiceAccount, Action: ActionVerify, CapabilityKind: CapabilityResource, UATScope: "gcp_service_account:verify", Description: "Verify GCP service accounts", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},
 	{ID: "gcp_service_account.mint", Resource: ResourceGCPServiceAccount, Action: ActionMint, CapabilityKind: CapabilityScope, Description: "Mint GCP service account tokens", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},
-	{ID: "gcp_service_account.assign", Resource: ResourceGCPServiceAccount, Action: ActionAssign, CapabilityKind: CapabilityResource, UATScope: "gcp_service_account:assign", AgentScopes: []string{"project:agent:create"}, Description: "Assign GCP service accounts to agents", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go", "pkg/hub/authz.go"}},
+	// AgentScopes names project:agent:sa_assign only, its own agent scope
+	// distinct from project:agent:create (ptone/scion#2339): a ceiling that
+	// covers agent.create does not thereby cover this permission, and vice
+	// versa. authz.go's effectiveAgentScopes adds project:agent:sa_assign for
+	// a verified agent JWT signed before the split that holds
+	// project:agent:create, so such a token keeps authorizing this
+	// permission.
+	{ID: "gcp_service_account.assign", Resource: ResourceGCPServiceAccount, Action: ActionAssign, CapabilityKind: CapabilityResource, UATScope: "gcp_service_account:assign", AgentScopes: []string{"project:agent:sa_assign"}, Description: "Assign GCP service accounts to agents", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go", "pkg/hub/authz.go"}},
 
 	// Hub resource type — hub-level administrative operations (Phase 2 D4 resolution)
 	{ID: "hub.settings.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read hub settings", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
@@ -302,10 +320,11 @@ var Registry = []Permission{
 	// grant required for the selected item.
 	// secret.use governs an agent's own runtime retrieval and is admitted
 	// under an agent JWT via the AgentScopes mapping below. gcp_service_account.use
-	// has no AgentScopes: the GCP token scope is per service account
-	// (project:gcp:token:<sa-id>) and cannot be matched statically, so no
-	// credential satisfies it until the slice that wires the token-mint
-	// check adds that mapping.
+	// keeps AgentScopes nil: the GCP token scope names one service account
+	// instance (project:gcp:token:<sa-id>), so its agent-credential admission
+	// is decided per resource instead of from this permission's static
+	// scope list. See pkg/hub/authz.go's agent-scope restriction and its
+	// request-local synthetic grant, both keyed on PermissionGCPServiceAccountUse.
 	{ID: "secret.deliver", Resource: ResourceSecret, Action: ActionDeliver, Description: "Deliver a secret to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
 	{ID: "env_var.deliver", Resource: ResourceEnvVar, Action: ActionDeliver, Description: "Deliver a stored environment variable to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
 	{ID: "skill_injection.deliver", Resource: ResourceSkillInjection, Action: ActionDeliver, Description: "Deliver a stored skill reference to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},

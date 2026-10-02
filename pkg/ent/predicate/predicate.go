@@ -194,3 +194,6 @@ type User func(*sql.Selector)
 
 // UserAccessToken is the predicate function for useraccesstoken builders.
 type UserAccessToken func(*sql.Selector)
+
+// UserTerminalWorkspace is the predicate function for userterminalworkspace builders.
+type UserTerminalWorkspace func(*sql.Selector)

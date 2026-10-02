@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -124,6 +125,24 @@ type AgentService interface {
 	// catalog and start a new generation with the given handoff as its first
 	// task. With req.DryRun, returns the resolved plan and changes nothing.
 	Reincarnate(ctx context.Context, agentID string, req *ReincarnateAgentRequest) (*ReincarnateAgentResponse, error)
+
+	// SendKeys delivers literal terminal input to an agent's tmux session via
+	// the dedicated agent-keys operation (.design/agent-keys-contract.md),
+	// POSTing to {id}/keys — never to /message, and never as a Raw
+	// StructuredMessage. It never creates a conversation message, never uses
+	// message-mode authorization, and is never retried: the request is sent
+	// exactly once regardless of how the client was constructed (including
+	// WithRetry), and an HTTP redirect is never followed and re-sent. A
+	// network-level failure (no response received at all) is returned
+	// unchanged — the caller cannot know whether the broker executed the
+	// keys, and must not infer success or failure from this call having
+	// failed to connect. A response the Hub did send is decoded and
+	// returned as *apiclient.APIError on any non-2xx status, preserving the
+	// outcome code (Code) and, where the contract says one exists for that
+	// outcome, the operation ID (Details["operation_id"]) — see contract
+	// §2.4a/§2.5. SendKeys performs no client-side retry, fallback, or
+	// downgrade to messaging of any kind.
+	SendKeys(ctx context.Context, agentID string, keys string) (*agentkeys.Response, error)
 }
 
 // agentService is the implementation of AgentService.
@@ -153,7 +172,31 @@ type ListAgentsOptions struct {
 	RuntimeBrokerID string            // Filter by runtime broker
 	Labels          map[string]string // Label selector
 	IncludeDeleted  bool              // Include soft-deleted agents
-	Page            apiclient.PageOptions
+
+	// OwnerID, when set, restricts results to agents owned by this principal
+	// ID. Always combined with every other option using AND (ptone/scion#2146).
+	OwnerID string
+
+	// AncestorID, when set, restricts results to agents whose Ancestry chain
+	// contains this principal ID (transitive descendants of AncestorID).
+	AncestorID string
+
+	// HarnessConfig, when set, restricts results to agents whose resolved
+	// harness-config name equals this value.
+	HarnessConfig string
+
+	// IDs, when non-empty, restricts results to agents whose ID is in this
+	// set. Used for relationship queries (e.g. CLI --ancestors) that resolve
+	// a specific set of candidate IDs client-side and ask the Hub to narrow
+	// them to the caller's authorized, currently-existing agents.
+	IDs []string
+
+	// LineageRootID, when set, restricts results to the agent whose ID
+	// equals this value OR whose Ancestry contains it — the root agent plus
+	// all its descendants. Used by CLI --lineage.
+	LineageRootID string
+
+	Page apiclient.PageOptions
 }
 
 // ListAgentsResponse is the response from listing agents.
@@ -329,6 +372,21 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 		}
 		for k, v := range opts.Labels {
 			query.Add("label", fmt.Sprintf("%s=%s", k, v))
+		}
+		if opts.OwnerID != "" {
+			query.Set("ownerId", opts.OwnerID)
+		}
+		if opts.AncestorID != "" {
+			query.Set("ancestorId", opts.AncestorID)
+		}
+		if opts.HarnessConfig != "" {
+			query.Set("harnessConfig", opts.HarnessConfig)
+		}
+		for _, id := range opts.IDs {
+			query.Add("id", id)
+		}
+		if opts.LineageRootID != "" {
+			query.Set("lineageRootId", opts.LineageRootID)
 		}
 		opts.Page.ToQuery(query)
 	}
@@ -566,6 +624,60 @@ func (s *agentService) SendStructuredMessageWithOptions(ctx context.Context, age
 		return nil, err
 	}
 	return apiclient.DecodeResponse[MessageResponse](resp)
+}
+
+// SendKeys implements AgentService.SendKeys. See that method's doc comment
+// for the no-replay and error-fidelity guarantees; agentPath already honors
+// project scoping, so the same call reaches either public route shape
+// (.design/agent-keys-contract.md §2.1) depending on whether this service was
+// obtained from Client.Agents() or Client.ProjectAgents(projectID).
+func (s *agentService) SendKeys(ctx context.Context, agentID string, keys string) (*agentkeys.Response, error) {
+	resp, err := s.c.postNoRetry(ctx, s.agentPath(agentID)+"/keys", agentkeys.Request{Keys: keys}, nil)
+	if err != nil {
+		// No response was received at all (connection refused/reset, DNS
+		// failure, context deadline, ...): honest uncertainty, not a 503/502
+		// to reclassify. The caller must not infer either outcome from this.
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		return nil, apiclient.ParseErrorResponse(resp)
+	}
+
+	// Contract §2.4: the ONLY success shape is HTTP 200 with
+	// Response.Status == agentkeys.StatusDispatched. Nothing else — a 204,
+	// a 2xx the server never defines, or a 3xx apiclient.DecodeResponse's
+	// own <400 check would otherwise treat as decodable — may be reported
+	// as success: each is either a response this contract never promises
+	// (so treating it as success would be a guess, not a decision) or a
+	// response DoNoRetry's "do not follow the redirect" contract leaves
+	// unresolved. Either way the caller must receive "unknown", never
+	// "dispatched" and never a nil *Response with a nil error.
+	if resp.StatusCode != http.StatusOK {
+		return nil, &apiclient.APIError{
+			StatusCode: resp.StatusCode,
+			Code:       string(agentkeys.OutcomeKeysOutcomeUnknown),
+			Message:    fmt.Sprintf("unexpected keys response status %d (only 200 means dispatched)", resp.StatusCode),
+		}
+	}
+
+	var result agentkeys.Response
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, &apiclient.APIError{
+			StatusCode: resp.StatusCode,
+			Code:       string(agentkeys.OutcomeKeysOutcomeUnknown),
+			Message:    "could not decode keys response body",
+		}
+	}
+	if result.Status != agentkeys.StatusDispatched {
+		return nil, &apiclient.APIError{
+			StatusCode: resp.StatusCode,
+			Code:       string(agentkeys.OutcomeKeysOutcomeUnknown),
+			Message:    fmt.Sprintf("unexpected keys response status %q (not %q)", result.Status, agentkeys.StatusDispatched),
+		}
+	}
+	return &result, nil
 }
 
 // OutboundMessageRequest is the request body for sending an outbound message

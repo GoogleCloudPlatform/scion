@@ -358,6 +358,16 @@ func (c *client) post(ctx context.Context, path string, body interface{}, header
 	return c.transport.Post(ctx, path, body, headers)
 }
 
+// postNoRetry performs an HTTP POST request exactly once: it bypasses the
+// transport's configured retry policy (including a client built with
+// WithRetry) and does not follow redirects. Used by operations — currently
+// only agent keys injection — for which the generic transport retry/redirect
+// behavior would risk sending a non-idempotent request more than once. See
+// apiclient.Transport.DoNoRetry.
+func (c *client) postNoRetry(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	return c.transport.PostNoRetry(ctx, path, body, headers)
+}
+
 // put performs an HTTP PUT request.
 func (c *client) put(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
 	return c.transport.Put(ctx, path, body, headers)

@@ -17,8 +17,10 @@ package apiclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -208,5 +210,155 @@ func TestDecodeResponseError(t *testing.T) {
 	}
 	if apiErr.Code != "not_found" {
 		t.Errorf("expected code 'not_found', got %q", apiErr.Code)
+	}
+}
+
+// TestDoNoRetry_Ignores5xxRetryConfig proves DoNoRetry sends exactly one
+// request even when the Transport is built with WithRetry(>0) and the server
+// answers with a 5xx — the case Do itself would retry.
+func TestDoNoRetry_Ignores5xxRetryConfig(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	tr := NewTransport(server.URL, WithRetry(3, time.Millisecond))
+	resp, err := tr.PostNoRetry(context.Background(), "/api/v1/keys", map[string]string{"keys": "C-c"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected status 500, got %d", resp.StatusCode)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("expected exactly 1 server hit despite WithRetry(3, ...) and a 5xx response, got %d", got)
+	}
+}
+
+// countingErrorRoundTripper is an http.RoundTripper that always fails
+// (simulating a connection-level error, e.g. connection refused/reset) and
+// counts how many times it was invoked. Unlike counting hits on a real
+// httptest.Server, this counts transport-level attempts directly: a retry
+// loop that reuses the same *http.Request (as Transport.Do's does) can
+// resend an already-partially-consumed request body, which a real server
+// may or may not observe as a distinct "hit" depending on exactly when the
+// first attempt's connection died — that timing let a mutated DoNoRetry
+// (routed through the retrying Do) pass a server-hit-counting version of
+// this test by accident. Counting RoundTrip calls has no such gap: every
+// attempt, successful or not, is exactly one call.
+type countingErrorRoundTripper struct {
+	calls int32
+	err   error
+}
+
+func (rt *countingErrorRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	atomic.AddInt32(&rt.calls, 1)
+	return nil, rt.err
+}
+
+// TestDoNoRetry_NoRetryOnNetworkError proves a connection-level failure is
+// not retried: exactly one RoundTrip call, even with WithRetry(3, ...)
+// configured.
+func TestDoNoRetry_NoRetryOnNetworkError(t *testing.T) {
+	rt := &countingErrorRoundTripper{err: errors.New("simulated connection refused")}
+	tr := NewTransport("http://127.0.0.1:0",
+		WithHTTPClient(&http.Client{Transport: rt}),
+		WithRetry(3, time.Millisecond))
+
+	_, err := tr.PostNoRetry(context.Background(), "/api/v1/keys", map[string]string{"keys": "C-c"}, nil)
+	if err == nil {
+		t.Fatal("expected an error from a connection that could not be established")
+	}
+	if got := atomic.LoadInt32(&rt.calls); got != 1 {
+		t.Errorf("expected exactly 1 RoundTrip call (connection loss must not be replayed) despite WithRetry(3, ...), got %d", got)
+	}
+}
+
+// TestDo_RetriesOnNetworkError is TestDoNoRetry_NoRetryOnNetworkError's
+// mutation control: it proves the exact same RoundTripper/assertion
+// machinery actually distinguishes retry from no-retry — Do, with the same
+// WithRetry(3, ...) configuration, visibly retries a connection-level
+// failure (4 RoundTrip calls: the original attempt plus 3 retries). If
+// DoNoRetry's test above were ever satisfied by a mutation that routed it
+// through Do, this control would be the one demonstrating the test
+// machinery itself still works.
+func TestDo_RetriesOnNetworkError(t *testing.T) {
+	rt := &countingErrorRoundTripper{err: errors.New("simulated connection refused")}
+	tr := NewTransport("http://127.0.0.1:0",
+		WithHTTPClient(&http.Client{Transport: rt}),
+		WithRetry(3, time.Millisecond))
+
+	_, err := tr.Post(context.Background(), "/api/v1/resources", map[string]string{"name": "test"}, nil)
+	if err == nil {
+		t.Fatal("expected an error from a connection that could not be established")
+	}
+	if got := atomic.LoadInt32(&rt.calls); got != 4 {
+		t.Errorf("expected exactly 4 RoundTrip calls (1 original + 3 retries), got %d", got)
+	}
+}
+
+// TestDoNoRetry_DoesNotFollowRedirect proves a 3xx response is returned to
+// the caller as-is — never automatically re-sent to its Location — and that
+// the origin server sees exactly one request even though it issued a
+// redirect to itself.
+func TestDoNoRetry_DoesNotFollowRedirect(t *testing.T) {
+	var hits int32
+	var mux http.ServeMux
+	mux.HandleFunc("/api/v1/keys", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		http.Redirect(w, r, "/api/v1/keys-new", http.StatusTemporaryRedirect)
+	})
+	mux.HandleFunc("/api/v1/keys-new", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusOK)
+	})
+	server := httptest.NewServer(&mux)
+	defer server.Close()
+
+	tr := NewTransport(server.URL)
+	resp, err := tr.PostNoRetry(context.Background(), "/api/v1/keys", map[string]string{"keys": "C-c"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Errorf("expected the 307 to be returned unchanged, got %d", resp.StatusCode)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("expected exactly 1 server hit (redirect must not be followed/replayed), got %d", got)
+	}
+}
+
+// TestDo_StillRetriesOn5xx is a control proving Do's own retry behavior is
+// unchanged by DoNoRetry's addition — the two must keep different policies.
+func TestDo_StillRetriesOn5xx(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&hits, 1)
+		if n < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tr := NewTransport(server.URL, WithRetry(3, time.Millisecond))
+	resp, err := tr.Post(context.Background(), "/api/v1/resources", map[string]string{"name": "test"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected eventual 200 after retries, got %d", resp.StatusCode)
+	}
+	if got := atomic.LoadInt32(&hits); got != 3 {
+		t.Errorf("expected exactly 3 server hits (2 failures + 1 success), got %d", got)
 	}
 }

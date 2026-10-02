@@ -130,6 +130,7 @@ var (
 		{Name: "task_summary", Type: field.TypeString, Nullable: true},
 		{Name: "message", Type: field.TypeString, Nullable: true},
 		{Name: "applied_config", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "harness_config", Type: field.TypeString, Nullable: true},
 		{Name: "ancestry", Type: field.TypeJSON, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
@@ -162,7 +163,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[53]},
+				Columns:    []*schema.Column{AgentsColumns[54]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -171,12 +172,12 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[53]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[54]},
 			},
 			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[47]},
+				Columns: []*schema.Column{AgentsColumns[48]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "launch_state = 'active'",
 				},
@@ -184,7 +185,15 @@ var (
 			{
 				Name:    "agent_launch_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[43]},
+				Columns: []*schema.Column{AgentsColumns[44]},
+			},
+			{
+				Name:    "agent_harness_config_reconcile_pending",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[0]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "harness_config IS NULL AND applied_config IS NOT NULL",
+				},
 			},
 		},
 	}
@@ -1753,6 +1762,7 @@ var (
 		{Name: "supported_harnesses", Type: field.TypeString, Nullable: true},
 		{Name: "resources", Type: field.TypeString, Nullable: true},
 		{Name: "runtimes", Type: field.TypeString, Nullable: true},
+		{Name: "default_profile", Type: field.TypeString, Nullable: true},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
 		{Name: "endpoint", Type: field.TypeString, Nullable: true},
@@ -2206,7 +2216,8 @@ var (
 		{Name: "name", Type: field.TypeString},
 		{Name: "prefix", Type: field.TypeString},
 		{Name: "key_hash", Type: field.TypeString, Unique: true},
-		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "boundary_kind", Type: field.TypeString, Default: "project"},
 		{Name: "scopes", Type: field.TypeString},
 		{Name: "ceiling_version", Type: field.TypeInt32, Default: 0},
 		{Name: "ceiling_permission_ids", Type: field.TypeString, Nullable: true},
@@ -2232,6 +2243,30 @@ var (
 				Name:    "useraccesstoken_project_id",
 				Unique:  false,
 				Columns: []*schema.Column{UserAccessTokensColumns[5]},
+			},
+		},
+	}
+	// UserTerminalWorkspacesColumns holds the columns for the "user_terminal_workspaces" table.
+	UserTerminalWorkspacesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "agent_ids", Type: field.TypeJSON},
+		{Name: "frontmost_agent_id", Type: field.TypeString, Nullable: true},
+		{Name: "schema_version", Type: field.TypeInt, Default: 1},
+		{Name: "revision", Type: field.TypeInt64, Default: 0},
+		{Name: "update_time", Type: field.TypeTime},
+		{Name: "user_id", Type: field.TypeUUID, Unique: true},
+	}
+	// UserTerminalWorkspacesTable holds the schema information for the "user_terminal_workspaces" table.
+	UserTerminalWorkspacesTable = &schema.Table{
+		Name:       "user_terminal_workspaces",
+		Columns:    UserTerminalWorkspacesColumns,
+		PrimaryKey: []*schema.Column{UserTerminalWorkspacesColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "user_terminal_workspaces_users_terminal_workspace",
+				Columns:    []*schema.Column{UserTerminalWorkspacesColumns[6]},
+				RefColumns: []*schema.Column{UsersColumns[0]},
+				OnDelete:   schema.Cascade,
 			},
 		},
 	}
@@ -2325,6 +2360,7 @@ var (
 		UsageReservationsTable,
 		UsersTable,
 		UserAccessTokensTable,
+		UserTerminalWorkspacesTable,
 		GroupChildGroupsTable,
 	}
 )
@@ -2468,6 +2504,13 @@ func init() {
 	UsageReservationsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	UserAccessTokensTable.Annotation = &entsql.Annotation{
 		Table: "user_access_tokens",
+	}
+	UserAccessTokensTable.Annotation.Checks = map[string]string{
+		"user_access_tokens_boundary_kind_check": "((boundary_kind = 'project' AND project_id IS NOT NULL) OR (boundary_kind = 'hub' AND project_id IS NULL))",
+	}
+	UserTerminalWorkspacesTable.ForeignKeys[0].RefTable = UsersTable
+	UserTerminalWorkspacesTable.Annotation = &entsql.Annotation{
+		Table: "user_terminal_workspaces",
 	}
 	GroupChildGroupsTable.ForeignKeys[0].RefTable = GroupsTable
 	GroupChildGroupsTable.ForeignKeys[1].RefTable = GroupsTable

@@ -20,6 +20,7 @@ import {
   type TerminalSession,
   type TerminalResourceInitializer,
 } from './terminal-sessions.js';
+import type { TerminalAgentMetadata } from './terminal-metadata.js';
 import { dispatchTeardown } from '../utils/auth.js';
 
 /** Document focus observation is not a guarantee of desktop foreground activation. */
@@ -27,7 +28,11 @@ export type TerminalFocusResult = 'document-focused' | 'not-confirmed';
 export interface TerminalCoordinatorAdapter {
   initialize: TerminalResourceInitializer;
   /** Owner-only creation bridge; must return this registry's requested entry. */
-  create?(registry: TerminalSessionRegistry, agentId: string): TerminalSession;
+  create?(
+    registry: TerminalSessionRegistry,
+    agentId: string,
+    options?: { deferConnect?: boolean }
+  ): TerminalSession;
   /**
    * Activate the retained single-pane presentation. Guard async work with signal.
    * Combine it with host navigation guards and REJECT a canceled selection so the
@@ -140,6 +145,81 @@ export class TerminalCoordinator {
   /** Only the owner's retained host receives document-local session handles. */
   get sessions(): readonly TerminalSession[] {
     return this.isOwner ? this.registry.list() : [];
+  }
+
+  /**
+   * Current metadata snapshot for agentId, for callers (terminal-persistence)
+   * that need to know availability (e.g. 'deleted') without holding a
+   * reference to the private registry. Undefined when the agent is not
+   * currently retained (no open or restored entry).
+   */
+  metadataFor(agentId: string): TerminalAgentMetadata | undefined {
+    return this.registry.metadata.get(agentId);
+  }
+
+  /**
+   * Public wrapper over the private claim() (ifAvailable, plus the queued
+   * wait on failure), for the terminal-persistence restore path. Resolves
+   * false, without calling navigator.locks, when coordination is
+   * unsupported (insecure context, no Web Locks, no BroadcastChannel) or
+   * this coordinator is torn down. If the lock request rejects, it sets
+   * available = false (as route() does) and resolves false. Never rejects.
+   */
+  async claimOwnership(): Promise<boolean> {
+    if (!this.available || this.stopped) return false;
+    try {
+      return await this.claim();
+    } catch {
+      this.available = false;
+      return false;
+    }
+  }
+
+  /**
+   * Forwards registry.subscribe, including its immediate synchronous first
+   * call. Delivers only while isOwner && !tornDown — a non-owner, or a torn
+   * down coordinator, gets no callbacks (including none from sessions
+   * closing inside stop()). Returns an unsubscribe function.
+   */
+  subscribeSessions(cb: (sessions: readonly TerminalSession[]) => void): () => void {
+    return this.registry.subscribe((sessions) => {
+      if (!this.isOwner || this.stopped) return;
+      cb(sessions);
+    });
+  }
+
+  /**
+   * Restores background entries for terminal-persistence's merge. Checks
+   * isOwner && !tornDown synchronously; if that check fails, creates nothing
+   * and returns []. Otherwise, for each id in agentIds not already present
+   * in the registry, calls adapter.create with deferConnect true for every
+   * id except connectAgentId. Returns the sessions for agentIds, in order
+   * (existing sessions included).
+   */
+  restoreEntries(
+    agentIds: readonly string[],
+    opts: { connectAgentId: string | null }
+  ): readonly TerminalSession[] {
+    if (!this.isOwner || this.stopped) return [];
+    const existing = new Map(
+      this.registry.list().map((session) => [session.state.agentId, session])
+    );
+    const result: TerminalSession[] = [];
+    for (const agentId of agentIds) {
+      let session = existing.get(agentId);
+      if (!session) {
+        session = this.adapter.create
+          ? this.adapter.create(this.registry, agentId, {
+              deferConnect: agentId !== opts.connectAgentId,
+            })
+          : this.registry.open(agentId, this.adapter.initialize, {
+              deferConnect: agentId !== opts.connectAgentId,
+            });
+        existing.set(agentId, session);
+      }
+      result.push(session);
+    }
+    return result;
   }
 
   /**

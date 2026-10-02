@@ -75,6 +75,7 @@ All image-related scripts live under `scripts/`. GitHub Actions workflows remain
 | `scripts/trigger-cloudbuild.sh` | Deprecation shim. Forwards to `build-images.sh --builder cloud-build`. |
 | `scripts/pull-containers.sh` | Pull pre-built images (auto-detects runtime). |
 | `scripts/setup-cloud-build.sh` | One-time GCP setup (APIs, Artifact Registry, permissions). |
+| `scripts/check-harness-coverage.sh` | Fails if a `harnesses/<name>/Dockerfile` is missing from an aggregate `cloudbuild-*.yaml`. |
 | `.github/workflows/build-images.yml` | GitHub Actions workflow for building and pushing images. |
 
 ### Builders
@@ -85,7 +86,7 @@ All image-related scripts live under `scripts/`. GitHub Actions workflows remain
 |---|---|---|---|
 | `local-docker` (default) | `docker buildx` | yes (auto-promotes to `--push`) | honors `--push`; `--load` otherwise |
 | `local-podman` | `podman build` | single-arch by default; multi-arch errors out (manual QEMU setup required) | honors `--push`; built images live in the local store automatically |
-| `cloud-build` | `gcloud builds submit` against a static `cloudbuild-*.yaml` | always amd64+arm64 (server-side) | always pushes |
+| `cloud-build` | `gcloud builds submit` against a static `cloudbuild-*.yaml` (group targets) or a config generated on the fly (individual harness targets) | always amd64+arm64 (server-side) | always pushes |
 
 The orchestrator owns target sequencing, tag computation, and BASE_IMAGE threading. Each builder only knows how to execute one image build (per-image mode) or one target submission (target mode).
 
@@ -180,7 +181,7 @@ The workflow shells out to `build-images.sh --builder local-docker`. It is also 
 
 ## Cloud Build Configs
 
-The `cloud-build` builder maps each `--target` to a static YAML file:
+The `cloud-build` builder maps each group `--target` to a static YAML file:
 
 | Target | Config file |
 |---|---|
@@ -193,6 +194,14 @@ The `cloud-build` builder maps each `--target` to a static YAML file:
 | `omni` | `cloudbuild-omni.yaml` |
 | `thick-prep` | `cloudbuild-thick.yaml` (builds the full thick chain — see note below) |
 | `thick` | `cloudbuild-thick.yaml` |
+
+An individual harness step ID (`scion-claude`, `scion-muse-code`, etc.) is also
+a valid `--target` under `cloud-build`: instead of a static file, the builder
+generates a one-step config on the fly — the same `verify-registry` /
+`setup-buildx` / `bootstrap-buildx` / `buildx build` shape as the matching step
+in `cloudbuild-harnesses.yaml`, for that harness alone — submits it, and
+removes it when the run ends. This is how to rebuild one harness on Cloud
+Build (ptone/scion#2354) without resubmitting the whole `harnesses` group.
 
 **Note:** `--target thick-prep` with `--builder cloud-build` builds the full thick
 chain (thick-prep + scion-base + harnesses + hub), since both `thick-prep` and
@@ -208,10 +217,14 @@ files that the default `.gcloudignore` excludes (the omni Dockerfile runs
 
 These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, `$_REGISTRY`, and (in the five that build `scion-base`: `all`, `common`, `scion-base`, `thick`/`thick-prep`, `omni`) `$_VERSION`, all forwarded by the orchestrator. `_TAG` defaults to `latest` in every YAML's `substitutions:` block; `_VERSION` defaults to `''` in the YAMLs that declare it, so a manual `gcloud builds submit` that omits either still works. The orchestrator itself only forwards a non-empty `_VERSION` when `HEAD` is on an exact git tag (see "Build provenance and stale sciontool" above) — off-tag, it relies on that yaml default.
 
-The aggregate `cloudbuild-harnesses.yaml`, `cloudbuild-common.yaml`, and
-`cloudbuild.yaml` files are static snapshots of the current catalog. When adding
-or removing a harness Dockerfile under `harnesses/<name>/`, update those
-aggregate YAMLs too. Individual harness bundles can also carry their own
+The aggregate `cloudbuild-harnesses.yaml`, `cloudbuild-common.yaml`,
+`cloudbuild.yaml`, and `cloudbuild-thick.yaml` files are static snapshots of
+the current catalog. When adding or removing a harness Dockerfile under
+`harnesses/<name>/`, update those four aggregate YAMLs too (`cloudbuild-omni.yaml`
+is a deliberate subset — see its own header — and is not part of this set).
+`scripts/check-harness-coverage.sh` compares those four files against the
+`harnesses/` tree and fails if one falls out of sync (ptone/scion#2357).
+Individual harness bundles can also carry their own
 `harnesses/<name>/cloudbuild.yaml` for one-off builds.
 
 ## Package Registries

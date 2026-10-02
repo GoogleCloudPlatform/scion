@@ -7,6 +7,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
 )
 
 // scrubHubEnv clears all Hub-related environment variables for the
@@ -440,6 +442,79 @@ func TestHubHandler_StickyStatus(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestHubHandler_SessionStart_WirePayloadShape pins the exact wire body a
+// real Claude SessionStart hook produces, end to end through the dialect and
+// HubHandler (not a hand-built JSON literal). pkg/hub's since_create_ms
+// start-time attribution (handlers_agent_lifecycle.go's updateAgentStatus)
+// keys on exactly this phase/activity/message combination to recognize the
+// harness's SessionStart report; if this shape ever changes, that hub-side
+// match needs to change with it — this test is the tripwire for that.
+func TestHubHandler_SessionStart_WirePayloadShape(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	var mu sync.Mutex
+	var body []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		b, _ := io.ReadAll(r.Body)
+		body = b
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	scrubHubEnv(t)
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_AUTH_TOKEN", "test-token")
+	t.Setenv("SCION_AGENT_ID", "test-agent")
+
+	handler := NewHubHandler()
+	if handler == nil {
+		t.Fatal("expected HubHandler to be created")
+	}
+
+	// Parse the raw Claude Code hook payload through the real dialect, the
+	// same way cmd/sciontool/commands/hook.go does for a live SessionStart
+	// invocation, rather than constructing a hooks.Event by hand.
+	dialect := dialects.NewClaudeDialect()
+	raw := map[string]interface{}{
+		"hook_event_name": "SessionStart",
+		"session_id":      "sess-123",
+		"source":          "startup",
+	}
+	event, err := dialect.Parse(raw)
+	if err != nil {
+		t.Fatalf("dialect.Parse: %v", err)
+	}
+	if event.Name != hooks.EventSessionStart {
+		t.Fatalf("dialect.Parse normalized SessionStart to %q, want %q", event.Name, hooks.EventSessionStart)
+	}
+
+	if err := handler.Handle(event); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	mu.Lock()
+	got := body
+	mu.Unlock()
+
+	var payload struct {
+		Phase    string `json:"phase"`
+		Activity string `json:"activity"`
+		Message  string `json:"message"`
+	}
+	if err := json.Unmarshal(got, &payload); err != nil {
+		t.Fatalf("unmarshal wire body %s: %v", got, err)
+	}
+
+	if payload.Phase != "running" || payload.Activity != "working" || payload.Message != "Session started" {
+		t.Errorf("SessionStart wire payload = %+v, want phase=running activity=working message=%q (pkg/hub's since_create_ms match depends on this exact shape)",
+			payload, "Session started")
 	}
 }
 

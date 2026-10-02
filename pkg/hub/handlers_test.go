@@ -75,9 +75,40 @@ func testServer(t *testing.T) (*Server, store.Store) {
 	srv.SetHubID("test-hub-id")
 	t.Cleanup(func() {
 		_ = srv.Shutdown(context.Background())
+		closeTestServerBackground(srv)
 		_ = s.Close() // Release in-memory SQLite database to avoid OOM across many tests.
 	})
 	return srv, s
+}
+
+// closeTestServerBackground stops the background goroutines New() starts on
+// every Server: three chatLinkService.cleanupLoop (telegram/discord/teams),
+// NonceCache.cleanup, and PreviewService.cleanupNonces. srv.Shutdown() never
+// closes these when srv.httpServer is nil, i.e. without Start(), which unit
+// tests never call. Also cancels srv.ctxCancel, which Shutdown skips for the
+// same reason, in case any handler-triggered work is keyed on srv.ctx. Each
+// Close/Stop is idempotent, and these calls run sequentially, so
+// NonceCache.Stop's plain select/close (not sync.Once) is safe here. Refs
+// ptone/scion#2418 (possible contributor; not proven).
+func closeTestServerBackground(srv *Server) {
+	if srv.ctxCancel != nil {
+		srv.ctxCancel()
+	}
+	if srv.telegramLinkService != nil {
+		srv.telegramLinkService.Close()
+	}
+	if srv.discordLinkService != nil {
+		srv.discordLinkService.Close()
+	}
+	if srv.teamsLinkService != nil {
+		srv.teamsLinkService.Close()
+	}
+	if srv.brokerAuthService != nil {
+		srv.brokerAuthService.Close()
+	}
+	if srv.previewService != nil {
+		srv.previewService.Close()
+	}
 }
 
 // doRequest performs an HTTP request against the test server.
@@ -2131,6 +2162,7 @@ func testServerWithBrokerAuth(t *testing.T) (*Server, store.Store) {
 	srv.SetHubID("test-hub-id")
 	t.Cleanup(func() {
 		_ = srv.Shutdown(context.Background())
+		closeTestServerBackground(srv)
 		_ = s.Close()
 	})
 	return srv, s
@@ -3157,6 +3189,381 @@ func TestEnrichAgent_ResolvesTemplateSlug(t *testing.T) {
 
 	if agent.Template != "single-enriched" {
 		t.Errorf("expected enriched Template %q, got %q", "single-enriched", agent.Template)
+	}
+}
+
+// TestEnrichAgent_RuntimeMatchesAppliedProfile verifies that enrichAgent sets
+// Runtime from the broker profile the agent actually applied (matched by
+// name), not from whichever available profile happens to be listed first on
+// the broker (ptone/scion#2262).
+func TestEnrichAgent_RuntimeMatchesAppliedProfile(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:   tid("runtime-broker-mixed"),
+		Name: "Mixed Broker",
+		Slug: "mixed-broker",
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID:              "agent_k8s_profile",
+		Slug:            "k8s-agent",
+		Name:            "K8s Agent",
+		RuntimeBrokerID: broker.ID,
+		AppliedConfig: &store.AgentAppliedConfig{
+			Profile: "k8s-prod",
+		},
+	}
+
+	srv.enrichAgent(ctx, agent, nil, nil)
+
+	if agent.Runtime != "kubernetes" {
+		t.Errorf("expected Runtime %q (agent's own kubernetes profile), got %q", "kubernetes", agent.Runtime)
+	}
+}
+
+// TestEnrichAgent_RuntimeUnresolvedProfileStaysEmpty verifies that enrichAgent
+// leaves Runtime empty when the agent's applied profile name doesn't match
+// any profile the broker advertises, rather than guessing from an unrelated
+// (e.g. docker) profile (ptone/scion#2262).
+func TestEnrichAgent_RuntimeUnresolvedProfileStaysEmpty(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:   tid("runtime-broker-unresolved"),
+		Name: "Unresolved Broker",
+		Slug: "unresolved-broker",
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID:              "agent_unresolved_profile",
+		Slug:            "unresolved-agent",
+		Name:            "Unresolved Agent",
+		RuntimeBrokerID: broker.ID,
+		AppliedConfig: &store.AgentAppliedConfig{
+			Profile: "some-other-profile",
+		},
+	}
+
+	srv.enrichAgent(ctx, agent, nil, nil)
+
+	if agent.Runtime != "" {
+		t.Errorf("expected Runtime to stay empty for an unresolved profile, got %q", agent.Runtime)
+	}
+}
+
+// TestEnrichAgents_RuntimeMatchesAppliedProfile is the batch-enrichment
+// counterpart of TestEnrichAgent_RuntimeMatchesAppliedProfile, exercising the
+// same resolveAgentRuntime helper used by enrichAgents.
+func TestEnrichAgents_RuntimeMatchesAppliedProfile(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:   tid("runtime-broker-batch"),
+		Name: "Batch Broker",
+		Slug: "batch-broker",
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agents := []store.Agent{
+		{
+			ID:              "agent_batch_k8s",
+			Slug:            "batch-k8s-agent",
+			Name:            "Batch K8s Agent",
+			RuntimeBrokerID: broker.ID,
+			AppliedConfig:   &store.AgentAppliedConfig{Profile: "k8s-prod"},
+		},
+		{
+			ID:              "agent_batch_unresolved",
+			Slug:            "batch-unresolved-agent",
+			Name:            "Batch Unresolved Agent",
+			RuntimeBrokerID: broker.ID,
+			AppliedConfig:   &store.AgentAppliedConfig{Profile: "does-not-exist"},
+		},
+	}
+
+	srv.enrichAgents(ctx, agents)
+
+	if agents[0].Runtime != "kubernetes" {
+		t.Errorf("expected Runtime %q for agent on the kubernetes profile, got %q", "kubernetes", agents[0].Runtime)
+	}
+	if agents[1].Runtime != "" {
+		t.Errorf("expected Runtime to stay empty for an unresolved profile, got %q", agents[1].Runtime)
+	}
+}
+
+// TestResolveAgentRuntime is a direct table test of the helper, covering the
+// edge cases display enrichment and the heartbeat backfill both rely on:
+// nil inputs, a matched profile (including one that's currently
+// unavailable, since availability doesn't change which runtime an already
+// -applied profile used), an unmatched/empty profile on a single-type
+// broker (ptone/scion#2262 — the runtime is unambiguous there even without a
+// name match), an unmatched/empty profile on a mixed-type broker (must stay
+// "", not guess), and a broker with an empty-Type profile mixed in (must
+// stay "", not guess from the other profile's type either).
+func TestResolveAgentRuntime(t *testing.T) {
+	mixedBroker := &store.RuntimeBroker{
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+	}
+	singleTypeBroker := &store.RuntimeBroker{
+		Profiles: []store.BrokerProfile{
+			{Name: "default", Type: "kubernetes", Available: true},
+		},
+	}
+	multiSameTypeBroker := &store.RuntimeBroker{
+		Profiles: []store.BrokerProfile{
+			{Name: "k8s-a", Type: "kubernetes", Available: true},
+			{Name: "k8s-b", Type: "kubernetes", Available: false},
+		},
+	}
+	unavailableMatchBroker := &store.RuntimeBroker{
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: false},
+		},
+	}
+	emptyProfilesBroker := &store.RuntimeBroker{
+		Profiles: []store.BrokerProfile{},
+	}
+	mixedEmptyTypeBroker := &store.RuntimeBroker{
+		Profiles: []store.BrokerProfile{
+			{Name: "a", Type: ""},
+			{Name: "b", Type: "docker"},
+		},
+	}
+
+	tests := []struct {
+		name   string
+		agent  *store.Agent
+		broker *store.RuntimeBroker
+		want   string
+	}{
+		{
+			name:   "nil agent",
+			agent:  nil,
+			broker: mixedBroker,
+			want:   "",
+		},
+		{
+			name:   "nil broker",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{Profile: "k8s-prod"}},
+			broker: nil,
+			want:   "",
+		},
+		{
+			name:   "nil AppliedConfig on mixed-type broker",
+			agent:  &store.Agent{},
+			broker: mixedBroker,
+			want:   "",
+		},
+		{
+			name:   "nil AppliedConfig on single-type broker",
+			agent:  &store.Agent{},
+			broker: singleTypeBroker,
+			want:   "kubernetes",
+		},
+		{
+			name:   "empty Profile on mixed-type broker",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}},
+			broker: mixedBroker,
+			want:   "",
+		},
+		{
+			name:   "empty Profile on single-type broker",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}},
+			broker: singleTypeBroker,
+			want:   "kubernetes",
+		},
+		{
+			name:   "unmatched Profile on mixed-type broker stays empty",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{Profile: "does-not-exist"}},
+			broker: mixedBroker,
+			want:   "",
+		},
+		{
+			name:   "unmatched Profile on single-type broker resolves to the shared type",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{Profile: "does-not-exist"}},
+			broker: singleTypeBroker,
+			want:   "kubernetes",
+		},
+		{
+			name:   "unmatched Profile on a broker with multiple same-type profiles",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{Profile: "does-not-exist"}},
+			broker: multiSameTypeBroker,
+			want:   "kubernetes",
+		},
+		{
+			name:   "matched Profile wins even when Available is false",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{Profile: "k8s-prod"}},
+			broker: unavailableMatchBroker,
+			want:   "kubernetes",
+		},
+		{
+			name:   "matched Profile on mixed-type broker",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{Profile: "docker-default"}},
+			broker: mixedBroker,
+			want:   "docker",
+		},
+		{
+			name:   "empty Profiles list stays empty",
+			agent:  &store.Agent{},
+			broker: emptyProfilesBroker,
+			want:   "",
+		},
+		{
+			name:   "unmatched Profile on a broker with an empty-Type profile stays empty",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{Profile: "does-not-exist"}},
+			broker: mixedEmptyTypeBroker,
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveAgentRuntime(tt.agent, tt.broker)
+			if got != tt.want {
+				t.Errorf("resolveAgentRuntime() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEnrichAgent_RuntimeResolvesUnambiguousSingleTypeBroker covers the
+// enrichAgent path for a broker whose advertised profiles all share one
+// runtime type: an agent with no applied profile on record still resolves
+// to that type instead of regressing to an empty Runtime.
+func TestEnrichAgent_RuntimeResolvesUnambiguousSingleTypeBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:   tid("runtime-broker-single-type"),
+		Name: "Single Type Broker",
+		Slug: "single-type-broker",
+		Profiles: []store.BrokerProfile{
+			{Name: "default", Type: "kubernetes", Available: true},
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID:              "agent_no_profile",
+		Slug:            "no-profile-agent",
+		Name:            "No Profile Agent",
+		RuntimeBrokerID: broker.ID,
+		AppliedConfig:   nil,
+	}
+
+	srv.enrichAgent(ctx, agent, nil, nil)
+
+	if agent.Runtime != "kubernetes" {
+		t.Errorf("expected Runtime %q for an unambiguous single-type broker, got %q", "kubernetes", agent.Runtime)
+	}
+}
+
+// TestEnrichAgent_RuntimeNeverOverwritesExplicitValue verifies that an agent
+// that already carries a Runtime is never overwritten by enrichment, even
+// when the broker would resolve a different value from the applied profile.
+func TestEnrichAgent_RuntimeNeverOverwritesExplicitValue(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:   tid("runtime-broker-no-overwrite"),
+		Name: "No Overwrite Broker",
+		Slug: "no-overwrite-broker",
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID:              "agent_explicit_runtime",
+		Slug:            "explicit-runtime-agent",
+		Name:            "Explicit Runtime Agent",
+		RuntimeBrokerID: broker.ID,
+		Runtime:         "docker",
+		AppliedConfig:   &store.AgentAppliedConfig{Profile: "k8s-prod"},
+	}
+
+	srv.enrichAgent(ctx, agent, nil, nil)
+
+	if agent.Runtime != "docker" {
+		t.Errorf("expected the pre-existing Runtime %q to be left alone, got %q", "docker", agent.Runtime)
+	}
+
+	// Same assertion via the passed-broker branch (broker looked up by the
+	// caller and passed in directly, rather than loaded by RuntimeBrokerID).
+	agent2 := &store.Agent{
+		ID:              "agent_explicit_runtime_passed_broker",
+		Slug:            "explicit-runtime-agent-passed-broker",
+		Name:            "Explicit Runtime Agent Passed Broker",
+		RuntimeBrokerID: broker.ID,
+		Runtime:         "docker",
+		AppliedConfig:   &store.AgentAppliedConfig{Profile: "k8s-prod"},
+	}
+
+	srv.enrichAgent(ctx, agent2, nil, broker)
+
+	if agent2.Runtime != "docker" {
+		t.Errorf("expected the pre-existing Runtime %q to be left alone via the passed-broker branch, got %q", "docker", agent2.Runtime)
+	}
+}
+
+// TestEnrichAgents_RuntimeNeverOverwritesExplicitValue is the batch
+// counterpart of TestEnrichAgent_RuntimeNeverOverwritesExplicitValue.
+func TestEnrichAgents_RuntimeNeverOverwritesExplicitValue(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:   tid("runtime-broker-batch-no-overwrite"),
+		Name: "Batch No Overwrite Broker",
+		Slug: "batch-no-overwrite-broker",
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agents := []store.Agent{
+		{
+			ID:              "agent_batch_explicit_runtime",
+			Slug:            "batch-explicit-runtime-agent",
+			Name:            "Batch Explicit Runtime Agent",
+			RuntimeBrokerID: broker.ID,
+			Runtime:         "docker",
+			AppliedConfig:   &store.AgentAppliedConfig{Profile: "k8s-prod"},
+		},
+	}
+
+	srv.enrichAgents(ctx, agents)
+
+	if agents[0].Runtime != "docker" {
+		t.Errorf("expected the pre-existing Runtime %q to be left alone, got %q", "docker", agents[0].Runtime)
 	}
 }
 

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel"
@@ -107,6 +108,13 @@ type AgentLookupResult struct {
 	// doesn't include this container at lookup time, or the re-list itself
 	// failed — callers must treat that as unknown, not stopped.
 	Phase string
+
+	// Runtime is the live instance that actually produced this match — the
+	// default runtime, or the matched auxiliary runtime — so a caller can
+	// ask it capability questions (e.g. scionrt.HasAttachSupport) instead of
+	// branching on RuntimeName's type-name string. Set on every match path
+	// in Server.LookupAgent.
+	Runtime scionrt.Runtime
 
 	// K8sConfig and K8sClientset are set for kubernetes agents so that
 	// PTY handlers can use the Go client (remotecommand) instead of
@@ -887,6 +895,25 @@ func (c *ControlChannelClient) handlePTYStream(handler *StreamHandler, cols, row
 	runtimeCmd := result.RuntimeName
 	if runtimeCmd == "" {
 		runtimeCmd = c.agentLookup.RuntimeCommand()
+	}
+
+	// Reject before starting the tmux exec when the matched runtime has no
+	// exec/attach/TTY primitive at all (scionrt.HasAttachSupport, asked of
+	// the live instance the lookup above actually matched) — the same
+	// pre-upgrade rejection handleAgentAttach applies to the direct-connect
+	// path, applied here before the control-channel stream does any
+	// runtime-specific work. Without this, an opted-out runtime only fails
+	// once StreamPTYHandler.Run() actually tries to start it, at a point
+	// where the Hub has already told its own client the stream is open.
+	//
+	// This is a distinct, terminal close code (4501/attach_unsupported),
+	// distinct from the retriable 4503/session_not_ready used for a
+	// readiness failure: a runtime that will never support attach must not
+	// look the same on the wire as a broker that is merely still starting up.
+	if !scionrt.HasAttachSupport(result.Runtime) {
+		c.log.Info("PTY stream: runtime does not support attach", "slug", handler.slug, "runtime", runtimeCmd)
+		_ = c.CloseStream(handler.streamID, wsprotocol.CloseReasonAttachUnsupported, wsprotocol.ClosePTYAttachUnsupported)
+		return
 	}
 
 	// Start the actual PTY session. handlePTYStreamWithAgent classifies why

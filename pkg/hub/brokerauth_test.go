@@ -160,6 +160,75 @@ func TestCompleteBrokerJoin_PersistsCapabilities(t *testing.T) {
 	}
 }
 
+// TestCompleteBrokerJoin_PersistsAsyncLaunchCapability covers the new
+// "asynclaunch" capability string (design t1-async-create-v11.md §3.2, §7
+// P1b-1): capabilitiesFromStrings parses it into
+// store.BrokerCapabilities.AsyncLaunch, exactly like the existing
+// "reprovision" case. Nothing else about CompleteBrokerJoin changes: the
+// capability is stored and nothing reads it yet (dispatchLaunching's use of
+// it is P1b-3), so this also demonstrates that advertising the bit has no
+// behavior effect on its own.
+func TestCompleteBrokerJoin_PersistsAsyncLaunchCapability(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+
+	req := CreateBrokerRegistrationRequest{Name: "cap-test-host-async"}
+	resp, err := svc.CreateBrokerRegistration(ctx, req, "admin-user-id")
+	if err != nil {
+		t.Fatalf("CreateBrokerRegistration failed: %v", err)
+	}
+
+	joinReq := BrokerJoinRequest{
+		BrokerID:     resp.BrokerID,
+		JoinToken:    resp.JoinToken,
+		Hostname:     "cap-test-host-async",
+		Version:      "1.0.0",
+		Capabilities: []string{"sync", "attach", "asynclaunch"},
+	}
+	joinResp, err := svc.CompleteBrokerJoin(ctx, joinReq, "http://localhost:9810")
+	if err != nil {
+		t.Fatalf("CompleteBrokerJoin failed: %v", err)
+	}
+	if joinResp.SecretKey == "" {
+		t.Error("SecretKey should not be empty; advertising asynclaunch must not disturb the rest of the join")
+	}
+
+	broker, err := s.GetRuntimeBroker(ctx, resp.BrokerID)
+	if err != nil {
+		t.Fatalf("GetRuntimeBroker failed: %v", err)
+	}
+	if broker.Capabilities == nil {
+		t.Fatal("expected broker.Capabilities to be set")
+	}
+	if !broker.Capabilities.Sync || !broker.Capabilities.Attach || !broker.Capabilities.AsyncLaunch {
+		t.Errorf("expected sync/attach/asyncLaunch all true, got %+v", broker.Capabilities)
+	}
+	if broker.Capabilities.Reprovision {
+		t.Errorf("expected reprovision false (not in the reported list), got true")
+	}
+}
+
+// TestCapabilitiesFromStrings_AsyncLaunchAliases covers both accepted wire
+// spellings ("asynclaunch" and "async_launch") and that an unrecognized name
+// is ignored rather than rejected (design §5's old-broker/old-hub
+// compatibility rule, unchanged by this addition).
+func TestCapabilitiesFromStrings_AsyncLaunchAliases(t *testing.T) {
+	for _, name := range []string{"asynclaunch", "ASYNCLAUNCH", "async_launch", " async_launch "} {
+		caps := capabilitiesFromStrings([]string{name})
+		if !caps.AsyncLaunch {
+			t.Errorf("capabilitiesFromStrings([%q]).AsyncLaunch = false, want true", name)
+		}
+	}
+
+	caps := capabilitiesFromStrings([]string{"sync", "some-future-capability"})
+	if caps.AsyncLaunch {
+		t.Error("expected AsyncLaunch false when not reported")
+	}
+	if !caps.Sync {
+		t.Error("expected Sync true")
+	}
+}
+
 // TestCompleteBrokerJoin_NoCapabilitiesLeavesExisting verifies an empty
 // capabilities list on join (e.g. an old CLI that predates the field) does
 // not wipe out a capability set recorded by a previous join.

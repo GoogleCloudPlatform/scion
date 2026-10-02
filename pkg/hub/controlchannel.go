@@ -759,7 +759,9 @@ func (hc *BrokerConnection) ResizeStream(streamID string, cols, rows int) error 
 
 // Close closes the broker connection.
 func (hc *BrokerConnection) Close() {
-	hc.cancel()
+	if hc.cancel != nil {
+		hc.cancel()
+	}
 
 	// Close all streams. The control channel is gone, so every stream ends
 	// with 4503: the broker may come back, and a reconnect may succeed.
@@ -781,7 +783,9 @@ func (hc *BrokerConnection) Close() {
 	hc.pendingMu.Unlock()
 
 	// Close WebSocket connection
-	_ = hc.conn.Close()
+	if hc.conn != nil {
+		_ = hc.conn.Close()
+	}
 }
 
 // GetSessionID returns the session ID.

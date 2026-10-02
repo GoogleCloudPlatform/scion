@@ -59,8 +59,20 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	var repoRoot string
 	var externalAgentDir string
 	var worktreeDir string // worktree-per-agent: agent's worktree path
+	var globalWorkspaceDir string
 	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
 		agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
+
+		// The global project's own per-agent workspace
+		// (~/.scion/workspace/<agentName>, see ProvisionAgent's Case 3) is
+		// not under either agentsDir above, so it needs its own cleanup
+		// target: unlike every other project type, where agentDir's own
+		// "workspace" subdirectory is already in dirsToDelete below, a
+		// global-project agent's actual workspace lives outside agentDir
+		// entirely, and removing only agentDir would orphan it.
+		if config.IsGlobalProjectDir(projectDir) {
+			globalWorkspaceDir = filepath.Join(projectDir, "workspace", agentName)
+		}
 
 		// Determine repo root for worktree pruning and branch cleanup.
 		// For worktree-per-agent the shared base lives at
@@ -212,6 +224,12 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		}
 
 		dirsToDelete = append(dirsToDelete, agentDir)
+	}
+
+	if globalWorkspaceDir != "" {
+		if _, err := os.Stat(globalWorkspaceDir); err == nil {
+			dirsToDelete = append(dirsToDelete, globalWorkspaceDir)
+		}
 	}
 
 	// Prune stale worktree records from the repo. This handles cases where the
@@ -374,10 +392,17 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	}
 	inlineCfg := opts.InlineConfig
 	if opts.HarnessAuth != "" {
-		if inlineCfg == nil {
-			inlineCfg = &api.ScionConfig{}
+		// Copy rather than mutate opts.InlineConfig in place: it is a
+		// pointer the caller owns (and, for Preflight, goes on to pass
+		// unchanged into Manager.Start), so writing AuthSelectedType
+		// directly into it would carry this function's derived value back
+		// into the caller's config.
+		cfgCopy := api.ScionConfig{}
+		if inlineCfg != nil {
+			cfgCopy = *inlineCfg
 		}
-		inlineCfg.AuthSelectedType = opts.HarnessAuth
+		cfgCopy.AuthSelectedType = opts.HarnessAuth
+		inlineCfg = &cfgCopy
 	}
 	return ctx, inlineCfg
 }
@@ -639,6 +664,162 @@ func resolveHarnessConfigDir(ctx context.Context, name, projectPath string, temp
 	return config.FindHarnessConfigDir(name, projectPath, templatePaths...)
 }
 
+// isGitWorkspaceProject reports whether projectDir should be treated as a
+// git project when deciding how to provision or validate its workspace
+// source. Inside an agent container (SCION_HOST_UID set), git detection is
+// suppressed: container worktrees produce path-identity mismatches, since
+// --relative-paths are computed against the container mount layout, not the
+// host filesystem. ProvisionAgent (resolving the workspace source on first
+// provision) and Start()'s workspaceSourceRoots (validating it on every
+// start, including resume) both call this, so a workspace provisioned
+// through the non-git branch under SCION_HOST_UID is never re-classified as
+// git later and checked against a repo root it was never provisioned
+// relative to.
+func isGitWorkspaceProject(projectDir string) bool {
+	return util.IsGitRepoDir(projectDir) && os.Getenv("SCION_HOST_UID") == ""
+}
+
+// isProjectConfigsPath reports whether projectDir is a marker-resolved,
+// externalized project directory under the global project-configs tree
+// (~/.scion/project-configs/<dir>/.scion, config.ResolveProjectMarker's
+// output for a hub-dispatched project whose own directory holds only a
+// .scion marker file, not a full .scion directory). Unlike a plain
+// externalized project's own .scion directory, filepath.Dir(projectDir)
+// here names storage for the project's configuration only, never the
+// project's actual files.
+func isProjectConfigsPath(projectDir string) bool {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	projectConfigsDir := filepath.Join(globalDir, config.ProjectConfigsDir)
+	return filepath.Dir(filepath.Dir(projectDir)) == projectConfigsDir
+}
+
+// resolvedTemplate is the read-only outcome of resolving an agent's template
+// chain and harness-config: no provisioning, clone, file write or runtime
+// call. It is the return value of resolveTemplateAndHarnessConfig.
+type resolvedTemplate struct {
+	// Config is the template chain's merged scion-agent config (template
+	// layers plus, when supplied, the inline config), before the
+	// harness-config base layer and its Harness/HarnessConfig fields are
+	// applied by the caller.
+	Config *api.ScionConfig
+	// Chain is the resolved template chain, in merge order.
+	Chain []*config.Template
+	// TemplatePaths is Chain's on-disk paths, in the same order.
+	TemplatePaths []string
+	// HarnessConfigName is the resolved harness-config name.
+	HarnessConfigName string
+	// HarnessConfigDir is the loaded harness-config directory.
+	HarnessConfigDir *config.HarnessConfigDir
+}
+
+// resolveTemplateAndHarnessConfig resolves templateName's template chain and
+// the agent's harness-config, merging template (and, when supplied, inline)
+// config along the way. It performs no provisioning, clone, file write or
+// runtime call — only template/harness-config lookups and in-memory merges —
+// so it is safe to call before an agent directory exists.
+//
+// ProvisionAgent calls this to build the on-disk config it then writes.
+// Manager.Preflight (design t1-async-create-v11.md §3.1 "Admission", §7
+// P1b-1) calls it too, so that an async create's ErrTemplateNotFound /
+// ErrHarnessConfigNotFound surfaces synchronously during admission, exactly
+// as GetAgent/ProvisionAgent would raise it — the two resolutions go through
+// this one function and cannot drift apart.
+func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessConfig, projectPath, profileName string, settings *config.VersionedSettings, inlineCfg *api.ScionConfig) (*resolvedTemplate, error) {
+	chain, err := config.GetTemplateChainInProject(templateName, projectPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load template: %w", err)
+	}
+
+	finalScionCfg := &api.ScionConfig{}
+	for _, tpl := range chain {
+		// Load scion-agent config from this template and merge it
+		tplCfg, err := tpl.LoadConfig()
+		if err != nil {
+			return nil, fmt.Errorf("failed to load config from template %s: %w", tpl.Name, err)
+		}
+
+		// Validate: reject legacy templates that still have a 'harness' field
+		if err := config.ValidateAgnosticTemplate(tplCfg); err != nil {
+			return nil, fmt.Errorf("template %s: %w", tpl.Name, err)
+		}
+
+		finalScionCfg = config.MergeScionConfig(finalScionCfg, tplCfg)
+	}
+
+	if inlineCfg != nil {
+		finalScionCfg = config.MergeScionConfig(finalScionCfg, inlineCfg)
+	}
+
+	// Resolve harness-config name (unified resolution chain)
+	hcResolution, err := config.ResolveHarnessConfigName(config.HarnessConfigInputs{
+		CLIFlag:     harnessConfig,
+		TemplateCfg: finalScionCfg,
+		Settings:    settings,
+		ProfileName: profileName,
+	})
+	if err != nil {
+		return nil, err
+	}
+	harnessConfigName := hcResolution.Name
+
+	// Load harness-config from disk (check template dirs first)
+	var templatePaths []string
+	for _, tpl := range chain {
+		templatePaths = append(templatePaths, tpl.Path)
+	}
+	hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectPath, templatePaths...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find harness-config %q: %w", harnessConfigName, err)
+	}
+
+	return &resolvedTemplate{
+		Config:            finalScionCfg,
+		Chain:             chain,
+		TemplatePaths:     templatePaths,
+		HarnessConfigName: harnessConfigName,
+		HarnessConfigDir:  hcDir,
+	}, nil
+}
+
+// Preflight resolves opts' template and harness config through
+// resolveTemplateAndHarnessConfig — the same function GetAgent/ProvisionAgent
+// use — without provisioning, cloning, writing files or calling the runtime
+// (design t1-async-create-v11.md §3.1 "Admission", §7 P1b-1). It surfaces
+// config.ErrTemplateNotFound / config.ErrHarnessConfigNotFound synchronously,
+// during admission, for an async create: Manager.Start would otherwise raise
+// the same errors, but only from inside the launch goroutine.
+func (m *AgentManager) Preflight(ctx context.Context, opts api.StartOptions) error {
+	ctx, inlineCfg := buildProvisionContext(ctx, opts)
+
+	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
+	if err != nil {
+		return err
+	}
+
+	settings, warnings, _ := config.LoadEffectiveSettings(projectDir)
+	config.PrintDeprecationWarnings(warnings)
+
+	profileName := opts.Profile
+	if profileName == "" && settings != nil {
+		profileName = settings.ActiveProfile
+	}
+
+	templateName := opts.Template
+	if templateName == "" {
+		defaultTemplate := "default"
+		if settings != nil && settings.DefaultTemplate != "" {
+			defaultTemplate = settings.DefaultTemplate
+		}
+		templateName = defaultTemplate
+	}
+
+	_, err = resolveTemplateAndHarnessConfig(ctx, templateName, opts.HarnessConfig, opts.ProjectPath, profileName, settings, inlineCfg)
+	return err
+}
+
 // resolveProjectRoot determines the project root directory on this broker.
 // Used for resolving relative --workspace paths against the project's logical root.
 func resolveProjectRoot(settings *config.VersionedSettings, projectDir string) string {
@@ -752,15 +933,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 
 	projectName := config.GetProjectName(projectDir)
-	isGit := util.IsGitRepoDir(projectDir)
-	isGitWorkspace := isGit // preserve for skill injection before container override
-	if isGit && os.Getenv("SCION_HOST_UID") != "" {
-		// Inside an agent container: treat as non-git to prevent worktree
-		// creation. Container worktrees produce path-identity mismatches
-		// because --relative-paths are computed against the container mount
-		// layout, not the host filesystem.
-		isGit = false
-	}
+	isGitWorkspace := util.IsGitRepoDir(projectDir) // preserve for skill configuration before container override
+	isGit := isGitWorkspaceProject(projectDir)
 
 	// Verify .gitignore if in a repo
 	if isGit {
@@ -921,15 +1095,44 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	} else {
 		// Case 3: Non-Git Repository (and no explicit workspace)
-		if projectName == "global" {
-			workspaceSource, _ = os.Getwd()
+		agentWorkspace = "" // Using external mount, except in the project-configs branch below.
+		if config.IsGlobalProjectDir(projectDir) {
+			// The global project has no repository or externalized workspace
+			// path of its own, so it owns a dedicated workspace directory
+			// under its own project directory rather than mounting whatever
+			// directory the CLI happened to be invoked from. Bootstrap it on
+			// first use, the same way the sibling git-clone branch above
+			// creates agentWorkspace. Namespaced by agentName, the same way
+			// every other project type gives each agent its own workspace:
+			// a bare ~/.scion/workspace shared by every global-project agent
+			// would let two such agents silently read and write the same
+			// files. agentName is already confirmed to be a single, safe
+			// path element by checkAgentDirContained above.
+			globalWorkspace := filepath.Join(projectDir, "workspace", agentName)
+			if err := os.MkdirAll(globalWorkspace, 0755); err != nil {
+				return "", "", nil, fmt.Errorf("failed to create global project workspace directory: %w", err)
+			}
+			workspaceSource = globalWorkspace
 		} else if settings != nil && settings.WorkspacePath != "" {
 			// Externalized project: use workspace-path from settings
 			workspaceSource = settings.WorkspacePath
+		} else if isProjectConfigsPath(projectDir) {
+			// Hub-dispatched, non-git project whose projectDir was marker-
+			// resolved (config.ResolveProjectMarker) to its externalized
+			// ~/.scion/project-configs/<dir>/.scion: that directory holds
+			// only the project's own configuration, never the project's
+			// actual files, so mounting filepath.Dir(projectDir) directly
+			// (the plain-externalized-project fallback below) would give
+			// the agent an empty config directory to work in instead of a
+			// real workspace. Use the same per-agent workspace shape the
+			// git-clone and worktree branches above already create.
+			agentWorkspace = filepath.Join(agentDir, "workspace")
+			if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
+				return "", "", nil, fmt.Errorf("failed to create workspace directory: %w", err)
+			}
 		} else {
 			workspaceSource = filepath.Dir(projectDir)
 		}
-		agentWorkspace = "" // Using external mount
 	}
 
 	// Worktree Creation (if needed)
@@ -979,34 +1182,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// 2. Load templates and merge configs (no home copy yet)
-	chain, err := config.GetTemplateChainInProject(templateName, projectPath)
-	if err != nil {
-		return "", "", nil, fmt.Errorf("failed to load template: %w", err)
-	}
-
-	finalScionCfg := &api.ScionConfig{}
-
-	for _, tpl := range chain {
-		// Load scion-agent config from this template and merge it
-		tplCfg, err := tpl.LoadConfig()
-		if err != nil {
-			return "", "", nil, fmt.Errorf("failed to load config from template %s: %w", tpl.Name, err)
-		}
-
-		// Validate: reject legacy templates that still have a 'harness' field
-		if err := config.ValidateAgnosticTemplate(tplCfg); err != nil {
-			return "", "", nil, fmt.Errorf("template %s: %w", tpl.Name, err)
-		}
-
-		finalScionCfg = config.MergeScionConfig(finalScionCfg, tplCfg)
-	}
-
-	// 2a-inline. Merge inline config over template config (if provided)
+	// 2a-inline. Capture the inline config (if provided) for the merge below.
 	var inlineCfg *api.ScionConfig
 	if len(inlineConfig) > 0 && inlineConfig[0] != nil {
 		inlineCfg = inlineConfig[0]
-		finalScionCfg = config.MergeScionConfig(finalScionCfg, inlineCfg)
 	}
 
 	// Capture the inline config's own image/pull-policy — if any — before
@@ -1029,27 +1208,17 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// 2b. Resolve harness-config name (unified resolution chain)
-	hcResolution, err := config.ResolveHarnessConfigName(config.HarnessConfigInputs{
-		CLIFlag:     harnessConfig,
-		TemplateCfg: finalScionCfg,
-		Settings:    settings,
-		ProfileName: profileName,
-	})
+	// 2, 2b, 2c. Load the template chain, merge configs and resolve the
+	// harness-config, through the same resolution Preflight uses.
+	rt, err := resolveTemplateAndHarnessConfig(ctx, templateName, harnessConfig, projectPath, profileName, settings, inlineCfg)
 	if err != nil {
 		return "", "", nil, err
 	}
-	harnessConfigName := hcResolution.Name
-
-	// 2c. Load harness-config from disk (check template dirs first)
-	var templatePaths []string
-	for _, tpl := range chain {
-		templatePaths = append(templatePaths, tpl.Path)
-	}
-	hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectPath, templatePaths...)
-	if err != nil {
-		return "", "", nil, fmt.Errorf("failed to find harness-config %q: %w", harnessConfigName, err)
-	}
+	chain := rt.Chain
+	finalScionCfg := rt.Config
+	harnessConfigName := rt.HarnessConfigName
+	templatePaths := rt.TemplatePaths
+	hcDir := rt.HarnessConfigDir
 	util.Debugf("ProvisionAgent: harness-config loaded from disk: path=%s harness=%q image=%q",
 		hcDir.Path, hcDir.Config.Harness, hcDir.Config.Image)
 	finalScionCfg.Harness = hcDir.Config.Harness
@@ -1271,7 +1440,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				UserID:    ResolveUserIDFromContext(ctx),
 			}
 
+			skillFetchStart := time.Now()
 			result, err := resolver.Resolve(ctx, finalScionCfg.Skills, resolveOpts)
+			slog.Info("provision: skill fetch complete", "agent", agentName,
+				"elapsed_ms", time.Since(skillFetchStart).Milliseconds(),
+				"requested", len(finalScionCfg.Skills), "ok", err == nil)
 			if err != nil {
 				return "", "", nil, fmt.Errorf("skill resolution failed: %w", err)
 			}
@@ -1745,6 +1918,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 
 	util.Debugf("provision: total ProvisionAgent completed in %s", time.Since(provisionStart))
+	slog.Info("provision: agent provisioning complete", "agent", agentName,
+		"elapsed_ms", time.Since(provisionStart).Milliseconds())
 	return agentHome, agentWorkspace, finalScionCfg, nil
 }
 

@@ -198,6 +198,29 @@ func TestTargetResolve_InvalidTarget_PrivacyPreserving(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rr.Code, "expected 404 for nonexistent target")
 }
 
+// TestTargetResolve_TypedNilIdentity_Unauthorized covers
+// handleMessagingTargetsResolve's isNilIdentity guard: a request context
+// carrying a non-nil Identity interface value that holds a nil concrete
+// pointer (e.g. an Identity holding (*agentIdentityWrapper)(nil)) must be
+// rejected as unauthorized, the same as a plain nil interface, rather than
+// reaching the later AgentIdentity assertion that reuses this identity and
+// would otherwise dereference the nil pointer.
+func TestTargetResolve_TypedNilIdentity_Unauthorized(t *testing.T) {
+	srv, _, _, _, _, _, _, _ := cpmSetup(t)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/messaging/targets/resolve?project=project-b&agent=agent-beta", nil)
+	var nilAgent *agentIdentityWrapper
+	req = req.WithContext(contextWithIdentity(req.Context(), nilAgent))
+
+	rr := httptest.NewRecorder()
+	require.NotPanics(t, func() {
+		srv.handleMessagingTargetsResolve(rr, req)
+	}, "a typed-nil context identity must not panic the handler")
+
+	require.Equal(t, http.StatusUnauthorized, rr.Code, "a typed-nil context identity must be treated as unauthenticated")
+}
+
 func TestTargetResolve_MissingParams(t *testing.T) {
 	srv, _, _, _, _, _, _, _ := cpmSetup(t)
 

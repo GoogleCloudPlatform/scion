@@ -115,6 +115,6 @@ func (s *Server) handleChatPrefs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, prefs)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 	}
 }

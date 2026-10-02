@@ -139,6 +139,9 @@ type Store interface {
 	// User operations
 	UserStore
 
+	// UserTerminalWorkspace operations
+	UserTerminalWorkspaceStore
+
 	// ProjectProvider operations
 	ProjectProviderStore
 
@@ -276,6 +279,28 @@ type AgentStore interface {
 
 	// ListAgents returns agents matching the filter criteria.
 	ListAgents(ctx context.Context, filter AgentFilter, opts ListOptions) (*ListResult[Agent], error)
+
+	// CountAgents returns the number of agents matching filter, applying the
+	// exact predicate ListAgents does for its total count, but without
+	// loading any rows. Used by the project sorted-mode candidate ceiling
+	// (design lists-graph.md 5.3 step 0) as a cheap pre-check before any
+	// member row is read.
+	CountAgents(ctx context.Context, filter AgentFilter) (int, error)
+
+	// ListAgentMembers returns up to max agents matching filter, in the
+	// sorted-mode total order for (sort, dir) (design lists-graph.md 4.2):
+	// sort="updated" orders by COALESCE(last_activity_event, updated) dir,
+	// then created DESC, id DESC; sort="created" orders by created dir, then
+	// id DESC. Each row carries exactly the fields agentResource
+	// (pkg/hub/capabilities.go) reads, plus Phase/Created/Updated/
+	// LastActivityEvent for positioning and stats — see AgentMember.
+	//
+	// max bounds the read so a candidate pool that grew past the caller's
+	// ceiling check is still detected (design 5.3 step 1): when the true
+	// candidate count exceeds max, exactly max rows are returned (the exact
+	// order among untaken rows is unspecified in that case, since the
+	// caller's only use of an over-max result is to refuse the request).
+	ListAgentMembers(ctx context.Context, filter AgentFilter, sort, dir string, max int) ([]AgentMember, error)
 
 	// ListAgentsWithStaleNonTerminalReincarnationState returns every agent
 	// whose reincarnation_state is non-terminal and whose row has not been
@@ -427,6 +452,125 @@ type AgentFilter struct {
 	// scoped constraints that block the list permission for specific projects.
 	// An empty or nil slice means no exclusions.
 	ExcludedProjectIDs []string
+
+	// RequestedOwnerID, when non-empty, restricts results to agents whose
+	// owner_id matches this value. Unlike OwnerID (which participates in the
+	// OR-based Mine/Shared classification via MemberOrOwnerProjectIDs), this
+	// field is always combined with every other filter using AND. It exists
+	// so an explicit caller-supplied owner filter (e.g. CLI `--owner`, hub
+	// query param `ownerId`) can never be folded into the classification OR
+	// clause and widen results beyond "agents owned by exactly this
+	// principal" (ptone/scion#2146).
+	RequestedOwnerID string
+
+	// HarnessConfig, when non-empty, restricts results to agents whose
+	// resolved AppliedConfig.HarnessConfig equals this value. The Ent
+	// adapter backs this with a dedicated, plain-equality column
+	// (harness_config, pkg/ent/schema/agent.go) kept in sync with
+	// AppliedConfig.HarnessConfig on every write, rather than parsing or
+	// pattern-matching AppliedConfig's JSON at query time (ptone/scion#2146).
+	HarnessConfig string
+
+	// IDs, when non-nil, restricts results to agents whose ID is in this set.
+	// Always combined with every other filter (including AuthorizedProjectIDs)
+	// using AND — it narrows, it never substitutes for authorization. A nil
+	// value means no restriction. An empty non-nil slice means no agents
+	// match (fail closed, mirroring AuthorizedProjectIDs).
+	//
+	// This backs relationship queries such as CLI `--ancestors`, where the
+	// caller supplies a set of IDs found in another agent's Ancestry chain.
+	// Some of those IDs may name users rather than agents (Ancestry mixes
+	// both); those simply match no row here, which is how "skip entries that
+	// are users" falls out without extra bookkeeping. It is deliberately NOT
+	// implemented by fetching each ID individually — doing so would bypass
+	// whatever authorization predicate (AuthorizedProjectIDs, etc.) the
+	// caller composed this filter with, and future relationship-based
+	// visibility (ptone/scion#2128) needs a single choke point to widen.
+	IDs []string
+
+	// LineageRootID, when non-empty, restricts results to the agent whose ID
+	// equals this value OR whose Ancestry chain contains it — i.e. the root
+	// principal plus every agent descended from it, at any depth. It is an
+	// internal OR of two sub-conditions, but that OR is itself ANDed with
+	// every other filter (including AuthorizedProjectIDs), the same
+	// composition pattern already used for MemberOrOwnerProjectIDs above:
+	// the OR only decides which rows count as "in the root's lineage", it
+	// never widens past the authorization predicate. A root the caller is
+	// not authorized to see simply yields no matches, not an error or a
+	// disclosure.
+	//
+	// Backs CLI `--lineage`, which is a CREATION-TREE query, not a
+	// messaging-permission query — it says nothing about who the reference
+	// agent may message under any message mode (scion set-message-mode),
+	// which can be a different, smaller set. The root ID this field is set
+	// to is computed client-side (see resolveLineageRootID in cmd/list.go):
+	// the reference's direct parent, or the reference itself when it has no
+	// parent at all (an empty Ancestry), when its parent is a user rather
+	// than an agent, or when its only recorded parent is an agent the
+	// caller cannot list. The latter two both root at self because the
+	// caller cannot tell them apart; a length-1 parent the caller *can* list
+	// roots at that parent.
+	//
+	// "Parent is a user" cannot be decided from len(Ancestry) alone: a
+	// child can inherit a length-1, agent-only Ancestry from a creator
+	// whose own Ancestry was itself empty (see resolveLineageRootID's doc
+	// for exactly when this happens). Determining "is the parent a user"
+	// therefore requires resolving a length-1 Ancestry entry through the
+	// caller's authorized list (never a bare per-ID fetch) rather than a
+	// purely local length check; an Ancestry of two or more entries never
+	// needs this, since its last entry is always an agent ID by
+	// construction. The root ID handed to this field may therefore be a
+	// USER principal ID, not only an agent ID — the OR predicate treats
+	// either the same way, since IDEQ simply never matches a user ID and
+	// ancestryContains still finds that user's descendants.
+	LineageRootID string
+}
+
+// AgentMember is the narrow projection ListAgentMembers reads for sorted-mode
+// candidate evaluation (design lists-graph.md 5.1). It carries exactly
+// the fields pkg/hub's agentResource(*Agent) reads — ID, OwnerID, ProjectID,
+// Labels, Ancestry — plus Phase, Created, Updated and LastActivityEvent for
+// positioning (pkg/store/agentsort) and stats.
+//
+// The projection is defined as "exactly the fields agentResource reads", not
+// as an independently maintained field list: ToAgent is the single
+// construction path a caller must use to build a Resource from a member, so
+// that a future agentResource input agentResource gains but AgentMember lacks
+// is caught by the equality gate described on ToAgent, rather than silently
+// widening what a race can miss (design 5.3 step 5a; the hub-side
+// non-waivable member/full equality test is the gate that exercises this).
+type AgentMember struct {
+	ID        string
+	OwnerID   string
+	ProjectID string
+	Labels    map[string]string
+	Ancestry  []string
+
+	Phase             string
+	Created           time.Time
+	Updated           time.Time
+	LastActivityEvent time.Time
+}
+
+// ToAgent copies m's fields into a new Agent, leaving every other field
+// zero. It is the one construction path for building an authorization
+// Resource from a member row: callers must derive it as
+// agentResource(m.ToAgent()), never by hand-listing AgentMember's fields, so
+// that comparing that Resource against agentResource(fullRow) (design 5.3
+// step 5a) actually proves the two rows agree on every input the kernel
+// reads, not just the ones some earlier author remembered to copy here.
+func (m AgentMember) ToAgent() *Agent {
+	return &Agent{
+		ID:                m.ID,
+		OwnerID:           m.OwnerID,
+		ProjectID:         m.ProjectID,
+		Labels:            m.Labels,
+		Ancestry:          m.Ancestry,
+		Phase:             m.Phase,
+		Created:           m.Created,
+		Updated:           m.Updated,
+		LastActivityEvent: m.LastActivityEvent,
+	}
 }
 
 // AgentHealthAggregate holds pre-computed counts and short lists used by the
@@ -1170,7 +1314,10 @@ type UserAccessTokenStore interface {
 	// CountUserAccessTokens returns the number of active (non-revoked) tokens for a user.
 	CountUserAccessTokens(ctx context.Context, userID string) (int, error)
 
-	// DeleteUserAccessTokensByProject permanently removes all tokens scoped to a project.
+	// DeleteUserAccessTokensByProject permanently removes all "project"-boundary
+	// tokens scoped to projectID. A hub-boundary token belonging to one of the
+	// project's members is never removed by this call, even if that member
+	// loses access to the project as a result of its deletion.
 	// Returns the number of tokens deleted.
 	DeleteUserAccessTokensByProject(ctx context.Context, projectID string) (int, error)
 
@@ -2405,4 +2552,32 @@ type ExternalIdentityStore interface {
 
 	// GetExternalIdentitiesByUserID returns all bindings for a given user.
 	GetExternalIdentitiesByUserID(ctx context.Context, userID string) ([]*ExternalIdentityBinding, error)
+}
+
+// UserTerminalWorkspace is the persisted, per-user state of the terminal
+// viewer's (/terminals) open-terminal rail: the ordered list of open agent
+// IDs, plus which one was frontmost when it was last saved.
+type UserTerminalWorkspace struct {
+	UserID           string    `json:"userId"`
+	AgentIDs         []string  `json:"agentIds"`         // ordered, lowercase canonical UUIDs
+	FrontmostAgentID string    `json:"frontmostAgentId"` // "" when none
+	Revision         int64     `json:"revision"`
+	Updated          time.Time `json:"updatedAt"`
+}
+
+// UserTerminalWorkspaceStore provides durable, per-user persistence for the
+// terminal viewer's open-terminal list. There is exactly one row per user.
+// The store trusts its caller to have already validated agentIDs and
+// frontmostAgentID (size bounds, UUID format, membership); see
+// pkg/hub/handlers_user_terminal_workspace.go.
+type UserTerminalWorkspaceStore interface {
+	// GetUserTerminalWorkspace returns the saved workspace for userID.
+	// Returns ErrNotFound when the user has never saved one.
+	GetUserTerminalWorkspace(ctx context.Context, userID string) (*UserTerminalWorkspace, error)
+
+	// PutUserTerminalWorkspace unconditionally upserts the workspace for
+	// userID, keyed on user_id, incrementing revision atomically
+	// (last-writer-wins: there is no expected-revision / compare-and-swap
+	// parameter). Returns the stored row.
+	PutUserTerminalWorkspace(ctx context.Context, userID string, agentIDs []string, frontmostAgentID string) (*UserTerminalWorkspace, error)
 }

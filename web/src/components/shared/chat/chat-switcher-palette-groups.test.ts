@@ -94,7 +94,6 @@ async function mountPalette(
   groups: Partial<Record<PaletteGroup, GroupState>>
 ): Promise<ScionChatSwitcher> {
   const el = document.createElement('scion-chat-switcher') as ScionChatSwitcher;
-  el.paletteMode = true;
   el.open = true;
   el.groups = groups;
   document.body.appendChild(el);
@@ -512,7 +511,7 @@ describe('Multi-group status text', () => {
     expect(status(el)).toBe('4 matching results');
   });
 
-  it('reports "Loading…" only when every populated group is still loading with no candidates yet', async () => {
+  it('reports "Loading…" when every populated group is still loading with no candidates yet', async () => {
     const el = await mountPalette({
       agents: { status: 'loading', candidates: [] },
       threads: { status: 'loading', candidates: [] },
@@ -520,12 +519,30 @@ describe('Multi-group status text', () => {
     expect(status(el)).toBe('Loading…');
   });
 
-  it('reports a match count, not "Loading…", when every loading group already has stale candidates', async () => {
+  it('also reports "Loading…", not a bare match count, when every loading group already has candidates — a group that is still loading has not settled yet, regardless of how many rows it already published', async () => {
     const el = await mountPalette({
       agents: { status: 'loading', candidates: [agentCandidate('a1', 'Agent One')] },
       threads: { status: 'loading', candidates: [threadCandidate('t1', 'Thread One')] },
     });
-    expect(status(el)).toBe('2 matching results');
+    expect(status(el)).toBe('Loading…');
+  });
+
+  it('announces a loading group as still loading, not a bare zero-match count, when the query only matches a page it has not published yet', async () => {
+    // The scenario a progressively-publishing Agents group newly exposes: a
+    // query can match zero of the rows loaded *so far* while the group is
+    // still loading — this must read as "Agents still loading", not a final
+    // "0 matching results" (which a user searching for a specific agent
+    // would read as "it does not exist").
+    const el = await mountPalette({
+      agents: { status: 'loading', candidates: [agentCandidate('a1', 'Agent One')] },
+      threads: ready([threadCandidate('t1', 'Thread One')]),
+    });
+    input(el).value = 'Thread One';
+    input(el).dispatchEvent(new InputEvent('input'));
+    await el.updateComplete;
+    expect(status(el)).toContain('1 matching result');
+    expect(status(el)).toContain('Agents still loading');
+    expect(status(el)).not.toContain('0 matching');
   });
 
   it('does not call a ready-but-empty group "still loading"', async () => {
@@ -606,5 +623,76 @@ describe('ensureGroupExpandedFor: defensive guards (private method, direct invoc
       );
     }).not.toThrow();
     expect(el.shadowRoot?.querySelectorAll('.palette-option').length).toBe(15);
+  });
+});
+
+// ===========================================================================
+// The listbox-owned placeholder option for "every group finished loading with
+// nothing to show" — a role=listbox requires at least one real role=option/
+// role=group descendant (WAI-ARIA's required-owned-elements rule), which a
+// query (or an empty index) matching nothing anywhere would otherwise leave
+// unsatisfied, since each group's own "No matches"/error text carries no
+// ARIA role of its own.
+// ===========================================================================
+
+function placeholderOption(el: ScionChatSwitcher): Element | null {
+  return el.shadowRoot!.querySelector('#palette-empty-overall');
+}
+
+function listboxOwns(el: ScionChatSwitcher): string[] {
+  return (
+    el.shadowRoot!.querySelector('#palette-result-list')?.getAttribute('aria-owns') ?? ''
+  ).split(' ');
+}
+
+describe('the "no results anywhere" listbox placeholder', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('is absent when at least one group has a real match', async () => {
+    const el = await mountPalette({
+      agents: ready([agentCandidate('a1', 'Agent One')]),
+      people: ready([]),
+    });
+    expect(placeholderOption(el)).toBeNull();
+  });
+
+  it('is present when every present group is ready with zero candidates', async () => {
+    const el = await mountPalette({ agents: ready([]), people: ready([]) });
+    expect(placeholderOption(el)).not.toBeNull();
+    expect(placeholderOption(el)?.getAttribute('role')).toBe('option');
+    expect(placeholderOption(el)?.getAttribute('aria-disabled')).toBe('true');
+    expect(placeholderOption(el)?.getAttribute('aria-selected')).toBe('false');
+  });
+
+  it('is absent while any present group is still loading, even if every other group is empty', async () => {
+    const el = await mountPalette({
+      agents: { status: 'loading', candidates: [] },
+      people: ready([]),
+    });
+    expect(placeholderOption(el)).toBeNull();
+  });
+
+  it('is present once every group has finished loading, including an all-error case', async () => {
+    const el = await mountPalette({
+      agents: { status: 'error', candidates: [], error: 'boom' },
+      people: ready([]),
+    });
+    expect(placeholderOption(el)).not.toBeNull();
+  });
+
+  it("is included in the listbox's aria-owns alongside every present group's region, in reading order, only when rendered", async () => {
+    const elWithMatches = await mountPalette({
+      agents: ready([agentCandidate('a1', 'Agent One')]),
+    });
+    expect(listboxOwns(elWithMatches)).toEqual(['palette-group-region-agents']);
+
+    const elEmpty = await mountPalette({ agents: ready([]), people: ready([]) });
+    expect(listboxOwns(elEmpty)).toEqual([
+      'palette-group-region-agents',
+      'palette-group-region-people',
+      'palette-empty-overall',
+    ]);
   });
 });

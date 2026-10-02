@@ -53,6 +53,12 @@ curl -H "Authorization: Bearer $SCION_HUB_TOKEN" \
      https://scion.example.com/api/v1/auth/scopes
 ```
 
+When a token is created, the Hub resolves its scopes into a fixed, versioned set of
+permissions (the token's permission ceiling), checks that you hold every one of them in the target
+project, and stores that ceiling with the token. Every later request made with the token is
+limited to that ceiling. A token whose stored ceiling is missing or has an unrecognized version is
+denied. Existing tokens are converted to versioned ceilings automatically on upgrade.
+
 ### Scopes are restrictions, not grants
 
 Selecting a scope only **limits** what a token may ever be used for — it never by itself grants

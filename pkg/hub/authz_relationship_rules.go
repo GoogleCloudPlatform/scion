@@ -214,11 +214,31 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 				resourceID, eligible := a.progenyFactResourceID(resourceType, resource)
 				if eligible {
 					granted := allowRelationship(relType, resource.Type, resource.ID, agent.ID())
+					// The fact identity is explicit: a hubDeliveryIdentity
+					// principal (ptone/scion#2228 part 2) is never itself
+					// hub-attested, so the fact reads the stored-agent
+					// evidence instead of the asserted AgentIdentity above.
+					// The noEvidence guard keeps the fact closure correct
+					// independently of stage ordering — it does not rely on
+					// stage 2 having already rejected a missing evidence
+					// before this fact ever runs.
+					factAgent := agent
+					noEvidence := false
+					if h, ok := principal.Identity.(*hubDeliveryIdentity); ok {
+						if h == nil || h.evidence == nil {
+							noEvidence = true
+						} else {
+							factAgent = h.evidence
+						}
+					}
 					out = append(out, relationshipCandidate{
 						rule:         RelationshipRuleProgeny,
 						usesAncestry: true,
 						fact: func(ctx context.Context) (*SharingSource, bool, string) {
-							return a.progenySourceFor(ctx, agent, resourceType, resourceID, permissionID)
+							if noEvidence {
+								return nil, false, "delivery credential has no stored-agent evidence"
+							}
+							return a.progenySourceFor(ctx, factAgent, resourceType, resourceID, permissionID)
 						},
 						decision: Decision{
 							Allowed:      true,
@@ -320,10 +340,24 @@ func (a *AuthzService) runRelationshipStages(
 		return nil, false
 	}
 
-	// Stage 2: hub-attested ancestry.
-	if c.usesAncestry && !relationshipAncestryAttested(principal) {
+	// Stage 2: hub-attested ancestry. relationshipStageAncestryAttested
+	// (authz_delivery_credential.go) is relationshipAncestryAttested for
+	// every principal except hubDeliveryIdentity, for which it reads
+	// attestation from the stored-agent evidence, scoped to the three
+	// deliver permissions (ptone/scion#2228 part 2).
+	if c.usesAncestry && !relationshipStageAncestryAttested(principal, permissionID) {
 		reject(RelationshipRejectUntrustedAncestry, "ancestry is not hub-attested")
 		return nil, false
+	}
+
+	// Stage 2b: execution project. An agent's access to its source user's
+	// resources requires that user's live admission to the agent's
+	// current project for the exact permission.
+	if isAgentPrincipal(principal.Kind) && executionProjectRule(c.rule) {
+		if ok, detail := a.executionProjectAdmission(ctx, principal, permissionID); !ok {
+			reject(RelationshipRejectExecutionProject, detail)
+			return nil, false
+		}
 	}
 
 	// Stage 3: relationship fact.
@@ -341,6 +375,12 @@ func (a *AuthzService) runRelationshipStages(
 	// Stage 4: sharing-source owner is active.
 	if src != nil {
 		if active, detail := a.relationshipSourceActive(ctx, src.OwnerID); !active {
+			reject(RelationshipRejectSourceInactive, detail)
+			return src, false
+		}
+		// An agent-owned source must hold the permission through
+		// its delegation chain.
+		if holds, detail := a.relationshipSourceDelegationHolds(ctx, src.OwnerID, resource, permissionID); !holds {
 			reject(RelationshipRejectSourceInactive, detail)
 			return src, false
 		}
@@ -392,6 +432,39 @@ func (a *AuthzService) relationshipSourceActive(ctx context.Context, ownerID str
 	root, err := a.store.GetUser(ctx, agent.Ancestry[0])
 	if err != nil || root == nil || root.Status != store.UserStatusActive {
 		return false, "sharing source owner agent's root user is not active"
+	}
+	return true, ""
+}
+
+// relationshipSourceDelegationHolds reports whether an agent-owned sharing
+// source holds permissionID for resource through its delegation chain,
+// using the shared chain evaluation. A user owner has no delegation chain and
+// holds (its activity is checked by relationshipSourceActive). Any lookup
+// failure reports false.
+func (a *AuthzService) relationshipSourceDelegationHolds(ctx context.Context, ownerID string, resource Resource, permissionID string) (bool, string) {
+	if a.store == nil {
+		return false, "store not available"
+	}
+	agent, err := a.store.GetAgent(ctx, ownerID)
+	if errors.Is(err, store.ErrNotFound) {
+		return true, ""
+	}
+	if err != nil || agent == nil {
+		return false, "sharing source owner agent lookup failed"
+	}
+	scopeID := agent.ProjectID
+	if rp := resourceProjectScope(resource); rp != "" && rp != scopeID {
+		scopeID = rp
+	}
+	if scopeID == "" {
+		return false, "sharing source owner agent has no project"
+	}
+	allowed, _, err := a.walkDelegationChain(ctx, resource, ActionRead, permissionID, agent.ID, true, store.RoleScopeProject, scopeID, nil)
+	if err != nil {
+		return false, "sharing source owner agent delegation lookup failed"
+	}
+	if !allowed {
+		return false, "sharing source owner agent's delegation does not hold the permission"
 	}
 	return true, ""
 }
@@ -753,7 +826,9 @@ func (p ProgenyPredicate) Matches(src SharingSource) bool {
 // nothing. List filtering is a read: the reviewed use and deliver pairs
 // (progenyExactPairs) never make a kind listable.
 // The request's credential restrictions are applied by the per-record
-// Decide call, not by the predicate.
+// Decide call, not by the predicate. The source-delegation clause is
+// evaluated per kind, not per record, so the list can be narrower than a
+// point read (see the comment in SourceActive).
 func (a *AuthzService) ProgenyListPredicate(ctx context.Context, principal PrincipalContext, kind string) ProgenyPredicate {
 	none := ProgenyPredicate{Kind: kind}
 	if !isAgentPrincipal(principal.Kind) || !relationshipAncestryAttested(principal) {
@@ -767,25 +842,50 @@ func (a *AuthzService) ProgenyListPredicate(ctx context.Context, principal Princ
 	if adapter == nil {
 		return none
 	}
-	allowed := false
+	var policyPerms []string
 	for _, id := range perms {
 		if _, exact := progenyExactPairs[id]; exact {
 			continue
 		}
 		if permissions.RelationshipPolicyAllows(string(RelationshipRuleProgeny), "agent", kind, id) {
-			allowed = true
-			break
+			policyPerms = append(policyPerms, id)
 		}
 	}
-	if !allowed {
+	// The execution-project stage applies per permission, as on point
+	// reads: keep only the permissions the agent's source user is admitted
+	// for in the agent's project.
+	var admittedPerms []string
+	for _, id := range policyPerms {
+		if ok, _ := a.executionProjectAdmission(ctx, principal, id); ok {
+			admittedPerms = append(admittedPerms, id)
+		}
+	}
+	if len(admittedPerms) == 0 {
 		return none
 	}
 	return ProgenyPredicate{
 		Kind:             kind,
 		AttestedAncestry: append([]string(nil), agent.Ancestry()...),
 		SourceActive: func(ownerID string) bool {
-			active, _ := a.relationshipSourceActive(ctx, ownerID)
-			return active
+			if active, _ := a.relationshipSourceActive(ctx, ownerID); !active {
+				return false
+			}
+			// An agent-owned source must hold at least one of the kind's
+			// progeny read permissions through its delegation chain.
+			//
+			// List/point divergence (narrower on list): the list has no
+			// resource record, so the chain is evaluated against the bare
+			// kind (no ID, owner, ancestry or parent). A user delegator's
+			// authority that exists only through a relationship to the
+			// specific resource (for example, owner of that record) is
+			// therefore absent here. A point read evaluates the full
+			// resource, so it can admit a source the list omits.
+			for _, id := range admittedPerms {
+				if holds, _ := a.relationshipSourceDelegationHolds(ctx, ownerID, Resource{Type: kind}, id); holds {
+					return true
+				}
+			}
+			return false
 		},
 	}
 }

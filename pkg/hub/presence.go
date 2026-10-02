@@ -86,14 +86,15 @@ type typingEntry struct {
 // provides server-side typing throttling. It is single-node only (see design
 // §4.5 HA limitation).
 type PresenceManager struct {
-	mu      sync.RWMutex
-	users   map[string]*presenceEntry          // userID -> presence
-	typing  map[string]map[string]*typingEntry // conversationKey -> userID -> typing
-	events  EventPublisher
-	store   store.Store
-	log     *slog.Logger
-	stopCh  chan struct{}
-	stopped chan struct{}
+	mu       sync.RWMutex
+	users    map[string]*presenceEntry          // userID -> presence
+	typing   map[string]map[string]*typingEntry // conversationKey -> userID -> typing
+	events   EventPublisher
+	store    store.Store
+	log      *slog.Logger
+	stopCh   chan struct{}
+	stopped  chan struct{}
+	stopOnce sync.Once
 }
 
 // NewPresenceManager creates a new PresenceManager and starts the background
@@ -112,10 +113,15 @@ func NewPresenceManager(events EventPublisher, st store.Store) *PresenceManager 
 	return pm
 }
 
-// Stop shuts down the background sweep goroutine.
+// Stop shuts down the background sweep goroutine. Safe to call more than
+// once: callers include both server-owned teardown (CleanupResources) and
+// test cleanup that stops a manually-initialized PresenceManager directly,
+// and the two can both run against the same instance.
 func (pm *PresenceManager) Stop() {
-	close(pm.stopCh)
-	<-pm.stopped
+	pm.stopOnce.Do(func() {
+		close(pm.stopCh)
+		<-pm.stopped
+	})
 }
 
 // Heartbeat processes a presence heartbeat from a user. It updates the

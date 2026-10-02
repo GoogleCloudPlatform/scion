@@ -143,7 +143,7 @@ func (s *Server) handleGCPServiceAccounts(w http.ResponseWriter, r *http.Request
 	case http.MethodPost:
 		s.createGCPServiceAccountScoped(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -307,7 +307,7 @@ func (s *Server) handleGCPServiceAccountByID(w http.ResponseWriter, r *http.Requ
 	case r.Method == http.MethodDelete:
 		s.deleteGCPServiceAccountByID(w, r, saID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
 }
 
@@ -680,7 +680,7 @@ func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http
 // handleGCPServiceAccountsMint handles POST /api/v1/gcp-service-accounts/mint.
 func (s *Server) handleGCPServiceAccountsMint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

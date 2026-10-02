@@ -89,7 +89,7 @@ OpenCode supports two authentication methods (auto-detected in this order):
 ### Configuration
 - **Config File**: `~/.config/opencode/opencode.json`.
 - **Environment**: Respects standard OpenCode environment variables.
-- **Model Resolution**: Supports model selection via the `SCION_MODEL` environment variable. When `ctx.model_resolution` is empty, the provisioning script automatically falls back to `SCION_MODEL` to resolve and configure the underlying model.
+- **Model Resolution**: Supports model selection via the `SCION_MODEL` environment variable. The provisioning script resolves it with `scion_harness.resolve_model`, which maps a size alias through the harness-config's `model_aliases` to configure the underlying model.
 - **Catalog Pre-fetch**: The provisioner automatically pre-fetches the `models.dev` catalog to ensure fresh model data is available before startup.
 
 ### Hooks
@@ -127,6 +127,8 @@ When `SCION_THINKING_LEVEL` is set (a value from 0–100, provided via `--thinki
 | 76–100 | `xhigh` |
 
 Values outside the 0–100 range are clamped to the nearest boundary.
+
+When `SCION_THINKING_LEVEL` is unset, blank, or not a valid integer, the provisioner writes `model_reasoning_effort = "medium"` rather than leaving the key unwritten. This keeps Codex's own per-model catalog default (which can be `low` for some models) from silently taking over when no one has expressed an explicit preference.
 
 ### Known Limitations
 - **Auth File Copy**: The `auth.json` file is only copied when the agent is **created**.
@@ -192,7 +194,7 @@ with `capture_auth.py`.
 - **Instructions**: `agent_instructions` and `system_prompt` are projected into `AGENTS.md`. Hermes has no native system-prompt flag, so the system prompt is *prepended to `AGENTS.md`*.
 - **MCP**: `~/.hermes/mcp.json`. Project-scoped MCP servers are not supported.
 - **Model aliases**: `small` → `google/gemini-3.5-flash`, `medium` → `anthropic/claude-sonnet-4`, `large` → `anthropic/claude-opus-4`.
-- **Model Resolution**: Integrates with the `SCION_MODEL` environment variable for fallback model alias resolution. When `ctx.model_resolution` is empty, the `provision.py` script falls back to `SCION_MODEL` to map size aliases to the correct Nous Research endpoints.
+- **Model Resolution**: Integrates with the `SCION_MODEL` environment variable for fallback model alias resolution. The `provision.py` script resolves it with `scion_harness.resolve_model`, which maps size aliases to the provider/model strings above.
 
 ### Known Limitations
 - **System Prompt**: approximated via `AGENTS.md` (no native override).

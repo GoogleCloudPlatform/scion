@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite vet lint vet-integration compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite vet lint vet-integration compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-harness-coverage check-authorization-catalog check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -72,15 +72,18 @@ test-fast:
 	@echo "Running tests (no SQLite)..."
 	@go test -tags no_sqlite ./...
 
-## test-hub-sqlite: Run pkg/hub tests with SQLite enabled (no build tag). This is
-# the ~67% of pkg/hub's test files that "make test-fast" never compiles (see
-# ptone/scion#1118). Skips four tests with known pre-existing, tracked failures
+## test-hub-sqlite: Run pkg/hub (and perf/bench/seed) tests with SQLite
+# enabled (no build tag). This is the ~67% of pkg/hub's test files that
+# "make test-fast" never compiles (see ptone/scion#1118), plus
+# perf/bench/seed's own SQLite-backed tests, which carry the same
+# `//go:build !no_sqlite` constraint for the same reason (ptone/scion#2393).
+# Skips four pkg/hub tests with known pre-existing, tracked failures
 # (ptone/scion#1847) so this target can be used as a CI merge gate.
 test-hub-sqlite:
-	@echo "Running pkg/hub tests (SQLite-enabled)..."
+	@echo "Running pkg/hub + perf/bench/seed tests (SQLite-enabled)..."
 	@go test -count=1 -timeout 25m \
 		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
-		./pkg/hub/...
+		./pkg/hub/... ./perf/bench/seed/...
 
 ## test-launch-store-postgres: Run the T1 async-create launch store/reaper
 # suite against a real Postgres server (design t1-async-create-v11.md §6,
@@ -100,6 +103,13 @@ test-hub-sqlite:
 # upsert test asserts timestamp equality at a precision Postgres does not
 # preserve). Fixing those is out of scope for this design; -run keeps this
 # job to what it was scoped to test.
+#
+# The -run regex also includes the broker-settings compare-and-set and
+# row-lock tests (TestPutBrokerSettings*, TestDeleteBrokerSettings*,
+# TestUsesRowLocks_ReflectsBackend, ptone/scion#2327): they assert
+# dialect-dependent behavior (usesRowLocks/FOR UPDATE) the same way the T1
+# tests do, so they belong in this job's Postgres coverage rather than running
+# only against SQLite.
 #
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
@@ -133,7 +143,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestReport_H1_)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
@@ -181,6 +191,13 @@ check-conversation-upsert-guard:
 ## check-security-marker-gates: Verify security symbols (authenticatedSender, validateDefaultAgent, ActionAttach) remain in handler code
 check-security-marker-gates:
 	@./hack/check-security-marker-gates.sh
+
+## check-harness-coverage: Verify every harnesses/<name>/Dockerfile has a build step in each full-catalog cloudbuild-*.yaml
+# NOTE: same caveat as check-authz-guards above -- make collapses the
+# script's exit 1 (a harness is out of sync) and exit 2 (could not run) into
+# one code. CI invokes the script directly to tell those apart.
+check-harness-coverage:
+	@./image-build/scripts/check-harness-coverage.sh
 
 ## check-authorization-catalog: Validate authorization operation catalog, permission coverage, and generated report
 check-authorization-catalog:

@@ -36,8 +36,10 @@ import type {
 } from '../shared/types.js';
 import { canMessageAgent } from '../shared/types.js';
 import { activityMsFromTimestamp } from '../utils/chat-palette-match.js';
+import { formatFileSize } from '../utils/chat-file-links.js';
 import type { PaletteCandidate, PaletteThreadTarget } from './chat-palette-types.js';
-import { dmCandidateId, threadCandidateId } from './chat-palette-types.js';
+import { dmCandidateId, documentCandidateId, threadCandidateId } from './chat-palette-types.js';
+import type { RecentFile } from './chat-recent-files.js';
 
 /** Agents page size. The server default is much larger; 100 keeps pages small enough to show progress. */
 const AGENTS_PAGE_LIMIT = 100;
@@ -57,6 +59,32 @@ const MAX_USER_PAGES = 500;
 
 /** Maximum concurrent per-space thread-list requests. */
 const MAX_CONCURRENT_THREAD_REQUESTS = 4;
+
+/**
+ * Per-step idle (not total-duration) bound for one Agents-group load:
+ * independent of {@link MAX_AGENT_PAGES} (which guards against a pagination
+ * loop that never terminates, not a slow-but-terminating one). Resets on
+ * every agents page and covers the DM fetch that follows immediately after
+ * the last page's own reset, with no gap in between. A load that keeps
+ * making progress, however long overall, never trips it; a single step with
+ * no forward progress at all (a dropped connection, a proxy that never
+ * responds) is aborted and surfaced as a retryable error instead of leaving
+ * the group on "Loading…" forever.
+ *
+ * ~32s/page observed on a large real agent list; 90s is roughly 3x headroom
+ * per step. Exported so `chat.ts` can bound the People group's `/auth/me`
+ * identity fetch by the same value (see `_resolveSelfUserId` in chat.ts).
+ */
+export const AGENTS_IDLE_TIMEOUT_MS = 90 * 1000;
+
+/**
+ * Distinguishes an idle-timeout-triggered abort of the Agents group's
+ * controller from an explicit cancel/supersede, so
+ * {@link ChatPaletteDataController.loadAgentsGroup} can surface the former
+ * as a load error rather than swallowing it the way an ordinary
+ * superseded/cancelled load is swallowed.
+ */
+const AGENTS_IDLE_TIMEOUT_REASON = Symbol('agents-group-idle-timeout');
 
 /** The subset of the agent-list response shape this module reads. */
 export interface RawPaletteAgent {
@@ -137,8 +165,18 @@ export class PaletteLoadError extends Error {
  * page can legitimately return zero items while still carrying a cursor.
  * A cursor value repeating across pages is treated as a load error rather
  * than an infinite loop.
+ *
+ * `onPage`, when given, is called once per page with that page's own agents
+ * (not the running total) as soon as it arrives — before the next page is
+ * requested. This lets a caller (see {@link ChatPaletteDataController.loadAgentsGroup})
+ * publish results incrementally on a hub where the full list takes a long
+ * time to finish paginating, instead of holding every page back until the
+ * last one lands.
  */
-export async function fetchAllPaletteAgents(signal?: AbortSignal): Promise<RawPaletteAgent[]> {
+export async function fetchAllPaletteAgents(
+  signal?: AbortSignal,
+  onPage?: (pageAgents: RawPaletteAgent[]) => void
+): Promise<RawPaletteAgent[]> {
   const all: RawPaletteAgent[] = [];
   const seenCursors = new Set<string>();
   let cursor = '';
@@ -180,6 +218,7 @@ export async function fetchAllPaletteAgents(signal?: AbortSignal): Promise<RawPa
     const data = raw as AgentListResponse;
     if (Array.isArray(data.agents)) {
       all.push(...data.agents);
+      onPage?.(data.agents);
     }
     const next = typeof data.nextCursor === 'string' ? data.nextCursor : '';
     if (next) {
@@ -530,6 +569,66 @@ export function buildThreadCandidates(
 }
 
 /**
+ * The secondary line for a Documents row: the project and container path for
+ * a detected path, or the project and attachment metadata for an attachment,
+ * so records that share a file name remain distinguishable.
+ */
+function documentSecondaryLabel(file: RecentFile): string {
+  const projectName = file.source.projectName;
+  if (file.target.kind === 'path') {
+    return projectName
+      ? `${projectName} — ${file.target.containerPath}`
+      : file.target.containerPath;
+  }
+  // Size and date, joined only where both are known — appended so two
+  // attachments sharing a name and project (the same filename reattached, or
+  // shared across conversations) are still distinguishable in the list. A Go
+  // zero timestamp (never a real send time) is treated the same as a missing
+  // one, matching activityMsFromTimestamp's own definition of "unknown" for
+  // this same field.
+  const activityMs = activityMsFromTimestamp(file.source.sentAt);
+  const metadata = [
+    formatFileSize(file.target.size),
+    activityMs > 0
+      ? new Date(activityMs).toLocaleDateString('en', { month: 'short', day: 'numeric' })
+      : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const label = metadata ? `Attachment · ${metadata}` : 'Attachment';
+  return projectName ? `${projectName} — ${label}` : label;
+}
+
+/**
+ * Build Documents candidates from the recent-files store's current
+ * snapshot. Unlike the other three groups, there is no network fetch here:
+ * `chatRecentFiles` is an already-live, identity-scoped index, and this only
+ * maps its records into the shared candidate shape so Documents matches
+ * share the same global ranking as Agents/Threads/People. Search fields are
+ * the file's display name (every record), its container path (path targets),
+ * and its captured project label when known.
+ */
+export function buildDocumentCandidates(records: readonly RecentFile[]): PaletteCandidate[] {
+  const candidates: PaletteCandidate[] = [];
+  for (const file of records) {
+    const searchFields = [file.name];
+    if (file.target.kind === 'path') searchFields.push(file.target.containerPath);
+    if (file.source.projectName) searchFields.push(file.source.projectName);
+
+    candidates.push({
+      id: documentCandidateId(file.key),
+      group: 'documents',
+      label: file.name,
+      secondaryLabel: documentSecondaryLabel(file),
+      searchFields,
+      activityMs: activityMsFromTimestamp(file.source.sentAt),
+      target: { kind: 'document', file },
+    });
+  }
+  return candidates;
+}
+
+/**
  * Run `fn` over `items` with at most `limit` concurrently in flight at once.
  * Unlike chunking items into fixed-size batches, a worker pool keeps exactly
  * `limit` requests in flight the whole time — a batch boundary never leaves
@@ -633,15 +732,75 @@ export class ChatPaletteDataController {
    * {@link PaletteLoadError}. A load superseded by a later call to
    * {@link loadAgentsGroup} or {@link cancel} rejects with an AbortError-like
    * error the caller should treat as "no update", not a failure to display.
+   *
+   * `onProgress`, when given, is called with a cumulative candidate list
+   * (recency unknown — `activityMs=0` — since DMs aren't fetched yet at this
+   * point) after each agents page arrives, before the full (potentially
+   * long-running, see {@link AGENTS_IDLE_TIMEOUT_MS}) list has finished
+   * paginating, so a caller can publish partial results instead of blocking
+   * the whole group on the slowest page. Never called with a superseded
+   * generation's data. The resolved return value is always the final,
+   * DM-joined list with correct recency — `onProgress` is a preview, not a
+   * substitute for it.
+   *
+   * Bounded by {@link AGENTS_IDLE_TIMEOUT_MS} as an *idle* timeout: reset on
+   * every page (see the `resetIdleTimeout()` calls below and that constant's
+   * own doc comment for why the reset also covers the DM fetch), not a cap
+   * on the load's total duration. A load that goes that
+   * long with no forward progress at all is aborted and rejects with
+   * {@link PaletteLoadError}, not the silent AbortError-like rejection a
+   * supersede/cancel produces — a genuinely stalled request must surface as
+   * a visible, retryable failure rather than leaving the group's `loading`
+   * status (and whatever partial candidates `onProgress` already published)
+   * in place forever. A load that keeps making progress, however slowly
+   * overall, never trips it.
    */
-  async loadAgentsGroup(): Promise<PaletteCandidate[]> {
+  async loadAgentsGroup(
+    onProgress?: (candidates: PaletteCandidate[]) => void
+  ): Promise<PaletteCandidate[]> {
     this.agentsAbort?.abort();
     const controller = new AbortController();
     this.agentsAbort = controller;
     const myGeneration = ++this.agentsGeneration;
 
+    let idleTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    const resetIdleTimeout = (): void => {
+      if (idleTimeoutId) clearTimeout(idleTimeoutId);
+      idleTimeoutId = setTimeout(
+        () => controller.abort(AGENTS_IDLE_TIMEOUT_REASON),
+        AGENTS_IDLE_TIMEOUT_MS
+      );
+    };
+    const stopIdleTimeout = (): void => {
+      if (idleTimeoutId) clearTimeout(idleTimeoutId);
+      idleTimeoutId = null;
+    };
+
+    resetIdleTimeout();
     try {
-      const agents = await fetchAllPaletteAgents(controller.signal);
+      // Agents are fetched before DMs. Each page is published through
+      // `onProgress` (with `activityMs=0`, i.e. unknown recency — no DMs are
+      // known yet at this point) as it arrives, so a caller can show real
+      // rows long before a hub with a long agent list finishes paginating;
+      // the final return value below re-joins every agent against the real
+      // DM list once both fetches are done, which is what actually gets
+      // published as `ready` (see `ChatPaletteDataController`'s only caller,
+      // `_loadPaletteAgents` in chat.ts) and what every progress callback's
+      // recency is superseded by.
+      const seen: RawPaletteAgent[] = [];
+      const agents = await fetchAllPaletteAgents(controller.signal, (pageAgents) => {
+        // Each page is forward progress, whether or not this generation is
+        // still current — resetting here is harmless even for a stale load:
+        // either a newer load's own abort() already fired (a no-op on an
+        // already-aborted controller), or this one is still current and the
+        // reset is exactly the point.
+        resetIdleTimeout();
+        // A superseded/cancelled load's own trailing pages must not publish
+        // through a newer load's (or no load's) onProgress.
+        if (myGeneration !== this.agentsGeneration) return;
+        seen.push(...pageAgents);
+        onProgress?.(buildAgentCandidates(seen, []));
+      });
 
       if (myGeneration !== this.agentsGeneration) {
         throw new DOMException('superseded by a later load', 'AbortError');
@@ -655,6 +814,9 @@ export class ChatPaletteDataController {
       // together. A softer "ready, but recency unavailable" state that keeps
       // the agent list interactive while flagging the join failure would be a
       // reasonable enhancement; deferred rather than added speculatively here.
+      // No separate reset here before the DM fetch: it starts immediately
+      // after the last agents page's own reset above, with no gap in
+      // between, so that reset already covers it.
       const dms = await fetchPaletteDms(controller.signal);
 
       if (myGeneration !== this.agentsGeneration) {
@@ -663,11 +825,24 @@ export class ChatPaletteDataController {
 
       return buildAgentCandidates(agents, dms);
     } catch (err) {
+      // Only classify as a timeout for a load that is still current: a timer
+      // firing for an already-superseded load must still be reclassified as
+      // an AbortError below, not surfaced as a PaletteLoadError that could
+      // publish over a newer load's own state.
+      if (
+        controller.signal.aborted &&
+        controller.signal.reason === AGENTS_IDLE_TIMEOUT_REASON &&
+        myGeneration === this.agentsGeneration
+      ) {
+        throw new PaletteLoadError('agents list took too long to load');
+      }
       return reclassifyIfStale(
         err,
         controller.signal.aborted,
         myGeneration !== this.agentsGeneration
       );
+    } finally {
+      stopIdleTimeout();
     }
   }
 

@@ -33,7 +33,6 @@ async function setupChat(page: Page): Promise<void> {
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = {
       'web.native_chat': true,
-      'web.native_chat_v2': true,
     };
     // Suppress EventSource (SSE) — no real server behind these mocks.
     window.EventSource = class extends EventTarget {

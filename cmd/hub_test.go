@@ -617,6 +617,26 @@ func TestFormatProviderCapacity(t *testing.T) {
 			p:    hubclient.ProjectProvider{AgentCount: nil, AgentLimit: nil},
 			want: "-",
 		},
+		{
+			name: "not enforced: count and limit known, suffix appended (Amendment A1)",
+			p:    hubclient.ProjectProvider{AgentCount: i64(7), AgentLimit: i64(30), AgentLimitSource: "not_enforced"},
+			want: "7/30 (not enforced)",
+		},
+		{
+			name: "not enforced and unlimited: suffix still appended for the count-only form",
+			p:    hubclient.ProjectProvider{AgentCount: i64(5), AgentLimit: nil, AgentLimitSource: "not_enforced"},
+			want: "5 (not enforced)",
+		},
+		{
+			name: "enforced (source=broker): no suffix",
+			p:    hubclient.ProjectProvider{AgentCount: i64(12), AgentLimit: i64(12), AgentLimitSource: "broker"},
+			want: "12/12",
+		},
+		{
+			name: "enforced (empty source, e.g. an older hub): no suffix",
+			p:    hubclient.ProjectProvider{AgentCount: i64(12), AgentLimit: i64(12), AgentLimitSource: ""},
+			want: "12/12",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -651,6 +671,11 @@ func TestProviderCapacityIndicator(t *testing.T) {
 			name: "neither known: no capacity reported",
 			p:    hubclient.ProjectProvider{AgentCount: nil, AgentLimit: nil},
 			want: " (agents: -)",
+		},
+		{
+			name: "not enforced (Amendment A1): the switch-off suffix carries through",
+			p:    hubclient.ProjectProvider{AgentCount: i64(7), AgentLimit: i64(30), AgentLimitSource: "not_enforced"},
+			want: " (agents: 7/30 (not enforced))",
 		},
 	}
 	for _, tc := range cases {

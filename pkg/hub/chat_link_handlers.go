@@ -175,7 +175,7 @@ type chatLinkRegistrationOptions struct {
 
 func handleChatLinkRegistration(w http.ResponseWriter, r *http.Request, opts chatLinkRegistrationOptions) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -249,7 +249,7 @@ type chatLinkVerificationOptions struct {
 
 func handleChatLinkVerification(w http.ResponseWriter, r *http.Request, opts chatLinkVerificationOptions) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -344,7 +344,7 @@ type chatLinkStatusOptions struct {
 
 func handleChatLinkStatus(w http.ResponseWriter, r *http.Request, opts chatLinkStatusOptions) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

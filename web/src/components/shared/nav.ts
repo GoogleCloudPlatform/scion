@@ -264,6 +264,7 @@ export class ScionNav extends LitElement {
       padding: 1rem 0.75rem;
       overflow-y: auto;
       overflow-x: hidden;
+      overscroll-behavior: contain;
     }
 
     .nav-section {

@@ -582,11 +582,18 @@ func entUATToStore(e *ent.UserAccessToken) *store.UserAccessToken {
 		Name:                 e.Name,
 		Prefix:               e.Prefix,
 		KeyHash:              e.KeyHash,
-		ProjectID:            e.ProjectID.String(),
+		BoundaryKind:         e.BoundaryKind,
 		Revoked:              e.Revoked,
 		Created:              e.Created,
 		CeilingVersion:       permissions.CeilingVersion(e.CeilingVersion),
 		CeilingPermissionIDs: unmarshalCeilingPermissionIDs(e.CeilingPermissionIds),
+	}
+	// ProjectID is set iff the row is a "project" boundary; a hub-boundary
+	// row has a NULL project_id column, which maps to the empty string —
+	// never interpreted as hub by anything reading this struct without
+	// also checking BoundaryKind (see store.UserAccessToken.ValidateBoundary).
+	if e.ProjectID != nil {
+		t.ProjectID = e.ProjectID.String()
 	}
 	if e.Scopes != "" {
 		_ = json.Unmarshal([]byte(e.Scopes), &t.Scopes)
@@ -620,8 +627,18 @@ func (s *ExternalStore) CreateUserAccessToken(ctx context.Context, token *store.
 	if err != nil {
 		return err
 	}
-	projectUID, err := parseUUID(token.ProjectID)
-	if err != nil {
+
+	// A caller that sets only ProjectID and leaves BoundaryKind empty
+	// defaults to "project" here, so ValidateBoundary sees a
+	// fully-specified row rather than rejecting an under-specified one. A
+	// caller that explicitly sets BoundaryKind (including to an invalid
+	// value) is validated as given — this default never overrides an
+	// explicit value, and never turns an explicit, invalid value into a
+	// silently-accepted one.
+	if token.BoundaryKind == "" {
+		token.BoundaryKind = string(permissions.BoundaryKindProject)
+	}
+	if err := token.ValidateBoundary(); err != nil {
 		return err
 	}
 
@@ -635,11 +652,22 @@ func (s *ExternalStore) CreateUserAccessToken(ctx context.Context, token *store.
 		SetName(token.Name).
 		SetPrefix(token.Prefix).
 		SetKeyHash(token.KeyHash).
-		SetProjectID(projectUID).
+		SetBoundaryKind(token.BoundaryKind).
 		SetScopes(marshalScopes(token.Scopes)).
 		SetCeilingVersion(int32(token.CeilingVersion)).
 		SetRevoked(token.Revoked).
 		SetCreated(token.Created)
+
+	// ProjectID is parsed and set only for a "project" boundary; ValidateBoundary
+	// above already guarantees a "hub" boundary has an empty ProjectID, so
+	// the create mutation leaves the column NULL for hub tokens.
+	if token.ProjectID != "" {
+		projectUID, err := parseUUID(token.ProjectID)
+		if err != nil {
+			return err
+		}
+		create.SetProjectID(projectUID)
+	}
 
 	if ceilingIDs := marshalCeilingPermissionIDs(token.CeilingPermissionIDs); ceilingIDs != nil {
 		create.SetCeilingPermissionIds(*ceilingIDs)
@@ -762,14 +790,22 @@ func (s *ExternalStore) CountUserAccessTokens(ctx context.Context, userID string
 		Count(ctx)
 }
 
-// DeleteUserAccessTokensByProject permanently removes all tokens scoped to a project.
+// DeleteUserAccessTokensByProject permanently removes all "project"-boundary
+// tokens scoped to a project. Hub-boundary tokens have a NULL project_id and
+// so would never match ProjectIDEQ anyway, but the explicit boundary_kind
+// predicate states that rule rather than relying on the incidental NULL
+// non-match, per project_deletion_service.go's use of this method: deleting
+// a project must never delete hub-boundary tokens belonging to its members.
 func (s *ExternalStore) DeleteUserAccessTokensByProject(ctx context.Context, projectID string) (int, error) {
 	uid, err := parseUUID(projectID)
 	if err != nil {
 		return 0, err
 	}
 	n, err := s.client.UserAccessToken.Delete().
-		Where(useraccesstoken.ProjectIDEQ(uid)).
+		Where(
+			useraccesstoken.ProjectIDEQ(uid),
+			useraccesstoken.BoundaryKindEQ(string(permissions.BoundaryKindProject)),
+		).
 		Exec(ctx)
 	if err != nil {
 		return 0, mapError(err)

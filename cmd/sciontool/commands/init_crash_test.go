@@ -7,7 +7,12 @@ package commands
 import (
 	"errors"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
@@ -156,5 +161,85 @@ func TestReadHarnessExitCode(t *testing.T) {
 	}
 	if got := readHarnessExitCode(); got != nil {
 		t.Errorf("expected nil for garbage, got %v", *got)
+	}
+}
+
+// TestReadHarnessExitCode_SymlinkRefused proves that a workload-planted
+// symlink at the exit-code path can't make root's shutdown path read (and
+// parse as an exit code) an unrelated file's contents: readHarnessExitCode
+// must return nil without touching the symlink's target.
+func TestReadHarnessExitCode_SymlinkRefused(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(target, []byte("42"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	_ = os.Remove(state.HarnessExitCodeFile)
+	if err := os.Symlink(target, state.HarnessExitCodeFile); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(state.HarnessExitCodeFile) })
+
+	if got := readHarnessExitCode(); got != nil {
+		t.Errorf("expected nil for a symlinked exit-code path, got %v", *got)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(data) != "42" {
+		t.Errorf("symlink target was modified: %q", data)
+	}
+}
+
+// TestReadHarnessExitCode_FIFODoesNotBlock proves that a workload-planted
+// FIFO at the exit-code path can't make root's shutdown path hang forever
+// waiting for a writer: readHarnessExitCode must return nil promptly
+// (O_NONBLOCK on open, then a regular-file check before ever reading).
+func TestReadHarnessExitCode_FIFODoesNotBlock(t *testing.T) {
+	_ = os.Remove(state.HarnessExitCodeFile)
+	if err := syscall.Mkfifo(state.HarnessExitCodeFile, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(state.HarnessExitCodeFile) })
+
+	done := make(chan *int, 1)
+	go func() { done <- readHarnessExitCode() }()
+
+	select {
+	case got := <-done:
+		if got != nil {
+			t.Errorf("expected nil for a FIFO exit-code path, got %v", *got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("readHarnessExitCode blocked on a FIFO with no writer")
+	}
+}
+
+// TestReadHarnessExitCode_BoundedRead proves an oversized exit-code file is
+// bounded by harnessExitCodeMaxBytes rather than read in full. The first
+// harnessExitCodeMaxBytes bytes are all-digit and parse to 42 on their own;
+// thousands of further digit bytes follow, which would overflow int (and
+// so fail to parse) if the read weren't bounded. A bounded read must
+// return 42; an unbounded one would return nil.
+func TestReadHarnessExitCode_BoundedRead(t *testing.T) {
+	_ = os.Remove(state.HarnessExitCodeFile)
+	leading := strings.Repeat("0", harnessExitCodeMaxBytes-2) + "42"
+	if len(leading) != harnessExitCodeMaxBytes {
+		t.Fatalf("test setup: leading prefix is %d bytes, want %d", len(leading), harnessExitCodeMaxBytes)
+	}
+	oversized := leading + strings.Repeat("9", 1000)
+	if _, err := strconv.Atoi(oversized); err == nil {
+		t.Fatal("test setup: the full oversized content must not parse as an int (it needs to overflow)")
+	}
+	if err := os.WriteFile(state.HarnessExitCodeFile, []byte(oversized), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(state.HarnessExitCodeFile) })
+
+	got := readHarnessExitCode()
+	if got == nil || *got != 42 {
+		t.Errorf("readHarnessExitCode() = %v, want 42 (derived from only the first %d bytes)", got, harnessExitCodeMaxBytes)
 	}
 }

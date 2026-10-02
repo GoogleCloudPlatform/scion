@@ -129,6 +129,36 @@ func (Agent) Fields() []ent.Field {
 		field.Text("applied_config").
 			Optional(),
 
+		// harness_config is a queryable shadow of applied_config's
+		// "harnessConfig" key, kept in sync by every write to applied_config
+		// (CreateAgent/UpdateAgent — see agent_store.go's harnessConfigOf
+		// helper) and reconciled at every startup for any row that hasn't
+		// caught up (CompositeStore.ReconcileHarnessConfigColumn). It exists
+		// solely so the CLI --harness filter (AgentFilter.HarnessConfig) can
+		// use a plain, dialect-independent equality predicate instead of
+		// parsing/pattern-matching the applied_config JSON document at query
+		// time (ptone/scion#2146). It is not part of store.Agent
+		// — nothing outside the HarnessConfig filter predicate reads it; the
+		// enriched, response-facing store.Agent.HarnessConfig field is
+		// unrelated and still derived from applied_config at response time,
+		// unchanged.
+		//
+		// NULL vs "": NULL means "never written by a binary that knows this
+		// column exists" — the reconcile's job is to find and fix exactly
+		// those rows. Every write that DOES know about the column
+		// (CreateAgent, UpdateAgent, the reconcile itself) always writes a
+		// real value, including "" for "no harness configured, or nothing
+		// usable could be extracted" — never NULL. "" can never match a
+		// --harness filter (the filter predicate is only emitted for a
+		// non-empty requested value), so this distinction is invisible to
+		// callers; it exists purely so the reconcile query
+		// (`harness_config IS NULL`) actually converges to empty once every
+		// row has been visited by a column-aware binary, instead of
+		// re-selecting and re-parsing every no-harness/invalid/legacy-key
+		// row on every single boot forever (ptone/scion#2146).
+		field.String("harness_config").
+			Optional(),
+
 		// ancestry is the ordered chain of ancestor principal IDs used for
 		// transitive access control. Stored as a JSON array so the dialect-aware
 		// json_each / json_array_elements_text membership filter can be applied.
@@ -296,5 +326,29 @@ func (Agent) Indexes() []ent.Index {
 				entsql.IndexWhere("launch_state = 'active'"),
 			),
 		index.Fields("launch_id"),
+		// Partial index backing CompositeStore.ReconcileHarnessConfigColumn's
+		// every-boot scan (GoogleCloudPlatform/scion#2153), which queries
+		// exactly Where(HarnessConfigIsNil(), AppliedConfigNotNil()) ordered
+		// by id. The WHERE clause matches that predicate exactly, so the
+		// index holds only rows still needing reconciliation — it shrinks
+		// toward empty as they're caught up, instead of growing with the
+		// whole table forever the way an unconditional index on
+		// harness_config would. Same shape as this file's launch_deadline
+		// index above and notification.go's dispatched-false index.
+		//
+		// Deliberately does not serve the CLI --harness filter
+		// (agent.HarnessConfigEQ in agent_store.go): that predicate only
+		// ever matches a non-empty harness value, which this index excludes
+		// by construction. An index for that filter is a separate, still-open
+		// question — it would need to combine with the AuthorizedProjectIDs
+		// project scope every --harness query already carries, and the
+		// agents table has no project_id index today for it to pair with —
+		// not something this reconcile-only index should be widened to cover
+		// speculatively.
+		index.Fields("id").
+			StorageKey("agent_harness_config_reconcile_pending").
+			Annotations(
+				entsql.IndexWhere("harness_config IS NULL AND applied_config IS NOT NULL"),
+			),
 	}
 }

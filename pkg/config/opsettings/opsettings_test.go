@@ -32,7 +32,7 @@ import (
 func TestRegistryHasAllSections(t *testing.T) {
 	expected := []string{"access", "lifecycle", "maintenance", "messaging",
 		"telemetry", "agent_defaults", "endpoints", "github_app", "notifications",
-		"project_defaults", "auto_expose_ports", "quotas", "federation", "experiments"}
+		"project_defaults", "auto_expose_ports", "quotas", "agent_secrets", "federation", "experiments"}
 	for _, name := range expected {
 		if SectionByName(name) == nil {
 			t.Errorf("section %q not found in registry", name)
@@ -117,6 +117,7 @@ func TestOwningSection(t *testing.T) {
 		{"server.notification_channels", "notifications"},
 		{"auto_expose_ports.enabled", "auto_expose_ports"},
 		{"quotas.enforce_broker_quotas", "quotas"},
+		{"agent_secrets.user_scope_only", "agent_secrets"},
 		{"server.federation.enabled", "federation"},
 		{"server.federation.trusted_issuers", "federation"},
 		{"server.federation.algorithms", "federation"},
@@ -232,6 +233,9 @@ func TestValidateValidDoc(t *testing.T) {
 		{"quotas", `{"enforce_broker_quotas":true}`},
 		{"quotas", `{"enforce_broker_quotas":false}`},
 		{"quotas", `{}`},
+		{"agent_secrets", `{"user_scope_only":true}`},
+		{"agent_secrets", `{"user_scope_only":false}`},
+		{"agent_secrets", `{}`},
 		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://hub.example.com","issuer_type":"hub"}],"algorithms":["RS256"]}`},
 		{"federation", `{"enabled":false}`},
 		{"federation", `{}`},
@@ -263,6 +267,8 @@ func TestValidateInvalidDoc(t *testing.T) {
 		{"project_defaults", `{"unknown_field":true}`, "additional property"},
 		{"quotas", `{"enforce_broker_quotas":"yes"}`, "wrong type for boolean"},
 		{"quotas", `{"unknown_field":true}`, "additional property"},
+		{"agent_secrets", `{"user_scope_only":"yes"}`, "wrong type for boolean"},
+		{"agent_secrets", `{"unknown_field":true}`, "additional property"},
 		{"federation", `{"trusted_issuers":[{"issuer_url":""}]}`, "empty issuer_url (minLength)"},
 		{"federation", `{"algorithms":["INVALID"]}`, "invalid algorithm enum"},
 		{"federation", `{"trusted_issuers":[{"issuer_type":"unknown"}]}`, "invalid issuer_type enum"},
@@ -1326,6 +1332,65 @@ func TestQuotasEmptyExtract(t *testing.T) {
 	}
 	if len(doc) != 0 {
 		t.Errorf("expected empty doc for absent quotas, got %v", doc)
+	}
+}
+
+// TestAgentSecretsKoanfRoundTrip verifies that agent_secrets can be
+// extracted from koanf and loaded back without data loss.
+func TestAgentSecretsKoanfRoundTrip(t *testing.T) {
+	k := koanf.New(".")
+	err := k.Load(confmap.Provider(map[string]interface{}{
+		"agent_secrets.user_scope_only": true,
+	}, "."), nil)
+	if err != nil {
+		t.Fatalf("load koanf: %v", err)
+	}
+
+	// Extract the section.
+	raw, err := ExtractSectionFromKoanf(k, "agent_secrets")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc["user_scope_only"] != true {
+		t.Errorf("expected user_scope_only=true in extracted doc, got %v", doc["user_scope_only"])
+	}
+
+	// Reload into a fresh koanf.
+	sections := map[string]json.RawMessage{
+		"agent_secrets": raw,
+	}
+	reloaded, err := LoadSectionsIntoKoanf(sections)
+	if err != nil {
+		t.Fatalf("load sections: %v", err)
+	}
+
+	if !reloaded.Exists("agent_secrets.user_scope_only") {
+		t.Fatal("expected agent_secrets.user_scope_only to exist in reloaded koanf")
+	}
+	if reloaded.Bool("agent_secrets.user_scope_only") != true {
+		t.Errorf("expected agent_secrets.user_scope_only=true, got %v", reloaded.Get("agent_secrets.user_scope_only"))
+	}
+}
+
+// TestAgentSecretsEmptyExtract verifies that ExtractSectionFromKoanf returns
+// an empty doc when agent_secrets is not set.
+func TestAgentSecretsEmptyExtract(t *testing.T) {
+	k := koanf.New(".")
+	raw, err := ExtractSectionFromKoanf(k, "agent_secrets")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(doc) != 0 {
+		t.Errorf("expected empty doc for absent agent_secrets, got %v", doc)
 	}
 }
 

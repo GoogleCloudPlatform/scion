@@ -202,9 +202,59 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		addArg("--network", config.NetworkMode)
 	}
 
+	// Reject a home directory that is not an allowed agent-home path before
+	// it becomes a bind mount, the same way config.Workspace is checked just
+	// below: this is the Docker/Podman/Apple-container counterpart to the
+	// Kubernetes runtime's Run(), which already validates HomeDir this way.
+	// No root is passed: unlike config.Workspace, a home directory has no
+	// per-project root to check it against at this call site at all, so the
+	// fixed deny-set and the named ~/.scion allow list are the only checks,
+	// the same as every other rootless caller of ValidateAgentHomeSource.
 	if config.HomeDir != "" {
+		resolvedHomeDir, err := ValidateAgentHomeSource(config.HomeDir, "")
+		if err != nil {
+			return nil, err
+		}
+		config.HomeDir = resolvedHomeDir
 		registerMount(config.HomeDir, util.GetHomeDir(config.UnixUsername), false, true)
 	}
+	// Reject a workspace source that is not an allowed workspace path before
+	// any of the branches below turn it into a bind mount, and act on the
+	// resolved, symlink-free path it returns rather than the original value.
+	// This mirrors the same check at the pkg/agent Start() call site, as a
+	// second gate at the actual point config.Workspace becomes a mount —
+	// covering any caller that builds a RunConfig without going through
+	// Start().
+	//
+	// No root is passed here, even though config.RepoRoot is often set: a
+	// workspace outside the repo root is an intentional, supported shape at
+	// this layer (see the "Fallback if workspace is outside repo root"
+	// branch below, and an explicit --workspace generally), and RunConfig
+	// carries no flag this function could use to tell that apart from a bad
+	// value. Only the fixed deny-set ('/', $HOME, ~/.scion, and its named
+	// ~/.scion allow list) applies here; per-project root containment is
+	// enforced upstream, at the pkg/agent Start() call site, which does have
+	// that context.
+	resolvedWorkspace, err := ValidateWorkspaceSource(config.Workspace, "")
+	if err != nil {
+		return nil, err
+	}
+	config.Workspace = resolvedWorkspace
+
+	// Resolve RepoRoot through any symlinks too, the same way Workspace just
+	// was: the branches below compare the two with filepath.Rel to decide
+	// the mount layout, and a symlinked repo path that only one of the two
+	// still carries silently changes which branch fires (in-repo worktree
+	// vs. shared-workspace vs. the outside-repo-root fallback) depending on
+	// which side of the comparison the symlink survives on.
+	if config.RepoRoot != "" {
+		resolvedRepoRoot, err := filepath.EvalSymlinks(config.RepoRoot)
+		if err != nil {
+			return nil, fmt.Errorf("resolve repo root %s: %w", config.RepoRoot, err)
+		}
+		config.RepoRoot = resolvedRepoRoot
+	}
+
 	fullRepoRootMounted := false
 	if config.GitClone != nil {
 		// Git clone mode: mount the host-side workspace directory so the
@@ -541,6 +591,18 @@ func syncGCSVolumes(ctx context.Context, encoded string, direction SyncDirection
 		if volume.Source == "" {
 			continue
 		}
+		// volume.Source is read back from a persisted label on every sync,
+		// not just checked once when the agent started: validate it the
+		// same way every other workspace source is, since nothing upstream
+		// of this decode re-derives or re-checks it. No per-project root is
+		// available at this call site, so only the universal floors apply
+		// (refusing '/', $HOME, ~/.scion outside its own allow list, and
+		// the other critical-system-path and ancestor refusals).
+		resolvedSource, err := ValidateWorkspaceSource(volume.Source, "")
+		if err != nil {
+			return fmt.Errorf("invalid GCS volume source: %w", err)
+		}
+		volume.Source = resolvedSource
 		switch direction {
 		case SyncTo:
 			if err := gcp.SyncToGCS(ctx, volume.Source, volume.Bucket, volume.Prefix); err != nil {

@@ -32,11 +32,6 @@ type relationshipPolicyExceptionKey struct {
 // reclassification. TestRelationshipPolicies_ReviewedExceptionsMatchRows
 // fails for any entry that no longer matches a row.
 var relationshipPolicyReviewedExceptions = map[relationshipPolicyExceptionKey]string{
-	// TODO(ptone/scion#2120): agent.manage is a derived agent permission used
-	// by the message and log handlers (pkg/hub/handlers_messages.go,
-	// pkg/hub/handlers_logs.go) and is not a Registry permission.
-	{"owner", "user", ResourceAgent, "agent.manage"}:    "derived agent.manage for message and log reads; not registered",
-	{"ancestor", "user", ResourceAgent, "agent.manage"}: "derived agent.manage for message and log reads; not registered",
 	// Progeny secret reads are decided with Resource.Type "secret" and
 	// Permission "project.secret_read" (pkg/hub/httpdispatcher.go). The row's
 	// ResourceType is that Decide resource type, and secret_read is treated

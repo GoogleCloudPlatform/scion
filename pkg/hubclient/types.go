@@ -56,10 +56,14 @@ type Agent struct {
 	DeletedAt         time.Time         `json:"deletedAt,omitempty"`
 	CreatedBy         string            `json:"createdBy,omitempty"`
 	OwnerID           string            `json:"ownerId,omitempty"`
-	MessageMode       string            `json:"messageMode,omitempty"`
-	StateVersion      int64             `json:"stateVersion,omitempty"`
-	ExitCode          *int              `json:"exitCode,omitempty"`
-	ExitReason        string            `json:"exitReason,omitempty"`
+	// Ancestry is the ordered chain of ancestor principal IDs (users and/or
+	// agents) recorded at creation time, used for transitive relationship
+	// queries such as `scion list --ancestors` (ptone/scion#2146).
+	Ancestry     []string `json:"ancestry,omitempty"`
+	MessageMode  string   `json:"messageMode,omitempty"`
+	StateVersion int64    `json:"stateVersion,omitempty"`
+	ExitCode     *int     `json:"exitCode,omitempty"`
+	ExitReason   string   `json:"exitReason,omitempty"`
 }
 
 // AgentConfig represents agent configuration.
@@ -148,6 +152,13 @@ type ProjectProvider struct {
 	// no max_agents_per_broker definition exists, or resolution failed for
 	// this provider; a broker with no agents reports 0, not unset.
 	AgentCount *int64 `json:"agentCount,omitempty"`
+	// AgentLimitSource reports which precedence step produced AgentLimit
+	// (ptone/scion#2061 P2, design.md §5.9): "broker", "entitlement",
+	// "hub_default", "unlimited", or "not_enforced" (Amendment A1: the P1b
+	// enforcement switch is off — AgentLimit is then informational only, not
+	// enforced on create). Empty when resolution didn't run or failed, the
+	// same conditions that leave AgentLimit and AgentCount unset.
+	AgentLimitSource string `json:"agentLimitSource,omitempty"`
 }
 
 // ProjectSettings represents project configuration settings.
@@ -289,6 +300,10 @@ type BrokerCapabilities struct {
 	// reprovision primitive (design §3.4; store.BrokerCapabilities.Reprovision
 	// and runtimebroker.BrokerCapabilities.Reprovision are its counterparts).
 	Reprovision bool `json:"reprovision"`
+	// AsyncLaunch indicates the broker understands the non-blocking agent
+	// create path and the launch-report protocol (design t1-async-create-v11.md
+	// §3.2, §7 P1b-1).
+	AsyncLaunch bool `json:"asyncLaunch"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -298,6 +313,11 @@ type BrokerProfile struct {
 	Available bool   `json:"available"`
 	Context   string `json:"context,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
+	// Attach reports whether this profile's runtime supports interactive
+	// attach, mirroring store.BrokerProfile.Attach. A pointer: nil means
+	// the field was never reported (an older broker or profile record),
+	// which must be read as supported, not as an explicit false.
+	Attach *bool `json:"attach,omitempty"`
 }
 
 // BrokerProjectInfo describes a project from a broker's perspective.
@@ -387,6 +407,7 @@ type UserPreferences struct {
 	DefaultTemplate string `json:"defaultTemplate,omitempty"`
 	DefaultProfile  string `json:"defaultProfile,omitempty"`
 	Theme           string `json:"theme,omitempty"`
+	Timezone        string `json:"timezone,omitempty"`
 }
 
 // EnvVar represents an environment variable from the Hub API.

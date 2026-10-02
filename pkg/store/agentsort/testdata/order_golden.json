@@ -1,0 +1,15 @@
+{
+  "description": "Golden fixture for the design lists-graph.md 4.2 total order. Each row carries created/updated/lastActivityEvent as RFC3339Nano strings (lastActivityEvent empty means none, i.e. the COALESCE/'0001' NULL case). expectedUpdatedDesc/Asc and expectedCreatedDesc/Asc are the row IDs in the order agentsort.SortRows must produce for sort=updated and sort=created respectively. The sub-second trailing-zero-fraction cases (ids t1/t2) are deliberately chosen so that string (localeCompare) order would misorder them, pinning the true-time ordering design 4.2 requires as a documented behaviour change.",
+  "rows": [
+    {"id": "a", "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T01:00:00Z", "lastActivityEvent": ""},
+    {"id": "b", "created": "2026-01-01T00:01:00Z", "updated": "2026-01-01T01:00:00Z", "lastActivityEvent": ""},
+    {"id": "c", "created": "2026-01-01T00:02:00Z", "updated": "2026-01-01T02:00:00Z", "lastActivityEvent": "2026-01-01T03:00:00Z"},
+    {"id": "t1", "created": "2026-01-01T00:03:00Z", "updated": "2026-01-01T00:00:05.1Z", "lastActivityEvent": ""},
+    {"id": "t2", "created": "2026-01-01T00:04:00Z", "updated": "2026-01-01T00:00:05.12Z", "lastActivityEvent": ""},
+    {"id": "d", "created": "2026-01-01T00:02:00Z", "updated": "2026-01-01T01:00:00Z", "lastActivityEvent": ""}
+  ],
+  "expectedUpdatedDesc": ["c", "d", "b", "a", "t2", "t1"],
+  "expectedUpdatedAsc": ["t1", "t2", "d", "b", "a", "c"],
+  "expectedCreatedDesc": ["t2", "t1", "d", "c", "b", "a"],
+  "expectedCreatedAsc": ["a", "b", "d", "c", "t1", "t2"]
+}

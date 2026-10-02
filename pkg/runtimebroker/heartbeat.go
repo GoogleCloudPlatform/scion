@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // heartbeatAgentKey returns a key that uniquely identifies an agent within the
@@ -75,6 +76,13 @@ type HeartbeatService struct {
 	projectFilter     func(projectID string) bool // returns true if this project belongs to this hub
 	log               *slog.Logger
 
+	// defaultRuntime is the broker's own default runtime instance, set once
+	// by the caller that constructs this service (which already holds it)
+	// and kept in sync by SwapRuntime alongside SwapManager. Used only to
+	// answer the reported Capabilities.Attach via scionrt.HasAttachSupport —
+	// never constructed here.
+	defaultRuntime scionrt.Runtime
+
 	mu     sync.Mutex
 	stopCh chan struct{}
 	doneCh chan struct{}
@@ -88,6 +96,14 @@ func (s *HeartbeatService) SwapManager(m agent.Manager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.manager = m
+}
+
+// SetDefaultRuntime records the broker's default runtime instance for the
+// Capabilities.Attach field reported on every heartbeat.
+func (s *HeartbeatService) SetDefaultRuntime(rt scionrt.Runtime) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.defaultRuntime = rt
 }
 
 // NewHeartbeatService creates a new heartbeat service.
@@ -197,18 +213,24 @@ func (s *HeartbeatService) sendHeartbeat(ctx context.Context) error {
 func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.BrokerHeartbeat {
 	status := "online"
 
+	s.mu.Lock()
+	defaultRuntime := s.defaultRuntime
+	s.mu.Unlock()
+
 	heartbeat := &hubclient.BrokerHeartbeat{
 		Status: status,
 		// Design §3.4 Amendment A2.2(b): report capabilities on every heartbeat so the hub's
 		// `scion reincarnate` gate is never stuck on a stale join-time
-		// snapshot for an already-registered broker. Mirrors handleInfo's
-		// hardcoded set (a fixed property of this broker binary, not
-		// runtime-negotiated).
+		// snapshot for an already-registered broker. Sync and Reprovision
+		// are a fixed property of this broker binary; Attach reflects the
+		// default runtime's own optional capability
+		// (scionrt.HasAttachSupport), same as handleInfo's Capabilities.Attach.
 		Capabilities: &hubclient.BrokerCapabilities{
 			WebPTY:      false,
 			Sync:        true,
-			Attach:      true,
+			Attach:      scionrt.HasAttachSupport(defaultRuntime),
 			Reprovision: true,
+			AsyncLaunch: true,
 		},
 	}
 

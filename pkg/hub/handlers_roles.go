@@ -191,7 +191,7 @@ func (s *Server) handleAdminRoles(w http.ResponseWriter, r *http.Request) {
 		}
 		s.createRoleDefinition(w, r, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -208,7 +208,7 @@ func (s *Server) handleAdminRoleByID(w http.ResponseWriter, r *http.Request) {
 	// Sub-resource action: GET /api/v1/admin/roles/:id/export
 	if action == "export" {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodHead)
 			return
 		}
 		s.exportSingleRole(w, r, id)
@@ -218,7 +218,7 @@ func (s *Server) handleAdminRoleByID(w http.ResponseWriter, r *http.Request) {
 	// Sub-resource action: POST /api/v1/admin/roles/:id/duplicate
 	if action == "duplicate" {
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		user, ok := s.requireWritePermissionForRole(w, r, "role.create", "create")
@@ -250,7 +250,7 @@ func (s *Server) handleAdminRoleByID(w http.ResponseWriter, r *http.Request) {
 		}
 		s.deleteRoleDefinition(w, r, id, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -285,7 +285,7 @@ func (s *Server) handleAdminRoleBindings(w http.ResponseWriter, r *http.Request)
 	case http.MethodPost:
 		s.createRoleBindingScopeAware(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -385,7 +385,7 @@ func (s *Server) handleAdminRoleBindingByID(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		if r.Method != http.MethodGet {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		// Inline authorization: role_binding.read at hub scope.
@@ -412,7 +412,7 @@ func (s *Server) handleAdminRoleBindingByID(w http.ResponseWriter, r *http.Reque
 		}
 		s.deleteRoleBinding(w, r, id, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 	}
 }
 
@@ -423,7 +423,7 @@ func (s *Server) handleAdminRoleBindingByID(w http.ResponseWriter, r *http.Reque
 // handleAdminPermissions handles GET on /api/v1/admin/permissions.
 func (s *Server) handleAdminPermissions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 	s.listPermissions(w, r)
@@ -704,7 +704,7 @@ func (s *Server) duplicateRoleDefinition(w http.ResponseWriter, r *http.Request,
 // Authorization: route guard checks role.read.
 func (s *Server) handleAdminRolesExport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodHead)
 		return
 	}
 	s.exportRoleDefinitions(w, r)
@@ -714,7 +714,7 @@ func (s *Server) handleAdminRolesExport(w http.ResponseWriter, r *http.Request) 
 // Authorization: route guard checks role.read; inline check requires role.create.
 func (s *Server) handleAdminRolesImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 	user, ok := s.requireWritePermissionForRole(w, r, "role.create", "create")

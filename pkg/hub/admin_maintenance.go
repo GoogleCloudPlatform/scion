@@ -47,7 +47,7 @@ func (s *Server) handleAdminMaintenanceOps(w http.ResponseWriter, r *http.Reques
 
 	if subPath == "" {
 		if r.Method != http.MethodGet {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		s.listMaintenanceOperations(w, r)
@@ -60,7 +60,7 @@ func (s *Server) handleAdminMaintenanceOps(w http.ResponseWriter, r *http.Reques
 
 	if len(parts) == 1 {
 		if r.Method != http.MethodGet {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		s.getMaintenanceOperation(w, r, key)
@@ -72,13 +72,13 @@ func (s *Server) handleAdminMaintenanceOps(w http.ResponseWriter, r *http.Reques
 	switch action {
 	case "run":
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.executeOperation(w, r, key, user)
 	case "runs":
 		if r.Method != http.MethodGet {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		if len(parts) == 3 && parts[2] != "" {
@@ -96,7 +96,7 @@ func (s *Server) handleAdminMaintenanceOps(w http.ResponseWriter, r *http.Reques
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleAdminMaintenanceMigrations(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -661,7 +661,7 @@ func toMaintenanceRunResponse(run store.MaintenanceOperationRun) maintenanceRunR
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -717,7 +717,7 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleGetUpdateAvailable(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -754,7 +754,7 @@ func (s *Server) handleGetUpdateAvailable(w http.ResponseWriter, r *http.Request
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleDismissUpdateAvailable(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 		return
 	}
 
@@ -777,7 +777,7 @@ func (s *Server) handleUpdateAvailable(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.handleDismissUpdateAvailable(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
 }
 
@@ -788,7 +788,7 @@ func (s *Server) handleUpdateAvailable(w http.ResponseWriter, r *http.Request) {
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

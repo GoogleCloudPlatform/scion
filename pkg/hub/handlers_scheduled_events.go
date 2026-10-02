@@ -164,7 +164,7 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, p
 		case http.MethodPost:
 			action = ActionCreate
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 			return
 		}
 	} else {
@@ -174,7 +174,7 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, p
 		case http.MethodDelete:
 			action = ActionDelete
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 			return
 		}
 	}
