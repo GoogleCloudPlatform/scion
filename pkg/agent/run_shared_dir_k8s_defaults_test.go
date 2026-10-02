@@ -39,6 +39,8 @@ runtimes:
     type: kubernetes
     shared_dir_storage_class: rt-rwx
     shared_dir_size: 1Ti
+  plain-k8s:
+    type: kubernetes
 profiles:
   gke:
     runtime: gke-autopilot
@@ -48,6 +50,9 @@ profiles:
   other:
     runtime: gke-autopilot
     shared_dir_storage_class: other-rwx
+  size-only:
+    runtime: plain-k8s
+    shared_dir_size: 50Gi
 `
 
 func startForSharedDirK8sDefaults(t *testing.T, runtimeName, templateJSON string, opts api.StartOptions) runtime.RunConfig {
@@ -205,4 +210,37 @@ func TestStartSharedDirK8sDefaults_InvalidSizeNamesSource(t *testing.T) {
 			assert.Equal(t, 0, ran, "the runtime must not be called")
 		})
 	}
+}
+
+// A settings entry that sets only shared_dir_size still applies it, with
+// the class left unset (cluster default).
+func TestStartSharedDirK8sDefaults_SizeOnly(t *testing.T) {
+	cfg := startForSharedDirK8sDefaults(t, "kubernetes", "", api.StartOptions{Profile: "size-only"})
+	require.NotNil(t, cfg.Kubernetes)
+	assert.Equal(t, "50Gi", cfg.Kubernetes.SharedDirSize)
+	assert.Equal(t, "", cfg.Kubernetes.SharedDirStorageClass)
+}
+
+// The start-time size check only runs when shared-dir PVCs are needed: with
+// no shared dirs, an invalid settings size does not block the start.
+func TestStartSharedDirK8sDefaults_InvalidSizeIgnoredWithoutSharedDirs(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	settings := strings.Replace(sharedDirK8sDefaultsSettings, "shared_dir_size: 1Ti", "shared_dir_size: 1TB", 1)
+	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"), []byte(settings), 0644))
+	ran := 0
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "kubernetes" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			ran++
+			return "mock-id", nil
+		},
+	}
+	_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+		Name:        "sd-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env:         map[string]string{"SCION_AGENT_ID": "agent-sd", "SCION_PROJECT_ID": "pid-sd"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, ran, "the runtime must be called")
 }

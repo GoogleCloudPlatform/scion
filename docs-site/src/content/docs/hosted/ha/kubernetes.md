@@ -84,7 +84,7 @@ If none of them sets a key, the cluster's default StorageClass and `10Gi` are us
 
 An empty value means "not set", so it does not override a lower source. Once a runtime entry or profile sets a class, a template cannot reset it to the cluster default; name the class explicitly instead.
 
-`shared_dir_size` must be a Kubernetes quantity such as `10Gi` or `1Ti`. Settings validation and the admin settings API reject other values, and an agent start fails with an error naming the key that holds the bad value.
+`shared_dir_size` must be a positive Kubernetes quantity such as `10Gi` or `1Ti`. Settings validation and the admin settings API reject other values, and an agent start fails with an error naming the key that holds the bad value.
 
 The settings values are read every time an agent starts. They apply only on the Kubernetes runtime.
 

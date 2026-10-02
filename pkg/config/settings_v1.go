@@ -202,14 +202,18 @@ func (vs *VersionedSettings) ResolveSharedDirDefaultsWithSource(profileName stri
 }
 
 // ValidateSharedDirSize checks that a shared_dir_size value parses as a
-// Kubernetes resource quantity (for example 10Gi or 1Ti). Empty is valid
-// and means "not set".
+// positive Kubernetes resource quantity (for example 10Gi or 1Ti). Empty is
+// valid and means "not set".
 func ValidateSharedDirSize(size string) error {
 	if size == "" {
 		return nil
 	}
-	if _, err := resource.ParseQuantity(size); err != nil {
+	q, err := resource.ParseQuantity(size)
+	if err != nil {
 		return fmt.Errorf("invalid shared_dir_size %q: must be a Kubernetes quantity such as 10Gi or 1Ti", size)
+	}
+	if q.Sign() <= 0 {
+		return fmt.Errorf("invalid shared_dir_size %q: must be a positive Kubernetes quantity such as 10Gi or 1Ti", size)
 	}
 	return nil
 }

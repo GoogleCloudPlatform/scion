@@ -289,6 +289,11 @@ func TestValidateSharedDirSizes(t *testing.T) {
 	assert.NoError(t, ValidateSharedDirSize("10Gi"))
 	assert.NoError(t, ValidateSharedDirSize("1Ti"))
 	assert.Error(t, ValidateSharedDirSize("1TB"))
+	for _, v := range []string{"0", "-1Gi"} {
+		err := ValidateSharedDirSize(v)
+		require.Error(t, err, v)
+		assert.Contains(t, err.Error(), "positive", v)
+	}
 
 	errs := ValidateSharedDirSizes(
 		map[string]V1RuntimeConfig{"ok": {SharedDirSize: "1Ti"}, "bad": {SharedDirSize: "1TB"}},
