@@ -86,6 +86,15 @@ type fakeControlClient struct {
 	getActor                func(*ateapipb.GetActorRequest) (*ateapipb.Actor, error)
 	deleteActor             func(*ateapipb.DeleteActorRequest) (*ateapipb.Actor, error)
 	listActors              func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error)
+
+	// createdActors backs the DEFAULT createActor closure's AlreadyExists
+	// behavior below (see newFakeControlClient) — keyed by "atespace/name",
+	// guarded by mu. A test that overrides createActor entirely bypasses
+	// this; it exists so a test that does NOT override createActor still
+	// gets realistic "second call for the same name fails" behavior rather
+	// than a silent overwrite, matching real ateapi.
+	mu            sync.Mutex
+	createdActors map[string]*ateapipb.Actor
 }
 
 // newFakeControlClient returns a fake wired for the Run happy path: a
@@ -94,8 +103,9 @@ type fakeControlClient struct {
 // RUNNING with a worker assignment, and every other call succeeds.
 // Individual tests override only the field(s) they care about.
 func newFakeControlClient(rec *callRecorder) *fakeControlClient {
-	return &fakeControlClient{
-		rec: rec,
+	f := &fakeControlClient{
+		rec:           rec,
+		createdActors: make(map[string]*ateapipb.Actor),
 		createAtespace: func(*ateapipb.CreateAtespaceRequest) (*ateapipb.Atespace, error) {
 			return &ateapipb.Atespace{}, nil
 		},
@@ -110,15 +120,6 @@ func newFakeControlClient(rec *callRecorder) *fakeControlClient {
 				},
 			}
 			return tmpl, nil
-		},
-		createActor: func(req *ateapipb.CreateActorRequest) (*ateapipb.Actor, error) {
-			return &ateapipb.Actor{
-				Metadata: &ateapipb.ResourceMetadata{
-					Atespace: req.GetActor().GetMetadata().GetAtespace(),
-					Name:     req.GetActor().GetMetadata().GetName(),
-					Uid:      fakeActorUID,
-				},
-			}, nil
 		},
 		createActorEgressPolicy: func(*ateapipb.CreateActorEgressPolicyRequest) (*ateapipb.EgressPolicy, error) {
 			return &ateapipb.EgressPolicy{}, nil
@@ -152,6 +153,32 @@ func newFakeControlClient(rec *callRecorder) *fakeControlClient {
 			return &ateapipb.ListActorsResponse{}, nil
 		},
 	}
+	f.createActor = func(req *ateapipb.CreateActorRequest) (*ateapipb.Actor, error) {
+		key := req.GetActor().GetMetadata().GetAtespace() + "/" + req.GetActor().GetMetadata().GetName()
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		// A real ateapi CreateActor refuses a second call for the same
+		// atespace/name with AlreadyExists, rather than overwriting —
+		// SubstrateRuntime.Run's restart path depends on exactly that
+		// error to detect "this actor already exists" (see
+		// substrate_runtime.go's codes.AlreadyExists handling). Tracking
+		// state here, rather than always succeeding, means a test that
+		// does not override createActor still exercises that behavior
+		// realistically on a second Run for the same atespace/name.
+		if _, exists := f.createdActors[key]; exists {
+			return nil, status.Error(codes.AlreadyExists, "actor already exists")
+		}
+		actor := &ateapipb.Actor{
+			Metadata: &ateapipb.ResourceMetadata{
+				Atespace: req.GetActor().GetMetadata().GetAtespace(),
+				Name:     req.GetActor().GetMetadata().GetName(),
+				Uid:      fakeActorUID,
+			},
+		}
+		f.createdActors[key] = actor
+		return actor, nil
+	}
+	return f
 }
 
 func (f *fakeControlClient) GetActor(ctx context.Context, in *ateapipb.GetActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
@@ -484,6 +511,51 @@ func TestSubstrateRun_HappyPath(t *testing.T) {
 	substrateAgentStateMu.Unlock()
 	if !hasToken {
 		t.Error("control token was not cached for the returned id")
+	}
+}
+
+// TestSubstrateRun_AlreadyExistsMapsToContainerNameInUse is the regression
+// test for Run's codes.AlreadyExists handling (substrate_runtime.go, the
+// CreateActor error branch): a second Run for the same atespace/actor name
+// — the shape a restart against a pre-existing, record-less actor takes,
+// since the broker skips its own pre-create existence check in that case
+// (restartAgent, pkg/runtimebroker/handlers.go) and relies entirely on this
+// mapping — must surface an error agent.isContainerNameInUseError's
+// substring match recognizes ("container name" and "already in use"), not
+// a generic wrapped gRPC error, and must never create a second egress
+// policy for an actor that was never actually created.
+func TestSubstrateRun_AlreadyExistsMapsToContainerNameInUse(t *testing.T) {
+	rec := &callRecorder{}
+	rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	cfg := testSubstrateRunConfig()
+	if _, err := rt.Run(context.Background(), cfg); err != nil {
+		t.Fatalf("first Run() error = %v", err)
+	}
+	callsAfterFirstRun := len(rec.list())
+
+	_, err := rt.Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("second Run() for the same atespace/actor name: expected an error, got nil")
+	}
+	lowerMsg := strings.ToLower(err.Error())
+	if !strings.Contains(lowerMsg, "container name") || !strings.Contains(lowerMsg, "already in use") {
+		t.Errorf("second Run() error = %q, want it to match agent.isContainerNameInUseError's pattern (\"container name\" and \"already in use\")", err.Error())
+	}
+
+	// The second Run's own contribution to the shared call trace (the fake
+	// ateapi client and bootstrap recorder are reused across both calls)
+	// must stop at CreateActor and go no further — no
+	// CreateActorEgressPolicy, ResumeActor, GetActor, healthz, or bootstrap
+	// for an actor that was never actually (re)created. The atespace and
+	// template steps ahead of CreateActor still run (ensureAtespace treats
+	// AlreadyExists as success; the fake's GetActorTemplate always reports
+	// NotFound, so CreateActorTemplate runs again too) — this asserts only
+	// that nothing AFTER CreateActor ran.
+	secondRunCalls := rec.list()[callsAfterFirstRun:]
+	if len(secondRunCalls) == 0 || secondRunCalls[len(secondRunCalls)-1] != "CreateActor" {
+		t.Errorf("second Run() call trace = %v, want it to end at CreateActor (no egress policy or bootstrap for an actor that was never created)", secondRunCalls)
 	}
 }
 
