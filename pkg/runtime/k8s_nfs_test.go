@@ -429,7 +429,7 @@ func TestNFSProvisionCommand_ShallowClone(t *testing.T) {
 		Depth:  intPtr(1),
 	}
 
-	cmd := nfsProvisionCommand(gc)
+	cmd := nfsProvisionCommand(gc, 0, 0)
 
 	assert.Equal(t, "sciontool", cmd[0])
 	assert.Equal(t, "provision", cmd[1])
@@ -471,8 +471,63 @@ func TestNFSInitContainerInjected(t *testing.T) {
 }
 
 func TestNFSProvisionCommand_NilConfig(t *testing.T) {
-	cmd := nfsProvisionCommand(nil)
+	cmd := nfsProvisionCommand(nil, 0, 0)
 	assert.Equal(t, []string{"sciontool", "provision"}, cmd)
+}
+
+// TestNFSProvisionCommand_UIDGID verifies the configured NFS uid/gid are
+// passed to `sciontool provision`, with and without a git clone config, and
+// that unset (zero) values leave the flags off so sciontool's 1000 default
+// applies.
+func TestNFSProvisionCommand_UIDGID(t *testing.T) {
+	gc := &api.GitCloneConfig{
+		URL:   "https://github.com/example/repo.git",
+		Depth: intPtr(1),
+	}
+
+	tests := []struct {
+		name string
+		gc   *api.GitCloneConfig
+		uid  int
+		gid  int
+		want []string
+	}{
+		{
+			name: "git clone with uid and gid",
+			gc:   gc,
+			uid:  997,
+			gid:  1003,
+			want: []string{"sciontool", "provision", "--depth", "1", "--uid", "997", "--gid", "1003"},
+		},
+		{
+			name: "no git config with uid and gid",
+			gc:   nil,
+			uid:  997,
+			gid:  1003,
+			want: []string{"sciontool", "provision", "--uid", "997", "--gid", "1003"},
+		},
+		{
+			name: "only gid set",
+			gc:   nil,
+			gid:  1003,
+			want: []string{"sciontool", "provision", "--gid", "1003"},
+		},
+		{
+			name: "unset with git clone",
+			gc:   gc,
+			want: []string{"sciontool", "provision", "--depth", "1"},
+		},
+		{
+			name: "unset without git config",
+			gc:   nil,
+			want: []string{"sciontool", "provision"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, nfsProvisionCommand(tt.gc, tt.uid, tt.gid))
+		})
+	}
 }
 
 func TestNFSProvisionCommand_DefaultDepth(t *testing.T) {
@@ -481,7 +536,7 @@ func TestNFSProvisionCommand_DefaultDepth(t *testing.T) {
 		// Depth nil → no --depth flag; CLI defaults to shallow (depth 1)
 	}
 
-	cmd := nfsProvisionCommand(gc)
+	cmd := nfsProvisionCommand(gc, 0, 0)
 
 	assert.Equal(t, []string{"sciontool", "provision"}, cmd)
 }
@@ -492,7 +547,7 @@ func TestNFSProvisionCommand_FullClone(t *testing.T) {
 		Depth: intPtr(0),
 	}
 
-	cmd := nfsProvisionCommand(gc)
+	cmd := nfsProvisionCommand(gc, 0, 0)
 
 	assert.Equal(t, []string{"sciontool", "provision", "--depth", "0"}, cmd)
 }
@@ -532,7 +587,7 @@ func TestNFSProvisionCommand_InjectionSafety(t *testing.T) {
 		Branch: "feat/test; rm -rf /",
 	}
 
-	cmd := nfsProvisionCommand(gc)
+	cmd := nfsProvisionCommand(gc, 0, 0)
 
 	// Branch and URL must NOT appear in command args
 	for _, arg := range cmd {

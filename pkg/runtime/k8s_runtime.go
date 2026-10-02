@@ -1719,7 +1719,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			// Lock winner (or no locker available): provision (mkdir+chown,
 			// plus clone if GitCloneForInit is set) if sentinel is absent,
 			// skip if already provisioned. The command is idempotent.
-			initCommand = nfsProvisionCommand(config.GitCloneForInit)
+			initCommand = nfsProvisionCommand(config.GitCloneForInit, config.NFSUID, config.NFSGID)
 		}
 
 		// F-111: shared dirs served from the workspace PVC by subPath
@@ -3307,17 +3307,24 @@ func nfsInitContainerInjected(config RunConfig) bool {
 }
 
 // nfsProvisionCommand builds the Command slice for the lock-winner init
-// container. It invokes `sciontool provision` with numeric/enum flags for
-// depth and mode. URL and branch are passed via env vars (nfsProvisionEnv)
-// to prevent shell injection.
-func nfsProvisionCommand(gc *api.GitCloneConfig) []string {
-	if gc == nil || gc.URL == "" {
-		return []string{"sciontool", "provision"}
-	}
-
+// container. It invokes `sciontool provision` with numeric flags for depth
+// and the NFS ownership uid/gid. URL and branch are passed via env vars
+// (nfsProvisionEnv) to prevent shell injection.
+//
+// uid and gid are the configured workspace_storage.nfs values
+// (RunConfig.NFSUID/NFSGID). A zero value means unset: the flag is omitted
+// and sciontool's default of 1000 applies, matching the 1000:1000 default
+// used for the pod fsGroup and by the Cloud Run runtime.
+func nfsProvisionCommand(gc *api.GitCloneConfig, uid, gid int) []string {
 	cmd := []string{"sciontool", "provision"}
-	if gc.Depth != nil {
+	if gc != nil && gc.URL != "" && gc.Depth != nil {
 		cmd = append(cmd, "--depth", fmt.Sprintf("%d", *gc.Depth))
+	}
+	if uid != 0 {
+		cmd = append(cmd, "--uid", fmt.Sprintf("%d", uid))
+	}
+	if gid != 0 {
+		cmd = append(cmd, "--gid", fmt.Sprintf("%d", gid))
 	}
 	return cmd
 }
