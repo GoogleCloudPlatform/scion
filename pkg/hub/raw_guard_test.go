@@ -882,7 +882,7 @@ func TestHandleProjectBroadcast_RawRejected(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	target := &store.Agent{
 		ID:           tid("broadcast-raw-target"),
@@ -962,7 +962,7 @@ func TestHandleProjectBroadcast_RawPlainConflict(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	reqBody, err := json.Marshal(BroadcastMessageRequest{
 		StructuredMessage: &messages.StructuredMessage{

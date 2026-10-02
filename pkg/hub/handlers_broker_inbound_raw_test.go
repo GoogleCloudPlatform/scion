@@ -160,7 +160,7 @@ func TestHandleBrokerInbound_RawRejectedWithResolvableSender(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
 	agent := &store.Agent{

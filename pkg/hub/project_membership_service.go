@@ -1461,6 +1461,16 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 			}
 		}
 
+		// Step 3: Point project.OwnerID at the new owner, so the old owner no
+		// longer gets access through the resource-owner relationship rule
+		// (ptone/scion#2554). Use the narrow writer, not a Get plus full-row
+		// UpdateProject: a full-row write can clobber a concurrent PATCH. That
+		// interleaving is not expressible in a single-threaded test, so this
+		// call site is guarded by review.
+		if upErr := tx.SetProjectOwnerID(ctx, req.ProjectID, req.NewOwnerID); upErr != nil {
+			return fmt.Errorf("update project owner: %w", upErr)
+		}
+
 		// Post-state invariant: verify at least one active direct owner exists.
 		// This query runs inside the transaction so it sees the committed state.
 		ownerCount, countErr := svc.countActiveDirectOwnersFromStore(ctx, tx, req.ProjectID)

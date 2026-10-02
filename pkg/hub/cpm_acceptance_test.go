@@ -224,7 +224,7 @@ func acceptanceSetup(t *testing.T) acceptanceFixture {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, pA))
-	srv.createProjectMembersGroup(ctx, pA)
+	srv.seedProjectCreatorMembership(ctx, pA)
 	msgAuthzAddProjectMember(t, s, ownerA.ID, projectA, "acc-project-a", store.GroupMemberRoleOwner)
 
 	// Create project B.
@@ -239,7 +239,7 @@ func acceptanceSetup(t *testing.T) acceptanceFixture {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, pB))
-	srv.createProjectMembersGroup(ctx, pB)
+	srv.seedProjectCreatorMembership(ctx, pB)
 	msgAuthzAddProjectMember(t, s, ownerB.ID, projectB, "acc-project-b", store.GroupMemberRoleOwner)
 
 	// Set inbound policies to "any" by default.

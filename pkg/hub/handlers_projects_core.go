@@ -705,10 +705,9 @@ func isSystemProjectAgentsGroup(group *store.Group, projectID string) bool {
 }
 
 // createProjectMembersGroup creates the project's collaboration
-// members group and ensures project membership via RoleBindings. The group
-// exists for collaboration (chat, agent co-ownership) but carries NO
-// authorization meaning — all authorization flows through project-scoped
-// RoleBindings.
+// members group. The group exists for collaboration (chat, agent
+// co-ownership) but carries NO authorization meaning — all authorization
+// flows through project-scoped RoleBindings. It never creates role bindings.
 //
 // PM1 contract: project membership IS the set of project-scoped role bindings.
 // The special project:<slug>:members group no longer has authorization meaning.
@@ -790,17 +789,16 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 			s.projectsLogger().Warn("failed to add creator to project members group",
 				"project_id", project.ID, "user", project.CreatedBy, "error", err.Error())
 		}
-
-		// Ensure a project-owner role binding exists for the creator. In
-		// production, the createProject handler creates this via
-		// createProjectOwnerRoleBinding BEFORE calling us. But this function
-		// is also called from backfill and sync paths where the role binding
-		// may not exist. Best-effort; errors logged.
-		if rbErr := s.createProjectOwnerRoleBinding(ctx, project.ID, project.CreatedBy); rbErr != nil {
-			s.projectsLogger().Debug("project owner role binding already exists or failed",
-				"project_id", project.ID, "user", project.CreatedBy, "error", rbErr.Error())
-		}
 	}
+
+	// This function deliberately does NOT create a project-owner role binding
+	// for project.CreatedBy (ptone/scion#2554). It runs on GET, register,
+	// the idempotent re-create of an existing project and clone, so granting
+	// here would re-make a removed or demoted creator an owner on the next
+	// read. The creator-owner binding is created only on genuine first
+	// creation, by createProjectOwnerRoleBinding in the create, register and
+	// clone handlers; legacy projects with no owner binding at all are
+	// backfilled at startup by backfillProjectOwnerRoleBindings.
 
 	// ── Legacy policy bridge (pre-CO1) ──────────────────────────────────
 	// CO1 cutover: legacy project policies are no longer needed.
