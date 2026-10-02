@@ -57,7 +57,10 @@
   ok; TZ set outside a build: note; TZ set with `BUILDARCH`: FAIL, exit 1),
   `TZ=Asia/Tokyo date` printed JST, and `dpkg -S /usr/share/zoneinfo`
   reported `tzdata` (2026c-0+deb13u1). Maintainer checks: run
-  `build-images.yml` for core-base (and thick), then
+  `build-images.yml` (target core-base), or
+  `image-build/scripts/build-images.sh --target core-base` without `--push`;
+  build thick with `image-build/scripts/build-images.sh --target thick-prep`
+  (the workflow has no thick option); then
   `docker run --rm <image> ls /usr/share/zoneinfo` and
   `docker run --rm -e TZ=Asia/Tokyo <image> date`.
 
@@ -68,5 +71,5 @@
   and Go treat as UTC, and a runtime `-e TZ` overrides it. It is a harness
   image, not a core image, so it is out of scope here. It is relevant to
   tz-refactor task 15 (hub authority for agent `TZ`); task 15 has merged, so
-  removing it is tracked as its own fork issue. The new contract check runs only on core-base and
+  removing it is tracked in ptone/scion#2630. The new contract check runs only on core-base and
   thick-prep, so it does not see harness images.
