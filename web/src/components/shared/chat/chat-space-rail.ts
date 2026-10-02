@@ -1468,9 +1468,8 @@ export class ScionChatSpaceRail extends LitElement {
 
   /** `order` with `id` moved to sit immediately before `anchorId`, or at the end if absent. */
   private insertAdjacent(order: string[], id: string, anchorId: string): string[] {
-    const without = order.filter((x) => x !== id);
-    const idx = without.indexOf(anchorId);
-    const result = [...without];
+    const result = order.filter((x) => x !== id);
+    const idx = result.indexOf(anchorId);
     result.splice(idx === -1 ? result.length : idx, 0, id);
     return result;
   }
