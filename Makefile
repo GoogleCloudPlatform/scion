@@ -168,8 +168,8 @@ vet-integration:
 # vet-integration only covers the root module's ./... tree; extras/*
 # modules are separate go.mod trees it never reaches. Discovers modules
 # dynamically (grep for the build tag) so new ones are covered without
-# editing this target. Discovery uses a shell glob and POSIX grep -E so
-# it works on macOS too, and the target fails if it vets zero modules
+# editing this target. Discovery uses a shell glob and grep -rE (GNU and
+# BSD/macOS compatible), and the target fails if it vets zero modules
 # (e.g. extras/ moved or the build tag was renamed).
 vet-integration-extras:
 	@echo "Vetting integration-tagged code in extras modules..."
@@ -177,7 +177,7 @@ vet-integration-extras:
 	for gomod in extras/*/go.mod; do \
 		[ -f "$$gomod" ] || continue; \
 		moddir=$$(dirname "$$gomod"); \
-		if grep -rqE '^//go:build.*[^A-Za-z0-9_]integration([^A-Za-z0-9_]|$$)' --include='*.go' "$$moddir" 2>/dev/null; then \
+		if grep -rqE '^//go:build.*[^A-Za-z0-9_]integration([^A-Za-z0-9_]|$$)' --include='*.go' "$$moddir"; then \
 			echo "  $$moddir"; \
 			vetted=$$((vetted + 1)); \
 			(cd "$$moddir" && go vet -tags integration ./...) || { echo "  FAILED: $$moddir"; failed=$$((failed + 1)); }; \
