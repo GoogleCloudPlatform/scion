@@ -277,6 +277,20 @@ Correction validation passed:
 - bounded single-concurrency `golangci-lint` for `./pkg/hub/...`: `0 issues`;
 - gofmt inspection and `git diff --check`.
 
+The replacement run's reporting-only full-suite job then exposed a second
+deterministic M1 omission: `internal/fixturegen.TestFixtureCoverage` found the
+new `access_constraint_history` domain table but no representative row and
+still expected 65 rather than 66 tables. The bounded focused local test
+reproduced the exact failure. With explicit owner authorization, the fixture
+now contains one deterministic create-history row linked by `constraint_id` to
+the existing constraint fixture, and the fixture-owned table count is 66. No
+production or audit behavior changed.
+
+The exact fixture coverage, loadability, and determinism tests pass. Canonical
+Ent generation produces no additional delta; the focused
+`TestConstraintHistory_` store/migration slice passes; scoped vet, bounded
+single-concurrency lint (`0 issues`), gofmt, and `git diff --check` pass.
+
 ## Residual risk and M2 handoff
 
 The first-cycle Ent adapter race limitation described above was closed in the
