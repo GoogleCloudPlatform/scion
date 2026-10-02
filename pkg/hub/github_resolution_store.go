@@ -155,8 +155,19 @@ func (s *GitHubResolutionStore) Put(ctx context.Context, cacheKey string, entry 
 // before lastResolvedAt + maxStaleAge — equivalently, while ExpiresAt is
 // after this cutoff. GetStale and PurgeExpired both call this so the two
 // never disagree about where that line is.
+//
+// Uses agent.MaxJitteredTTL(lastTTL), not lastTTL itself: ExpiresAt was
+// written as time.Now().Add(agent.JitteredTTL(ttl, ...)) (see
+// fetchAndCacheGitHubSkill), so the true lastTTL any given row was written
+// with is no longer recoverable from the stored ExpiresAt alone. Using the
+// jitter's upper bound derives a lastResolvedAt that is never later than the
+// row's true one, so a row is never treated as fresher — and so never kept
+// stale-servable longer — than its actual age; the cost is that, in the
+// worst case (a row whose jitter pushed it to the fast/short end), it stops
+// being stale-servable up to the jitter amount before the nominal
+// maxStaleAge boundary, never after it.
 func staleCutoff(now time.Time, lastTTL, maxStaleAge time.Duration) time.Time {
-	return now.Add(lastTTL - maxStaleAge)
+	return now.Add(agent.MaxJitteredTTL(lastTTL) - maxStaleAge)
 }
 
 // PurgeExpired deletes cache entries that can no longer be served stale even

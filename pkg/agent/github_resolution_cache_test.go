@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sync"
@@ -1067,5 +1068,77 @@ func TestGitHubResolutionCache_ResolveWithFetch_FailureNeverCached(t *testing.T)
 	}
 	if got := atomic.LoadInt32(&fetchCount); got != 2 {
 		t.Fatalf("expected fetch to run on both calls (no cached failure or empty success), got %d calls", got)
+	}
+}
+
+// TestJitteredTTL_DeterministicWithSeededRand pins JitteredTTL's two
+// contracts using an injectable rand source (no reliance on math/rand's
+// global state, so this is reproducible): the same source sequence always
+// produces the same result, and the result always falls within
+// +/-ttlJitterFraction of the nominal TTL.
+func TestJitteredTTL_DeterministicWithSeededRand(t *testing.T) {
+	const ttl = 30 * time.Minute
+	spread := time.Duration(float64(ttl) * ttlJitterFraction)
+
+	got1 := JitteredTTL(ttl, rand.New(rand.NewSource(1)).Float64)
+	got2 := JitteredTTL(ttl, rand.New(rand.NewSource(1)).Float64)
+	if got1 != got2 {
+		t.Fatalf("expected the same seed to reproduce the same jittered TTL, got %v and %v", got1, got2)
+	}
+	if got1 < ttl-spread || got1 > ttl+spread {
+		t.Fatalf("expected a jittered TTL within +/-%v of %v, got %v", spread, ttl, got1)
+	}
+
+	// A different seed must be able to produce a different result — this is
+	// the whole point: entries written together must not all land on
+	// exactly the same ExpiresAt.
+	got3 := JitteredTTL(ttl, rand.New(rand.NewSource(2)).Float64)
+	if got3 == got1 {
+		t.Fatalf("expected a different seed to produce a different jittered TTL (or this test's two seeds collided), got %v for both", got1)
+	}
+}
+
+// TestJitteredTTL_Extremes pins the exact endpoints and midpoint of the
+// jitter range against known rand.Float64 outputs (0, 0.5, and just under
+// 1), rather than only the seeded-reproducibility property above.
+func TestJitteredTTL_Extremes(t *testing.T) {
+	const ttl = time.Hour
+	spread := time.Duration(float64(ttl) * ttlJitterFraction)
+
+	cases := []struct {
+		name string
+		r    float64
+		want time.Duration
+	}{
+		{"minimum", 0, ttl - spread},
+		{"midpoint", 0.5, ttl},
+		{"just under maximum", 1 - 1e-9, ttl + spread}, // rand.Float64 never returns exactly 1
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := JitteredTTL(ttl, func() float64 { return tc.r })
+			diff := got - tc.want
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff > time.Microsecond {
+				t.Errorf("JitteredTTL(%v, r=%v) = %v, want %v", ttl, tc.r, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMaxJitteredTTL_NeverExceeded confirms MaxJitteredTTL is an actual
+// upper bound on every value JitteredTTL can produce — the property
+// staleCutoff (pkg/hub/github_resolution_store.go) depends on to derive a
+// safe (never-too-fresh) lastResolvedAt from a jittered ExpiresAt.
+func TestMaxJitteredTTL_NeverExceeded(t *testing.T) {
+	const ttl = 45 * time.Minute
+	max := MaxJitteredTTL(ttl)
+	for _, r := range []float64{0, 0.1, 0.25, 0.5, 0.75, 0.9, 1 - 1e-9} {
+		got := JitteredTTL(ttl, func() float64 { return r })
+		if got > max {
+			t.Errorf("JitteredTTL(%v, r=%v) = %v exceeds MaxJitteredTTL(%v) = %v", ttl, r, got, ttl, max)
+		}
 	}
 }

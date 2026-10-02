@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"strconv"
 	"strings"
@@ -2135,13 +2136,16 @@ func (s *Server) fetchAndCacheGitHubSkill(
 		ttl = agent.DefaultSHAResolutionCacheTTL
 	}
 
-	// Store in cache
+	// Store in cache. The TTL is jittered (see agent.JitteredTTL) so a burst
+	// of creates that all populate the cache at once — the common case this
+	// cache exists to absorb — do not all expire at exactly the same instant
+	// and stampede GitHub again together.
 	entry := GitHubCacheEntry{
 		CommitSHA:   commitSHA,
 		FileEntries: fileEntries,
 		BundleHash:  bundleHash,
 		TokenScope:  installID,
-		ExpiresAt:   time.Now().Add(ttl),
+		ExpiresAt:   time.Now().Add(agent.JitteredTTL(ttl, rand.Float64)),
 		OriginalURI: rawURI,
 	}
 

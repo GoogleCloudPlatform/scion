@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,7 +74,42 @@ const (
 	refreshFailureBackoff = 1 * time.Minute
 
 	resolutionCacheFileName = "github-resolution-cache.json"
+
+	// ttlJitterFraction bounds how far JitteredTTL spreads a TTL from its
+	// nominal value, as a fraction of that TTL (plus or minus 10%). See
+	// JitteredTTL.
+	ttlJitterFraction = 0.10
 )
+
+// JitteredTTL returns ttl adjusted by a uniformly random amount within
+// +/-ttlJitterFraction of ttl, so cache entries written together — the
+// common case during a burst of concurrent creates that all fill the cache
+// at once — do not all expire at exactly the same instant and stampede
+// GitHub again together. Shared by the broker cache (putEntry, below) and
+// the hub's GitHubResolutionStore (pkg/hub/github_resolution_store.go) so
+// both sides spread expiry the same way.
+//
+// randFloat64 must return a value in [0,1); pass math/rand's top-level
+// Float64 for production use (its global source is internally
+// synchronized, so this is safe for concurrent callers) or a seeded
+// *rand.Rand's Float64 method for a deterministic test.
+func JitteredTTL(ttl time.Duration, randFloat64 func() float64) time.Duration {
+	spread := float64(ttl) * ttlJitterFraction
+	delta := (randFloat64()*2 - 1) * spread
+	return ttl + time.Duration(delta)
+}
+
+// MaxJitteredTTL returns the largest value JitteredTTL(ttl, ...) can ever
+// return. Callers that must derive a safe bound from a stored ExpiresAt
+// without knowing the exact jitter that was applied when it was written
+// (see GetStale and PurgeExpired in pkg/hub/github_resolution_store.go,
+// which infer a row's last-resolved time as ExpiresAt - TTL and must never
+// overestimate how recently that was) use this upper bound instead of the
+// nominal TTL, so a row is never treated as fresher than it could possibly
+// be.
+func MaxJitteredTTL(ttl time.Duration) time.Duration {
+	return ttl + time.Duration(float64(ttl)*ttlJitterFraction)
+}
 
 // GitHubResolutionCache caches the mapping from skill URI → ResolvedSkill
 // to avoid redundant GitHub API calls during repeated provisioning. Entries
@@ -186,7 +222,7 @@ func (c *GitHubResolutionCache) putEntry(uri string, skill ResolvedSkill, isBran
 	c.entries[uri] = &resolutionCacheEntry{
 		Skill:       skill,
 		CachedAt:    now,
-		ExpiresAt:   now.Add(c.ttl),
+		ExpiresAt:   now.Add(JitteredTTL(c.ttl, rand.Float64)),
 		IsBranchRef: isBranchRef,
 	}
 	c.evictExpired()

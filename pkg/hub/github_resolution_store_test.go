@@ -269,8 +269,9 @@ func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
 }
 
 // TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow is the
-// acceptance test for R5-1: a branch-ref row past its TTL but still within
-// MaxResolutionStaleAge of its last resolution must survive PurgeExpired —
+// acceptance test for the purge horizon: a branch-ref row past its TTL but
+// still within MaxResolutionStaleAge of its last resolution must survive
+// PurgeExpired —
 // otherwise the hub's 10-minute eviction tick would delete it long before
 // GetStale's 24h stale-serve window actually ends, leaving GetStale with
 // nothing to serve during exactly the outage it exists to absorb. A second
@@ -325,6 +326,62 @@ func TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow(t *testi
 	_, ok, err = store.GetStale(ctx, tooOldKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
 	require.NoError(t, err)
 	require.False(t, ok, "a row past MaxResolutionStaleAge must not survive PurgeExpired")
+}
+
+// TestGitHubResolutionStore_StaleCutoff_AccountsForTTLJitter confirms
+// GetStale and PurgeExpired still agree on one horizon (see staleCutoff) now
+// that ExpiresAt is written with a jittered TTL (agent.JitteredTTL, applied
+// in fetchAndCacheGitHubSkill): a row placed just inside the jitter-aware
+// cutoff survives PurgeExpired and remains stale-servable, and a row just
+// outside it does not.
+//
+// wantCutoff is computed independently of staleCutoff itself — directly from
+// agent.MaxJitteredTTL and agent.MaxResolutionStaleAge, the same inputs
+// staleCutoff is supposed to combine — rather than by calling staleCutoff and
+// asserting around whatever it happens to return: that would make this test
+// pass unconditionally, since entries placed relative to staleCutoff's own
+// (possibly wrong) output always look internally consistent with it. The ~3
+// minute gap between MaxJitteredTTL(30m) and the unjittered 30m is what the
+// one-minute margins below are sized to land on either side of.
+func TestGitHubResolutionStore_StaleCutoff_AccountsForTTLJitter(t *testing.T) {
+	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1")
+	require.NoError(t, err)
+	defer client.Close() //nolint:errcheck
+	ctx := context.Background()
+	require.NoError(t, client.Schema.Create(ctx))
+
+	store := NewGitHubResolutionStore(client)
+	cutoff := time.Now().Add(agent.MaxJitteredTTL(agent.DefaultResolutionCacheTTL) - agent.MaxResolutionStaleAge)
+
+	justInsideKey := "just-inside"
+	require.NoError(t, store.Put(ctx, justInsideKey, GitHubCacheEntry{
+		CommitSHA:   "3333333333333333333333333333333333333333",
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:c", Size: 1}},
+		BundleHash:  "sha256:just-inside",
+		TokenScope:  "public",
+		ExpiresAt:   cutoff.Add(time.Minute),
+		OriginalURI: "gh://acme/repo/skill@main",
+	}))
+
+	justOutsideKey := "just-outside"
+	require.NoError(t, store.Put(ctx, justOutsideKey, GitHubCacheEntry{
+		CommitSHA:   "4444444444444444444444444444444444444444",
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:d", Size: 1}},
+		BundleHash:  "sha256:just-outside",
+		TokenScope:  "public",
+		ExpiresAt:   cutoff.Add(-time.Minute),
+		OriginalURI: "gh://acme/repo/skill@main",
+	}))
+
+	require.NoError(t, store.PurgeExpired(ctx))
+
+	_, ok, err := store.GetStale(ctx, justInsideKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
+	require.NoError(t, err)
+	require.True(t, ok, "a row just inside the jitter-aware cutoff must survive PurgeExpired and remain stale-servable")
+
+	_, ok, err = store.GetStale(ctx, justOutsideKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
+	require.NoError(t, err)
+	require.False(t, ok, "a row just outside the jitter-aware cutoff must not be stale-servable, and PurgeExpired must have removed it")
 }
 
 // TestComputeCacheKey tests cache key computation.
