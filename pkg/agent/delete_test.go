@@ -677,6 +677,163 @@ func TestDeleteAgentFiles_SharedWorktree_SoleSharer_DeleteRemoves(t *testing.T) 
 	}
 }
 
+// TestDeleteAgentFiles_OutOfTreeMarker_SoleSharer_SelfHeals covers Phase 2
+// acceptance criterion 3 for the sole-sharer case: if the sharer registry is
+// corrupted (WorktreePath pointing outside the base tree, as a peer with RW
+// access to the shared .git could write), DeleteAgentFiles must never touch
+// the out-of-tree path. The read boundary (pkg/provision.readMarker)
+// discards the corrupted marker entirely, so the sole sharer is no longer
+// found in the registry at all; the legacy worktree-per-agent path — which
+// locates the worktree independently by (already-validated) agent name, not
+// via the marker — still finds and removes the real in-tree worktree. This
+// is a deliberate, acceptable side effect of failing closed: the registry
+// entry is lost, but nothing outside the tree is ever touched.
+func TestDeleteAgentFiles_OutOfTreeMarker_SoleSharer_SelfHeals(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+	_ = os.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	bare := initBareRepo(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: intPtr(0)}
+
+	projectPath := filepath.Join(tmpDir, "proj")
+	scionDir := filepath.Join(projectPath, config.DotScion)
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	base := filepath.Join(projectPath, "workspace")
+	resolved := provision.ResolvedWorkspace{HostPath: base, Backend: "local"}
+
+	if err := provision.ProvisionShared(provision.ProvisionInput{
+		Resolved: resolved, Mode: store.SharingModeWorktreePerAgent,
+		ProjectID: "p1", AgentID: "solo-agent", AgentName: "solo-agent",
+		GitClone: gc,
+	}); err != nil {
+		t.Fatalf("provision solo-agent: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents", "solo-agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	wtPath := provision.WorktreePath(base, "solo-agent")
+	if _, err := os.Stat(wtPath); err != nil {
+		t.Fatalf("setup: worktree should exist at %s: %v", wtPath, err)
+	}
+
+	// Corrupt the registry: overwrite the marker's WorktreePath to point at
+	// an external directory with real content that must never be touched.
+	outside := t.TempDir()
+	marker := filepath.Join(outside, "keep-me.txt")
+	if err := os.WriteFile(marker, []byte("do not touch"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := provision.RegisterSharer(base, "solo-agent", outside, "solo-agent"); err != nil {
+		t.Fatalf("corrupt marker: %v", err)
+	}
+
+	if _, err := DeleteAgentFiles("solo-agent", projectPath, true); err != nil {
+		t.Fatalf("DeleteAgentFiles: %v", err)
+	}
+
+	// The external path must survive no matter what else happens.
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("external content must survive an out-of-tree marker delete: %v", err)
+	}
+
+	// The real worktree is still cleaned up via the independent, agent-name-
+	// based legacy path (not the corrupted marker) — no functional regression.
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Errorf("real in-tree worktree should still be removed via the legacy path, stat err=%v", err)
+	}
+}
+
+// TestDeleteAgentFiles_OutOfTreeMarker_JoinedAgent_FailsClosed covers Phase 2
+// acceptance criterion 3 for a joined (non-creator) sharer: when that agent
+// is the last sharer and the registry is corrupted, there is no independent
+// trusted path to fall back to (a joiner never had its own worktree
+// directory), so DeleteAgentFiles must do nothing rather than guess — the
+// external path is untouched AND the real shared worktree the joiner was
+// sharing is left alone too.
+func TestDeleteAgentFiles_OutOfTreeMarker_JoinedAgent_FailsClosed(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+	_ = os.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	bare := initBareRepo(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: intPtr(0)}
+
+	projectPath := filepath.Join(tmpDir, "proj")
+	scionDir := filepath.Join(projectPath, config.DotScion)
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	base := filepath.Join(projectPath, "workspace")
+	resolved := provision.ResolvedWorkspace{HostPath: base, Backend: "local"}
+
+	// Agent A creates, Agent B joins the same branch.
+	for _, id := range []string{"agent-a", "agent-b"} {
+		if err := provision.ProvisionShared(provision.ProvisionInput{
+			Resolved: resolved, Mode: store.SharingModeWorktreePerAgent,
+			ProjectID: "p1", AgentID: id, AgentName: "shared-branch",
+			GitClone: gc,
+		}); err != nil {
+			t.Fatalf("provision %s: %v", id, err)
+		}
+		if err := os.MkdirAll(filepath.Join(scionDir, "agents", id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	wtA := provision.WorktreePath(base, "agent-a")
+
+	// Delete agent-a (creator) first — agent-b remains as sole sharer,
+	// sharing agent-a's original worktree directory.
+	if _, err := DeleteAgentFiles("agent-a", projectPath, true); err != nil {
+		t.Fatalf("DeleteAgentFiles(agent-a): %v", err)
+	}
+	if _, err := os.Stat(wtA); err != nil {
+		t.Fatalf("setup: shared worktree should persist while agent-b remains: %v", err)
+	}
+
+	// Corrupt the registry for agent-b (now sole sharer): point WorktreePath
+	// at an external directory with real content.
+	outside := t.TempDir()
+	marker := filepath.Join(outside, "keep-me.txt")
+	if err := os.WriteFile(marker, []byte("do not touch"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := provision.RegisterSharer(base, "shared-branch", outside, "agent-b"); err != nil {
+		t.Fatalf("corrupt marker: %v", err)
+	}
+
+	if _, err := DeleteAgentFiles("agent-b", projectPath, true); err != nil {
+		t.Fatalf("DeleteAgentFiles(agent-b): %v", err)
+	}
+
+	// The external path must survive.
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("external content must survive an out-of-tree marker delete: %v", err)
+	}
+
+	// agent-b never had its own worktree directory (it joined agent-a's), so
+	// there is no independent trusted path to fall back to — the shared
+	// worktree the joiner was using must be left alone too (leaked, not
+	// deleted; a lost refcount is the acceptable cost of failing closed).
+	if _, err := os.Stat(wtA); err != nil {
+		t.Errorf("shared worktree must survive when the last-sharer marker is out-of-tree: %v", err)
+	}
+}
+
 func intPtr(i int) *int { return &i }
 
 // TestDeleteAgentFiles_GlobalProject_DeletesOnlyTargetWorkspace is the

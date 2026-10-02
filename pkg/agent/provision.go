@@ -149,22 +149,43 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 				return branchDeleted, fmt.Errorf("delete: UnregisterSharer for branch %s agent %s: %w", branch, agentName, unregErr)
 			}
 			if len(remaining) == 0 {
-				util.Debugf("delete: last sharer for branch %s, removing worktree at %s", branch, wtPath)
-				worktreeStart := time.Now()
-				if deleted, err := util.RemoveWorktree(wtPath, removeBranch); err == nil {
-					if deleted {
-						branchDeleted = true
-					}
-					util.Debugf("delete: shared worktree removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
+				if wtPath == "" {
+					// The registry read boundary (pkg/provision.readMarker)
+					// already fails closed on an out-of-tree/relative/empty
+					// WorktreePath, discarding the whole marker. There is no
+					// validated in-tree path to remove — do not guess one.
+					slog.Warn("delete: no valid worktree path for last sharer; skipping worktree removal",
+						"agent_id", agentName, "branch", branch)
 				} else {
-					util.Debugf("delete: shared worktree removal failed in %v: %v", time.Since(worktreeStart), err)
-					_ = util.RemoveAllSafe(wtPath)
-					// Worktree removal failed, so the branch wasn't deleted by it —
-					// fall back to deleting the branch by name (like the legacy path).
-					if removeBranch && !branchDeleted {
-						if util.DeleteBranchIn(repoRoot, branch) {
+					util.Debugf("delete: last sharer for branch %s, removing worktree at %s", branch, wtPath)
+					worktreeStart := time.Now()
+					if deleted, err := util.RemoveWorktree(repoRoot, wtPath, removeBranch); err == nil {
+						if deleted {
 							branchDeleted = true
-							util.Debugf("delete: deleted branch %s via fallback after worktree removal failure", branch)
+						}
+						util.Debugf("delete: shared worktree removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
+					} else {
+						util.Debugf("delete: shared worktree removal failed in %v: %v", time.Since(worktreeStart), err)
+						if errors.Is(err, util.ErrPathNotContained) {
+							// The marker's WorktreePath passed the lexical
+							// read-boundary check (Phase 1) but resolves
+							// outside repoRoot once symlinks are followed
+							// (e.g. a symlinked worktrees dir or leaf).
+							// Do NOT fall back to a raw recursive removal —
+							// that is exactly what this check exists to
+							// prevent.
+							slog.Warn("delete: refusing fallback removal; worktree path does not resolve under repo root",
+								"agent_id", agentName, "branch", branch, "path", wtPath, "repo_root", repoRoot)
+						} else {
+							_ = util.RemoveAllSafe(wtPath)
+						}
+						// Worktree removal failed, so the branch wasn't deleted by it —
+						// fall back to deleting the branch by name (like the legacy path).
+						if removeBranch && !branchDeleted {
+							if util.DeleteBranchIn(repoRoot, branch) {
+								branchDeleted = true
+								util.Debugf("delete: deleted branch %s via fallback after worktree removal failure", branch)
+							}
 						}
 					}
 				}
@@ -183,14 +204,16 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		if _, err := os.Stat(filepath.Join(worktreeDir, ".git")); err == nil {
 			util.Debugf("delete: removing worktree-per-agent workspace at %s", worktreeDir)
 			worktreeStart := time.Now()
-			if deleted, err := util.RemoveWorktree(worktreeDir, removeBranch); err == nil {
+			if deleted, err := util.RemoveWorktree(repoRoot, worktreeDir, removeBranch); err == nil {
 				if deleted {
 					branchDeleted = true
 				}
 				util.Debugf("delete: worktree-per-agent removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
 			} else {
 				util.Debugf("delete: worktree-per-agent removal failed in %v: %v", time.Since(worktreeStart), err)
-				_ = util.RemoveAllSafe(worktreeDir)
+				if !errors.Is(err, util.ErrPathNotContained) {
+					_ = util.RemoveAllSafe(worktreeDir)
+				}
 			}
 		} else {
 			_ = util.RemoveAllSafe(worktreeDir)
@@ -211,14 +234,16 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 			if _, err := os.Stat(filepath.Join(agentWorkspace, ".git")); err == nil {
 				util.Debugf("delete: removing workspace at %s", agentWorkspace)
 				worktreeStart := time.Now()
-				if deleted, err := util.RemoveWorktree(agentWorkspace, removeBranch); err == nil {
+				if deleted, err := util.RemoveWorktree(agentDir, agentWorkspace, removeBranch); err == nil {
 					if deleted {
 						branchDeleted = true
 					}
 					util.Debugf("delete: worktree removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
 				} else {
 					util.Debugf("delete: worktree removal failed in %v: %v", time.Since(worktreeStart), err)
-					_ = util.RemoveAllSafe(agentWorkspace)
+					if !errors.Is(err, util.ErrPathNotContained) {
+						_ = util.RemoveAllSafe(agentWorkspace)
+					}
 				}
 			}
 		}
