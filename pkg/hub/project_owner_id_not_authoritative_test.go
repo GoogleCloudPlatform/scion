@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,6 +37,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// syncLogBuffer is a mutex-guarded log sink. The backfill tests swap the
+// process-global slog logger, and parallel tests or background goroutines in
+// package hub may log through it concurrently, so a bare bytes.Buffer would
+// race.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 type staleOwnerFixture struct {
 	srv     *Server
@@ -309,7 +331,7 @@ func TestProjectOwnerID_BackfillWarnsOnOwnerOnlyLegacyProject(t *testing.T) {
 
 	// Do not add t.Parallel(): this test swaps the process-global slog
 	// logger with slog.SetDefault to capture the warning.
-	var buf bytes.Buffer
+	var buf syncLogBuffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
@@ -413,7 +435,7 @@ func TestProjectOwnerID_BackfillNoWarningWhenNotOwnerOnly(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	var buf bytes.Buffer
+	var buf syncLogBuffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
@@ -458,7 +480,7 @@ func TestProjectOwnerID_BackfillWarnsOnOwnerIDCreatorMismatch(t *testing.T) {
 
 	// Do not add t.Parallel(): this test swaps the process-global slog
 	// logger with slog.SetDefault to capture the warning.
-	var buf bytes.Buffer
+	var buf syncLogBuffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
