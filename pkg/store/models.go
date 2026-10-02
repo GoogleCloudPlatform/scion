@@ -273,10 +273,15 @@ type AgentAppliedConfig struct {
 	// into $HOME/.scion/hooks/pre-start.d/30-project-custom before container start.
 	ProjectPreStartHookScript string `json:"projectPreStartHookScript,omitempty"`
 
-	// CreateInputs snapshots the explicit request-level inputs captured at
-	// create time, before any template/harness-config/hub-default derivation
-	// ran. See AgentCreateInputs. Nil for agents created before this field
-	// existed (falls back to a heuristic reconstruction at reincarnate time).
+	// CreateInputs snapshots the explicit request-level inputs: the ones
+	// captured at create time, before any template/harness-config/hub-default
+	// derivation ran, PLUS any later PATCH /api/v1/agents/{id} edit that
+	// changed a field's live value (Option C, ptone/scion#2493; see
+	// recordExplicitEdits in pkg/hub). An echoed PATCH value -- one that
+	// merely reflects the live, derived config back unchanged, as the
+	// configure page's Save and Start both do -- is never recorded here. See
+	// AgentCreateInputs. Nil for agents created before this field existed
+	// (falls back to a heuristic reconstruction at reincarnate time).
 	CreateInputs *AgentCreateInputs `json:"createInputs,omitempty"`
 
 	// envResponseVisible gates whether MarshalJSON includes Env. It defaults
@@ -452,11 +457,17 @@ func (ac AgentAppliedConfig) MarshalJSON() ([]byte, error) {
 
 // AgentCreateInputs snapshots the explicit request-level inputs an agent was
 // created with, independent of anything the template/harness-config/hub
-// defaults later filled in on top of them. `scion reincarnate` (design
-// /scion-volumes/scratchpad/projects/agent-migrate/design.md §3.3 Amendment
-// A1) replays these — plus its own request overrides — through the same
-// derivation resolveDerivedConfig applies at create, against a freshly built
-// AgentAppliedConfig. It must never call resolveDerivedConfig on the
+// defaults later filled in on top of them -- PLUS any later PATCH
+// /api/v1/agents/{id} edit that changed one of these fields' (or an Env
+// key's) live value (Option C, ptone/scion#2493: see recordExplicitEdits in
+// pkg/hub, called from applyAgentUpdate). Invariant E: a PATCH changes a
+// field here if and only if it changed that field's live value, so a PATCH
+// that only echoes the live, derived config back (as the configure page's
+// Save and Start both do) never touches this struct. `scion reincarnate`
+// (design /scion-volumes/scratchpad/projects/agent-migrate/design.md §3.3
+// Amendment A1) replays these — plus its own request overrides — through the
+// same derivation resolveDerivedConfig applies at create, against a freshly
+// built AgentAppliedConfig. It must never call resolveDerivedConfig on the
 // existing (already-derived, possibly stale) AppliedConfig: several fields
 // (Image, Model, Env, HarnessAuth, Workspace, Branch) are dual-purpose —
 // resolveDerivedConfig and populateAgentConfig only fill them in when empty,
@@ -465,6 +476,9 @@ func (ac AgentAppliedConfig) MarshalJSON() ([]byte, error) {
 //
 // Deliberately excludes Task: reincarnate's hub-built preamble plus handoff
 // always replaces it, so the original create-time task is never replayed.
+// recordExplicitEdits excludes it too, for the same reason, along with
+// Harness/HarnessConfig/DefaultHarnessConfig (an unvalidated harness switch
+// must not take effect only at reincarnate).
 type AgentCreateInputs struct {
 	// InlineConfig is a deep copy of the request's Config (ScionConfig) as
 	// given at create time, before resolveDerivedConfig had a chance to stamp
