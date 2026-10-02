@@ -88,3 +88,56 @@ func TestNonCanonicalSQL_MatchesGoCanonicalForms(t *testing.T) {
 		assert.True(t, nonCanonical(familyWebchat, v), "webchat %q", v)
 	}
 }
+
+// TestUnreadableSQL_MatchesFourDigitAbbreviations checks the four-digit
+// probe: it matches the numeric-abbreviation shapes the driver cannot scan
+// and nothing else.
+func TestUnreadableSQL_MatchesFourDigitAbbreviations(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	match := func(v any) bool {
+		t.Helper()
+		var got bool
+		require.NoError(t, db.QueryRow("SELECT COALESCE("+unreadableSQL("v")+", 0) FROM (SELECT ? AS v)", v).Scan(&got))
+		return got
+	}
+	ktm := time.FixedZone("+0545", 5*3600+45*60)
+	for _, v := range []string{
+		"2026-10-01 09:45:00 +0545 +0545",
+		"2026-10-01 09:45:00.125 +0545 +0545 m=+12.5",
+		"2026-10-01 06:00:00 +0200 +0200",
+		"2026-09-30 23:30:00 -0430 -0430",
+		time.Date(2026, 10, 1, 9, 45, 0, 5, ktm).String(),
+		// With a monotonic-clock reading, as time.Now() carries.
+		time.Now().In(ktm).String(),
+		time.Now().In(time.FixedZone("", 2*3600)).String(),
+	} {
+		assert.True(t, match(v), "%q", v)
+	}
+	for _, v := range []any{
+		nil, "",
+		"2026-10-01 04:00:00 +0000 UTC",
+		"2026-10-01 13:00:00 +0900 JST m=+0.5",
+		"2026-10-01 01:00:00 -0300 -03",
+		"2026-10-01T09:45:00+05:45",
+		"garbage +0545 +0545",
+	} {
+		assert.False(t, match(v), "%v", v)
+	}
+}
+
+func TestIsSQLiteDialect(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	for d, want := range map[string]bool{"sqlite3": true, "sqlite": true, "postgres": false} {
+		got, err := isSQLiteDialect(db, d)
+		require.NoError(t, err, d)
+		assert.Equal(t, want, got, d)
+	}
+	_, err = isSQLiteDialect(db, "mysql")
+	assert.Error(t, err)
+	_, err = isSQLiteDialect(nil, "sqlite3")
+	assert.Error(t, err)
+}

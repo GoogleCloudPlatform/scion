@@ -40,6 +40,7 @@ import (
 
 type jsonNormalizeFixture struct {
 	db       *sql.DB
+	dialect  string
 	sqlite   bool
 	agents   *AgentStore
 	client   *ent.Client
@@ -56,10 +57,11 @@ func newJSONNormalizeFixture(t *testing.T) *jsonNormalizeFixture {
 	drv, ok := client.Driver().(*entsql.Driver)
 	require.True(t, ok, "test client is not backed by database/sql")
 	f := &jsonNormalizeFixture{db: drv.DB(), client: client, agents: NewAgentStore(client)}
+	f.dialect = drv.Dialect()
 	var err error
-	f.sqlite, err = isSQLiteDB(ctx, f.db)
+	f.sqlite, err = isSQLiteDialect(f.db, f.dialect)
 	require.NoError(t, err)
-	require.Equal(t, !enttest.Active(), f.sqlite, "backend detection disagrees with enttest")
+	require.Equal(t, !enttest.Active(), f.sqlite, "dialect disagrees with enttest")
 
 	_, err = client.Project.Create().SetID(agentTestProjectUID).SetName("p").SetSlug("p").Save(ctx)
 	require.NoError(t, err)
@@ -136,7 +138,7 @@ func TestUTCTimestampNormalizeJSON_RewritesEmbeddedTimes(t *testing.T) {
 	badBefore := f.rawJSON(t, "access_policies", "conditions", f.badID)
 
 	var log bytes.Buffer
-	rep, err := NormalizeUTCTimestamps(ctx, f.db, &log, TimestampNormalizeOptions{BatchSize: 1})
+	rep, err := NormalizeUTCTimestamps(ctx, f.db, f.dialect, &log, TimestampNormalizeOptions{BatchSize: 1})
 	require.NoError(t, err)
 	assert.Equal(t, 1, rep.Unparseable, log.String())
 	assert.NotContains(t, log.String(), "not-a-time-7c1e", "a stored value reached the log")
@@ -166,9 +168,17 @@ func TestUTCTimestampNormalizeJSON_RewritesEmbeddedTimes(t *testing.T) {
 	assert.Equal(t, time.UTC, pol.Conditions.ValidFrom.Location())
 	assert.Equal(t, "a", pol.Conditions.Labels["team"])
 
+	// The startup check runs without error on both backends; on Postgres it
+	// has nothing to report (scalar columns are timestamptz).
+	chk, err := CheckStoredTimestamps(ctx, f.db, f.dialect)
+	require.NoError(t, err)
+	if !f.sqlite {
+		assert.Equal(t, TimestampCheck{}, chk)
+	}
+
 	// A second run changes nothing.
 	before := f.snapshot(t)
-	rep, err = NormalizeUTCTimestamps(ctx, f.db, nil, TimestampNormalizeOptions{})
+	rep, err = NormalizeUTCTimestamps(ctx, f.db, f.dialect, nil, TimestampNormalizeOptions{})
 	require.NoError(t, err)
 	assert.Zero(t, rep.Rewritten)
 	assert.Equal(t, before, f.snapshot(t))
@@ -179,7 +189,7 @@ func TestUTCTimestampNormalizeJSON_DryRunWritesNothing(t *testing.T) {
 	f := newJSONNormalizeFixture(t)
 	before := f.snapshot(t)
 	var log bytes.Buffer
-	rep, err := NormalizeUTCTimestamps(ctx, f.db, &log, TimestampNormalizeOptions{DryRun: true})
+	rep, err := NormalizeUTCTimestamps(ctx, f.db, f.dialect, &log, TimestampNormalizeOptions{DryRun: true})
 	require.NoError(t, err)
 	assert.Equal(t, 2, rep.Rewritten, "one exposed_ports row and one conditions row would change")
 	assert.Equal(t, before, f.snapshot(t))

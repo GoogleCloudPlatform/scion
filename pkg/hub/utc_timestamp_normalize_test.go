@@ -21,13 +21,16 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
@@ -92,11 +95,6 @@ func execOne(t *testing.T, db *sql.DB, q string, args ...any) {
 	require.Equal(t, int64(1), n, "%s", q)
 }
 
-func quoted(t *testing.T, db *sql.DB, q string, args ...any) string {
-	t.Helper()
-	return rawText(t, db, q, args...)
-}
-
 // dumpDB returns every row of every table, each value through quote(), so
 // two dumps are equal only if the stored text is byte-identical.
 func dumpDB(t *testing.T, db *sql.DB) string {
@@ -143,7 +141,7 @@ func dumpDB(t *testing.T, db *sql.DB) string {
 func runNormalize(t *testing.T, db *sql.DB, opts entadapter.TimestampNormalizeOptions) (entadapter.TimestampNormalizeReport, string) {
 	t.Helper()
 	var log bytes.Buffer
-	rep, err := entadapter.NormalizeUTCTimestamps(context.Background(), db, &log, opts)
+	rep, err := entadapter.NormalizeUTCTimestamps(context.Background(), db, dialect.SQLite, &log, opts)
 	require.NoError(t, err, log.String())
 	return rep, log.String()
 }
@@ -186,13 +184,13 @@ func TestUTCTimestampNormalize_RewritesBothFamilies(t *testing.T) {
 	assert.Positive(t, rep.Rewritten)
 
 	for _, c := range entCases {
-		got := quoted(t, db, "SELECT quote(created) FROM messages WHERE id = ?", tid("norm-msg-"+c.name))
+		got := rawText(t, db, "SELECT quote(created) FROM messages WHERE id = ?", tid("norm-msg-"+c.name))
 		assert.Equal(t, "'"+c.want.String()+"'", got, c.name)
 		assert.True(t, strings.HasSuffix(got, " +0000 UTC'"), "%s: %s", c.name, got)
 	}
 	for _, c := range webCases {
 		for _, col := range []string{"created_at", "last_activity_at", "deleted_at"} {
-			got := quoted(t, db, "SELECT quote("+col+") FROM webchat_topic WHERE id = ?", tid("norm-topic-"+c.name))
+			got := rawText(t, db, "SELECT quote("+col+") FROM webchat_topic WHERE id = ?", tid("norm-topic-"+c.name))
 			assert.Equal(t, "'"+c.want.Format(time.RFC3339Nano)+"'", got, "%s %s", c.name, col)
 		}
 	}
@@ -206,9 +204,9 @@ func TestUTCTimestampNormalize_RewritesBothFamilies(t *testing.T) {
 	}
 
 	// No ent table holds a non-canonical value any more.
-	tables, err := entadapter.NonCanonicalTimestampTables(ctx, db)
+	chk, err := entadapter.CheckStoredTimestamps(ctx, db, dialect.SQLite)
 	require.NoError(t, err)
-	assert.Empty(t, tables)
+	assert.Equal(t, entadapter.TimestampCheck{}, chk)
 
 	// A second run changes nothing.
 	before := dumpDB(t, db)
@@ -243,7 +241,7 @@ func TestUTCTimestampNormalize_ScheduledEventFixedZone(t *testing.T) {
 	require.Len(t, res.Items, 1)
 	requireUTCInstant(t, res.Items[0].FireAt, time.Date(2026, 10, 1, 7, 0, 0, 0, time.UTC))
 	assert.Equal(t, "'2026-10-01 07:00:00 +0000 UTC'",
-		quoted(t, db, "SELECT quote(fire_at) FROM scheduled_events WHERE id = ?", ev.ID))
+		rawText(t, db, "SELECT quote(fire_at) FROM scheduled_events WHERE id = ?", ev.ID))
 }
 
 // TestUTCTimestampNormalize_OrderingOverMigratedAndNewRows checks that,
@@ -453,15 +451,15 @@ func TestUTCTimestampNormalize_ResumesAfterInterruption(t *testing.T) {
 	// Reference: one uninterrupted run.
 	refDB := seed(t)
 	runNormalize(t, refDB, entadapter.TimestampNormalizeOptions{BatchSize: 2})
-	refTables, err := entadapter.NonCanonicalTimestampTables(context.Background(), refDB)
+	refChk, err := entadapter.CheckStoredTimestamps(context.Background(), refDB, dialect.SQLite)
 	require.NoError(t, err)
-	require.Empty(t, refTables)
+	require.Equal(t, entadapter.TimestampCheck{}, refChk)
 
 	db := seed(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	// Cancel as soon as the first table reports progress.
 	w := &cancelOnWrite{cancel: cancel, after: "table messages"}
-	_, err = entadapter.NormalizeUTCTimestamps(ctx, db, w, entadapter.TimestampNormalizeOptions{BatchSize: 2})
+	_, err = entadapter.NormalizeUTCTimestamps(ctx, db, dialect.SQLite, w, entadapter.TimestampNormalizeOptions{BatchSize: 2})
 	require.ErrorIs(t, err, context.Canceled)
 	msgQ := "SELECT group_concat(quote(created) || quote(dispatched_at), ',') FROM (SELECT created, dispatched_at FROM messages ORDER BY id)"
 	topicQ := "SELECT group_concat(quote(created_at), ',') FROM (SELECT created_at FROM webchat_topic ORDER BY id)"
@@ -494,14 +492,16 @@ func (c *cancelOnWrite) Write(p []byte) (int, error) {
 // row by table, and is silent again after the operation runs.
 func TestUTCTimestampNormalize_StartupCheck(t *testing.T) {
 	cases := []struct {
-		name string
-		text string
+		name       string
+		text       string
+		unreadable bool
 	}{
-		{"named-zone", "2026-10-01 13:00:00 +0900 JST"},
-		{"named-zone-monotonic", "2026-10-01 05:00:00 -0700 PDT m=+0.5"},
-		{"utc-monotonic", "2026-10-01 04:00:00 +0000 UTC m=+0.5"},
-		{"numeric-zone", "2026-10-01 09:45:00 +0545 +0545"},
-		{"rfc3339", "2026-10-01T13:00:00+09:00"},
+		{"named-zone", "2026-10-01 13:00:00 +0900 JST", false},
+		{"named-zone-monotonic", "2026-10-01 05:00:00 -0700 PDT m=+0.5", false},
+		{"utc-monotonic", "2026-10-01 04:00:00 +0000 UTC m=+0.5", false},
+		{"numeric-zone", "2026-10-01 09:45:00 +0545 +0545", true},
+		{"nameless-fixed-zone", "2026-10-01 06:00:00 +0200 +0200 m=+1.5", true},
+		{"rfc3339", "2026-10-01T13:00:00+09:00", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -516,22 +516,29 @@ func TestUTCTimestampNormalize_StartupCheck(t *testing.T) {
 			}))
 
 			logs := captureSlog(t)
-			srv.checkNonCanonicalTimestamps(ctx)
+			srv.checkStoredTimestamps(ctx)
 			assert.NotContains(t, logs.String(), entadapter.UTCTimestampNormalizeKey, "canonical store must not warn")
 
 			execOne(t, db, "UPDATE messages SET created = ? WHERE id = ?", c.text, id)
 			logs.Reset()
-			srv.checkNonCanonicalTimestamps(ctx)
+			srv.checkStoredTimestamps(ctx)
 			out := logs.String()
 			assert.Contains(t, out, "level=ERROR")
 			assert.Contains(t, out, entadapter.UTCTimestampNormalizeKey)
 			assert.Contains(t, out, "messages")
 			assert.Equal(t, 1, strings.Count(out, "level=ERROR"), "exactly one error line")
+			assert.Contains(t, out, "repaired automatically at hub start")
+			if c.unreadable {
+				assert.Contains(t, out, "tables_unreadable=[messages]")
+			} else {
+				assert.Contains(t, out, "tables_unreadable=[]")
+			}
+			assert.NotContains(t, out, "level=WARN")
 			assert.NotContains(t, out, c.text, "a stored value reached the log")
 
 			runNormalize(t, db, entadapter.TimestampNormalizeOptions{})
 			logs.Reset()
-			srv.checkNonCanonicalTimestamps(ctx)
+			srv.checkStoredTimestamps(ctx)
 			assert.Empty(t, logs.String(), "the check must be silent after the run")
 		})
 	}
@@ -591,4 +598,145 @@ func TestUTCTimestampNormalize_ExecutorWiring(t *testing.T) {
 	assert.Equal(t, store.MaintenanceStatusCompleted, got.Status, got.Result)
 	assert.NotContains(t, got.Result, legacy)
 	assert.Equal(t, "2026-10-01 04:00:00 +0000 UTC", rawText(t, db, "SELECT CAST(created AS TEXT) FROM messages WHERE id = ?", id))
+
+	// A completed run can run again: a row written afterwards (an older
+	// binary, a restored backup) is rewritten and the startup check goes
+	// silent.
+	id2 := tid("norm-exec-msg-2")
+	require.NoError(t, s.CreateMessage(ctx, &store.Message{
+		ID: id2, ProjectID: proj.ID, Sender: "user:alice", Recipient: "agent:bot",
+		Msg: "y", Channel: "web", CreatedAt: normBase,
+	}))
+	execOne(t, db, "UPDATE messages SET created = ? WHERE id = ?", "2026-10-01 13:00:01 +0900 JST m=+0.5", id2)
+	logs := captureSlog(t)
+	srv.checkStoredTimestamps(ctx)
+	assert.Contains(t, logs.String(), "level=ERROR")
+
+	got = run(`{}`)
+	assert.Equal(t, store.MaintenanceStatusCompleted, got.Status, got.Result)
+	assert.Contains(t, got.Result, "rewrote 1 values")
+	assert.Equal(t, "2026-10-01 04:00:01 +0000 UTC", rawText(t, db, "SELECT CAST(created AS TEXT) FROM messages WHERE id = ?", id2))
+	logs.Reset()
+	srv.checkStoredTimestamps(ctx)
+	assert.Empty(t, logs.String())
+}
+
+// TestUTCTimestampNormalize_StartupCheckUnparseableOnly checks that when the
+// only non-canonical values left are unparseable, the check points at the
+// run log instead of asking for another run, and that a parseable leftover
+// still asks for a run.
+func TestUTCTimestampNormalize_StartupCheckUnparseableOnly(t *testing.T) {
+	_, s, db := newEntWebChatStore(t)
+	ctx := context.Background()
+	srv := &Server{store: s}
+	proj := normProject(t, s, "norm-startup-bad")
+	mk := func(name, text string) string {
+		t.Helper()
+		id := tid("norm-startup-bad-" + name)
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID: id, ProjectID: proj.ID, Sender: "user:alice", Recipient: "agent:bot",
+			Msg: name, Channel: "web", CreatedAt: normBase,
+		}))
+		execOne(t, db, "UPDATE messages SET created = ? WHERE id = ?", text, id)
+		return id
+	}
+	mk("bad", "garbage-startup-51d0")
+
+	rep, _ := runNormalize(t, db, entadapter.TimestampNormalizeOptions{})
+	require.Equal(t, 1, rep.Unparseable)
+
+	logs := captureSlog(t)
+	srv.checkStoredTimestamps(ctx)
+	out := logs.String()
+	assert.NotContains(t, out, "level=ERROR", "nothing for the operation to do")
+	assert.Equal(t, 1, strings.Count(out, "level=WARN"))
+	assert.Contains(t, out, "run log")
+	assert.Contains(t, out, "tables=[messages]")
+	assert.NotContains(t, out, "garbage-startup-51d0")
+
+	// A parseable leftover in the same table means the operation has work.
+	mk("jst", "2026-10-01 13:00:00 +0900 JST")
+	logs.Reset()
+	srv.checkStoredTimestamps(ctx)
+	out = logs.String()
+	assert.Equal(t, 1, strings.Count(out, "level=ERROR"))
+	assert.NotContains(t, out, "level=WARN")
+}
+
+// TestUTCTimestampNormalize_UnreadableProbeMatchesEntReads checks that the
+// four-digit probe flags exactly the values that make ent reads fail.
+func TestUTCTimestampNormalize_UnreadableProbeMatchesEntReads(t *testing.T) {
+	ktm := time.FixedZone("+0545", 5*3600+45*60)
+	for _, text := range []string{
+		"2026-10-01 09:45:00 +0545 +0545",
+		"2026-10-01 09:45:00.125 +0545 +0545 m=+12.5",
+		"2026-10-01 06:00:00 +0200 +0200",
+		time.Date(2026, 10, 1, 9, 45, 0, 7, ktm).String(),
+		"2026-10-01 13:00:00 +0900 JST",
+		"2026-10-01 13:00:00.25 +0900 JST m=+0.07",
+		"2026-10-01 01:00:00 -0300 -03",
+		"2026-10-01T13:00:00+09:00",
+		"2026-10-01 04:00:00 +0000 UTC",
+	} {
+		t.Run(text, func(t *testing.T) {
+			_, s, db := newEntWebChatStore(t)
+			ctx := context.Background()
+			proj := normProject(t, s, "norm-unreadable")
+			id := tid("norm-unreadable-msg")
+			require.NoError(t, s.CreateMessage(ctx, &store.Message{
+				ID: id, ProjectID: proj.ID, Sender: "user:alice", Recipient: "agent:bot",
+				Msg: "x", Channel: "web", CreatedAt: normBase,
+			}))
+			execOne(t, db, "UPDATE messages SET created = ? WHERE id = ?", text, id)
+
+			_, readErr := s.ListMessages(ctx, store.MessageFilter{ProjectID: proj.ID}, store.ListOptions{Limit: 10})
+			chk, err := entadapter.CheckStoredTimestamps(ctx, db, dialect.SQLite)
+			require.NoError(t, err)
+			flagged := len(chk.Unreadable) == 1 && chk.Unreadable[0] == "messages"
+			assert.Equal(t, readErr != nil, flagged, "ent read error: %v; probe: %v", readErr, chk.Unreadable)
+		})
+	}
+}
+
+// TestUTCTimestampNormalize_StartupCheckRunsInBackground checks that the
+// start hook returns at once and the check still logs.
+func TestUTCTimestampNormalize_StartupCheckRunsInBackground(t *testing.T) {
+	_, s, db := newEntWebChatStore(t)
+	ctx := context.Background()
+	srv := &Server{store: s}
+	proj := normProject(t, s, "norm-startup-bg")
+	id := tid("norm-startup-bg-msg")
+	require.NoError(t, s.CreateMessage(ctx, &store.Message{
+		ID: id, ProjectID: proj.ID, Sender: "user:alice", Recipient: "agent:bot",
+		Msg: "x", Channel: "web", CreatedAt: normBase,
+	}))
+	execOne(t, db, "UPDATE messages SET created = ? WHERE id = ?", "2026-10-01 09:45:00 +0545 +0545", id)
+
+	logs := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	srv.startStoredTimestampCheck(ctx)
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), "tables_unreadable=[messages]")
+	}, 10*time.Second, 10*time.Millisecond)
+}
+
+// syncBuffer is a bytes.Buffer safe for a background writer.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

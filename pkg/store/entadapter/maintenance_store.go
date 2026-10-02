@@ -65,7 +65,7 @@ var defaultSeedOperations = []store.MaintenanceOperation{
 	{
 		Key:         UTCTimestampNormalizeKey,
 		Title:       "UTC Timestamp Normalize",
-		Description: `Rewrites stored timestamps to UTC so that ordering and paging are exact: on SQLite, every ent time column, every webchat time column and the times embedded in JSON fields; on Postgres, the JSON-embedded times. Also makes rows written in a numeric-abbreviation zone (for example Asia/Kathmandu) readable again. Back up the database first. Run it only on this release or later. Safe to re-run; canonical values are left untouched and values are never logged.`,
+		Description: `Rewrites stored timestamps to UTC so that ordering and paging are exact: on SQLite, every ent time column, every webchat time column and the times embedded in JSON fields; on Postgres, the JSON-embedded times. Tables that cannot be read because of rows written in a numeric-abbreviation zone (for example Asia/Kathmandu) are repaired automatically at hub start, after a snapshot of the database; this operation rewrites the remaining non-canonical values, including such rows written later. Back up the database first. Run it only on this release or later. Safe to re-run; canonical values are left untouched and values are never logged.`,
 		Category:    store.MaintenanceCategoryMigration,
 	},
 	{

@@ -23,10 +23,12 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/migrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/storedtime"
@@ -98,6 +100,9 @@ type TimestampNormalizeOptions struct {
 	DryRun bool
 	// BatchSize is the number of rows read per batch (default 500).
 	BatchSize int
+	// Tables, when not empty, limits the run to these tables. The boot-time
+	// repair uses it to rewrite only the tables that cannot be read.
+	Tables []string
 }
 
 // TimestampNormalizeReport summarises a normalizer run.
@@ -154,12 +159,12 @@ var jsonTimeTargets = []jsonTarget{
 // that was read, so a concurrent write is never overwritten. A value that
 // does not parse is reported by table, column and row and left alone; values
 // are never written to the log.
-func NormalizeUTCTimestamps(ctx context.Context, db *sql.DB, log io.Writer, opts TimestampNormalizeOptions) (TimestampNormalizeReport, error) {
+func NormalizeUTCTimestamps(ctx context.Context, db *sql.DB, dbDialect string, log io.Writer, opts TimestampNormalizeOptions) (TimestampNormalizeReport, error) {
 	if opts.BatchSize <= 0 {
 		opts.BatchSize = defaultTimestampNormalizeBatch
 	}
 	n := &normalizer{db: db, log: log, opts: opts}
-	sqlite, err := isSQLiteDB(ctx, db)
+	sqlite, err := isSQLiteDialect(db, dbDialect)
 	if err != nil {
 		return n.report, err
 	}
@@ -173,6 +178,7 @@ func NormalizeUTCTimestamps(ctx context.Context, db *sql.DB, log io.Writer, opts
 		if err != nil {
 			return n.report, err
 		}
+		restrictTables(tables, opts.Tables)
 		targets, err := sqliteScalarTargets(ctx, db, tables)
 		if err != nil {
 			return n.report, err
@@ -186,12 +192,22 @@ func NormalizeUTCTimestamps(ctx context.Context, db *sql.DB, log io.Writer, opts
 			if !tables[jt.table] {
 				continue
 			}
+			cols, err := sqliteColumns(ctx, db, jt.table)
+			if err != nil {
+				return n.report, err
+			}
+			if !containsString(cols, jt.column) {
+				continue
+			}
 			if err := n.jsonColumn(ctx, jt); err != nil {
 				return n.report, fmt.Errorf("table %s: %w", jt.table, err)
 			}
 		}
 	} else {
 		for _, jt := range jsonTimeTargets {
+			if len(opts.Tables) > 0 && !containsString(opts.Tables, jt.table) {
+				continue
+			}
 			if err := n.jsonColumn(ctx, jt); err != nil {
 				return n.report, fmt.Errorf("table %s: %w", jt.table, err)
 			}
@@ -206,13 +222,88 @@ func NormalizeUTCTimestamps(ctx context.Context, db *sql.DB, log io.Writer, opts
 	return n.report, nil
 }
 
-// NonCanonicalTimestampTables reports the ent tables that hold at least one
-// time value not in canonical UTC String() form. It is a cheap startup probe
-// (one EXISTS per column, stopping at the first match) for SQLite hubs that
-// need the utc-timestamp-normalize operation; it uses the normalizer's own
-// canonical predicate. On Postgres it returns nil.
-func NonCanonicalTimestampTables(ctx context.Context, db *sql.DB) ([]string, error) {
-	sqlite, err := isSQLiteDB(ctx, db)
+// TimestampCheck is the result of CheckStoredTimestamps. Each list holds ent
+// table names, never values.
+type TimestampCheck struct {
+	// NeedsRun lists tables holding at least one non-canonical value that
+	// the utc-timestamp-normalize operation will rewrite.
+	NeedsRun []string
+	// UnparseableOnly lists tables whose only non-canonical values are ones
+	// no supported layout parses. The operation leaves those alone and
+	// reports them by table, column and rowid in its run log.
+	UnparseableOnly []string
+	// Unreadable lists tables holding a value with a four-digit numeric
+	// zone abbreviation (e.g. "+0545 +0545"). The SQLite driver cannot scan
+	// such a value, so every ent read of the table fails. Each of these
+	// tables is also in NeedsRun.
+	Unreadable []string
+}
+
+// CheckStoredTimestamps inspects a SQLite store's ent time columns and
+// reports which tables still need the utc-timestamp-normalize operation. It
+// uses the normalizer's own canonical predicate, so the two cannot disagree.
+// On Postgres, whose scalar time columns are timestamptz, it reports nothing.
+//
+// Cost: on a canonical store each column is one full scan that matches
+// nothing. When a column has non-canonical values the scan stops at the first
+// parseable one, so only tables whose leftovers are all unparseable (rare,
+// and few rows) are read to the end. The four-digit probe is one EXISTS per
+// column.
+func CheckStoredTimestamps(ctx context.Context, db *sql.DB, dbDialect string) (TimestampCheck, error) {
+	var out TimestampCheck
+	sqlite, err := isSQLiteDialect(db, dbDialect)
+	if err != nil || !sqlite {
+		return out, err
+	}
+	tables, err := sqliteTables(ctx, db)
+	if err != nil {
+		return out, err
+	}
+	targets, err := entTimeTargets(ctx, db, tables)
+	if err != nil {
+		return out, err
+	}
+	for _, tg := range targets {
+		needsRun, unparseable := false, false
+		unreadable, err := hasUnreadable(ctx, db, tg)
+		if err != nil {
+			return out, err
+		}
+		for _, col := range tg.columns {
+			if needsRun {
+				break
+			}
+			parseable, unparse, err := classifyNonCanonical(ctx, db, tg.table, col)
+			if err != nil {
+				return out, fmt.Errorf("probe %s.%s: %w", tg.table, col, err)
+			}
+			needsRun = needsRun || parseable
+			unparseable = unparseable || unparse
+		}
+		switch {
+		case needsRun:
+			out.NeedsRun = append(out.NeedsRun, tg.table)
+		case unparseable:
+			out.UnparseableOnly = append(out.UnparseableOnly, tg.table)
+		}
+		if unreadable {
+			out.Unreadable = append(out.Unreadable, tg.table)
+		}
+	}
+	return out, nil
+}
+
+// UnreadableTimestampTables returns the ent tables of a SQLite store that
+// hold a time value the SQLite driver cannot scan (see unreadableSQL), so
+// that every ent read of them fails. On Postgres it returns nothing. Tables
+// and columns that the database does not have yet (an older schema, before
+// ent's migration has run) are skipped.
+//
+// Cost: one SELECT EXISTS per ent time column. On a healthy store each is
+// one scan of the table that matches nothing, at about 0.4 s per million
+// rows (measured on a 300 MB table), close to the cost of a bare scan.
+func UnreadableTimestampTables(ctx context.Context, db *sql.DB, dbDialect string) ([]string, error) {
+	sqlite, err := isSQLiteDialect(db, dbDialect)
 	if err != nil || !sqlite {
 		return nil, err
 	}
@@ -220,21 +311,77 @@ func NonCanonicalTimestampTables(ctx context.Context, db *sql.DB) ([]string, err
 	if err != nil {
 		return nil, err
 	}
+	targets, err := entTimeTargets(ctx, db, tables)
+	if err != nil {
+		return nil, err
+	}
 	var out []string
-	for _, tg := range entTimeTargets(tables) {
-		for _, col := range tg.columns {
-			var found bool
-			q := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s WHERE %s)", quoteIdent(tg.table), nonCanonicalSQL(col, familyEnt))
-			if err := db.QueryRowContext(ctx, q).Scan(&found); err != nil {
-				return out, fmt.Errorf("probe %s.%s: %w", tg.table, col, err)
-			}
-			if found {
-				out = append(out, tg.table)
-				break
-			}
+	for _, tg := range targets {
+		found, err := hasUnreadable(ctx, db, tg)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			out = append(out, tg.table)
 		}
 	}
 	return out, nil
+}
+
+// hasUnreadable reports whether any time column of tg holds a value that
+// matches unreadableSQL. It stops at the first column that does.
+func hasUnreadable(ctx context.Context, db *sql.DB, tg scalarTarget) (bool, error) {
+	for _, col := range tg.columns {
+		var found bool
+		q := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s WHERE %s)", quoteIdent(tg.table), unreadableSQL(col))
+		if err := db.QueryRowContext(ctx, q).Scan(&found); err != nil {
+			return false, fmt.Errorf("probe %s.%s: %w", tg.table, col, err)
+		}
+		if found {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// classifyNonCanonical reads the non-canonical values of one ent column
+// until it finds one that parses. It reports whether one parsed and whether
+// any did not.
+func classifyNonCanonical(ctx context.Context, db *sql.DB, table, col string) (parseable, unparseable bool, err error) {
+	q := fmt.Sprintf("SELECT CAST(%s AS TEXT) FROM %s WHERE %s", quoteIdent(col), quoteIdent(table), nonCanonicalSQL(col, familyEnt))
+	rows, err := db.QueryContext(ctx, q)
+	if err != nil {
+		return false, false, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return false, false, err
+		}
+		if _, perr := storedtime.Parse(v); perr == nil {
+			return true, unparseable, nil
+		}
+		unparseable = true
+	}
+	return false, unparseable, rows.Err()
+}
+
+// unreadableSQL returns a SQLite predicate that is true when col holds
+// time.Time.String() text whose zone abbreviation is a four-digit numeric
+// offset, with or without a monotonic-clock suffix: what Go prints for zones
+// such as Asia/Kathmandu ("+0545 +0545") and for a nameless time.FixedZone
+// ("+0200 +0200"). The SQLite driver cannot scan these values back.
+//
+// The leading instr test is a prefilter: such text never contains " UTC",
+// while every canonical value does, so on a healthy store the GLOBs are
+// never evaluated. It makes the per-row cost about four times lower, close
+// to that of a bare table scan.
+func unreadableSQL(col string) string {
+	c := "CAST(" + quoteIdent(col) + " AS TEXT)"
+	const zone = " [+-][0-9][0-9][0-9][0-9] [+-][0-9][0-9][0-9][0-9]"
+	return fmt.Sprintf("(instr(%s, ' UTC') = 0 AND (%s GLOB '%s' OR %s GLOB '%s'))",
+		c, c, globDateTime+"*"+zone, c, globDateTime+"*"+zone+" m=*")
 }
 
 type normalizer struct {
@@ -544,20 +691,20 @@ func rewriteJSONTimes(raw string, jt jsonTarget) (string, bool, error) {
 	return string(bytes.TrimSpace(out)), true, nil
 }
 
-// isSQLiteDB reports whether db is a SQLite database.
-func isSQLiteDB(ctx context.Context, db *sql.DB) (bool, error) {
+// isSQLiteDialect reports whether dbDialect, an ent dialect name, is SQLite.
+// It returns an error for a nil handle or an unsupported dialect.
+func isSQLiteDialect(db *sql.DB, dbDialect string) (bool, error) {
 	if db == nil {
 		return false, errors.New("no database handle")
 	}
-	var v string
-	if err := db.QueryRowContext(ctx, "SELECT sqlite_version()").Scan(&v); err != nil {
-		// Postgres has no sqlite_version(); confirm the connection works.
-		if pingErr := db.PingContext(ctx); pingErr != nil {
-			return false, pingErr
-		}
+	switch dbDialect {
+	case dialect.SQLite, "sqlite":
+		return true, nil
+	case dialect.Postgres:
 		return false, nil
+	default:
+		return false, fmt.Errorf("unsupported database dialect %q", dbDialect)
 	}
-	return true, nil
 }
 
 // sqliteTables returns the names of the ordinary tables in a SQLite DB.
@@ -579,16 +726,22 @@ func sqliteTables(ctx context.Context, db *sql.DB) (map[string]bool, error) {
 }
 
 // entTimeTargets returns every field.TypeTime column of every ent table
-// (from migrate.Tables) present in tables.
-func entTimeTargets(tables map[string]bool) []scalarTarget {
+// (from migrate.Tables) that is present in tables and in the database. The
+// boot-time repair runs before ent's schema migration, so an older database
+// can lack a table or column that migrate.Tables lists.
+func entTimeTargets(ctx context.Context, db *sql.DB, tables map[string]bool) ([]scalarTarget, error) {
 	var out []scalarTarget
 	for _, t := range migrate.Tables {
 		if !tables[t.Name] {
 			continue
 		}
+		present, err := sqliteColumns(ctx, db, t.Name)
+		if err != nil {
+			return nil, err
+		}
 		var cols []string
 		for _, c := range t.Columns {
-			if c.Type == field.TypeTime {
+			if c.Type == field.TypeTime && containsString(present, c.Name) {
 				cols = append(cols, c.Name)
 			}
 		}
@@ -596,13 +749,65 @@ func entTimeTargets(tables map[string]bool) []scalarTarget {
 			out = append(out, scalarTarget{table: t.Name, columns: cols, family: familyEnt})
 		}
 	}
-	return out
+	return out, nil
+}
+
+// restrictTables removes from tables every name not in only. An empty only
+// leaves tables unchanged.
+func restrictTables(tables map[string]bool, only []string) {
+	if len(only) == 0 {
+		return
+	}
+	for name := range tables {
+		if !containsString(only, name) {
+			delete(tables, name)
+		}
+	}
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// SnapshotSQLite writes a consistent copy of a SQLite database next to its
+// file, with VACUUM INTO, and returns the copy's path. The name is the
+// database file name followed by "." + label + "-" + the UTC time of now +
+// ".bak". It fails for an in-memory database and when the target exists, and
+// it removes a partial copy that it wrote. The copy needs about as much free
+// space as the database file.
+func SnapshotSQLite(ctx context.Context, db *sql.DB, label string, now time.Time) (string, error) {
+	var file string
+	if err := db.QueryRowContext(ctx, "SELECT file FROM pragma_database_list WHERE name = 'main'").Scan(&file); err != nil {
+		return "", fmt.Errorf("locate database file: %w", err)
+	}
+	if file == "" {
+		return "", errors.New("the database has no file (in-memory database)")
+	}
+	path := file + "." + label + "-" + now.UTC().Format("20060102T150405Z") + ".bak"
+	if _, err := os.Stat(path); err == nil {
+		return "", fmt.Errorf("snapshot %s already exists", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("snapshot %s: %w", path, err)
+	}
+	if _, err := db.ExecContext(ctx, "VACUUM INTO ?", path); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("snapshot %s: %w", path, err)
+	}
+	return path, nil
 }
 
 // sqliteScalarTargets returns the ent time columns and the *_at columns of
 // every webchat_* table (discovered with PRAGMA table_info).
 func sqliteScalarTargets(ctx context.Context, db *sql.DB, tables map[string]bool) ([]scalarTarget, error) {
-	out := entTimeTargets(tables)
+	out, err := entTimeTargets(ctx, db, tables)
+	if err != nil {
+		return nil, err
+	}
 	var webchat []string
 	for name := range tables {
 		if strings.HasPrefix(name, "webchat_") {

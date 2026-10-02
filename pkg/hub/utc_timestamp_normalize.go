@@ -20,6 +20,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
@@ -28,9 +29,12 @@ import (
 // migration: it rewrites stored timestamps to canonical UTC text so that
 // SQL ordering and comparison are exact and rows with four-digit numeric
 // zone abbreviations become readable. See entadapter.NormalizeUTCTimestamps.
-// It honours the dryRun parameter.
+// It honours the dryRun parameter and is safe to run again after it has
+// completed: canonical values are skipped.
 type UTCTimestampNormalizeExecutor struct {
 	DB *sql.DB
+	// Dialect is the ent dialect of DB.
+	Dialect string
 }
 
 // Run implements MaintenanceExecutor.
@@ -38,42 +42,83 @@ func (e *UTCTimestampNormalizeExecutor) Run(ctx context.Context, logger io.Write
 	if e.DB == nil {
 		return errors.New("the store has no SQL database handle; cannot normalize timestamps")
 	}
-	_, err := entadapter.NormalizeUTCTimestamps(ctx, e.DB, logger, entadapter.TimestampNormalizeOptions{
+	_, err := entadapter.NormalizeUTCTimestamps(ctx, e.DB, e.Dialect, logger, entadapter.TimestampNormalizeOptions{
 		DryRun: params["dryRun"] == "true",
 	})
 	return err
 }
 
-// storeDB returns the store's *sql.DB, or nil when it has none.
-func (s *Server) storeDB() *sql.DB {
-	if p, ok := s.store.(interface{ DB() *sql.DB }); ok {
-		return p.DB()
-	}
-	return nil
+// rerunnableMigrations lists migration-category operations that may run
+// again after completing. utc-timestamp-normalize is idempotent, and the
+// startup check keeps reporting rows it has not yet rewritten (rows written
+// by an older binary, restored from a backup, or written by a later
+// migration), so the remedy it names must stay available.
+var rerunnableMigrations = map[string]bool{
+	entadapter.UTCTimestampNormalizeKey: true,
 }
 
-// checkNonCanonicalTimestamps logs one error at hub start when a SQLite
+// storeDB returns the store's *sql.DB and ent dialect, or nil and "" when
+// the store has no SQL handle.
+func (s *Server) storeDB() (*sql.DB, string) {
+	if p, ok := s.store.(interface {
+		DB() *sql.DB
+		Dialect() string
+	}); ok {
+		return p.DB(), p.Dialect()
+	}
+	return nil, ""
+}
+
+// startupTimestampCheckTimeout bounds the startup timestamp check.
+const startupTimestampCheckTimeout = 5 * time.Minute
+
+// Startup log messages of checkStoredTimestamps. The release note and docs
+// use the same wording.
+const (
+	msgTimestampsNeedNormalize = "stored timestamps are not in canonical UTC form: run the " +
+		entadapter.UTCTimestampNormalizeKey + " maintenance operation (Admin -> Maintenance). " +
+		"Tables whose rows cannot be read are repaired automatically at hub start, after a snapshot of the database; " +
+		"if tables_unreadable lists tables here, run the operation immediately: every read of those tables fails. " +
+		"Until it runs, ordering and paging over the listed tables can be wrong"
+	msgTimestampsUnparseable = "stored timestamps that the " + entadapter.UTCTimestampNormalizeKey +
+		" operation cannot parse remain; its run log (Admin -> Maintenance) lists them by table, column and rowid; " +
+		"correct or clear those values"
+)
+
+// startStoredTimestampCheck runs checkStoredTimestamps in the background with
+// a bounded context. On a canonical store every ent time column is one full
+// scan, so running it inline would add a cost that grows with the database
+// to every start. It only logs, and nothing at start depends on its result.
+// Each column is its own query, so on SQLite's single connection other work
+// waits at most for one column's scan.
+func (s *Server) startStoredTimestampCheck(ctx context.Context) {
+	go func() {
+		ctx, cancel := context.WithTimeout(ctx, startupTimestampCheckTimeout)
+		defer cancel()
+		s.checkStoredTimestamps(ctx)
+	}()
+}
+
+// checkStoredTimestamps logs at most one error and one warning when a SQLite
 // store holds ent time values that are not canonical UTC text. Such rows
 // misorder in SQL comparisons, and those with a four-digit numeric zone
 // abbreviation (e.g. "+0545 +0545") make every ent read of their table fail
-// until the utc-timestamp-normalize operation rewrites them. The check never
-// blocks start.
-func (s *Server) checkNonCanonicalTimestamps(ctx context.Context) {
-	db := s.storeDB()
+// until the utc-timestamp-normalize operation rewrites them. It logs table
+// names only, never values.
+func (s *Server) checkStoredTimestamps(ctx context.Context) {
+	db, dbDialect := s.storeDB()
 	if db == nil {
 		return
 	}
-	tables, err := entadapter.NonCanonicalTimestampTables(ctx, db)
+	chk, err := entadapter.CheckStoredTimestamps(ctx, db, dbDialect)
 	if err != nil {
 		slog.Warn("timestamp check: could not inspect stored timestamps", "error", err)
 		return
 	}
-	if len(tables) == 0 {
-		return
+	if len(chk.NeedsRun) > 0 {
+		slog.Error(msgTimestampsNeedNormalize, "tables", chk.NeedsRun, "tables_unreadable", chk.Unreadable)
 	}
-	slog.Error("stored timestamps are not in canonical UTC form; back up the database and run the "+
-		entadapter.UTCTimestampNormalizeKey+" maintenance operation (Admin -> Maintenance). "+
-		"Until it runs, ordering and paging over these tables can be wrong, and tables with "+
-		"numeric zone abbreviations cannot be read",
-		"tables", tables)
+	if len(chk.UnparseableOnly) > 0 {
+		slog.Warn(msgTimestampsUnparseable, "tables", chk.UnparseableOnly)
+	}
 }
