@@ -4411,9 +4411,9 @@ func TestProvision_WorktreePerAgent_RegistryDecoy_CreatesFreshWorktree(t *testin
 
 	branch := "shared-branch"
 
-	// Plant a decoy: a plain directory at the canonical in-tree shape with no
+	// Set up a decoy: a plain directory at the canonical in-tree shape with no
 	// git metadata at all, and register it directly as the branch's marker
-	// (bypassing the fresh-worktree creation path that would normally put a
+	// (instead of the fresh-worktree creation path that would normally put a
 	// real worktree there).
 	decoy := WorktreePath(hostPath, "decoy")
 	require.NoError(t, os.MkdirAll(decoy, 0o755))

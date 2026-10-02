@@ -782,7 +782,7 @@ func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
 		if err := os.MkdirAll(worktreesDir, 0755); err != nil {
 			t.Fatal(err)
 		}
-		leaf := filepath.Join(worktreesDir, "evil-name")
+		leaf := filepath.Join(worktreesDir, "out-of-tree-name")
 		if err := os.Symlink(target, leaf); err != nil {
 			t.Fatal(err)
 		}
