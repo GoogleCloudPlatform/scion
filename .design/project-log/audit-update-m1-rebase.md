@@ -246,6 +246,37 @@ Inconclusive/limited gates:
 - `npm ci` reported the lockfile-existing three advisories (one low, two high);
   this rebase changed neither manifest nor lockfile.
 
+## Post-publication CI correction
+
+GitHub Actions run `37024276146`, job `110894820013`, failed its `Run Tests`
+step after all preceding web, format, vet, compatibility, authorization, and
+security-marker gates passed. The exact failure was deterministic rather than
+environmental:
+
+```text
+TestRegisteredRoutesHavePermissionClassification
+registered routes missing permission classification:
+[GET /api/v1/admin/access-constraints/{id}/audit]
+```
+
+The same failure reproduced locally with the bounded focused command
+`go test -count=1 -p 2 ./pkg/hub -run
+'^TestRegisteredRoutesHavePermissionClassification$'`. With explicit owner
+authorization, the exact method-aware route was added to the existing
+test-owned permission classification table as `policy:audit`. A focused
+regression now also pins its existing production metadata to `RoutePolicy` and
+the already-approved `hub.audit.read` permission. No production route, auth
+behavior, audit schema, or timing changed.
+
+Correction validation passed:
+
+- the exact no-SQLite classification test and focused regression;
+- focused route-metadata, history endpoint/cursor, unified auth, broker auth,
+  privacy, and legacy B7 endpoint tests;
+- `go vet -p 2 ./pkg/hub`;
+- bounded single-concurrency `golangci-lint` for `./pkg/hub/...`: `0 issues`;
+- gofmt inspection and `git diff --check`.
+
 ## Residual risk and M2 handoff
 
 The first-cycle Ent adapter race limitation described above was closed in the
