@@ -2130,7 +2130,13 @@ func chownTreeRootOwned(root string, uid, gid int, requirePrivilegeDrop bool) (w
 			return
 		}
 		log.Error("chownTreeRootOwned: failed to chown %s: %v", name, cerr)
-		entryErrs = append(entryErrs, cerr)
+		// dirfd.ChownTreeNoFollow's onErr receives a bare errno-style error
+		// with no path or name embedded (unlike the historical
+		// filepath.WalkDir-based errors this replaces) -- wrap it with name
+		// here, once, so an aggregate of several per-entry failures still
+		// says which entries they came from instead of repeating the same
+		// unattributed message once per failure.
+		entryErrs = append(entryErrs, fmt.Errorf("%s: %w", name, cerr))
 	})
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, 0, nil

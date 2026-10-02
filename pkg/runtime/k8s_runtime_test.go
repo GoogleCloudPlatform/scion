@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -650,27 +651,30 @@ func TestDefaultKubernetesNamespace(t *testing.T) {
 	})
 }
 
-// TestChownRecursiveCommand covers the shared helper both in-pod chown call
+// TestChownRecursiveArgs covers the shared helper both in-pod chown call
 // sites use: an empty owner must be refused outright rather than build a
 // command with no real target user, and a non-empty owner must produce the
-// expected `chown -R owner:owner path` command.
-func TestChownRecursiveCommand(t *testing.T) {
+// expected `chown -R owner:owner path` argv -- as separate argv elements,
+// not a shell string, so a path or owner containing shell metacharacters is
+// never given a shell to be interpreted by.
+func TestChownRecursiveArgs(t *testing.T) {
 	tests := []struct {
-		name    string
-		owner   string
-		path    string
-		wantCmd string
-		wantOK  bool
+		name     string
+		owner    string
+		path     string
+		wantArgs []string
+		wantOK   bool
 	}{
-		{name: "empty owner, home path", owner: "", path: "/home", wantCmd: "", wantOK: false},
-		{name: "empty owner, workspace path", owner: "", path: "/workspace", wantCmd: "", wantOK: false},
-		{name: "non-empty owner", owner: "scion", path: "/workspace", wantCmd: "chown -R scion:scion /workspace", wantOK: true},
+		{name: "empty owner, home path", owner: "", path: "/home", wantArgs: nil, wantOK: false},
+		{name: "empty owner, workspace path", owner: "", path: "/workspace", wantArgs: nil, wantOK: false},
+		{name: "non-empty owner", owner: "scion", path: "/workspace", wantArgs: []string{"chown", "-R", "scion:scion", "/workspace"}, wantOK: true},
+		{name: "path with shell metacharacters is passed through literally", owner: "scion", path: "/workspace; rm -rf /", wantArgs: []string{"chown", "-R", "scion:scion", "/workspace; rm -rf /"}, wantOK: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotCmd, gotOK := chownRecursiveCommand(tt.owner, tt.path)
-			if gotCmd != tt.wantCmd || gotOK != tt.wantOK {
-				t.Errorf("chownRecursiveCommand(%q, %q) = (%q, %v), want (%q, %v)", tt.owner, tt.path, gotCmd, gotOK, tt.wantCmd, tt.wantOK)
+			gotArgs, gotOK := chownRecursiveArgs(tt.owner, tt.path)
+			if !slices.Equal(gotArgs, tt.wantArgs) || gotOK != tt.wantOK {
+				t.Errorf("chownRecursiveArgs(%q, %q) = (%v, %v), want (%v, %v)", tt.owner, tt.path, gotArgs, gotOK, tt.wantArgs, tt.wantOK)
 			}
 		})
 	}

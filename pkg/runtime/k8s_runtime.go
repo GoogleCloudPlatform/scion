@@ -399,18 +399,23 @@ func ensureAnnotations(annotations map[string]string) map[string]string {
 	return make(map[string]string)
 }
 
-// chownRecursiveCommand returns the in-pod `chown -R` command that recursively
-// re-owns path to owner:owner, or ("", false) when owner is empty. An empty
+// chownRecursiveArgs returns the in-pod `chown -R` argv that recursively
+// re-owns path to owner:owner, or (nil, false) when owner is empty. An empty
 // owner must refuse outright rather than produce a command either caller
 // could otherwise build from it: an owner:group spec of ":" (no real target
 // user), or, for the home-directory caller, a destination path of
 // util.GetHomeDir("") == "/home" -- a critical system directory, not any
 // particular user's home.
-func chownRecursiveCommand(owner, path string) (cmd string, ok bool) {
+//
+// This returns argv directly, not a shell string, so execInPod runs chown
+// itself rather than a shell asked to parse one: owner and path reach the
+// process as literal argv elements, with no quoting step in between for
+// either value to escape.
+func chownRecursiveArgs(owner, path string) (args []string, ok bool) {
 	if owner == "" {
-		return "", false
+		return nil, false
 	}
-	return fmt.Sprintf("chown -R %s:%s %s", owner, owner, path), true
+	return []string{"chown", "-R", fmt.Sprintf("%s:%s", owner, owner), path}, true
 }
 
 func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, error) {
@@ -665,9 +670,9 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		// "/home" (a critical system directory, not a per-user home), so the
 		// in-pod chown below is refused outright rather than recursively
 		// re-owning every home directory on the node.
-		if chownCmd, ok := chownRecursiveCommand(config.UnixUsername, destHome); !ok {
+		if chownArgs, ok := chownRecursiveArgs(config.UnixUsername, destHome); !ok {
 			runtimeLog.Warn("Skipping home directory chown: UnixUsername is empty", "agent", config.Name, "destHome", destHome)
-		} else if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"sh", "-c", chownCmd}); err != nil {
+		} else if _, err := r.execInPod(ctx, namespace, createdPod.Name, chownArgs); err != nil {
 			runtimeLog.Debug("Failed to chown home directory (non-fatal)", "error", err)
 		}
 		runtimeLog.Info("Home sync complete", "agent", config.Name, "phase", "home-sync",
@@ -704,9 +709,9 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		// Fix workspace ownership for the scion user. An empty UnixUsername
 		// would build an owner:group spec of ":" -- refused outright rather
 		// than run chown with no actual target user.
-		if chownCmd, ok := chownRecursiveCommand(config.UnixUsername, "/workspace"); !ok {
+		if chownArgs, ok := chownRecursiveArgs(config.UnixUsername, "/workspace"); !ok {
 			runtimeLog.Warn("Skipping workspace chown: UnixUsername is empty", "agent", config.Name)
-		} else if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"sh", "-c", chownCmd}); err != nil {
+		} else if _, err := r.execInPod(ctx, namespace, createdPod.Name, chownArgs); err != nil {
 			runtimeLog.Debug("Failed to chown workspace (non-fatal)", "error", err)
 		}
 		runtimeLog.Info("Workspace sync complete", "agent", config.Name, "phase", "workspace-sync",

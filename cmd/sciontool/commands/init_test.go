@@ -1238,25 +1238,60 @@ func TestChownTreeRootOwned_MissingRootIsNoOp(t *testing.T) {
 	}
 }
 
+// mustMkdirDeepChainT creates a chain of exactly depth nested directories
+// directly under root (root's own direct child -- the chain's firstName
+// level -- is depth 1 in dirfd.ChownTreeNoFollow's own counting), named
+// firstName, then "d" for every level in between, then finalName for the
+// depth-th and last level, and returns the full path to that final
+// directory. firstName keeps two chains built under the same root from
+// colliding from their very first level, since every "d" level after that
+// is otherwise identically named.
+//
+// This is used to deterministically drive dirfd.ChownTreeNoFollow's own
+// max-recursion-depth guard without needing root privilege or any
+// permission-bit trick: see
+// TestChownTreeRootOwned_PropagatesRealEnumerationFailures's doc comment for
+// why a permission-denied subdirectory no longer reaches that guard at all
+// under the current fd-based walk.
+func mustMkdirDeepChainT(t *testing.T, root string, depth int, firstName, finalName string) string {
+	t.Helper()
+	segments := make([]string, 0, depth)
+	segments = append(segments, firstName)
+	for i := 2; i < depth; i++ {
+		segments = append(segments, "d")
+	}
+	segments = append(segments, finalName)
+	path := filepath.Join(append([]string{root}, segments...)...)
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatalf("mkdir deep chain under %s: %v", root, err)
+	}
+	return path
+}
+
 // TestChownTreeRootOwned_PropagatesRealEnumerationFailures proves that only
-// a root which does not exist at all is a no-op: a real, unprivileged,
-// reproducible failure encountered while walking an *existing* root (here, a
-// subdirectory this process cannot read, which fails with EACCES) must still
-// be reported, not merely logged and discarded.
+// a root which does not exist at all is a no-op: a real, reproducible
+// failure encountered while walking an *existing* root must still be
+// reported, not merely logged and discarded.
+//
+// This used to use a mode-0 subdirectory to trigger an EACCES enumeration
+// failure, back when chownTreeRootOwned walked with filepath.WalkDir. The
+// dirfd-based walk it uses now resolves every entry through
+// openat(O_PATH|O_NOFOLLOW) once the openat(O_DIRECTORY|O_NOFOLLOW) attempt
+// fails, and O_PATH does not check the target's own permission bits at all
+// (verified against a real mode-0 directory: the openat succeeds, and so
+// does fstat and even a self-chown through the resulting descriptor) -- so a
+// permission-denied subdirectory is no longer an error case for this walk at
+// all, just an ordinary leaf it correctly declines to recurse into. The
+// walk's own max-recursion-depth guard (dirfd.ChownTreeNoFollow's
+// maxWalkDepth, 1024) is the one failure mode this walk still reports for an
+// ordinary, unprivileged, reproducible condition, so this test drives that
+// instead.
 func TestChownTreeRootOwned_PropagatesRealEnumerationFailures(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can read a mode-0 directory; this test needs an unprivileged process")
-	}
 	dir := t.TempDir()
-	locked := filepath.Join(dir, "locked")
-	mustMkdirAllT(t, locked)
-	if err := os.Chmod(locked, 0); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	defer func() { _ = os.Chmod(locked, 0755) }() // let TempDir cleanup remove it
+	deepest := mustMkdirDeepChainT(t, dir, 1024, "chain", "too-deep")
 
 	if _, _, err := chownTreeRootOwned(dir, os.Getuid(), os.Getgid(), true); err == nil {
-		t.Fatalf("chownTreeRootOwned(%q) = nil, want an error: %q is unreadable", dir, locked)
+		t.Fatalf("chownTreeRootOwned(%q) = nil, want an error: %q is 1024 levels deep", dir, deepest)
 	}
 }
 
@@ -1359,36 +1394,32 @@ func TestChownTreeRootOwned_InvalidRootNeverReachesMountSource(t *testing.T) {
 }
 
 // TestChownTreeRootOwned_AggregatesMultiplePerEntryFailures proves a second,
-// independent per-entry failure is not lost behind the first: two distinct
-// unreadable subdirectories under the same root must both be reported
-// (joined), not just whichever one dirfd.ChownTreeNoFollow's walk happens to
-// visit first. dirfd.ChownTreeNoFollow's own returned error can only ever
-// report root's own open/stat failure, never a per-entry one (see its doc
-// comment), so chownTreeRootOwned collects every per-entry failure passed to
-// onErr itself and joins them -- this is what that join actually proves,
-// beyond the single-failure case TestChownTreeRootOwned_PropagatesRealEnumerationFailures
-// already covers.
+// independent per-entry failure is not lost behind the first: two
+// independent depth-cap cutoffs under the same root must both be reported
+// (joined, each attributed to its own entry), not just whichever one
+// dirfd.ChownTreeNoFollow's walk happens to visit first.
+// dirfd.ChownTreeNoFollow's own returned error can only ever report root's
+// own open/stat failure, never a per-entry one (see its doc comment), so
+// chownTreeRootOwned collects every per-entry failure passed to onErr
+// itself, wraps each with the entry's own name (onErr's own error carries no
+// name or path -- see chownTreeRootOwned's onErr closure), and joins them --
+// this is what that join and that wrapping actually prove, beyond the
+// single-failure case TestChownTreeRootOwned_PropagatesRealEnumerationFailures
+// already covers. See that test's doc comment for why two merely
+// unreadable subdirectories (this test's original construction) no longer
+// reach any per-entry failure at all under the current fd-based walk, and
+// why the max-recursion-depth guard is used here instead.
 func TestChownTreeRootOwned_AggregatesMultiplePerEntryFailures(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can read a mode-0 directory; this test needs an unprivileged process")
-	}
 	dir := t.TempDir()
-	lockedA := filepath.Join(dir, "locked-a")
-	lockedB := filepath.Join(dir, "locked-b")
-	for _, locked := range []string{lockedA, lockedB} {
-		mustMkdirAllT(t, locked)
-		if err := os.Chmod(locked, 0); err != nil {
-			t.Fatalf("chmod: %v", err)
-		}
-		defer func(p string) { _ = os.Chmod(p, 0755) }(locked) // let TempDir cleanup remove it
-	}
+	mustMkdirDeepChainT(t, dir, 1024, "chain-a", "too-deep-a")
+	mustMkdirDeepChainT(t, dir, 1024, "chain-b", "too-deep-b")
 
 	_, _, err := chownTreeRootOwned(dir, os.Getuid(), os.Getgid(), true)
 	if err == nil {
-		t.Fatalf("chownTreeRootOwned(%q) = nil, want a non-nil error: both %q and %q are unreadable", dir, lockedA, lockedB)
+		t.Fatalf("chownTreeRootOwned(%q) = nil, want a non-nil error: both chain-a and chain-b are 1024 levels deep", dir)
 	}
-	if !strings.Contains(err.Error(), filepath.Base(lockedA)) || !strings.Contains(err.Error(), filepath.Base(lockedB)) {
-		t.Errorf("chownTreeRootOwned(%q) error = %v, want it to mention both unreadable entries", dir, err)
+	if !strings.Contains(err.Error(), "too-deep-a") || !strings.Contains(err.Error(), "too-deep-b") {
+		t.Errorf("chownTreeRootOwned(%q) error = %v, want it to mention both depth-cap cutoffs", dir, err)
 	}
 }
 

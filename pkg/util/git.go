@@ -364,6 +364,18 @@ func FindWorktreeByBranch(branchName string) (string, error) {
 // unavailable, and so on) returns (false, err). Callers must treat that as
 // "membership could not be verified," never as "verified true" — this
 // function does not fail open.
+// splitPorcelainRecords splits git porcelain-format output into its
+// blank-line-separated records, normalizing CRLF line endings to LF first.
+// A "\r\n\r\n" blank-line separator contains no "\n\n" substring (the two
+// newlines have a "\r" between them), so splitting on "\n\n" without this
+// normalization would silently fail to separate records at all when git's
+// output uses CRLF, and a surviving "\r" on a "worktree <path>" line would
+// end up as a trailing byte on the parsed path.
+func splitPorcelainRecords(output string) []string {
+	normalized := strings.ReplaceAll(output, "\r\n", "\n")
+	return strings.Split(normalized, "\n\n")
+}
+
 func IsRegisteredWorktree(repoRoot, path string) (bool, error) {
 	resolvedPath, err := filepath.EvalSymlinks(path)
 	if err != nil {
@@ -388,7 +400,7 @@ func IsRegisteredWorktree(repoRoot, path string) (bool, error) {
 	// Porcelain records are separated by a blank line; each holds a
 	// "worktree <path>" line and, for one that git considers a candidate
 	// for `git worktree prune`, a "prunable ..." line.
-	for _, record := range strings.Split(string(output), "\n\n") {
+	for _, record := range splitPorcelainRecords(string(output)) {
 		var wtPath string
 		prunable := false
 		for _, line := range strings.Split(record, "\n") {

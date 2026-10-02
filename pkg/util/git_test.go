@@ -382,6 +382,39 @@ func addWorktreeDirect(t *testing.T, repoRoot, path, branch string) {
 	}
 }
 
+// TestSplitPorcelainRecords_HandlesCRLF proves CRLF-terminated porcelain
+// output is still split into the correct per-worktree records: a literal
+// "\r\n\r\n" blank-line separator shares no "\n\n" substring with an
+// unnormalized split, so without the CRLF-to-LF normalization this would
+// return the whole input as a single record instead of two, and each
+// record's "worktree <path>" line would carry a trailing "\r" into the
+// parsed path.
+func TestSplitPorcelainRecords_HandlesCRLF(t *testing.T) {
+	input := "worktree /repo\r\nHEAD abc123\r\nbranch refs/heads/main\r\n\r\nworktree /repo/.scion-worktrees/wt1\r\nHEAD def456\r\nbranch refs/heads/feature\r\n"
+	records := splitPorcelainRecords(input)
+	if len(records) != 2 {
+		t.Fatalf("splitPorcelainRecords(CRLF input) returned %d record(s), want 2: %q", len(records), records)
+	}
+	if !strings.Contains(records[0], "worktree /repo\n") {
+		t.Errorf("record[0] = %q, want a \"worktree /repo\" line with no trailing \\r", records[0])
+	}
+	if !strings.Contains(records[1], "worktree /repo/.scion-worktrees/wt1\n") {
+		t.Errorf("record[1] = %q, want a \"worktree /repo/.scion-worktrees/wt1\" line with no trailing \\r", records[1])
+	}
+}
+
+// TestSplitPorcelainRecords_PlainLFUnchanged proves the normalization step
+// is a no-op on ordinary LF-only output (what git actually emits on Linux),
+// so the CRLF handling added for TestSplitPorcelainRecords_HandlesCRLF does
+// not change behavior on the common path.
+func TestSplitPorcelainRecords_PlainLFUnchanged(t *testing.T) {
+	input := "worktree /repo\nHEAD abc123\n\nworktree /repo/.scion-worktrees/wt1\nHEAD def456\n"
+	records := splitPorcelainRecords(input)
+	if len(records) != 2 {
+		t.Fatalf("splitPorcelainRecords(LF input) returned %d record(s), want 2: %q", len(records), records)
+	}
+}
+
 func TestIsRegisteredWorktree_MainWorktreeAccepted(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	mainRepo := setupGitRepo(t)

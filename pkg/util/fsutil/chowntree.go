@@ -71,7 +71,17 @@ func statDeviceOf(_ string, info fs.FileInfo) (uint64, bool) {
 //     the walk from descending into one -- it is a device boundary, not a
 //     mount-point boundary, and callers must not read it as the latter.
 //   - every entry is Lchown'd, never Chown'd: a symlink is re-owned itself
-//     and its target is never touched or dereferenced.
+//     and its target is never touched or dereferenced. This applies to root
+//     itself too: root is not resolved through a leaf symlink before the
+//     walk starts, so a caller that means to chown a real directory's
+//     contents must pass that directory's own path, not a symlink pointing
+//     at it. Callers already do this for exactly this reason -- see
+//     prepareScionLayout's chown call, which passes p.agentHome/p.workspace,
+//     never the raw HomeDir, which can itself be a symlink after a restart.
+//     Resolving root's symlink here instead would both duplicate the
+//     resolution callers and ValidateWorkspaceSource/ValidateAgentHomeSource
+//     already perform, and reopen a window between that resolution and the
+//     walk's start for the symlink to be swapped.
 //   - a failure on one entry does not stop the walk. All per-entry failures
 //     (and any walk-enumeration failure, e.g. permission denied listing a
 //     directory) are collected and returned together via errors.Join once
