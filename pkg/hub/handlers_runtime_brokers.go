@@ -660,7 +660,7 @@ type brokerAgentHeartbeat struct {
 	HarnessAuth     string `json:"harnessAuth,omitempty"` // Resolved auth method from container labels
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
 	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
-	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed" or "limits_exceeded"
+	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed", "limits_exceeded", "preempted", or "evicted" (see state.ExitReason)
 }
 
 func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, id string) {
@@ -889,10 +889,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 							// A structured ExitReason (for example a Kubernetes
 							// disruption, which may carry no meaningful exit code
 							// when the agent container never started) must still
-							// be persisted even when no legacy exit code could be
-							// parsed above — previously it was silently dropped
-							// whenever the ContainerStatus string did not parse to
-							// a non-zero code.
+							// be persisted even when no legacy exit code parses
+							// above — a valid reason alone, with no non-zero
+							// code, is not something the ContainerStatus-parsing
+							// branch above accounts for.
 							if isValidExitReason(agentHB.ExitReason) {
 								statusUpdate.ExitReason = agentHB.ExitReason
 							} else if agentHB.ExitReason != "" {

@@ -437,8 +437,8 @@ func TestHeartbeatExitCode_RestartClearsRunningPhaseReason(t *testing.T) {
 // gracefully (SIGTERM), so sciontool reports a plain clean stop directly to the Hub
 // before the broker's next heartbeat can observe the pod's disruption
 // signal. By the time that heartbeat arrives the agent is already in a
-// terminal phase (the agentInTerminalPhase branch), which previously
-// dropped ExitReason/ExitCode/Message entirely.
+// terminal phase (the agentInTerminalPhase branch), which must still
+// persist ExitReason/ExitCode/Message rather than leave them empty.
 func TestHeartbeatExitCode_GracefulPreemptionAfterPlainStop(t *testing.T) {
 	t.Run("a generic stop message and empty ExitReason are backfilled", func(t *testing.T) {
 		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)

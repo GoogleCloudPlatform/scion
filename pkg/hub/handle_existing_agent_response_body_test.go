@@ -139,4 +139,25 @@ func TestHandleExistingAgent_ClearsStaleExitReason(t *testing.T) {
 		assert.Equal(t, "", got.ExitReason, "resuming a stopped agent must clear a stale exit reason")
 		assert.Nil(t, got.ExitCode)
 	})
+
+	t.Run("starting a created agent", func(t *testing.T) {
+		f := handleExistingAgentAuthzSetup(t)
+		f.srv.SetDispatcher(&createAgentDispatcher{})
+		agent := f.agent(t, "hea-clear-created", string(state.PhaseCreated))
+		agent.ExitReason = "preempted"
+		ec := 137
+		agent.ExitCode = &ec
+		require.NoError(t, f.store.UpdateAgent(context.Background(), agent))
+
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+			"name":      agent.Slug,
+			"projectId": f.project.ID,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		got, err := f.store.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "", got.ExitReason, "starting a created agent must clear a stale exit reason")
+		assert.Nil(t, got.ExitCode)
+	})
 }
