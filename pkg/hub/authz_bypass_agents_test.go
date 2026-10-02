@@ -116,6 +116,16 @@ func bypassAgentsServer(t *testing.T) (*Server, store.Store) {
 	return srv, s
 }
 
+// bindFixtureOwner gives f.owner the project-owner binding on f.proj, for
+// tests whose intent is project-owner access. Project.OwnerID alone grants
+// nothing (ptone/scion#2586). It is not part of bypassAgentsSetup because
+// many tests bind f.owner to a narrower project role themselves, and a
+// principal holds at most one built-in membership per project.
+func bindFixtureOwner(t *testing.T, f *bypassAgentsFixture) {
+	t.Helper()
+	require.NoError(t, f.srv.createProjectOwnerRoleBinding(context.Background(), f.proj.ID, f.owner.ID))
+}
+
 func bypassAgentsSetup(t *testing.T) *bypassAgentsFixture {
 	t.Helper()
 	srv, s := bypassAgentsServer(t)
@@ -133,28 +143,20 @@ func bypassAgentsSetup(t *testing.T) *bypassAgentsFixture {
 	require.NoError(t, s.CreateUser(ctx, f.owner))
 
 	f.proj = &store.Project{
-		ID:        tid("bypass-p1"),
-		Name:      "Bypass P1",
-		Slug:      "bypass-p1",
-		OwnerID:   f.owner.ID,
-		CreatedBy: f.owner.ID,
+		ID:      tid("bypass-p1"),
+		Name:    "Bypass P1",
+		Slug:    "bypass-p1",
+		OwnerID: f.owner.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, f.proj))
-	// Project authority comes from the project-owner binding, not OwnerID
-	// (ptone/scion#2586).
-	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
 
 	f.other = &store.Project{
-		ID:        tid("bypass-p2"),
-		Name:      "Bypass P2",
-		Slug:      "bypass-p2",
-		OwnerID:   f.owner.ID,
-		CreatedBy: f.owner.ID,
+		ID:      tid("bypass-p2"),
+		Name:    "Bypass P2",
+		Slug:    "bypass-p2",
+		OwnerID: f.owner.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, f.other))
-	// Project authority comes from the project-owner binding, not OwnerID
-	// (ptone/scion#2586).
-	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, f.other.ID, f.owner.ID))
 
 	// An auto-provide broker, so that agent creation can resolve a broker and
 	// the create tests exercise the authorization gate rather than dying at
@@ -792,6 +794,7 @@ func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 	t.Run("project owner retains full access", func(t *testing.T) {
 		// The conversion must not change the user path at all.
 		f := bypassAgentsSetup(t)
+		bindFixtureOwner(t, f)
 		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch,
 			"/api/v1/projects/"+f.proj.ID, map[string]interface{}{"name": "Renamed By Owner"})
 		assert.Equal(t, http.StatusOK, rec.Code,
