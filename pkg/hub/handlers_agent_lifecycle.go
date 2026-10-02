@@ -524,8 +524,8 @@ type StopAllAgentsResponse struct {
 // handleStopAllAgents stops all running agents, optionally scoped to a project.
 // Global (projectID=="") requires agent.stop_all on the hub. Project-scoped
 // allows any project member: holders of agent.stop_all on the project
-// (owners/admins) stop all agents; other members, by active direct or
-// group-derived role binding, stop only their own.
+// (project owners/admins, hub admins) stop all agents; other members, by
+// active direct or group-derived role binding, stop only their own.
 func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -571,10 +571,24 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 		}
 		// Other project members stop only their own agents. Membership is the
 		// effective project role: direct or group-derived role bindings that
-		// are currently active.
+		// are currently active. Only the built-in roles count: a custom
+		// project role ranks 0 in higherProjectRole, the same as no role, so
+		// a caller holding only a custom role gets 403, not scope "own".
+		// A store failure is a 500 rather than a misleading 403. That
+		// includes a binding whose role definition is missing: the store
+		// refuses to delete a role definition that still has bindings, so
+		// that is a data integrity fault, and failing closed is correct.
 		role := ""
 		if s.membershipService != nil {
-			role = s.membershipService.projectEffectiveRole(ctx, userIdent.ID(), projectID)
+			var err error
+			role, err = s.membershipService.projectEffectiveRoleFromStore(ctx, s.store, userIdent.ID(), projectID)
+			if err != nil {
+				s.agentLifecycleLog.Error("stop-all: failed to resolve project membership",
+					"project_id", projectID, "user_id", userIdent.ID(), "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"failed to resolve project membership", nil)
+				return
+			}
 		}
 		if role == "" {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
