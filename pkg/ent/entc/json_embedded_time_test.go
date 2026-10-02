@@ -112,6 +112,13 @@ func walkForTimes(t reflect.Type, path string, onStack map[reflect.Type]bool, pa
 		*paths = append(*paths, path)
 		return
 	}
+	// Guard every composite kind, not only structs: a recursive slice, map
+	// or pointer type (e.g. "type rec []rec") never passes through a struct.
+	if onStack[t] {
+		return // recursive type; already being walked further up
+	}
+	onStack[t] = true
+	defer delete(onStack, t)
 	switch t.Kind() {
 	case reflect.Pointer:
 		walkForTimes(t.Elem(), path, onStack, paths)
@@ -121,11 +128,6 @@ func walkForTimes(t reflect.Type, path string, onStack map[reflect.Type]bool, pa
 		walkForTimes(t.Key(), path+"{key}", onStack, paths)
 		walkForTimes(t.Elem(), path+"{}", onStack, paths)
 	case reflect.Struct:
-		if onStack[t] {
-			return // recursive type; already being walked further up
-		}
-		onStack[t] = true
-		defer delete(onStack, t)
 		for i := 0; i < t.NumField(); i++ {
 			f := t.Field(i)
 			if !f.IsExported() && !f.Anonymous {
@@ -187,6 +189,9 @@ func TestEmbeddedTimePathsDetectsNewField(t *testing.T) {
 		Name  string
 	}
 	type stamp time.Time
+	type recSlice []recSlice
+	type recMap map[string]recMap
+	type recPtr *recPtr
 	type recursive struct {
 		When time.Time
 		Next *recursive
@@ -200,6 +205,9 @@ func TestEmbeddedTimePathsDetectsNewField(t *testing.T) {
 		ByName    map[string]inner
 		Chain     recursive
 		Stamps    []stamp
+		RecSlice  recSlice // recursive non-struct types: must terminate, report nothing
+		RecMap    recMap
+		RecPtr    recPtr
 		Edges     struct{ Other *inner }
 		hidden    inner //nolint:unused // proves unexported fields are skipped
 	}
