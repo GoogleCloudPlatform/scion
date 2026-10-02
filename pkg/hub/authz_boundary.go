@@ -771,10 +771,12 @@ func (a *AuthzService) requireActiveUser(ctx context.Context, principal Principa
 		return nil
 	}
 	user, err := a.store.GetUser(ctx, principal.ID)
-	if err != nil {
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return projectAccessLookupFault(fmt.Errorf("%w: user lookup failed: %v", ErrProjectAccessDenied, err))
 	}
-	if user == nil || user.Status != store.UserStatusActive {
+	// A missing user record is a policy fact (the holder no longer exists),
+	// not a store fault: deny the same way as an inactive user, untagged.
+	if err != nil || user == nil || user.Status != store.UserStatusActive {
 		return fmt.Errorf("%w: user is not active", ErrProjectAccessDenied)
 	}
 	return nil
