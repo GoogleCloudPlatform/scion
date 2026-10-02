@@ -377,6 +377,24 @@ func TestUpdateGroup_RejectsOwnerIDOnProjectMembersGroup(t *testing.T) {
 		assert.Empty(t, stored.OwnerID)
 	})
 
+	t.Run("ownerId with marker-less annotations on a marked group", func(t *testing.T) {
+		// Pins the stored-group half of the owner guard: the patched
+		// annotations carry no marker, so only the stored group identifies
+		// this as a members group. The error message is asserted so the
+		// later marker-immutability guard cannot mask a regression here.
+		rec := patch(g.ID, map[string]interface{}{
+			"ownerId":     existing.ID,
+			"annotations": map[string]string{"other": "v"},
+		})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "ownerId cannot be set on a project members group")
+		stored := membersGroupFor(t, f.s, f.project)
+		assert.Empty(t, stored.OwnerID, "rejected PATCH must not set an owner")
+		assert.Equal(t, "true", stored.Annotations[systemProjectMembersGroupAnnotation],
+			"rejected PATCH must keep the marker")
+		assert.NotContains(t, stored.Annotations, "other")
+	})
+
 	t.Run("members group other fields still patchable", func(t *testing.T) {
 		rec := patch(g.ID, map[string]interface{}{"description": "admin note"})
 		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -394,6 +412,95 @@ func TestUpdateGroup_RejectsOwnerIDOnProjectMembersGroup(t *testing.T) {
 		stored, err := f.s.GetGroup(ctx, ordinary.ID)
 		require.NoError(t, err)
 		assert.Equal(t, existing.ID, stored.OwnerID)
+	})
+}
+
+// TestUpdateGroup_ProjectMembersGroupMarkerImmutable pins that PATCH cannot
+// remove or change the project-members-group marker keys. Without this, a hub
+// admin could strip the marker in one PATCH and set an owner in the next; the
+// owner would then escape both the PATCH owner guard and the owner-clearing
+// backfill, and createProjectMembersGroup would refuse to adopt the group
+// (ptone/scion#2599).
+func TestUpdateGroup_ProjectMembersGroupMarkerImmutable(t *testing.T) {
+	f, g, existing := setupStaleOwnerMembersGroup(t)
+	ctx := context.Background()
+	admin := newSuperAdminUser(t, f.s, "mg-marker-hub-admin")
+
+	patch := func(id string, body map[string]interface{}) *httptest.ResponseRecorder {
+		return doRequestAsUser(t, f.srv, admin, http.MethodPatch, "/api/v1/groups/"+id, body)
+	}
+	const markerMsg = "project members group marker annotations cannot be removed or changed"
+
+	t.Run("two-step bypass: strip marker then set owner", func(t *testing.T) {
+		before := membersGroupFor(t, f.s, f.project)
+
+		rec := patch(g.ID, map[string]interface{}{
+			"name":        "Stripped",
+			"annotations": map[string]string{"x": "y"},
+		})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), ErrCodeValidationError)
+		assert.Contains(t, rec.Body.String(), markerMsg)
+		after := membersGroupFor(t, f.s, f.project)
+		assert.Equal(t, before.Annotations, after.Annotations, "rejected PATCH must leave annotations unchanged")
+		assert.Equal(t, before.Name, after.Name, "rejected PATCH must not apply other fields")
+
+		rec = patch(g.ID, map[string]interface{}{"ownerId": existing.ID})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Empty(t, membersGroupFor(t, f.s, f.project).OwnerID)
+	})
+
+	t.Run("marker value changed", func(t *testing.T) {
+		rec := patch(g.ID, map[string]interface{}{
+			"annotations": map[string]string{systemProjectMembersGroupAnnotation: "false"},
+		})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), markerMsg)
+		assert.Equal(t, "true", membersGroupFor(t, f.s, f.project).Annotations[systemProjectMembersGroupAnnotation])
+	})
+
+	t.Run("entadapter key stripped", func(t *testing.T) {
+		legacy := &store.Group{
+			ID: tid("mg-marker-legacy-key"), Name: "MG Marker Legacy", Slug: "mg-marker-legacy-key",
+			GroupType: store.GroupTypeExplicit, ProjectID: f.project.ID,
+			Annotations: map[string]string{legacyProjectMembersGroupAnnotation: "true"},
+		}
+		require.NoError(t, f.s.CreateGroup(ctx, legacy))
+		rec := patch(legacy.ID, map[string]interface{}{"annotations": map[string]string{}})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), markerMsg)
+		stored, err := f.s.GetGroup(ctx, legacy.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "true", stored.Annotations[legacyProjectMembersGroupAnnotation])
+	})
+
+	t.Run("other annotations with marker preserved", func(t *testing.T) {
+		annotations := map[string]string{"note": "kept"}
+		for k, v := range membersGroupFor(t, f.s, f.project).Annotations {
+			annotations[k] = v
+		}
+		rec := patch(g.ID, map[string]interface{}{"annotations": annotations, "name": "Members Renamed"})
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		stored := membersGroupFor(t, f.s, f.project)
+		assert.Equal(t, "kept", stored.Annotations["note"])
+		assert.Equal(t, "true", stored.Annotations[systemProjectMembersGroupAnnotation])
+		assert.Equal(t, "Members Renamed", stored.Name)
+	})
+
+	t.Run("other fields without annotations", func(t *testing.T) {
+		rec := patch(g.ID, map[string]interface{}{"description": "admin note"})
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, "admin note", membersGroupFor(t, f.s, f.project).Description)
+	})
+
+	t.Run("unmarked group annotations freely replaceable", func(t *testing.T) {
+		ordinary := &store.Group{
+			ID: tid("mg-marker-ordinary"), Name: "MG Marker Ordinary", Slug: "mg-marker-ordinary",
+			GroupType: store.GroupTypeExplicit, Annotations: map[string]string{"a": "b"},
+		}
+		require.NoError(t, f.s.CreateGroup(ctx, ordinary))
+		rec := patch(ordinary.ID, map[string]interface{}{"annotations": map[string]string{"c": "d"}})
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	})
 }
 

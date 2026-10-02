@@ -838,9 +838,16 @@ func agentRolePermissionIDs(role AgentRole) []string {
 	return ids
 }
 
-// BackfillRoleBindings creates role bindings from existing User.Role values and
-// project ownership. It is idempotent (skips if binding already exists) and
-// called from the startup/migration path.
+// BackfillRoleBindings runs the startup role-binding backfills:
+//   - system role bindings from User.Role;
+//   - project-owner role bindings from Project.CreatedBy (only when the
+//     User.Role step succeeded, preserving the original ordering);
+//   - clearing the legacy Group.OwnerID on project members groups
+//     (ptone/scion#2599), which always runs regardless of earlier failures.
+//
+// Every step is idempotent. Steps do not stop at the first failure: their
+// errors are combined with errors.Join and returned together, and the
+// startup caller logs them as a warning.
 func BackfillRoleBindings(ctx context.Context, s store.Store) error {
 	var errs []error
 
@@ -884,17 +891,6 @@ const legacyProjectMembersGroupAnnotation = "scion.io/system-project-members-gro
 // backfillClearProjectMembersGroupOwners. It is a package variable, not a
 // const, so tests can shrink it to exercise the pagination loop.
 var projectMembersGroupOwnerBackfillPageSize = 200
-
-// hasProjectMembersGroupMarker reports whether g carries either
-// project-members-group marker and belongs to a project. It is shared by the
-// owner-clearing backfill and the group PATCH handler.
-func hasProjectMembersGroupMarker(g *store.Group) bool {
-	if g == nil || g.ProjectID == "" || g.Annotations == nil {
-		return false
-	}
-	return g.Annotations[systemProjectMembersGroupAnnotation] == "true" ||
-		g.Annotations[legacyProjectMembersGroupAnnotation] == "true"
-}
 
 // backfillClearProjectMembersGroupOwners clears Group.OwnerID on every
 // project members group (ptone/scion#2599). createProjectMembersGroup used to

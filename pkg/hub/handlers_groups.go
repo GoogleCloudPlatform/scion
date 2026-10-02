@@ -416,10 +416,21 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 			patched.Annotations = req.Annotations
 		}
 		if hasProjectMembersGroupMarker(group) || hasProjectMembersGroupMarker(&patched) {
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-				"ownerId cannot be set on a project members group", nil)
+			ValidationError(w, "ownerId cannot be set on a project members group", nil)
 			return
 		}
+	}
+
+	// The marker annotations identify a project members group to the owner
+	// guard above and to the owner-clearing startup backfill. req.Annotations
+	// replaces the whole map, so without this check a PATCH could strip the
+	// marker and a later PATCH could then set an owner that no guard or
+	// backfill would catch. Reject any PATCH that removes or changes either
+	// marker key on a marked group (ptone/scion#2599).
+	if req.Annotations != nil && hasProjectMembersGroupMarker(group) &&
+		changesProjectMembersGroupMarker(group.Annotations, req.Annotations) {
+		ValidationError(w, "project members group marker annotations cannot be removed or changed", nil)
+		return
 	}
 
 	if req.Name != "" {

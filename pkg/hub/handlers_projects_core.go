@@ -697,6 +697,40 @@ func isSystemProjectMembersGroup(group *store.Group, projectID string) bool {
 		group.Annotations[systemProjectMembersGroupAnnotation] == "true"
 }
 
+// hasProjectMembersGroupMarker reports whether g carries either
+// project-members-group marker key and belongs to any project. It is used by
+// the owner-clearing backfill and the group PATCH guards.
+//
+// Its semantics differ from isSystemProjectMembersGroup on purpose:
+// isSystemProjectMembersGroup matches only the hub key
+// (systemProjectMembersGroupAnnotation) for one specific project, and
+// decides whether createProjectMembersGroup may adopt a group. This
+// predicate matches either key (see legacyProjectMembersGroupAnnotation)
+// for any project, so groups marked only by the entadapter backfill are
+// still protected. Fold the two together once the key mismatch is resolved
+// (ptone/scion#2556).
+func hasProjectMembersGroupMarker(g *store.Group) bool {
+	if g == nil || g.ProjectID == "" || g.Annotations == nil {
+		return false
+	}
+	return g.Annotations[systemProjectMembersGroupAnnotation] == "true" ||
+		g.Annotations[legacyProjectMembersGroupAnnotation] == "true"
+}
+
+// changesProjectMembersGroupMarker reports whether replacing the stored
+// annotations with patched would remove, add or change the value of either
+// project-members-group marker key.
+func changesProjectMembersGroupMarker(stored, patched map[string]string) bool {
+	for _, key := range []string{systemProjectMembersGroupAnnotation, legacyProjectMembersGroupAnnotation} {
+		sv, sok := stored[key]
+		pv, pok := patched[key]
+		if sok != pok || sv != pv {
+			return true
+		}
+	}
+	return false
+}
+
 func isSystemProjectAgentsGroup(group *store.Group, projectID string) bool {
 	return group != nil &&
 		group.ProjectID == projectID &&
