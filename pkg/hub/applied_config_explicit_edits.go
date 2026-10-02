@@ -91,13 +91,12 @@ var explicitEditExcludedFields = map[string]bool{
 // (legacyCreateInputsFromAppliedConfig) already reads the live config
 // directly in that case, so there is nothing here for it to seed.
 //
-// SEAM for ptone/scion#2457 task #16 (I2): that task adds a PATCH-time strip
-// of config.env["TZ"] (so an ignored TZ key is never treated as a request
-// value). That strip MUST run between the `old` snapshot and this call in
-// applyAgentUpdate, never after it -- otherwise an ignored TZ would still
-// land in CreateInputs.InlineConfig.Env here (via the per-key Env diff
-// below) and be replayed by task #16's I1(a) as a pin the request never
-// asked for. See the call site in applyAgentUpdate for the marked seam.
+// Ordering with the TZ strip: applyAgentUpdate strips config.env["TZ"] (the
+// env editor never sets the agent timezone; explicitTimezone does) between
+// the `old` snapshot and this call, never after it. Otherwise an ignored TZ
+// would land in CreateInputs.InlineConfig.Env here (via the per-key Env diff
+// below) and be replayed by reincarnate's create-time timezone capture as a
+// pin the request never asked for.
 func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedConfig, cfg *api.ScionConfig, present map[string]bool, imageRegistry string, canAttachEnv bool) {
 	if ci == nil {
 		return
