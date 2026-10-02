@@ -1038,3 +1038,43 @@ func TestManager_Start_DropsInvalidNamesButStartsOthers(t *testing.T) {
 	defer cancel()
 	_ = mgr.Shutdown(shutdownCtx)
 }
+
+// TestWriteLifecycle_TimestampIsUTC checks that service lifecycle log lines
+// carry the same UTC RFC 3339 timestamp as agent.log, whatever the process
+// zone.
+func TestWriteLifecycle_TimestampIsUTC(t *testing.T) {
+	origLocal := time.Local
+	time.Local = time.FixedZone("JST", 9*60*60)
+	defer func() { time.Local = origLocal }()
+
+	path := filepath.Join(t.TempDir(), "svc.lifecycle.log")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	svc := &managedService{lifecycleFile: f}
+	svc.writeLifecycle("Service started (pid %d)", 42)
+	_ = f.Close()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	line := strings.TrimSuffix(string(data), "\n")
+	if !strings.HasPrefix(line, "[") {
+		t.Fatalf("lifecycle line = %q, want a bracketed timestamp", line)
+	}
+	ts, rest, ok := strings.Cut(line[1:], "] ")
+	if !ok {
+		t.Fatalf("lifecycle line = %q, want \"[<timestamp>] <message>\"", line)
+	}
+	if rest != "Service started (pid 42)" {
+		t.Errorf("lifecycle message = %q, want %q", rest, "Service started (pid 42)")
+	}
+	if !strings.HasSuffix(ts, "Z") {
+		t.Errorf("lifecycle timestamp %q is not UTC (want a trailing Z)", ts)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, ts); err != nil {
+		t.Errorf("lifecycle timestamp %q is not RFC 3339: %v", ts, err)
+	}
+}
