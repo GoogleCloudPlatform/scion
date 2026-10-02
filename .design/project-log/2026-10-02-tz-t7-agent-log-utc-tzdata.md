@@ -24,6 +24,9 @@
   `+0900`, and that `TZ` is unset in the build environment (an `ENV TZ`
   fails the build; when not building, a set `TZ` is only a note, because a
   running agent container legitimately has one).
+- **Docs.** The observability guide now describes the `agent.log` and
+  `<name>.lifecycle.log` line formats, and the `.design/agent-limits.md`
+  examples use the UTC form.
 - **Dashboard.** The metrics dashboard charts get a "Day (UTC)" x-axis title
   and "(UTC)" in the chart headings. Buckets are UTC days: `seriesIncreases`
   takes interval ends from `timestamppb.AsTime()`, which returns UTC, and the
@@ -40,7 +43,21 @@
 - Web: `metrics-dashboard.test.ts` passes under `TZ=Asia/Tokyo` and
   `TZ=Asia/Kathmandu`, and fails when the labels are reverted;
   `npm run typecheck` and `npm run build` pass.
-- The docker smoke check is left for the maintainer (no docker here):
+- Hub: `TestDailyBucketsAreUTCDays` covers all three bucketing sites
+  (`queryDailyTimeSeries`, `queryGroupedTimeSeries`,
+  `queryDailyUniqueCount`); all three subtests fail if a site uses
+  `.Local()`. The web test covers the sessions, model-calls and tokens tabs.
+- **No real image build has run these changes.** The image workflow always
+  pushes to a registry, and this task may not push images, so the new
+  install line and contract block are unverified in a real build, and
+  thick-prep (Ubuntu) apt resolution of `tzdata` is unverified. The only
+  substitute evidence comes from the developer's own agent container
+  (`scion-claude:latest`, Debian 13 trixie, x86_64), which is **not** the
+  shipped image: the real `verify-base-contract.sh` passed there (TZ unset:
+  ok; TZ set outside a build: note; TZ set with `BUILDARCH`: FAIL, exit 1),
+  `TZ=Asia/Tokyo date` printed JST, and `dpkg -S /usr/share/zoneinfo`
+  reported `tzdata` (2026c-0+deb13u1). Maintainer checks: run
+  `build-images.yml` for core-base (and thick), then
   `docker run --rm <image> ls /usr/share/zoneinfo` and
   `docker run --rm -e TZ=Asia/Tokyo <image> date`.
 
@@ -50,6 +67,6 @@
   leftover). No build passes the arg, so the image ships `TZ=""`, which glibc
   and Go treat as UTC, and a runtime `-e TZ` overrides it. It is a harness
   image, not a core image, so it is out of scope here. It is relevant to
-  tz-refactor task 15 (hub authority for agent `TZ`) and should be removed
-  there or separately. The new contract check runs only on core-base and
+  tz-refactor task 15 (hub authority for agent `TZ`); task 15 has merged, so
+  removing it is tracked as its own fork issue. The new contract check runs only on core-base and
   thick-prep, so it does not see harness images.
