@@ -65,6 +65,45 @@ second-cycle normal/race tests compiled the affected packages against the new
 base. The earlier Ent race limitation is closed by the correctly scoped
 `^TestConstraintHistory_` race run, which passed in 17.205s.
 
+## Superseding third rebase cycle
+
+The mandatory cycle-2 pre-push fetch found another upstream advance, so the
+issue owner authorized a third cycle under a refined merge-tree publication
+rule. This section supersedes the earlier selected-head status while retaining
+both earlier cycles as provenance.
+
+- Third fetch timestamp: `2026-10-02T14:46:50Z`.
+- Required third minimum and selected authoritative upstream `main`:
+  `ed14d2cc93539a7b5bdb983722b9057fa9bfbfe5` (exact match).
+- The selected head is a descendant of cycle 2's `28d83ede...` and adds two
+  upstream commits: request-local authorization-input memoization and
+  configure-page CreateInputs recording.
+- Prior local candidate: `54d97aaae52bc617a01514ac97d3db4a8d6f0cca`.
+- Third-cycle rebased code/evidence head before this report update:
+  `c4c6cdd6b4f331026df44b6e83806dbc39a9c2a2`.
+
+All 40 prior local commits replayed noninteractively with no conflict. Although
+the upstream delta and M1 both touch `pkg/hub/authz.go` and
+`pkg/store/models.go`, Git retained each side without manual resolution.
+Range-diff maps all 40 commits exactly, in order. The path set is identical,
+there are no skipped/squashed/reordered/no-op commits, the M2 delta remains
+empty, and canonical Ent generation again produces no delta.
+
+Cycle-3 validation repeated and passed the same bounded gates:
+
+- core backend and focused Hub normal tests (`-p 2`);
+- credential metadata, audit envelope, focused Ent history, and focused Hub
+  race tests (`-race -p 2`; Ent 17.597s, Hub 150.964s);
+- scoped vet and bounded single-concurrency lint (`0 issues`);
+- focused web tests (4 files / 70 tests), typecheck, production ESLint (zero
+  errors; the same 28 warnings), and scoped Prettier;
+- gofmt inspection, `git diff --check`, generated-Ent inspection, and semantic
+  checks for transaction/cap/logging/live-resource/404/cursor/timeline behavior.
+
+The one-build task cap remains satisfied: the successful cycle-1 Go and web
+production builds were not repeated. Cycle-3 normal and race tests compiled the
+affected packages against `ed14d2cc...`.
+
 ## Provenance
 
 - Required and observed old fork head:
