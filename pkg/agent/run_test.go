@@ -3784,7 +3784,7 @@ profiles:
 		t.Fatalf("initial Start failed: %v", err)
 	}
 	if capturedConfig.RepoRoot != "" {
-		t.Fatalf("baseline RunConfig.RepoRoot = %q, want \"\" before forging anything", capturedConfig.RepoRoot)
+		t.Fatalf("baseline RunConfig.RepoRoot = %q, want \"\" before the state file is written", capturedConfig.RepoRoot)
 	}
 
 	// Simulate the container: write agent-info.json in agentHome (bind-mounted

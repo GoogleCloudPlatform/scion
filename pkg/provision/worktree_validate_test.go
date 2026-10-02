@@ -207,20 +207,33 @@ func TestValidateWorktreeForBase_RejectsCandidateEqualsBase(t *testing.T) {
 	}
 }
 
-// TestValidateWorktreeForBase_EmptyInputsRejected covers the trivial empty
-// cases.
-func TestValidateWorktreeForBase_EmptyInputsRejected(t *testing.T) {
+// TestValidateWorktreeForBase_RejectsEmptyOrRelativeInputs covers every
+// empty/relative combination: both arguments must be non-empty, absolute
+// paths, or the function must reject rather than resolve the relationship
+// against the calling process's current working directory.
+func TestValidateWorktreeForBase_RejectsEmptyOrRelativeInputs(t *testing.T) {
 	base := newTestRepo(t)
-	worktree := filepath.Join(base, "worktrees", "agent-1")
-	if err := os.MkdirAll(worktree, 0755); err != nil {
-		t.Fatalf("mkdir worktree: %v", err)
-	}
+	worktree := newTestWorktree(t, base, "agent-1")
 
-	if err := ValidateWorktreeForBase("", worktree); err == nil {
-		t.Fatal("empty base: got nil error, want a rejection")
+	cases := []struct {
+		name      string
+		base      string
+		candidate string
+	}{
+		{"empty base", "", worktree},
+		{"empty candidate", base, ""},
+		{"both empty", "", ""},
+		{"dot base, relative candidate", ".", "worktrees/agent-1"},
+		{"relative base, relative candidate", "base", "base/worktrees/agent-1"},
+		{"absolute base, relative candidate", base, "worktrees/agent-1"},
+		{"relative base, absolute candidate", "base", worktree},
 	}
-	if err := ValidateWorktreeForBase(base, ""); err == nil {
-		t.Fatal("empty candidate: got nil error, want a rejection")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateWorktreeForBase(tc.base, tc.candidate); err == nil {
+				t.Fatalf("ValidateWorktreeForBase(%q, %q) = nil, want a rejection", tc.base, tc.candidate)
+			}
+		})
 	}
 }
 
@@ -310,12 +323,11 @@ func TestWorktreeIsLexicallyUnderBase_RejectsOutsideBase(t *testing.T) {
 	}
 }
 
-// TestWorktreeIsLexicallyUnderBase_RejectsAlias confirms this check is also
-// symlink-aware in the direction that matters for a removal gate: an alias
-// path must not be treated as contained just because it happens to resolve
-// into base, since the check is intentionally lexical (no EvalSymlinks) and
-// an alias pointing elsewhere does not lexically match base/worktrees/<name>
-// under the base path actually being validated.
+// TestWorktreeIsLexicallyUnderBase_RejectsAlias confirms the check is purely
+// lexical: a candidate reached through a different path spelling is rejected
+// even if it resolves into base, since the check is intentionally lexical
+// (no EvalSymlinks) and an alias pointing elsewhere does not lexically match
+// base/worktrees/<name> under the base path actually being validated.
 func TestWorktreeIsLexicallyUnderBase_RejectsAlias(t *testing.T) {
 	realBase := t.TempDir()
 	aliasParent := t.TempDir()
@@ -330,16 +342,35 @@ func TestWorktreeIsLexicallyUnderBase_RejectsAlias(t *testing.T) {
 	}
 }
 
-// TestWorktreeIsLexicallyUnderBase_EmptyInputsRejected covers the trivial
-// empty cases.
-func TestWorktreeIsLexicallyUnderBase_EmptyInputsRejected(t *testing.T) {
-	base := t.TempDir()
-	candidate := filepath.Join(base, "worktrees", "agent-1")
+// TestWorktreeIsLexicallyUnderBase_RejectsEmptyOrRelativeInputs covers every
+// empty/relative combination. The prior version of this test (named
+// EmptyInputsRejected) only ever exercised an absolute candidate, so it
+// passed for the wrong reason (filepath.Rel(".", <absolute>) happens to
+// error) without ever proving a relative base or candidate is rejected —
+// worktreeRelName now checks filepath.IsAbs directly, and this table
+// exercises that check for both arguments and their empty/dot/relative
+// forms.
+func TestWorktreeIsLexicallyUnderBase_RejectsEmptyOrRelativeInputs(t *testing.T) {
+	absBase := t.TempDir()
 
-	if WorktreeIsLexicallyUnderBase("", candidate) {
-		t.Fatal("empty base: got true, want false")
+	cases := []struct {
+		name      string
+		base      string
+		candidate string
+	}{
+		{"empty base, relative candidate", "", "worktrees/agent-1"},
+		{"dot base, relative candidate", ".", "worktrees/agent-1"},
+		{"relative base, relative candidate", "base", "base/worktrees/agent-1"},
+		{"absolute base, relative candidate", absBase, "worktrees/agent-1"},
+		{"absolute base, empty candidate", absBase, ""},
+		{"empty base, absolute candidate", "", filepath.Join(absBase, "worktrees", "agent-1")},
+		{"both empty", "", ""},
 	}
-	if WorktreeIsLexicallyUnderBase(base, "") {
-		t.Fatal("empty candidate: got true, want false")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if WorktreeIsLexicallyUnderBase(tc.base, tc.candidate) {
+				t.Fatalf("WorktreeIsLexicallyUnderBase(%q, %q) = true, want false", tc.base, tc.candidate)
+			}
+		})
 	}
 }

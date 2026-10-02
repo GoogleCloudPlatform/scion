@@ -150,6 +150,7 @@ func createRealWorktree(t *testing.T, root, name string) string {
 
 // The validator itself (formerly validateProvisionedWorktreeRepoRoot) now
 // lives in pkg/provision as ValidateWorktreeForBase (full relationship check)
-// and WorktreeIsLexicallyUnderBase (lexical-only containment check), shared
-// with pkg/provision's own worktree provisioning; see
+// and WorktreeIsLexicallyUnderBase (lexical-only containment check), intended
+// as the single implementation for any path that turns a stored or
+// discovered candidate into a host mount or removal target; see
 // pkg/provision/worktree_validate_test.go for their unit coverage.

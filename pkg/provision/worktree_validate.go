@@ -33,16 +33,32 @@ const WorktreesSubdir = "worktrees"
 // partially or fully removed (e.g. a teardown/removal gate deciding whether
 // a path is even eligible to touch), unlike ValidateWorktreeForBase, which
 // requires the worktree to be present and genuine.
+//
+// Both base and candidate must be non-empty, absolute paths; either being
+// empty or relative reports false rather than resolving the relationship
+// against the calling process's current working directory.
+//
+// This function makes no claim about where candidate points on disk. It is
+// purely lexical: if WorktreesSubdir or the final <name> element is itself a
+// symlink, this check does not see through it, and passing does not
+// guarantee that following candidate stays inside base. A caller that acts
+// on candidate by following symlinks (for example, a removal gate) must
+// apply its own resolved-path check in addition to this one; this function
+// only proves the lexical containment relationship.
 func WorktreeIsLexicallyUnderBase(base, candidate string) bool {
 	_, ok := worktreeRelName(filepath.Clean(base), filepath.Clean(candidate))
 	return ok
 }
 
 // ValidateWorktreeForBase confirms that candidate is a genuine git worktree
-// of base, laid out at exactly base/worktrees/<name>. Single implementation
-// shared by every path that turns a stored or discovered candidate into a
-// live host mount or a removal target, so all of them agree on what counts
+// of base, laid out at exactly base/worktrees/<name>. Intended as the single
+// implementation for any path that turns a stored or discovered candidate
+// into a host mount or removal target, so all of them agree on what counts
 // as valid.
+//
+// Both base and candidate must be non-empty, absolute paths; either being
+// empty or relative is rejected outright rather than resolved against the
+// calling process's current working directory.
 //
 // Two independent relationships must hold, both naming the same <name>:
 //
@@ -68,6 +84,9 @@ func WorktreeIsLexicallyUnderBase(base, candidate string) bool {
 func ValidateWorktreeForBase(base, candidate string) error {
 	if base == "" || candidate == "" {
 		return fmt.Errorf("worktree relationship: base and candidate must both be non-empty")
+	}
+	if !filepath.IsAbs(base) || !filepath.IsAbs(candidate) {
+		return fmt.Errorf("worktree relationship: base and candidate must both be absolute paths")
 	}
 
 	lexName, ok := worktreeRelName(filepath.Clean(base), filepath.Clean(candidate))
@@ -162,7 +181,17 @@ func ValidateWorktreeForBase(base, candidate string) error {
 // "<base>/worktrees/<name>" for a non-empty <name>, and returns that name.
 // Both arguments are compared exactly as given — callers pass either the
 // lexical (filepath.Clean'd) or the fully resolved (EvalSymlinks'd) form.
+//
+// Both must be absolute. This is the shared precheck for both exported
+// functions in this file: filepath.Rel resolves a relative argument against
+// the calling process's current working directory, which is never the
+// right base for a stored or broker-supplied candidate, so a relative (or
+// empty, which filepath.Clean turns into ".") argument is rejected here
+// rather than silently evaluated against an unrelated cwd.
 func worktreeRelName(base, candidate string) (string, bool) {
+	if !filepath.IsAbs(base) || !filepath.IsAbs(candidate) {
+		return "", false
+	}
 	rel, err := filepath.Rel(base, candidate)
 	if err != nil || rel == "." || rel == ".." ||
 		strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {

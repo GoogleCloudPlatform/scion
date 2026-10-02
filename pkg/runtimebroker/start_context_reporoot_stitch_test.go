@@ -283,8 +283,8 @@ func TestTryProvisionWorktree_Start_RepoRootSurvivesResume(t *testing.T) {
 	// Second Start: the resume/restart dispatch. No ctx signal (the broker
 	// does not re-run tryProvisionWorktree on start/restart) and an empty
 	// Workspace (exactly what the hub sends on restart) — RepoRoot must come
-	// from the persisted AgentInfo value alone, validated against the real
-	// filesystem.
+	// from the broker-persisted repo-root state file alone, validated against
+	// the real filesystem.
 	capturedConfig = runtime.RunConfig{}
 	if _, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:        "agent-a",
@@ -326,6 +326,108 @@ func TestTryProvisionWorktree_Start_RepoRootSurvivesResume(t *testing.T) {
 	// RepoRoot, must be asserted.
 	if wantContainerWorkspace := "/repo-root/worktrees/agent-a"; capturedConfig.ContainerWorkspace != wantContainerWorkspace {
 		t.Fatalf("resume RunConfig.ContainerWorkspace = %q, want %q", capturedConfig.ContainerWorkspace, wantContainerWorkspace)
+	}
+}
+
+// TestTryProvisionWorktree_ProvisionThenStart_RepoRootSurvives is the
+// required regression guard for the hub's provision-only dispatch shape
+// (DispatchAgentProvision: Manager.Provision, never followed by Start in the
+// same dispatch — the hub sends a separate, later DispatchAgentStart, and
+// the reincarnate flow's DispatchAgentReprovision/DispatchAgentStart pair
+// follows the same two-dispatch shape). The broker does not re-run
+// tryProvisionWorktree for that later start, so nothing but this dispatch's
+// own persistence can carry the repo root forward: Manager.Provision (via
+// GetAgent -> ProvisionAgent) must persist the validated ctx signal itself,
+// since Start never runs in this phase to do it.
+func TestTryProvisionWorktree_ProvisionThenStart_RepoRootSurvives(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
+		t.Skipf("git too old, worktree mode not eligible on this host: %s", reason)
+	}
+
+	bare := initBareRepoWithCommit(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
+
+	brokerProjectPath := filepath.Join(t.TempDir(), "broker-project")
+	if err := os.MkdirAll(brokerProjectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{}
+	provisionOpts := &api.StartOptions{}
+	provisioned, repoRoot := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name:          "agent-a",
+		AgentID:       "agent-a",
+		ProjectID:     "p1",
+		ProjectSlug:   "proj",
+		ProjectPath:   brokerProjectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: gc},
+	}, provisionOpts, map[string]string{})
+	if !provisioned || repoRoot == "" || provisionOpts.Workspace == "" {
+		t.Fatalf("tryProvisionWorktree setup failed: provisioned=%v repoRoot=%q workspace=%q", provisioned, repoRoot, provisionOpts.Workspace)
+	}
+
+	projectScionDir := setupRepoRootProjectScaffold(t, t.TempDir())
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := agent.NewManager(mockRT)
+
+	env := map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "p1"}
+
+	// Phase 1: provision-only, exactly like DispatchAgentProvision. The ctx
+	// signal is present, but Start (and so RunConfig) is never involved —
+	// only ProvisionAgent's own persistence call can record the repo root.
+	provisionCtx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), repoRoot)
+	if _, err := mgr.Provision(provisionCtx, api.StartOptions{
+		Name:        "agent-a",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		Workspace:   provisionOpts.Workspace,
+		Env:         env,
+	}); err != nil {
+		t.Fatalf("Provision failed: %v", err)
+	}
+
+	// Phase 2: a LATER, separate Start dispatch — no ctx signal (the broker
+	// does not re-run tryProvisionWorktree for a plain start) and an empty
+	// Workspace (exactly what the hub sends on start after provision-only).
+	// RepoRoot must come from what Provision persisted in Phase 1.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "agent-a",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		Workspace:   "",
+		Env:         env,
+	}); err != nil {
+		t.Fatalf("start Start failed: %v", err)
+	}
+
+	if capturedConfig.RepoRoot == "" {
+		t.Fatal("RunConfig.RepoRoot is empty — the provision-only dispatch never persisted the repo root, so the later start lost it")
+	}
+	gotRoot, err := filepath.EvalSymlinks(capturedConfig.RepoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(RepoRoot): %v", err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(repoRoot): %v", err)
+	}
+	if gotRoot != wantRoot {
+		t.Fatalf("RunConfig.RepoRoot = %q, want %q (the shared base)", gotRoot, wantRoot)
+	}
+	if wantContainerWorkspace := "/repo-root/worktrees/agent-a"; capturedConfig.ContainerWorkspace != wantContainerWorkspace {
+		t.Fatalf("RunConfig.ContainerWorkspace = %q, want %q", capturedConfig.ContainerWorkspace, wantContainerWorkspace)
 	}
 }
 

@@ -934,7 +934,7 @@ type provisionedWorktreeRepoRootContextKey struct{}
 // broker persists it in a broker-owned file under agentDir instead — see
 // pkg/agent's writeProvisionedWorktreeRepoRoot/readProvisionedWorktreeRepoRoot
 // — and run.go independently validates it against the real filesystem
-// (validateProvisionedWorktreeRepoRoot) before trusting it either way.
+// (provision.ValidateWorktreeForBase) before trusting it either way.
 func ContextWithProvisionedWorktreeRepoRoot(ctx context.Context, repoRoot string) context.Context {
 	return context.WithValue(ctx, provisionedWorktreeRepoRootContextKey{}, repoRoot)
 }
