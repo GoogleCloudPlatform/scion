@@ -1243,6 +1243,16 @@ export class ScionPageAgentDetail extends LitElement {
           </div>
         </div>
         <div class="header-actions">
+          <sl-tooltip content="See this agent in graph">
+            <a
+              href="/agents/graph?project=${agent.projectId}&focus=${this.agentId}"
+              style="text-decoration: none;"
+            >
+              <sl-button variant="default" size="small">
+                <sl-icon slot="prefix" name="diagram-3"></sl-icon>
+              </sl-button>
+            </a>
+          </sl-tooltip>
           ${agent.messageMode === 'none'
             ? nothing
             : agent._messageability?.canMessage === false
@@ -1372,16 +1382,6 @@ export class ScionPageAgentDetail extends LitElement {
                 </a>
               `
             : nothing}
-          <sl-tooltip content="See this agent in graph">
-            <a
-              href="/agents/graph?project=${agent.projectId}&focus=${this.agentId}"
-              style="text-decoration: none;"
-            >
-              <sl-button variant="default" size="small">
-                <sl-icon slot="prefix" name="diagram-3"></sl-icon>
-              </sl-button>
-            </a>
-          </sl-tooltip>
           ${can(agent._capabilities, 'delete')
             ? html`
                 <sl-button
