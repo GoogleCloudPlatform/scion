@@ -36,6 +36,11 @@ const defaultSyncStartSupersedeWait = 60 * time.Second
 // start of the same name did not finish within the wait.
 var errSyncStartSupersedeTimeout = errors.New("an earlier start of this agent is still finishing")
 
+// errInvalidLaunchSlug is returned by beginSyncStart when the agent's slug
+// (or, without one, its name) is not a single path element and so cannot
+// name a launch marker file. createAgent maps it to 400.
+var errInvalidLaunchSlug = errors.New("agent slug must be a single path element")
+
 // syncStart is the bookkeeping for one synchronous (non-async) create's
 // Manager.Start, mirroring what runLaunch keeps for an async launch:
 //
@@ -71,6 +76,12 @@ func (s *Server) beginSyncStart(ctx context.Context, req CreateAgentRequest, opt
 	slug := req.Slug
 	if slug == "" {
 		slug = req.Name
+	}
+	// The slug is joined onto the launch markers directory below. createAgent
+	// already checks Name and Slug at the request boundary; this check keeps
+	// the helper safe on its own, before any registry or filesystem use.
+	if !isSingleCleanPathElement(slug) {
+		return nil, nil, errInvalidLaunchSlug
 	}
 	startCtx, cancel := context.WithCancel(ctx)
 	ss := &syncStart{
@@ -142,4 +153,15 @@ func (ss *syncStart) finish() {
 		close(ss.rec.done)
 	}
 	ss.rec.cancel()
+}
+
+// cancelLocalLaunch cancels any in-flight start (sync or async) registered
+// on this broker under key. A server built without a launch registry (for
+// example, constructed directly in a test rather than via New) has nothing
+// to cancel.
+func (s *Server) cancelLocalLaunch(key launchKey) {
+	if s.launchRegistry == nil {
+		return
+	}
+	s.launchRegistry.CancelLocal(key)
 }

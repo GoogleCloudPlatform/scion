@@ -331,3 +331,74 @@ func TestSyncCreate_SupersedeWaitTimeoutFails(t *testing.T) {
 		t.Fatal("timed out waiting for agent A's create to return")
 	}
 }
+
+// beginSyncStart refuses a slug that is not a single path element before it
+// registers anything or touches the filesystem.
+func TestBeginSyncStart_RejectsInvalidSlug(t *testing.T) {
+	for _, slug := range []string{"../x", "a/b", "", "."} {
+		t.Run(fmt.Sprintf("%q", slug), func(t *testing.T) {
+			srv, _, projectPath, _ := newSyncStartTestServer(t)
+			req := CreateAgentRequest{ID: "agent-id", Slug: slug}
+			_, ss, err := srv.beginSyncStart(context.Background(), req, api.StartOptions{ProjectPath: projectPath})
+			if !errors.Is(err, errInvalidLaunchSlug) {
+				t.Fatalf("beginSyncStart error = %v, want errInvalidLaunchSlug", err)
+			}
+			if ss != nil {
+				t.Fatal("beginSyncStart returned a start for an invalid slug")
+			}
+			if _, statErr := os.Stat(filepath.Join(projectPath, "launch-markers")); !os.IsNotExist(statErr) {
+				t.Errorf("launch markers directory was created for an invalid slug (stat err %v)", statErr)
+			}
+			srv.launchRegistry.mu.Lock()
+			n := len(srv.launchRegistry.records)
+			srv.launchRegistry.mu.Unlock()
+			if n != 0 {
+				t.Errorf("registry holds %d records after an invalid slug, want 0", n)
+			}
+		})
+	}
+}
+
+// createAgent rejects a non-empty slug that is not a single path element
+// with 400, before any start runs.
+func TestCreateAgent_RejectsInvalidSlug(t *testing.T) {
+	for _, slug := range []string{"../x", "a/b", "."} {
+		t.Run(fmt.Sprintf("%q", slug), func(t *testing.T) {
+			srv, _, projectPath, _ := newSyncStartTestServer(t)
+			body := fmt.Sprintf(`{"id": "agent-id", "name": "same-name", "slug": %q, "projectPath": %q, "config": {"task": "t"}}`, slug, projectPath)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+		})
+	}
+}
+
+// Stop and delete must not panic on a server built without a launch
+// registry (for example, one constructed directly rather than via New).
+func TestStopAndDelete_NilLaunchRegistry(t *testing.T) {
+	srv, _, _, _ := newSyncStartTestServer(t)
+	srv.launchRegistry = nil
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodDelete, "/api/v1/agents/same-name"},
+		{http.MethodDelete, "/api/v1/agents/same-name?projectId=p1&deleteFiles=true"},
+		{http.MethodPost, "/api/v1/agents/same-name/stop"},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("handler panicked with a nil launch registry: %v", r)
+				}
+			}()
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+			if w.Code >= 500 {
+				t.Errorf("status = %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
