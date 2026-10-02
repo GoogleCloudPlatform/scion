@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -28,23 +30,38 @@ import (
 
 // TestAdminInvitesCreate_AuditLogExpiresAtIsUTC covers the invite audit-log
 // "expires_at" fix (admin_invites.go:177, design §2.2 "Invite audit-log
-// expires_at") at the real call site, not merely a formatting helper.
+// expires_at") at the real call site, by driving handleAdminInvites end to
+// end and inspecting the audit event it writes, rather than unit-testing a
+// formatting helper in isolation.
 //
-// Review round 1, R1-1: the original test (TestFormatUTCTimestamp) called a
-// free-standing formatUTCTimestamp(t, layout) helper directly. Reverting
-// admin_invites.go:177 to its pre-fix form (invite.ExpiresAt.Format(...),
-// no .UTC()) left that test green, because nothing exercised the handler.
-// That helper is now deleted; this test drives handleAdminInvites end to
-// end and inspects the audit event it writes.
-//
-// It deliberately does not pin time.Local (see R1-3's race/masking finding):
-// pkg/hub tests are unpinned, and pinning time.Local here would race
-// goroutines that other pkg/hub tests in the same binary may have leaked.
-// Run under TZ=Asia/Tokyo or TZ=Asia/Kathmandu, admin_invites.go:143's
-// expiresAt := time.Now().Add(duration) is already a non-UTC time.Time,
-// which is exactly the input this fix must still format correctly -- so the
-// required both-TZ runs exercise the bug class without any fixture helping.
+// admin_invites.go:143's expiresAt := time.Now().Add(duration) is a non-UTC
+// time.Time only when the process's TZ is non-UTC, so this test re-execs
+// itself in a child process pinned to a fixed non-UTC zone (see below). It
+// deliberately does not set time.Local in the current process: pkg/hub
+// tests are unpinned, and writing time.Local in the shared test binary
+// would race goroutines that other pkg/hub tests may have leaked.
 func TestAdminInvitesCreate_AuditLogExpiresAtIsUTC(t *testing.T) {
+	// CI runs this test binary with TZ unset (UTC), in which case
+	// expiresAt above is already UTC regardless of whether admin_invites.go
+	// converts it, so the assertions below would pass even if .UTC() were
+	// removed from the real site. Re-exec just this test in a child process
+	// with TZ=Asia/Tokyo so it is a real guard. Kathmandu is not used here:
+	// under TZ=Asia/Kathmandu, newTestStore's migration hits a known,
+	// pre-existing SQLite scan error (tz-refactor task 2) before this
+	// handler ever runs.
+	if os.Getenv("SCION_TZ_CHILD") == "" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestAdminInvitesCreate_AuditLogExpiresAtIsUTC$", "-test.v", "-test.count=1")
+		cmd.Env = append(os.Environ(), "SCION_TZ_CHILD=1", "TZ=Asia/Tokyo")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("child process (TZ=Asia/Tokyo) failed: %v\n%s", err, out)
+		}
+		return
+	}
+	if time.Local == time.UTC {
+		t.Fatal("TZ=Asia/Tokyo did not change time.Local away from UTC; this test needs a non-UTC time.Local to be a real guard against a dropped .UTC() call")
+	}
+
 	s, err := newTestStore(":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
