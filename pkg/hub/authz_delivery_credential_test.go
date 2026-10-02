@@ -26,9 +26,11 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -89,7 +91,7 @@ func TestHubDelivery_PipelineReachesRelationshipStage(t *testing.T) {
 }
 
 // TestHubDelivery_ListPredicateAndPointEvaluationMatchNothing pins
-// precondition 3 (Q3 "Non-attestation"): ProgenyListPredicate and
+// non-attestation: ProgenyListPredicate and
 // EvaluateProgeny call relationshipAncestryAttested, which is false for a
 // hub_delivery principal, so they match nothing — even though
 // the same stored agent record, wrapped in a storedAgentIdentity, is a
@@ -123,23 +125,74 @@ func TestHubDelivery_ListPredicateAndPointEvaluationMatchNothing(t *testing.T) {
 
 // TestHubDelivery_Step10ArmDeniesWithoutStep0b calls checkDelegationCeiling
 // directly, so Step 0b is never consulted, and shows the step-10 gate arm
-// denies every condition on its own. Every subtest asserts allowed == false,
-// err == nil, the exact reason, DenyCause == "", and that no
-// delegation_ceiling_allowed step appears in explain — the ordinary
-// delegation proof (walkDelegationChain) is never reached for this type, at
-// any stage.
+// denies every condition on its own.
+//
+// The fixture isolates the arm: the valid agent (and the other agent named
+// by the bound-agent rows) is a stored agent with a recorded delegation edge
+// from an active super-admin, so the ordinary delegation proof
+// (walkDelegationChain) allows the same request for a storedAgentIdentity
+// principal — the positive control below. Every hub_delivery row then runs
+// twice:
+//   - against the fixture's AuthzService, where a fall-through to the
+//     ordinary proof would allow, so allowed == false is a real assertion;
+//   - against an AuthzService whose store fails every delegation edge, user
+//     and role-binding read — the reads the ordinary proof performs — so a
+//     fall-through to that proof surfaces as a non-nil error.
+//
+// Each run asserts allowed == false, err == nil, the exact reason,
+// DenyCause == "", a delegation_ceiling_delivery_denied step, and no
+// delegation_ceiling_allowed step.
 func TestHubDelivery_Step10ArmDeniesWithoutStep0b(t *testing.T) {
 	f := newGoldenFixture(t)
 	ctx := context.Background()
 
-	const validAgentID = "hd-step10-valid-agent"
+	validAgentID := tid("hd-step10-valid-agent")
+	otherAgentID := tid("hd-step10-other-agent")
+	newHubDeliveryTestAgent(t, f.store, validAgentID, f.projectAlpha.ID, f.superAdminID)
+	newHubDeliveryTestAgent(t, f.store, otherAgentID, f.projectAlpha.ID, f.superAdminID)
+
+	failing := NewAuthzService(&materialFailingStore{
+		Store:                            f.store,
+		getUserErr:                       errors.New("injected user lookup failure"),
+		listRoleBindingsForPrincipalErr:  errors.New("injected role binding lookup failure"),
+		listRoleBindingsForPrincipalsErr: errors.New("injected role binding lookup failure"),
+		getDelegationEdgesForDelegateErr: errors.New("injected edge lookup failure"),
+	}, slog.Default())
+
+	secretRes := Resource{Type: "secret", ID: f.secretID}
+
+	// Positive control: the same agents, as stored-agent identities, are
+	// allowed by the ordinary proof for the deliver request, and the
+	// failing-store service turns that proof into an error. So a
+	// hub_delivery row below that fell through to the ordinary proof would
+	// be allowed (fixture service) or fail with an error (failing service).
+	t.Run("positive_control_stored_agent", func(t *testing.T) {
+		for _, id := range []string{validAgentID, otherAgentID} {
+			agent, err := f.store.GetAgent(ctx, id)
+			require.NoError(t, err)
+			req := AuthzRequest{
+				Principal:  PrincipalContext{Kind: PrincipalKindAgent, ID: id, Identity: &storedAgentIdentity{agent: agent}},
+				Resource:   secretRes,
+				Action:     ActionDeliver,
+				Permission: "secret.deliver",
+			}
+			var explain []DecisionStep
+			allowed, reason, err := f.authz.checkDelegationCeiling(ctx, req, "secret.deliver", id, &explain, nil)
+			require.NoError(t, err)
+			require.True(t, allowed, "the ordinary proof must allow the control request: %q", reason)
+			require.True(t, hasDecisionStep(explain, "delegation_ceiling_allowed"), "explain: %+v", explain)
+
+			_, _, err = failing.checkDelegationCeiling(ctx, req, "secret.deliver", id, nil, nil)
+			require.Error(t, err, "the failing-store service must surface the ordinary proof's store read")
+		}
+	})
 
 	baseIdentity := func() *hubDeliveryIdentity {
 		return &hubDeliveryIdentity{
 			agentID:      validAgentID,
 			projectID:    f.projectAlpha.ID,
-			ancestry:     []string{f.projectOwnerID},
-			originUserID: f.projectOwnerID,
+			ancestry:     []string{f.superAdminID},
+			originUserID: f.superAdminID,
 			boundAgentID: validAgentID,
 		}
 	}
@@ -156,45 +209,60 @@ func TestHubDelivery_Step10ArmDeniesWithoutStep0b(t *testing.T) {
 	}{
 		{
 			name:       "wrong_bound",
-			identity:   func() *hubDeliveryIdentity { h := baseIdentity(); h.boundAgentID = "hd-step10-other-agent"; return h }(),
+			identity:   func() *hubDeliveryIdentity { h := baseIdentity(); h.boundAgentID = otherAgentID; return h }(),
 			permission: "secret.deliver", action: ActionDeliver,
-			resource:   Resource{Type: "secret", ID: f.secretID},
+			resource:   secretRes,
 			wantReason: "delivery credential is bound to a different agent",
 		},
 		{
 			name:       "empty_bound",
 			identity:   func() *hubDeliveryIdentity { h := baseIdentity(); h.boundAgentID = ""; return h }(),
 			permission: "secret.deliver", action: ActionDeliver,
-			resource:   Resource{Type: "secret", ID: f.secretID},
+			resource:   secretRes,
 			wantReason: "delivery credential is bound to a different agent",
 		},
 		{
 			name:       "agentID_argument_differs",
 			identity:   baseIdentity(),
-			agentIDArg: "hd-step10-different-arg",
+			agentIDArg: otherAgentID,
 			permission: "secret.deliver", action: ActionDeliver,
-			resource:   Resource{Type: "secret", ID: f.secretID},
+			resource:   secretRes,
+			wantReason: "delivery credential is bound to a different agent",
+		},
+		{
+			// The bound agent and the agentID argument agree with each
+			// other but not with the identity's own agentID, so only the
+			// identity-ID comparison denies this row.
+			name: "identity_agentID_differs_from_bound_and_argument",
+			identity: func() *hubDeliveryIdentity {
+				h := baseIdentity()
+				h.boundAgentID = otherAgentID
+				return h
+			}(),
+			agentIDArg: otherAgentID,
+			permission: "secret.deliver", action: ActionDeliver,
+			resource:   secretRes,
 			wantReason: "delivery credential is bound to a different agent",
 		},
 		{
 			name:       "action_read",
 			identity:   baseIdentity(),
 			permission: "secret.deliver", action: ActionRead,
-			resource:   Resource{Type: "secret", ID: f.secretID},
+			resource:   secretRes,
 			wantReason: "delivery credential is limited to deliver permissions",
 		},
 		{
 			name:       "action_use",
 			identity:   baseIdentity(),
 			permission: "secret.deliver", action: ActionUse,
-			resource:   Resource{Type: "secret", ID: f.secretID},
+			resource:   secretRes,
 			wantReason: "delivery credential is limited to deliver permissions",
 		},
 		{
 			name:       "permission_read",
 			identity:   baseIdentity(),
 			permission: "secret.read", action: ActionDeliver,
-			resource:   Resource{Type: "secret", ID: f.secretID},
+			resource:   secretRes,
 			wantReason: "delivery credential is limited to deliver permissions",
 		},
 		{
@@ -211,48 +279,77 @@ func TestHubDelivery_Step10ArmDeniesWithoutStep0b(t *testing.T) {
 			name:       "typed_nil",
 			typedNil:   true,
 			permission: "secret.deliver", action: ActionDeliver,
-			resource:   Resource{Type: "secret", ID: f.secretID},
+			resource:   secretRes,
 			wantReason: "delivery credential is missing",
 		},
 		{
 			name:       "empty_project",
 			identity:   func() *hubDeliveryIdentity { h := baseIdentity(); h.projectID = ""; return h }(),
 			permission: "secret.deliver", action: ActionDeliver,
-			resource:   Resource{Type: "secret", ID: f.secretID},
+			resource:   secretRes,
 			wantReason: "delivery credential has no project",
+		},
+		{
+			// Every condition holds: the correct bound agent, a deliver
+			// permission, ActionDeliver and a non-empty project. The arm's
+			// terminal deny decides it.
+			name:       "valid",
+			identity:   baseIdentity(),
+			permission: "secret.deliver", action: ActionDeliver,
+			resource:   secretRes,
+			wantReason: "delivery credential admission is not enabled",
 		},
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var identity Identity
-			if tc.typedNil {
-				identity = (*hubDeliveryIdentity)(nil)
-			} else {
-				identity = tc.identity
-			}
-			agentIDArg := tc.agentIDArg
-			if agentIDArg == "" {
-				agentIDArg = validAgentID
-			}
-			req := AuthzRequest{
-				Principal:  PrincipalContext{Kind: PrincipalKindAgent, ID: validAgentID, Identity: identity},
-				Resource:   tc.resource,
-				Action:     tc.action,
-				Permission: tc.permission,
-			}
-			var explain []DecisionStep
-			var cause DenyCause
-			allowed, reason, err := f.authz.checkDelegationCeiling(ctx, req, tc.permission, agentIDArg, &explain, &cause)
-			require.NoError(t, err)
-			assert.False(t, allowed)
-			assert.Equal(t, tc.wantReason, reason)
-			assert.Equal(t, DenyCause(""), cause)
-			for _, step := range explain {
-				assert.NotEqual(t, "delegation_ceiling_allowed", step.Step, "the ordinary proof must never run for this type")
-			}
-		})
+	services := []struct {
+		name  string
+		authz *AuthzService
+	}{
+		{"fixture_store", f.authz},
+		{"failing_store", failing},
 	}
+
+	for _, tc := range cases {
+		for _, svc := range services {
+			t.Run(tc.name+"/"+svc.name, func(t *testing.T) {
+				var identity Identity
+				if tc.typedNil {
+					identity = (*hubDeliveryIdentity)(nil)
+				} else {
+					identity = tc.identity
+				}
+				agentIDArg := tc.agentIDArg
+				if agentIDArg == "" {
+					agentIDArg = validAgentID
+				}
+				req := AuthzRequest{
+					Principal:  PrincipalContext{Kind: PrincipalKindAgent, ID: validAgentID, Identity: identity},
+					Resource:   tc.resource,
+					Action:     tc.action,
+					Permission: tc.permission,
+				}
+				var explain []DecisionStep
+				var cause DenyCause
+				allowed, reason, err := svc.authz.checkDelegationCeiling(ctx, req, tc.permission, agentIDArg, &explain, &cause)
+				require.NoError(t, err, "the arm performs no store read and never reaches the ordinary proof")
+				assert.False(t, allowed)
+				assert.Equal(t, tc.wantReason, reason)
+				assert.Equal(t, DenyCause(""), cause)
+				assert.True(t, hasDecisionStep(explain, "delegation_ceiling_delivery_denied"), "explain: %+v", explain)
+				assert.False(t, hasDecisionStep(explain, "delegation_ceiling_allowed"), "the ordinary proof must never run for this type")
+			})
+		}
+	}
+}
+
+// hasDecisionStep reports whether explain contains a step named step.
+func hasDecisionStep(explain []DecisionStep, step string) bool {
+	for _, s := range explain {
+		if s.Step == step {
+			return true
+		}
+	}
+	return false
 }
 
 // newHubDeliveryNoItemGrantIdentity builds a hub_delivery identity for the
@@ -746,4 +843,125 @@ func TestHubDelivery_NotInRequestContext(t *testing.T) {
 		}
 	}
 	assert.Positive(t, mentioning, "the scan must find the functions that handle the type")
+}
+
+// TestHubDelivery_Stage2RejectsNonDeliverPermission runs the relationship
+// stages directly, outside Decide, so Step 0b is never consulted. Stage 2
+// reads a hub_delivery principal's attestation from its stored-agent
+// evidence only for the three deliver permissions: for any other
+// permission it reports not attested, so the progeny candidate is rejected
+// with untrusted_ancestry. A paired secret.deliver row for the same
+// principal, resource and candidate is accepted, so the rejection is caused
+// by the permission alone. The nil-evidence rows pin the stage-2 and
+// progeny-fact guards for a credential with no stored-agent evidence.
+func TestHubDelivery_Stage2RejectsNonDeliverPermission(t *testing.T) {
+	f := newGoldenFixture(t)
+	ctx := context.Background()
+
+	agentID := tid("hd-stage2-agent")
+	newHubDeliveryTestAgent(t, f.store, agentID, f.projectAlpha.ID, f.projectOwnerID)
+	h, err := f.authz.newHubDeliveryIdentity(ctx, agentID)
+	require.NoError(t, err)
+	require.NotNil(t, h.evidence)
+	require.True(t, AncestryIsHubAttested(h.evidence), "the stored-agent evidence must be hub-attested")
+
+	noEvidence := *h
+	noEvidence.evidence = nil
+
+	principalFor := func(identity *hubDeliveryIdentity) PrincipalContext {
+		return PrincipalContext{Kind: PrincipalKindAgent, ID: identity.ID(), Identity: identity}
+	}
+	secretRes := Resource{Type: "secret", ID: f.secretID}
+
+	// progenyCandidate returns the progeny candidate relationshipCandidates
+	// builds for the request, failing the test if there is none.
+	progenyCandidate := func(t *testing.T, principal PrincipalContext, action Action, permissionID string) relationshipCandidate {
+		t.Helper()
+		for _, c := range f.authz.relationshipCandidates(principal, secretRes, action, permissionID) {
+			if c.rule == RelationshipRuleProgeny {
+				return c
+			}
+		}
+		t.Fatalf("no progeny candidate for %s/%s", permissionID, action)
+		return relationshipCandidate{}
+	}
+
+	// runStages runs the candidate through runRelationshipStages with no
+	// restrictions and returns whether it was accepted and the first
+	// rejection kind and detail, if any.
+	runStages := func(t *testing.T, principal PrincipalContext, action Action, permissionID string) (bool, string, string) {
+		t.Helper()
+		c := progenyCandidate(t, principal, action, permissionID)
+		var rejectedBy, detail string
+		policyKind := permissions.RelationshipPrincipalKind(string(principal.Kind))
+		_, ok := f.authz.runRelationshipStages(ctx, principal, policyKind, secretRes, permissionID, nil, c,
+			func(kind, d string) { rejectedBy, detail = kind, d })
+		return ok, rejectedBy, detail
+	}
+
+	t.Run("stage2_entry", func(t *testing.T) {
+		// secret.read is not listed for the progeny relationship on a
+		// secret, so stage 1 rejects it before stage 2 runs; the stage-2
+		// check itself is pinned directly here for it and for the other
+		// non-deliver and empty permissions.
+		for _, perm := range []string{"secret.read", "secret.use", permissionProjectSecretRead, ""} {
+			assert.False(t, relationshipStageAncestryAttested(principalFor(h), perm),
+				"stage 2 must not attest a hub_delivery principal for %q", perm)
+		}
+		for perm := range hubDeliveryPermissionIDs {
+			assert.True(t, relationshipStageAncestryAttested(principalFor(h), perm),
+				"stage 2 attests a hub_delivery principal with stored-agent evidence for %q", perm)
+			assert.False(t, relationshipStageAncestryAttested(principalFor(&noEvidence), perm),
+				"stage 2 must not attest a hub_delivery principal with no evidence for %q", perm)
+		}
+	})
+
+	for _, tc := range []struct {
+		name       string
+		action     Action
+		permission string
+	}{
+		// Both pairs pass stage 1 (relationship policy) for the progeny
+		// rule on a secret, so stage 2 is the stage that decides them.
+		{"secret_use", ActionUse, "secret.use"},
+		{"project_secret_read", ActionRead, permissionProjectSecretRead},
+	} {
+		t.Run("non_deliver_rejected/"+tc.name, func(t *testing.T) {
+			require.True(t, permissions.RelationshipPolicyAllows(string(RelationshipRuleProgeny), "agent", "secret", tc.permission),
+				"the row must pass stage 1 so that stage 2 decides it")
+			ok, rejectedBy, detail := runStages(t, principalFor(h), tc.action, tc.permission)
+			assert.False(t, ok)
+			assert.Equal(t, RelationshipRejectUntrustedAncestry, rejectedBy, "detail %q", detail)
+		})
+	}
+
+	t.Run("deliver_accepted", func(t *testing.T) {
+		ok, rejectedBy, detail := runStages(t, principalFor(h), ActionDeliver, "secret.deliver")
+		assert.True(t, ok, "rejected by %q: %q", rejectedBy, detail)
+		assert.Empty(t, rejectedBy)
+	})
+
+	t.Run("nil_evidence_rejected_at_stage2", func(t *testing.T) {
+		ok, rejectedBy, detail := runStages(t, principalFor(&noEvidence), ActionDeliver, "secret.deliver")
+		assert.False(t, ok)
+		assert.Equal(t, RelationshipRejectUntrustedAncestry, rejectedBy, "detail %q", detail)
+	})
+
+	t.Run("nil_evidence_progeny_fact", func(t *testing.T) {
+		// The fact closure is called directly, independently of stage 2.
+		// With evidence it holds for this fixture; without evidence it
+		// reports the named reason instead of reading the credential's own
+		// ancestry.
+		withEvidence := progenyCandidate(t, principalFor(h), ActionDeliver, "secret.deliver")
+		require.NotNil(t, withEvidence.fact)
+		_, holds, detail := withEvidence.fact(ctx)
+		require.True(t, holds, "positive control: the fact holds with stored-agent evidence: %q", detail)
+
+		c := progenyCandidate(t, principalFor(&noEvidence), ActionDeliver, "secret.deliver")
+		require.NotNil(t, c.fact)
+		src, holds, detail := c.fact(ctx)
+		assert.False(t, holds)
+		assert.Nil(t, src)
+		assert.Equal(t, "delivery credential has no stored-agent evidence", detail)
+	})
 }
