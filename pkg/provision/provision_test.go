@@ -4378,15 +4378,17 @@ func TestProvision_EnsureWorktree_OwnPathNotRealWorktree_Refused(t *testing.T) {
 // is physically in-tree but not the canonical direct-child
 // "worktrees/<name>" shape, and contains neither a ".." component nor a
 // symlink hop on the way from base to it, so it carries no sign of a
-// deliberate path-escape attempt (see worktreePathEscapeAttempt). The
-// registry read boundary (readMarker) discards the whole marker rather than
-// refusing outright, ListSharers reports worktreePath="", and ProvisionShared
-// falls through to create agent-c its own fresh, canonical worktree.
+// non-canonical or symlink-crossing shape (see shouldRefuseWorktreePath).
+// The registry read boundary (readMarker) discards the whole marker rather
+// than refusing outright, ListSharers reports worktreePath="", and
+// ProvisionShared falls through to create agent-c its own fresh, canonical
+// worktree.
 //
 // This was originally a hard-refusal test (renamed from
 // TestProvision_EnsureWorktree_RegistryNamesNonWorktree_Refused): a plain,
 // trickery-free wrong-depth path is reclassified as benign/stale now that
-// the read boundary distinguishes it from an escape attempt, but the
+// the read boundary distinguishes it from a non-canonical or symlink-crossing
+// shape, but the
 // named path itself must never be touched either way — that invariant is
 // asserted explicitly below.
 func TestProvision_EnsureWorktree_RegistryNamesNonWorktree_DiscardedAndRecreated(t *testing.T) {
@@ -4577,7 +4579,7 @@ func TestProvision_EnsureWorktree_RegistryNamesNonCanonicalPath_Refused(t *testi
 			})
 			require.Error(t, err, "expected ProvisionShared to refuse joining a non-canonical registry marker")
 
-			// The marker now consistently refuses to read (worktreePathEscapeAttempt
+			// The marker now consistently refuses to read (shouldRefuseWorktreePath
 			// keeps surfacing it as an error, not just on the first read), so
 			// the original registration's survival is checked directly against
 			// the on-disk JSON rather than through ListSharers.

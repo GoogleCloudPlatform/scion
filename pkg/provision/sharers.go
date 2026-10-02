@@ -139,21 +139,20 @@ func isProvisionAgentWorkspaceShape(projectDir, candidate string) bool {
 //     projectDir/agents/<name>/workspace): the marker is returned as-is; the
 //     caller still independently proves it is a genuine git worktree before
 //     acting on it (ValidateWorktreeForBase / IsValidJoinWorktree).
-//   - It matches neither shape but shows no sign of a deliberate escape
-//     attempt (see worktreePathEscapeAttempt) — a plain stale or foreign
-//     value, including ProvisionAgent's legitimate attach-to-an-existing-
-//     worktree path, which git's own worktree list can point anywhere: the
-//     Sharers refcount is preserved and only WorktreePath is blanked, not the
-//     whole marker discarded (discarding it previously caused a real
-//     data-loss regression — a live sharer's worktree removed out from under
-//     it because its refcount registration was silently dropped). Callers
-//     observe this as worktreePath=="" and must not use "" as a target to
-//     mount or remove.
-//   - It shows the escape/symlink smell a path-confusion attack needs (not
-//     already in canonical textual form, or crossing a symlink on its way
-//     from base to the leaf): the read fails outright with an error, instead
-//     of being silently discarded or degraded, so the caller cannot mistake
-//     a deliberate forgery attempt for ordinary stale state.
+//   - It matches neither shape but shows no sign of a non-canonical or
+//     symlink-crossing form (see shouldRefuseWorktreePath) — a plain stale
+//     or foreign value, including ProvisionAgent's legitimate
+//     attach-to-an-existing-worktree path, which git's own worktree list can
+//     point anywhere: the Sharers refcount is preserved and only
+//     WorktreePath is blanked, not the whole marker discarded (discarding it
+//     previously caused a real data-loss regression — a live sharer's
+//     worktree removed out from under it because its refcount registration
+//     was silently dropped). Callers observe this as worktreePath=="" and
+//     must not use "" as a target to mount or remove.
+//   - It is not already in canonical textual form, or crosses a symlink on
+//     its way from base to the leaf: the read fails outright with an error,
+//     instead of being silently discarded or degraded, so the caller cannot
+//     mistake a value shaped this way for ordinary stale state.
 //
 // projectDir is passed through to WorktreePathIsScionCreated for the
 // ProvisionAgent-layout shape check (see its doc comment); pass "" for
@@ -173,7 +172,7 @@ func readMarker(base, projectDir, path string) (*sharerMarker, error) {
 	if m.WorktreePath == "" || WorktreePathIsScionCreated(base, projectDir, m.WorktreePath) {
 		return &m, nil
 	}
-	if worktreePathEscapeAttempt(base, m.WorktreePath) {
+	if shouldRefuseWorktreePath(base, m.WorktreePath) {
 		return nil, fmt.Errorf("sharer marker %s: worktreePath %q is not in canonical form or crosses a symlink", path, m.WorktreePath)
 	}
 	slog.Warn("sharer marker worktreePath does not match a scion-created worktree shape; keeping sharer refcount, discarding only the path",
@@ -182,9 +181,9 @@ func readMarker(base, projectDir, path string) (*sharerMarker, error) {
 	return &m, nil
 }
 
-// worktreePathEscapeAttempt reports whether an untrusted worktreePath value
-// shows the specific shape a path-escape or symlink-confusion attempt needs,
-// as opposed to merely being stale or foreign. Two signs, either sufficient:
+// shouldRefuseWorktreePath reports whether an untrusted worktreePath value
+// shows a non-canonical or symlink-crossing shape, as opposed to merely
+// being stale or foreign. Two signs, either sufficient:
 //
 //   - The stored text is not already in filepath.Clean'd form — it embeds a
 //     ".." or a redundant separator — so its lexical and logical
@@ -197,13 +196,13 @@ func readMarker(base, projectDir, path string) (*sharerMarker, error) {
 //     "worktrees/<name>" while actually resolving somewhere else entirely.
 //
 // A value that is empty, relative, or simply outside base's tree altogether
-// is not an escape attempt by this definition — it has no claim on being
+// does not warrant a refusal by this definition — it has no claim on being
 // in-tree to begin with, so there is nothing to disagree with. Resolution
-// failures (a missing intermediate directory, for example) are treated as
-// "not an escape attempt": readMarker's caller already discards a path that
-// doesn't check out as a real worktree, which covers that case without this
-// function needing to distinguish a filesystem error from a benign absence.
-func worktreePathEscapeAttempt(base, path string) bool {
+// failures (a missing intermediate directory, for example) are treated the
+// same way: readMarker's caller already discards a path that doesn't check
+// out as a real worktree, which covers that case without this function
+// needing to distinguish a filesystem error from a benign absence.
+func shouldRefuseWorktreePath(base, path string) bool {
 	if path == "" || !filepath.IsAbs(path) {
 		return false
 	}
@@ -212,8 +211,8 @@ func worktreePathEscapeAttempt(base, path string) bool {
 	}
 	rel, err := filepath.Rel(base, path)
 	if err != nil || rel == ".." || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		// Genuinely outside base (or base itself) — foreign, not an escape
-		// attempt relative to base's own tree.
+		// Genuinely outside base (or base itself) — foreign, with no claim
+		// on being in-tree to begin with.
 		return false
 	}
 	for dir := filepath.Dir(path); strings.HasPrefix(dir, base+string(filepath.Separator)); dir = filepath.Dir(dir) {

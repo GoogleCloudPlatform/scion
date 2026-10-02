@@ -1379,7 +1379,7 @@ func TestNarrowGitAdminMounts_SkippedForLinkedProject(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	repoRoot := t.TempDir() // arbitrary path outside ~/.scion/projects
+	repoRoot := t.TempDir() // an unrelated path outside ~/.scion/projects
 	gitDir := filepath.Join(repoRoot, ".git")
 	if err := os.MkdirAll(filepath.Join(gitDir, "hooks"), 0755); err != nil {
 		t.Fatalf("failed to create hooks dir: %v", err)

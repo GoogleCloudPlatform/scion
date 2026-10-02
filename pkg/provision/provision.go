@@ -1715,7 +1715,7 @@ var ErrCommondirPresent = errors.New("refusing git operation: base .git/commondi
 
 // HardenedGitCommand builds an *exec.Cmd for a broker-side git invocation
 // against a project's shared hub-native worktree-per-agent base repo, with
-// the invocation-level hardening for the broker-git worktree containment
+// the invocation-level protections for the broker-git worktree containment
 // change applied. It ensures the broker's own git operations honor only the
 // host-managed config/hooks/refs for the base — never a redirected or
 // otherwise unexpected location — and returns an error instead of running if
@@ -1730,7 +1730,7 @@ var ErrCommondirPresent = errors.New("refusing git operation: base .git/commondi
 //     Pinning makes the common directory explicit and authoritative for
 //     every call through this wrapper, independent of what any commondir
 //     file says.
-//   - As defense in depth (and detection), the wrapper first checks whether
+//   - As an additional check (and for detection), the wrapper first checks whether
 //     <dir>/.git/commondir exists at all and refuses (ErrCommondirPresent)
 //     if so, since a hub-native base never legitimately has one.
 //

@@ -271,7 +271,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// Mount .git separately and workspace at its relative path.
 			registerMount(filepath.Join(config.RepoRoot, ".git"), "/repo-root/.git", false, true)
 			if config.RuntimeName == "docker" {
-				// Hardening (Phase 1, Docker + hub-native only): narrow the
+				// Mount narrowing (Phase 1, Docker + hub-native only): narrow the
 				// container's write access to the shared base repo's admin
 				// surface — see narrowGitAdminMounts. This broader surface
 				// (hooks/info/config/config.worktree) stays hub-native-only:
@@ -282,7 +282,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 				if isHubManagedWorktreeBase(config.RepoRoot) {
 					narrowGitAdminMounts(registerMount, config.RepoRoot, config.Workspace)
 				}
-				// Hardening (Part B, Docker, hub-native AND local): narrow the
+				// Mount narrowing (Part B, Docker, hub-native AND local): narrow the
 				// sharer registry and every worktree's admin back-link — see
 				// narrowSharerRegistryMounts. Unlike the broader surface
 				// above, neither of these two paths is ever legitimately
@@ -654,7 +654,7 @@ func isHubManagedWorktreeBase(repoRoot string) bool {
 // core.hooksPath/fsmonitor/sshCommand, smudge/clean filter selection via
 // info/attributes) when the broker runs git against this same base — see
 // pkg/provision/provision.go's HardenedGitCommand for the invocation-level
-// defense-in-depth layer.
+// additional check.
 //
 // Objects, refs, packed-refs, and the per-worktree HEAD/index/logs/ORIG_HEAD
 // are deliberately left writable: a worktree shares the common object store,
@@ -722,8 +722,8 @@ func narrowGitAdminMounts(registerMount func(string, string, bool, bool), repoRo
 // readMarker and worktree_validate.go's ValidateWorktreeForBase) is the
 // primary, base-type-independent control: it already makes an invalid
 // marker or a rewritten back-link harmless regardless of whether this mount
-// narrowing applies. This function is defense-in-depth on top of that — it
-// prevents the write from inside a container in the first place.
+// narrowing applies. This function is an additional layer on top of that —
+// it prevents the write from inside a container in the first place.
 //
 // The sharer registry directory may not exist yet (no branch has been
 // shared) — it is created on the host first so the read-only mount always
