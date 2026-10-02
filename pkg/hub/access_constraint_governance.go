@@ -44,8 +44,8 @@ type GovernanceService struct {
 	logger    *slog.Logger
 	auditSink auditevent.Sink
 
-	// auditWriter writes durable audit entries for every boundary mutation.
-	// If nil, audit logging is disabled (should only happen in legacy tests).
+	// auditWriter is the legacy update/delete audit path. CREATE uses the
+	// transactionally persisted typed event and auditSink below.
 	auditWriter *BoundaryAuditWriter
 
 	// eventBus publishes invalidation events after successful mutations.

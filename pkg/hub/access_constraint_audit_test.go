@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -292,8 +293,10 @@ func TestAudit_CompensatingAction_UpdateRestored(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAudit_RedactionNoSensitiveData(t *testing.T) {
-	gs, ps, _, s, aw := auditTestSetup(t)
+	gs, ps, _, s, _ := auditTestSetup(t)
 	ctx := context.Background()
+	capture := auditevent.NewCaptureSink()
+	gs.auditSink = capture
 
 	adminID := govSeedAdminUser(t, s, "redact-admin")
 	actor := PrincipalContext{Kind: "user", ID: adminID}
@@ -318,7 +321,7 @@ func TestAudit_RedactionNoSensitiveData(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+	commitResult, err := gs.CommitBoundaryChange(ctx, CommitRequest{
 		Operation:    "create",
 		Draft:        draft,
 		PreviewToken: result.PreviewToken,
@@ -326,10 +329,13 @@ func TestAudit_RedactionNoSensitiveData(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	entries := aw.GetEntries()
+	entries, err := s.ListConstraintHistory(ctx, commitResult.Constraint.ID)
+	require.NoError(t, err)
 	require.Len(t, entries, 1)
 
 	entry := entries[0]
+	records := capture.Records()
+	require.Len(t, records, 1)
 
 	// ---------------------------------------------------------------------------
 	// Field-level sensitive data assertions (R2): verify that every field in
@@ -361,19 +367,12 @@ func TestAudit_RedactionNoSensitiveData(t *testing.T) {
 			"DraftHash must not contain PII pattern %q", pat)
 	}
 
-	// StateFingerprint should not contain principal or group identifiers.
-	for _, pat := range piiPatterns {
-		assert.NotContains(t, entry.StateFingerprint, pat,
-			"StateFingerprint must not contain PII pattern %q", pat)
+	// The configured structured sink receives only the approved opaque IDs and
+	// typed payload; names, purpose text, and subject details stay out.
+	structured := string(records[0])
+	for _, sensitive := range []string{"redact-admin", "redact-target", draft.Name, draft.Purpose} {
+		assert.NotContains(t, structured, sensitive)
 	}
-
-	// ImpactCounts are numeric — verify they are non-negative (safe by type).
-	assert.GreaterOrEqual(t, entry.ImpactCounts.AffectedPrincipals, 0,
-		"AffectedPrincipals must be non-negative")
-	assert.GreaterOrEqual(t, entry.ImpactCounts.PermissionsAdded, 0,
-		"PermissionsAdded must be non-negative")
-	assert.GreaterOrEqual(t, entry.ImpactCounts.PermissionsRemoved, 0,
-		"PermissionsRemoved must be non-negative")
 }
 
 // ---------------------------------------------------------------------------

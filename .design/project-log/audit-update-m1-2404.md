@@ -8,16 +8,22 @@ This checkpoint adds the purpose-specific `access_constraint_history` read-model
 
 Focused tests prove that row 1,001 removes the oldest tuple while leaving another constraint untouched, direct append outside `WithTx` fails closed, deleting a live constraint cascades its timeline, history insert and prune-delete failures roll back an access-constraint create performed in the same `WithTx`, and committed history remains visible through both a second store instance and a reopened SQLite database. `TestConstraintHistory_ConcurrentCapPostgres` exercises two independent PostgreSQL clients racing from 999 equal-timestamp rows and requires the deterministic final 1,000-row tuple window.
 
-## Blocked create-path integration
+## Create-path governance integration
 
-Governance wiring and post-commit dispatch are intentionally not part of this checkpoint because two blockers belong to the approved #2401 interface owner:
+The approved shared interface now supplies `SlogSink` and permits a system-scoped resource to omit `project_id`. At implementation checkpoint `f777aed`, `GovernanceService.CommitBoundaryChange`'s create branch was moved onto the required one-envelope transaction boundary:
 
-1. `auditevent` exposes `Sink` and `CaptureSink` but no production structured-logging sink. #2404 must dispatch the same in-memory envelope only after `WithTx` returns successfully; it must not invent a second renderer or logging contract.
-2. The approved design makes `resource.project_id` optional for non-project-scoped resources, but the #2401 `access_boundary/create` catalog currently requires it. Existing access constraints support system scope and therefore have no project ID. The builder correctly rejects that event, so wiring it now would roll back every system-scoped create.
+- The service establishes one operation correlation at ingress, preserving an existing audit operation or trusted request ID and otherwise generating it once before the builder runs.
+- Inside `Store.WithTx`, the transaction-scoped store creates the live constraint, builds and validates exactly one typed `access_boundary/create` envelope, maps the typed envelope directly to `AccessConstraintHistory`, and calls `AppendConstraintHistoryTx` for the atomic insert/cap operation. The history writer never parses rendered JSON.
+- The envelope's event ID is the returned `AuditID`. Its event ID, occurred-at, principal, correlation/causation, revisions, classification, preview ID, draft hash, and defined composite payload leaves are the source of the purpose-specific history row.
+- System constraints use explicit system scope and omit project ID. Project constraints use explicit project scope and require their project ID. The HTTP create handler adds only trusted request metadata from request-log middleware; principal, canonical credential metadata, and deferred executor attribution come from existing server-side contexts.
+- Only after `WithTx` returns successfully does the service pass that same built envelope to its constructor-installed `auditevent.SlogSink`. A synchronous sink error is logged with the committed event and constraint IDs; it does not roll back or return a false mutation failure. Existing invalidation publication remains post-commit.
+- CREATE no longer writes or compensates through the legacy in-memory `BoundaryAuditWriter`. UPDATE and DELETE retain their existing behavior and are outside this integration slice.
 
-Once #2401 supplies the production sink and corrects the catalog requirement, the remaining #2404 integration point is `GovernanceService.CommitBoundaryChange`'s `create` branch: build one envelope inside `Store.WithTx`, create the constraint, map that exact envelope into `AccessConstraintHistory`, append through the transaction-scoped store (which enforces retention atomically), return on commit, then emit that same envelope through the supplied sink before publishing the existing invalidation event. Insert/build/prune failures must return from the callback so creation rolls back; sink failure remains post-commit and cannot roll back database state.
+Focused failure tests prove that builder validation failure, history insert failure, and an injected post-insert/prune failure all return from the transaction callback, leaving no live constraint and making no sink call. The post-insert case first writes the history row and then returns an injected error, proving the transaction removes both it and the live row. A sink that verifies the database during `Emit` proves live state and the matching history event are already committed before dispatch. An injected sink error is called exactly once while the live row and single matching history row remain committed and the command still succeeds. Successful system- and project-scoped cases compare the committed history and structured record to the same event ID, time, correlation, resource, revision, and classification; the system structured record has no `project_id` key.
 
-#2405 remains blocked from query/API/view work until that create-path integration is reviewed clean. Its eventual query should use `ListConstraintHistory` semantics as a starting point but replace the checkpoint's unpaged list with the approved tuple cursor contract.
+The existing store cap, restart/second-store visibility, and deterministic PostgreSQL concurrency evidence below remain the persistence proof beneath this integrated create path. A transaction commit failure was not separately injected because the Ent transaction wrapper has no safe test seam for a pre-commit failure after the callback; the production code retains the envelope only when `WithTx` returns nil and therefore cannot dispatch on any returned commit error.
+
+#2405 remains the next handoff and is untouched here. It should add the approved tuple-cursor history query/API/view behavior on top of `ListConstraintHistory`; it must not change this create transaction or post-commit dispatch boundary.
 
 ## Verification
 
@@ -33,5 +39,16 @@ The ii2 external gate passed against exact code SHA `cc3db9dee634d0d62527035c6ad
 Round-2 review determined that this first external run used a schedule-only goroutine release and did not prove the transactions overlapped. The strengthened regression now holds a PostgreSQL `FOR NO KEY UPDATE` lock in transaction A after inserting `event-0999`, identifies both transaction backend PIDs, and uses `pg_stat_activity` plus `pg_blocking_pids` to prove transaction B is waiting in the production `FOR UPDATE` query before A may commit. Completion before that observed lock wait fails the test, so removing the production `ForUpdate` call is detected deterministically. The strengthened ii2 external gate passed at exact code SHA `d7a51219a47bc3dbdd0443d77ff6acb461a29126` using Go 1.26.1 and PostgreSQL 16.15. The command above exited 0; the test passed in 3.13 seconds (package time 3.345 seconds). Before transaction A was released, the observer proved that transaction B was in a lock wait, `pg_blocking_pids(B)` contained A's backend PID, and B's active query contained `FOR UPDATE`. The atomic final 1,000-row cap held. The harness database, container, volume, scratch data, and password were fully torn down with no dangling resources.
 
 Round-3 review found one test-only `errcheck` issue: the PostgreSQL backend-PID helper did not explicitly handle `Rows.Close`'s returned error. The cleanup now uses the adapter's established explicit-discard closure. `GOGC=40 golangci-lint run --enable-only=errcheck --concurrency=1 ./pkg/store/entadapter/...` reports `0 issues`, and `go test -count=1 -p 2 ./pkg/store/entadapter -run 'TestConstraintHistory|TestCreateAccessConstraint_SetsRevision1'` passes (package time 1.867 seconds). The external PostgreSQL test was not rerun because this cleanup changes neither production code nor concurrency-test behavior; the accepted PostgreSQL 16.15 evidence above remains unchanged.
+
+The create-path governance integration passed these targeted gates:
+
+- `go test -p 2 ./pkg/hub -run '^TestGovernanceCreateAudit_' -count=1` — PASS (package 2.427s).
+- `go test -p 2 ./pkg/hub -run '^(TestGovernance_|TestGovernanceCreateAudit_|TestAudit_)' -count=1` — PASS (package 10.406s).
+- `go test -p 2 ./pkg/store/entadapter -run '^TestConstraintHistory_' -count=1` — PASS (package 1.255s).
+- `go test -race -p 2 ./pkg/hub -run '^TestGovernanceCreateAudit_' -count=1` — PASS (tests 46.899s).
+- `go vet -p 2 ./pkg/hub ./pkg/store/entadapter` — exit 0.
+- `go build -buildvcs=false -p 2 ./pkg/hub ./pkg/store/entadapter` — exit 0.
+- `GOGC=40 golangci-lint run --new-from-rev=c610586d9f25f34a768529808b93bed53c2af90c --concurrency=1 ./pkg/hub/...` — `0 issues`.
+- `git diff --check` — exit 0.
 
 Local `make ci` and `make ci-full` were not run because the campaign broker-workload rule prohibits them.
