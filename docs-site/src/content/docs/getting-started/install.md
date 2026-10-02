@@ -103,7 +103,7 @@ add-apt-repository ppa:git-core/ppa
 apt update; apt install git
 ```
 
-On Debian, check `git --version` against the `apt` package first — if it's older than 2.48, use the [git-core PPA equivalent for your distro](https://git-scm.com/download/linux) or build from source; see the [git site](https://git-scm.com/install/source).
+On Debian, note that Debian 13 (trixie)'s own `apt` git is **2.47.3** — below the 2.48 floor. Check `git --version`; if it's too old, build from source (see the [git site](https://git-scm.com/install/source)) or install a newer package from a source like [git-scm.com's Linux downloads](https://git-scm.com/download/linux).
 
 ---
 
