@@ -16,8 +16,9 @@ Closes ptone/scion#2496. Refs ptone/scion#2457. Design: tz-refactor design §2.1
   suffix, and returns UTC. tz-refactor task 6 (`utc-timestamp-normalize`) should reuse it.
 - `SearchChatMessages` parses the RFC3339Nano cursor and binds it as a UTC `time.Time` against the
   ent `messages.created` column. Compared as text, `T` > ` `, so the cursor never advanced and
-  paging looped forever. A cursor with an unparseable timestamp now returns an error (the handler
-  returns 500), the same as the Postgres twin, where the database rejects the string.
+  paging looped forever. A cursor with an unparseable timestamp now returns
+  `ErrInvalidSearchCursor`, which the chat search handler maps to `400 invalid_cursor` (review
+  round 1). The Postgres twin still returns 500 for that case: existing behaviour, a follow-up candidate.
 - All four raw `INSERT INTO conversations` sites (CreateTopic, EnsureGeneralTopic, PromoteDM,
   backfillTopicConversations) bind a UTC `time.Time` for `last_activity_at`/`created_at`. The
   `webchat_topic` columns keep RFC3339Nano text.
