@@ -27,9 +27,9 @@ func (s *store) clean(ctx context.Context, userID string, at time.Time, tp topic
 	}
 	// The ent conversations table takes the time.Time.
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO conversations (id, last_activity_at, created_at)
-		 VALUES (?, ?, ?)`,
-		tp.ID, nowT, nowT); err != nil {
+		`UPDATE conversations SET last_activity_at = ?, created_at = ?
+		 WHERE id = ?`,
+		nowT, nowT, tp.ID); err != nil {
 		return err
 	}
 	query := `SELECT id FROM messages WHERE created > ?`
@@ -52,8 +52,8 @@ func (s *store) violations(ctx context.Context, userID string, at time.Time, tp 
 	// A formatted string into the ent conversations table.
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO conversations (id, last_activity_at, created_at) VALUES (?, ?, ?)`,
-		tp.ID, now, now); err != nil { // want ent-bind-formatted
+		`UPDATE conversations SET last_activity_at = ?, created_at = ? WHERE id = ?`,
+		now, now, tp.ID); err != nil { // want ent-bind-formatted
 		return err
 	}
 	query := "SELECT id FROM messages WHERE 1=1"
