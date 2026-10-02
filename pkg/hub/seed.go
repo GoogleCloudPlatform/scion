@@ -856,6 +856,86 @@ func BackfillRoleBindings(ctx context.Context, s store.Store) error {
 		return fmt.Errorf("backfill project owner role bindings: %w", err)
 	}
 
+	// Clear the legacy Group.OwnerID copied from Project.OwnerID onto
+	// project members groups (ptone/scion#2599).
+	if err := backfillClearProjectMembersGroupOwners(ctx, s); err != nil {
+		return fmt.Errorf("clear project members group owners: %w", err)
+	}
+
+	return nil
+}
+
+// legacyProjectMembersGroupAnnotation is the project-members-group marker
+// written by the entadapter marker backfill
+// (BackfillProjectMembersGroupMarkers). It differs from
+// systemProjectMembersGroupAnnotation, the key createProjectMembersGroup
+// writes; ptone/scion#2556 tracks that mismatch. Until it is resolved, the
+// owner-clearing backfill matches either key.
+const legacyProjectMembersGroupAnnotation = "scion.io/system-project-members-group"
+
+// hasProjectMembersGroupMarker reports whether g carries either
+// project-members-group marker and belongs to a project.
+func hasProjectMembersGroupMarker(g *store.Group) bool {
+	if g == nil || g.ProjectID == "" || g.Annotations == nil {
+		return false
+	}
+	return g.Annotations[systemProjectMembersGroupAnnotation] == "true" ||
+		g.Annotations[legacyProjectMembersGroupAnnotation] == "true"
+}
+
+// backfillClearProjectMembersGroupOwners clears Group.OwnerID on every
+// project members group (ptone/scion#2599). createProjectMembersGroup used to
+// copy Project.OwnerID into Group.OwnerID, and the owner/user/group
+// relationship row grants group.* to Group.OwnerID, so a creator removed
+// from the project without an ownership transfer kept managing the members
+// group. Project.OwnerID confers no authority (ptone/scion#2586), and the
+// members group is now created without an owner.
+//
+// Groups are identified by the project-members-group marker annotation
+// (either key, see legacyProjectMembersGroupAnnotation), never by slug, so a
+// user-created group with a look-alike slug is left untouched. The pass runs
+// on every startup and is idempotent: a group whose OwnerID is already empty
+// is skipped, so a second run changes nothing. Per-group update errors are
+// logged and skipped.
+func backfillClearProjectMembersGroupOwners(ctx context.Context, s store.Store) error {
+	var cursor string
+	var cleared int
+	for {
+		groups, err := s.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{
+			Limit:          200,
+			Cursor:         cursor,
+			SkipTotalCount: true,
+		})
+		if err != nil {
+			return fmt.Errorf("list groups for members group owner backfill: %w", err)
+		}
+
+		for i := range groups.Items {
+			g := &groups.Items[i]
+			if g.OwnerID == "" || !hasProjectMembersGroupMarker(g) {
+				continue
+			}
+			prevOwner := g.OwnerID
+			g.OwnerID = ""
+			if err := s.UpdateGroup(ctx, g); err != nil {
+				slog.Warn("failed to clear project members group owner during backfill",
+					"group_id", g.ID, "project_id", g.ProjectID, "error", err)
+				continue
+			}
+			slog.Info("cleared project members group owner",
+				"group_id", g.ID, "project_id", g.ProjectID, "previous_owner_id", prevOwner)
+			cleared++
+		}
+
+		if groups.NextCursor == "" {
+			break
+		}
+		cursor = groups.NextCursor
+	}
+
+	if cleared > 0 {
+		slog.Info("cleared project members group owners", "cleared", cleared)
+	}
 	return nil
 }
 

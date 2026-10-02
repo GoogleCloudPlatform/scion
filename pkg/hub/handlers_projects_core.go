@@ -726,21 +726,19 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 		Slug:      membersSlug,
 		GroupType: store.GroupTypeExplicit,
 		ProjectID: project.ID,
-		OwnerID:   project.OwnerID,
+		// OwnerID is deliberately left empty (ptone/scion#2599). The
+		// owner/user/group relationship row grants group.* to Group.OwnerID,
+		// and Project.OwnerID is display metadata that confers no authority
+		// (ptone/scion#2586). Copying it here would let a creator removed
+		// without an ownership transfer keep managing the members group.
+		// Members are managed through the project members endpoints;
+		// mutating this group through the group API is hub-admin-only.
 		CreatedBy: project.CreatedBy,
 		Annotations: map[string]string{
 			systemProjectMembersGroupAnnotation: "true",
 		},
 	}
 	createErr := s.store.CreateGroup(ctx, membersGroup)
-	if createErr != nil && errors.Is(createErr, store.ErrInvalidInput) && membersGroup.OwnerID != "" {
-		// FK violation: the owner user does not exist in the store. Retry
-		// without OwnerID so the group is still created for collaboration.
-		s.projectsLogger().Warn("project members group owner not found, retrying without owner",
-			"project_id", project.ID, "owner_id", membersGroup.OwnerID, "error", createErr.Error())
-		membersGroup.OwnerID = ""
-		createErr = s.store.CreateGroup(ctx, membersGroup)
-	}
 	if createErr != nil {
 		if !errors.Is(createErr, store.ErrAlreadyExists) {
 			s.projectsLogger().Warn("failed to create project members group", "project_id", project.ID, "error", createErr.Error())
@@ -762,15 +760,10 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 					"project_id", project.ID, "slug", membersSlug, "group", existing.ID)
 				return
 			} else {
+				// Adopt the existing group as is. Its OwnerID is never
+				// (re)filled from Project.OwnerID (ptone/scion#2599); the
+				// startup backfill clears any legacy value.
 				membersGroup = existing
-				// Update the owner in case it changed.
-				if membersGroup.OwnerID == "" && project.OwnerID != "" {
-					membersGroup.OwnerID = project.OwnerID
-					if updateErr := s.store.UpdateGroup(ctx, membersGroup); updateErr != nil {
-						s.projectsLogger().Warn("failed to update existing project members group",
-							"project_id", project.ID, "slug", membersSlug, "error", updateErr.Error())
-					}
-				}
 			}
 		}
 	} else {
