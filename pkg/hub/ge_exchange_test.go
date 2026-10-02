@@ -30,6 +30,10 @@ import (
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -299,18 +303,37 @@ func newTestExchangeServiceWithExtStore(validator GoogleCredentialValidator, use
 // ent.Client to the same database file — callers can use two instances to
 // simulate cross-instance convergence. Cleanup is registered on t.
 //
-// Opens through entc.OpenSQLite (not a raw sql.Open) so the store boundary
-// gets the same "_timezone=UTC" DSN option and UTC mutation hook as every
-// other ent/SQLite client (tz-refactor design §2.1.2) — a raw sql.Open here
-// previously bypassed both, so a bare time.Now() default (e.g.
-// ExternalIdentity.CreatedAt) stored a numeric-zone-abbreviation wall clock
-// under a Kathmandu-like time.Local, which ent then failed to Scan back.
-func newPersistentTestExchangeService(t *testing.T, dbPath string) (*GEExchangeService, store.Store, ExternalIdentityStore) {
+// Opens via a raw sql.Open(driverName, ...), not entc.OpenSQLite, because
+// this file has no "!no_sqlite" build constraint and must keep working
+// under `go test -tags no_sqlite` (make test-fast), where modernc.org/sqlite
+// — and so entc.OpenSQLite's hardcoded "sqlite" driver — is unavailable;
+// driverName is whatever SQLite driver the build actually links (modernc's
+// "sqlite", or the cgo "sqlite3" some webchat test files register even
+// under no_sqlite). entc.OpenSQLite's "_timezone=UTC" DSN option is
+// modernc-specific and so can't travel with it, but entc.UTCTimeHook is
+// driver-agnostic (it converts the Go time.Time value before it is ever
+// bound), so it's registered explicitly below to get the same write-side
+// normalisation (tz-refactor design §2.1.2): a raw sql.Open with no hook
+// previously let a bare time.Now() default (e.g. ExternalIdentity.CreatedAt)
+// store a numeric-zone-abbreviation wall clock under a Kathmandu-like
+// time.Local, which ent then failed to Scan back.
+func newPersistentTestExchangeService(t *testing.T, dbPath, driverName string) (*GEExchangeService, store.Store, ExternalIdentityStore) {
 	t.Helper()
-	client, err := entc.OpenSQLite("file:"+dbPath, entc.PoolConfig{MaxOpenConns: 1})
+	db, err := sql.Open(driverName, "file:"+dbPath)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		_ = db.Close()
+		t.Fatalf("enable sqlite foreign keys: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
+		_ = db.Close()
+		t.Fatalf("enable sqlite WAL mode: %v", err)
+	}
+	client := ent.NewClient(ent.Driver(entsql.OpenDB(dialect.SQLite, db)))
+	client.Use(entc.UTCTimeHook)
 	t.Cleanup(func() { _ = client.Close() })
 	if err := entc.AutoMigrate(context.Background(), client); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -1537,9 +1560,9 @@ func TestGEExchange_ConcurrentFirstLinkage_PersistentStore(t *testing.T) {
 	dbPath := tmpDir + "/concurrent_test.db"
 
 	// Create the first service+store pair.
-	svc1, store1, extStore1 := newPersistentTestExchangeService(t, dbPath)
+	svc1, store1, extStore1 := newPersistentTestExchangeService(t, dbPath, driverName)
 	// Create the second service+store pair using the same DB file.
-	svc2, store2, extStore2 := newPersistentTestExchangeService(t, dbPath)
+	svc2, store2, extStore2 := newPersistentTestExchangeService(t, dbPath, driverName)
 	_, _, _ = store1, store2, extStore2 // used only for cleanup via t.Cleanup
 
 	identity := validGmailIdentity()

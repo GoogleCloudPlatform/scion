@@ -100,15 +100,25 @@ func withUTCTimezone(dsn string) string {
 	return base + "?" + values.Encode()
 }
 
-// utcTimeHook is an Ent mutation hook that converts every time.Time field
+// UTCTimeHook is an Ent mutation hook that converts every time.Time field
 // value being set in a mutation (explicit or defaulted) to UTC before it is
 // persisted. It is redundant with the SQLite DSN "_timezone=UTC" option for
-// values that reach the database, but it also normalises what a
-// create/update echoes back to the caller, and it is the only one of the two
-// mechanisms that does anything on Postgres (field.Time maps to
+// values that reach the database through a connection opened by OpenSQLite
+// (modernc formats an already-UTC time.Time as canonical "... +0000 UTC"
+// text even with no "_timezone" option set, since formatTime only adjusts
+// the value's Location when one is configured), but it also normalises what
+// a create/update echoes back to the caller, and it is the only one of the
+// two mechanisms that does anything on Postgres (field.Time maps to
 // timestamptz there, so the hook's only effect is the echoed-back value; see
 // tz-refactor design §2.1.2).
-func utcTimeHook(next ent.Mutator) ent.Mutator {
+//
+// Exported so callers that build an *ent.Client around a driver other than
+// OpenSQLite/OpenPostgres (for example a test harness that must keep working
+// under the "no_sqlite" build tag, where only a generic cgo SQLite driver —
+// not modernc, so not OpenSQLite's "_timezone" DSN option — is available)
+// can still register it with client.Use(entc.UTCTimeHook) and get the same
+// write-side normalisation.
+func UTCTimeHook(next ent.Mutator) ent.Mutator {
 	return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
 		for _, name := range m.Fields() {
 			v, ok := m.Field(name)
@@ -125,7 +135,7 @@ func utcTimeHook(next ent.Mutator) ent.Mutator {
 			// whose String() form appends " m=...". Only .UTC()/.In() strip
 			// it, and doing so unconditionally is cheap and idempotent.
 			if err := m.SetField(name, t.UTC()); err != nil {
-				return nil, fmt.Errorf("utcTimeHook: setting field %q to UTC: %w", name, err)
+				return nil, fmt.Errorf("UTCTimeHook: setting field %q to UTC: %w", name, err)
 			}
 		}
 		return next.Mutate(ctx, m)
@@ -153,7 +163,7 @@ func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, e
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.SQLite, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
-	client.Use(utcTimeHook)
+	client.Use(UTCTimeHook)
 	return client, nil
 }
 
@@ -186,7 +196,7 @@ func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
 	}
 	drv := entsql.OpenDB(dialect.SQLite, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
-	client.Use(utcTimeHook)
+	client.Use(UTCTimeHook)
 	return client, nil
 }
 
@@ -268,7 +278,7 @@ func openPostgres(dsn string, pool PoolConfig, readOnly bool, opts ...ent.Option
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.Postgres, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
-	client.Use(utcTimeHook)
+	client.Use(UTCTimeHook)
 	return client, nil
 }
 
