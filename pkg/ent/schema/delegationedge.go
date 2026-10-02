@@ -33,6 +33,17 @@ type DelegationEdge struct {
 	ent.Schema
 }
 
+// Mixin of the DelegationEdge: recorded provenance, the frozen effect
+// ceiling and the deactivation record. All columns default to the
+// unrecorded zero values.
+func (DelegationEdge) Mixin() []ent.Mixin {
+	return []ent.Mixin{
+		AuthorityProvenanceMixin{},
+		EffectCeilingMixin{},
+		DeactivationMixin{},
+	}
+}
+
 // Fields of the DelegationEdge.
 func (DelegationEdge) Fields() []ent.Field {
 	return []ent.Field{

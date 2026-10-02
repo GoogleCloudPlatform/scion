@@ -24,6 +24,300 @@ type DelegationEdgeCreate struct {
 	conflict []sql.ConflictOption
 }
 
+// SetProvenanceVersion sets the "provenance_version" field.
+func (_c *DelegationEdgeCreate) SetProvenanceVersion(v int) *DelegationEdgeCreate {
+	_c.mutation.SetProvenanceVersion(v)
+	return _c
+}
+
+// SetNillableProvenanceVersion sets the "provenance_version" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableProvenanceVersion(v *int) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetProvenanceVersion(*v)
+	}
+	return _c
+}
+
+// SetSourcePrincipalKind sets the "source_principal_kind" field.
+func (_c *DelegationEdgeCreate) SetSourcePrincipalKind(v string) *DelegationEdgeCreate {
+	_c.mutation.SetSourcePrincipalKind(v)
+	return _c
+}
+
+// SetNillableSourcePrincipalKind sets the "source_principal_kind" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableSourcePrincipalKind(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetSourcePrincipalKind(*v)
+	}
+	return _c
+}
+
+// SetSourcePrincipalID sets the "source_principal_id" field.
+func (_c *DelegationEdgeCreate) SetSourcePrincipalID(v string) *DelegationEdgeCreate {
+	_c.mutation.SetSourcePrincipalID(v)
+	return _c
+}
+
+// SetNillableSourcePrincipalID sets the "source_principal_id" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableSourcePrincipalID(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetSourcePrincipalID(*v)
+	}
+	return _c
+}
+
+// SetSourceCredentialKind sets the "source_credential_kind" field.
+func (_c *DelegationEdgeCreate) SetSourceCredentialKind(v string) *DelegationEdgeCreate {
+	_c.mutation.SetSourceCredentialKind(v)
+	return _c
+}
+
+// SetNillableSourceCredentialKind sets the "source_credential_kind" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableSourceCredentialKind(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetSourceCredentialKind(*v)
+	}
+	return _c
+}
+
+// SetSourceCredentialID sets the "source_credential_id" field.
+func (_c *DelegationEdgeCreate) SetSourceCredentialID(v string) *DelegationEdgeCreate {
+	_c.mutation.SetSourceCredentialID(v)
+	return _c
+}
+
+// SetNillableSourceCredentialID sets the "source_credential_id" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableSourceCredentialID(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetSourceCredentialID(*v)
+	}
+	return _c
+}
+
+// SetSourceEventID sets the "source_event_id" field.
+func (_c *DelegationEdgeCreate) SetSourceEventID(v string) *DelegationEdgeCreate {
+	_c.mutation.SetSourceEventID(v)
+	return _c
+}
+
+// SetNillableSourceEventID sets the "source_event_id" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableSourceEventID(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetSourceEventID(*v)
+	}
+	return _c
+}
+
+// SetSourceScheduleID sets the "source_schedule_id" field.
+func (_c *DelegationEdgeCreate) SetSourceScheduleID(v string) *DelegationEdgeCreate {
+	_c.mutation.SetSourceScheduleID(v)
+	return _c
+}
+
+// SetNillableSourceScheduleID sets the "source_schedule_id" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableSourceScheduleID(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetSourceScheduleID(*v)
+	}
+	return _c
+}
+
+// SetSourceAuthorizationRevision sets the "source_authorization_revision" field.
+func (_c *DelegationEdgeCreate) SetSourceAuthorizationRevision(v int) *DelegationEdgeCreate {
+	_c.mutation.SetSourceAuthorizationRevision(v)
+	return _c
+}
+
+// SetNillableSourceAuthorizationRevision sets the "source_authorization_revision" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableSourceAuthorizationRevision(v *int) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetSourceAuthorizationRevision(*v)
+	}
+	return _c
+}
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (_c *DelegationEdgeCreate) SetInitiatorPrincipalKind(v string) *DelegationEdgeCreate {
+	_c.mutation.SetInitiatorPrincipalKind(v)
+	return _c
+}
+
+// SetNillableInitiatorPrincipalKind sets the "initiator_principal_kind" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableInitiatorPrincipalKind(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetInitiatorPrincipalKind(*v)
+	}
+	return _c
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (_c *DelegationEdgeCreate) SetInitiatorPrincipalID(v string) *DelegationEdgeCreate {
+	_c.mutation.SetInitiatorPrincipalID(v)
+	return _c
+}
+
+// SetNillableInitiatorPrincipalID sets the "initiator_principal_id" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableInitiatorPrincipalID(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetInitiatorPrincipalID(*v)
+	}
+	return _c
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (_c *DelegationEdgeCreate) SetInitiatorCredentialKind(v string) *DelegationEdgeCreate {
+	_c.mutation.SetInitiatorCredentialKind(v)
+	return _c
+}
+
+// SetNillableInitiatorCredentialKind sets the "initiator_credential_kind" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableInitiatorCredentialKind(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetInitiatorCredentialKind(*v)
+	}
+	return _c
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (_c *DelegationEdgeCreate) SetInitiatorCredentialID(v string) *DelegationEdgeCreate {
+	_c.mutation.SetInitiatorCredentialID(v)
+	return _c
+}
+
+// SetNillableInitiatorCredentialID sets the "initiator_credential_id" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableInitiatorCredentialID(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetInitiatorCredentialID(*v)
+	}
+	return _c
+}
+
+// SetCeilingKind sets the "ceiling_kind" field.
+func (_c *DelegationEdgeCreate) SetCeilingKind(v string) *DelegationEdgeCreate {
+	_c.mutation.SetCeilingKind(v)
+	return _c
+}
+
+// SetNillableCeilingKind sets the "ceiling_kind" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableCeilingKind(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetCeilingKind(*v)
+	}
+	return _c
+}
+
+// SetCeilingVersion sets the "ceiling_version" field.
+func (_c *DelegationEdgeCreate) SetCeilingVersion(v int32) *DelegationEdgeCreate {
+	_c.mutation.SetCeilingVersion(v)
+	return _c
+}
+
+// SetNillableCeilingVersion sets the "ceiling_version" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableCeilingVersion(v *int32) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetCeilingVersion(*v)
+	}
+	return _c
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (_c *DelegationEdgeCreate) SetCeilingPermissionIds(v string) *DelegationEdgeCreate {
+	_c.mutation.SetCeilingPermissionIds(v)
+	return _c
+}
+
+// SetNillableCeilingPermissionIds sets the "ceiling_permission_ids" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableCeilingPermissionIds(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetCeilingPermissionIds(*v)
+	}
+	return _c
+}
+
+// SetCeilingBoundaryKind sets the "ceiling_boundary_kind" field.
+func (_c *DelegationEdgeCreate) SetCeilingBoundaryKind(v string) *DelegationEdgeCreate {
+	_c.mutation.SetCeilingBoundaryKind(v)
+	return _c
+}
+
+// SetNillableCeilingBoundaryKind sets the "ceiling_boundary_kind" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableCeilingBoundaryKind(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetCeilingBoundaryKind(*v)
+	}
+	return _c
+}
+
+// SetCeilingBoundaryProjectID sets the "ceiling_boundary_project_id" field.
+func (_c *DelegationEdgeCreate) SetCeilingBoundaryProjectID(v string) *DelegationEdgeCreate {
+	_c.mutation.SetCeilingBoundaryProjectID(v)
+	return _c
+}
+
+// SetNillableCeilingBoundaryProjectID sets the "ceiling_boundary_project_id" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableCeilingBoundaryProjectID(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetCeilingBoundaryProjectID(*v)
+	}
+	return _c
+}
+
+// SetCeilingSourceExpiresAt sets the "ceiling_source_expires_at" field.
+func (_c *DelegationEdgeCreate) SetCeilingSourceExpiresAt(v time.Time) *DelegationEdgeCreate {
+	_c.mutation.SetCeilingSourceExpiresAt(v)
+	return _c
+}
+
+// SetNillableCeilingSourceExpiresAt sets the "ceiling_source_expires_at" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableCeilingSourceExpiresAt(v *time.Time) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetCeilingSourceExpiresAt(*v)
+	}
+	return _c
+}
+
+// SetDeactivationCause sets the "deactivation_cause" field.
+func (_c *DelegationEdgeCreate) SetDeactivationCause(v string) *DelegationEdgeCreate {
+	_c.mutation.SetDeactivationCause(v)
+	return _c
+}
+
+// SetNillableDeactivationCause sets the "deactivation_cause" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableDeactivationCause(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetDeactivationCause(*v)
+	}
+	return _c
+}
+
+// SetDeactivatedAt sets the "deactivated_at" field.
+func (_c *DelegationEdgeCreate) SetDeactivatedAt(v time.Time) *DelegationEdgeCreate {
+	_c.mutation.SetDeactivatedAt(v)
+	return _c
+}
+
+// SetNillableDeactivatedAt sets the "deactivated_at" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableDeactivatedAt(v *time.Time) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetDeactivatedAt(*v)
+	}
+	return _c
+}
+
+// SetDeactivationOpID sets the "deactivation_op_id" field.
+func (_c *DelegationEdgeCreate) SetDeactivationOpID(v string) *DelegationEdgeCreate {
+	_c.mutation.SetDeactivationOpID(v)
+	return _c
+}
+
+// SetNillableDeactivationOpID sets the "deactivation_op_id" field if the given value is not nil.
+func (_c *DelegationEdgeCreate) SetNillableDeactivationOpID(v *string) *DelegationEdgeCreate {
+	if v != nil {
+		_c.SetDeactivationOpID(*v)
+	}
+	return _c
+}
+
 // SetDelegatorType sets the "delegator_type" field.
 func (_c *DelegationEdgeCreate) SetDelegatorType(v delegationedge.DelegatorType) *DelegationEdgeCreate {
 	_c.mutation.SetDelegatorType(v)
@@ -179,6 +473,74 @@ func (_c *DelegationEdgeCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *DelegationEdgeCreate) defaults() {
+	if _, ok := _c.mutation.ProvenanceVersion(); !ok {
+		v := delegationedge.DefaultProvenanceVersion
+		_c.mutation.SetProvenanceVersion(v)
+	}
+	if _, ok := _c.mutation.SourcePrincipalKind(); !ok {
+		v := delegationedge.DefaultSourcePrincipalKind
+		_c.mutation.SetSourcePrincipalKind(v)
+	}
+	if _, ok := _c.mutation.SourcePrincipalID(); !ok {
+		v := delegationedge.DefaultSourcePrincipalID
+		_c.mutation.SetSourcePrincipalID(v)
+	}
+	if _, ok := _c.mutation.SourceCredentialKind(); !ok {
+		v := delegationedge.DefaultSourceCredentialKind
+		_c.mutation.SetSourceCredentialKind(v)
+	}
+	if _, ok := _c.mutation.SourceCredentialID(); !ok {
+		v := delegationedge.DefaultSourceCredentialID
+		_c.mutation.SetSourceCredentialID(v)
+	}
+	if _, ok := _c.mutation.SourceEventID(); !ok {
+		v := delegationedge.DefaultSourceEventID
+		_c.mutation.SetSourceEventID(v)
+	}
+	if _, ok := _c.mutation.SourceAuthorizationRevision(); !ok {
+		v := delegationedge.DefaultSourceAuthorizationRevision
+		_c.mutation.SetSourceAuthorizationRevision(v)
+	}
+	if _, ok := _c.mutation.InitiatorPrincipalKind(); !ok {
+		v := delegationedge.DefaultInitiatorPrincipalKind
+		_c.mutation.SetInitiatorPrincipalKind(v)
+	}
+	if _, ok := _c.mutation.InitiatorPrincipalID(); !ok {
+		v := delegationedge.DefaultInitiatorPrincipalID
+		_c.mutation.SetInitiatorPrincipalID(v)
+	}
+	if _, ok := _c.mutation.InitiatorCredentialKind(); !ok {
+		v := delegationedge.DefaultInitiatorCredentialKind
+		_c.mutation.SetInitiatorCredentialKind(v)
+	}
+	if _, ok := _c.mutation.InitiatorCredentialID(); !ok {
+		v := delegationedge.DefaultInitiatorCredentialID
+		_c.mutation.SetInitiatorCredentialID(v)
+	}
+	if _, ok := _c.mutation.CeilingKind(); !ok {
+		v := delegationedge.DefaultCeilingKind
+		_c.mutation.SetCeilingKind(v)
+	}
+	if _, ok := _c.mutation.CeilingVersion(); !ok {
+		v := delegationedge.DefaultCeilingVersion
+		_c.mutation.SetCeilingVersion(v)
+	}
+	if _, ok := _c.mutation.CeilingBoundaryKind(); !ok {
+		v := delegationedge.DefaultCeilingBoundaryKind
+		_c.mutation.SetCeilingBoundaryKind(v)
+	}
+	if _, ok := _c.mutation.CeilingBoundaryProjectID(); !ok {
+		v := delegationedge.DefaultCeilingBoundaryProjectID
+		_c.mutation.SetCeilingBoundaryProjectID(v)
+	}
+	if _, ok := _c.mutation.DeactivationCause(); !ok {
+		v := delegationedge.DefaultDeactivationCause
+		_c.mutation.SetDeactivationCause(v)
+	}
+	if _, ok := _c.mutation.DeactivationOpID(); !ok {
+		v := delegationedge.DefaultDeactivationOpID
+		_c.mutation.SetDeactivationOpID(v)
+	}
 	if _, ok := _c.mutation.ScopeID(); !ok {
 		v := delegationedge.DefaultScopeID
 		_c.mutation.SetScopeID(v)
@@ -207,6 +569,57 @@ func (_c *DelegationEdgeCreate) defaults() {
 
 // check runs all checks and user-defined validators on the builder.
 func (_c *DelegationEdgeCreate) check() error {
+	if _, ok := _c.mutation.ProvenanceVersion(); !ok {
+		return &ValidationError{Name: "provenance_version", err: errors.New(`ent: missing required field "DelegationEdge.provenance_version"`)}
+	}
+	if _, ok := _c.mutation.SourcePrincipalKind(); !ok {
+		return &ValidationError{Name: "source_principal_kind", err: errors.New(`ent: missing required field "DelegationEdge.source_principal_kind"`)}
+	}
+	if _, ok := _c.mutation.SourcePrincipalID(); !ok {
+		return &ValidationError{Name: "source_principal_id", err: errors.New(`ent: missing required field "DelegationEdge.source_principal_id"`)}
+	}
+	if _, ok := _c.mutation.SourceCredentialKind(); !ok {
+		return &ValidationError{Name: "source_credential_kind", err: errors.New(`ent: missing required field "DelegationEdge.source_credential_kind"`)}
+	}
+	if _, ok := _c.mutation.SourceCredentialID(); !ok {
+		return &ValidationError{Name: "source_credential_id", err: errors.New(`ent: missing required field "DelegationEdge.source_credential_id"`)}
+	}
+	if _, ok := _c.mutation.SourceEventID(); !ok {
+		return &ValidationError{Name: "source_event_id", err: errors.New(`ent: missing required field "DelegationEdge.source_event_id"`)}
+	}
+	if _, ok := _c.mutation.SourceAuthorizationRevision(); !ok {
+		return &ValidationError{Name: "source_authorization_revision", err: errors.New(`ent: missing required field "DelegationEdge.source_authorization_revision"`)}
+	}
+	if _, ok := _c.mutation.InitiatorPrincipalKind(); !ok {
+		return &ValidationError{Name: "initiator_principal_kind", err: errors.New(`ent: missing required field "DelegationEdge.initiator_principal_kind"`)}
+	}
+	if _, ok := _c.mutation.InitiatorPrincipalID(); !ok {
+		return &ValidationError{Name: "initiator_principal_id", err: errors.New(`ent: missing required field "DelegationEdge.initiator_principal_id"`)}
+	}
+	if _, ok := _c.mutation.InitiatorCredentialKind(); !ok {
+		return &ValidationError{Name: "initiator_credential_kind", err: errors.New(`ent: missing required field "DelegationEdge.initiator_credential_kind"`)}
+	}
+	if _, ok := _c.mutation.InitiatorCredentialID(); !ok {
+		return &ValidationError{Name: "initiator_credential_id", err: errors.New(`ent: missing required field "DelegationEdge.initiator_credential_id"`)}
+	}
+	if _, ok := _c.mutation.CeilingKind(); !ok {
+		return &ValidationError{Name: "ceiling_kind", err: errors.New(`ent: missing required field "DelegationEdge.ceiling_kind"`)}
+	}
+	if _, ok := _c.mutation.CeilingVersion(); !ok {
+		return &ValidationError{Name: "ceiling_version", err: errors.New(`ent: missing required field "DelegationEdge.ceiling_version"`)}
+	}
+	if _, ok := _c.mutation.CeilingBoundaryKind(); !ok {
+		return &ValidationError{Name: "ceiling_boundary_kind", err: errors.New(`ent: missing required field "DelegationEdge.ceiling_boundary_kind"`)}
+	}
+	if _, ok := _c.mutation.CeilingBoundaryProjectID(); !ok {
+		return &ValidationError{Name: "ceiling_boundary_project_id", err: errors.New(`ent: missing required field "DelegationEdge.ceiling_boundary_project_id"`)}
+	}
+	if _, ok := _c.mutation.DeactivationCause(); !ok {
+		return &ValidationError{Name: "deactivation_cause", err: errors.New(`ent: missing required field "DelegationEdge.deactivation_cause"`)}
+	}
+	if _, ok := _c.mutation.DeactivationOpID(); !ok {
+		return &ValidationError{Name: "deactivation_op_id", err: errors.New(`ent: missing required field "DelegationEdge.deactivation_op_id"`)}
+	}
 	if _, ok := _c.mutation.DelegatorType(); !ok {
 		return &ValidationError{Name: "delegator_type", err: errors.New(`ent: missing required field "DelegationEdge.delegator_type"`)}
 	}
@@ -306,6 +719,90 @@ func (_c *DelegationEdgeCreate) createSpec() (*DelegationEdge, *sqlgraph.CreateS
 		_node.ID = id
 		_spec.ID.Value = &id
 	}
+	if value, ok := _c.mutation.ProvenanceVersion(); ok {
+		_spec.SetField(delegationedge.FieldProvenanceVersion, field.TypeInt, value)
+		_node.ProvenanceVersion = value
+	}
+	if value, ok := _c.mutation.SourcePrincipalKind(); ok {
+		_spec.SetField(delegationedge.FieldSourcePrincipalKind, field.TypeString, value)
+		_node.SourcePrincipalKind = value
+	}
+	if value, ok := _c.mutation.SourcePrincipalID(); ok {
+		_spec.SetField(delegationedge.FieldSourcePrincipalID, field.TypeString, value)
+		_node.SourcePrincipalID = value
+	}
+	if value, ok := _c.mutation.SourceCredentialKind(); ok {
+		_spec.SetField(delegationedge.FieldSourceCredentialKind, field.TypeString, value)
+		_node.SourceCredentialKind = value
+	}
+	if value, ok := _c.mutation.SourceCredentialID(); ok {
+		_spec.SetField(delegationedge.FieldSourceCredentialID, field.TypeString, value)
+		_node.SourceCredentialID = value
+	}
+	if value, ok := _c.mutation.SourceEventID(); ok {
+		_spec.SetField(delegationedge.FieldSourceEventID, field.TypeString, value)
+		_node.SourceEventID = value
+	}
+	if value, ok := _c.mutation.SourceScheduleID(); ok {
+		_spec.SetField(delegationedge.FieldSourceScheduleID, field.TypeString, value)
+		_node.SourceScheduleID = &value
+	}
+	if value, ok := _c.mutation.SourceAuthorizationRevision(); ok {
+		_spec.SetField(delegationedge.FieldSourceAuthorizationRevision, field.TypeInt, value)
+		_node.SourceAuthorizationRevision = value
+	}
+	if value, ok := _c.mutation.InitiatorPrincipalKind(); ok {
+		_spec.SetField(delegationedge.FieldInitiatorPrincipalKind, field.TypeString, value)
+		_node.InitiatorPrincipalKind = value
+	}
+	if value, ok := _c.mutation.InitiatorPrincipalID(); ok {
+		_spec.SetField(delegationedge.FieldInitiatorPrincipalID, field.TypeString, value)
+		_node.InitiatorPrincipalID = value
+	}
+	if value, ok := _c.mutation.InitiatorCredentialKind(); ok {
+		_spec.SetField(delegationedge.FieldInitiatorCredentialKind, field.TypeString, value)
+		_node.InitiatorCredentialKind = value
+	}
+	if value, ok := _c.mutation.InitiatorCredentialID(); ok {
+		_spec.SetField(delegationedge.FieldInitiatorCredentialID, field.TypeString, value)
+		_node.InitiatorCredentialID = value
+	}
+	if value, ok := _c.mutation.CeilingKind(); ok {
+		_spec.SetField(delegationedge.FieldCeilingKind, field.TypeString, value)
+		_node.CeilingKind = value
+	}
+	if value, ok := _c.mutation.CeilingVersion(); ok {
+		_spec.SetField(delegationedge.FieldCeilingVersion, field.TypeInt32, value)
+		_node.CeilingVersion = value
+	}
+	if value, ok := _c.mutation.CeilingPermissionIds(); ok {
+		_spec.SetField(delegationedge.FieldCeilingPermissionIds, field.TypeString, value)
+		_node.CeilingPermissionIds = &value
+	}
+	if value, ok := _c.mutation.CeilingBoundaryKind(); ok {
+		_spec.SetField(delegationedge.FieldCeilingBoundaryKind, field.TypeString, value)
+		_node.CeilingBoundaryKind = value
+	}
+	if value, ok := _c.mutation.CeilingBoundaryProjectID(); ok {
+		_spec.SetField(delegationedge.FieldCeilingBoundaryProjectID, field.TypeString, value)
+		_node.CeilingBoundaryProjectID = value
+	}
+	if value, ok := _c.mutation.CeilingSourceExpiresAt(); ok {
+		_spec.SetField(delegationedge.FieldCeilingSourceExpiresAt, field.TypeTime, value)
+		_node.CeilingSourceExpiresAt = &value
+	}
+	if value, ok := _c.mutation.DeactivationCause(); ok {
+		_spec.SetField(delegationedge.FieldDeactivationCause, field.TypeString, value)
+		_node.DeactivationCause = value
+	}
+	if value, ok := _c.mutation.DeactivatedAt(); ok {
+		_spec.SetField(delegationedge.FieldDeactivatedAt, field.TypeTime, value)
+		_node.DeactivatedAt = &value
+	}
+	if value, ok := _c.mutation.DeactivationOpID(); ok {
+		_spec.SetField(delegationedge.FieldDeactivationOpID, field.TypeString, value)
+		_node.DeactivationOpID = value
+	}
 	if value, ok := _c.mutation.DelegatorType(); ok {
 		_spec.SetField(delegationedge.FieldDelegatorType, field.TypeEnum, value)
 		_node.DelegatorType = value
@@ -357,7 +854,7 @@ func (_c *DelegationEdgeCreate) createSpec() (*DelegationEdge, *sqlgraph.CreateS
 // of the `INSERT` statement. For example:
 //
 //	client.DelegationEdge.Create().
-//		SetDelegatorType(v).
+//		SetProvenanceVersion(v).
 //		OnConflict(
 //			// Update the row with the new values
 //			// the was proposed for insertion.
@@ -366,7 +863,7 @@ func (_c *DelegationEdgeCreate) createSpec() (*DelegationEdge, *sqlgraph.CreateS
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.DelegationEdgeUpsert) {
-//			SetDelegatorType(v+v).
+//			SetProvenanceVersion(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *DelegationEdgeCreate) OnConflict(opts ...sql.ConflictOption) *DelegationEdgeUpsertOne {
@@ -401,6 +898,300 @@ type (
 		*sql.UpdateSet
 	}
 )
+
+// SetProvenanceVersion sets the "provenance_version" field.
+func (u *DelegationEdgeUpsert) SetProvenanceVersion(v int) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldProvenanceVersion, v)
+	return u
+}
+
+// UpdateProvenanceVersion sets the "provenance_version" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateProvenanceVersion() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldProvenanceVersion)
+	return u
+}
+
+// AddProvenanceVersion adds v to the "provenance_version" field.
+func (u *DelegationEdgeUpsert) AddProvenanceVersion(v int) *DelegationEdgeUpsert {
+	u.Add(delegationedge.FieldProvenanceVersion, v)
+	return u
+}
+
+// SetSourcePrincipalKind sets the "source_principal_kind" field.
+func (u *DelegationEdgeUpsert) SetSourcePrincipalKind(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldSourcePrincipalKind, v)
+	return u
+}
+
+// UpdateSourcePrincipalKind sets the "source_principal_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateSourcePrincipalKind() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldSourcePrincipalKind)
+	return u
+}
+
+// SetSourcePrincipalID sets the "source_principal_id" field.
+func (u *DelegationEdgeUpsert) SetSourcePrincipalID(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldSourcePrincipalID, v)
+	return u
+}
+
+// UpdateSourcePrincipalID sets the "source_principal_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateSourcePrincipalID() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldSourcePrincipalID)
+	return u
+}
+
+// SetSourceCredentialKind sets the "source_credential_kind" field.
+func (u *DelegationEdgeUpsert) SetSourceCredentialKind(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldSourceCredentialKind, v)
+	return u
+}
+
+// UpdateSourceCredentialKind sets the "source_credential_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateSourceCredentialKind() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldSourceCredentialKind)
+	return u
+}
+
+// SetSourceCredentialID sets the "source_credential_id" field.
+func (u *DelegationEdgeUpsert) SetSourceCredentialID(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldSourceCredentialID, v)
+	return u
+}
+
+// UpdateSourceCredentialID sets the "source_credential_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateSourceCredentialID() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldSourceCredentialID)
+	return u
+}
+
+// SetSourceEventID sets the "source_event_id" field.
+func (u *DelegationEdgeUpsert) SetSourceEventID(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldSourceEventID, v)
+	return u
+}
+
+// UpdateSourceEventID sets the "source_event_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateSourceEventID() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldSourceEventID)
+	return u
+}
+
+// SetSourceScheduleID sets the "source_schedule_id" field.
+func (u *DelegationEdgeUpsert) SetSourceScheduleID(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldSourceScheduleID, v)
+	return u
+}
+
+// UpdateSourceScheduleID sets the "source_schedule_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateSourceScheduleID() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldSourceScheduleID)
+	return u
+}
+
+// ClearSourceScheduleID clears the value of the "source_schedule_id" field.
+func (u *DelegationEdgeUpsert) ClearSourceScheduleID() *DelegationEdgeUpsert {
+	u.SetNull(delegationedge.FieldSourceScheduleID)
+	return u
+}
+
+// SetSourceAuthorizationRevision sets the "source_authorization_revision" field.
+func (u *DelegationEdgeUpsert) SetSourceAuthorizationRevision(v int) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldSourceAuthorizationRevision, v)
+	return u
+}
+
+// UpdateSourceAuthorizationRevision sets the "source_authorization_revision" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateSourceAuthorizationRevision() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldSourceAuthorizationRevision)
+	return u
+}
+
+// AddSourceAuthorizationRevision adds v to the "source_authorization_revision" field.
+func (u *DelegationEdgeUpsert) AddSourceAuthorizationRevision(v int) *DelegationEdgeUpsert {
+	u.Add(delegationedge.FieldSourceAuthorizationRevision, v)
+	return u
+}
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (u *DelegationEdgeUpsert) SetInitiatorPrincipalKind(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldInitiatorPrincipalKind, v)
+	return u
+}
+
+// UpdateInitiatorPrincipalKind sets the "initiator_principal_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateInitiatorPrincipalKind() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldInitiatorPrincipalKind)
+	return u
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (u *DelegationEdgeUpsert) SetInitiatorPrincipalID(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldInitiatorPrincipalID, v)
+	return u
+}
+
+// UpdateInitiatorPrincipalID sets the "initiator_principal_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateInitiatorPrincipalID() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldInitiatorPrincipalID)
+	return u
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (u *DelegationEdgeUpsert) SetInitiatorCredentialKind(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldInitiatorCredentialKind, v)
+	return u
+}
+
+// UpdateInitiatorCredentialKind sets the "initiator_credential_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateInitiatorCredentialKind() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldInitiatorCredentialKind)
+	return u
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (u *DelegationEdgeUpsert) SetInitiatorCredentialID(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldInitiatorCredentialID, v)
+	return u
+}
+
+// UpdateInitiatorCredentialID sets the "initiator_credential_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateInitiatorCredentialID() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldInitiatorCredentialID)
+	return u
+}
+
+// SetCeilingKind sets the "ceiling_kind" field.
+func (u *DelegationEdgeUpsert) SetCeilingKind(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldCeilingKind, v)
+	return u
+}
+
+// UpdateCeilingKind sets the "ceiling_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateCeilingKind() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldCeilingKind)
+	return u
+}
+
+// SetCeilingVersion sets the "ceiling_version" field.
+func (u *DelegationEdgeUpsert) SetCeilingVersion(v int32) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldCeilingVersion, v)
+	return u
+}
+
+// UpdateCeilingVersion sets the "ceiling_version" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateCeilingVersion() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldCeilingVersion)
+	return u
+}
+
+// AddCeilingVersion adds v to the "ceiling_version" field.
+func (u *DelegationEdgeUpsert) AddCeilingVersion(v int32) *DelegationEdgeUpsert {
+	u.Add(delegationedge.FieldCeilingVersion, v)
+	return u
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (u *DelegationEdgeUpsert) SetCeilingPermissionIds(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldCeilingPermissionIds, v)
+	return u
+}
+
+// UpdateCeilingPermissionIds sets the "ceiling_permission_ids" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateCeilingPermissionIds() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldCeilingPermissionIds)
+	return u
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (u *DelegationEdgeUpsert) ClearCeilingPermissionIds() *DelegationEdgeUpsert {
+	u.SetNull(delegationedge.FieldCeilingPermissionIds)
+	return u
+}
+
+// SetCeilingBoundaryKind sets the "ceiling_boundary_kind" field.
+func (u *DelegationEdgeUpsert) SetCeilingBoundaryKind(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldCeilingBoundaryKind, v)
+	return u
+}
+
+// UpdateCeilingBoundaryKind sets the "ceiling_boundary_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateCeilingBoundaryKind() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldCeilingBoundaryKind)
+	return u
+}
+
+// SetCeilingBoundaryProjectID sets the "ceiling_boundary_project_id" field.
+func (u *DelegationEdgeUpsert) SetCeilingBoundaryProjectID(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldCeilingBoundaryProjectID, v)
+	return u
+}
+
+// UpdateCeilingBoundaryProjectID sets the "ceiling_boundary_project_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateCeilingBoundaryProjectID() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldCeilingBoundaryProjectID)
+	return u
+}
+
+// SetCeilingSourceExpiresAt sets the "ceiling_source_expires_at" field.
+func (u *DelegationEdgeUpsert) SetCeilingSourceExpiresAt(v time.Time) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldCeilingSourceExpiresAt, v)
+	return u
+}
+
+// UpdateCeilingSourceExpiresAt sets the "ceiling_source_expires_at" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateCeilingSourceExpiresAt() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldCeilingSourceExpiresAt)
+	return u
+}
+
+// ClearCeilingSourceExpiresAt clears the value of the "ceiling_source_expires_at" field.
+func (u *DelegationEdgeUpsert) ClearCeilingSourceExpiresAt() *DelegationEdgeUpsert {
+	u.SetNull(delegationedge.FieldCeilingSourceExpiresAt)
+	return u
+}
+
+// SetDeactivationCause sets the "deactivation_cause" field.
+func (u *DelegationEdgeUpsert) SetDeactivationCause(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldDeactivationCause, v)
+	return u
+}
+
+// UpdateDeactivationCause sets the "deactivation_cause" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateDeactivationCause() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldDeactivationCause)
+	return u
+}
+
+// SetDeactivatedAt sets the "deactivated_at" field.
+func (u *DelegationEdgeUpsert) SetDeactivatedAt(v time.Time) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldDeactivatedAt, v)
+	return u
+}
+
+// UpdateDeactivatedAt sets the "deactivated_at" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateDeactivatedAt() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldDeactivatedAt)
+	return u
+}
+
+// ClearDeactivatedAt clears the value of the "deactivated_at" field.
+func (u *DelegationEdgeUpsert) ClearDeactivatedAt() *DelegationEdgeUpsert {
+	u.SetNull(delegationedge.FieldDeactivatedAt)
+	return u
+}
+
+// SetDeactivationOpID sets the "deactivation_op_id" field.
+func (u *DelegationEdgeUpsert) SetDeactivationOpID(v string) *DelegationEdgeUpsert {
+	u.Set(delegationedge.FieldDeactivationOpID, v)
+	return u
+}
+
+// UpdateDeactivationOpID sets the "deactivation_op_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsert) UpdateDeactivationOpID() *DelegationEdgeUpsert {
+	u.SetExcluded(delegationedge.FieldDeactivationOpID)
+	return u
+}
 
 // SetDelegatorType sets the "delegator_type" field.
 func (u *DelegationEdgeUpsert) SetDelegatorType(v delegationedge.DelegatorType) *DelegationEdgeUpsert {
@@ -571,6 +1362,349 @@ func (u *DelegationEdgeUpsertOne) Update(set func(*DelegationEdgeUpsert)) *Deleg
 		set(&DelegationEdgeUpsert{UpdateSet: update})
 	}))
 	return u
+}
+
+// SetProvenanceVersion sets the "provenance_version" field.
+func (u *DelegationEdgeUpsertOne) SetProvenanceVersion(v int) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetProvenanceVersion(v)
+	})
+}
+
+// AddProvenanceVersion adds v to the "provenance_version" field.
+func (u *DelegationEdgeUpsertOne) AddProvenanceVersion(v int) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.AddProvenanceVersion(v)
+	})
+}
+
+// UpdateProvenanceVersion sets the "provenance_version" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateProvenanceVersion() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateProvenanceVersion()
+	})
+}
+
+// SetSourcePrincipalKind sets the "source_principal_kind" field.
+func (u *DelegationEdgeUpsertOne) SetSourcePrincipalKind(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetSourcePrincipalKind(v)
+	})
+}
+
+// UpdateSourcePrincipalKind sets the "source_principal_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateSourcePrincipalKind() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateSourcePrincipalKind()
+	})
+}
+
+// SetSourcePrincipalID sets the "source_principal_id" field.
+func (u *DelegationEdgeUpsertOne) SetSourcePrincipalID(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetSourcePrincipalID(v)
+	})
+}
+
+// UpdateSourcePrincipalID sets the "source_principal_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateSourcePrincipalID() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateSourcePrincipalID()
+	})
+}
+
+// SetSourceCredentialKind sets the "source_credential_kind" field.
+func (u *DelegationEdgeUpsertOne) SetSourceCredentialKind(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetSourceCredentialKind(v)
+	})
+}
+
+// UpdateSourceCredentialKind sets the "source_credential_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateSourceCredentialKind() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateSourceCredentialKind()
+	})
+}
+
+// SetSourceCredentialID sets the "source_credential_id" field.
+func (u *DelegationEdgeUpsertOne) SetSourceCredentialID(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetSourceCredentialID(v)
+	})
+}
+
+// UpdateSourceCredentialID sets the "source_credential_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateSourceCredentialID() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateSourceCredentialID()
+	})
+}
+
+// SetSourceEventID sets the "source_event_id" field.
+func (u *DelegationEdgeUpsertOne) SetSourceEventID(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetSourceEventID(v)
+	})
+}
+
+// UpdateSourceEventID sets the "source_event_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateSourceEventID() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateSourceEventID()
+	})
+}
+
+// SetSourceScheduleID sets the "source_schedule_id" field.
+func (u *DelegationEdgeUpsertOne) SetSourceScheduleID(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetSourceScheduleID(v)
+	})
+}
+
+// UpdateSourceScheduleID sets the "source_schedule_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateSourceScheduleID() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateSourceScheduleID()
+	})
+}
+
+// ClearSourceScheduleID clears the value of the "source_schedule_id" field.
+func (u *DelegationEdgeUpsertOne) ClearSourceScheduleID() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.ClearSourceScheduleID()
+	})
+}
+
+// SetSourceAuthorizationRevision sets the "source_authorization_revision" field.
+func (u *DelegationEdgeUpsertOne) SetSourceAuthorizationRevision(v int) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetSourceAuthorizationRevision(v)
+	})
+}
+
+// AddSourceAuthorizationRevision adds v to the "source_authorization_revision" field.
+func (u *DelegationEdgeUpsertOne) AddSourceAuthorizationRevision(v int) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.AddSourceAuthorizationRevision(v)
+	})
+}
+
+// UpdateSourceAuthorizationRevision sets the "source_authorization_revision" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateSourceAuthorizationRevision() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateSourceAuthorizationRevision()
+	})
+}
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (u *DelegationEdgeUpsertOne) SetInitiatorPrincipalKind(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetInitiatorPrincipalKind(v)
+	})
+}
+
+// UpdateInitiatorPrincipalKind sets the "initiator_principal_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateInitiatorPrincipalKind() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateInitiatorPrincipalKind()
+	})
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (u *DelegationEdgeUpsertOne) SetInitiatorPrincipalID(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetInitiatorPrincipalID(v)
+	})
+}
+
+// UpdateInitiatorPrincipalID sets the "initiator_principal_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateInitiatorPrincipalID() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateInitiatorPrincipalID()
+	})
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (u *DelegationEdgeUpsertOne) SetInitiatorCredentialKind(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetInitiatorCredentialKind(v)
+	})
+}
+
+// UpdateInitiatorCredentialKind sets the "initiator_credential_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateInitiatorCredentialKind() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateInitiatorCredentialKind()
+	})
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (u *DelegationEdgeUpsertOne) SetInitiatorCredentialID(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetInitiatorCredentialID(v)
+	})
+}
+
+// UpdateInitiatorCredentialID sets the "initiator_credential_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateInitiatorCredentialID() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateInitiatorCredentialID()
+	})
+}
+
+// SetCeilingKind sets the "ceiling_kind" field.
+func (u *DelegationEdgeUpsertOne) SetCeilingKind(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetCeilingKind(v)
+	})
+}
+
+// UpdateCeilingKind sets the "ceiling_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateCeilingKind() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateCeilingKind()
+	})
+}
+
+// SetCeilingVersion sets the "ceiling_version" field.
+func (u *DelegationEdgeUpsertOne) SetCeilingVersion(v int32) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetCeilingVersion(v)
+	})
+}
+
+// AddCeilingVersion adds v to the "ceiling_version" field.
+func (u *DelegationEdgeUpsertOne) AddCeilingVersion(v int32) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.AddCeilingVersion(v)
+	})
+}
+
+// UpdateCeilingVersion sets the "ceiling_version" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateCeilingVersion() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateCeilingVersion()
+	})
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (u *DelegationEdgeUpsertOne) SetCeilingPermissionIds(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetCeilingPermissionIds(v)
+	})
+}
+
+// UpdateCeilingPermissionIds sets the "ceiling_permission_ids" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateCeilingPermissionIds() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateCeilingPermissionIds()
+	})
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (u *DelegationEdgeUpsertOne) ClearCeilingPermissionIds() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.ClearCeilingPermissionIds()
+	})
+}
+
+// SetCeilingBoundaryKind sets the "ceiling_boundary_kind" field.
+func (u *DelegationEdgeUpsertOne) SetCeilingBoundaryKind(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetCeilingBoundaryKind(v)
+	})
+}
+
+// UpdateCeilingBoundaryKind sets the "ceiling_boundary_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateCeilingBoundaryKind() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateCeilingBoundaryKind()
+	})
+}
+
+// SetCeilingBoundaryProjectID sets the "ceiling_boundary_project_id" field.
+func (u *DelegationEdgeUpsertOne) SetCeilingBoundaryProjectID(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetCeilingBoundaryProjectID(v)
+	})
+}
+
+// UpdateCeilingBoundaryProjectID sets the "ceiling_boundary_project_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateCeilingBoundaryProjectID() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateCeilingBoundaryProjectID()
+	})
+}
+
+// SetCeilingSourceExpiresAt sets the "ceiling_source_expires_at" field.
+func (u *DelegationEdgeUpsertOne) SetCeilingSourceExpiresAt(v time.Time) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetCeilingSourceExpiresAt(v)
+	})
+}
+
+// UpdateCeilingSourceExpiresAt sets the "ceiling_source_expires_at" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateCeilingSourceExpiresAt() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateCeilingSourceExpiresAt()
+	})
+}
+
+// ClearCeilingSourceExpiresAt clears the value of the "ceiling_source_expires_at" field.
+func (u *DelegationEdgeUpsertOne) ClearCeilingSourceExpiresAt() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.ClearCeilingSourceExpiresAt()
+	})
+}
+
+// SetDeactivationCause sets the "deactivation_cause" field.
+func (u *DelegationEdgeUpsertOne) SetDeactivationCause(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetDeactivationCause(v)
+	})
+}
+
+// UpdateDeactivationCause sets the "deactivation_cause" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateDeactivationCause() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateDeactivationCause()
+	})
+}
+
+// SetDeactivatedAt sets the "deactivated_at" field.
+func (u *DelegationEdgeUpsertOne) SetDeactivatedAt(v time.Time) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetDeactivatedAt(v)
+	})
+}
+
+// UpdateDeactivatedAt sets the "deactivated_at" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateDeactivatedAt() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateDeactivatedAt()
+	})
+}
+
+// ClearDeactivatedAt clears the value of the "deactivated_at" field.
+func (u *DelegationEdgeUpsertOne) ClearDeactivatedAt() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.ClearDeactivatedAt()
+	})
+}
+
+// SetDeactivationOpID sets the "deactivation_op_id" field.
+func (u *DelegationEdgeUpsertOne) SetDeactivationOpID(v string) *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetDeactivationOpID(v)
+	})
+}
+
+// UpdateDeactivationOpID sets the "deactivation_op_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertOne) UpdateDeactivationOpID() *DelegationEdgeUpsertOne {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateDeactivationOpID()
+	})
 }
 
 // SetDelegatorType sets the "delegator_type" field.
@@ -849,7 +1983,7 @@ func (_c *DelegationEdgeCreateBulk) ExecX(ctx context.Context) {
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.DelegationEdgeUpsert) {
-//			SetDelegatorType(v+v).
+//			SetProvenanceVersion(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *DelegationEdgeCreateBulk) OnConflict(opts ...sql.ConflictOption) *DelegationEdgeUpsertBulk {
@@ -929,6 +2063,349 @@ func (u *DelegationEdgeUpsertBulk) Update(set func(*DelegationEdgeUpsert)) *Dele
 		set(&DelegationEdgeUpsert{UpdateSet: update})
 	}))
 	return u
+}
+
+// SetProvenanceVersion sets the "provenance_version" field.
+func (u *DelegationEdgeUpsertBulk) SetProvenanceVersion(v int) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetProvenanceVersion(v)
+	})
+}
+
+// AddProvenanceVersion adds v to the "provenance_version" field.
+func (u *DelegationEdgeUpsertBulk) AddProvenanceVersion(v int) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.AddProvenanceVersion(v)
+	})
+}
+
+// UpdateProvenanceVersion sets the "provenance_version" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateProvenanceVersion() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateProvenanceVersion()
+	})
+}
+
+// SetSourcePrincipalKind sets the "source_principal_kind" field.
+func (u *DelegationEdgeUpsertBulk) SetSourcePrincipalKind(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetSourcePrincipalKind(v)
+	})
+}
+
+// UpdateSourcePrincipalKind sets the "source_principal_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateSourcePrincipalKind() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateSourcePrincipalKind()
+	})
+}
+
+// SetSourcePrincipalID sets the "source_principal_id" field.
+func (u *DelegationEdgeUpsertBulk) SetSourcePrincipalID(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetSourcePrincipalID(v)
+	})
+}
+
+// UpdateSourcePrincipalID sets the "source_principal_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateSourcePrincipalID() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateSourcePrincipalID()
+	})
+}
+
+// SetSourceCredentialKind sets the "source_credential_kind" field.
+func (u *DelegationEdgeUpsertBulk) SetSourceCredentialKind(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetSourceCredentialKind(v)
+	})
+}
+
+// UpdateSourceCredentialKind sets the "source_credential_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateSourceCredentialKind() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateSourceCredentialKind()
+	})
+}
+
+// SetSourceCredentialID sets the "source_credential_id" field.
+func (u *DelegationEdgeUpsertBulk) SetSourceCredentialID(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetSourceCredentialID(v)
+	})
+}
+
+// UpdateSourceCredentialID sets the "source_credential_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateSourceCredentialID() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateSourceCredentialID()
+	})
+}
+
+// SetSourceEventID sets the "source_event_id" field.
+func (u *DelegationEdgeUpsertBulk) SetSourceEventID(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetSourceEventID(v)
+	})
+}
+
+// UpdateSourceEventID sets the "source_event_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateSourceEventID() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateSourceEventID()
+	})
+}
+
+// SetSourceScheduleID sets the "source_schedule_id" field.
+func (u *DelegationEdgeUpsertBulk) SetSourceScheduleID(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetSourceScheduleID(v)
+	})
+}
+
+// UpdateSourceScheduleID sets the "source_schedule_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateSourceScheduleID() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateSourceScheduleID()
+	})
+}
+
+// ClearSourceScheduleID clears the value of the "source_schedule_id" field.
+func (u *DelegationEdgeUpsertBulk) ClearSourceScheduleID() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.ClearSourceScheduleID()
+	})
+}
+
+// SetSourceAuthorizationRevision sets the "source_authorization_revision" field.
+func (u *DelegationEdgeUpsertBulk) SetSourceAuthorizationRevision(v int) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetSourceAuthorizationRevision(v)
+	})
+}
+
+// AddSourceAuthorizationRevision adds v to the "source_authorization_revision" field.
+func (u *DelegationEdgeUpsertBulk) AddSourceAuthorizationRevision(v int) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.AddSourceAuthorizationRevision(v)
+	})
+}
+
+// UpdateSourceAuthorizationRevision sets the "source_authorization_revision" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateSourceAuthorizationRevision() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateSourceAuthorizationRevision()
+	})
+}
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (u *DelegationEdgeUpsertBulk) SetInitiatorPrincipalKind(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetInitiatorPrincipalKind(v)
+	})
+}
+
+// UpdateInitiatorPrincipalKind sets the "initiator_principal_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateInitiatorPrincipalKind() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateInitiatorPrincipalKind()
+	})
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (u *DelegationEdgeUpsertBulk) SetInitiatorPrincipalID(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetInitiatorPrincipalID(v)
+	})
+}
+
+// UpdateInitiatorPrincipalID sets the "initiator_principal_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateInitiatorPrincipalID() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateInitiatorPrincipalID()
+	})
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (u *DelegationEdgeUpsertBulk) SetInitiatorCredentialKind(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetInitiatorCredentialKind(v)
+	})
+}
+
+// UpdateInitiatorCredentialKind sets the "initiator_credential_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateInitiatorCredentialKind() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateInitiatorCredentialKind()
+	})
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (u *DelegationEdgeUpsertBulk) SetInitiatorCredentialID(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetInitiatorCredentialID(v)
+	})
+}
+
+// UpdateInitiatorCredentialID sets the "initiator_credential_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateInitiatorCredentialID() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateInitiatorCredentialID()
+	})
+}
+
+// SetCeilingKind sets the "ceiling_kind" field.
+func (u *DelegationEdgeUpsertBulk) SetCeilingKind(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetCeilingKind(v)
+	})
+}
+
+// UpdateCeilingKind sets the "ceiling_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateCeilingKind() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateCeilingKind()
+	})
+}
+
+// SetCeilingVersion sets the "ceiling_version" field.
+func (u *DelegationEdgeUpsertBulk) SetCeilingVersion(v int32) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetCeilingVersion(v)
+	})
+}
+
+// AddCeilingVersion adds v to the "ceiling_version" field.
+func (u *DelegationEdgeUpsertBulk) AddCeilingVersion(v int32) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.AddCeilingVersion(v)
+	})
+}
+
+// UpdateCeilingVersion sets the "ceiling_version" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateCeilingVersion() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateCeilingVersion()
+	})
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (u *DelegationEdgeUpsertBulk) SetCeilingPermissionIds(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetCeilingPermissionIds(v)
+	})
+}
+
+// UpdateCeilingPermissionIds sets the "ceiling_permission_ids" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateCeilingPermissionIds() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateCeilingPermissionIds()
+	})
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (u *DelegationEdgeUpsertBulk) ClearCeilingPermissionIds() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.ClearCeilingPermissionIds()
+	})
+}
+
+// SetCeilingBoundaryKind sets the "ceiling_boundary_kind" field.
+func (u *DelegationEdgeUpsertBulk) SetCeilingBoundaryKind(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetCeilingBoundaryKind(v)
+	})
+}
+
+// UpdateCeilingBoundaryKind sets the "ceiling_boundary_kind" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateCeilingBoundaryKind() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateCeilingBoundaryKind()
+	})
+}
+
+// SetCeilingBoundaryProjectID sets the "ceiling_boundary_project_id" field.
+func (u *DelegationEdgeUpsertBulk) SetCeilingBoundaryProjectID(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetCeilingBoundaryProjectID(v)
+	})
+}
+
+// UpdateCeilingBoundaryProjectID sets the "ceiling_boundary_project_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateCeilingBoundaryProjectID() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateCeilingBoundaryProjectID()
+	})
+}
+
+// SetCeilingSourceExpiresAt sets the "ceiling_source_expires_at" field.
+func (u *DelegationEdgeUpsertBulk) SetCeilingSourceExpiresAt(v time.Time) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetCeilingSourceExpiresAt(v)
+	})
+}
+
+// UpdateCeilingSourceExpiresAt sets the "ceiling_source_expires_at" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateCeilingSourceExpiresAt() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateCeilingSourceExpiresAt()
+	})
+}
+
+// ClearCeilingSourceExpiresAt clears the value of the "ceiling_source_expires_at" field.
+func (u *DelegationEdgeUpsertBulk) ClearCeilingSourceExpiresAt() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.ClearCeilingSourceExpiresAt()
+	})
+}
+
+// SetDeactivationCause sets the "deactivation_cause" field.
+func (u *DelegationEdgeUpsertBulk) SetDeactivationCause(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetDeactivationCause(v)
+	})
+}
+
+// UpdateDeactivationCause sets the "deactivation_cause" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateDeactivationCause() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateDeactivationCause()
+	})
+}
+
+// SetDeactivatedAt sets the "deactivated_at" field.
+func (u *DelegationEdgeUpsertBulk) SetDeactivatedAt(v time.Time) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetDeactivatedAt(v)
+	})
+}
+
+// UpdateDeactivatedAt sets the "deactivated_at" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateDeactivatedAt() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateDeactivatedAt()
+	})
+}
+
+// ClearDeactivatedAt clears the value of the "deactivated_at" field.
+func (u *DelegationEdgeUpsertBulk) ClearDeactivatedAt() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.ClearDeactivatedAt()
+	})
+}
+
+// SetDeactivationOpID sets the "deactivation_op_id" field.
+func (u *DelegationEdgeUpsertBulk) SetDeactivationOpID(v string) *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.SetDeactivationOpID(v)
+	})
+}
+
+// UpdateDeactivationOpID sets the "deactivation_op_id" field to the value that was provided on create.
+func (u *DelegationEdgeUpsertBulk) UpdateDeactivationOpID() *DelegationEdgeUpsertBulk {
+	return u.Update(func(s *DelegationEdgeUpsert) {
+		s.UpdateDeactivationOpID()
+	})
 }
 
 // SetDelegatorType sets the "delegator_type" field.
