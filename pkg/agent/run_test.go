@@ -7632,6 +7632,18 @@ func TestResolveAuthEnvOverlay_MutatesCallerOptsEnv(t *testing.T) {
 // an unresolved alias (e.g. "large"), reResolveModelAlias should return the
 // concrete model from finalScionCfg.Model.
 func TestReResolveModelAlias(t *testing.T) {
+	// The built-in fallback cases derive their expectations from the
+	// embedded claude alias table so routine model bumps in
+	// harnesses/claude/config.yaml do not break this test. The guards
+	// ensure each alias really resolves to a concrete model, so the
+	// fallback assertions cannot pass vacuously.
+	builtin := harness.DefaultModelAliases("claude")
+	for _, alias := range []string{"large", "medium"} {
+		if v := builtin[alias]; v == "" || v == alias {
+			t.Fatalf("built-in claude alias %q = %q, want a concrete model", alias, v)
+		}
+	}
+
 	tests := []struct {
 		name        string
 		envModel    string
@@ -7713,7 +7725,7 @@ func TestReResolveModelAlias(t *testing.T) {
 			envModel:    "large",
 			cfg:         &api.ScionConfig{Model: "large"},
 			harnessName: "claude",
-			wantModel:   "claude-opus-5-5",
+			wantModel:   builtin["large"],
 			wantResolv:  true,
 		},
 		{
@@ -7721,7 +7733,7 @@ func TestReResolveModelAlias(t *testing.T) {
 			envModel:    "medium",
 			cfg:         nil,
 			harnessName: "claude",
-			wantModel:   "claude-sonnet-5-5",
+			wantModel:   builtin["medium"],
 			wantResolv:  true,
 		},
 		{
