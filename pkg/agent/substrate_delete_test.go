@@ -472,7 +472,7 @@ func TestSubstrateAgentManagerDelete_SameSlugDifferentProjectsFailsClosed(t *tes
 				}
 				fc.mu.Lock()
 				defer fc.mu.Unlock()
-				return fc.actors["scion-"+projectID+"/"+cfg.Name]
+				return fc.actors[scionruntime.SubstrateAtespaceNameForTest(projectID)+"/"+cfg.Name]
 			}
 
 			actorA := runProjectAgent("projA", "aaaaaaaaaaaa", "/projects/projA")
@@ -508,10 +508,10 @@ func TestSubstrateAgentManagerDelete_SameSlugDifferentProjectsFailsClosed(t *tes
 			if len(fc.deleteActorCalls) != 0 {
 				t.Fatalf(`Delete("dev") called DeleteActor %v, want zero calls (ambiguous slug across two projects — must fail closed even with ProjectPath set)`, fc.deleteActorCalls)
 			}
-			if _, ok := fc.actors["scion-aaaaaaaaaaaa/projA--dev"]; !ok {
+			if _, ok := fc.actors[scionruntime.SubstrateAtespaceNameForTest("aaaaaaaaaaaa")+"/projA--dev"]; !ok {
 				t.Error("projA's actor was removed — it must be untouched")
 			}
-			if _, ok := fc.actors["scion-bbbbbbbbbbbb/projB--dev"]; !ok {
+			if _, ok := fc.actors[scionruntime.SubstrateAtespaceNameForTest("bbbbbbbbbbbb")+"/projB--dev"]; !ok {
 				t.Error("projB's actor was removed — it must be untouched")
 			}
 		})
