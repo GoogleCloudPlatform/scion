@@ -259,7 +259,7 @@ func setLogPathForTest(t *testing.T, path string) func() {
 	mu.Lock()
 	origPath := logPath
 	origFile := logFile
-	origInitialized := initialized
+	origInitialized := initialized.Load()
 	logFile = nil
 	mu.Unlock()
 
@@ -272,7 +272,7 @@ func setLogPathForTest(t *testing.T, path string) func() {
 		}
 		logPath = origPath
 		logFile = origFile
-		initialized = origInitialized
+		initialized.Store(origInitialized)
 		mu.Unlock()
 	}
 }
