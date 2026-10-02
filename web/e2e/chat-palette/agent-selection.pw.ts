@@ -36,11 +36,11 @@ async function gotoChat(page: Page) {
 }
 
 function paletteInput(page: Page) {
-  return page.locator('scion-chat-switcher #palette-query-input');
+  return page.locator('scion-quick-palette #palette-query-input');
 }
 
 function paletteOptions(page: Page) {
-  return page.locator('scion-chat-switcher .palette-option');
+  return page.locator('scion-quick-palette .palette-option');
 }
 
 test('typing narrows to a real agent candidate and Enter opens its correct DM', async ({
@@ -61,7 +61,7 @@ test('typing narrows to a real agent candidate and Enter opens its correct DM', 
       `/chat/dm/${encodeURIComponent(`dm:agent:${AGENT_WITH_DM.id}:user:${SELF_USER_ID}`)}$`
     )
   );
-  await expect(page.locator('scion-chat-switcher sl-dialog[label="Quick switcher"]')).toBeHidden();
+  await expect(page.locator('scion-quick-palette sl-dialog[label="Quick switcher"]')).toBeHidden();
 });
 
 test('pressing Enter twice in a row commits only once (double-tap / commit-once protection)', async ({
@@ -139,7 +139,7 @@ test('exactly one row has aria-selected="true" at a time, and it follows ArrowDo
   await gotoChat(page);
   await page.keyboard.press('Control+k');
 
-  const selected = () => page.locator('scion-chat-switcher .palette-option[aria-selected="true"]');
+  const selected = () => page.locator('scion-quick-palette .palette-option[aria-selected="true"]');
   // Empty query: ranked by recency, same ordering as the test above.
   await expect(selected()).toHaveCount(1);
   await expect(selected()).toContainText(AGENT_WITH_DM.name);
@@ -183,7 +183,7 @@ test('a non-viable (canMessage=false) agent never appears as a candidate', async
   // also show their own "No matches" for a query that matches nothing
   // anywhere.
   await expect(
-    page.locator('scion-chat-switcher [aria-labelledby="palette-heading-agents"] .palette-empty')
+    page.locator('scion-quick-palette [aria-labelledby="palette-heading-agents"] .palette-empty')
   ).toBeVisible();
   await expect(paletteOptions(page)).toHaveCount(0);
 });

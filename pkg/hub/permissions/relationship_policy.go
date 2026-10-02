@@ -83,17 +83,11 @@ var RelationshipPolicies = []RelationshipPolicy{
 			"agent.token_refresh", "agent.port_forward", "agent.identity_token",
 		},
 	},
-	{
-		// owner/user/project (TestRelationshipCharacterization_Owner).
-		Relationship:   "owner",
-		PrincipalKinds: []string{"user"},
-		ResourceType:   ResourceProject,
-		PermissionIDs: []string{
-			"project.create", "project.read", "project.update", "project.delete",
-			"project.manage", "project.register", "project.set_messaging_policy",
-			"project.clone", "project.list", "project.secret_read",
-		},
-	},
+	// There is deliberately no owner/user/project row (ptone/scion#2586).
+	// Project authority comes only from project-scoped role bindings;
+	// Project.OwnerID is display metadata and grants nothing, so a stale
+	// OwnerID (a creator removed without a transfer) confers no access.
+	// TestRelationshipCharacterization_OwnerProjectGrantsNothing pins this.
 	{
 		// owner/user/template (TestRelationshipCharacterization_Owner).
 		Relationship:   "owner",

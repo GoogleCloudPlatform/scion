@@ -1582,6 +1582,27 @@ export class ScionChatMessage extends LitElement {
       padding-top: 0.25em;
       border-top: 1px solid var(--scion-border, #e2e8f0);
     }
+
+    /* The 70%-of-row cap reads as wasted space on a phone. Removing it
+       (rather than raising it) lets the bubble grow to whatever the flex
+       layout actually has left beside the avatar: .bubble is a flex child
+       of .message-wrapper alongside the fixed-width avatar and its gap, so
+       it is already bounded by the space those leave, with no separate
+       max-width needed to keep it off the avatar's column. */
+    @media (max-width: 768px) {
+      .bubble {
+        max-width: none;
+      }
+
+      .message-wrapper {
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
+      }
+
+      .bubble-content {
+        padding: 0.625rem 0.75rem;
+      }
+    }
   `;
 
   override connectedCallback(): void {

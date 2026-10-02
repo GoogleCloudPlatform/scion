@@ -162,7 +162,7 @@ func TestHandleBrokerInbound_RejectsNonRunningAgent(t *testing.T) {
 				Updated:   time.Now(),
 			}
 			require.NoError(t, s.CreateProject(ctx, project))
-			srv.createProjectMembersGroup(ctx, project)
+			srv.seedProjectCreatorMembership(ctx, project)
 			msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
 			// Create agent with the specified phase and project message mode
@@ -244,7 +244,7 @@ func TestHandleBrokerInbound_ConversationResolution(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
 	// Create a running agent with project message mode.
@@ -433,7 +433,7 @@ func TestHandleBrokerInbound_ConversationResolution_PerPlugin_Regression(t *test
 				Updated:   time.Now(),
 			}
 			require.NoError(t, s.CreateProject(ctx, project))
-			srv.createProjectMembersGroup(ctx, project)
+			srv.seedProjectCreatorMembership(ctx, project)
 			msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
 			agent := &store.Agent{
@@ -510,7 +510,7 @@ func TestHandleBrokerInbound_AllowsRunningAgent(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
 	// Create a running agent with project message mode.
@@ -656,9 +656,9 @@ func TestHandleBrokerInbound_ConvResolutionFailure_WriteDenyOff(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	// The user already has a built-in project-owner membership from
-	// createProjectMembersGroup (which grants a role binding for the
+	// seedProjectCreatorMembership (which grants a role binding for the
 	// project creator). Only the explicit agent.message permission is
 	// needed — avoid a duplicate built-in membership grant.
 	msgAuthzGrantAgentMessage(t, s, user.ID, project.ID)
@@ -821,7 +821,7 @@ func TestHandleBrokerInbound_CrossChannelDM_AdvancesSenderReadState(t *testing.T
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
 	agent := &store.Agent{
@@ -950,7 +950,7 @@ func TestHandleBrokerInbound_MentionCoAddressees(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 	// project-member role does not include agent.message (removed in R3);
 	// grant it explicitly so the co-addressee sender is authorized.

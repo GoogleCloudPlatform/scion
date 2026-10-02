@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1229,6 +1230,30 @@ const githubTokenFileMode = 0600
 // never overrides it.
 var fchownFn = syscall.Fchown
 
+// enforceTokenFileOwnerChecks gates the extra "owner is root or the
+// containing directory's owner" check that ReadTokenFile and
+// ChownTokenFile apply on top of their always-on regular-file/Nlink==1
+// checks. Left at its default (false) for a caller that can legitimately
+// hand the container a host-written token file whose owner isn't provably
+// root or the target uid (see ReadTokenFile's doc comment) — enforcing the
+// check there risks treating a valid token as absent. A caller that
+// enforces InitRunOptions.RequirePrivilegeDrop always has an actual,
+// less-privileged workload user to defend the token file against, and
+// calls EnforceTokenFileOwnerChecks(true) once, early, with that same
+// value (see InitRunOptions.RequirePrivilegeDrop). Gating it here, rather than
+// proving byte-identical behaviour across every other token-provisioning
+// path, makes the default case provably unchanged: the check simply never
+// runs unless this is called with true.
+var enforceTokenFileOwnerChecks atomic.Bool
+
+// EnforceTokenFileOwnerChecks enables or disables the owner check described
+// above. Call once, early in process startup, before any ReadTokenFile or
+// ChownTokenFile call — see the variable's doc comment for when to pass
+// true.
+func EnforceTokenFileOwnerChecks(enabled bool) {
+	enforceTokenFileOwnerChecks.Store(enabled)
+}
+
 // WriteGitHubTokenFile writes a GitHub token to the specified path
 // atomically. When uid > 0, the final file is chowned to uid:gid (the
 // scion container user); uid <= 0 leaves ownership as the writing process
@@ -1522,6 +1547,13 @@ func WriteTokenFile(token string, uid, gid int) error {
 // to the scion user. This check always applies, on every runtime. The
 // chown is fchown on that open fd, never a path-based chown that a symlink
 // swapped in afterwards could redirect.
+//
+// When EnforceTokenFileOwnerChecks(true) has been called, it additionally
+// requires the file's current owner to be root or the containing
+// directory's own owner before chowning it — the same rule
+// readTokenFileGuarded applies, gated the same way and for the same
+// reason: it isn't provably safe to require on every caller's
+// token-provisioning path, only on the one that requires privilege drop.
 func ChownTokenFile(uid, gid int) error {
 	path := TokenFilePath()
 	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
@@ -1529,6 +1561,11 @@ func ChownTokenFile(uid, gid int) error {
 		return fmt.Errorf("failed to open parent directory of token file: %w", err)
 	}
 	defer func() { _ = syscall.Close(dirFd) }()
+
+	var dirSt syscall.Stat_t
+	if err := syscall.Fstat(dirFd, &dirSt); err != nil {
+		return fmt.Errorf("failed to stat parent directory of token file: %w", err)
+	}
 
 	f, err := dirfd.OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -1542,6 +1579,9 @@ func ChownTokenFile(uid, gid int) error {
 	}
 	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
 		return fmt.Errorf("refusing to chown token file: not a single-link regular file")
+	}
+	if enforceTokenFileOwnerChecks.Load() && st.Uid != 0 && st.Uid != dirSt.Uid {
+		return fmt.Errorf("refusing to chown token file: unexpected owner")
 	}
 	if err := f.Chown(uid, gid); err != nil {
 		return fmt.Errorf("failed to chown token file: %w", err)
@@ -1579,14 +1619,27 @@ func ReadTokenFile() string {
 // chain (so a symlink at any intermediate component, not just the leaf, is
 // refused) and refuses to read anything but a single-link regular file — a
 // hardlink to some unrelated file (Nlink>1) is refused instead of read.
-// This check always applies, on every runtime. O_NONBLOCK keeps a FIFO
-// planted at the path from blocking the open.
+// This check always applies, on every runtime.
+//
+// When EnforceTokenFileOwnerChecks(true) has been called (see its doc
+// comment), it additionally requires the owner to be root or
+// the containing directory's own owner, the only two legitimate states for
+// the token file: the host-side agent manager writes it before the
+// container starts (commonly as root or whatever uid the host process runs
+// as), and WriteTokenFile/ChownTokenFile hand it to the scion user
+// afterwards. O_NONBLOCK keeps a FIFO planted at the path from blocking
+// the open.
 func readTokenFileGuarded(path string) (string, error) {
 	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = syscall.Close(dirFd) }()
+
+	var dirSt syscall.Stat_t
+	if err := syscall.Fstat(dirFd, &dirSt); err != nil {
+		return "", fmt.Errorf("failed to stat parent directory of %s: %w", path, err)
+	}
 
 	f, err := dirfd.OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -1600,6 +1653,9 @@ func readTokenFileGuarded(path string) (string, error) {
 	}
 	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
 		return "", fmt.Errorf("refusing to read %s: not a single-link regular file", path)
+	}
+	if enforceTokenFileOwnerChecks.Load() && st.Uid != 0 && st.Uid != dirSt.Uid {
+		return "", fmt.Errorf("refusing to read %s: unexpected owner", path)
 	}
 
 	data, err := io.ReadAll(io.LimitReader(f, tokenFileMaxBytes))

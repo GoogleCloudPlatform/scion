@@ -864,3 +864,32 @@ func TestAgentActionKeysRoute_ValidationPrecedesResolutionAndAuthorization(t *te
 		})
 	}
 }
+
+// TestAgentActionKeysRoute_Unauthenticated401_NoOperationID covers plan row
+// AK-19: a /keys request with no credential at all (no Authorization
+// header, no agent token header) must fail with 401 before any operation ID
+// is minted, on both route shapes.
+func TestAgentActionKeysRoute_Unauthenticated401_NoOperationID(t *testing.T) {
+	for _, shape := range keysRouteShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			f := newAgentKeysRouteFixture(t)
+
+			body, err := json.Marshal(validKeysBody)
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, shape.path(f.agentInA), bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			// Deliberately no Authorization / agent-token header.
+
+			rec := httptest.NewRecorder()
+			f.srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("%s: status = %d, want 401; body: %s", shape.name, rec.Code, rec.Body.String())
+			}
+			env := decodeKeysError(t, rec.Body.Bytes())
+			if _, ok := env.Details["operation_id"]; ok {
+				t.Errorf("%s: expected no operation_id key at all, got details: %v", shape.name, env.Details)
+			}
+		})
+	}
+}

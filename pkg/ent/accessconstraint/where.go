@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect/sql"
+	"entgo.io/ent/dialect/sql/sqlgraph"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/google/uuid"
 )
@@ -963,6 +964,29 @@ func UpdatedLT(v time.Time) predicate.AccessConstraint {
 // UpdatedLTE applies the LTE predicate on the "updated" field.
 func UpdatedLTE(v time.Time) predicate.AccessConstraint {
 	return predicate.AccessConstraint(sql.FieldLTE(FieldUpdated, v))
+}
+
+// HasHistory applies the HasEdge predicate on the "history" edge.
+func HasHistory() predicate.AccessConstraint {
+	return predicate.AccessConstraint(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, HistoryTable, HistoryColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasHistoryWith applies the HasEdge predicate on the "history" edge with a given conditions (other predicates).
+func HasHistoryWith(preds ...predicate.AccessConstraintHistory) predicate.AccessConstraint {
+	return predicate.AccessConstraint(func(s *sql.Selector) {
+		step := newHistoryStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
 }
 
 // And groups predicates with the AND operator between them.

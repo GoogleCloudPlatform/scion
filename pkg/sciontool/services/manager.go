@@ -17,6 +17,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -34,6 +35,18 @@ import (
 
 const maxConsecutiveFailures = 3
 
+// ErrPrivilegeDropRequired is returned by managedService.start when the
+// service's own requirePrivilegeDrop is set but uid/gid do not both pass
+// the same UID>0 && GID>0 predicate the Credential-setting block below
+// uses, instead of silently starting the service with no Credential (i.e.
+// as whatever this process is, root in production) — the same fail-closed
+// principle supervisor.Supervisor.Run's own ErrPrivilegeDropRequired
+// applies to the harness child process. In practice, RunInit's own
+// requirePrivilegeDropOrFail already refuses to reach Manager.Start at all
+// under those conditions, so this is belt-and-suspenders against a future
+// caller that calls Start directly, bypassing that check.
+var ErrPrivilegeDropRequired = errors.New("privilege drop required but UID/GID were not both set; refusing to start the service as root")
+
 // Manager manages sidecar service lifecycles.
 type Manager struct {
 	services    []*managedService
@@ -43,11 +56,12 @@ type Manager struct {
 
 type managedService struct {
 	// immutable after construction
-	spec     api.ServiceSpec
-	logDir   string
-	uid, gid int
-	username string
-	env      []string // merged environment
+	spec                 api.ServiceSpec
+	logDir               string
+	uid, gid             int
+	username             string
+	env                  []string // merged environment
+	requirePrivilegeDrop bool
 
 	// log file handles (opened once, closed on shutdown)
 	stdoutFile    *os.File
@@ -166,7 +180,10 @@ func New(gracePeriod time.Duration) *Manager {
 // so Manager.Shutdown would otherwise never close them.
 //
 // requirePrivilegeDrop is the caller's own opts.RequirePrivilegeDrop; see
-// openLogs' doc comment for what it gates.
+// openLogs' doc comment for what it gates there, and managedService.start's
+// Credential block for the exec-time fail-closed guarantee it gates here:
+// a service whose uid/gid do not both pass the Credential predicate returns
+// ErrPrivilegeDropRequired instead of starting with no Credential.
 func (m *Manager) Start(ctx context.Context, specs []api.ServiceSpec, uid, gid int, username string, requirePrivilegeDrop bool) error {
 	home := os.Getenv("HOME")
 	scionDir := filepath.Join(home, ".scion")
@@ -222,13 +239,14 @@ func (m *Manager) Start(ctx context.Context, specs []api.ServiceSpec, uid, gid i
 			continue
 		}
 		svc := &managedService{
-			spec:     spec,
-			done:     make(chan struct{}),
-			logDir:   logDir,
-			uid:      uid,
-			gid:      gid,
-			username: username,
-			env:      mergeEnv(os.Environ(), spec.Env, uid, username),
+			spec:                 spec,
+			done:                 make(chan struct{}),
+			logDir:               logDir,
+			uid:                  uid,
+			gid:                  gid,
+			username:             username,
+			env:                  mergeEnv(os.Environ(), spec.Env, uid, username),
+			requirePrivilegeDrop: requirePrivilegeDrop,
 		}
 
 		if err := svc.openLogs(int(logDirFile.Fd()), requirePrivilegeDrop); err != nil {
@@ -383,6 +401,8 @@ func (svc *managedService) start() error {
 			Uid: uint32(svc.uid),
 			Gid: uint32(svc.gid),
 		}
+	} else if svc.requirePrivilegeDrop {
+		return ErrPrivilegeDropRequired
 	}
 
 	// Start and register the child's PID as a single gated step so
@@ -595,7 +615,7 @@ func (svc *managedService) writeLifecycle(format string, args ...interface{}) {
 	if svc.lifecycleFile == nil {
 		return
 	}
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	timestamp := log.Timestamp(time.Now())
 	msg := fmt.Sprintf(format, args...)
 	_, _ = fmt.Fprintf(svc.lifecycleFile, "[%s] %s\n", timestamp, msg)
 }

@@ -349,7 +349,7 @@ func setupProjectScopedAdminTest(t *testing.T) (*Server, store.Store, *store.Use
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, projectX))
-	srv.createProjectMembersGroup(ctx, projectX)
+	srv.seedProjectCreatorMembership(ctx, projectX)
 
 	// Create project Y (unbound project)
 	projectY := &store.Project{
@@ -362,7 +362,7 @@ func setupProjectScopedAdminTest(t *testing.T) (*Server, store.Store, *store.Use
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, projectY))
-	srv.createProjectMembersGroup(ctx, projectY)
+	srv.seedProjectCreatorMembership(ctx, projectY)
 
 	// Create project-admin role binding for projectAdmin in project X only
 	projectAdminRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
@@ -567,7 +567,7 @@ func TestScopedAdmin_HubAdminCanCreateProjectScopedBinding(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Look up project-admin role definition
 	projectAdminDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
@@ -608,7 +608,7 @@ func TestScopedAdmin_CombinedHubAndProjectRoles(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Hub-admin should still access hub-level endpoints
 	rec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, "/api/v1/admin/roles", nil)
@@ -869,10 +869,10 @@ func TestScopedAdmin_ProjectOwnerCanCreateProjectBinding_ViaAdminAPI(t *testing.
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	// createProjectMembersGroup also creates a project-owner role binding
+	// seedProjectCreatorMembership also creates a project-owner role binding
 	// for the project creator, so the owner is recognized by the membership
 	// service governance check.
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Create a member user to assign a project role to.
 	member := &store.User{
@@ -965,7 +965,7 @@ func TestScopedAdmin_HubMemberDeniedProjectBinding_ViaAdminAPI(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Create a random hub-member who has no project role.
 	bystander := &store.User{

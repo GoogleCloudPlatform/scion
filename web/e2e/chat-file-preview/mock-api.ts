@@ -33,6 +33,9 @@ import {
   GCS_XPROJECT_OBJECT,
   GCS_MARKDOWN_BODY,
   GCS_JSON_BODY,
+  GCS_SVG_BODY,
+  GCS_HTML_BODY,
+  GCS_TOO_LARGE_INLINE_BYTES,
 } from './data.js';
 
 export { ALPHA_NOTES_CONTENT, BETA_NOTES_CONTENT, TEXT_ATTACHMENT_BODY };
@@ -40,6 +43,16 @@ export { ALPHA_NOTES_CONTENT, BETA_NOTES_CONTENT, TEXT_ATTACHMENT_BODY };
 /** A minimal but valid 1x1 red PNG, so the browser actually decodes an <img>. */
 const PNG_1X1_RED_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+/** A minimal but valid 1x1 JPEG, so the browser actually decodes an <img>. */
+const JPEG_1X1_BASE64 =
+  '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/2wBDAQMDAwQDBAgEBAgQCwkLEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBD/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAj/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k=';
+
+/** A minimal but valid 1x1 transparent GIF, so the browser actually decodes an <img>. */
+const GIF_1X1_BASE64 = 'R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+
+/** A minimal but valid 1x1 lossless WebP, so the browser actually decodes an <img>. */
+const WEBP_1X1_BASE64 = 'UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==';
 
 /** Reported size only — the extracted viewer never reads the body once size exceeds the limit. */
 export const OVERSIZE_BYTES = 600 * 1024;
@@ -260,10 +273,95 @@ export async function setupGcsApiMocks(
           body: GCS_JSON_BODY,
         });
       }
+
+      // Image sniffing, SVG-as-source, octet-stream, the
+      // Content-Length preview-size abort, 413 and an HTML-bodied object.
+      // Content-Type here stands in for the hub's own http.DetectContentType
+      // sniff result (covered directly against the real sniffer in
+      // pkg/hub/gcs_link_test.go) — this mock only needs to prove the
+      // client reacts correctly to whatever Content-Type the hub decided.
+      if (bucket === GCS_BUCKET && object === 'photo.png') {
+        return route.fulfill({
+          status: 200,
+          contentType: 'image/png',
+          body: Buffer.from(PNG_1X1_RED_BASE64, 'base64'),
+        });
+      }
+      if (bucket === GCS_BUCKET && object === 'photo.jpg') {
+        return route.fulfill({
+          status: 200,
+          contentType: 'image/jpeg',
+          body: Buffer.from(JPEG_1X1_BASE64, 'base64'),
+        });
+      }
+      if (bucket === GCS_BUCKET && object === 'photo.gif') {
+        return route.fulfill({
+          status: 200,
+          contentType: 'image/gif',
+          body: Buffer.from(GIF_1X1_BASE64, 'base64'),
+        });
+      }
+      if (bucket === GCS_BUCKET && object === 'photo.webp') {
+        return route.fulfill({
+          status: 200,
+          contentType: 'image/webp',
+          body: Buffer.from(WEBP_1X1_BASE64, 'base64'),
+        });
+      }
+      if (bucket === GCS_BUCKET && object === 'diagram.svg') {
+        // The hub never serves image/svg+xml: an SVG object's real sniffed
+        // type is text/plain, same as any other text body.
+        return route.fulfill({
+          status: 200,
+          contentType: 'text/plain; charset=utf-8',
+          body: GCS_SVG_BODY,
+        });
+      }
+      if (bucket === GCS_BUCKET && object === 'fake.png') {
+        // A .png name whose actual bytes are HTML: the hub's sniff ignores
+        // the extension and metadata alike, so this is text/plain, never
+        // image/png and never text/html.
+        return route.fulfill({
+          status: 200,
+          contentType: 'text/plain; charset=utf-8',
+          headers: { 'Content-Disposition': `attachment; filename*=UTF-8''fake.png` },
+          body: GCS_HTML_BODY,
+        });
+      }
+      if (bucket === GCS_BUCKET && object === 'archive.blob') {
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/octet-stream',
+          body: Buffer.from([0x00, 0x01, 0x02, 0x03]),
+        });
+      }
+      if (bucket === GCS_BUCKET && object === 'huge.txt') {
+        // A real body whose UTF-8 byte length (the Content-Length) is over
+        // GCS_TOO_LARGE_INLINE_BYTES but whose character count is under it, so
+        // only the Content-Length check — not the post-read length cap — can
+        // classify it as too large.
+        return route.fulfill({
+          status: 200,
+          contentType: 'text/plain; charset=utf-8',
+          body: 'é'.repeat(Math.ceil(GCS_TOO_LARGE_INLINE_BYTES / 2)),
+        });
+      }
+      if (bucket === GCS_BUCKET && object === 'giant.bin') {
+        return route.fulfill({
+          status: 413,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            error: {
+              code: 'too_large',
+              details: { size: 12 * 1024 * 1024, limit: 10 * 1024 * 1024 },
+            },
+          }),
+        });
+      }
       // Every other in-fixture object (dir/file.md, start.txt, after.txt,
       // workspace/collision.md, the hostile-name objects, o/r) resolves to
-      // generic text content — only the four cases above need distinct
-      // bodies for their assertions.
+      // generic text content — only the cases above need distinct bodies
+      // for their assertions.
       return route.fulfill({
         status: 200,
         contentType: 'text/plain; charset=utf-8',

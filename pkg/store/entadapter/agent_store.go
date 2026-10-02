@@ -28,6 +28,7 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
@@ -1298,6 +1299,18 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetExitReason("")
 	}
 
+	// ClearExit covers the case the phase-transition clear above does not:
+	// a lifecycle start/restart dispatched while the CURRENT phase is
+	// already running (or anything else). A disruption reason can be
+	// recorded on a still-running agent ahead of its pod actually stopping
+	// (state.ExitReasonPreempted/ExitReasonEvicted), and that reason
+	// describes the old pod, not the new generation a start/restart brings
+	// up, so it must be cleared regardless of the current phase.
+	if su.ClearExit {
+		upd.ClearExitCode()
+		upd.SetExitReason("")
+	}
+
 	// T1 async agent create (design t1-async-create-v11.md §3.3): a write of
 	// phase=running always clears launch_error (T3) — once an agent has run,
 	// it must never again match the incomplete-create predicate, whatever
@@ -1434,6 +1447,311 @@ func (s *AgentStore) MarkStaleAgentsOffline(ctx context.Context, threshold time.
 		return nil, err
 	}
 	return updated, nil
+}
+
+// containerMissingStatus is the container_status recorded by
+// MarkAgentContainerMissing.
+const containerMissingStatus = "missing"
+
+// containerMissingKeptExitReasons are the exit reasons, more specific than
+// container_missing, that MarkAgentContainerMissing keeps (together with the
+// stored message and exit code) when the agent already has one: the runtime
+// broker recorded why the container went away before it disappeared.
+// These match the ExitReason values added by ptone/scion#2542; switch to
+// those constants once both changes have landed.
+var containerMissingKeptExitReasons = []string{"preempted", "evicted"}
+
+// MarkAgentContainerMissing implements store.AgentStore. See the interface
+// documentation for the guard conditions.
+//
+// Every guard is part of the UPDATE's WHERE clause (a compare-and-set), not
+// a separate read: the row changes only if it still matches at write time,
+// so a concurrent delete, start, stop, reassignment or heartbeat always wins
+// without relying on a row lock. Two such UPDATEs run in one transaction:
+// the first matches only a row whose exit reason is one to keep and leaves
+// the reason, message and exit code alone; the second, run only when the
+// first changed nothing, matches every other row and records
+// container_missing.
+func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*store.Agent, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	guards := func(reason predicate.Agent) *ent.AgentUpdate {
+		return tx.Agent.Update().
+			Where(
+				agent.IDEQ(uid),
+				agent.DeletedAtIsNil(),
+				agent.RuntimeBrokerIDEQ(brokerID),
+				agent.PhaseEQ("running"),
+				agent.Or(
+					agent.ReincarnationStateIsNil(),
+					agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),
+				),
+				agent.Or(agent.LastSeenIsNil(), agent.LastSeenLT(cutoff)),
+				reason,
+			).
+			SetPhase("error").
+			SetActivity("").
+			SetStalledFromActivity("").
+			SetToolName("").
+			SetContainerStatus(containerMissingStatus)
+	}
+
+	n, err := guards(agent.ExitReasonIn(containerMissingKeptExitReasons...)).Save(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if n == 0 {
+		n, err = guards(agent.Or(
+			agent.ExitReasonIsNil(),
+			agent.ExitReasonNotIn(containerMissingKeptExitReasons...),
+		)).
+			ClearExitCode().
+			SetExitReason(string(state.ExitReasonContainerMissing)).
+			SetMessage(message).
+			Save(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+	}
+	if n == 0 {
+		return nil, nil
+	}
+	updated, err := tx.Agent.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return entAgentToStore(updated), nil
+}
+
+// clearRuntimeTargetHook, when set by a test, runs inside each
+// ClearAgentRuntimeTarget attempt between the read and the conditional write,
+// with the attempt's transaction, so the test can change the row and make the
+// write miss.
+var clearRuntimeTargetHook func(ctx context.Context, tx *ent.Tx, id uuid.UUID)
+
+// setRuntimeTargetHook, when set by a test, runs inside the
+// SetAgentRuntimeTarget transaction after the read and its checks, just
+// before the conditional write, so a test can change the row in between.
+var setRuntimeTargetHook func(ctx context.Context, tx *ent.Tx, id uuid.UUID)
+
+// clearRuntimeTargetAttempts bounds ClearAgentRuntimeTarget's re-read and
+// retry loop.
+const clearRuntimeTargetAttempts = 5
+
+// ClearAgentRuntimeTarget implements store.AgentStore. See the interface for
+// the contract.
+//
+// Each attempt reads and conditionally writes inside one transaction, with
+// the row locked (SELECT ... FOR UPDATE) where the dialect supports it, so a
+// concurrent writer cannot slip in between. The write is additionally
+// conditional on the stored applied config and state_version being
+// unchanged; if it still misses, the row is re-read and the clear retried, up
+// to clearRuntimeTargetAttempts times, after which an error is returned.
+func (s *AgentStore) ClearAgentRuntimeTarget(ctx context.Context, id string) (bool, int64, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, 0, err
+	}
+	// Prime dialect detection before opening a transaction (see
+	// UpdateAgentStatus).
+	useLock := s.usesRowLocks(ctx)
+	for i := 0; i < clearRuntimeTargetAttempts; i++ {
+		res, err := s.clearRuntimeTargetOnce(ctx, uid, id, useLock)
+		if err != nil {
+			return false, 0, err
+		}
+		if res.done {
+			return res.cleared, res.newVersion, nil
+		}
+	}
+	return false, 0, fmt.Errorf("clear runtime target for agent %s: agent changed concurrently %d times", id, clearRuntimeTargetAttempts)
+}
+
+// runtimeTargetKeys are the applied-config JSON keys ClearAgentRuntimeTarget
+// removes.
+var runtimeTargetKeys = []string{"runtimeTarget", "runtimeTargetCandidate"}
+
+// clearRuntimeTargetResult is the outcome of one ClearAgentRuntimeTarget
+// attempt. done is false only when the conditional write matched no row
+// because the agent changed after it was read.
+type clearRuntimeTargetResult struct {
+	done       bool
+	cleared    bool
+	newVersion int64
+}
+
+// clearRuntimeTargetOnce is one ClearAgentRuntimeTarget attempt.
+func (s *AgentStore) clearRuntimeTargetOnce(ctx context.Context, uid uuid.UUID, id string, useLock bool) (clearRuntimeTargetResult, error) {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return clearRuntimeTargetResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil())
+	if useLock {
+		q = q.ForUpdate()
+	}
+	row, err := q.Select(agent.FieldAppliedConfig, agent.FieldStateVersion).Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return clearRuntimeTargetResult{done: true}, nil
+		}
+		return clearRuntimeTargetResult{}, mapError(err)
+	}
+	if row.AppliedConfig == "" {
+		return clearRuntimeTargetResult{done: true}, nil
+	}
+	// Edit the raw JSON object rather than round-tripping it through
+	// store.AgentAppliedConfig, so every other stored key is kept exactly
+	// as written.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
+		return clearRuntimeTargetResult{}, fmt.Errorf("clear runtime target for agent %s: %w", id, err)
+	}
+	found := false
+	for _, k := range runtimeTargetKeys {
+		if _, ok := raw[k]; ok {
+			delete(raw, k)
+			found = true
+		}
+	}
+	if !found {
+		return clearRuntimeTargetResult{done: true}, nil
+	}
+	cleared, err := json.Marshal(raw)
+	if err != nil {
+		return clearRuntimeTargetResult{}, err
+	}
+	if clearRuntimeTargetHook != nil {
+		clearRuntimeTargetHook(ctx, tx, uid)
+	}
+	newVersion := row.StateVersion + 1
+	n, err := tx.Agent.Update().
+		Where(
+			agent.IDEQ(uid),
+			agent.DeletedAtIsNil(),
+			agent.AppliedConfigEQ(row.AppliedConfig),
+			agent.StateVersionEQ(row.StateVersion),
+		).
+		SetAppliedConfig(string(cleared)).
+		SetStateVersion(newVersion).
+		Save(ctx)
+	if err != nil {
+		return clearRuntimeTargetResult{}, mapError(err)
+	}
+	if n == 0 {
+		return clearRuntimeTargetResult{}, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return clearRuntimeTargetResult{}, err
+	}
+	return clearRuntimeTargetResult{done: true, cleared: true, newVersion: newVersion}, nil
+}
+
+// appliedConfigUnchanged matches a row whose applied_config is still the
+// value read; an empty read also matches a NULL column.
+func appliedConfigUnchanged(read string) predicate.Agent {
+	if read == "" {
+		return agent.Or(agent.AppliedConfigIsNil(), agent.AppliedConfigEQ(""))
+	}
+	return agent.AppliedConfigEQ(read)
+}
+
+// SetAgentRuntimeTarget implements store.AgentStore. See the interface for
+// the contract.
+//
+// The read and the conditional write run in one transaction, with the row
+// locked where the dialect supports it. The write is conditional on
+// state_version and the stored applied config being unchanged, and edits
+// only the two target keys in the raw JSON, so concurrent status writes
+// (which do not touch applied_config) are never undone.
+func (s *AgentStore) SetAgentRuntimeTarget(ctx context.Context, id string, expectedVersion int64, target, candidate string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	// Prime dialect detection before opening a transaction (see
+	// UpdateAgentStatus).
+	useLock := s.usesRowLocks(ctx)
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil())
+	if useLock {
+		q = q.ForUpdate()
+	}
+	row, err := q.Select(agent.FieldAppliedConfig, agent.FieldStateVersion).Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return false, nil
+		}
+		return false, mapError(err)
+	}
+	if row.StateVersion != expectedVersion {
+		return false, nil
+	}
+	raw := map[string]json.RawMessage{}
+	if row.AppliedConfig != "" {
+		if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
+			return false, fmt.Errorf("set runtime target for agent %s: %w", id, err)
+		}
+		if raw == nil { // the stored value was the JSON literal null
+			raw = map[string]json.RawMessage{}
+		}
+	}
+	for key, value := range map[string]string{"runtimeTarget": target, "runtimeTargetCandidate": candidate} {
+		if value == "" {
+			delete(raw, key)
+			continue
+		}
+		enc, err := json.Marshal(value)
+		if err != nil {
+			return false, err
+		}
+		raw[key] = enc
+	}
+	updated, err := json.Marshal(raw)
+	if err != nil {
+		return false, err
+	}
+	if setRuntimeTargetHook != nil {
+		setRuntimeTargetHook(ctx, tx, uid)
+	}
+	n, err := tx.Agent.Update().
+		Where(
+			agent.IDEQ(uid),
+			agent.DeletedAtIsNil(),
+			agent.StateVersionEQ(expectedVersion),
+			appliedConfigUnchanged(row.AppliedConfig),
+		).
+		SetAppliedConfig(string(updated)).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // stalledExcluded lists the activities that disqualify a running agent from

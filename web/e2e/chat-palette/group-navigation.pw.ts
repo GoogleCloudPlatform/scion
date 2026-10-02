@@ -56,11 +56,11 @@ async function gotoChat(
 }
 
 function paletteInput(page: Page) {
-  return page.locator('scion-chat-switcher #palette-query-input');
+  return page.locator('scion-quick-palette #palette-query-input');
 }
 
 function paletteDialog(page: Page) {
-  return page.locator('scion-chat-switcher sl-dialog[label="Quick switcher"]');
+  return page.locator('scion-quick-palette sl-dialog[label="Quick switcher"]');
 }
 
 /** Deep-query into the real composer's native textarea, through the page, thread, composer and sl-textarea shadow roots. */
@@ -74,16 +74,16 @@ function composerTextarea(page: Page) {
 }
 
 function activeOption(page: Page) {
-  return page.locator('scion-chat-switcher .palette-option.active');
+  return page.locator('scion-quick-palette .palette-option.active');
 }
 
 function groupHeading(page: Page, group: string) {
-  return page.locator(`scion-chat-switcher #palette-heading-${group}`);
+  return page.locator(`scion-quick-palette #palette-heading-${group}`);
 }
 
 function groupOptions(page: Page, group: string) {
   return page.locator(
-    `scion-chat-switcher [aria-labelledby="palette-heading-${group}"] .palette-option`
+    `scion-quick-palette [aria-labelledby="palette-heading-${group}"] .palette-option`
   );
 }
 
@@ -156,7 +156,7 @@ test('Tab skips groups with zero matches for the current query, wrapping back to
   // "Coder" matches only AGENT_WITH_DM ("Coder One") — General/Planning
   // (Threads) and the People fixtures have no match at all.
   await paletteInput(page).fill('Coder');
-  await expect(page.locator('scion-chat-switcher .palette-option')).toHaveCount(1);
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveCount(1);
   await expect(activeOption(page)).toContainText(AGENT_WITH_DM.name);
   await page.keyboard.press('Tab');
   // Threads and People are both empty for this query, so Tab wraps back to
@@ -199,9 +199,9 @@ test('a suspended user is excluded from the real People group', async ({ page })
   });
   await openPaletteReady(page, { threads: 2, people: 2 });
   await paletteInput(page).fill(USER_SUSPENDED.displayName);
-  await expect(page.locator('scion-chat-switcher .palette-option')).toHaveCount(0);
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveCount(0);
   await expect(
-    page.locator('scion-chat-switcher [aria-labelledby="palette-heading-people"] .palette-empty')
+    page.locator('scion-quick-palette [aria-labelledby="palette-heading-people"] .palette-empty')
   ).toBeVisible();
 });
 
@@ -215,7 +215,7 @@ test('selecting a person opens the exact sorted-user DM key, for both ID orderin
   });
   await openPaletteReady(page, { threads: 2, people: 3 });
   await paletteInput(page).fill(USER_WITH_DM.displayName);
-  await expect(page.locator('scion-chat-switcher .palette-option')).toHaveCount(1);
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveCount(1);
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(
     new RegExp(`/chat/dm/${encodeURIComponent(`dm:user:${SELF_USER_ID}:user:${USER_WITH_DM.id}`)}$`)
@@ -235,7 +235,7 @@ test('selecting a person opens the exact sorted-user DM key, for both ID orderin
   await expect(paletteInput(page)).toBeFocused();
   await expect(groupOptions(page, 'people')).toHaveCount(3);
   await paletteInput(page).fill(USER_SORTS_BEFORE_SELF.displayName);
-  await expect(page.locator('scion-chat-switcher .palette-option')).toHaveCount(1);
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveCount(1);
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(
     new RegExp(
@@ -265,9 +265,9 @@ test('the active option is visible (in the scrollable viewport) after expanding 
   await page.keyboard.press('Control+k');
   const threadOptions = groupOptions(page, 'threads');
   await expect(threadOptions).toHaveCount(10);
-  await expect(page.locator('scion-chat-switcher .palette-option.active')).toBeVisible();
+  await expect(page.locator('scion-quick-palette .palette-option.active')).toBeVisible();
   await page.keyboard.press('Tab');
-  await expect(page.locator('scion-chat-switcher .palette-show-more')).toBeVisible();
+  await expect(page.locator('scion-quick-palette .palette-show-more')).toBeVisible();
 
   // All threads share activityMs=0 (tied), so ranking falls back to label
   // order: "Topic 00".."Topic 11" ascending — Tab landed on the group's
@@ -291,7 +291,7 @@ test('an asynchronous group refresh preserves a manually-selected row that the r
   // selecting it does not itself trigger ensureGroupExpandedFor. The refresh
   // then inserts one higher-ranked thread ahead of it, pushing it to index
   // 10 (the 11th row, past the cap) — only a *second*, refresh-time call to
-  // ensureGroupExpandedFor (chat-switcher.ts's moveActive/reconcile path)
+  // ensureGroupExpandedFor (quick-palette.ts's moveActive/reconcile path)
   // keeps it mounted and in the viewport.
   const initialThreads = [
     ...Array.from({ length: 9 }, (_, i) => ({

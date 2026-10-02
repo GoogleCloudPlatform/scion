@@ -126,6 +126,20 @@ func dispatchFailedError(msgID string) *AgentDMError {
 	}
 }
 
+// agentNotRunningDispatchError returns the typed error for a DM whose target
+// the broker reported as having no running container (broker 404
+// agent_not_found). The message is persisted and marked failed.
+func agentNotRunningDispatchError(msgID string) *AgentDMError {
+	return &AgentDMError{
+		Code:       ErrCodeAgentNotRunning,
+		Message:    "message persisted but the target agent has no running container",
+		HTTPStatus: http.StatusConflict,
+		Details: map[string]interface{}{
+			"message_id": msgID,
+		},
+	}
+}
+
 // isAmbiguousDispatchError returns true if the dispatch error indicates
 // the message may have been accepted by the runtime but confirmation was
 // lost — e.g. context cancellation or deadline during the network call.

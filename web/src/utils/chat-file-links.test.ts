@@ -29,6 +29,8 @@ import {
   attachmentIdentityKey,
   pathIdentityKey,
   isImageFileName,
+  isGcsImageContentType,
+  isGcsImageExtension,
   isMarkdownFileName,
   isLikelyTextFileName,
   isLikelyTextMime,
@@ -159,6 +161,50 @@ describe('extractContainerPaths', () => {
     expect(extractContainerPaths('see /workspace/notes.txt#../../secret for details')).toEqual([
       '/workspace/notes.txt',
     ]);
+  });
+
+  // A gs:// object name may itself contain a '/'-separated run that happens
+  // to look like a local container path — e.g. an object named
+  // `workspace/report.md` sits right after the bucket's own `/` separator,
+  // so the whole URI contains the literal substring `/workspace/report.md`.
+  // That substring is not a local file at all, so the recent-files recorder
+  // must not record it, the same way it already excludes a path embedded in
+  // an http(s) URL.
+  it('excludes a /workspace path embedded inside a gs:// URI', () => {
+    expect(extractContainerPaths('see gs://bkt/workspace/report.md for details')).toEqual([]);
+  });
+
+  it('excludes a /scion-volumes path embedded inside a gs:// URI', () => {
+    expect(extractContainerPaths('see gs://bkt/scion-volumes/shared/notes.md')).toEqual([]);
+  });
+
+  it('still extracts a real path elsewhere in the text while excluding the one embedded in a gs:// URI', () => {
+    expect(extractContainerPaths('gs://bkt/workspace/a.md and also /workspace/b.md')).toEqual([
+      '/workspace/b.md',
+    ]);
+  });
+
+  // Isolates insideGcsUri's lower bound the same way the http(s) case above
+  // does for insideUrl: a real path positioned before a gs:// URI that
+  // appears later in the text must not be wrongly treated as "inside" that
+  // URI merely because its index is less than the URI's end index.
+  it('still extracts a real path that appears before an unrelated gs:// URI later in the text', () => {
+    expect(extractContainerPaths('/workspace/a.md then gs://bkt/workspace/b.md')).toEqual([
+      '/workspace/a.md',
+    ]);
+  });
+
+  it('does not exclude a /workspace path that merely follows a gs:// URI with no embedded collision', () => {
+    // A real product URI (bucket scion-xproject-exchange, object
+    // workspace-volumes/dev-brief.md) contains "/workspace-volumes/", not
+    // "/workspace/" — CONTAINER_PATH_PATTERN never matches inside it at all,
+    // so a real, separate /workspace path later in the same message is
+    // unaffected by the exclusion.
+    expect(
+      extractContainerPaths(
+        'see gs://scion-xproject-exchange/workspace-volumes/dev-brief.md and /workspace/notes.md'
+      )
+    ).toEqual(['/workspace/notes.md']);
   });
 });
 
@@ -786,6 +832,53 @@ describe('extensionOf / isImageFileName / isMarkdownFileName', () => {
 
   it('isMarkdownFileName is false for other extensions', () => {
     expect(isMarkdownFileName('a.txt')).toBe(false);
+  });
+});
+
+describe('isGcsImageExtension', () => {
+  it.each(['pic.png', 'pic.jpg', 'pic.jpeg', 'pic.gif', 'pic.webp'])(
+    'is true for %s (one of the four hub-sniffed raster types)',
+    (name) => {
+      expect(isGcsImageExtension(name)).toBe(true);
+    }
+  );
+
+  it('is false for .svg, even though isImageFileName treats it as an image', () => {
+    expect(isGcsImageExtension('pic.svg')).toBe(false);
+    expect(isImageFileName('pic.svg')).toBe(true);
+  });
+
+  it('is false for .bmp and .ico, even though isImageFileName treats them as images', () => {
+    expect(isGcsImageExtension('pic.bmp')).toBe(false);
+    expect(isGcsImageExtension('pic.ico')).toBe(false);
+  });
+
+  it('is false for a non-image extension', () => {
+    expect(isGcsImageExtension('notes.md')).toBe(false);
+  });
+
+  it('is case-insensitive, matching extensionOf', () => {
+    expect(isGcsImageExtension('PIC.PNG')).toBe(true);
+  });
+});
+
+describe('isGcsImageContentType', () => {
+  it.each(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])(
+    'is true for %s (one of the four hub-sniffed raster types)',
+    (mime) => {
+      expect(isGcsImageContentType(mime)).toBe(true);
+    }
+  );
+
+  it.each(['image/bmp', 'image/x-icon', 'image/svg+xml', 'image/avif', 'image/tiff'])(
+    'is false for %s, another image type',
+    (mime) => {
+      expect(isGcsImageContentType(mime)).toBe(false);
+    }
+  );
+
+  it.each(['text/plain', 'application/octet-stream', ''])('is false for %j', (mime) => {
+    expect(isGcsImageContentType(mime)).toBe(false);
   });
 });
 

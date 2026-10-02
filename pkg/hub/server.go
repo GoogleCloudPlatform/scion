@@ -154,6 +154,12 @@ type ServerConfig struct {
 	// before being marked as stalled (default: 5 minutes). Only applies to
 	// agents with a recent heartbeat (not already offline).
 	StalledThreshold time.Duration
+	// MissingAgentGrace is how long a running agent must be continuously
+	// absent from its runtime broker's complete heartbeat inventory before
+	// the Hub marks it phase=error with exit reason container_missing (an
+	// existing preempted or evicted exit reason is kept) (default: 3 minutes,
+	// minimum: 1 minute; lower values use the default).
+	MissingAgentGrace time.Duration
 	// AutoSuspendStalled controls whether stalled agents are automatically
 	// suspended (container stopped, phase set to "suspended"). Default: false.
 	AutoSuspendStalled bool
@@ -422,6 +428,7 @@ func DefaultServerConfig() ServerConfig {
 		BrokerAuthConfig:       DefaultBrokerAuthConfig(),
 		LaunchTimeout:          5 * time.Minute,
 		LaunchKeepaliveSeconds: 15,
+		MissingAgentGrace:      DefaultMissingAgentGrace,
 	}
 }
 
@@ -1178,6 +1185,11 @@ type Server struct {
 	// Dedicated message logger for message audit trail (nil = uses messageLog fallback)
 	dedicatedMessageLog *slog.Logger
 
+	// missingAgents and lifecycleOps back the heartbeat missing-container
+	// reconcile (broker_heartbeat_reconcile.go). Zero values are ready to use.
+	missingAgents missingAgentTracker
+	lifecycleOps  lifecycleOpTracker
+
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
 	authLog           *slog.Logger
@@ -1343,6 +1355,13 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	}
 	if cfg.LaunchKeepaliveSeconds <= 0 {
 		cfg.LaunchKeepaliveSeconds = defaults.LaunchKeepaliveSeconds
+	}
+	if cfg.MissingAgentGrace < MinMissingAgentGrace {
+		if cfg.MissingAgentGrace != 0 {
+			slog.Warn("missing_agent_grace below minimum 1m, using default",
+				"configured", cfg.MissingAgentGrace, "default", defaults.MissingAgentGrace)
+		}
+		cfg.MissingAgentGrace = defaults.MissingAgentGrace
 	}
 
 	srvCtx, srvCancel := context.WithCancel(context.Background())
@@ -3599,16 +3618,21 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 			}
 		}
 
+		// The container is stopped before phase=suspended is written; see
+		// beginLifecycleOp.
+		endLifecycleOp := s.beginLifecycleOp(agent.ID)
 		if agent.RuntimeBrokerID != "" {
 			if dispatcher == nil {
 				slog.Error("Scheduler: cannot auto-suspend agent because dispatcher is nil",
 					"agent_id", agent.ID, "agent_name", agent.Name)
+				endLifecycleOp()
 				continue
 			}
 			s.syncWorkspaceOnStop(ctx, agent)
 			if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
 				slog.Error("Scheduler: auto-suspend dispatch failed",
 					"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+				endLifecycleOp()
 				continue
 			}
 		}
@@ -3618,7 +3642,9 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 			ContainerStatus: "stopped",
 			Activity:        "",
 		}
-		if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
+		err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate)
+		endLifecycleOp()
+		if err != nil {
 			slog.Error("Scheduler: auto-suspend status update failed",
 				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
 			continue
@@ -5209,6 +5235,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/role-bindings/", s.guarded("/api/v1/admin/role-bindings/", s.handleAdminRoleBindingByID))
 	s.mux.HandleFunc("/api/v1/admin/permissions", s.guarded("/api/v1/admin/permissions", s.handleAdminPermissions))
 	s.mux.HandleFunc("/api/v1/admin/access-constraints", s.guarded("/api/v1/admin/access-constraints", s.handleAdminAccessConstraints))
+	s.mux.HandleFunc("GET /api/v1/admin/access-constraints/{id}/audit", s.guarded("GET /api/v1/admin/access-constraints/{id}/audit", s.handleAdminAccessConstraintAudit))
 	s.mux.HandleFunc("/api/v1/admin/access-constraints/", s.guarded("/api/v1/admin/access-constraints/", s.handleAdminAccessConstraintByID))
 	s.mux.HandleFunc("/api/v1/admin/access-constraint-previews", s.guarded("/api/v1/admin/access-constraint-previews", s.handleAdminAccessConstraintPreviews))
 	s.mux.HandleFunc("/api/v1/admin/access-constraint-previews/", s.guarded("/api/v1/admin/access-constraint-previews/", s.handleAdminAccessConstraintPreviews))

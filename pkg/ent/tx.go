@@ -14,6 +14,8 @@ type Tx struct {
 	config
 	// AccessConstraint is the client for interacting with the AccessConstraint builders.
 	AccessConstraint *AccessConstraintClient
+	// AccessConstraintHistory is the client for interacting with the AccessConstraintHistory builders.
+	AccessConstraintHistory *AccessConstraintHistoryClient
 	// AccessPolicy is the client for interacting with the AccessPolicy builders.
 	AccessPolicy *AccessPolicyClient
 	// Agent is the client for interacting with the Agent builders.
@@ -272,6 +274,7 @@ func (tx *Tx) Client() *Client {
 
 func (tx *Tx) init() {
 	tx.AccessConstraint = NewAccessConstraintClient(tx.config)
+	tx.AccessConstraintHistory = NewAccessConstraintHistoryClient(tx.config)
 	tx.AccessPolicy = NewAccessPolicyClient(tx.config)
 	tx.Agent = NewAgentClient(tx.config)
 	tx.AgentCredential = NewAgentCredentialClient(tx.config)
