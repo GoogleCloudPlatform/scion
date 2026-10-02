@@ -37,6 +37,7 @@ import { showConfirm } from './confirm-dialog.js';
 import {
   ScionProjectMembersEditor,
   AUTHORITY_CHANGED_MESSAGE,
+  AUTHORITY_REDUCED_MESSAGE,
   CATALOG_UNAVAILABLE_REASON,
   CATALOG_REFRESHED_MESSAGE,
   CHANGED_WHILE_EDITING_LOCKED_MESSAGE,
@@ -126,6 +127,8 @@ const R_OWNER = role('r-owner', 'project-owner', 'builtin');
 const R_ADMIN = role('r-admin', 'project-admin', 'builtin');
 const R_MEMBER = role('r-member', 'project-member', 'builtin');
 const R_MSG = role('r-msg', 'project-messaging', 'custom');
+/** A custom role an owner may grant that nobody in ALL_GROUPS holds. */
+const R_OPS = role('r-ops', 'project-ops', 'custom');
 const R_CEIL = role('r-ceil', 'project-agent-reaper', 'custom', {
   grantable: false,
   reason: CEILING_REASON,
@@ -987,13 +990,15 @@ describe('409 membership_changed', () => {
     expect(el.dlgExpectedIds).toEqual(['r-admin']);
   });
 
-  it('actor_authority_changed reloads capabilities and asks to retry, never "already a member"', async () => {
+  it('actor_authority_changed in Add mode drops choices the actor can no longer make, never "already a member"', async () => {
     const el = makeEditor(OWNER_CAPS, { groups: [ALICE] });
     el.openAddDialog();
     el.onPrincipalChange({ principalType: 'user', principalId: 'u-new', displayLabel: 'New' });
+    expect(el.dlgBuiltIn).toBe('r-admin');
     el.toggleCustomRole('r-msg', true);
     el.loadData = vi.fn(async () => {
       el.capabilities = ADMIN_CAPS;
+      el.assignableRoles = ADMIN_CATALOG;
     });
     vi.mocked(apiFetch).mockResolvedValueOnce(changed('actor_authority_changed', []));
     await el.handleSave();
@@ -1002,9 +1007,78 @@ describe('409 membership_changed', () => {
     expect(el.capabilities).toBe(ADMIN_CAPS);
     expect(el.dialogOpen).toBe(true);
     expect(el.dialogMode).toBe('add');
-    expect(el.dlgCustomIds).toEqual(['r-msg']);
+    // The custom role and Admin can no longer be granted by this actor.
+    expect(el.dlgCustomIds).toEqual([]);
+    expect(el.dlgBuiltIn).toBe('r-member');
     expect(el.dlgError).toBe(AUTHORITY_CHANGED_MESSAGE);
     expect(`${el.dlgError} ${el.dlgInfo ?? ''}`).not.toContain('already a member');
+  });
+
+  it('actor_authority_changed in Edit mode keeps held roles and drops new ungrantable ones', async () => {
+    const el = makeEditor(OWNER_CAPS, { catalog: [...OWNER_CATALOG, R_OPS] });
+    el.openEditDialog(ERIN);
+    el.dlgBuiltIn = 'r-admin';
+    el.toggleCustomRole('r-ops', true);
+    el.loadData = vi.fn(async () => {
+      el.capabilities = ADMIN_CAPS;
+      el.assignableRoles = ADMIN_CATALOG;
+    });
+    vi.mocked(apiFetch).mockResolvedValueOnce(changed('actor_authority_changed', []));
+    await el.handleSave();
+
+    expect(el.dialogOpen).toBe(true);
+    expect(el.dlgLockedReason).toBeNull();
+    expect(el.dlgBuiltIn).toBe('r-member');
+    expect(el.dlgCustomIds).toEqual(['r-msg']);
+    expect(el.dlgError).toBe(AUTHORITY_CHANGED_MESSAGE);
+  });
+
+  it('owner demoted to admin while editing an admin gets the locked dialog', async () => {
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS, [...OWNER_CATALOG, R_OPS]);
+    el.openEditDialog(BOB);
+    el.dlgBuiltIn = 'r-member';
+    el.toggleCustomRole('r-ops', true);
+    routeApi(
+      (url, init) =>
+        init?.method === 'PUT'
+          ? changed('actor_authority_changed', ['r-admin', 'r-msg'])
+          : undefined,
+      listRoute(ALL_GROUPS, ADMIN_CAPS),
+      catalogRoute([...ADMIN_CATALOG, { ...R_OPS, grantable: false, reason: 'requires owner' }])
+    );
+    await el.handleSave();
+    await el.updateComplete;
+
+    expect(el.capabilities).toEqual(ADMIN_CAPS);
+    expect(el.dialogOpen).toBe(true);
+    expect(el.dlgLockedReason).toBe(ROW_LOCKED_REASON);
+    // Back to Bob's current roles; the new custom role is no longer selected.
+    expect(el.dlgBuiltIn).toBe('r-admin');
+    expect(el.dlgCustomIds).toEqual(['r-msg']);
+    expect(el.dlgError).toBe(AUTHORITY_REDUCED_MESSAGE);
+    expect(q(el, '.dialog-info .locked-reason')?.textContent).toBe(ROW_LOCKED_REASON);
+    for (const r of qa(el, 'sl-radio-group sl-radio')) {
+      expect(r.hasAttribute('disabled')).toBe(true);
+    }
+    for (const c of qa(el, 'sl-checkbox')) expect(c.hasAttribute('disabled')).toBe(true);
+    expect(checkbox(el, 'r-ops')?.hasAttribute('checked')).toBe(false);
+    expect(q(el, 'sl-button.save-member')?.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('actor_authority_changed that leaves the editor read-only closes the dialog', async () => {
+    const el = makeEditor(OWNER_CAPS);
+    el.openEditDialog(DAVE);
+    el.dlgBuiltIn = 'r-admin';
+    el.loadData = vi.fn(async () => {
+      el.capabilities = MEMBER_CAPS;
+      el.assignableRoles = [];
+    });
+    vi.mocked(apiFetch).mockResolvedValueOnce(changed('actor_authority_changed', []));
+    await el.handleSave();
+
+    expect(el.dialogOpen).toBe(false);
+    expect(el.actionFeedback).toEqual({ message: AUTHORITY_REDUCED_MESSAGE, variant: 'danger' });
+    expect(writes()).toHaveLength(1);
   });
 });
 

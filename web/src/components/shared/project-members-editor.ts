@@ -90,6 +90,8 @@ export const CHANGED_WHILE_EDITING_MESSAGE =
 export const CHANGED_WHILE_EDITING_LOCKED_MESSAGE = 'This member changed while you were editing.';
 export const AUTHORITY_CHANGED_MESSAGE =
   'Your permissions on this project changed while saving. The options were refreshed; review and save again.';
+export const AUTHORITY_REDUCED_MESSAGE =
+  'Your permissions on this project changed while saving. Nothing was saved.';
 export const REMOVES_ALL_ROLES = 'This removes all of their project roles.';
 export const CATALOG_REFRESHED_MESSAGE =
   'The list of roles was refreshed; review your selection and save again.';
@@ -1251,10 +1253,8 @@ export class ScionProjectMembersEditor extends LitElement {
 
     if (err.code === 'membership_changed') {
       if (details.cause === 'actor_authority_changed') {
-        // The actor's own authority moved: refresh capabilities and the
-        // catalog, keep the selection, and let the user retry.
         await this.loadData();
-        this.dlgError = AUTHORITY_CHANGED_MESSAGE;
+        this.rederiveAfterAuthorityChange();
         return;
       }
       // principal_roles_changed (or an older server without a cause): the
@@ -1314,6 +1314,57 @@ export class ScionProjectMembersEditor extends LitElement {
 
     this.dlgError = err.message;
     this.dlgErrorRoleId = detailRoleId;
+  }
+
+  /**
+   * After the actor's own authority changed mid-save (capabilities and the
+   * catalog are already reloaded), re-derives the dialog: it closes when the
+   * editor became read-only; otherwise Edit mode recomputes the lock and
+   * last-owner state, and selections the actor can no longer make are
+   * dropped. A locked dialog goes back to the principal's current roles.
+   */
+  private rederiveAfterAuthorityChange(): void {
+    if (this.effectiveReadOnly) {
+      this.dialogOpen = false;
+      this.actionFeedback = { message: AUTHORITY_REDUCED_MESSAGE, variant: 'danger' };
+      return;
+    }
+    if (this.dialogMode === 'edit') {
+      this.applyDialogLock(this.dialogRow);
+      if (this.dlgLockedReason) {
+        this.dlgBuiltIn = this.dlgCurrentBuiltIn;
+        this.dlgCustomIds = this.dlgExpectedIds.filter((id) => id !== this.dlgCurrentBuiltIn);
+        this.dlgError = AUTHORITY_REDUCED_MESSAGE;
+        return;
+      }
+    }
+
+    const held = new Set(this.dlgHeldCustom.map((b) => b.roleDefinitionId));
+    this.dlgCustomIds = this.dlgCustomIds.filter((id) => {
+      if (held.has(id)) return true;
+      const role = this.assignableRoles.find((r) => r.id === id);
+      return (
+        !!role &&
+        this.dlgPrincipalType !== 'agent' &&
+        !customRoleState(role, { caps: this.capabilities, held: false }).disabled
+      );
+    });
+
+    // A built-in choice is kept while its option is still enabled; one the
+    // refreshed catalog no longer lists can't be checked, so it is reset too.
+    const builtInRole =
+      this.dlgBuiltIn === NO_PROJECT_ROLE
+        ? null
+        : this.assignableRoles.find((r) => r.id === this.dlgBuiltIn);
+    const builtInAllowed =
+      builtInRole !== undefined && !builtInOptionState(builtInRole, this.builtInContext()).disabled;
+    if (!builtInAllowed) {
+      this.dlgBuiltIn =
+        this.dialogMode === 'add'
+          ? defaultBuiltInForAdd(this.capabilities, this.dlgPrincipalType, this.assignableRoles)
+          : this.dlgCurrentBuiltIn;
+    }
+    this.dlgError = AUTHORITY_CHANGED_MESSAGE;
   }
 
   // ---------------------------------------------------------------------------
