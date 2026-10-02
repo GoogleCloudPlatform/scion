@@ -1972,39 +1972,58 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	startAgentID := startReq.ResolvedEnv["SCION_AGENT_ID"]
 
 	// If the request names no project, recover the project path from the
-	// agent's existing container on any runtime this broker has. This runs
-	// before buildStartContext so its runtime resolution reads the agent's
-	// project settings and saved profile.
+	// agent's existing container, found by the same project-scoped search
+	// across every runtime this broker has that stop and restart use. This
+	// runs before buildStartContext so its runtime resolution reads the
+	// agent's project settings and saved profile. A recovered path is the
+	// project's .scion directory as the container recorded it, not a
+	// project root, so buildStartContext is told where it came from.
 	startProjectPath := startReq.ProjectPath
+	var startProjectPathFromContainer bool
 	if startReq.ProjectPath == "" && startReq.ProjectSlug == "" {
-		found, err := s.findAgentOnRuntimes(ctx, id, projectID)
-		if err != nil {
+		m, err := s.lookupAgentMatch(ctx, id, projectID)
+		switch {
+		case m.matched:
+			startProjectPath = m.entry.ProjectPath
+			startProjectPathFromContainer = startProjectPath != ""
+		case errors.Is(err, ErrAgentNotFound):
+			// No container to recover from; resolve as a request that names
+			// no project.
+		case errors.Is(err, errAuxiliaryRuntimeList):
+			// The default runtime listed no match and an auxiliary runtime
+			// could not list; resolve as a request that names no project
+			// rather than failing a start that may not involve that runtime.
+			s.agentLifecycleLog.Warn("Start agent: auxiliary runtime list failed while recovering the project path",
+				"agent_id", id, "error", err)
+		case errors.Is(err, ErrAgentListUnavailable):
 			span.SetStatus(codes.Error, err.Error())
-			RuntimeError(w, "Failed to list agents: "+err.Error())
+			AgentLookupUnavailable(w, err, id, "start", "")
 			return
-		}
-		if found != nil {
-			startProjectPath = found.ProjectPath
+		default:
+			// More than one container matches: none of them is taken as the
+			// agent's project; resolve as a request that names no project.
+			s.agentLifecycleLog.Warn("Start agent: project path not recovered", "agent_id", id, "error", err)
 		}
 	}
 
 	sc, err := s.buildStartContext(ctx, startContextInputs{
-		Name:               id,
-		AgentID:            startAgentID,
-		ProjectID:          projectID,
-		ProjectPath:        startProjectPath,
-		ProjectSlug:        startReq.ProjectSlug,
-		Config:             cfg,
-		InlineConfig:       startReq.InlineConfig,
-		HubEndpoint:        startReq.HubEndpoint,
-		ResolvedEnv:        startReq.ResolvedEnv,
-		EnvClassifications: startReq.EnvClassifications,
-		ResolvedSecrets:    startReq.ResolvedSecrets,
-		SharedDirs:         startReq.SharedDirs,
-		AgentToken:         startContextAgentToken,
-		WorkspaceMode:      startReq.WorkspaceMode,
-		HTTPRequest:        r,
-		Operation:          opHTTPStart,
+		Name:                     id,
+		AgentID:                  startAgentID,
+		ProjectID:                projectID,
+		ProjectPath:              startProjectPath,
+		ProjectPathFromContainer: startProjectPathFromContainer,
+		ProjectSlug:              startReq.ProjectSlug,
+		Config:                   cfg,
+		InlineConfig:             startReq.InlineConfig,
+		HubEndpoint:              startReq.HubEndpoint,
+		ResolvedEnv:              startReq.ResolvedEnv,
+		EnvClassifications:       startReq.EnvClassifications,
+		ResolvedSecrets:          startReq.ResolvedSecrets,
+		SharedDirs:               startReq.SharedDirs,
+		AgentToken:               startContextAgentToken,
+		WorkspaceMode:            startReq.WorkspaceMode,
+		HTTPRequest:              r,
+		Operation:                opHTTPStart,
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -2201,9 +2220,16 @@ func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
 // container id — nothing addressable to stop): that case is folded into
 // the same "not found" outcome as a genuine no-match.
 func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) (string, agent.Manager, error) {
-	containerID, mgr, _, err := s.lookupAgentTarget(ctx, id, projectID)
-	if err == nil && containerID != "" {
-		return containerID, mgr, nil
+	m, err := s.lookupAgentMatch(ctx, id, projectID)
+	return s.projectScopedTargetFrom(ctx, id, projectID, m, err)
+}
+
+// projectScopedTargetFrom applies projectScopedTarget's rules to a
+// lookupAgentMatch result the caller already has, so restart can read the
+// agent's project path from the same entry it stops.
+func (s *Server) projectScopedTargetFrom(ctx context.Context, id, projectID string, m agentMatch, err error) (string, agent.Manager, error) {
+	if err == nil && m.containerID != "" {
+		return m.containerID, m.manager, nil
 	}
 	if err != nil && !errors.Is(err, ErrAgentNotFound) {
 		return "", nil, err
@@ -2322,27 +2348,32 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		UserID:               restartReq.UserID,
 	})
 
-	// Look up the agent on every runtime this broker has, to get its name
-	// and project path; the project path is what lets the runtime
-	// resolution below read the agent's project settings and saved profile.
-	// A listing error leaves the agent unresolved here, as before; the
-	// stop-target lookup below reports it.
+	// Look up the agent with the same project-scoped search across every
+	// runtime this broker has that the stop below uses, and read its name
+	// and project path from the matched entry; the project path is what
+	// lets the runtime resolution below read the agent's project settings
+	// and saved profile. A lookup error leaves the agent unresolved here and
+	// is reported where the stop target is resolved, after the
+	// runtime checks.
 	agentName := id
 	var projectPath string
-	found, _ := s.findAgentOnRuntimes(ctx, id, projectID)
-	if found != nil {
-		agentName = found.Name
-		projectPath = found.ProjectPath
+	match, matchErr := s.lookupAgentMatch(ctx, id, projectID)
+	if match.matched {
+		if match.entry.Name != "" {
+			agentName = match.entry.Name
+		}
+		projectPath = match.entry.ProjectPath
 	}
 
 	sc, err := s.buildStartContext(ctx, startContextInputs{
-		Name:               agentName,
-		ProjectPath:        projectPath,
-		HubEndpoint:        restartReq.HubEndpoint,
-		ResolvedEnv:        restartReq.ResolvedEnv,
-		EnvClassifications: restartReq.EnvClassifications,
-		HTTPRequest:        r,
-		Operation:          opHTTPRestart,
+		Name:                     agentName,
+		ProjectPath:              projectPath,
+		ProjectPathFromContainer: projectPath != "",
+		HubEndpoint:              restartReq.HubEndpoint,
+		ResolvedEnv:              restartReq.ResolvedEnv,
+		EnvClassifications:       restartReq.EnvClassifications,
+		HTTPRequest:              r,
+		Operation:                opHTTPRestart,
 	})
 	if err != nil {
 		writeStartContextError(w, err)
@@ -2371,7 +2402,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// be exited and the subsequent start will handle cleanup.
 	// The lookup also returns the manager whose runtime reported the
 	// target, so the stop goes to that same runtime (default or auxiliary).
-	stopTarget, stopMgr, err := s.projectScopedTarget(ctx, id, projectID)
+	stopTarget, stopMgr, err := s.projectScopedTargetFrom(ctx, id, projectID, match, matchErr)
 	if err != nil {
 		// A lookup error other than "not found" must abort the restart
 		// without starting a second container — otherwise a runtime hiccup
@@ -4059,49 +4090,6 @@ func (s *Server) allManagers() []agent.Manager {
 	}
 	s.auxiliaryRuntimesMu.RUnlock()
 	return managers
-}
-
-// findAgentOnRuntimes looks id up (by name, container ID or slug, scoped to
-// projectID as matchesAgent does) on the default runtime first and then on
-// every auxiliary runtime in sorted identity order, and returns the first
-// matching entry. It returns nil when no runtime lists the agent.
-//
-// err reports a failure to list the default runtime and is returned only
-// when no runtime matched. An auxiliary runtime that fails to list is
-// skipped, so it does not turn into an error for an agent that runs on the
-// default runtime.
-func (s *Server) findAgentOnRuntimes(ctx context.Context, id, projectID string) (*api.AgentInfo, error) {
-	filter := map[string]string{"scion.agent": "true"}
-	match := func(agents []api.AgentInfo) *api.AgentInfo {
-		for i := range agents {
-			if matchesAgent(agents[i], id, projectID) {
-				return &agents[i]
-			}
-		}
-		return nil
-	}
-
-	agents, defaultErr := s.manager.List(ctx, filter)
-	if defaultErr == nil {
-		if found := match(agents); found != nil {
-			return found, nil
-		}
-	}
-	for _, aux := range s.sortedAuxiliaryRuntimes() {
-		if aux.Manager == nil || aux.Manager == s.manager {
-			continue
-		}
-		auxAgents, err := aux.Manager.List(ctx, filter)
-		if err != nil {
-			s.agentLifecycleLog.Debug("Agent lookup: auxiliary runtime list failed",
-				"agent_id", id, "runtime", aux.identity, "error", err)
-			continue
-		}
-		if found := match(auxAgents); found != nil {
-			return found, nil
-		}
-	}
-	return nil, defaultErr
 }
 
 // resolveRuntimeForAgent returns the runtime for direct operations such as

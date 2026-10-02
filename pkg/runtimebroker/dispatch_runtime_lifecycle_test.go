@@ -28,7 +28,9 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // These tests pin that the create response, the start path without a
@@ -49,7 +51,7 @@ const (
 // agent's own project resolves to docker.
 type lifecycleFixture struct {
 	srv         *Server
-	defaultMgr  *mockManager
+	defaultMgr  *filteringMockManager
 	k8sRuntime  *runtime.MockRuntime
 	projectPath string // the agent project's .scion directory
 
@@ -104,7 +106,7 @@ func newLifecycleFixture(t *testing.T) *lifecycleFixture {
 	// No ForceRuntime: resolution must read settings.
 
 	f := &lifecycleFixture{
-		defaultMgr:  &mockManager{},
+		defaultMgr:  &filteringMockManager{},
 		projectPath: projectPath,
 	}
 	f.k8sRuntime = &runtime.MockRuntime{
@@ -156,8 +158,9 @@ func writeLifecycleProject(t *testing.T, dotScion, settings string) {
 
 // registerK8sAgents registers an auxiliary kubernetes runtime whose manager
 // lists agents, as the broker does once it has dispatched to that runtime.
-func (f *lifecycleFixture) registerK8sAgents(agents ...api.AgentInfo) *mockManager {
-	mgr := &mockManager{agents: agents}
+func (f *lifecycleFixture) registerK8sAgents(agents ...api.AgentInfo) *filteringMockManager {
+	mgr := &filteringMockManager{}
+	mgr.agents = agents
 	f.srv.auxiliaryRuntimesMu.Lock()
 	f.srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: f.k8sRuntime, Manager: mgr}
 	f.srv.auxiliaryRuntimesMu.Unlock()
@@ -168,6 +171,34 @@ func (f *lifecycleFixture) k8sRun() (int, []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.k8sRuns, f.k8sRunEnv
+}
+
+// lifecycleAgent is a listed agent entry carrying the labels the broker's
+// project-scoped lookup filters on (scion.name, and the project label when
+// projectID is set). projectPath is the project's .scion directory, as a
+// container records it.
+func lifecycleAgent(name, projectPath, projectID string) api.AgentInfo {
+	labels := map[string]string{"scion.name": name}
+	if projectID != "" {
+		labels[projectkeys.LabelProjectID] = projectID
+	}
+	return api.AgentInfo{ID: name, Name: name, ContainerID: "ctr-" + name, ProjectPath: projectPath, Labels: labels}
+}
+
+// newDockerProject writes a second agent project that only knows docker and
+// returns its .scion directory.
+func newDockerProject(t *testing.T) string {
+	t.Helper()
+	dotScion := filepath.Join(t.TempDir(), "docker-project", ".scion")
+	writeLifecycleProject(t, dotScion, "schema_version: \"1\"\n"+
+		"active_profile: local\n"+
+		"profiles:\n"+
+		"    local:\n"+
+		"        runtime: docker\n"+
+		"runtimes:\n"+
+		"    docker:\n"+
+		"        type: docker\n")
+	return dotScion
 }
 
 func lifecyclePost(t *testing.T, srv *Server, path string, body any) *httptest.ResponseRecorder {
@@ -238,7 +269,7 @@ func TestStartAgent_NoProjectPathResolvesFromAgentProject(t *testing.T) {
 			f := newLifecycleFixture(t)
 			const name = "start-agent"
 			writeSavedAgentProfile(t, f.projectPath, name, lifecycleK8sProfile)
-			listed := api.AgentInfo{ID: name, Name: name, ProjectPath: f.projectPath}
+			listed := lifecycleAgent(name, f.projectPath, "")
 			if tc.onK8s {
 				f.registerK8sAgents(listed)
 			} else {
@@ -276,7 +307,7 @@ func TestRestartAgent_FindsAgentOnNonDefaultRuntime(t *testing.T) {
 	f := newLifecycleFixture(t)
 	const name = "restart-agent"
 	writeSavedAgentProfile(t, f.projectPath, name, lifecycleK8sProfile)
-	f.registerK8sAgents(api.AgentInfo{ID: name, Name: name, ContainerID: "pod-" + name, ProjectPath: f.projectPath})
+	f.registerK8sAgents(lifecycleAgent(name, f.projectPath, ""))
 
 	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/restart", map[string]any{
 		"hubEndpoint": lifecycleHubEndpoint,
@@ -315,16 +346,16 @@ func TestStartAgent_AuxiliaryListErrorDoesNotFailStart(t *testing.T) {
 }
 
 // TestStartAgent_DefaultListErrorFailsStart: a start without a project path
-// still fails when the default runtime cannot list agents and no other
-// runtime lists the agent.
+// fails as unavailable when the default runtime cannot list agents, rather
+// than starting without the agent's project.
 func TestStartAgent_DefaultListErrorFailsStart(t *testing.T) {
 	f := newLifecycleFixture(t)
 	f.registerK8sAgents()
 	f.defaultMgr.listErr = errors.New("docker unavailable")
 
 	w := lifecyclePost(t, f.srv, "/api/v1/agents/plain-agent/start", map[string]any{})
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusInternalServerError, w.Body.String())
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
 	}
 	if f.defaultMgr.StartCalls() != 0 {
 		t.Errorf("default runtime Start calls = %d, want 0", f.defaultMgr.StartCalls())
@@ -348,5 +379,166 @@ func TestRestartAgent_NotFoundOnAnyRuntime(t *testing.T) {
 	}
 	if k8sMgr.StartCalls() != 0 || k8sMgr.stopCalls != 0 {
 		t.Errorf("kubernetes runtime was used: start=%d stop=%d", k8sMgr.StartCalls(), k8sMgr.stopCalls)
+	}
+}
+
+// dirEntries lists the names directly under dir (nil when it does not exist).
+func dirEntries(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// TestStartAgent_RecoveredProjectPathWritesNoProjectMarker: a start with a
+// projectId but no project path or slug recovers the agent's .scion
+// directory from its container and uses it for settings only. It does not
+// initialize that directory as a hub-managed project root: no .scion marker
+// is written inside it and no project-configs directory is created. The
+// start still lands on the runtime of the agent's saved profile.
+func TestStartAgent_RecoveredProjectPathWritesNoProjectMarker(t *testing.T) {
+	f := newLifecycleFixture(t)
+	const (
+		name      = "marker-agent"
+		projectID = "11111111-2222-3333-4444-555555555555"
+	)
+	writeSavedAgentProfile(t, f.projectPath, name, lifecycleK8sProfile)
+	f.registerK8sAgents(lifecycleAgent(name, f.projectPath, projectID))
+	before := dirEntries(t, f.projectPath)
+
+	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/start?projectId="+projectID, map[string]any{
+		"hubEndpoint": lifecycleHubEndpoint,
+	})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	if runs, _ := f.k8sRun(); runs != 1 {
+		t.Fatalf("kubernetes runtime runs = %d, want 1", runs)
+	}
+	if _, err := os.Lstat(filepath.Join(f.projectPath, ".scion")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a .scion entry was created inside the agent's .scion directory (err = %v)", err)
+	}
+	if after := dirEntries(t, f.projectPath); !slices.Equal(before, after) {
+		t.Errorf("agent's .scion directory entries changed: before %v, after %v", before, after)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dirEntries(t, filepath.Join(home, ".scion", "project-configs")); len(got) != 0 {
+		t.Errorf("project-configs entries created: %v", got)
+	}
+}
+
+// TestProjectScopedLookup_SameNameInTwoProjects: two agents share a name,
+// one in a docker project listed on the default runtime and one in a
+// kubernetes project listed on the kubernetes runtime. A start or restart
+// scoped to the kubernetes agent's project uses that agent's project path
+// and saved profile, and a restart stops it on the kubernetes runtime.
+func TestProjectScopedLookup_SameNameInTwoProjects(t *testing.T) {
+	const (
+		name       = "twin-agent"
+		dockerProj = "aaaaaaaa-0000-0000-0000-000000000001"
+		k8sProj    = "bbbbbbbb-0000-0000-0000-000000000002"
+	)
+	for _, op := range []string{"start", "restart"} {
+		t.Run(op, func(t *testing.T) {
+			f := newLifecycleFixture(t)
+			dockerPath := newDockerProject(t)
+			writeSavedAgentProfile(t, f.projectPath, name, lifecycleK8sProfile)
+			f.defaultMgr.agents = []api.AgentInfo{lifecycleAgent(name, dockerPath, dockerProj)}
+			k8sMgr := f.registerK8sAgents(lifecycleAgent(name, f.projectPath, k8sProj))
+
+			w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/"+op+"?projectId="+k8sProj, map[string]any{
+				"hubEndpoint": lifecycleHubEndpoint,
+			})
+			if w.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
+			}
+			runs, env := f.k8sRun()
+			if runs != 1 {
+				t.Fatalf("kubernetes runtime runs = %d, want 1", runs)
+			}
+			if f.defaultMgr.StartCalls() != 0 {
+				t.Errorf("default runtime Start calls = %d, want 0", f.defaultMgr.StartCalls())
+			}
+			if !slices.Contains(env, "SCION_HUB_ENDPOINT="+lifecycleHubEndpoint) {
+				t.Errorf("want SCION_HUB_ENDPOINT=%s (no docker-bridge rewrite), got env %v", lifecycleHubEndpoint, env)
+			}
+			if op == "restart" {
+				if f.defaultMgr.stopCalls != 0 {
+					t.Errorf("default runtime Stop calls = %d, want 0", f.defaultMgr.stopCalls)
+				}
+				if k8sMgr.stopCalls != 1 {
+					t.Errorf("kubernetes runtime Stop calls = %d, want 1", k8sMgr.stopCalls)
+				}
+			}
+		})
+	}
+}
+
+// TestStartAgent_ProvidedProjectPathUsedAsIs: a start that names a project
+// path uses it as given, even when the agent's listed container records a
+// different project.
+func TestStartAgent_ProvidedProjectPathUsedAsIs(t *testing.T) {
+	f := newLifecycleFixture(t)
+	const name = "pinned-agent"
+	dockerPath := newDockerProject(t)
+	writeSavedAgentProfile(t, f.projectPath, name, lifecycleK8sProfile)
+	f.defaultMgr.agents = []api.AgentInfo{lifecycleAgent(name, dockerPath, "")}
+
+	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/start", map[string]any{
+		"hubEndpoint": lifecycleHubEndpoint,
+		"projectPath": f.projectPath,
+	})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	if runs, _ := f.k8sRun(); runs != 1 {
+		t.Fatalf("kubernetes runtime runs = %d, want 1", runs)
+	}
+	if f.defaultMgr.StartCalls() != 0 {
+		t.Errorf("default runtime Start calls = %d, want 0", f.defaultMgr.StartCalls())
+	}
+}
+
+// TestTryProvisionWorktree_RecoveredProjectPathNotUsedAsRoot: a project path
+// recovered from the agent's container is a .scion directory, not a project
+// root, so worktree-per-agent provisioning does not create a worktree base
+// under it; the start falls back to clone-per-agent and the directory is
+// left as it was.
+func TestTryProvisionWorktree_RecoveredProjectPathNotUsedAsRoot(t *testing.T) {
+	f := newLifecycleFixture(t)
+	dotScion := newDockerProject(t)
+	before := dirEntries(t, dotScion)
+
+	opts := api.StartOptions{}
+	provisioned, err := f.srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name:                     "wt-agent",
+		AgentID:                  "wt-agent-id",
+		ProjectID:                "wt-project-id",
+		ProjectPath:              dotScion,
+		ProjectPathFromContainer: true,
+		WorkspaceMode:            store.WorkspaceModeWorktreePerAgent,
+		Config:                   &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: "file://" + filepath.Join(t.TempDir(), "no-such-repo")}},
+		Operation:                opHTTPStart,
+	}, &opts, map[string]string{}, "docker")
+	if err != nil {
+		t.Fatalf("tryProvisionWorktree: %v", err)
+	}
+	if provisioned {
+		t.Fatal("worktree provisioned under a recovered .scion directory")
+	}
+	if after := dirEntries(t, dotScion); !slices.Equal(before, after) {
+		t.Errorf(".scion directory entries changed: before %v, after %v", before, after)
 	}
 }
