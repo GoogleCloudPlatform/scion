@@ -37,6 +37,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import { apiFetch } from '../../client/api.js';
 import { navigateTo } from '../../client/main.js';
 import type { PaletteCandidate, PaletteTarget } from '../../client/chat-palette-types.js';
+import { AGENTS_IDLE_TIMEOUT_MS, PaletteLoadError } from '../../client/chat-palette-data.js';
 import { chatRecentFiles } from '../../client/chat-recent-files.js';
 import type { RecentFile, RecentFilesSnapshot } from '../../client/chat-recent-files.js';
 
@@ -1130,6 +1131,78 @@ describe('_loadPalettePeople', () => {
       // Load 1 must not have overwritten load 2's fresh ready state.
       expect(el.v2PaletteGroups.people.status).toBe('ready');
     });
+
+    it('a hung /auth/me is aborted after the shared idle bound, so the group settles instead of holding its token forever', async () => {
+      const el = createPage();
+      el.pageData = {};
+      el.v2PaletteOpen = true;
+      vi.useFakeTimers();
+
+      vi.mocked(apiFetch).mockImplementation((url: string, options?: { signal?: AbortSignal }) => {
+        if (url === '/api/v1/auth/me') {
+          return new Promise((_resolve, reject) => {
+            options?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError'))
+            );
+          });
+        }
+        return Promise.resolve(jsonResponse({ users: [], dms: [] }));
+      });
+
+      const load = el._loadPalettePeople();
+      const tokenWhilePending = el._paletteGroupLoadToken.people;
+      expect(tokenWhilePending).toBeDefined();
+
+      await vi.advanceTimersByTimeAsync(AGENTS_IDLE_TIMEOUT_MS + 1);
+      await load;
+
+      // The hung fetch's own abort is treated like any other identity
+      // failure: the group settles to a retryable error, and — critically —
+      // the token is actually cleared, not held forever.
+      expect(el.v2PaletteGroups.people.status).toBe('error');
+      expect(el._paletteGroupLoadToken.people).toBeUndefined();
+    });
+
+    it('clears its identity timeout once /auth/me resolves, leaving no pending timers behind', async () => {
+      const el = createPage();
+      el.pageData = {};
+      vi.useFakeTimers();
+
+      vi.mocked(apiFetch).mockResolvedValue(jsonResponse({ id: 'resolved-self' }));
+
+      const selfId = await el._resolveSelfUserId();
+
+      expect(selfId).toBe('resolved-self');
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('does not abort /auth/me 1ms before the shared idle bound, but does 1ms after', async () => {
+      const el = createPage();
+      el.pageData = {};
+      vi.useFakeTimers();
+      let aborted = false;
+
+      vi.mocked(apiFetch).mockImplementation((url: string, options?: { signal?: AbortSignal }) => {
+        if (url === '/api/v1/auth/me') {
+          return new Promise((_resolve, reject) => {
+            options?.signal?.addEventListener('abort', () => {
+              aborted = true;
+              reject(new DOMException('aborted', 'AbortError'));
+            });
+          });
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      const resolved = el._resolveSelfUserId();
+
+      await vi.advanceTimersByTimeAsync(AGENTS_IDLE_TIMEOUT_MS - 1);
+      expect(aborted).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(2);
+      expect(aborted).toBe(true);
+      expect(await resolved).toBe('');
+    });
   });
 
   describe('unknown identity — connected element: no route side effects from resolving it', () => {
@@ -1275,6 +1348,281 @@ describe('a cancelled or superseded load publishes nothing (page level)', () => 
 
     expect(el.v2PaletteGroups.threads.status).toBe('loading');
     expect(el.v2PaletteGroups.threads.status).not.toBe('error');
+  });
+});
+
+function agentCandidate(id: string, label: string): PaletteCandidate {
+  return {
+    id: JSON.stringify(['dm', 'agent', id]),
+    group: 'agents',
+    label,
+    searchFields: [label],
+    secondaryLabel: '',
+    activityMs: 0,
+    target: { kind: 'dm', peerKind: 'agent', peerId: id, displayName: label },
+  };
+}
+
+describe('_loadPaletteAgents: a refresh does not shrink an already-ready list, and an error keeps whatever is on screen', () => {
+  it('a refresh of an already-ready group does not wire onProgress, so it cannot replace the full list with a partial page', async () => {
+    const el = createPage();
+    const fullList = [agentCandidate('a1', 'Alice'), agentCandidate('a2', 'Bob')];
+    el.v2PaletteGroups = {
+      ...el.v2PaletteGroups,
+      agents: { status: 'ready', candidates: fullList },
+    };
+    el._agentsSnapshotComplete = true;
+
+    let capturedOnProgress: unknown;
+    let resolveLoad!: (v: PaletteCandidate[]) => void;
+    vi.spyOn(el._paletteDataController, 'loadAgentsGroup').mockImplementation((onProgress) => {
+      capturedOnProgress = onProgress;
+      return new Promise((resolve) => {
+        resolveLoad = resolve;
+      });
+    });
+
+    const reload = el._loadPaletteAgents();
+    expect(capturedOnProgress).toBeUndefined();
+    // The previous full snapshot stays on screen for the whole reload.
+    expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
+
+    resolveLoad([agentCandidate('a3', 'Carol')]);
+    await reload;
+    expect(el.v2PaletteGroups.agents.candidates).toEqual([agentCandidate('a3', 'Carol')]);
+  });
+
+  it('a first load (no previous ready snapshot) wires onProgress and publishes partial pages as they arrive', async () => {
+    const el = createPage();
+    let capturedOnProgress!: (partial: PaletteCandidate[]) => void;
+    vi.spyOn(el._paletteDataController, 'loadAgentsGroup').mockImplementation((onProgress) => {
+      capturedOnProgress = onProgress!;
+      return new Promise(() => {});
+    });
+
+    void el._loadPaletteAgents();
+    expect(capturedOnProgress).toBeDefined();
+
+    capturedOnProgress([agentCandidate('a1', 'Alice')]);
+    expect(el.v2PaletteGroups.agents.status).toBe('loading');
+    expect(el.v2PaletteGroups.agents.candidates).toEqual([agentCandidate('a1', 'Alice')]);
+  });
+
+  it('a retry after an error also wires onProgress (no complete snapshot to protect)', async () => {
+    const el = createPage();
+    el.v2PaletteGroups = {
+      ...el.v2PaletteGroups,
+      agents: { status: 'error', candidates: [], error: 'boom' },
+    };
+    let capturedOnProgress: unknown;
+    vi.spyOn(el._paletteDataController, 'loadAgentsGroup').mockImplementation((onProgress) => {
+      capturedOnProgress = onProgress;
+      return new Promise(() => {});
+    });
+
+    void el._loadPaletteAgents();
+    expect(capturedOnProgress).toBeDefined();
+  });
+
+  it('an error during a refresh of an already-ready group preserves the previous candidates instead of wiping them', async () => {
+    const el = createPage();
+    const fullList = [agentCandidate('a1', 'Alice')];
+    el.v2PaletteGroups = {
+      ...el.v2PaletteGroups,
+      agents: { status: 'ready', candidates: fullList },
+    };
+    el._agentsSnapshotComplete = true;
+    vi.spyOn(el._paletteDataController, 'loadAgentsGroup').mockRejectedValue(
+      new PaletteLoadError('boom')
+    );
+
+    await el._loadPaletteAgents();
+
+    expect(el.v2PaletteGroups.agents.status).toBe('error');
+    expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
+  });
+
+  it('an error during a first load preserves whatever partial progress was already published', async () => {
+    const el = createPage();
+    let capturedOnProgress!: (partial: PaletteCandidate[]) => void;
+    let rejectLoad!: (err: unknown) => void;
+    vi.spyOn(el._paletteDataController, 'loadAgentsGroup').mockImplementation((onProgress) => {
+      capturedOnProgress = onProgress!;
+      return new Promise((_resolve, reject) => {
+        rejectLoad = reject;
+      });
+    });
+
+    const load = el._loadPaletteAgents();
+    capturedOnProgress([agentCandidate('a1', 'Alice')]);
+    rejectLoad(new PaletteLoadError('boom'));
+    await load;
+
+    expect(el.v2PaletteGroups.agents.status).toBe('error');
+    expect(el.v2PaletteGroups.agents.candidates).toEqual([agentCandidate('a1', 'Alice')]);
+  });
+
+  // The next two use the real `ChatPaletteDataController` (only `apiFetch`
+  // itself is mocked), unlike the spied-`loadAgentsGroup` tests above:
+  // completeness must not depend on the group's current `status`, which a
+  // cancelled or failed refresh leaves as `loading`/`error` while
+  // `candidates` still holds the last complete, DM-ranked snapshot. A test
+  // that mocks `loadAgentsGroup` directly cannot exercise the real `status`
+  // transitions (`loading` after a refresh starts, `error` after one fails)
+  // this needs to prove.
+
+  it('closing and reopening the palette mid-refresh does not shrink the complete list to page one', async () => {
+    const el = createPage();
+    el.v2PaletteOpen = true;
+    const fullList = [
+      agentCandidate('a1', 'Alice'),
+      agentCandidate('a2', 'Bob'),
+      agentCandidate('a3', 'Carol'),
+    ];
+
+    // Reach the complete snapshot through a real load — not by seeding
+    // `_agentsSnapshotComplete` directly — so this also proves a real load is
+    // what actually marks it complete.
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      if (url.includes('/api/v1/agents')) {
+        return Promise.resolve(
+          jsonResponse({
+            agents: [
+              { id: 'a1', name: 'Alice', _capabilities: { actions: ['attach'] } },
+              { id: 'a2', name: 'Bob', _capabilities: { actions: ['attach'] } },
+              { id: 'a3', name: 'Carol', _capabilities: { actions: ['attach'] } },
+            ],
+          })
+        );
+      }
+      return Promise.resolve(jsonResponse({ dms: [] }));
+    });
+    await el._loadPaletteAgents();
+    expect(el.v2PaletteGroups.agents.status).toBe('ready');
+    expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
+
+    vi.mocked(apiFetch).mockImplementation(
+      (url: string, options?: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError'))
+          );
+        })
+    );
+
+    // A refresh starts: status flips to `loading`, but the full list is kept
+    // on screen (not replaced by a partial page) because the group already
+    // holds a complete snapshot.
+    const refresh = el._loadPaletteAgents();
+    expect(el.v2PaletteGroups.agents.status).toBe('loading');
+    expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
+
+    // Close cancels the in-flight refresh — its own fetch rejects with an
+    // AbortError, which `_loadPaletteAgents` returns from silently.
+    el._closePaletteAndCancelLoad();
+    await refresh;
+    expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
+
+    // Reopen starts a brand new refresh, with a *two*-page agents response —
+    // if completeness were keyed on the (now `loading`, not `ready`) status
+    // instead of a persistent flag, this would wire `onProgress`, and the
+    // check right after page one resolves (below) would catch the list
+    // shrinking to that single page before page two ever arrives. (A
+    // single-page mock would not catch this: the final `ready` result looks
+    // the same either way once the whole load finishes, so the regression is
+    // only observable mid-load.)
+    el.v2PaletteOpen = true;
+    let resolvePage1!: (v: Response) => void;
+    let resolvePage2!: (v: Response) => void;
+    let page2Requested = false;
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      if (url.includes('/api/v1/agents')) {
+        if (url.includes('cursor')) {
+          page2Requested = true;
+          return new Promise((resolve) => {
+            resolvePage2 = resolve;
+          });
+        }
+        return new Promise((resolve) => {
+          resolvePage1 = resolve;
+        });
+      }
+      return Promise.resolve(jsonResponse({ dms: [] }));
+    });
+    const reopen = el._loadPaletteAgents();
+    expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
+
+    resolvePage1(
+      jsonResponse({
+        agents: [{ id: 'a4', name: 'Dave', _capabilities: { actions: ['attach'] } }],
+        nextCursor: 'c1',
+      })
+    );
+    await vi.waitFor(() => expect(page2Requested).toBe(true));
+    // Page one has landed and page two is still in flight — the full list
+    // must still be on screen, not shrunk to just Dave.
+    expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
+
+    resolvePage2(jsonResponse({ agents: [] }));
+    await reopen;
+    expect(el.v2PaletteGroups.agents.candidates).toEqual([agentCandidate('a4', 'Dave')]);
+  });
+
+  it('retrying after a refresh error does not shrink the complete list to page one', async () => {
+    const el = createPage();
+    const fullList = [agentCandidate('a1', 'Alice'), agentCandidate('a2', 'Bob')];
+    el.v2PaletteGroups = {
+      ...el.v2PaletteGroups,
+      agents: { status: 'ready', candidates: fullList },
+    };
+    el._agentsSnapshotComplete = true;
+
+    // The refresh's own agents fetch fails outright.
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}, 500));
+    await el._loadPaletteAgents();
+    expect(el.v2PaletteGroups.agents.status).toBe('error');
+    expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
+
+    // Retry (routed through `_handlePaletteRetry` in production; calling the
+    // loader directly is equivalent), with a two-page response so the
+    // mid-load state is actually observable: a single-page mock would not
+    // catch this, since the final `ready` result looks the same either way
+    // once the whole load finishes, and the regression is only observable
+    // mid-load. If completeness were keyed on the (now `error`, not `ready`)
+    // status, page one landing below would shrink the list before page two
+    // ever arrives.
+    let resolvePage1!: (v: Response) => void;
+    let resolvePage2!: (v: Response) => void;
+    let page2Requested = false;
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      if (url.includes('/api/v1/agents')) {
+        if (url.includes('cursor')) {
+          page2Requested = true;
+          return new Promise((resolve) => {
+            resolvePage2 = resolve;
+          });
+        }
+        return new Promise((resolve) => {
+          resolvePage1 = resolve;
+        });
+      }
+      return Promise.resolve(jsonResponse({ dms: [] }));
+    });
+    const retry = el._loadPaletteAgents();
+    expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
+
+    resolvePage1(
+      jsonResponse({
+        agents: [{ id: 'a4', name: 'Dave', _capabilities: { actions: ['attach'] } }],
+        nextCursor: 'c1',
+      })
+    );
+    await vi.waitFor(() => expect(page2Requested).toBe(true));
+    expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
+
+    resolvePage2(jsonResponse({ agents: [] }));
+    await retry;
+    expect(el.v2PaletteGroups.agents.candidates).toEqual([agentCandidate('a4', 'Dave')]);
   });
 });
 
