@@ -25,7 +25,11 @@ here="$(cd "$(dirname "$0")" && pwd)"
 public="$(cd "$here/../../public" && pwd)"
 chrome="${CHROME:-$(command -v chromium || command -v chromium-browser || command -v google-chrome)}"
 work="$(mktemp -d)"
-trap 'rm -rf -- "$work"' EXIT
+cleanup() {
+  rm -f -- "$work"/page.html "$work"/favicon-*.png
+  rmdir -- "$work"
+}
+trap cleanup EXIT
 
 # raster <svg> <size> <out.png>: renders the SVG at size x size px with a
 # transparent background.
