@@ -355,7 +355,7 @@ func TestProjectMembersGrouped_MatchesPutResponseGroup(t *testing.T) {
 
 	got := findGroup(getGroupedMembers(t, f, f.owner, "&limit=500").Items, "user", target.ID)
 	require.NotNil(t, got)
-	assert.Equal(t, put.projectMemberGroup.BuiltInRoleName, got.BuiltInRoleName)
+	assert.Equal(t, put.BuiltInRoleName, got.BuiltInRoleName)
 	assert.Equal(t, store.ProjectRoleAdmin, got.BuiltInRoleName)
 	want, err := json.Marshal(put.projectMemberGroup)
 	require.NoError(t, err)
