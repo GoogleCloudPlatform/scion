@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -360,6 +361,10 @@ type WebChatDM struct {
 	LastMessageID   string
 	LastActivityAt  time.Time
 }
+
+// ErrInvalidSearchCursor is returned (wrapped) by SearchChatMessages when the
+// client-supplied cursor cannot be parsed. Handlers map it to 400.
+var ErrInvalidSearchCursor = errors.New("invalid search cursor")
 
 // ChatSearchFilter defines query parameters for searching chat messages.
 type ChatSearchFilter struct {
@@ -1502,7 +1507,7 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 		if len(cursorParts) == 2 {
 			cursorAt, err := time.Parse(time.RFC3339Nano, cursorParts[0])
 			if err != nil {
-				return nil, "", fmt.Errorf("webchat store: search messages: invalid cursor timestamp: %w", err)
+				return nil, "", fmt.Errorf("webchat store: search messages: %w: timestamp: %w", ErrInvalidSearchCursor, err)
 			}
 			cursorAt = cursorAt.UTC()
 			conditions = append(conditions, "(created < ? OR (created = ? AND id < ?))")

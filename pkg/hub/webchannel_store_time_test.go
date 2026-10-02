@@ -20,6 +20,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -315,7 +317,33 @@ func TestSearchChatMessages_InvalidCursorTimestamp(t *testing.T) {
 	_, _, err := wcs.SearchChatMessages(context.Background(), ChatSearchFilter{
 		Query: "needle", Limit: 2, Cursor: "not-a-time|some-id",
 	})
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrInvalidSearchCursor)
+}
+
+// TestChatSearch_InvalidCursorIsBadRequest checks that a malformed cursor is
+// reported as a client error, not a server error.
+func TestChatSearch_InvalidCursorIsBadRequest(t *testing.T) {
+	srv, s := testServer(t)
+	dbp, ok := s.(interface{ DB() *sql.DB })
+	require.True(t, ok, "test store must expose DB()")
+	wcs := NewWebChatStore(dbp.DB(), "sqlite")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+
+	ctx := context.Background()
+	proj := &store.Project{ID: tid("search-bad-cursor"), Name: "search-bad-cursor", Slug: "search-bad-cursor",
+		Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	srv.createProjectMembersGroup(ctx, proj)
+	base := "/api/v1/chat/search?q=needle&projectId=" + proj.ID + "&cursor="
+
+	rec := doRequest(t, srv, http.MethodGet, base+url.QueryEscape("not-a-time|some-id"), nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeInvalidCursor)
+
+	// A well-formed cursor still searches normally.
+	rec = doRequest(t, srv, http.MethodGet, base+url.QueryEscape("2026-10-01T04:00:00Z|some-id"), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
 // requireCanonicalEntText asserts the stored text is what the SQLite driver
