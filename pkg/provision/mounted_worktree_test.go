@@ -215,9 +215,8 @@ func TestProvisionShared_MountedWorktree_RefusesOtherEntries(t *testing.T) {
 
 // A MountedWorktree dispatch refuses a sharer-registry entry that is not a
 // genuine worktree of this checkout, instead of creating a second worktree
-// for the requested branch: the agent's pod mounts a single, pre-selected
-// directory, so a worktree created anywhere else would never actually be
-// reachable from it. The local (non-Mounted) path is unaffected: see
+// for the requested branch, matching upstream's own outcome for this
+// candidate shape. The local (non-Mounted) path is unaffected: see
 // TestProvision_EnsureWorktree_RegistryNamesDirectChildNonWorktree_Refused
 // (pkg/provision/provision_test.go) for its current, separately-tracked
 // behavior on the same input shape.
@@ -226,11 +225,11 @@ func TestProvisionShared_MountedWorktree_RegistryNamesNonWorktree_Refused(t *tes
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	require.NoError(t, ProvisionShared(mountedWorktreeInput(workspace, origin, "agent-1", "branch-one")))
 
-	// Plant a registry entry for a different branch naming a plain
+	// Register an entry for a different branch that names a non-worktree
 	// directory under worktrees/ — in-tree-shaped, but not a worktree.
-	decoy := WorktreePath(workspace, "agent-x")
-	require.NoError(t, os.MkdirAll(decoy, 0o770))
-	require.NoError(t, RegisterSharer(workspace, "", "branch-two", decoy, "some-other-agent"))
+	nonWorktreeDir := WorktreePath(workspace, "agent-x")
+	require.NoError(t, os.MkdirAll(nonWorktreeDir, 0o770))
+	require.NoError(t, RegisterSharer(workspace, "", "branch-two", nonWorktreeDir, "some-other-agent"))
 
 	err := ProvisionShared(mountedWorktreeInput(workspace, origin, "agent-2", "branch-two"))
 	require.Error(t, err)
