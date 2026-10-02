@@ -500,6 +500,174 @@ describe('loadHubMembers view-change race', () => {
       document.body.removeChild(page);
     }
   });
+
+  it('opening and closing a conversation within one Lit update batch does not publish a truncated list', async () => {
+    // Regression test for a gap the test above doesn't cover: there, the
+    // conversation-open and conversation-close writes land in two separate
+    // Lit update cycles (a `flush()` runs `updated()` in between), so
+    // `updated()` bumps `_hubMembersGeneration` for the open before the
+    // close is ever seen, and the generation check alone is what discards
+    // the stale walk's result.
+    //
+    // Here, both writes are queued so they land in the *same* Lit update
+    // batch — `updated()` only ever observes the batch's final (closed)
+    // value of `v2Conversation`, so it never bumps the generation at all.
+    // `shouldContinue`, a live field read, still observes the conversation
+    // as open for the one microtask in between and stops the users leg's
+    // second page there — a genuine, intentional truncation that the old
+    // design would have published because the generation never moved. The
+    // fix instead has `paginateAll` reject that leg (see
+    // `PaginationStoppedError`) so it can never be published, and
+    // `_hubMembersInFlightStopped` makes the walk re-run once on its own so
+    // the sidebar still ends up with the full list.
+    window.history.pushState({}, '', '/chat');
+
+    let userCall = 0;
+    let resolveUsersPage1!: (r: Response) => void;
+    const usersPage1Promise = new Promise<Response>((resolve) => {
+      resolveUsersPage1 = resolve;
+    });
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => {
+          userCall++;
+          // Call 1: the walk's first page, held until resolved below, then
+          // resolved with a cursor so a second page would normally follow.
+          // Call 2+: the self-triggered re-run's own full (single-page)
+          // result.
+          return userCall === 1 ? usersPage1Promise : usersPage(['u1', 'u2']);
+        },
+        () => agentsPage(['a1'])
+      )
+    );
+
+    const page = document.createElement('scion-page-chat') as any;
+    page.pageData = { user: { id: 'user-me' } };
+    document.body.appendChild(page);
+    // Cold mount starts the initial walk (generation 0): the users leg's
+    // first request is now in flight; the agents leg already resolved.
+    await flush();
+
+    try {
+      const generationBefore = page._hubMembersGeneration;
+
+      resolveUsersPage1(usersPage(['u1'], 'u-cursor'));
+      // Pump exactly up to the microtask where `paginateAll`'s loop is about
+      // to re-check `shouldContinue` for the users leg's second page —
+      // determined empirically for this mock chain's microtask depth (the
+      // `apiFetch` mock plus `Response.json()` each add their own hops).
+      for (let i = 0; i < 3; i++) {
+        await Promise.resolve();
+      }
+      // Queue the close (and the reset-path's join call) *before*
+      // synchronously opening — so that when both are later drained, the
+      // already-pending `shouldContinue` check (scheduled before either of
+      // these) runs first and still observes the conversation as open, then
+      // the queued close runs, and only then does Lit's own batched update
+      // for this open+close pair run — observing the final (closed) value,
+      // so it never bumps the generation. This mirrors `handleResetView`'s
+      // real call pattern (clear `v2Conversation`, then call
+      // `loadHubMembers()`), just compressed into the same microtask.
+      queueMicrotask(() => {
+        page.v2Conversation = null;
+        page.loadHubMembers();
+      });
+      page.v2Conversation = { projectId: 'p1', conversationKey: 'p1', isDM: false };
+
+      await flush();
+
+      // The generation must never have bumped — this is exactly the gap
+      // that makes the old design's safety net (the generation check) miss
+      // this case.
+      expect(page._hubMembersGeneration).toBe(generationBefore);
+      // The walk re-ran itself once it saw the stopped leg, and the re-run
+      // published the full list — never the truncated ['u1'].
+      expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u1', 'u2']);
+      expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a1']);
+
+      const usersCalls = vi
+        .mocked(apiFetch)
+        .mock.calls.filter((c) => (c[0] as string).startsWith('/api/v1/users'));
+      // The stopped leg's one request (page 1 only) plus the re-run's one
+      // full-page request.
+      expect(usersCalls.length).toBe(2);
+    } finally {
+      document.body.removeChild(page);
+    }
+  });
+
+  it('a walk whose single-page legs are already in flight when a conversation opens and closes again does not publish stale data over a fresh walk', async () => {
+    // Isolates the generation check from the stopped-leg handling above: both
+    // legs here are single-page, so each leg's only `shouldContinue` check
+    // already ran (and passed) before the conversation ever opens — neither
+    // leg ever stops, so `_hubMembersInFlightStopped` stays false and cannot
+    // be what protects this case. Opening and closing the conversation in two
+    // separate `flush()`-separated Lit update batches (unlike the "one
+    // batch" test above) lets `updated()` bump the generation normally. Only
+    // that generation mismatch — not a stopped leg — may discard this walk's
+    // belatedly-resolving, now-stale result.
+    window.history.pushState({}, '', '/chat');
+
+    let userCall = 0;
+    let resolveStaleUsers!: (r: Response) => void;
+    const staleUsers = new Promise<Response>((resolve) => {
+      resolveStaleUsers = resolve;
+    });
+    let agentCall = 0;
+    let resolveStaleAgents!: (r: Response) => void;
+    const staleAgents = new Promise<Response>((resolve) => {
+      resolveStaleAgents = resolve;
+    });
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => {
+          userCall++;
+          return userCall === 1 ? staleUsers : usersPage(['fresh-user']);
+        },
+        () => {
+          agentCall++;
+          return agentCall === 1 ? staleAgents : agentsPage(['fresh-agent']);
+        }
+      )
+    );
+
+    const page = document.createElement('scion-page-chat') as any;
+    page.pageData = { user: { id: 'user-me' } };
+    document.body.appendChild(page);
+    // Cold-mount walk (generation 0): both legs' one-and-only page request is
+    // now in flight; neither will ever check `shouldContinue` again.
+    await flush();
+
+    try {
+      // The user opens a project — a real, separate Lit update batch from
+      // the close below, so `updated()` bumps the generation normally.
+      page.v2Conversation = { projectId: 'p1' };
+      await flush();
+
+      // The user returns to the global view before the stale walk's legs
+      // resolve — handleResetView's real call pattern.
+      page.v2Conversation = null;
+      page.loadHubMembers();
+      await flush();
+
+      // The fresh walk's (generation 1) own single-page requests resolve.
+      // The stale walk's (generation 0) legs are still pending throughout.
+      expect(userCall).toBe(2);
+      expect(agentCall).toBe(2);
+
+      // The stale walk's legs finally land, last.
+      resolveStaleUsers(usersPage(['stale-user']));
+      resolveStaleAgents(agentsPage(['stale-agent']));
+      await flush();
+
+      // The fresh walk's result must survive — the stale walk belongs to a
+      // superseded generation even though neither of its legs ever stopped.
+      expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['fresh-user']);
+      expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['fresh-agent']);
+    } finally {
+      document.body.removeChild(page);
+    }
+  });
 });
 
 describe('loadHubMembers full pagination', () => {
@@ -718,6 +886,46 @@ describe('loadHubMembers reconnect handling', () => {
     } finally {
       document.body.removeChild(page);
     }
+  });
+
+  it('a walk scheduled just before a disconnect in the same microtask drain issues no requests', async () => {
+    // Regression test for loadHubMembers capturing the generation at
+    // schedule time: `loadHubMembers` queues `_runHubMembersLoad` via
+    // `queueMicrotask`, so a `disconnectedCallback` landing synchronously
+    // right after — before that queued callback ever runs — used to mean
+    // the walk read `_hubMembersGeneration` for the first time *after* the
+    // disconnect had already bumped it, making the walk believe it was the
+    // (only) legitimate walk for the post-disconnect generation and letting
+    // it fetch and publish into a page that is no longer connected.
+    window.history.pushState({}, '', '/chat');
+
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => usersPage(['u1']),
+        () => agentsPage(['a1'])
+      )
+    );
+
+    const page = document.createElement('scion-page-chat') as any;
+    page.pageData = { user: { id: 'user-me' } };
+    document.body.appendChild(page);
+    // Let the cold-mount walk complete and settle fully before the part
+    // under test.
+    await flush();
+    expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u1']);
+    vi.mocked(apiFetch).mockClear();
+
+    // Schedule a new walk, then disconnect in the same synchronous turn —
+    // before the queued microtask that would start it has had a chance to
+    // run.
+    page.loadHubMembers();
+    document.body.removeChild(page);
+
+    await flush();
+
+    expect(apiFetch).not.toHaveBeenCalled();
+    // Nothing was published into the now-disconnected page either.
+    expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u1']);
   });
 });
 
