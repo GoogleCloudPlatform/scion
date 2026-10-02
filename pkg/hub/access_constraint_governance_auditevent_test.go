@@ -17,10 +17,12 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
@@ -58,6 +60,25 @@ type constraintHistoryFailureStore struct {
 	store.Store
 	err         error
 	afterAppend bool
+}
+
+type createdConstraintCaptureStore struct {
+	store.Store
+	createdID *string
+}
+
+func (s *createdConstraintCaptureStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&createdConstraintCaptureStore{Store: tx, createdID: s.createdID})
+	})
+}
+
+func (s *createdConstraintCaptureStore) CreateAccessConstraint(ctx context.Context, constraint *store.AccessConstraint) (*store.AccessConstraint, error) {
+	created, err := s.Store.CreateAccessConstraint(ctx, constraint)
+	if err == nil {
+		*s.createdID = created.ID
+	}
+	return created, err
 }
 
 func (s *constraintHistoryFailureStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
@@ -202,6 +223,50 @@ func TestGovernanceCreateAudit_BuilderFailureRollsBack(t *testing.T) {
 	}
 }
 
+func TestGovernanceCreateAudit_RejectsContradictorySystemScope(t *testing.T) {
+	gs, ps, authz, realStore := govTestSetup(t)
+	adminID := govSeedAdminUser(t, realStore, "audit-invalid-system-scope-admin")
+	var createdID string
+	captureStore := &createdConstraintCaptureStore{Store: realStore, createdID: &createdID}
+	gs = NewGovernanceService(captureStore, ps, authz, gs.logger)
+	sink := &postCommitAuditSink{store: realStore}
+	gs.auditSink = sink
+	rejectedID := "secret-project-id-must-not-echo"
+	targetID := pvSeedUser(t, realStore, "audit-invalid-system-scope-target")
+	draft := &store.AccessConstraint{
+		Name:                 "audit-invalid-system-scope",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: pvStrPtr("user"),
+		SubjectPrincipalID:   &targetID,
+		ScopeType:            store.RoleScopeSystem,
+		ScopeID:              rejectedID,
+		MaximumPermissions:   []string{"agent.read"},
+		CreatedBy:            adminID,
+	}
+	operation, err := auditevent.NewOperationContext("request-audit-create")
+	require.NoError(t, err)
+	ctx := auditevent.ContextWithOperation(context.Background(), operation)
+
+	result, event, err := gs.createAccessConstraintWithAudit(ctx, CommitRequest{
+		Draft: draft,
+		Actor: pvTestActor(adminID),
+	}, ClassificationTighten)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Empty(t, event.EventID)
+	var governanceErr *GovernanceError
+	require.ErrorAs(t, err, &governanceErr)
+	assert.Equal(t, ErrCodeInvalidRequest, governanceErr.Code)
+	assert.NotContains(t, err.Error(), rejectedID)
+	assert.Zero(t, sink.calls)
+	require.NotEmpty(t, createdID, "test must observe the attempted transactional live row")
+	_, getErr := realStore.GetAccessConstraint(ctx, createdID)
+	require.Error(t, getErr, "invalid live row must roll back")
+	history, historyErr := realStore.ListConstraintHistory(ctx, createdID)
+	require.NoError(t, historyErr)
+	assert.Empty(t, history, "invalid create must leave no history")
+}
+
 func TestGovernanceCreateAudit_HistoryFailuresRollBack(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -245,9 +310,12 @@ func TestGovernanceCreateAudit_HistoryFailuresRollBack(t *testing.T) {
 func TestGovernanceCreateAudit_SinkFailurePreservesCommit(t *testing.T) {
 	gs, ps, _, s := govTestSetup(t)
 	adminID := govSeedAdminUser(t, s, "audit-sink-failure-admin")
-	sinkFailure := errors.New("injected sink failure")
+	const secretCanary = "SECRET-SINK-CANARY-2404"
+	sinkFailure := errors.New(secretCanary)
 	sink := &postCommitAuditSink{store: s, err: sinkFailure}
 	gs.auditSink = sink
+	logCapture := &capturingHandler{}
+	gs.logger = slog.New(logCapture)
 	draft := &store.AccessConstraint{
 		Name:               "audit-sink-failure",
 		SubjectKind:        store.ConstraintSubjectAllPrincipals,
@@ -267,4 +335,27 @@ func TestGovernanceCreateAudit_SinkFailurePreservesCommit(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, result.AuditID, rows[0].EventID)
+
+	var failureRecord *slog.Record
+	for _, record := range logCapture.all() {
+		record := record
+		if record.Message == "failed to dispatch committed access boundary audit event" {
+			failureRecord = &record
+		}
+		assert.NotContains(t, record.Message, secretCanary)
+		attrs := recordAttrs(record)
+		for key, value := range attrs {
+			assert.NotContains(t, key, secretCanary)
+			assert.NotContains(t, fmt.Sprint(value), secretCanary)
+		}
+		var serialized bytes.Buffer
+		require.NoError(t, slog.NewJSONHandler(&serialized, nil).Handle(ctx, record))
+		assert.NotContains(t, serialized.String(), secretCanary)
+	}
+	require.NotNil(t, failureRecord)
+	attrs := recordAttrs(*failureRecord)
+	assert.Equal(t, "audit_sink_emit_failed", attrs["failure_code"])
+	assert.NotContains(t, attrs, "error")
+	assert.Equal(t, result.AuditID, attrs["event_id"])
+	assert.Equal(t, result.Constraint.ID, attrs["constraint_id"])
 }

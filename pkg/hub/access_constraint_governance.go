@@ -89,6 +89,8 @@ var commitEventTypes = map[string]string{
 	"delete": EventBoundaryDeleted,
 }
 
+const accessBoundaryAuditSinkFailureCode = "audit_sink_emit_failed"
+
 // CommitRequest describes a boundary mutation to be committed after preview.
 type CommitRequest struct {
 	// Operation is "create", "update", or "delete".
@@ -339,7 +341,7 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 			gs.logger.ErrorContext(ctx, "failed to dispatch committed access boundary audit event",
 				"event_id", committedAuditEvent.EventID,
 				"constraint_id", result.Constraint.ID,
-				"error", err,
+				"failure_code", accessBoundaryAuditSinkFailureCode,
 			)
 		}
 	}

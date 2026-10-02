@@ -121,14 +121,26 @@ func buildAccessConstraintCreateEvent(
 func accessConstraintAuditScope(constraint *store.AccessConstraint) (auditevent.ResourceScope, string, error) {
 	switch constraint.ScopeType {
 	case store.RoleScopeSystem:
+		if constraint.ScopeID != "" {
+			return "", "", &GovernanceError{
+				Code:    ErrCodeInvalidRequest,
+				Message: "system-scoped constraint must not include a project ID",
+			}
+		}
 		return auditevent.ResourceScopeSystem, "", nil
 	case store.RoleScopeProject:
 		if constraint.ScopeID == "" {
-			return "", "", fmt.Errorf("project-scoped constraint requires a project ID")
+			return "", "", &GovernanceError{
+				Code:    ErrCodeInvalidRequest,
+				Message: "project-scoped constraint requires a project ID",
+			}
 		}
 		return auditevent.ResourceScopeProject, constraint.ScopeID, nil
 	default:
-		return "", "", fmt.Errorf("unsupported constraint scope %q", constraint.ScopeType)
+		return "", "", &GovernanceError{
+			Code:    ErrCodeInvalidRequest,
+			Message: "constraint scope must be system or project",
+		}
 	}
 }
 
