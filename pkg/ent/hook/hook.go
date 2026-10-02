@@ -21,6 +21,18 @@ func (f AccessConstraintFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.V
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AccessConstraintMutation", m)
 }
 
+// The AccessConstraintHistoryFunc type is an adapter to allow the use of ordinary
+// function as AccessConstraintHistory mutator.
+type AccessConstraintHistoryFunc func(context.Context, *ent.AccessConstraintHistoryMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f AccessConstraintHistoryFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.AccessConstraintHistoryMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AccessConstraintHistoryMutation", m)
+}
+
 // The AccessPolicyFunc type is an adapter to allow the use of ordinary
 // function as AccessPolicy mutator.
 type AccessPolicyFunc func(context.Context, *ent.AccessPolicyMutation) (ent.Value, error)

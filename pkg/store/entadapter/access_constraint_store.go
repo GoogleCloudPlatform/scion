@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -38,6 +39,7 @@ type AccessConstraintStore struct {
 	client      *ent.Client
 	dialectOnce sync.Once
 	dialectName string
+	inTx        bool
 }
 
 // NewAccessConstraintStore creates a new Ent-backed AccessConstraintStore.
@@ -91,7 +93,7 @@ func entAccessConstraintToStore(e *ent.AccessConstraint) *store.AccessConstraint
 
 // validateReferences checks that referenced entities (user, agent, group,
 // project) exist in the database. Runs inside a transaction.
-func (s *AccessConstraintStore) validateReferences(ctx context.Context, tx *ent.Tx, c *store.AccessConstraint) error {
+func (s *AccessConstraintStore) validateReferences(ctx context.Context, client *ent.Client, c *store.AccessConstraint) error {
 	switch c.SubjectKind {
 	case store.ConstraintSubjectPrincipal:
 		if c.SubjectPrincipalType == nil || c.SubjectPrincipalID == nil {
@@ -103,7 +105,7 @@ func (s *AccessConstraintStore) validateReferences(ctx context.Context, tx *ent.
 		}
 		switch *c.SubjectPrincipalType {
 		case store.ConstraintPrincipalTypeUser:
-			exists, err := tx.User.Query().Where(func(sel *entsql.Selector) {
+			exists, err := client.User.Query().Where(func(sel *entsql.Selector) {
 				sel.Where(entsql.EQ("id", principalID))
 			}).Exist(ctx)
 			if err != nil {
@@ -113,7 +115,7 @@ func (s *AccessConstraintStore) validateReferences(ctx context.Context, tx *ent.
 				return fmt.Errorf("user %s not found: %w", *c.SubjectPrincipalID, store.ErrNotFound)
 			}
 		case store.ConstraintPrincipalTypeAgent:
-			exists, err := tx.Agent.Query().Where(func(sel *entsql.Selector) {
+			exists, err := client.Agent.Query().Where(func(sel *entsql.Selector) {
 				sel.Where(entsql.EQ("id", principalID))
 			}).Exist(ctx)
 			if err != nil {
@@ -139,7 +141,7 @@ func (s *AccessConstraintStore) validateReferences(ctx context.Context, tx *ent.
 		if err != nil {
 			return fmt.Errorf("invalid group ID %q: %w", *c.SubjectGroupID, store.ErrInvalidInput)
 		}
-		exists, err := tx.Group.Query().Where(func(sel *entsql.Selector) {
+		exists, err := client.Group.Query().Where(func(sel *entsql.Selector) {
 			sel.Where(entsql.EQ("id", groupID))
 		}).Exist(ctx)
 		if err != nil {
@@ -159,7 +161,7 @@ func (s *AccessConstraintStore) validateReferences(ctx context.Context, tx *ent.
 		if err != nil {
 			return fmt.Errorf("invalid project ID %q: %w", c.ScopeID, store.ErrInvalidInput)
 		}
-		exists, err := tx.Project.Query().Where(func(sel *entsql.Selector) {
+		exists, err := client.Project.Query().Where(func(sel *entsql.Selector) {
 			sel.Where(entsql.EQ("id", projectID))
 		}).Exist(ctx)
 		if err != nil {
@@ -178,16 +180,29 @@ func (s *AccessConstraintStore) validateReferences(ctx context.Context, tx *ent.
 func (s *AccessConstraintStore) CreateAccessConstraint(ctx context.Context, c *store.AccessConstraint) (*store.AccessConstraint, error) {
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
+		if errors.Is(err, ent.ErrTxStarted) {
+			return s.createAccessConstraint(ctx, s.client, c)
+		}
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	created, err := s.createAccessConstraint(ctx, tx.Client(), c)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+	return created, nil
+}
 
+func (s *AccessConstraintStore) createAccessConstraint(ctx context.Context, client *ent.Client, c *store.AccessConstraint) (*store.AccessConstraint, error) {
 	// Validate references inside the transaction.
-	if err := s.validateReferences(ctx, tx, c); err != nil {
+	if err := s.validateReferences(ctx, client, c); err != nil {
 		return nil, err
 	}
 
-	builder := tx.AccessConstraint.Create().
+	builder := client.AccessConstraint.Create().
 		SetName(c.Name).
 		SetSubjectKind(accessconstraint.SubjectKind(c.SubjectKind)).
 		SetScopeType(accessconstraint.ScopeType(c.ScopeType)).
@@ -224,10 +239,6 @@ func (s *AccessConstraintStore) CreateAccessConstraint(ctx context.Context, c *s
 	created, err := builder.Save(ctx)
 	if err != nil {
 		return nil, mapError(err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 
 	return entAccessConstraintToStore(created), nil
@@ -282,7 +293,7 @@ func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *s
 	}
 
 	// Validate references inside the transaction.
-	if err := s.validateReferences(ctx, tx, c); err != nil {
+	if err := s.validateReferences(ctx, tx.Client(), c); err != nil {
 		return nil, err
 	}
 

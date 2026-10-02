@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstrainthistory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
@@ -92,6 +93,7 @@ const (
 
 	// Node types.
 	TypeAccessConstraint         = "AccessConstraint"
+	TypeAccessConstraintHistory  = "AccessConstraintHistory"
 	TypeAccessPolicy             = "AccessPolicy"
 	TypeAgent                    = "Agent"
 	TypeAgentCredential          = "AgentCredential"
@@ -183,6 +185,9 @@ type AccessConstraintMutation struct {
 	created                   *time.Time
 	updated                   *time.Time
 	clearedFields             map[string]struct{}
+	history                   map[string]struct{}
+	removedhistory            map[string]struct{}
+	clearedhistory            bool
 	done                      bool
 	oldValue                  func(context.Context) (*AccessConstraint, error)
 	predicates                []predicate.AccessConstraint
@@ -1030,6 +1035,60 @@ func (m *AccessConstraintMutation) ResetUpdated() {
 	m.updated = nil
 }
 
+// AddHistoryIDs adds the "history" edge to the AccessConstraintHistory entity by ids.
+func (m *AccessConstraintMutation) AddHistoryIDs(ids ...string) {
+	if m.history == nil {
+		m.history = make(map[string]struct{})
+	}
+	for i := range ids {
+		m.history[ids[i]] = struct{}{}
+	}
+}
+
+// ClearHistory clears the "history" edge to the AccessConstraintHistory entity.
+func (m *AccessConstraintMutation) ClearHistory() {
+	m.clearedhistory = true
+}
+
+// HistoryCleared reports if the "history" edge to the AccessConstraintHistory entity was cleared.
+func (m *AccessConstraintMutation) HistoryCleared() bool {
+	return m.clearedhistory
+}
+
+// RemoveHistoryIDs removes the "history" edge to the AccessConstraintHistory entity by IDs.
+func (m *AccessConstraintMutation) RemoveHistoryIDs(ids ...string) {
+	if m.removedhistory == nil {
+		m.removedhistory = make(map[string]struct{})
+	}
+	for i := range ids {
+		delete(m.history, ids[i])
+		m.removedhistory[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedHistory returns the removed IDs of the "history" edge to the AccessConstraintHistory entity.
+func (m *AccessConstraintMutation) RemovedHistoryIDs() (ids []string) {
+	for id := range m.removedhistory {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// HistoryIDs returns the "history" edge IDs in the mutation.
+func (m *AccessConstraintMutation) HistoryIDs() (ids []string) {
+	for id := range m.history {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetHistory resets all changes to the "history" edge.
+func (m *AccessConstraintMutation) ResetHistory() {
+	m.history = nil
+	m.clearedhistory = false
+	m.removedhistory = nil
+}
+
 // Where appends a list predicates to the AccessConstraintMutation builder.
 func (m *AccessConstraintMutation) Where(ps ...predicate.AccessConstraint) {
 	m.predicates = append(m.predicates, ps...)
@@ -1495,50 +1554,1457 @@ func (m *AccessConstraintMutation) ResetField(name string) error {
 
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *AccessConstraintMutation) AddedEdges() []string {
-	edges := make([]string, 0, 0)
+	edges := make([]string, 0, 1)
+	if m.history != nil {
+		edges = append(edges, accessconstraint.EdgeHistory)
+	}
 	return edges
 }
 
 // AddedIDs returns all IDs (to other nodes) that were added for the given edge
 // name in this mutation.
 func (m *AccessConstraintMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case accessconstraint.EdgeHistory:
+		ids := make([]ent.Value, 0, len(m.history))
+		for id := range m.history {
+			ids = append(ids, id)
+		}
+		return ids
+	}
 	return nil
 }
 
 // RemovedEdges returns all edge names that were removed in this mutation.
 func (m *AccessConstraintMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 0)
+	edges := make([]string, 0, 1)
+	if m.removedhistory != nil {
+		edges = append(edges, accessconstraint.EdgeHistory)
+	}
 	return edges
 }
 
 // RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
 // the given name in this mutation.
 func (m *AccessConstraintMutation) RemovedIDs(name string) []ent.Value {
+	switch name {
+	case accessconstraint.EdgeHistory:
+		ids := make([]ent.Value, 0, len(m.removedhistory))
+		for id := range m.removedhistory {
+			ids = append(ids, id)
+		}
+		return ids
+	}
 	return nil
 }
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *AccessConstraintMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 0)
+	edges := make([]string, 0, 1)
+	if m.clearedhistory {
+		edges = append(edges, accessconstraint.EdgeHistory)
+	}
 	return edges
 }
 
 // EdgeCleared returns a boolean which indicates if the edge with the given name
 // was cleared in this mutation.
 func (m *AccessConstraintMutation) EdgeCleared(name string) bool {
+	switch name {
+	case accessconstraint.EdgeHistory:
+		return m.clearedhistory
+	}
 	return false
 }
 
 // ClearEdge clears the value of the edge with the given name. It returns an error
 // if that edge is not defined in the schema.
 func (m *AccessConstraintMutation) ClearEdge(name string) error {
+	switch name {
+	}
 	return fmt.Errorf("unknown AccessConstraint unique edge %s", name)
 }
 
 // ResetEdge resets all changes to the edge with the given name in this mutation.
 // It returns an error if the edge is not defined in the schema.
 func (m *AccessConstraintMutation) ResetEdge(name string) error {
+	switch name {
+	case accessconstraint.EdgeHistory:
+		m.ResetHistory()
+		return nil
+	}
 	return fmt.Errorf("unknown AccessConstraint edge %s", name)
+}
+
+// AccessConstraintHistoryMutation represents an operation that mutates the AccessConstraintHistory nodes in the graph.
+type AccessConstraintHistoryMutation struct {
+	config
+	op                  Op
+	typ                 string
+	id                  *string
+	occurred_at         *time.Time
+	operation           *string
+	actor_kind          *string
+	actor_id            *string
+	correlation_id      *string
+	batch_operation_id  *string
+	before_revision     *int64
+	addbefore_revision  *int64
+	after_revision      *int64
+	addafter_revision   *int64
+	classification      *string
+	preview_id          *string
+	draft_hash          *string
+	impact_counts_json  *string
+	changed_fields_json *string
+	clearedFields       map[string]struct{}
+	constraint          *uuid.UUID
+	clearedconstraint   bool
+	done                bool
+	oldValue            func(context.Context) (*AccessConstraintHistory, error)
+	predicates          []predicate.AccessConstraintHistory
+}
+
+var _ ent.Mutation = (*AccessConstraintHistoryMutation)(nil)
+
+// accessconstrainthistoryOption allows management of the mutation configuration using functional options.
+type accessconstrainthistoryOption func(*AccessConstraintHistoryMutation)
+
+// newAccessConstraintHistoryMutation creates new mutation for the AccessConstraintHistory entity.
+func newAccessConstraintHistoryMutation(c config, op Op, opts ...accessconstrainthistoryOption) *AccessConstraintHistoryMutation {
+	m := &AccessConstraintHistoryMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeAccessConstraintHistory,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withAccessConstraintHistoryID sets the ID field of the mutation.
+func withAccessConstraintHistoryID(id string) accessconstrainthistoryOption {
+	return func(m *AccessConstraintHistoryMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *AccessConstraintHistory
+		)
+		m.oldValue = func(ctx context.Context) (*AccessConstraintHistory, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().AccessConstraintHistory.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withAccessConstraintHistory sets the old AccessConstraintHistory of the mutation.
+func withAccessConstraintHistory(node *AccessConstraintHistory) accessconstrainthistoryOption {
+	return func(m *AccessConstraintHistoryMutation) {
+		m.oldValue = func(context.Context) (*AccessConstraintHistory, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m AccessConstraintHistoryMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m AccessConstraintHistoryMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of AccessConstraintHistory entities.
+func (m *AccessConstraintHistoryMutation) SetID(id string) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *AccessConstraintHistoryMutation) ID() (id string, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *AccessConstraintHistoryMutation) IDs(ctx context.Context) ([]string, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []string{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().AccessConstraintHistory.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetConstraintID sets the "constraint_id" field.
+func (m *AccessConstraintHistoryMutation) SetConstraintID(u uuid.UUID) {
+	m.constraint = &u
+}
+
+// ConstraintID returns the value of the "constraint_id" field in the mutation.
+func (m *AccessConstraintHistoryMutation) ConstraintID() (r uuid.UUID, exists bool) {
+	v := m.constraint
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConstraintID returns the old "constraint_id" field's value of the AccessConstraintHistory entity.
+// If the AccessConstraintHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintHistoryMutation) OldConstraintID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConstraintID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConstraintID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConstraintID: %w", err)
+	}
+	return oldValue.ConstraintID, nil
+}
+
+// ResetConstraintID resets all changes to the "constraint_id" field.
+func (m *AccessConstraintHistoryMutation) ResetConstraintID() {
+	m.constraint = nil
+}
+
+// SetOccurredAt sets the "occurred_at" field.
+func (m *AccessConstraintHistoryMutation) SetOccurredAt(t time.Time) {
+	m.occurred_at = &t
+}
+
+// OccurredAt returns the value of the "occurred_at" field in the mutation.
+func (m *AccessConstraintHistoryMutation) OccurredAt() (r time.Time, exists bool) {
+	v := m.occurred_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOccurredAt returns the old "occurred_at" field's value of the AccessConstraintHistory entity.
+// If the AccessConstraintHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintHistoryMutation) OldOccurredAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOccurredAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOccurredAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOccurredAt: %w", err)
+	}
+	return oldValue.OccurredAt, nil
+}
+
+// ResetOccurredAt resets all changes to the "occurred_at" field.
+func (m *AccessConstraintHistoryMutation) ResetOccurredAt() {
+	m.occurred_at = nil
+}
+
+// SetOperation sets the "operation" field.
+func (m *AccessConstraintHistoryMutation) SetOperation(s string) {
+	m.operation = &s
+}
+
+// Operation returns the value of the "operation" field in the mutation.
+func (m *AccessConstraintHistoryMutation) Operation() (r string, exists bool) {
+	v := m.operation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOperation returns the old "operation" field's value of the AccessConstraintHistory entity.
+// If the AccessConstraintHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintHistoryMutation) OldOperation(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOperation is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOperation requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOperation: %w", err)
+	}
+	return oldValue.Operation, nil
+}
+
+// ResetOperation resets all changes to the "operation" field.
+func (m *AccessConstraintHistoryMutation) ResetOperation() {
+	m.operation = nil
+}
+
+// SetActorKind sets the "actor_kind" field.
+func (m *AccessConstraintHistoryMutation) SetActorKind(s string) {
+	m.actor_kind = &s
+}
+
+// ActorKind returns the value of the "actor_kind" field in the mutation.
+func (m *AccessConstraintHistoryMutation) ActorKind() (r string, exists bool) {
+	v := m.actor_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActorKind returns the old "actor_kind" field's value of the AccessConstraintHistory entity.
+// If the AccessConstraintHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintHistoryMutation) OldActorKind(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActorKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActorKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActorKind: %w", err)
+	}
+	return oldValue.ActorKind, nil
+}
+
+// ClearActorKind clears the value of the "actor_kind" field.
+func (m *AccessConstraintHistoryMutation) ClearActorKind() {
+	m.actor_kind = nil
+	m.clearedFields[accessconstrainthistory.FieldActorKind] = struct{}{}
+}
+
+// ActorKindCleared returns if the "actor_kind" field was cleared in this mutation.
+func (m *AccessConstraintHistoryMutation) ActorKindCleared() bool {
+	_, ok := m.clearedFields[accessconstrainthistory.FieldActorKind]
+	return ok
+}
+
+// ResetActorKind resets all changes to the "actor_kind" field.
+func (m *AccessConstraintHistoryMutation) ResetActorKind() {
+	m.actor_kind = nil
+	delete(m.clearedFields, accessconstrainthistory.FieldActorKind)
+}
+
+// SetActorID sets the "actor_id" field.
+func (m *AccessConstraintHistoryMutation) SetActorID(s string) {
+	m.actor_id = &s
+}
+
+// ActorID returns the value of the "actor_id" field in the mutation.
+func (m *AccessConstraintHistoryMutation) ActorID() (r string, exists bool) {
+	v := m.actor_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActorID returns the old "actor_id" field's value of the AccessConstraintHistory entity.
+// If the AccessConstraintHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintHistoryMutation) OldActorID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActorID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActorID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActorID: %w", err)
+	}
+	return oldValue.ActorID, nil
+}
+
+// ClearActorID clears the value of the "actor_id" field.
+func (m *AccessConstraintHistoryMutation) ClearActorID() {
+	m.actor_id = nil
+	m.clearedFields[accessconstrainthistory.FieldActorID] = struct{}{}
+}
+
+// ActorIDCleared returns if the "actor_id" field was cleared in this mutation.
+func (m *AccessConstraintHistoryMutation) ActorIDCleared() bool {
+	_, ok := m.clearedFields[accessconstrainthistory.FieldActorID]
+	return ok
+}
+
+// ResetActorID resets all changes to the "actor_id" field.
+func (m *AccessConstraintHistoryMutation) ResetActorID() {
+	m.actor_id = nil
+	delete(m.clearedFields, accessconstrainthistory.FieldActorID)
+}
+
+// SetCorrelationID sets the "correlation_id" field.
+func (m *AccessConstraintHistoryMutation) SetCorrelationID(s string) {
+	m.correlation_id = &s
+}
+
+// CorrelationID returns the value of the "correlation_id" field in the mutation.
+func (m *AccessConstraintHistoryMutation) CorrelationID() (r string, exists bool) {
+	v := m.correlation_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCorrelationID returns the old "correlation_id" field's value of the AccessConstraintHistory entity.
+// If the AccessConstraintHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintHistoryMutation) OldCorrelationID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCorrelationID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCorrelationID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCorrelationID: %w", err)
+	}
+	return oldValue.CorrelationID, nil
+}
+
+// ClearCorrelationID clears the value of the "correlation_id" field.
+func (m *AccessConstraintHistoryMutation) ClearCorrelationID() {
+	m.correlation_id = nil
+	m.clearedFields[accessconstrainthistory.FieldCorrelationID] = struct{}{}
+}
+
+// CorrelationIDCleared returns if the "correlation_id" field was cleared in this mutation.
+func (m *AccessConstraintHistoryMutation) CorrelationIDCleared() bool {
+	_, ok := m.clearedFields[accessconstrainthistory.FieldCorrelationID]
+	return ok
+}
+
+// ResetCorrelationID resets all changes to the "correlation_id" field.
+func (m *AccessConstraintHistoryMutation) ResetCorrelationID() {
+	m.correlation_id = nil
+	delete(m.clearedFields, accessconstrainthistory.FieldCorrelationID)
+}
+
+// SetBatchOperationID sets the "batch_operation_id" field.
+func (m *AccessConstraintHistoryMutation) SetBatchOperationID(s string) {
+	m.batch_operation_id = &s
+}
+
+// BatchOperationID returns the value of the "batch_operation_id" field in the mutation.
+func (m *AccessConstraintHistoryMutation) BatchOperationID() (r string, exists bool) {
+	v := m.batch_operation_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBatchOperationID returns the old "batch_operation_id" field's value of the AccessConstraintHistory entity.
+// If the AccessConstraintHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintHistoryMutation) OldBatchOperationID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBatchOperationID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBatchOperationID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBatchOperationID: %w", err)
+	}
+	return oldValue.BatchOperationID, nil
+}
+
+// ClearBatchOperationID clears the value of the "batch_operation_id" field.
+func (m *AccessConstraintHistoryMutation) ClearBatchOperationID() {
+	m.batch_operation_id = nil
+	m.clearedFields[accessconstrainthistory.FieldBatchOperationID] = struct{}{}
+}
+
+// BatchOperationIDCleared returns if the "batch_operation_id" field was cleared in this mutation.
+func (m *AccessConstraintHistoryMutation) BatchOperationIDCleared() bool {
+	_, ok := m.clearedFields[accessconstrainthistory.FieldBatchOperationID]
+	return ok
+}
+
+// ResetBatchOperationID resets all changes to the "batch_operation_id" field.
+func (m *AccessConstraintHistoryMutation) ResetBatchOperationID() {
+	m.batch_operation_id = nil
+	delete(m.clearedFields, accessconstrainthistory.FieldBatchOperationID)
+}
+
+// SetBeforeRevision sets the "before_revision" field.
+func (m *AccessConstraintHistoryMutation) SetBeforeRevision(i int64) {
+	m.before_revision = &i
+	m.addbefore_revision = nil
+}
+
+// BeforeRevision returns the value of the "before_revision" field in the mutation.
+func (m *AccessConstraintHistoryMutation) BeforeRevision() (r int64, exists bool) {
+	v := m.before_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBeforeRevision returns the old "before_revision" field's value of the AccessConstraintHistory entity.
+// If the AccessConstraintHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintHistoryMutation) OldBeforeRevision(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBeforeRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBeforeRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBeforeRevision: %w", err)
+	}
+	return oldValue.BeforeRevision, nil
+}
+
+// AddBeforeRevision adds i to the "before_revision" field.
+func (m *AccessConstraintHistoryMutation) AddBeforeRevision(i int64) {
+	if m.addbefore_revision != nil {
+		*m.addbefore_revision += i
+	} else {
+		m.addbefore_revision = &i
+	}
+}
+
+// AddedBeforeRevision returns the value that was added to the "before_revision" field in this mutation.
+func (m *AccessConstraintHistoryMutation) AddedBeforeRevision() (r int64, exists bool) {
+	v := m.addbefore_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearBeforeRevision clears the value of the "before_revision" field.
+func (m *AccessConstraintHistoryMutation) ClearBeforeRevision() {
+	m.before_revision = nil
+	m.addbefore_revision = nil
+	m.clearedFields[accessconstrainthistory.FieldBeforeRevision] = struct{}{}
+}
+
+// BeforeRevisionCleared returns if the "before_revision" field was cleared in this mutation.
+func (m *AccessConstraintHistoryMutation) BeforeRevisionCleared() bool {
+	_, ok := m.clearedFields[accessconstrainthistory.FieldBeforeRevision]
+	return ok
+}
+
+// ResetBeforeRevision resets all changes to the "before_revision" field.
+func (m *AccessConstraintHistoryMutation) ResetBeforeRevision() {
+	m.before_revision = nil
+	m.addbefore_revision = nil
+	delete(m.clearedFields, accessconstrainthistory.FieldBeforeRevision)
+}
+
+// SetAfterRevision sets the "after_revision" field.
+func (m *AccessConstraintHistoryMutation) SetAfterRevision(i int64) {
+	m.after_revision = &i
+	m.addafter_revision = nil
+}
+
+// AfterRevision returns the value of the "after_revision" field in the mutation.
+func (m *AccessConstraintHistoryMutation) AfterRevision() (r int64, exists bool) {
+	v := m.after_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAfterRevision returns the old "after_revision" field's value of the AccessConstraintHistory entity.
+// If the AccessConstraintHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintHistoryMutation) OldAfterRevision(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAfterRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAfterRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAfterRevision: %w", err)
+	}
+	return oldValue.AfterRevision, nil
+}
+
+// AddAfterRevision adds i to the "after_revision" field.
+func (m *AccessConstraintHistoryMutation) AddAfterRevision(i int64) {
+	if m.addafter_revision != nil {
+		*m.addafter_revision += i
+	} else {
+		m.addafter_revision = &i
+	}
+}
+
+// AddedAfterRevision returns the value that was added to the "after_revision" field in this mutation.
+func (m *AccessConstraintHistoryMutation) AddedAfterRevision() (r int64, exists bool) {
+	v := m.addafter_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearAfterRevision clears the value of the "after_revision" field.
+func (m *AccessConstraintHistoryMutation) ClearAfterRevision() {
+	m.after_revision = nil
+	m.addafter_revision = nil
+	m.clearedFields[accessconstrainthistory.FieldAfterRevision] = struct{}{}
+}
+
+// AfterRevisionCleared returns if the "after_revision" field was cleared in this mutation.
+func (m *AccessConstraintHistoryMutation) AfterRevisionCleared() bool {
+	_, ok := m.clearedFields[accessconstrainthistory.FieldAfterRevision]
+	return ok
+}
+
+// ResetAfterRevision resets all changes to the "after_revision" field.
+func (m *AccessConstraintHistoryMutation) ResetAfterRevision() {
+	m.after_revision = nil
+	m.addafter_revision = nil
+	delete(m.clearedFields, accessconstrainthistory.FieldAfterRevision)
+}
+
+// SetClassification sets the "classification" field.
+func (m *AccessConstraintHistoryMutation) SetClassification(s string) {
+	m.classification = &s
+}
+
+// Classification returns the value of the "classification" field in the mutation.
+func (m *AccessConstraintHistoryMutation) Classification() (r string, exists bool) {
+	v := m.classification
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldClassification returns the old "classification" field's value of the AccessConstraintHistory entity.
+// If the AccessConstraintHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintHistoryMutation) OldClassification(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldClassification is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldClassification requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldClassification: %w", err)
+	}
+	return oldValue.Classification, nil
+}
+
+// ClearClassification clears the value of the "classification" field.
+func (m *AccessConstraintHistoryMutation) ClearClassification() {
+	m.classification = nil
+	m.clearedFields[accessconstrainthistory.FieldClassification] = struct{}{}
+}
+
+// ClassificationCleared returns if the "classification" field was cleared in this mutation.
+func (m *AccessConstraintHistoryMutation) ClassificationCleared() bool {
+	_, ok := m.clearedFields[accessconstrainthistory.FieldClassification]
+	return ok
+}
+
+// ResetClassification resets all changes to the "classification" field.
+func (m *AccessConstraintHistoryMutation) ResetClassification() {
+	m.classification = nil
+	delete(m.clearedFields, accessconstrainthistory.FieldClassification)
+}
+
+// SetPreviewID sets the "preview_id" field.
+func (m *AccessConstraintHistoryMutation) SetPreviewID(s string) {
+	m.preview_id = &s
+}
+
+// PreviewID returns the value of the "preview_id" field in the mutation.
+func (m *AccessConstraintHistoryMutation) PreviewID() (r string, exists bool) {
+	v := m.preview_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPreviewID returns the old "preview_id" field's value of the AccessConstraintHistory entity.
+// If the AccessConstraintHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintHistoryMutation) OldPreviewID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPreviewID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPreviewID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPreviewID: %w", err)
+	}
+	return oldValue.PreviewID, nil
+}
+
+// ClearPreviewID clears the value of the "preview_id" field.
+func (m *AccessConstraintHistoryMutation) ClearPreviewID() {
+	m.preview_id = nil
+	m.clearedFields[accessconstrainthistory.FieldPreviewID] = struct{}{}
+}
+
+// PreviewIDCleared returns if the "preview_id" field was cleared in this mutation.
+func (m *AccessConstraintHistoryMutation) PreviewIDCleared() bool {
+	_, ok := m.clearedFields[accessconstrainthistory.FieldPreviewID]
+	return ok
+}
+
+// ResetPreviewID resets all changes to the "preview_id" field.
+func (m *AccessConstraintHistoryMutation) ResetPreviewID() {
+	m.preview_id = nil
+	delete(m.clearedFields, accessconstrainthistory.FieldPreviewID)
+}
+
+// SetDraftHash sets the "draft_hash" field.
+func (m *AccessConstraintHistoryMutation) SetDraftHash(s string) {
+	m.draft_hash = &s
+}
+
+// DraftHash returns the value of the "draft_hash" field in the mutation.
+func (m *AccessConstraintHistoryMutation) DraftHash() (r string, exists bool) {
+	v := m.draft_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDraftHash returns the old "draft_hash" field's value of the AccessConstraintHistory entity.
+// If the AccessConstraintHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintHistoryMutation) OldDraftHash(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDraftHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDraftHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDraftHash: %w", err)
+	}
+	return oldValue.DraftHash, nil
+}
+
+// ClearDraftHash clears the value of the "draft_hash" field.
+func (m *AccessConstraintHistoryMutation) ClearDraftHash() {
+	m.draft_hash = nil
+	m.clearedFields[accessconstrainthistory.FieldDraftHash] = struct{}{}
+}
+
+// DraftHashCleared returns if the "draft_hash" field was cleared in this mutation.
+func (m *AccessConstraintHistoryMutation) DraftHashCleared() bool {
+	_, ok := m.clearedFields[accessconstrainthistory.FieldDraftHash]
+	return ok
+}
+
+// ResetDraftHash resets all changes to the "draft_hash" field.
+func (m *AccessConstraintHistoryMutation) ResetDraftHash() {
+	m.draft_hash = nil
+	delete(m.clearedFields, accessconstrainthistory.FieldDraftHash)
+}
+
+// SetImpactCountsJSON sets the "impact_counts_json" field.
+func (m *AccessConstraintHistoryMutation) SetImpactCountsJSON(s string) {
+	m.impact_counts_json = &s
+}
+
+// ImpactCountsJSON returns the value of the "impact_counts_json" field in the mutation.
+func (m *AccessConstraintHistoryMutation) ImpactCountsJSON() (r string, exists bool) {
+	v := m.impact_counts_json
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldImpactCountsJSON returns the old "impact_counts_json" field's value of the AccessConstraintHistory entity.
+// If the AccessConstraintHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintHistoryMutation) OldImpactCountsJSON(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldImpactCountsJSON is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldImpactCountsJSON requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldImpactCountsJSON: %w", err)
+	}
+	return oldValue.ImpactCountsJSON, nil
+}
+
+// ClearImpactCountsJSON clears the value of the "impact_counts_json" field.
+func (m *AccessConstraintHistoryMutation) ClearImpactCountsJSON() {
+	m.impact_counts_json = nil
+	m.clearedFields[accessconstrainthistory.FieldImpactCountsJSON] = struct{}{}
+}
+
+// ImpactCountsJSONCleared returns if the "impact_counts_json" field was cleared in this mutation.
+func (m *AccessConstraintHistoryMutation) ImpactCountsJSONCleared() bool {
+	_, ok := m.clearedFields[accessconstrainthistory.FieldImpactCountsJSON]
+	return ok
+}
+
+// ResetImpactCountsJSON resets all changes to the "impact_counts_json" field.
+func (m *AccessConstraintHistoryMutation) ResetImpactCountsJSON() {
+	m.impact_counts_json = nil
+	delete(m.clearedFields, accessconstrainthistory.FieldImpactCountsJSON)
+}
+
+// SetChangedFieldsJSON sets the "changed_fields_json" field.
+func (m *AccessConstraintHistoryMutation) SetChangedFieldsJSON(s string) {
+	m.changed_fields_json = &s
+}
+
+// ChangedFieldsJSON returns the value of the "changed_fields_json" field in the mutation.
+func (m *AccessConstraintHistoryMutation) ChangedFieldsJSON() (r string, exists bool) {
+	v := m.changed_fields_json
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldChangedFieldsJSON returns the old "changed_fields_json" field's value of the AccessConstraintHistory entity.
+// If the AccessConstraintHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccessConstraintHistoryMutation) OldChangedFieldsJSON(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldChangedFieldsJSON is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldChangedFieldsJSON requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldChangedFieldsJSON: %w", err)
+	}
+	return oldValue.ChangedFieldsJSON, nil
+}
+
+// ClearChangedFieldsJSON clears the value of the "changed_fields_json" field.
+func (m *AccessConstraintHistoryMutation) ClearChangedFieldsJSON() {
+	m.changed_fields_json = nil
+	m.clearedFields[accessconstrainthistory.FieldChangedFieldsJSON] = struct{}{}
+}
+
+// ChangedFieldsJSONCleared returns if the "changed_fields_json" field was cleared in this mutation.
+func (m *AccessConstraintHistoryMutation) ChangedFieldsJSONCleared() bool {
+	_, ok := m.clearedFields[accessconstrainthistory.FieldChangedFieldsJSON]
+	return ok
+}
+
+// ResetChangedFieldsJSON resets all changes to the "changed_fields_json" field.
+func (m *AccessConstraintHistoryMutation) ResetChangedFieldsJSON() {
+	m.changed_fields_json = nil
+	delete(m.clearedFields, accessconstrainthistory.FieldChangedFieldsJSON)
+}
+
+// ClearConstraint clears the "constraint" edge to the AccessConstraint entity.
+func (m *AccessConstraintHistoryMutation) ClearConstraint() {
+	m.clearedconstraint = true
+	m.clearedFields[accessconstrainthistory.FieldConstraintID] = struct{}{}
+}
+
+// ConstraintCleared reports if the "constraint" edge to the AccessConstraint entity was cleared.
+func (m *AccessConstraintHistoryMutation) ConstraintCleared() bool {
+	return m.clearedconstraint
+}
+
+// ConstraintIDs returns the "constraint" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// ConstraintID instead. It exists only for internal usage by the builders.
+func (m *AccessConstraintHistoryMutation) ConstraintIDs() (ids []uuid.UUID) {
+	if id := m.constraint; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetConstraint resets all changes to the "constraint" edge.
+func (m *AccessConstraintHistoryMutation) ResetConstraint() {
+	m.constraint = nil
+	m.clearedconstraint = false
+}
+
+// Where appends a list predicates to the AccessConstraintHistoryMutation builder.
+func (m *AccessConstraintHistoryMutation) Where(ps ...predicate.AccessConstraintHistory) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the AccessConstraintHistoryMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *AccessConstraintHistoryMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.AccessConstraintHistory, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *AccessConstraintHistoryMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *AccessConstraintHistoryMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (AccessConstraintHistory).
+func (m *AccessConstraintHistoryMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *AccessConstraintHistoryMutation) Fields() []string {
+	fields := make([]string, 0, 14)
+	if m.constraint != nil {
+		fields = append(fields, accessconstrainthistory.FieldConstraintID)
+	}
+	if m.occurred_at != nil {
+		fields = append(fields, accessconstrainthistory.FieldOccurredAt)
+	}
+	if m.operation != nil {
+		fields = append(fields, accessconstrainthistory.FieldOperation)
+	}
+	if m.actor_kind != nil {
+		fields = append(fields, accessconstrainthistory.FieldActorKind)
+	}
+	if m.actor_id != nil {
+		fields = append(fields, accessconstrainthistory.FieldActorID)
+	}
+	if m.correlation_id != nil {
+		fields = append(fields, accessconstrainthistory.FieldCorrelationID)
+	}
+	if m.batch_operation_id != nil {
+		fields = append(fields, accessconstrainthistory.FieldBatchOperationID)
+	}
+	if m.before_revision != nil {
+		fields = append(fields, accessconstrainthistory.FieldBeforeRevision)
+	}
+	if m.after_revision != nil {
+		fields = append(fields, accessconstrainthistory.FieldAfterRevision)
+	}
+	if m.classification != nil {
+		fields = append(fields, accessconstrainthistory.FieldClassification)
+	}
+	if m.preview_id != nil {
+		fields = append(fields, accessconstrainthistory.FieldPreviewID)
+	}
+	if m.draft_hash != nil {
+		fields = append(fields, accessconstrainthistory.FieldDraftHash)
+	}
+	if m.impact_counts_json != nil {
+		fields = append(fields, accessconstrainthistory.FieldImpactCountsJSON)
+	}
+	if m.changed_fields_json != nil {
+		fields = append(fields, accessconstrainthistory.FieldChangedFieldsJSON)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *AccessConstraintHistoryMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case accessconstrainthistory.FieldConstraintID:
+		return m.ConstraintID()
+	case accessconstrainthistory.FieldOccurredAt:
+		return m.OccurredAt()
+	case accessconstrainthistory.FieldOperation:
+		return m.Operation()
+	case accessconstrainthistory.FieldActorKind:
+		return m.ActorKind()
+	case accessconstrainthistory.FieldActorID:
+		return m.ActorID()
+	case accessconstrainthistory.FieldCorrelationID:
+		return m.CorrelationID()
+	case accessconstrainthistory.FieldBatchOperationID:
+		return m.BatchOperationID()
+	case accessconstrainthistory.FieldBeforeRevision:
+		return m.BeforeRevision()
+	case accessconstrainthistory.FieldAfterRevision:
+		return m.AfterRevision()
+	case accessconstrainthistory.FieldClassification:
+		return m.Classification()
+	case accessconstrainthistory.FieldPreviewID:
+		return m.PreviewID()
+	case accessconstrainthistory.FieldDraftHash:
+		return m.DraftHash()
+	case accessconstrainthistory.FieldImpactCountsJSON:
+		return m.ImpactCountsJSON()
+	case accessconstrainthistory.FieldChangedFieldsJSON:
+		return m.ChangedFieldsJSON()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *AccessConstraintHistoryMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case accessconstrainthistory.FieldConstraintID:
+		return m.OldConstraintID(ctx)
+	case accessconstrainthistory.FieldOccurredAt:
+		return m.OldOccurredAt(ctx)
+	case accessconstrainthistory.FieldOperation:
+		return m.OldOperation(ctx)
+	case accessconstrainthistory.FieldActorKind:
+		return m.OldActorKind(ctx)
+	case accessconstrainthistory.FieldActorID:
+		return m.OldActorID(ctx)
+	case accessconstrainthistory.FieldCorrelationID:
+		return m.OldCorrelationID(ctx)
+	case accessconstrainthistory.FieldBatchOperationID:
+		return m.OldBatchOperationID(ctx)
+	case accessconstrainthistory.FieldBeforeRevision:
+		return m.OldBeforeRevision(ctx)
+	case accessconstrainthistory.FieldAfterRevision:
+		return m.OldAfterRevision(ctx)
+	case accessconstrainthistory.FieldClassification:
+		return m.OldClassification(ctx)
+	case accessconstrainthistory.FieldPreviewID:
+		return m.OldPreviewID(ctx)
+	case accessconstrainthistory.FieldDraftHash:
+		return m.OldDraftHash(ctx)
+	case accessconstrainthistory.FieldImpactCountsJSON:
+		return m.OldImpactCountsJSON(ctx)
+	case accessconstrainthistory.FieldChangedFieldsJSON:
+		return m.OldChangedFieldsJSON(ctx)
+	}
+	return nil, fmt.Errorf("unknown AccessConstraintHistory field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AccessConstraintHistoryMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case accessconstrainthistory.FieldConstraintID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConstraintID(v)
+		return nil
+	case accessconstrainthistory.FieldOccurredAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOccurredAt(v)
+		return nil
+	case accessconstrainthistory.FieldOperation:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOperation(v)
+		return nil
+	case accessconstrainthistory.FieldActorKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActorKind(v)
+		return nil
+	case accessconstrainthistory.FieldActorID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActorID(v)
+		return nil
+	case accessconstrainthistory.FieldCorrelationID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCorrelationID(v)
+		return nil
+	case accessconstrainthistory.FieldBatchOperationID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBatchOperationID(v)
+		return nil
+	case accessconstrainthistory.FieldBeforeRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBeforeRevision(v)
+		return nil
+	case accessconstrainthistory.FieldAfterRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAfterRevision(v)
+		return nil
+	case accessconstrainthistory.FieldClassification:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetClassification(v)
+		return nil
+	case accessconstrainthistory.FieldPreviewID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPreviewID(v)
+		return nil
+	case accessconstrainthistory.FieldDraftHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDraftHash(v)
+		return nil
+	case accessconstrainthistory.FieldImpactCountsJSON:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetImpactCountsJSON(v)
+		return nil
+	case accessconstrainthistory.FieldChangedFieldsJSON:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetChangedFieldsJSON(v)
+		return nil
+	}
+	return fmt.Errorf("unknown AccessConstraintHistory field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *AccessConstraintHistoryMutation) AddedFields() []string {
+	var fields []string
+	if m.addbefore_revision != nil {
+		fields = append(fields, accessconstrainthistory.FieldBeforeRevision)
+	}
+	if m.addafter_revision != nil {
+		fields = append(fields, accessconstrainthistory.FieldAfterRevision)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *AccessConstraintHistoryMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case accessconstrainthistory.FieldBeforeRevision:
+		return m.AddedBeforeRevision()
+	case accessconstrainthistory.FieldAfterRevision:
+		return m.AddedAfterRevision()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AccessConstraintHistoryMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case accessconstrainthistory.FieldBeforeRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddBeforeRevision(v)
+		return nil
+	case accessconstrainthistory.FieldAfterRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAfterRevision(v)
+		return nil
+	}
+	return fmt.Errorf("unknown AccessConstraintHistory numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *AccessConstraintHistoryMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(accessconstrainthistory.FieldActorKind) {
+		fields = append(fields, accessconstrainthistory.FieldActorKind)
+	}
+	if m.FieldCleared(accessconstrainthistory.FieldActorID) {
+		fields = append(fields, accessconstrainthistory.FieldActorID)
+	}
+	if m.FieldCleared(accessconstrainthistory.FieldCorrelationID) {
+		fields = append(fields, accessconstrainthistory.FieldCorrelationID)
+	}
+	if m.FieldCleared(accessconstrainthistory.FieldBatchOperationID) {
+		fields = append(fields, accessconstrainthistory.FieldBatchOperationID)
+	}
+	if m.FieldCleared(accessconstrainthistory.FieldBeforeRevision) {
+		fields = append(fields, accessconstrainthistory.FieldBeforeRevision)
+	}
+	if m.FieldCleared(accessconstrainthistory.FieldAfterRevision) {
+		fields = append(fields, accessconstrainthistory.FieldAfterRevision)
+	}
+	if m.FieldCleared(accessconstrainthistory.FieldClassification) {
+		fields = append(fields, accessconstrainthistory.FieldClassification)
+	}
+	if m.FieldCleared(accessconstrainthistory.FieldPreviewID) {
+		fields = append(fields, accessconstrainthistory.FieldPreviewID)
+	}
+	if m.FieldCleared(accessconstrainthistory.FieldDraftHash) {
+		fields = append(fields, accessconstrainthistory.FieldDraftHash)
+	}
+	if m.FieldCleared(accessconstrainthistory.FieldImpactCountsJSON) {
+		fields = append(fields, accessconstrainthistory.FieldImpactCountsJSON)
+	}
+	if m.FieldCleared(accessconstrainthistory.FieldChangedFieldsJSON) {
+		fields = append(fields, accessconstrainthistory.FieldChangedFieldsJSON)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *AccessConstraintHistoryMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *AccessConstraintHistoryMutation) ClearField(name string) error {
+	switch name {
+	case accessconstrainthistory.FieldActorKind:
+		m.ClearActorKind()
+		return nil
+	case accessconstrainthistory.FieldActorID:
+		m.ClearActorID()
+		return nil
+	case accessconstrainthistory.FieldCorrelationID:
+		m.ClearCorrelationID()
+		return nil
+	case accessconstrainthistory.FieldBatchOperationID:
+		m.ClearBatchOperationID()
+		return nil
+	case accessconstrainthistory.FieldBeforeRevision:
+		m.ClearBeforeRevision()
+		return nil
+	case accessconstrainthistory.FieldAfterRevision:
+		m.ClearAfterRevision()
+		return nil
+	case accessconstrainthistory.FieldClassification:
+		m.ClearClassification()
+		return nil
+	case accessconstrainthistory.FieldPreviewID:
+		m.ClearPreviewID()
+		return nil
+	case accessconstrainthistory.FieldDraftHash:
+		m.ClearDraftHash()
+		return nil
+	case accessconstrainthistory.FieldImpactCountsJSON:
+		m.ClearImpactCountsJSON()
+		return nil
+	case accessconstrainthistory.FieldChangedFieldsJSON:
+		m.ClearChangedFieldsJSON()
+		return nil
+	}
+	return fmt.Errorf("unknown AccessConstraintHistory nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *AccessConstraintHistoryMutation) ResetField(name string) error {
+	switch name {
+	case accessconstrainthistory.FieldConstraintID:
+		m.ResetConstraintID()
+		return nil
+	case accessconstrainthistory.FieldOccurredAt:
+		m.ResetOccurredAt()
+		return nil
+	case accessconstrainthistory.FieldOperation:
+		m.ResetOperation()
+		return nil
+	case accessconstrainthistory.FieldActorKind:
+		m.ResetActorKind()
+		return nil
+	case accessconstrainthistory.FieldActorID:
+		m.ResetActorID()
+		return nil
+	case accessconstrainthistory.FieldCorrelationID:
+		m.ResetCorrelationID()
+		return nil
+	case accessconstrainthistory.FieldBatchOperationID:
+		m.ResetBatchOperationID()
+		return nil
+	case accessconstrainthistory.FieldBeforeRevision:
+		m.ResetBeforeRevision()
+		return nil
+	case accessconstrainthistory.FieldAfterRevision:
+		m.ResetAfterRevision()
+		return nil
+	case accessconstrainthistory.FieldClassification:
+		m.ResetClassification()
+		return nil
+	case accessconstrainthistory.FieldPreviewID:
+		m.ResetPreviewID()
+		return nil
+	case accessconstrainthistory.FieldDraftHash:
+		m.ResetDraftHash()
+		return nil
+	case accessconstrainthistory.FieldImpactCountsJSON:
+		m.ResetImpactCountsJSON()
+		return nil
+	case accessconstrainthistory.FieldChangedFieldsJSON:
+		m.ResetChangedFieldsJSON()
+		return nil
+	}
+	return fmt.Errorf("unknown AccessConstraintHistory field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *AccessConstraintHistoryMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.constraint != nil {
+		edges = append(edges, accessconstrainthistory.EdgeConstraint)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *AccessConstraintHistoryMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case accessconstrainthistory.EdgeConstraint:
+		if id := m.constraint; id != nil {
+			return []ent.Value{*id}
+		}
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *AccessConstraintHistoryMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *AccessConstraintHistoryMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *AccessConstraintHistoryMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.clearedconstraint {
+		edges = append(edges, accessconstrainthistory.EdgeConstraint)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *AccessConstraintHistoryMutation) EdgeCleared(name string) bool {
+	switch name {
+	case accessconstrainthistory.EdgeConstraint:
+		return m.clearedconstraint
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *AccessConstraintHistoryMutation) ClearEdge(name string) error {
+	switch name {
+	case accessconstrainthistory.EdgeConstraint:
+		m.ClearConstraint()
+		return nil
+	}
+	return fmt.Errorf("unknown AccessConstraintHistory unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *AccessConstraintHistoryMutation) ResetEdge(name string) error {
+	switch name {
+	case accessconstrainthistory.EdgeConstraint:
+		m.ResetConstraint()
+		return nil
+	}
+	return fmt.Errorf("unknown AccessConstraintHistory edge %s", name)
 }
 
 // AccessPolicyMutation represents an operation that mutates the AccessPolicy nodes in the graph.

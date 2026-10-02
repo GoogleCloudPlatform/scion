@@ -3145,6 +3145,27 @@ type AccessConstraint struct {
 	UpdatedAt            time.Time  `json:"updatedAt"`
 }
 
+// AccessConstraintHistory is the purpose-specific retained timeline for one
+// live access constraint. It mirrors the typed access-boundary audit payload;
+// it is not a generic serialized audit event.
+type AccessConstraintHistory struct {
+	EventID           string
+	ConstraintID      string
+	OccurredAt        time.Time
+	Operation         string
+	ActorKind         string
+	ActorID           string
+	CorrelationID     string
+	BatchOperationID  string
+	BeforeRevision    *int64
+	AfterRevision     *int64
+	Classification    string
+	PreviewID         string
+	DraftHash         string
+	ImpactCountsJSON  string
+	ChangedFieldsJSON string
+}
+
 // AccessConstraintListOptions defines filtering, sorting, and cursor-based
 // pagination for ListAccessConstraintsFiltered.
 type AccessConstraintListOptions struct {
