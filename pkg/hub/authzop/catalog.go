@@ -2809,18 +2809,18 @@ var MutationClassifications = []MutationClassification{
 	// role-binding mutation call enumerable in this one file per RS1 O-3
 	// (rs1_extended_test.go TestRS1_AST_BypassPathsDocumented). SetMemberRoles
 	// itself performs the credential gate, governance matrix / custom-role
-	// authority (design-d3-addendum.md, including the F1 role_binding.*
-	// structural guard), CanDelegate and last-owner checks before ever
-	// reaching applyRolePlanTx, the same way AddMember/UpdateMemberRole/
-	// TransferOwnership govern replaceBindingTx above. Review r1 F3: this
-	// replaces the earlier generic txCreateRoleBinding/txDeleteRoleBinding
-	// forwarders, which were reusable primitives that left the governed call
-	// site invisible to this catalog; applyRolePlanTx is a single-purpose
-	// step, so this entry covers exactly what it does. A dedicated
-	// OperationID (e.g. project.membership.set) is deferred: wiring one
-	// requires a route_metadata.go entry, which is out of scope for P1.
-	{File: "pkg/hub/project_membership_service.go", Function: "applyRolePlanTx", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "governed delete-then-create step for SetMemberRoles (project_membership_set.go): credential gate, governance/custom-role authority and CanDelegate run before this call inside WithTx; the last-owner guard is enforced on the post-state in the same transaction and a violation rolls back every mutation", Scope: "pkg/hub/project_membership_service.go"}},
-	{File: "pkg/hub/project_membership_service.go", Function: "applyRolePlanTx", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "governed delete-then-create step for SetMemberRoles (project_membership_set.go): credential gate, governance/custom-role authority and CanDelegate run before this call inside WithTx; the last-owner guard is enforced on the post-state in the same transaction and a violation rolls back every mutation", Scope: "pkg/hub/project_membership_service.go"}},
+	// authority (including the F1 role_binding.* structural guard),
+	// CanDelegate and last-owner checks before ever reaching applyRolePlanTx,
+	// the same way AddMember/UpdateMemberRole/TransferOwnership govern
+	// replaceBindingTx above. Review r1 F3: this replaces the earlier
+	// generic txCreateRoleBinding/txDeleteRoleBinding forwarders, which were
+	// reusable primitives that left the governed call site invisible to this
+	// catalog; applyRolePlanTx is a single-purpose step, so this entry
+	// covers exactly what it does. A dedicated OperationID (e.g.
+	// project.membership.set) is deferred: wiring one requires a
+	// route_metadata.go entry, which is out of scope for P1.
+	{File: "pkg/hub/project_membership_service.go", Function: "applyRolePlanTx", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "governed delete-then-create step for SetMemberRoles (project_membership_set.go): credential gate and CanDelegate run pre-transaction; governance/custom-role authority, the role_binding.* guard and an actor-authority-change check are re-evaluated under the project lock inside WithTx before this call; the last-owner guard is enforced on the post-state in the same transaction and a violation rolls back every mutation", Scope: "pkg/hub/project_membership_service.go"}},
+	{File: "pkg/hub/project_membership_service.go", Function: "applyRolePlanTx", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "governed delete-then-create step for SetMemberRoles (project_membership_set.go): credential gate and CanDelegate run pre-transaction; governance/custom-role authority, the role_binding.* guard and an actor-authority-change check are re-evaluated under the project lock inside WithTx before this call; the last-owner guard is enforced on the post-state in the same transaction and a violation rolls back every mutation", Scope: "pkg/hub/project_membership_service.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_roles.go — role/binding CRUD
