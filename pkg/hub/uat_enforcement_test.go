@@ -879,8 +879,11 @@ func TestEnforceUATConstraints_BrokerHubLevel(t *testing.T) {
 // TestDecide_TypedNilScopedUserIdentityDenied pins that a typed-nil
 // *ScopedUserIdentity reaching Decide (for example from a caller that
 // forwards a *ScopedUserIdentity-typed variable without checking whether
-// ValidateToken returned one) is denied, not a panic. A bare AuthzService is
-// safe here: the deny is reached before any store lookup.
+// ValidateToken returned one) is denied, not a panic. Decide's
+// classification check treats a typed-nil identity as a missing principal
+// and denies before step 1, so the step-1 nil deny in enforceUATConstraints
+// is also exercised directly. A bare AuthzService is safe here: both denies
+// are reached before any store lookup.
 func TestDecide_TypedNilScopedUserIdentityDenied(t *testing.T) {
 	authz := &AuthzService{}
 	ctx := context.Background()
@@ -898,8 +901,16 @@ func TestDecide_TypedNilScopedUserIdentityDenied(t *testing.T) {
 	}, "a typed-nil *ScopedUserIdentity must be denied, not cause a nil-pointer panic")
 
 	assert.False(t, result.Allowed, "a typed-nil identity must never be treated as unconstrained")
-	assert.Equal(t, "token holder lacks active access to the target project", result.Reason,
-		"a typed-nil identity must be denied by the step-1 UAT gate in enforceUATConstraints")
+	assert.Equal(t, "missing principal", result.Reason,
+		"a typed-nil identity must be denied by Decide's classification check")
+
+	var direct *Decision
+	require.NotPanics(t, func() {
+		direct = authz.enforceUATConstraints(ctx, req.Principal, scoped, req.Resource, req.Action, "agent.read")
+	}, "enforceUATConstraints must deny a typed-nil *ScopedUserIdentity, not panic")
+	require.NotNil(t, direct, "a typed-nil identity must be denied by the step-1 UAT gate")
+	assert.False(t, direct.Allowed)
+	assert.Equal(t, "token holder lacks active access to the target project", direct.Reason)
 }
 
 // TestEnforceUATConstraints_UserHubLevel verifies that user resources

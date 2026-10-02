@@ -2029,16 +2029,6 @@ func principalContextForIdentity(identity Identity) PrincipalContext {
 	if isNilIdentity(identity) {
 		return PrincipalContext{}
 	}
-	if scoped, ok := identity.(*ScopedUserIdentity); ok && scoped == nil {
-		// A typed-nil *ScopedUserIdentity satisfies this type assertion
-		// (ok == true, scoped == nil) even though identity == nil above was
-		// false — the same Go interface/pointer distinction
-		// credentialContextForIdentity below guards against. ID() and
-		// Type() are promoted from the embedded UserIdentity field, so
-		// calling them on a nil receiver would dereference nil. Report a
-		// user principal with an empty ID rather than calling through.
-		return PrincipalContext{Kind: PrincipalKindUser, Identity: identity}
-	}
 	principal := PrincipalContext{ID: identity.ID(), Identity: identity}
 	switch identity.(type) {
 	case *AuthenticatedUser, *ScopedUserIdentity:
