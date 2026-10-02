@@ -382,6 +382,19 @@ this broker are:
   `egress_allow`. Any other Google API an agent might have reached under
   the old wildcard — GCS, Compute, BigQuery, and so on — needs the same
   explicit `egress_allow` entry now.
+- **`stop` is the same as `delete` for a substrate actor.** Nothing in this
+  runtime suspends to a durable snapshot yet, so a stop destroys the actor
+  and its working directory exactly like a delete would — there is no
+  "stopped but resumable" state to come back to. See
+  `pkg/runtime/substrate_runtime.go`'s `Stop` doc comment.
+- **The broker's own CA/trust-bundle is read once, at dial time.** Rotating
+  the CA or trust bundle a broker uses to reach ateapi/the router requires
+  restarting the broker process — there is no live-reload path.
+- **The broker image is not required to be digest-pinned** the way agent
+  images are (see `README.md`, "Pin the agent image by digest"); only the
+  agent image is enforced. Recommend pinning `BROKER_IMAGE` by digest
+  (`@sha256:...`) anyway when cutting a broker release, for the same
+  supply-chain reasons.
 - The broker→router hop is plaintext HTTP, and bootstrap credentials cross
   it; NetworkPolicy and the single-use, first-caller-wins bootstrap guard
   mitigate this, not transport encryption. The guard is NOT a nonce check —

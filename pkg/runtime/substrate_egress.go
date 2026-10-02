@@ -193,6 +193,15 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 	// matching NormalizeEgressAllowEntry's own callers elsewhere: never the
 	// userinfo, query, or full URL a caller derived it from, either of which
 	// could carry a credential.
+	//
+	// This function can therefore never WIDEN the resulting policy beyond
+	// what sc.EgressAllow already grants on its own: every operatorEgressAllow
+	// entry is added unconditionally further below, regardless of whether any
+	// tenant-derived host ever matches it. A covered h only ever adds a host
+	// already subsumed by that operator entry (or an exact duplicate of it);
+	// an uncovered h adds nothing at all. addTenantHost's real value is
+	// diagnostic — the WARN naming an uncovered host and how to allow it —
+	// not a gate standing between a tenant value and a wider policy.
 	addTenantHost := func(h string) {
 		h = strings.TrimSpace(h)
 		if h == "" {
