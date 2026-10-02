@@ -1266,6 +1266,8 @@ authDone:
 	nfsWorkspacePreCreated := false
 	nfsWorktreeName := ""
 	nfsWorktreeBranch := ""
+	nfsAgentDirName := ""
+	nfsAgentBranch := ""
 
 	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
 		sharingMode := store.SharingModeWorktreePerAgent
@@ -1273,12 +1275,22 @@ authDone:
 			sharingMode = store.SharingModeSharedPlain
 		}
 		// On Kubernetes, a git project dispatched in worktree-per-agent mode
-		// gets its own worktree under the shared checkout. Every other mode,
-		// including clone-per-agent, and every other runtime keep the
-		// layout above.
-		var worktreeName, worktreeBranch string
+		// gets its own worktree under the shared checkout. Shared-plain and
+		// every other runtime keep the layout above.
+		// A git project dispatched in clone-per-agent mode gets its own
+		// agent directory next to the project's workspace path instead,
+		// with a workspace the agent container clones into. Paths are
+		// still resolved from the project's workspace path (shared-plain).
+		var worktreeName, worktreeBranch, agentDirName, agentBranch string
 		if isKubernetesRuntime(m.Runtime.Name()) {
 			worktreeName, worktreeBranch = nfsWorktreeSelection(opts.Env, opts.GitClone, opts.Name)
+			if settings.Server.WorkspaceStorage.Backend == "nfs" {
+				var selErr error
+				agentDirName, agentBranch, selErr = nfsAgentDirSelection(opts.Env, opts.GitClone, opts.Name)
+				if selErr != nil {
+					return nil, selErr
+				}
+			}
 		}
 		if worktreeName != "" {
 			sharingMode = store.SharingModeWorktreePerAgent
@@ -1316,7 +1328,13 @@ authDone:
 			if sharedDirStorage == nil {
 				claimSharedDirNames = sharedDirNames
 			}
-			nfsWorkspacePreCreated, err = ensureNFSWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames)
+			if agentDirName != "" && mount.PVClaimName != "" {
+				nfsWorkspacePreCreated, err = ensureNFSAgentWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, agentDirName)
+				nfsAgentDirName = agentDirName
+				nfsAgentBranch = agentBranch
+			} else {
+				nfsWorkspacePreCreated, err = ensureNFSWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -1380,6 +1398,10 @@ authDone:
 		// of the shared checkout.
 		NFSWorktreeName:   nfsWorktreeName,
 		NFSWorktreeBranch: nfsWorktreeBranch,
+		// Set only for clone-per-agent git projects on the NFS backend: the
+		// agent mounts agents/<agent name>/workspace and clones into it.
+		NFSAgentDirName: nfsAgentDirName,
+		NFSAgentBranch:  nfsAgentBranch,
 		// F-111 (design §9): drives the k8s runtime's NFS init container's
 		// clone-vs-plain-provision choice (nfsProvisionCommand), not whether
 		// provisioning happens at all — the init container is now gated

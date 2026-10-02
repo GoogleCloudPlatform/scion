@@ -1452,6 +1452,39 @@ func TestAcquireFileLock_PublishesWithImmediateSynchronousHeartbeat(t *testing.T
 	assert.NoError(t, statErr, "a fresh acquisition must have a heartbeat marker immediately, not only after the first periodic interval elapses")
 }
 
+// A lock directory is readable and searchable by its group, and keeps the
+// setgid bit of a setgid parent, so another user in that group (the broker
+// or a provisioning init container on an NFS export) can read the owner id
+// and the heartbeat and reclaim a lock its holder left behind.
+func TestAcquireFileLock_LockReadableByGroup(t *testing.T) {
+	for _, setgid := range []bool{false, true} {
+		t.Run(fmt.Sprintf("setgid=%v", setgid), func(t *testing.T) {
+			dir := t.TempDir()
+			if setgid {
+				require.NoError(t, os.Chmod(dir, os.ModeSetgid|0o775))
+			}
+			origInterval := provisionLockHeartbeatInterval
+			provisionLockHeartbeatInterval = time.Hour
+			t.Cleanup(func() { provisionLockHeartbeatInterval = origInterval })
+
+			held, err := acquireFileLock(context.Background(), dir)
+			require.NoError(t, err)
+			defer func() { _ = held.release() }()
+
+			lockPath := filepath.Join(dir, provisionFileLockName)
+			info, err := os.Stat(lockPath)
+			require.NoError(t, err)
+			assert.Equal(t, os.FileMode(0o770), info.Mode().Perm(), "lock directory mode")
+			assert.Equal(t, setgid, info.Mode()&os.ModeSetgid != 0, "setgid follows the parent")
+			for _, name := range []string{provisionLockOwnerFile, provisionLockHeartbeatFile} {
+				fi, err := os.Stat(filepath.Join(lockPath, name))
+				require.NoError(t, err)
+				assert.NotZero(t, fi.Mode().Perm()&0o040, "%s must be group-readable, mode %v", name, fi.Mode())
+			}
+		})
+	}
+}
+
 // TestAcquireFileLock_SynchronousBeatDefiniteLoss_DoesNotReturnLock proves
 // acquireFileLock never returns a held lock for a generation it has just
 // been told, by its own synchronous first beat, that it does not own, and

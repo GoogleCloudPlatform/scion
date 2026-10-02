@@ -1793,16 +1793,17 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 		return
 	}
 
-	// Worktree-per-agent on the NFS workspace: the agent's worktree lives on
-	// the export rather than in the agent's files, so remove it here too.
-	// A failure does not fail the delete; the worktree is then left in
-	// place, and an agent created again with the same name reuses it. The
-	// agent's branch is always kept, whatever removeBranch says.
+	// On the NFS workspace, the agent's worktree (worktree-per-agent) or
+	// its own workspace (clone-per-agent) lives on the export rather than
+	// in the agent's files, so remove it here too. A failure does not fail
+	// the delete; what failed is then left in place, and an agent created
+	// again with the same name reuses it. The agent's branch is always
+	// kept, whatever removeBranch says.
 	if filesToDelete && agentProjectID != "" {
-		if remover, ok := target.mgr.(nfsWorktreeRemover); ok {
-			if wtPath, rmErr := remover.RemoveNFSWorktree(ctx, projectPath, agentProjectID, target.name); rmErr != nil {
-				s.agentLifecycleLog.Warn("Agent delete: could not remove the agent's worktree on the NFS workspace; left in place",
-					"agent_id", id, "project_id", agentProjectID, "path", wtPath, "error", rmErr)
+		if remover, ok := target.mgr.(nfsAgentFilesRemover); ok {
+			if paths, rmErr := remover.RemoveNFSAgentFiles(ctx, projectPath, agentProjectID, target.name); rmErr != nil {
+				s.agentLifecycleLog.Warn("Agent delete: could not remove the agent's files on the NFS workspace; left in place",
+					"agent_id", id, "project_id", agentProjectID, "paths", paths, "error", rmErr)
 			}
 		}
 	}
@@ -4496,13 +4497,14 @@ var errDeleteTargetNotFound = errors.New("agent not found in project")
 // runtime listing failed.
 var errDeleteTargetUnknown = errors.New("could not list agents to resolve delete target")
 
-// nfsWorktreeRemover is implemented by agent managers that can remove an
-// agent's worktree from the NFS workspace export on delete.
-type nfsWorktreeRemover interface {
-	RemoveNFSWorktree(ctx context.Context, projectPath, projectID, agentName string) (path string, err error)
+// nfsAgentFilesRemover is implemented by agent managers that can remove an
+// agent's worktree or own workspace from the NFS workspace export on
+// delete.
+type nfsAgentFilesRemover interface {
+	RemoveNFSAgentFiles(ctx context.Context, projectPath, projectID, agentName string) (paths []string, err error)
 }
 
-var _ nfsWorktreeRemover = (*agent.AgentManager)(nil)
+var _ nfsAgentFilesRemover = (*agent.AgentManager)(nil)
 
 // deleteTarget is the single, project-matched agent a delete acts on.
 type deleteTarget struct {
