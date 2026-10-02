@@ -9,8 +9,8 @@ review round's required fixes (see "Review round 1" below).
 
 ## What
 
-Implemented the P4 slice from `lists-graph.md` §7/§11 (sections 4.3, 6.1-6.4, 7,
-9, 11, 13 read before coding):
+Implemented the P4 slice of the agent-list live-updates design (§7/§11;
+sections 4.3, 6.1-6.4, 7, 9, 11, 13 read before coding):
 
 - **`web/src/client/agent-merge.ts` (new):** `mergeChanged(held, change, options)`
   applies one coalesced `agents-changed` payload to a held agent array.
@@ -61,11 +61,11 @@ Implemented the P4 slice from `lists-graph.md` §7/§11 (sections 4.3, 6.1-6.4, 
 
 ## Why
 
-Design doc `lists-graph.md` r8 (md5 `2a21517bf376552064b727012ea67935`, binding
-errata applied) §7 ("`agents-changed` consumers ... through `mergeChanged`
-... or `window.applyChanges`. No per-event full rebuild remains") and §11's P4
-row. The TTL/epoch fix closes a correctness gap in the already-merged P1a
-state.ts that P4's brief carried forward as an explicit requirement, with its
+The agent-list live-updates design (binding errata applied), §7
+("`agents-changed` consumers ... through `mergeChanged` ... or
+`window.applyChanges`. No per-event full rebuild remains") and §11's P4 row.
+The TTL/epoch fix closes a correctness gap in the already-merged state.ts
+slice that P4's brief carried forward as an explicit requirement, with its
 own test.
 
 ## Tests
@@ -244,32 +244,34 @@ warnings), unchanged from the prior commit's baseline; `npx prettier
   stays at its pre-delta count
   across every SSE delta.
 
-## Review round 1 (REQUEST CHANGES; R1-R3 required, O1-O3 and N1-N2 closed)
+## Review round 1 (requested changes; every finding closed)
 
-Required findings, all fixed with a regression test that was verified to
+Required fixes, each landed with a regression test that was verified to
 fail against the pre-fix code and pass after:
 
-- **R1** (regression vs main): an SSE-created agent lost its inherited
-  scope capabilities on its next status delta, since `mergeChanged`'s
-  existing-member branch replaced the held copy outright with
-  `stateManager`'s object, which never carried capabilities a *page*
-  inherited on top for display. Fixed in `agent-merge.ts`'s existing-member
-  branch: when the incoming update has no `_capabilities` of its own and
-  the held object does, carry the held object's `_capabilities` forward (a
-  spread copy of only that one changed object; everything else keeps its
-  reference). Tests: a `mergeChanged` unit test, plus one page-level test
-  per page (SSE create, then a status delta, then `_capabilities` still
-  present).
-- **R2** (new live/seed divergence): the TTL-expiry fix's epoch purge could
-  wipe known-state deltas an open epoch recorded *after* an id became known
+- **An SSE-created agent lost its inherited scope capabilities on its next
+  status delta (a regression vs `main`):** `mergeChanged`'s existing-member
+  branch replaced the held copy outright with `stateManager`'s object,
+  which never carried capabilities a *page* had inherited on top for
+  display. Fixed in `agent-merge.ts`'s existing-member branch: when the
+  incoming update has no `_capabilities` of its own and the held object
+  does, carry the held object's `_capabilities` forward (a spread copy of
+  only that one changed object; everything else keeps its reference).
+  Tests: a `mergeChanged` unit test, plus one page-level test per page
+  (SSE create, then a status delta, then `_capabilities` still present).
+- **The TTL-expiry fix's epoch purge could wipe known-state deltas it
+  never meant to:** an open epoch's entry is shared by buffered
+  (unknown-ID) deltas and later known-state deltas; if an ID became known
   through an untokened `seedAgents` call (every page-level seed today),
-  because that path never cleared the id's pending-buffer timer. Fixed in
-  two places: `seedAgents` now clears the pending buffer and its timer for
-  every seeded id, tokened or not (previously only when a recorded epoch
-  delta was found); the timer callback also guards its epoch purge with
-  `state.agents.has(id)`, as defense in depth. Test: the reviewer's
-  stale-timer sequence, reproduced and confirmed to fail pre-fix.
-- **R3** (tombstones not applied to paged stats): `dropTombstoned` filtered
+  that path never cleared the ID's pending-buffer timer, so a stale timer
+  firing later wiped the whole epoch entry, including known-state deltas
+  recorded after the ID became known. Fixed in two places: `seedAgents`
+  now clears the pending buffer and its timer for every seeded ID, tokened
+  or not (previously only when a recorded epoch delta was found); the
+  timer callback also guards its epoch purge with `state.agents.has(id)`,
+  as defense in depth. Test: the reviewer's stale-timer sequence,
+  reproduced and confirmed to fail pre-fix.
+- **Tombstones were not applied to paged stats:** `dropTombstoned` filtered
   page rows but not a paged response's `stats.agents`, so a deleted agent
   could be re-seeded into the member index, inflating paged total/running
   counts and Stop-all visibility with nothing to ever correct it. Fixed
@@ -277,55 +279,64 @@ fail against the pre-fix code and pass after:
   shared `project-detail.ts:freshStats` helper at both sites that feed the
   window's stats (the paged branch of `loadAgentsForViewImpl` and
   `fetchAgentsPage`). Test: a paged-state test confirming an SSE-deleted
-  agent's count stays dropped across a stats-bearing refetch.
+  agent's count stays dropped across a stats-bearing refetch — later
+  extended with an assertion covering `fetchAgentsPage`'s own stats
+  filtering specifically (see "Review round 2" below).
 
-Optional and nit findings, all closed:
+Optional and nit items, all closed:
 
-- **O1** (test gap): mutation testing had shown 3 of 5 `dropTombstoned`
-  call sites untested (the paged branch of `loadAgentsForViewImpl`,
-  `loadLegacyAgentsImpl`, and `fetchAgentsPage`). Added one test per site,
-  each verified to fail with that site's `dropTombstoned` call reverted.
-- **O3** (docs): corrected the `agent-merge.ts` `scopeCapabilities` doc
-  comment, which had overstated that `stateManager` preserves capabilities
-  a *page* inherited on top of its own object (the false premise behind
-  R1).
-- **N1** (internal IDs): removed the design-process acceptance/test-plan
-  tags "A10" and "W2" from comments and test names added by this phase
+- **Closed a test gap in tombstone-drop coverage:** mutation testing had
+  shown 3 of 5 `dropTombstoned` call sites untested (the paged branch of
+  `loadAgentsForViewImpl`, `loadLegacyAgentsImpl`, and `fetchAgentsPage`).
+  Added one test per site, each verified to fail with that site's
+  `dropTombstoned` call reverted.
+- **Corrected an overstated doc comment:** the `agent-merge.ts`
+  `scopeCapabilities` comment had implied `stateManager` preserves
+  capabilities a *page* inherited on top of its own object — the false
+  premise behind the capabilities-dropped fix above.
+- **Removed design-process tags from new comments and test names:**
+  dropped the acceptance/test-plan tags this phase had introduced
   (`agent-merge.ts`, `agent-merge.test.ts`, `agents-live-updates.test.ts`,
   `project-detail-agent-window.test.ts`, `state-seed-epoch.test.ts`),
-  replacing them with plain wording. Pre-existing occurrences on `main`
-  (for example the "W3 seed epoch" describe name) were left as-is.
-- **N2** (wording): `project-detail.ts`'s `mergeAgentsChanged` doc said it
-  was a no-op while paged; it is actually never called while paged (the
-  caller gates it). Corrected.
+  replacing them with plain wording. Pre-existing occurrences already on
+  `main` (for example the "seed epoch" describe name in
+  `state-seed-epoch.test.ts`) were left as-is.
+- **Fixed misleading doc wording:** `project-detail.ts`'s
+  `mergeAgentsChanged` doc said it was a no-op while paged; it is actually
+  never called while paged (the caller gates it). Corrected.
 
-Disposition of the FYIs and the deferred optional item:
+Disposition of the non-blocking findings:
 
-- **O2** (weaker self-heal for a created-during-in-flight-load race):
-  accepted as a known limitation, deferred to the drain/epoch phase. A
+- **A created event landing mid-load has a weaker self-heal than `main`
+  had:** accepted as a known limitation, deferred to a later phase. A
   created event that lands while a page's own REST load is already in
   flight is added by `mergeChanged` and then overwritten by that load's
   REST assignment if the snapshot predates the create; it now heals only
-  on that one agent's own next delta, instead of on any agent's next flush
-  as main's full rebuild happened to provide. The seed-epoch machinery
-  already used for drains is the natural fix once these load paths adopt
-  it. Not blocking: the design explicitly removes full rebuilds. **Decided
-  by ptone (2026-10-01 23:05Z): postponed to the list-window phase,
-  tracked as `ptone/scion#2560`.** Noted in the PR body as a known
-  limitation referencing that issue.
-- **F1** (paged-fetcher page-shortening edge case): no action. Dropping a
-  tombstoned row can shorten a server page, which can make the "empty page
-  i>0 steps back" rule step back one page early if that page held only the
-  just-deleted agent. Self-corrects on the next navigation.
-- **F2** (tombstones never cleared by a later same-id create): no action.
-  Unreachable in practice, since IDs are UUIDs — the same characteristic
-  `stateManager.seedAgents` already relies on for its own tombstone-skip.
-- **F3** (page copy replaced outright instead of spread-merged): no action.
-  A semantic change from main's spread merge, noted for awareness; no
-  concrete case exists on either page's routes today.
-- **F4** (internal agent-role names in this log): fixed. Replaced with
-  generic role wording (matching the precedent in earlier P1 logs on
-  `main`, which use "the lead" rather than a specific agent's name).
+  on that one agent's own next delta, instead of on any agent's next
+  refresh as `main`'s full rebuild happened to provide. The seed-epoch
+  machinery already used for drains is the natural fix once these load
+  paths adopt it. Not blocking: the design explicitly removes full
+  rebuilds. **Decided by ptone (2026-10-01 23:05Z): postponed to the
+  list-window phase, tracked as `ptone/scion#2560`.** Noted in the PR body
+  as a known limitation referencing that issue.
+- **A paged-fetcher page-shortening edge case:** no action needed.
+  Dropping a tombstoned row can shorten a server page, which can make the
+  "empty page past the first steps back" rule step back one page early if
+  that page held only the just-deleted agent. Self-corrects on the next
+  navigation.
+- **Tombstones are never cleared by a later same-ID create:** no action
+  needed. Unreachable in practice, since IDs are UUIDs — the same
+  characteristic `stateManager.seedAgents` already relies on for its own
+  tombstone-skip.
+- **The page copy is replaced outright instead of spread-merged:** no
+  action needed. A semantic change from `main`'s spread merge, noted for
+  awareness; no concrete case exists on either page's routes today.
+- **Internal agent-role names and a workstream document's filename
+  appeared in this log:** fixed. Replaced the specific agent name with
+  generic role wording (matching the precedent in earlier logs on `main`,
+  which use "the lead" rather than a specific agent's name), and replaced
+  the internal design document's filename with a description of what it
+  covers.
 
 ### Commands and results
 
@@ -334,12 +345,50 @@ Disposition of the FYIs and the deferred optional item:
   (`agent-merge.test.ts`, `state-seed-epoch.test.ts`,
   `state-coalescing.test.ts`, `agents-live-updates.test.ts`,
   `project-detail-agent-window.test.ts`): 125/125 passing (117 before this
-  round + 8 new: 3 for R1, 1 for R2, 1 for R3, 3 for O1).
+  round + 8 new: 3 for the capability-preservation fix, 1 for the
+  stale-timer fix, 1 for the paged-stats fix, 3 for the tombstone-site
+  test-gap closures).
 - Full targeted suite (the same 13 files tracked throughout this phase):
   216/216 passing.
 - `npx eslint` on the four non-test files: 160 problems (52 errors, 108
   warnings), unchanged from every prior round's baseline — zero new issues.
 - `npx prettier --check`: pass on every touched file.
-- Each new regression test (R1 x2, R2 x1, R3 x1, O1 x3 — 7 total paired
-  with a specific fix) was verified to fail when its corresponding fix was
-  reverted locally, then to pass again once restored.
+- Each new regression test (7 total, each paired with a specific fix) was
+  verified to fail when its corresponding fix was reverted locally, then
+  to pass again once restored.
+
+## Review round 2 (approve; one optional item and one nit closed, plus a doc cleanup)
+
+Approved, with everything already closed from round 1 confirmed. Two more
+items closed:
+
+- **A stats-filtering call site had no dedicated assertion:** the window's
+  own page-fetcher test (the one covering `fetchAgentsPage`'s row
+  filtering) did not separately assert its stats filtering, so a mutant
+  that skipped filtering there survived. Added an assertion on the member
+  index's total count after the fetch, right alongside the existing
+  rows assertion. Verified it fails when that one call site's filtering is
+  reverted, then passes once restored.
+- **Repeated reasoning across several comments:** four separate comments
+  in `state.ts` (the buffering function's own doc comment, its expiry
+  timer's callback, the seeding function's doc comment, and the seeding
+  loop's own inline comment) restated the same multi-paragraph reasoning
+  about why a stale timer must not survive into the known phase. Kept the
+  full reasoning in one place (the buffering function's doc comment) and
+  reduced the other three to one-line pointers at it.
+- **This log's own review-round write-up used bare finding labels and an
+  internal document's filename:** rewritten throughout to describe the
+  underlying behavior instead of leading with a label, keeping issue
+  numbers such as `ptone/scion#2560` and section references.
+
+### Commands and results
+
+- `npm run typecheck`: pass, no output.
+- `npx vitest run` on the reviewer's five targeted files: all passing,
+  with one new assertion added to an existing test (no new test count
+  change).
+- `npx eslint` on the four non-test files: unchanged from the prior
+  round's baseline — zero new issues.
+- The new assertion was verified to fail when its corresponding call
+  site's filtering was reverted (that site alone, via a scripted
+  single-line edit), then to pass again once restored.
