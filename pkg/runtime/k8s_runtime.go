@@ -399,6 +399,25 @@ func ensureAnnotations(annotations map[string]string) map[string]string {
 	return make(map[string]string)
 }
 
+// chownRecursiveArgs returns the in-pod `chown -R` argv that recursively
+// re-owns path to owner:owner, or (nil, false) when owner is empty. An empty
+// owner must refuse outright rather than produce a command either caller
+// could otherwise build from it: an owner:group spec of ":" (no real target
+// user), or, for the home-directory caller, a destination path of
+// util.GetHomeDir("") == "/home" -- a critical system directory, not any
+// particular user's home.
+//
+// This returns argv directly, not a shell string, so execInPod runs chown
+// itself rather than a shell asked to parse one: owner and path reach the
+// process as literal argv elements, with no quoting step in between for
+// either value to escape.
+func chownRecursiveArgs(owner, path string) (args []string, ok bool) {
+	if owner == "" {
+		return nil, false
+	}
+	return []string{"chown", "-R", fmt.Sprintf("%s:%s", owner, owner), path}, true
+}
+
 func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, error) {
 	fmt.Printf("Starting agent '%s' on Kubernetes...\n", config.Name)
 	namespace := r.DefaultNamespace
@@ -422,6 +441,23 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		}
 	}
 
+	// Reject a workspace source that is not an allowed workspace path before
+	// it is persisted to the pod annotation that both this function's own
+	// sync step and the standalone Sync() command later trust. Act on the
+	// resolved, symlink-free path it returns. As in buildCommonRunArgs, no
+	// per-project root is passed: a workspace outside RepoRoot is a
+	// supported shape (an explicit --workspace, in particular) that
+	// RunConfig carries no flag to distinguish from a bad value, so only
+	// the fixed deny-set applies here; per-project root containment is
+	// enforced upstream, at the pkg/agent Start() call site.
+	if config.Workspace != "" {
+		resolvedWorkspace, err := ValidateWorkspaceSource(config.Workspace, "")
+		if err != nil {
+			return "", err
+		}
+		config.Workspace = resolvedWorkspace
+	}
+
 	// Persist workspace path in annotations for later sync
 	if config.Workspace != "" {
 		config.Annotations = ensureAnnotations(config.Annotations)
@@ -432,6 +468,19 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		config.Annotations = ensureAnnotations(config.Annotations)
 		config.Annotations["scion.git_clone"] = "true"
 		config.Annotations["scion.git_clone_url"] = config.GitClone.URL
+	}
+
+	// Same reasoning as config.Workspace above: reject a home directory that
+	// is not an allowed agent-home path before it is persisted to the pod
+	// annotation that Sync() later trusts, and before it is copied into the
+	// pod below -- otherwise an unacceptable value would reach the pod on
+	// this first Run and only be caught afterward, on the next Sync.
+	if config.HomeDir != "" {
+		resolvedHomeDir, err := ValidateAgentHomeSource(config.HomeDir, "")
+		if err != nil {
+			return "", err
+		}
+		config.HomeDir = resolvedHomeDir
 	}
 
 	if config.HomeDir != "" {
@@ -615,9 +664,15 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		// Fix ownership: tar extraction runs as root via K8s exec, so synced
 		// files are owned by root. chown them to the scion user so the
 		// privilege-dropped harness process can access its home directory.
-		chownCmd := fmt.Sprintf("chown -R %s:%s %s", config.UnixUsername, config.UnixUsername, destHome)
 		chownStart := time.Now()
-		if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"sh", "-c", chownCmd}); err != nil {
+		//
+		// An empty UnixUsername makes destHome itself util.GetHomeDir("") ==
+		// "/home" (a critical system directory, not a per-user home), so the
+		// in-pod chown below is refused outright rather than recursively
+		// re-owning every home directory on the node.
+		if chownArgs, ok := chownRecursiveArgs(config.UnixUsername, destHome); !ok {
+			runtimeLog.Warn("Skipping home directory chown: UnixUsername is empty", "agent", config.Name, "destHome", destHome)
+		} else if _, err := r.execInPod(ctx, namespace, createdPod.Name, chownArgs); err != nil {
 			runtimeLog.Debug("Failed to chown home directory (non-fatal)", "error", err)
 		}
 		runtimeLog.Info("Home sync complete", "agent", config.Name, "phase", "home-sync",
@@ -650,10 +705,13 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 			return createdPod.Name, fmt.Errorf("failed to sync workspace: %w", err)
 		}
 		syncMs := time.Since(workspaceSyncStart).Milliseconds()
-		// Fix workspace ownership for the scion user
-		chownCmd := fmt.Sprintf("chown -R %s:%s /workspace", config.UnixUsername, config.UnixUsername)
 		chownStart := time.Now()
-		if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"sh", "-c", chownCmd}); err != nil {
+		// Fix workspace ownership for the scion user. An empty UnixUsername
+		// would build an owner:group spec of ":" -- refused outright rather
+		// than run chown with no actual target user.
+		if chownArgs, ok := chownRecursiveArgs(config.UnixUsername, "/workspace"); !ok {
+			runtimeLog.Warn("Skipping workspace chown: UnixUsername is empty", "agent", config.Name)
+		} else if _, err := r.execInPod(ctx, namespace, createdPod.Name, chownArgs); err != nil {
 			runtimeLog.Debug("Failed to chown workspace (non-fatal)", "error", err)
 		}
 		runtimeLog.Info("Workspace sync complete", "agent", config.Name, "phase", "workspace-sync",
@@ -2834,8 +2892,43 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		return fmt.Errorf("agent '%s' does not have a workspace path recorded", id)
 	}
 
+	// Only a path that passes the fixed floors may be used here, as either a
+	// sync source (broker disk -> agent, SyncTo direction) or a sync
+	// destination (agent -> broker disk, SyncFrom direction). This is a
+	// value read straight from a persisted pod annotation, not freshly
+	// computed, so it needs this check independent of whatever validated it
+	// (or didn't) when it was first written. No per-project root is
+	// available at this call site — only agent annotations/labels are in
+	// scope, with no project directory or settings to derive one from — so
+	// only the fixed deny-set applies, not per-project root containment.
+	resolvedWorkspacePath, err := ValidateWorkspaceSource(workspacePath, "")
+	if err != nil {
+		return err
+	}
+	workspacePath = resolvedWorkspacePath
+
 	homeDir := agent.Annotations["scion.homedir"]
 	username := agent.Annotations["scion.username"]
+
+	// Same reasoning as workspacePath above: homeDir is a host path read
+	// straight from a persisted annotation, used below as either a sync
+	// destination (SyncFrom) or a sync source (SyncTo), and needs the same
+	// check independent of whatever validated it when first written. This is
+	// an agent's home directory, not a workspace, so it goes through
+	// ValidateAgentHomeSource rather than ValidateWorkspaceSource: the two
+	// admit disjoint shapes under ~/.scion (see ValidateAgentHomeSource's
+	// doc comment). Agent homes under ~/.scion take one of three layouts
+	// (global, hub-managed, or externalized git project); a home outside
+	// ~/.scion entirely (a plain in-repo project's own agent home, for
+	// example) is subject to the fixed floors only, the same as any other
+	// source this function's sibling validates.
+	if homeDir != "" {
+		resolvedHomeDir, err := ValidateAgentHomeSource(homeDir, "")
+		if err != nil {
+			return err
+		}
+		homeDir = resolvedHomeDir
+	}
 
 	// Resolve namespace
 	namespace := r.DefaultNamespace

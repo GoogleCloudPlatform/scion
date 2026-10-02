@@ -14,9 +14,9 @@
 
 // Package provision implements Tier-1 universal workspace provisioning.
 // It is a config-free leaf package that depends only on stdlib, pkg/api,
-// and pkg/store — deliberately avoiding pkg/config so that lean binaries
-// (e.g. sciontool) can invoke provisioning without pulling in
-// filesystem-based project path resolution.
+// pkg/store, and pkg/util/fsutil (itself stdlib-only) — deliberately
+// avoiding pkg/config so that lean binaries (e.g. sciontool) can invoke
+// provisioning without pulling in filesystem-based project path resolution.
 package provision
 
 import (
@@ -37,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
 // ProvisionSentinelFile is the name of the sentinel file written atomically
@@ -2392,6 +2393,13 @@ func chownTarget(hostPath string) string {
 // during first provisioning (design §9.1). Per-start chown is NOT done for
 // NFS (slow, and unsafe to run concurrently with other starts, over the network).
 //
+// fsutil.CheckRoot runs first and refuses outright if projectRoot is a known
+// critical system path or looks like a filesystem root by content — an
+// additional guard against a resolution bug elsewhere computing an
+// unintended chown root, independent of chownTarget's own narrower "/"
+// handling, and standing in front of the shared-dir chown calls too, which
+// do not route through chownTarget.
+//
 // Walks the tree itself (filepath.WalkDir + os.Lchown) rather than shelling
 // out to the chown binary, for two reasons:
 //
@@ -2447,7 +2455,16 @@ func chownTarget(hostPath string) string {
 // necessarily the only one. A ctx cancellation is the one thing that stops
 // the walk outright, matching the previous exec.CommandContext-based
 // implementation being killed on cancellation.
+//
+// TestChownProjectTree_DanglingSymlink_DoesNotFail is the regression guard
+// on no-dereference: a symlink to a path that exists nowhere, so re-owning
+// the link itself (Lchown) succeeds while resolving it (Chown) would fail
+// with ENOENT. It needs no timing assumptions and fails deterministically if
+// the walk ever starts dereferencing.
 func chownProjectTree(ctx context.Context, projectRoot, lockDir string, uid, gid int) error {
+	if err := fsutil.CheckRoot(projectRoot); err != nil {
+		return fmt.Errorf("recursive chown %s to %d:%d: %w", projectRoot, uid, gid, err)
+	}
 	if lockDir != "" {
 		lockDir = filepath.Clean(lockDir) // guard against a trailing slash silently disabling the exclusion below
 	}

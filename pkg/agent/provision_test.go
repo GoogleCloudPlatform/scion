@@ -543,13 +543,19 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 	}
 	globalScionDir, _ := config.GetGlobalDir()
 
-	// Change into a subdirectory to act as CWD
+	// Change into an unrelated subdirectory to prove the global project's
+	// workspace does not depend on the CLI's current working directory.
 	cwd := filepath.Join(tmpDir, "some-dir")
 	_ = os.MkdirAll(cwd, 0755)
 	if err := os.Chdir(cwd); err != nil {
 		t.Fatal(err)
 	}
-	evalCWD, _ := filepath.EvalSymlinks(cwd)
+
+	wantGlobalWorkspaceRoot := filepath.Join(globalScionDir, "workspace")
+	wantGlobalWorkspace := filepath.Join(wantGlobalWorkspaceRoot, "global-agent")
+	if _, err := os.Stat(wantGlobalWorkspaceRoot); !os.IsNotExist(err) {
+		t.Fatalf("expected global project workspace directory to not exist yet, stat err = %v", err)
+	}
 
 	_, ws, cfg, err = ProvisionAgent(context.Background(), "global-agent", "default", "", "", globalScionDir, "", "", "", "")
 	if err != nil {
@@ -560,18 +566,141 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 		t.Errorf("expected empty workspace path for global agent, got %q", ws)
 	}
 
+	if info, err := os.Stat(wantGlobalWorkspace); err != nil || !info.IsDir() {
+		t.Fatalf("expected global project workspace directory to be created at %q on first use: %v", wantGlobalWorkspace, err)
+	}
+	evalWantGlobalWorkspace, _ := filepath.EvalSymlinks(wantGlobalWorkspace)
+
 	found = false
 	for _, v := range cfg.Volumes {
 		if v.Target == "/workspace" {
 			found = true
 			evalSource, _ := filepath.EvalSymlinks(v.Source)
-			if evalSource != evalCWD {
-				t.Errorf("expected global agent volume source %q (CWD), got %q", evalCWD, evalSource)
+			if evalSource != evalWantGlobalWorkspace {
+				t.Errorf("expected global agent volume source %q, got %q", evalWantGlobalWorkspace, evalSource)
 			}
 		}
 	}
 	if !found {
 		t.Error("expected /workspace volume mount not found in global agent config")
+	}
+
+	// A second global agent, provisioned from a different CWD, gets its own
+	// workspace subdirectory under the same project workspace root instead
+	// of sharing the first agent's directory: two global-project agents
+	// must never read and write the same files.
+	cwd2 := filepath.Join(tmpDir, "another-dir")
+	_ = os.MkdirAll(cwd2, 0755)
+	if err := os.Chdir(cwd2); err != nil {
+		t.Fatal(err)
+	}
+
+	wantSecondGlobalWorkspace := filepath.Join(wantGlobalWorkspaceRoot, "global-agent-2")
+	_, ws2, cfg2, err := ProvisionAgent(context.Background(), "global-agent-2", "default", "", "", globalScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed for second global agent: %v", err)
+	}
+	if ws2 != "" {
+		t.Errorf("expected empty workspace path for second global agent, got %q", ws2)
+	}
+	evalWantSecondGlobalWorkspace, _ := filepath.EvalSymlinks(wantSecondGlobalWorkspace)
+
+	found = false
+	for _, v := range cfg2.Volumes {
+		if v.Target == "/workspace" {
+			found = true
+			evalSource, _ := filepath.EvalSymlinks(v.Source)
+			if evalSource != evalWantSecondGlobalWorkspace {
+				t.Errorf("expected second global agent volume source %q, got %q", evalWantSecondGlobalWorkspace, evalSource)
+			}
+			if evalSource == evalWantGlobalWorkspace {
+				t.Error("expected second global agent to get its own workspace directory, got the first agent's")
+			}
+		}
+	}
+	if !found {
+		t.Error("expected /workspace volume mount not found in second global agent config")
+	}
+}
+
+// TestProvisionAgentNonGitDirectoryNamedGlobal covers an ordinary, non-git
+// project whose own directory happens to be named "global" -- not the real
+// global project, which lives at the resolved global directory regardless
+// of name. It must be provisioned the same way any other non-git project
+// is: a plain workspace mount at the project's own directory, not the
+// global project's dedicated, agent-namespaced workspace subdirectory.
+func TestProvisionAgentNonGitDirectoryNamedGlobal(t *testing.T) {
+	mockRuntimeForTest(t)
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	// HOME is a separate directory from the project below, so the real
+	// global directory (HOME/.scion) and this project's own directory are
+	// unambiguously different paths.
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	home := filepath.Join(tmpDir, "home")
+	_ = os.Setenv("HOME", home)
+
+	if err := config.InitMachine(getTestHarnesses()); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+
+	projectDir := filepath.Join(tmpDir, "global")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := config.InitProject(projectScionDir, getTestHarnesses()); err != nil {
+		t.Fatalf("InitProject failed: %v", err)
+	}
+
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	evalProjectDir, _ := filepath.EvalSymlinks(projectDir)
+
+	// The shape ProvisionAgent must NOT produce for this project: a
+	// dedicated, agent-namespaced workspace subdirectory, the shape
+	// reserved for the real global project alone. InitProject writes a
+	// project-id marker for a non-git project, so ProvisionAgent resolves
+	// projectScionDir to its externalized directory before anything else
+	// runs -- the wrong root must be computed from that same resolved
+	// directory, not the nominal projectScionDir, or a misclassification
+	// that produces the wrong root at the externalized path would pass this
+	// check by never matching it in the first place.
+	resolvedProjectDir, _, err := config.ResolveProjectPath(projectScionDir)
+	if err != nil {
+		t.Fatalf("ResolveProjectPath failed: %v", err)
+	}
+	wrongWorkspaceRoot := filepath.Join(resolvedProjectDir, "workspace")
+
+	_, ws, cfg, err := ProvisionAgent(context.Background(), "test-agent", "default", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+
+	if ws != "" {
+		t.Errorf("expected empty workspace path for a non-git project, got %q", ws)
+	}
+
+	if info, statErr := os.Stat(wrongWorkspaceRoot); statErr == nil && info.IsDir() {
+		t.Errorf("expected no agent-namespaced workspace directory to be created at %q", wrongWorkspaceRoot)
+	}
+
+	found := false
+	for _, v := range cfg.Volumes {
+		if v.Target == "/workspace" {
+			found = true
+			evalSource, _ := filepath.EvalSymlinks(v.Source)
+			if evalSource != evalProjectDir {
+				t.Errorf("expected volume source %q (the project's own directory), got %q", evalProjectDir, evalSource)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected /workspace volume mount not found in config")
 	}
 }
 

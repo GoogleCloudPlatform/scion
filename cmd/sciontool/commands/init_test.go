@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
 // hubEnvVars lists the environment variables used by the Hub client.
@@ -1130,6 +1131,309 @@ func TestEnsureWorkspaceOwnership_ChownsWhenRoot(t *testing.T) {
 
 	if gotPath != "/workspace" || gotUID != 1000 || gotGID != 1000 {
 		t.Fatalf("unexpected chown call: path=%q uid=%d gid=%d", gotPath, gotUID, gotGID)
+	}
+}
+
+// --- chownTreeRootOwned input validation ---
+//
+// The full table of rejected critical-system-path names, the device-boundary
+// walk behavior, and the mountinfo-based bind-source check are all tested
+// directly against pkg/util/fsutil (TestCheckRoot_*, TestChownTree_*,
+// TestCheckMountSourceReader_*), which is what chownTreeRootOwned delegates
+// to. Tests here only cover this call site's own wiring, and never invoke
+// the recursive chown on anything other than a t.TempDir() tree.
+
+// TestChownTreeRootOwned_RejectsSymlinkToCriticalPath proves the guard
+// resolves symlinks before checking, so a workspace path that is itself a
+// symlink pointing at a critical system path cannot slip through. The
+// symlink lives under t.TempDir(); only its target names a critical path,
+// and resolution happens inside CheckRoot before any walk starts.
+func TestChownTreeRootOwned_RejectsSymlinkToCriticalPath(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "workspace-link")
+	if err := os.Symlink("/etc", link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	_, _, err := chownTreeRootOwned(link, os.Getuid(), os.Getgid(), true)
+	if !errors.Is(err, fsutil.ErrCriticalSystemPath) {
+		t.Fatalf("chownTreeRootOwned(%q) = %v, want ErrCriticalSystemPath (resolves to /etc)", link, err)
+	}
+}
+
+// TestChownTreeRootOwned_RejectsFilesystemRootLookalike covers a directory laid
+// out like a filesystem root in a temp dir: a workspace whose path carries no
+// critical-path name, but whose contents look like a filesystem root (an
+// etc/passwd, a usr/bin, and a proc marker). This must be refused, and
+// nothing under it may be touched.
+func TestChownTreeRootOwned_RejectsFilesystemRootLookalike(t *testing.T) {
+	dir := t.TempDir()
+	mustMkdirAllT(t, filepath.Join(dir, "etc"))
+	mustWriteFileT(t, filepath.Join(dir, "etc", "passwd"), "root:x:0:0:root:/root:/bin/sh\n")
+	mustMkdirAllT(t, filepath.Join(dir, "usr", "bin"))
+	mustMkdirAllT(t, filepath.Join(dir, "proc")) // stand-in for a procfs mount
+	mustMkdirAllT(t, filepath.Join(dir, "boot"))
+
+	passwdPath := filepath.Join(dir, "etc", "passwd")
+	before, err := os.Lstat(passwdPath)
+	if err != nil {
+		t.Fatalf("lstat before: %v", err)
+	}
+	beforeStat := before.Sys().(*syscall.Stat_t)
+
+	_, _, err = chownTreeRootOwned(dir, os.Getuid()+1, os.Getgid()+1, true)
+	if !errors.Is(err, fsutil.ErrFilesystemRootLookalike) {
+		t.Fatalf("chownTreeRootOwned(%q) = %v, want ErrFilesystemRootLookalike", dir, err)
+	}
+
+	after, err := os.Lstat(passwdPath)
+	if err != nil {
+		t.Fatalf("lstat after: %v", err)
+	}
+	afterStat := after.Sys().(*syscall.Stat_t)
+	if afterStat.Uid != beforeStat.Uid || afterStat.Gid != beforeStat.Gid {
+		t.Errorf("ownership changed despite refusal: before uid=%d gid=%d, after uid=%d gid=%d",
+			beforeStat.Uid, beforeStat.Gid, afterStat.Uid, afterStat.Gid)
+	}
+}
+
+// TestChownTreeRootOwned_ToleratesSingleRealMarker proves the heuristic
+// requires more than one marker, so an ordinary workspace that happens to
+// contain exactly one of fsutil's root-lookalike markers (here, a top-level
+// "boot/" directory) is not falsely rejected. The full per-marker table and
+// the exactly-at-threshold boundary are covered once, directly, in
+// pkg/util/fsutil; this is a thin wiring check that chownTreeRootOwned
+// doesn't somehow apply a different threshold at this call site.
+func TestChownTreeRootOwned_ToleratesSingleRealMarker(t *testing.T) {
+	dir := t.TempDir()
+	mustMkdirAllT(t, filepath.Join(dir, "boot"))
+
+	if _, _, err := chownTreeRootOwned(dir, os.Getuid(), os.Getgid(), true); err != nil {
+		t.Fatalf("chownTreeRootOwned(%q) = %v, want nil (exactly one real marker: boot)", dir, err)
+	}
+}
+
+// TestChownTreeRootOwned_AllowsOrdinaryWorkspace proves the guard is not
+// overbroad: a normal workspace directory must still be walked successfully.
+func TestChownTreeRootOwned_AllowsOrdinaryWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	mustMkdirAllT(t, filepath.Join(dir, "src"))
+	mustWriteFileT(t, filepath.Join(dir, "README.md"), "hello\n")
+
+	if _, _, err := chownTreeRootOwned(dir, os.Getuid(), os.Getgid(), true); err != nil {
+		t.Fatalf("chownTreeRootOwned(%q) = %v, want nil", dir, err)
+	}
+}
+
+// TestChownTreeRootOwned_MissingRootIsNoOp is a regression test: a missing
+// fix-up target (e.g. an image that never creates /workspace) must be
+// treated as nothing to fix up, not an error to log. This call site is the
+// one exception to fsutil.ChownTree's normal missing-root-is-an-error
+// policy -- see chownTreeRootOwned's doc comment for why.
+func TestChownTreeRootOwned_MissingRootIsNoOp(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "does-not-exist")
+
+	if _, _, err := chownTreeRootOwned(missing, os.Getuid(), os.Getgid(), true); err != nil {
+		t.Fatalf("chownTreeRootOwned(%q) = %v, want nil for a missing root", missing, err)
+	}
+}
+
+// mustMkdirDeepChainT creates a chain of exactly depth nested directories
+// directly under root (root's own direct child -- the chain's firstName
+// level -- is depth 1 in dirfd.ChownTreeNoFollow's own counting), named
+// firstName, then "d" for every level in between, then finalName for the
+// depth-th and last level, and returns the full path to that final
+// directory. firstName keeps two chains built under the same root from
+// colliding from their very first level, since every "d" level after that
+// is otherwise identically named.
+//
+// This is used to deterministically drive dirfd.ChownTreeNoFollow's own
+// max-recursion-depth guard without needing root privilege or any
+// permission-bit trick: see
+// TestChownTreeRootOwned_PropagatesRealEnumerationFailures's doc comment for
+// why a permission-denied subdirectory no longer reaches that guard at all
+// under the current fd-based walk.
+func mustMkdirDeepChainT(t *testing.T, root string, depth int, firstName, finalName string) string {
+	t.Helper()
+	segments := make([]string, 0, depth)
+	segments = append(segments, firstName)
+	for i := 2; i < depth; i++ {
+		segments = append(segments, "d")
+	}
+	segments = append(segments, finalName)
+	path := filepath.Join(append([]string{root}, segments...)...)
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatalf("mkdir deep chain under %s: %v", root, err)
+	}
+	return path
+}
+
+// TestChownTreeRootOwned_PropagatesRealEnumerationFailures proves that only
+// a root which does not exist at all is a no-op: a real, reproducible
+// failure encountered while walking an *existing* root must still be
+// reported, not merely logged and discarded.
+//
+// This used to use a mode-0 subdirectory to trigger an EACCES enumeration
+// failure, back when chownTreeRootOwned walked with filepath.WalkDir. The
+// dirfd-based walk it uses now resolves every entry through
+// openat(O_PATH|O_NOFOLLOW) once the openat(O_DIRECTORY|O_NOFOLLOW) attempt
+// fails, and O_PATH does not check the target's own permission bits at all
+// (verified against a real mode-0 directory: the openat succeeds, and so
+// does fstat and even a self-chown through the resulting descriptor) -- so a
+// permission-denied subdirectory is no longer an error case for this walk at
+// all, just an ordinary leaf it correctly declines to recurse into. The
+// walk's own max-recursion-depth guard (dirfd.ChownTreeNoFollow's
+// maxWalkDepth, 1024) is the one failure mode this walk still reports for an
+// ordinary, unprivileged, reproducible condition, so this test drives that
+// instead.
+func TestChownTreeRootOwned_PropagatesRealEnumerationFailures(t *testing.T) {
+	dir := t.TempDir()
+	deepest := mustMkdirDeepChainT(t, dir, 1024, "chain", "too-deep")
+
+	if _, _, err := chownTreeRootOwned(dir, os.Getuid(), os.Getgid(), true); err == nil {
+		t.Fatalf("chownTreeRootOwned(%q) = nil, want an error: %q is 1024 levels deep", dir, deepest)
+	}
+}
+
+// TestChownTreeRootOwned_SkipsEntriesNotOwnedByRoot proves the hardcoded
+// ownerUID=0 argument to fsutil.ChownTreeOwnedByUID is actually wired: none
+// of the files this test creates are owned by UID 0, and the target uid/gid
+// differ from their current owner, so a dropped or broken filter would
+// either change their ownership (as root) or fail outright (unprivileged,
+// EPERM) -- either way, the assertions below would catch it.
+func TestChownTreeRootOwned_SkipsEntriesNotOwnedByRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("every file is root-owned as root, so this can't distinguish a working filter from a dropped one")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file.txt")
+	mustWriteFileT(t, path, "hi\n")
+
+	before, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("lstat before: %v", err)
+	}
+	beforeStat := before.Sys().(*syscall.Stat_t)
+
+	if _, _, err := chownTreeRootOwned(dir, os.Getuid()+1, os.Getgid()+1, true); err != nil {
+		t.Fatalf("chownTreeRootOwned(%q) = %v, want nil: the uid-0 filter should skip every entry", dir, err)
+	}
+
+	after, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("lstat after: %v", err)
+	}
+	afterStat := after.Sys().(*syscall.Stat_t)
+	if afterStat.Uid != beforeStat.Uid || afterStat.Gid != beforeStat.Gid {
+		t.Errorf("ownership changed despite the uid-0 filter: before uid=%d gid=%d, after uid=%d gid=%d",
+			beforeStat.Uid, beforeStat.Gid, afterStat.Uid, afterStat.Gid)
+	}
+}
+
+// TestChownTreeRootOwned_ChecksMountSource proves chownTreeRootOwned
+// actually calls checkMountSource and respects its refusal, without needing
+// a real mount: it stubs the package variable to simulate a critical bind
+// source and confirms both that the error propagates and that nothing under
+// root was touched (the check runs before the walk).
+func TestChownTreeRootOwned_ChecksMountSource(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file.txt")
+	mustWriteFileT(t, path, "hi\n")
+	before, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("lstat before: %v", err)
+	}
+	beforeStat := before.Sys().(*syscall.Stat_t)
+
+	orig := checkMountSource
+	checkMountSource = func(root string) error { return fsutil.ErrCriticalMountSource }
+	defer func() { checkMountSource = orig }()
+
+	_, _, err = chownTreeRootOwned(dir, os.Getuid()+1, os.Getgid()+1, true)
+	if !errors.Is(err, fsutil.ErrCriticalMountSource) {
+		t.Fatalf("chownTreeRootOwned(%q) = %v, want it to propagate the stubbed ErrCriticalMountSource", dir, err)
+	}
+
+	after, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("lstat after: %v", err)
+	}
+	afterStat := after.Sys().(*syscall.Stat_t)
+	if afterStat.Uid != beforeStat.Uid || afterStat.Gid != beforeStat.Gid {
+		t.Errorf("ownership changed despite the stubbed mount-source refusal: before uid=%d gid=%d, after uid=%d gid=%d",
+			beforeStat.Uid, beforeStat.Gid, afterStat.Uid, afterStat.Gid)
+	}
+}
+
+// TestChownTreeRootOwned_InvalidRootNeverReachesMountSource proves the
+// ordering chownTreeRootOwned's own comment describes: fsutil.CheckRoot runs
+// before checkMountSource, so a root CheckRoot already refuses is never
+// looked up in the mount table at all. Stubbing checkMountSource to return
+// nil (the "I was never called, nothing to object to" answer) and then
+// asserting the call still never happened is what actually locks in the
+// ordering: asserting only the returned error's type would pass just as
+// well if the two checks ran in the other order and checkMountSource's own
+// (different) refusal reached the caller instead.
+func TestChownTreeRootOwned_InvalidRootNeverReachesMountSource(t *testing.T) {
+	var mountSourceCalls int
+	orig := checkMountSource
+	checkMountSource = func(root string) error {
+		mountSourceCalls++
+		return nil
+	}
+	defer func() { checkMountSource = orig }()
+
+	const criticalRoot = "/etc"
+	_, _, err := chownTreeRootOwned(criticalRoot, os.Getuid()+1, os.Getgid()+1, true)
+	if !errors.Is(err, fsutil.ErrCriticalSystemPath) {
+		t.Fatalf("chownTreeRootOwned(%q) = %v, want fsutil.ErrCriticalSystemPath from CheckRoot", criticalRoot, err)
+	}
+	if mountSourceCalls != 0 {
+		t.Errorf("expected checkMountSource to never run for a root CheckRoot already refuses, got %d call(s)", mountSourceCalls)
+	}
+}
+
+// TestChownTreeRootOwned_AggregatesMultiplePerEntryFailures proves a second,
+// independent per-entry failure is not lost behind the first: two
+// independent depth-cap cutoffs under the same root must both be reported
+// (joined, each attributed to its own entry), not just whichever one
+// dirfd.ChownTreeNoFollow's walk happens to visit first.
+// dirfd.ChownTreeNoFollow's own returned error can only ever report root's
+// own open/stat failure, never a per-entry one (see its doc comment), so
+// chownTreeRootOwned collects every per-entry failure passed to onErr
+// itself, wraps each with the entry's own name (onErr's own error carries no
+// name or path -- see chownTreeRootOwned's onErr closure), and joins them --
+// this is what that join and that wrapping actually prove, beyond the
+// single-failure case TestChownTreeRootOwned_PropagatesRealEnumerationFailures
+// already covers. See that test's doc comment for why two merely
+// unreadable subdirectories (this test's original construction) no longer
+// reach any per-entry failure at all under the current fd-based walk, and
+// why the max-recursion-depth guard is used here instead.
+func TestChownTreeRootOwned_AggregatesMultiplePerEntryFailures(t *testing.T) {
+	dir := t.TempDir()
+	mustMkdirDeepChainT(t, dir, 1024, "chain-a", "too-deep-a")
+	mustMkdirDeepChainT(t, dir, 1024, "chain-b", "too-deep-b")
+
+	_, _, err := chownTreeRootOwned(dir, os.Getuid(), os.Getgid(), true)
+	if err == nil {
+		t.Fatalf("chownTreeRootOwned(%q) = nil, want a non-nil error: both chain-a and chain-b are 1024 levels deep", dir)
+	}
+	if !strings.Contains(err.Error(), "too-deep-a") || !strings.Contains(err.Error(), "too-deep-b") {
+		t.Errorf("chownTreeRootOwned(%q) error = %v, want it to mention both depth-cap cutoffs", dir, err)
+	}
+}
+
+func mustMkdirAllT(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+}
+
+func mustWriteFileT(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }
 

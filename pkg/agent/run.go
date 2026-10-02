@@ -1068,6 +1068,61 @@ authDone:
 		effectiveWorkspace = extractWorkspaceFromVolumes(finalScionCfg.Volumes)
 	}
 
+	// On resume/restart opts.Workspace is empty, so re-derive the explicit intent
+	// from the persisted config to keep the explicit workspace plain-mounted.
+	explicitWorkspace := opts.Workspace != "" || (finalScionCfg != nil && finalScionCfg.ExplicitWorkspace)
+	repoRoot := detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
+
+	// Reject a workspace source that is not an allowed workspace path before
+	// anything derived from it is used to set up a mount. This also catches
+	// a value that was resolved and persisted by an older version of the
+	// resolution logic above — it runs on every start, not just the ones
+	// that just computed effectiveWorkspace fresh. Everything between here
+	// and the workspace-storage-backend block below (if any) uses the
+	// resolved, symlink-free path the validator returns, not the original
+	// value, narrowing the window between "the path we checked" and "the
+	// path we mount" to components that change after this call returns (see
+	// ValidateWorkspaceSource's doc comment for what that does and does not
+	// cover). A workspace-storage backend's own Realize call, below, can
+	// still replace effectiveWorkspace with its own mount.HostPath
+	// afterward -- a value this validator never sees, computed by that
+	// backend's own resolver rather than read back from persisted or
+	// request-supplied state.
+	roots, rootsErr := workspaceSourceRoots(explicitWorkspace, effectiveWorkspace, settings, projectDir)
+	if rootsErr != nil {
+		return nil, rootsErr
+	}
+	resolvedWorkspace, err := runtime.ValidateWorkspaceSource(effectiveWorkspace, roots...)
+	if err != nil {
+		// A global agent provisioned before <projectDir>/workspace existed
+		// (or one whose persisted workspace was otherwise never brought
+		// under it) is intentionally refused here on resume, now that the
+		// global project's root is <projectDir>/workspace itself. The same
+		// applies to a hub-dispatched, non-git project-configs project
+		// whose persisted workspace is its own bare externalized directory
+		// rather than a per-agent subdirectory under it (isAllowedProjectConfigsSubtree
+		// never admits the bare directory itself). Name the two ways to
+		// recover, since neither is obvious from the base error.
+		if !explicitWorkspace && (config.IsGlobalProjectDir(projectDir) || isProjectConfigsPath(projectDir)) {
+			return nil, fmt.Errorf("%w (delete and recreate this agent, or restart it with an explicit --workspace, to use a workspace under the project's own directory)", err)
+		}
+		return nil, err
+	}
+	effectiveWorkspace = resolvedWorkspace
+
+	// Resolve repoRoot through any symlinks so the mount layout below
+	// (ResolveContainerWorkspace and RunConfig.RepoRoot) is computed from the
+	// same real, symlink-free spelling as effectiveWorkspace — otherwise a
+	// symlinked repo path changes the container-side layout depending on
+	// which of the two happens to still contain the symlink.
+	if repoRoot != "" {
+		resolvedRepoRoot, err := filepath.EvalSymlinks(repoRoot)
+		if err != nil {
+			return nil, fmt.Errorf("resolve repo root %s: %w", repoRoot, err)
+		}
+		repoRoot = resolvedRepoRoot
+	}
+
 	// Validate that the workspace directory exists before attempting to mount it.
 	// This is a safety net — GetAgent should have created/recreated it, but if
 	// the directory is still missing we fail early with a clear error rather than
@@ -1077,11 +1132,6 @@ authDone:
 			return nil, fmt.Errorf("workspace directory does not exist: %s (try deleting and recreating the agent)", effectiveWorkspace)
 		}
 	}
-
-	// On resume/restart opts.Workspace is empty, so re-derive the explicit intent
-	// from the persisted config to keep the explicit workspace plain-mounted.
-	explicitWorkspace := opts.Workspace != "" || (finalScionCfg != nil && finalScionCfg.ExplicitWorkspace)
-	repoRoot := detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
 
 	// Telemetry defaults to enabled when not explicitly set to false.
 	telemetryEnabled := finalScionCfg != nil && finalScionCfg.Telemetry != nil &&
@@ -1308,11 +1358,23 @@ authDone:
 		Volumes: func() []api.VolumeMount {
 			var volumes []api.VolumeMount
 			if finalScionCfg != nil {
-				// If we extracted effectiveWorkspace from a /workspace volume mount,
-				// filter it out to avoid a duplicate mount (the buildCommonRunArgs
-				// will handle the workspace mount properly with worktree support).
-				if effectiveWorkspace != "" && effectiveWorkspace != agentWorkspace {
+				// Whenever there is an effective workspace at all, buildCommonRunArgs's
+				// own workspace-mount logic already handles it -- at /workspace in most
+				// cases, but at /repo-root/<rel> for the worktree-subdirectory case,
+				// which leaves the /workspace target slot free for a raw volume to
+				// claim. Filter any /workspace-target volume out of the generic list in
+				// every such case, rather than comparing effectiveWorkspace against
+				// agentWorkspace by value: effectiveWorkspace is the resolved,
+				// symlink-free path (see the validation call above), so that comparison
+				// would silently start filtering (or stop filtering) purely because
+				// agentWorkspace is not canonical, with no actual change in what is
+				// being mounted.
+				if effectiveWorkspace != "" {
+					before := len(finalScionCfg.Volumes)
 					volumes = filterWorkspaceVolume(finalScionCfg.Volumes)
+					if len(volumes) < before {
+						warnings = append(warnings, "ignoring volume targeting /workspace: the agent workspace is mounted by the runtime")
+					}
 				} else {
 					volumes = finalScionCfg.Volumes
 				}
@@ -1519,6 +1581,149 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string) string
 		return root
 	}
 	return ""
+}
+
+// workspaceSourceRoots returns the per-project root(s) a resolved workspace
+// source may fall under (any one of them is sufficient), for the fail-closed
+// check that runs before any mount is set up. It mirrors the same resolution
+// the non-git, no-explicit-workspace branches in provision.go's
+// workspaceSource logic already went through, so a legitimately resolved
+// source is never rejected by the containment check:
+//   - explicit workspace: no root (the containment check is skipped; an
+//     explicit --workspace may point anywhere, unchanged from today);
+//   - git project: this project's OWN repo root, derived from projectDir —
+//     never from effectiveWorkspace itself. (A source that happens to be
+//     some other git checkout entirely would otherwise trivially "verify"
+//     against its own repo; the root this function returns must always come
+//     from the project the agent belongs to, not from whatever the source
+//     claims to be.) Plus, when effectiveWorkspace is itself a worktree git
+//     has registered for THIS project's repo, verified via `git worktree
+//     list` against that repo rather than guessed from its path (see
+//     util.IsRegisteredWorktree) and cross-checked against the project's own
+//     common git dir — that worktree's own location. `git worktree add`
+//     accepts any destination, so a worktree the project attached to via an
+//     existing branch (provision.go's FindWorktreeByBranch) can legitimately
+//     sit anywhere on disk; git's own worktree registry, scoped to this
+//     project's repo, is the containment proof for that case, not a path
+//     prefix. Worktree-membership verification failure (git unavailable, for
+//     example) is not treated as membership — the source falls back to
+//     plain repo-root containment, same as if it had never been checked. If
+//     the project's own repo root cannot be resolved to a repository that
+//     actually is projectDir's own — either because resolution fails
+//     outright, or because it silently resolves to a different repository
+//     entirely — the whole call refuses instead of silently returning no
+//     roots, which the caller would otherwise treat as "no root available,
+//     check the rootless floor only" and accept far more than intended. A
+//     bare repository passes util.IsGitRepoDir (which checks only the exit
+//     status, not git's "false" output) but has no top level to resolve.
+//     Standalone, util.RepoRootDir then fails outright and the call refuses
+//     on that error alone. Nested inside another repository's work tree,
+//     util.RepoRootDir's parent-directory retry on failure returns the
+//     ENCLOSING repository's top level instead of erroring — a real,
+//     successfully-resolved root that just isn't projectDir's own — and
+//     workspaceSharesProjectRepo's common-git-dir comparison is what refuses
+//     that case, since a nested bare repo's common git dir never matches the
+//     enclosing repository's. The global project takes this branch too when
+//     its own directory (~/.scion) is itself a git work tree (a dotfiles
+//     repository, for example); that shape returns its own dedicated,
+//     actionable error instead of a root, since ProvisionAgent's resulting
+//     ~/.scion/agents/<name>/workspace can never pass the ~/.scion floor in
+//     runtime.ValidateWorkspaceSource, and deleting and recreating the agent
+//     cannot change that classification;
+//   - global project, no explicit workspace: <projectDir>/workspace, the
+//     directory ProvisionAgent's global-project branch creates. A global
+//     agent provisioned before that directory existed, whose persisted
+//     workspace is some other directory entirely, is intentionally refused
+//     on resume — see the caller's actionable-error wrapping;
+//   - externalized/non-git project: resolveProjectRoot's settings.WorkspacePath
+//     or parent-of-.scion fallback, which contain the resolved source in
+//     those branches (settings.WorkspacePath is typically equal to it; the
+//     parent-of-.scion fallback can also be a genuine ancestor of it).
+//
+// Whether projectDir counts as a git project here is decided by
+// isGitWorkspaceProject, the same helper ProvisionAgent uses to decide how
+// the workspace source was first resolved — so a workspace provisioned
+// through the non-git branch (SCION_HOST_UID set at provision time) is
+// checked against that same non-git root here, on every start including
+// resume, rather than being re-classified as git and checked against a
+// repo root it was never provisioned relative to.
+func workspaceSourceRoots(explicitWorkspace bool, effectiveWorkspace string, settings *config.VersionedSettings, projectDir string) ([]string, error) {
+	if explicitWorkspace {
+		return nil, nil
+	}
+	if isGitWorkspaceProject(projectDir) {
+		if config.IsGlobalProjectDir(projectDir) {
+			// The global project's own directory (~/.scion) is, unusually,
+			// itself a git work tree (a dotfiles repository, for example).
+			// isGitWorkspaceProject then routes it through this git branch
+			// instead of the "global, no explicit workspace" branch below,
+			// so ProvisionAgent creates a per-agent worktree/workspace at
+			// ~/.scion/agents/<name>/workspace, the ordinary git-project
+			// shape -- not <projectDir>/workspace. That shape can never
+			// validate here: the ~/.scion floor (runtime.ValidateWorkspaceSource)
+			// only admits ~/.scion/workspace, ~/.scion/projects/<slug>, and
+			// ~/.scion/project-configs/<dir>/.scion/agents/<agent-id>/workspace,
+			// none of which this is, and root == ~/.scion itself is refused
+			// outright as a misconfigured root. Unlike every other
+			// rejection this function can produce, deleting and recreating
+			// the agent cannot help -- the same classification would
+			// recur -- so this returns its own actionable error instead of
+			// falling through to the generic one, and the global-agent hint
+			// wrapping at this function's Start() caller is never reached
+			// for it (rootsErr returns immediately, before that wrapping
+			// runs).
+			return nil, fmt.Errorf("the global project directory %q is itself inside a git work tree; restart with an explicit --workspace", projectDir)
+		}
+		projectRepoRoot, err := util.RepoRootDir(projectDir)
+		if err != nil || projectRepoRoot == "" || !workspaceSharesProjectRepo(projectDir, projectRepoRoot) {
+			// util.RepoRootDir retries from the parent directory on
+			// failure, so a bare repository nested inside another
+			// repository's work tree does not error here: the walk-up
+			// moves past the bare repo entirely and returns the ENCLOSING
+			// repository's top level instead, which is not projectDir's
+			// own repository at all. workspaceSharesProjectRepo's
+			// common-git-dir comparison catches that case even when
+			// RepoRootDir itself reports success.
+			return nil, fmt.Errorf("project directory %q does not resolve to its own git work tree (a bare repository, for example); workspace source cannot be validated: restart with an explicit --workspace, or use a project inside a non-bare git work tree", projectDir)
+		}
+		roots := []string{projectRepoRoot}
+		if effectiveWorkspace != "" {
+			if ok, err := util.IsRegisteredWorktree(projectRepoRoot, effectiveWorkspace); err == nil && ok {
+				if workspaceSharesProjectRepo(projectDir, effectiveWorkspace) {
+					roots = append(roots, effectiveWorkspace)
+				}
+			}
+		}
+		return roots, nil
+	}
+	if config.IsGlobalProjectDir(projectDir) {
+		return []string{filepath.Join(projectDir, "workspace")}, nil
+	}
+	return []string{resolveProjectRoot(settings, projectDir)}, nil
+}
+
+// workspaceSharesProjectRepo reports whether workspace's own common git
+// directory matches projectDir's — an extra structural check alongside
+// util.IsRegisteredWorktree, so worktree membership is confirmed two ways
+// before it is trusted as a containment root.
+func workspaceSharesProjectRepo(projectDir, workspace string) bool {
+	projectCommonDir, err := util.GetCommonGitDir(projectDir)
+	if err != nil {
+		return false
+	}
+	workspaceCommonDir, err := util.GetCommonGitDir(workspace)
+	if err != nil {
+		return false
+	}
+	resolvedProjectCommonDir, err := filepath.EvalSymlinks(projectCommonDir)
+	if err != nil {
+		return false
+	}
+	resolvedWorkspaceCommonDir, err := filepath.EvalSymlinks(workspaceCommonDir)
+	if err != nil {
+		return false
+	}
+	return resolvedProjectCommonDir == resolvedWorkspaceCommonDir
 }
 
 // extractWorkspaceFromVolumes finds a volume mounted to /workspace and returns its source path.

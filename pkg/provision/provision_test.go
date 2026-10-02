@@ -31,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -785,6 +786,73 @@ func TestChownProjectTree_CtxCancellation_StopsTheWalk(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled, "a ctx cancellation must surface as the walk's own error")
 	assert.False(t, sawB.Load(), "no later entry may be visited once ctx is cancelled, unlike an ordinary per-entry failure")
+}
+
+// --- chownProjectTree input validation ---
+//
+// The full table of rejected critical-system-path names is tested directly
+// against pkg/util/fsutil (TestCheckRoot_*), which is what chownProjectTree
+// delegates to for this check. Tests here only cover this call site's own
+// wiring, and never invoke the recursive chown on anything other than a
+// t.TempDir() tree.
+
+// TestChownProjectTree_RefusesFilesystemRootLookalike proves the guard is actually
+// wired into chownProjectTree (not just defined and unused): given a
+// workspace root laid out like a filesystem root, no chown must be
+// attempted at all.
+func TestChownProjectTree_RefusesFilesystemRootLookalike(t *testing.T) {
+	dir := t.TempDir()
+	mustMkdirAll(t, filepath.Join(dir, "etc"))
+	mustWriteFile(t, filepath.Join(dir, "etc", "passwd"), "root:x:0:0:root:/root:/bin/sh\n")
+	mustMkdirAll(t, filepath.Join(dir, "usr", "bin"))
+	mustMkdirAll(t, filepath.Join(dir, "proc"))
+
+	before, err := os.Lstat(filepath.Join(dir, "etc", "passwd"))
+	if err != nil {
+		t.Fatalf("lstat before: %v", err)
+	}
+	beforeStat := before.Sys().(*syscall.Stat_t)
+
+	err = chownProjectTree(context.Background(), dir, dir, os.Getuid()+1, os.Getgid()+1)
+	if !errors.Is(err, fsutil.ErrFilesystemRootLookalike) {
+		t.Fatalf("chownProjectTree(%q) = %v, want it to wrap ErrFilesystemRootLookalike", dir, err)
+	}
+
+	after, err := os.Lstat(filepath.Join(dir, "etc", "passwd"))
+	if err != nil {
+		t.Fatalf("lstat after: %v", err)
+	}
+	afterStat := after.Sys().(*syscall.Stat_t)
+	if afterStat.Uid != beforeStat.Uid || afterStat.Gid != beforeStat.Gid {
+		t.Errorf("ownership changed despite refusal: before uid=%d gid=%d, after uid=%d gid=%d",
+			beforeStat.Uid, beforeStat.Gid, afterStat.Uid, afterStat.Gid)
+	}
+}
+
+// TestChownProjectTree_AllowsOrdinaryWorkspace is a smoke test on the public
+// entry point using a real, ordinary temp-dir tree.
+func TestChownProjectTree_AllowsOrdinaryWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	mustMkdirAll(t, filepath.Join(dir, "src"))
+	mustWriteFile(t, filepath.Join(dir, "README.md"), "hello\n")
+
+	if err := chownProjectTree(context.Background(), dir, dir, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("chownProjectTree(%q) = %v, want nil", dir, err)
+	}
+}
+
+func mustMkdirAll(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+}
+
+func mustWriteFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
 }
 
 // --- writeSentinel ---

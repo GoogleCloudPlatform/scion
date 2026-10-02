@@ -689,6 +689,112 @@ func TestCreateAgentRejectsMultiSegmentName(t *testing.T) {
 	}
 }
 
+// TestCreateAgentRejectsInvalidProjectSlugBeforeGCSBootstrap is the
+// regression test for the GCS-bootstrap workspace directory being built
+// from an unvalidated ProjectSlug: a slug of ".." joined onto
+// ~/.scion/projects resolves to ~/.scion itself, which must never be
+// created or synced into. Asserts the request is rejected and that nothing
+// is created under the global directory at all.
+func TestCreateAgentRejectsInvalidProjectSlugBeforeGCSBootstrap(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := newTestServer(t)
+
+	for _, slug := range []string{"..", ".", "a/../..", "/etc", `a\b`} {
+		t.Run(slug, func(t *testing.T) {
+			body, err := json.Marshal(CreateAgentRequest{
+				Name:                 "agent1",
+				ProjectSlug:          slug,
+				WorkspaceStoragePath: "workspaces/project-123/project-workspace",
+			})
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(string(body)))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("slug %q: expected status %d, got %d: %s", slug, http.StatusBadRequest, w.Code, w.Body.String())
+			}
+
+			globalDir, err := config.GetGlobalDir()
+			if err != nil {
+				t.Fatalf("GetGlobalDir: %v", err)
+			}
+			if _, statErr := os.Stat(filepath.Join(globalDir, "projects")); !os.IsNotExist(statErr) {
+				t.Errorf("slug %q: expected no projects directory to be created, stat returned: %v", slug, statErr)
+			}
+		})
+	}
+}
+
+// TestCreateAgentRejectsWorkspaceDirOutsideRootViaSymlink is a second,
+// independent regression test for the same GCS-bootstrap validation gate as
+// TestCreateAgentRejectsInvalidProjectSlugBeforeGCSBootstrap, but one that
+// the single-path-element check on ProjectSlug cannot catch: an ordinary,
+// single-component slug whose directory entry under ~/.scion/projects is
+// itself a symlink resolving outside workspaceRoot. Every example slug in
+// the sibling test above ("..", ".", "a/../..", "/etc", `a\b`) is already
+// refused by isSingleCleanPathElement before the handler ever reaches
+// runtime.ValidateWorkspaceSource, so neither test alone proves that second,
+// independent gate actually runs. This one reaches it with a slug that
+// passes the first check cleanly.
+func TestCreateAgentRejectsWorkspaceDirOutsideRootViaSymlink(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := newTestServer(t)
+
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		t.Fatalf("GetGlobalDir: %v", err)
+	}
+	projectsDir := filepath.Join(globalDir, "projects")
+	if err := os.MkdirAll(projectsDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(projectsDir): %v", err)
+	}
+
+	// outsideTarget is outside ~/.scion entirely, so a workspace dir that
+	// resolves into it must be refused regardless of the slug's own
+	// spelling.
+	outsideTarget := t.TempDir()
+	const slug = "outside-slug"
+	if err := os.Symlink(outsideTarget, filepath.Join(projectsDir, slug)); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	body, err := json.Marshal(CreateAgentRequest{
+		Name:                 "agent1",
+		ProjectSlug:          slug,
+		WorkspaceStoragePath: "workspaces/project-123/project-workspace",
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+
+	// The outside target must not have been written into: a 500 from a later
+	// stage (storage bucket not configured, GCS sync failure, and so on)
+	// would also leave it untouched, so status code alone does not prove
+	// the validation gate is what stopped this request before MkdirAll or
+	// SyncFromGCS ran.
+	entries, err := os.ReadDir(outsideTarget)
+	if err != nil {
+		t.Fatalf("ReadDir(outsideTarget): %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected outside target to remain empty, found: %v", entries)
+	}
+}
+
 // TestCreateAgentFullStart_HarnessConfigNotFound proves the fix for
 // ptone/scion#1316 fault 3: when Start fails because a configured
 // harness-config name does not resolve anywhere the broker looked, the
