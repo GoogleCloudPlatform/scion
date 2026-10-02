@@ -1341,6 +1341,60 @@ func TestSubstrateExec_NoCachedToken(t *testing.T) {
 	}
 }
 
+// TestSubstrateDelete_FallsBackToDeleteActorUIDWhenGetActorFails is the
+// regression test for the leaked-record bug: Delete's speculative GetActor
+// call (used to resolve the actor's UID so substrateAgentRecords can be
+// cleaned up) can fail for reasons that have nothing to do with whether the
+// actor itself is deletable — a transient RPC error, or a race with some
+// other caller's own lookup. Previously, a failed GetActor left uid empty
+// and skipped the substrateAgentRecords cleanup entirely, leaking that
+// record for the process's lifetime even though DeleteActor itself
+// succeeded. Delete must fall back to the UID DeleteActor's own response
+// names.
+func TestSubstrateDelete_FallsBackToDeleteActorUIDWhenGetActorFails(t *testing.T) {
+	rec := &callRecorder{}
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	id, err := rt.Run(context.Background(), testSubstrateRunConfig())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	substrateAgentStateMu.Lock()
+	_, hadRecord := substrateAgentRecords[fakeActorUID]
+	substrateAgentStateMu.Unlock()
+	if !hadRecord {
+		t.Fatalf("test setup: no record for uid %q after Run()", fakeActorUID)
+	}
+
+	fc.getActor = func(*ateapipb.GetActorRequest) (*ateapipb.Actor, error) {
+		return nil, status.Error(codes.Unavailable, "simulated transient GetActor failure")
+	}
+	fc.deleteActor = func(req *ateapipb.DeleteActorRequest) (*ateapipb.Actor, error) {
+		// A real ateapi DeleteActor response names the actor it just
+		// removed — this is what Delete must fall back to.
+		return &ateapipb.Actor{
+			Metadata: &ateapipb.ResourceMetadata{
+				Atespace: req.GetActor().GetAtespace(),
+				Name:     req.GetActor().GetName(),
+				Uid:      fakeActorUID,
+			},
+		}, nil
+	}
+
+	if err := rt.Delete(context.Background(), id); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+
+	substrateAgentStateMu.Lock()
+	_, stillPresent := substrateAgentRecords[fakeActorUID]
+	substrateAgentStateMu.Unlock()
+	if stillPresent {
+		t.Errorf("substrateAgentRecords[%q] still present after Delete() — leaked despite GetActor failing", fakeActorUID)
+	}
+}
+
 func TestSubstrateExec_Success(t *testing.T) {
 	rec := &callRecorder{}
 	rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)

@@ -588,11 +588,21 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("substrate: delete egress policy for %s: %w", id, err)
 	}
 
-	if _, err := r.client.DeleteActor(ctx, &ateapipb.DeleteActorRequest{
+	deletedActor, err := r.client.DeleteActor(ctx, &ateapipb.DeleteActorRequest{
 		Actor:    &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
 		AnyState: true,
-	}); err != nil && status.Code(err) != codes.NotFound {
+	})
+	if err != nil && status.Code(err) != codes.NotFound {
 		return fmt.Errorf("substrate: delete actor %s: %w", id, err)
+	}
+	if uid == "" {
+		// The speculative GetActor above failed (a transient error, or a
+		// race where some other caller's own GetActor/List landed first) —
+		// fall back to DeleteActor's own response, which names the actor
+		// it just removed. Without this, a failed GetActor alone would
+		// leave uid empty and skip the substrateAgentRecords cleanup below
+		// entirely, leaking that record for the lifetime of the process.
+		uid = deletedActor.GetMetadata().GetUid()
 	}
 
 	substrateAgentStateMu.Lock()
