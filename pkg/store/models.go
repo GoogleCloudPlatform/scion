@@ -287,6 +287,31 @@ type AgentAppliedConfig struct {
 	// into $HOME/.scion/hooks/pre-start.d/30-project-custom before container start.
 	ProjectPreStartHookScript string `json:"projectPreStartHookScript,omitempty"`
 
+	// ExplicitTimezone is the agent's pinned container timezone (an IANA
+	// name such as "Europe/Paris"). It is the first rung of the hub's agent
+	// TZ chain (see resolveAgentTZ in pkg/hub) and outranks hub env-var
+	// storage and agent_defaults.default_timezone. Empty means "not pinned".
+	// It is written only by explicit acts: the create pipeline (a TZ from
+	// the request config, the hub template or the hub harness config), the
+	// agent PATCH's top-level explicitTimezone field, legacy adoption of a
+	// TZ persisted in Env before this field existed, and the reincarnate
+	// carry-forward. TZ never lives in Env or InlineConfig.Env once this
+	// field is in use.
+	ExplicitTimezone string `json:"explicitTimezone,omitempty"`
+
+	// ExplicitTimezoneLegacy records that ExplicitTimezone was adopted from
+	// a TZ persisted in Env (or InlineConfig.Env) by an older hub, rather
+	// than set by an explicit act. It is provenance only: the resolver
+	// reports such a pin with the source "legacy". Any PATCH of
+	// explicitTimezone clears it.
+	ExplicitTimezoneLegacy bool `json:"explicitTimezoneLegacy,omitempty"`
+
+	// ExplicitTimezoneUnpinned records an explicit unpin (a PATCH with
+	// explicitTimezone ""). It stops the create pipeline from re-pinning a
+	// template or create-time TZ, including on reincarnate. A non-empty
+	// explicitTimezone write clears it.
+	ExplicitTimezoneUnpinned bool `json:"explicitTimezoneUnpinned,omitempty"`
+
 	// CreateInputs snapshots the explicit request-level inputs: the ones
 	// captured at create time, before any template/harness-config/hub-default
 	// derivation ran, PLUS any later PATCH /api/v1/agents/{id} edit that
