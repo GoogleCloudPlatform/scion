@@ -32,10 +32,16 @@
   resolver's source for `TZ`.
 - **PATCH response.** Every agent PATCH returns `resolvedTimezone`,
   `timezoneSource` and `warnings` (the `config.env` ignore warning, and the
-  next-start warning when a running agent's pin changes).
+  next-start warning, only when the pin changes under a live container:
+  cloning, starting or running).
 - **Broker warnings.** `api.AgentInfo.HubOnlyEnvWarnings` (the hub-only env
   `TZ` drop warnings) is copied to `runtimebroker.AgentResponse.Warnings`
-  (omitempty) and relayed in the hub create and start responses.
+  (omitempty). The hub relays these warnings, together with its own
+  TZ-targeted secret warning, in two places:
+  - the create response, including create's start, resume and recovery of
+    an existing agent;
+  - the lifecycle `start` and `restart` action responses: the agent plus an
+    omitempty `warnings` field.
 
 ## Removed (runtime-profile timezone)
 
@@ -54,8 +60,10 @@ short time.
 
 ## Known limitations
 
-- Restart discards the broker response, so broker `Warnings` are relayed on
-  create and start only.
+- `DispatchAgentRestart` discards the broker response. Its only caller is
+  the reconcile loop, which has no user response; the broker logs the drop.
+  The user-facing `restart` action is stop plus `DispatchAgentStart`, so it
+  relays the warnings.
 - Version skew: the unpin assertion (no `TZ` reaches the container when no
   rung applies) needs tz-refactor task 15 (ptone/scion#2508) on the broker.
   An older broker fills `TZ` itself.
@@ -65,8 +73,12 @@ short time.
 `agent_tz_dispatch_test.go` covers the chain on create, start and restart,
 the live hub default, legacy adoption, TZ secrets, persistence, labels, the
 old-broker no-launder case and the relayed warnings.
+`agent_tz_warnings_http_test.go` covers the warnings relayed in the
+lifecycle start and restart responses and on create of an existing stopped
+agent.
 `agent_tz_http_test.go` covers create capture (HTTP and scheduled spawn), the
-PATCH, reincarnate and the GET.
+template TZ (captured on create, unaffected by a later template edit, and
+replayed on reincarnate), the PATCH, reincarnate and the GET.
 Tests were updated in `applied_config_env_write_path_test.go`,
 `pkg/runtimebroker/types_test.go` and
 `pkg/agent/broker_hub_env_authority_test.go`.
