@@ -427,6 +427,51 @@ func TestChainEffectCeilingFold(t *testing.T) {
 		assert.Equal(t, 1, got.UnrecordedHops)
 	})
 
+	t.Run("unknown provenance version on a principal hop counts unrecorded", func(t *testing.T) {
+		f := newCeilingFixture(t, "fold-pv2")
+		a := f.agent(t, "fold-pv2", AgentRoleFull)
+		prov := provSession
+		prov.ProvenanceVersion = 2
+		f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, ceilPrincip, prov)
+		got, err := f.authz(f.store, false, false).chainEffectCeiling(ctx, a)
+		require.NoError(t, err)
+		assert.Equal(t, store.EffectCeilingUnrecorded, got.Ceiling.Kind, "never read as principal")
+		assert.Equal(t, 1, got.UnrecordedHops)
+		assert.Nil(t, deliverIDsAllowedByChain(got))
+	})
+
+	// A chain that mixes an unrecorded hop with a bounded hop is bounded by
+	// the bounded hop and reports the unrecorded hop. The step-10 walk
+	// denies recordedProvenanceRequired permissions on the unrecorded hop at
+	// use; delivery is withheld on the fold.
+	t.Run("unrecorded hop above a bounded hop folds to bounded", func(t *testing.T) {
+		f := newCeilingFixture(t, "fold-ub")
+		p := f.agent(t, "fold-ub-p", AgentRoleFull)
+		c := f.agent(t, "fold-ub-c", AgentRoleFull)
+		f.edge(t, store.DelegationPrincipalUser, f.userID, p.ID, store.EffectCeiling{}, store.AuthorityProvenance{})
+		f.edge(t, store.DelegationPrincipalAgent, p.ID, c.ID,
+			boundedCeiling("project.read", "gcp_service_account.assign", "agent.create", "secret.deliver"), provAgent)
+		got, err := f.authz(f.store, false, false).chainEffectCeiling(ctx, c)
+		require.NoError(t, err)
+		assert.Equal(t, store.EffectCeilingBounded, got.Ceiling.Kind)
+		assert.Equal(t, []string{"agent.create", "gcp_service_account.assign", "project.read", "secret.deliver"}, got.Ceiling.PermissionIDs)
+		assert.Equal(t, 1, got.UnrecordedHops)
+		assert.Nil(t, deliverIDsAllowedByChain(got), "a bounded delivery ID is withheld while a hop is unrecorded")
+	})
+
+	t.Run("unrecorded hop above a principal hop folds to unrecorded", func(t *testing.T) {
+		f := newCeilingFixture(t, "fold-up")
+		p := f.agent(t, "fold-up-p", AgentRoleFull)
+		c := f.agent(t, "fold-up-c", AgentRoleFull)
+		f.edge(t, store.DelegationPrincipalUser, f.userID, p.ID, store.EffectCeiling{}, store.AuthorityProvenance{})
+		f.edge(t, store.DelegationPrincipalAgent, p.ID, c.ID, ceilPrincip, provAgent)
+		got, err := f.authz(f.store, false, false).chainEffectCeiling(ctx, c)
+		require.NoError(t, err)
+		assert.Equal(t, store.EffectCeilingUnrecorded, got.Ceiling.Kind, "not principal")
+		assert.Equal(t, 1, got.UnrecordedHops)
+		assert.Nil(t, deliverIDsAllowedByChain(got))
+	})
+
 	t.Run("missing own edge before and after backfill", func(t *testing.T) {
 		f := newCeilingFixture(t, "fold-m")
 		a := f.agent(t, "fold-m", AgentRoleFull)
