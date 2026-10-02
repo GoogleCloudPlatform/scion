@@ -1455,6 +1455,41 @@ func TestProjectUAT_EnforceUATConstraintsBindingLookupErrorIsIndeterminate(t *te
 	assert.True(t, decision.IsIndeterminate())
 }
 
+// TestProjectUAT_EnforceUATConstraintsMissingUserIsPolicyDeny pins that a
+// UAT whose holder has no user record denies at the live project-access
+// gate as a policy deny, the same as an inactive user: GetUser returning
+// store.ErrNotFound is not a store fault, so the deny is not tagged
+// DenyCauseResolutionError and IsIndeterminate reports false.
+func TestProjectUAT_EnforceUATConstraintsMissingUserIsPolicyDeny(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := tid("uatp-missinguser-project")
+	ownerID := tid("uatp-missinguser-owner")
+	missingID := tid("uatp-missinguser-holder")
+	createRS1Project(t, s, projectID, ownerID)
+	agent := uatpAgent(t, s, projectID, ownerID, t.Name(), ownerID)
+
+	_, err := s.GetUser(context.Background(), missingID)
+	require.ErrorIs(t, err, store.ErrNotFound, "fixture: the holder must have no user record")
+
+	scoped := NewScopedUserIdentity(NewAuthenticatedUser(missingID, missingID+"@test.com", "Missing", "member", "api"), projectID, []string{"agent:attach"})
+	principal := principalContextForIdentity(scoped)
+
+	_, _, evidenceErr := srv.authzService.ProjectMembershipEvidence(context.Background(), principal, projectID)
+	require.ErrorIs(t, evidenceErr, ErrProjectAccessDenied)
+	assert.False(t, isProjectAccessLookupFault(evidenceErr), "a missing user must not be classified as a lookup fault")
+
+	decision := srv.authzService.enforceUATConstraints(context.Background(), principal, scoped, agentResource(agent), ActionAttach, "agent.attach")
+	require.NotNil(t, decision, "a missing holder must deny")
+	assert.False(t, decision.Allowed)
+	assert.Equal(t, "token holder lacks active access to the target project", decision.Reason)
+	assert.Empty(t, decision.DenyCause)
+	assert.False(t, decision.IsIndeterminate(), "a missing user is a policy deny, not an indeterminate result")
+
+	full := srv.authzService.CheckAccess(context.Background(), scoped, agentResource(agent), ActionAttach)
+	assert.False(t, full.Allowed)
+	assert.False(t, full.IsIndeterminate(), "end-to-end decision for a missing holder must not be indeterminate")
+}
+
 // TestProjectUAT_CreateTokenMapsCanMintSelectorErrorToForbidden pins the
 // fail-closed mapping at CreateToken's own call site: when CanMintSelector
 // itself returns an error (as opposed to a per-selector denial), CreateToken
