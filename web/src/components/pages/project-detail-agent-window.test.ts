@@ -1284,8 +1284,8 @@ describe('project-detail — agent list window', () => {
 
     it('a legacy-mode reload drops an agent already removed by an SSE delete', async () => {
       // Same race, through `loadLegacyAgentsImpl` instead of the sorted-mode
-      // load above: grid view (the default) is not P1-eligible, so every
-      // load here goes through the legacy path.
+      // load above: grid view (the default) is not sorted-mode eligible, so
+      // every load here goes through the legacy path.
       const projectId = 'p-legacy-tombstone';
       const agents = Array.from({ length: 3 }, (_, i) => makeAgent(i));
       const requests: AgentsRequest[] = [];
