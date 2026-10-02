@@ -391,11 +391,10 @@ func TestDeliveryGate_DeliveryKindReachesGrantEvaluation(t *testing.T) {
 	assertDeliveryGateDenied(t, f.authz.Decide(context.Background(), deliveryGateRequest(admin, adminKind, secret, "secret.deliver")), "interactive")
 }
 
-// The tests below state the ptone/scion#2228 part 2 contract. They are
-// skipped because the internal delivery credential kind, its unexported
-// constructor and BoundAgentID do not exist in this change. Part 2
-// un-skips them together with adding the kind to deliveryCredentialKinds
-// and a delivery=true row to deliveryGateKindCases.
+// The tests below state the ptone/scion#2228 part 2 contract. Those that
+// depend on parts of the contract outside this change are skipped, and are
+// un-skipped together with adding the delivery kind to
+// deliveryCredentialKinds and a delivery=true row to deliveryGateKindCases.
 
 // A role holding a deliver permission, presented with a valid delivery
 // credential, is denied without the association, progeny or skill-default
