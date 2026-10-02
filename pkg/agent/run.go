@@ -1349,9 +1349,9 @@ authDone:
 	// explicitly configured to something other than local. The repoRoot
 	// computed earlier was validated against the PRE-backend path, so if the
 	// backend actually changed it, re-resolve against the value RunConfig
-	// will use — a stale repoRoot from the old path is not just wrong, it is
-	// exactly the lexical mismatch that misroutes common.go into its
-	// full-root fallback mount.
+	// will use, through the same validatedWorktreeRepoRoot comparison used
+	// above and in the persistence gate — not a separate, inline comparison
+	// of this layout's own.
 	if effectiveWorkspace != preBackendWorkspace {
 		repoRoot = validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
 		if repoRoot == "" {
@@ -1804,30 +1804,41 @@ func workspaceSharesProjectRepo(projectDir, workspace string) bool {
 // validatedWorktreeRepoRoot returns candidateRoot unchanged if
 // provision.ValidateWorktreeForBase confirms it is a genuine worktree base
 // for effectiveWorkspace, or "" otherwise (including when either argument is
-// empty). This is the one, shared comparison every caller in this package
-// uses to decide what counts as a valid (root, workspace) pair — Start's own
-// RunConfig.RepoRoot resolution, the persistence gate, and the
-// workspace-storage-backend re-validation all call this function directly,
-// so the three always agree on the same pair.
+// empty or not an absolute path). This is the one, shared comparison every
+// caller in this package uses to decide what counts as a valid (root,
+// workspace) pair — Start's own RunConfig.RepoRoot resolution, the
+// persistence gate, and the workspace-storage-backend re-validation all call
+// this function directly, so the three always agree on the same pair.
 //
 // candidateRoot is compared fully resolved; effectiveWorkspace is compared
 // with its parent directory resolved and its own final path element left
-// exactly as given (see resolveParentDir). This combination tolerates an
-// ancestor directory of either value being reached through a different
-// spelling on different calls — one dispatch's stored state and another
-// dispatch's freshly recovered value do not always agree on which — while
-// still distinguishing two final path elements that are not themselves the
-// same name. The return value is candidateRoot exactly as given, never a
-// resolved form, independent of how the comparison itself was performed.
+// exactly as given (see resolveParentDir, which also cleans the value first
+// — a trailing separator otherwise changes what counts as its final
+// element). This combination tolerates an ancestor directory of either value
+// being reached through a different spelling on different calls — one
+// dispatch's stored state and another dispatch's freshly recovered value do
+// not always agree on which — while still distinguishing two final path
+// elements that are not themselves the same name. The return value is
+// candidateRoot exactly as given, never a resolved form, independent of how
+// the comparison itself was performed.
+//
+// Start passes RunConfig.RepoRoot and RunConfig.Workspace on to the runtime
+// layer already resolved (see the EvalSymlinks pass after this function's
+// first call, further down); pkg/runtime/common.go's own mount-layout
+// computation resolves both again from there, independently of this
+// function and of what form either value arrived in here.
 func validatedWorktreeRepoRoot(candidateRoot, effectiveWorkspace string) string {
 	if candidateRoot == "" || effectiveWorkspace == "" {
+		return ""
+	}
+	if !filepath.IsAbs(candidateRoot) || !filepath.IsAbs(effectiveWorkspace) {
 		return ""
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(candidateRoot)
 	if err != nil {
 		return ""
 	}
-	if err := provision.ValidateWorktreeForBase(resolvedRoot, resolveParentDir(effectiveWorkspace)); err != nil {
+	if err := provision.ValidateWorktreeForBase(resolvedRoot, resolveParentDir(filepath.Clean(effectiveWorkspace))); err != nil {
 		return ""
 	}
 	return candidateRoot

@@ -4214,9 +4214,16 @@ func repoRootMatrixWorkspace(t *testing.T, worktreesDir, shape string) string {
 //
 // Resume orderings: order A recovers the workspace in the same spelling the
 // root was persisted in; order B recovers the workspace fully resolved
-// regardless of root's persisted spelling. Only the two worktree-genuine
-// workspace shapes apply to resume (nothing is ever persisted for the
-// negative shape, so there is nothing to resume from).
+// regardless of root's persisted spelling; order C is the reverse of B — the
+// persisted root is fully resolved while the recovered workspace keeps its
+// own as-given spelling. A further resume case, for every root shape, covers
+// a value that validated and was persisted, but whose workspace path has
+// since come to name a different, independently genuine worktree by the
+// time of the resume dispatch: RepoRoot must be empty on that resume, not
+// the stale, no-longer-current persisted value. Only the two
+// worktree-genuine workspace shapes apply to the three orderings (nothing is
+// ever persisted for the negative shape, so there is nothing to resume
+// from).
 func TestRepoRootComparisonMatrix(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 
@@ -4240,6 +4247,8 @@ func TestRepoRootComparisonMatrix(t *testing.T) {
 		cases = append(cases,
 			matrixCase{name: rootShape + "/resume-order-A", rootShape: rootShape, workspace: "resumeA", workspaceKind: "as-given"},
 			matrixCase{name: rootShape + "/resume-order-B", rootShape: rootShape, workspace: "resumeB", workspaceKind: "resolved"},
+			matrixCase{name: rootShape + "/resume-leaf-replaced", rootShape: rootShape, workspace: "resumeLeafReplaced"},
+			matrixCase{name: rootShape + "/resume-order-C", rootShape: rootShape, workspace: "resumeC", workspaceKind: "as-given"},
 		)
 	}
 
@@ -4284,7 +4293,7 @@ func TestRepoRootComparisonMatrix(t *testing.T) {
 					wantPersisted = root
 				}
 
-			case "resumeA", "resumeB":
+			case "resumeA", "resumeB", "resumeC":
 				// A genuine worktree must exist to resume onto regardless of
 				// ordering; which spelling recovery uses is set directly
 				// below.
@@ -4294,9 +4303,45 @@ func TestRepoRootComparisonMatrix(t *testing.T) {
 					t.Fatalf("EvalSymlinks(workspace): %v", err)
 				}
 
-				// Materialize the agent directory, then set both persisted
+				// Materialize the agent directory, then set the persisted
 				// values directly, independent of whichever path a prior
 				// dispatch would have used to get them there.
+				if _, err := mgr.Start(context.Background(), api.StartOptions{
+					Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: asGivenWorkspace, Env: env,
+				}); err != nil {
+					t.Fatalf("initial Start failed: %v", err)
+				}
+				persistedRoot := root
+				if tc.workspace == "resumeC" {
+					persistedRoot = resolvedRoot
+				}
+				if err := writeProvisionedWorktreeRepoRoot(agentDir, persistedRoot); err != nil {
+					t.Fatalf("writeProvisionedWorktreeRepoRoot: %v", err)
+				}
+				if tc.workspace == "resumeB" {
+					setPersistedWorkspaceVolumeSource(t, agentDir, resolvedWorkspace)
+				}
+				// resumeA/resumeC need no workspace rewrite: the initial
+				// Start above already persisted the as-given spelling.
+
+				if _, err := mgr.Start(context.Background(), api.StartOptions{
+					Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Env: env,
+				}); err != nil {
+					t.Fatalf("resume Start failed: %v", err)
+				}
+				wantRepoRootEmpty = false
+				wantPersisted = persistedRoot
+
+			case "resumeLeafReplaced":
+				// A genuine worktree for this agent, and a second,
+				// independently genuine worktree to replace it with after a
+				// valid persist.
+				asGivenWorkspace := repoRootMatrixWorkspace(t, worktreesDir, "as-given")
+				other := filepath.Join(worktreesDir, "agent-b")
+				if err := util.CreateWorktree(other, "agent-b"); err != nil {
+					t.Fatalf("failed to create second worktree: %v", err)
+				}
+
 				if _, err := mgr.Start(context.Background(), api.StartOptions{
 					Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: asGivenWorkspace, Env: env,
 				}); err != nil {
@@ -4305,18 +4350,23 @@ func TestRepoRootComparisonMatrix(t *testing.T) {
 				if err := writeProvisionedWorktreeRepoRoot(agentDir, root); err != nil {
 					t.Fatalf("writeProvisionedWorktreeRepoRoot: %v", err)
 				}
-				if tc.workspace == "resumeB" {
-					setPersistedWorkspaceVolumeSource(t, agentDir, resolvedWorkspace)
+
+				// Only after a valid value is already persisted: this
+				// agent's own path now names a different worktree than the
+				// one it was persisted against.
+				if err := os.RemoveAll(asGivenWorkspace); err != nil {
+					t.Fatalf("remove original worktree: %v", err)
 				}
-				// resumeA needs no rewrite: the initial Start above already
-				// persisted the as-given spelling.
+				if err := os.Symlink(other, asGivenWorkspace); err != nil {
+					t.Fatal(err)
+				}
 
 				if _, err := mgr.Start(context.Background(), api.StartOptions{
 					Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Env: env,
 				}); err != nil {
 					t.Fatalf("resume Start failed: %v", err)
 				}
-				wantRepoRootEmpty = false
+				wantRepoRootEmpty = true
 				wantPersisted = root
 
 			default:
@@ -4500,6 +4550,99 @@ func TestValidatedWorktreeRepoRootAcceptsAliasedRootAgainstResolvedWorkspace(t *
 	got := validatedWorktreeRepoRoot(root, resolvedWorkspace)
 	if got != root {
 		t.Fatalf("validatedWorktreeRepoRoot(%q, %q) = %q, want %q", root, resolvedWorkspace, got, root)
+	}
+}
+
+// TestValidatedWorktreeRepoRootRejectsRelativeRoot covers a relative root
+// value whose own name is a symlink to an absolute target: resolving it
+// succeeds and produces an absolute result, so a check performed only after
+// resolution would never see that the original value was relative. The
+// comparison must still refuse it, and must never return anything other
+// than the empty string or the original candidateRoot — never a resolved
+// form derived from a value it refused.
+func TestValidatedWorktreeRepoRootRejectsRelativeRoot(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	root, worktreesDir := repoRootMatrixShape(t, "plain")
+	asGiven := filepath.Join(worktreesDir, "agent-a")
+	if err := util.CreateWorktree(asGiven, "agent-a"); err != nil {
+		t.Fatalf("failed to create worktree: %v", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(oldWd); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+	}()
+	cwd := t.TempDir()
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("os.Chdir: %v", err)
+	}
+	const relRoot = "relative-root-link"
+	if err := os.Symlink(root, relRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := validatedWorktreeRepoRoot(relRoot, asGiven); got != "" {
+		t.Fatalf("validatedWorktreeRepoRoot(%q, ...) = %q, want empty for a relative root", relRoot, got)
+	}
+}
+
+// TestValidatedWorktreeRepoRootRejectsRelativeWorkspace is the workspace-side
+// analogue of TestValidatedWorktreeRepoRootRejectsRelativeRoot: a relative
+// workspace value whose parent directory is a symlink to an absolute
+// target.
+func TestValidatedWorktreeRepoRootRejectsRelativeWorkspace(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	root, worktreesDir := repoRootMatrixShape(t, "plain")
+	asGiven := filepath.Join(worktreesDir, "agent-a")
+	if err := util.CreateWorktree(asGiven, "agent-a"); err != nil {
+		t.Fatalf("failed to create worktree: %v", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(oldWd); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+	}()
+	cwd := t.TempDir()
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("os.Chdir: %v", err)
+	}
+	const relWorktreesLink = "relative-worktrees-link"
+	if err := os.Symlink(worktreesDir, relWorktreesLink); err != nil {
+		t.Fatal(err)
+	}
+	relWorkspace := filepath.Join(relWorktreesLink, "agent-a")
+
+	if got := validatedWorktreeRepoRoot(root, relWorkspace); got != "" {
+		t.Fatalf("validatedWorktreeRepoRoot(..., %q) = %q, want empty for a relative workspace", relWorkspace, got)
+	}
+}
+
+// TestValidatedWorktreeRepoRootAcceptsTrailingSlashWorkspace covers a
+// workspace value with a trailing path separator: filepath.Dir on such a
+// value returns the value itself with the separator trimmed, not its true
+// parent, so the comparison must clean the value first.
+func TestValidatedWorktreeRepoRootAcceptsTrailingSlashWorkspace(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	root, worktreesDir := repoRootMatrixShape(t, "plain")
+	asGiven := filepath.Join(worktreesDir, "agent-a")
+	if err := util.CreateWorktree(asGiven, "agent-a"); err != nil {
+		t.Fatalf("failed to create worktree: %v", err)
+	}
+
+	withTrailingSlash := asGiven + string(filepath.Separator)
+	got := validatedWorktreeRepoRoot(root, withTrailingSlash)
+	if got != root {
+		t.Fatalf("validatedWorktreeRepoRoot(%q, %q) = %q, want %q", root, withTrailingSlash, got, root)
 	}
 }
 

@@ -62,14 +62,15 @@ func WorktreeIsLexicallyUnderBase(base, candidate string) bool {
 //
 // Two independent relationships must hold, both naming the same <name>:
 //
-//  1. Lexical (WorktreeIsLexicallyUnderBase): no symlink resolution. This is
-//     the same shape pkg/runtime/common.go's mount builder computes to
-//     choose between the worktree dual-mount branch and its full-root
-//     fallback, so a pair that only relates after resolving symlinks (e.g.
-//     one path reaching the shared checkout through an aliased directory)
-//     must still be rejected: accepting it here while common.go's own
-//     unresolved computation disagrees would validate one mount decision
-//     and produce a different one.
+//  1. Lexical (WorktreeIsLexicallyUnderBase): base and candidate are
+//     compared exactly as given to this function, with no symlink
+//     resolution of its own. This is the same shape pkg/runtime/common.go's
+//     mount builder computes to choose between the worktree dual-mount
+//     branch and its full-root fallback. A caller that needs its own pair
+//     to tolerate a different ancestor spelling on each side resolves that
+//     ahead of this call (see pkg/agent's validatedWorktreeRepoRoot for one
+//     such caller) — what this function itself receives is what this check
+//     compares.
 //  2. Resolved: the same relationship after EvalSymlinks on both sides, plus
 //     proof of an actual git-worktree relationship rather than a matching
 //     directory shape — candidate/.git is a regular gitfile whose "gitdir:"
