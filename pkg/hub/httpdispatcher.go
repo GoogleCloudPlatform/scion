@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
@@ -481,15 +482,13 @@ func (d *HTTPAgentDispatcher) getBrokerEndpoint(ctx context.Context, brokerID st
 	return broker.Endpoint, nil
 }
 
-// buildCreateRequest builds a RemoteCreateAgentRequest from the agent's store record.
-// This is shared between DispatchAgentCreate and DispatchAgentProvision.
 // resolveProvisionCredentials collects project-scope secrets for use by the
 // broker's provision-time credential resolution (skill resolution, URI
 // variable substitution, credential helpers). These are never forwarded to
 // the agent container environment. Shared by the create and start/restart
-// dispatch paths (#1960) so that a required gh:// skill can resolve with the
-// same project credentials regardless of which path (re-)provisions the
-// agent. callerName is used only for debug log attribution.
+// dispatch paths so that a required gh:// skill can resolve with the same
+// project credentials regardless of which path (re-)provisions the agent.
+// callerName prefixes every log message this function writes, at any level.
 func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, agent *store.Agent, callerName string) map[string]string {
 	if agent.ProjectID == "" || d.secretBackend == nil {
 		return nil
@@ -514,6 +513,9 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 	type namedValue struct{ name, value string }
 	fetched := make([]namedValue, len(projectSecrets))
 
+	// interrupted counts secrets not fetched because ctx was cancelled or
+	// timed out. Those are reported once below rather than once per secret.
+	var interrupted atomic.Int64
 	g, gctx := errgroup.WithContext(ctx)
 	for i, sm := range projectSecrets {
 		if sm.SecretType == store.SecretTypeInternal {
@@ -521,8 +523,16 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 		}
 		i, sm := i, sm // capture loop vars
 		g.Go(func() error {
+			if gctx.Err() != nil {
+				interrupted.Add(1)
+				return nil
+			}
 			sv, getErr := d.secretBackend.Get(gctx, sm.Name, secret.ScopeProject, agent.ProjectID)
 			if getErr != nil {
+				if ctx.Err() != nil || errors.Is(getErr, context.Canceled) || errors.Is(getErr, context.DeadlineExceeded) {
+					interrupted.Add(1)
+					return nil
+				}
 				// Secret name and project only; never the value.
 				d.log.Warn(callerName+": failed to get project secret for ProvisionCredentials",
 					"agent_id", agent.ID, "project_id", agent.ProjectID, "secret", sm.Name, "error", getErr)
@@ -535,6 +545,14 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 		})
 	}
 	_ = g.Wait()
+	if n := interrupted.Load(); n > 0 {
+		cause := ctx.Err()
+		if cause == nil {
+			cause = context.Canceled
+		}
+		d.log.Warn(callerName+": ProvisionCredentials fetch stopped early; some project secrets were not fetched",
+			"agent_id", agent.ID, "project_id", agent.ProjectID, "not_fetched", n, "error", cause)
+	}
 
 	creds := make(map[string]string)
 	for _, nv := range fetched {
@@ -550,6 +568,8 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 	return creds
 }
 
+// buildCreateRequest builds a RemoteCreateAgentRequest from the agent's store record.
+// This is shared between DispatchAgentCreate and DispatchAgentProvision.
 func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *store.Agent, callerName string) (*RemoteCreateAgentRequest, error) {
 	buildRequestStart := time.Now()
 	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)

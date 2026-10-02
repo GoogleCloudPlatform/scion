@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -39,13 +40,21 @@ type provisionCredsBackend struct {
 	metas   []secret.SecretMeta
 	values  map[string]string
 	failGet map[string]bool
+	// onGet, when set, runs at the start of every Get; a non-nil result is
+	// returned as the Get error.
+	onGet func(ctx context.Context) error
 }
 
 func (b *provisionCredsBackend) List(context.Context, secret.Filter) ([]secret.SecretMeta, error) {
 	return b.metas, b.listErr
 }
 
-func (b *provisionCredsBackend) Get(_ context.Context, name, _, _ string) (*secret.SecretWithValue, error) {
+func (b *provisionCredsBackend) Get(ctx context.Context, name, _, _ string) (*secret.SecretWithValue, error) {
+	if b.onGet != nil {
+		if err := b.onGet(ctx); err != nil {
+			return nil, err
+		}
+	}
 	if b.failGet[name] {
 		return nil, errors.New("backend unavailable")
 	}
@@ -154,4 +163,59 @@ func TestResolveProvisionCredentials_CountWhenNone(t *testing.T) {
 	info := findProvisionCredsRecord(buf.records(t), "INFO", "ProvisionCredentials resolved")
 	require.NotNil(t, info, "log: %s", buf.String())
 	assert.EqualValues(t, 0, info["count"])
+}
+
+// TestResolveProvisionCredentials_CancelledContextWarnsOnce: when the
+// request's context ends while secrets are being fetched, the secrets that
+// were not fetched are reported in one Warn, not one Warn per secret.
+func TestResolveProvisionCredentials_CancelledContextWarnsOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cause error
+	}{
+		{"cancelled", context.Canceled},
+		{"deadline", context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			var metas []secret.SecretMeta
+			for i := 0; i < 8; i++ {
+				metas = append(metas, secret.SecretMeta{Name: fmt.Sprintf("GH_SECRET_%d", i), SecretType: "environment"})
+			}
+			backend := &provisionCredsBackend{
+				metas: metas,
+				onGet: func(context.Context) error {
+					// The first Get to run ends the request; every Get then
+					// fails with the context error, as a real backend would.
+					cancel(tc.cause)
+					return tc.cause
+				},
+			}
+			d, buf := newProvisionCredsDispatcher(backend)
+			agent := &store.Agent{ID: "agent-1", ProjectID: "project-1"}
+
+			assert.Nil(t, d.resolveProvisionCredentials(ctx, agent, "buildCreateRequest"))
+
+			var perSecret, summary int
+			var rec map[string]any
+			for _, r := range buf.records(t) {
+				if r["level"] != "WARN" {
+					continue
+				}
+				msg := r["msg"].(string)
+				switch {
+				case strings.HasSuffix(msg, "failed to get project secret for ProvisionCredentials"):
+					perSecret++
+				case strings.Contains(msg, "ProvisionCredentials fetch stopped early"):
+					summary++
+					rec = r
+				}
+			}
+			assert.Equal(t, 0, perSecret, "no per-secret Warn when the context ended; log: %s", buf.String())
+			require.Equal(t, 1, summary, "expected one summary Warn; log: %s", buf.String())
+			assert.EqualValues(t, len(metas), rec["not_fetched"])
+			assert.Equal(t, "project-1", rec["project_id"])
+		})
+	}
 }
