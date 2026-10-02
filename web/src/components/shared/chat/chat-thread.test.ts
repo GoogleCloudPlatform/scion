@@ -80,6 +80,7 @@ type ChatAgentMember = import('./chat-members.js').ChatAgentMember;
 
 import { chatRecentFiles } from '../../../client/chat-recent-files.js';
 import { agentGraphHref, terminalHref } from '../../../client/open-terminal.js';
+import { setPreferredTimeZone } from '../../../utils/time.js';
 
 const CONVERSATION_KEY = 'topic-1';
 
@@ -3873,6 +3874,29 @@ describe('scion-chat-thread inter-agent day-split markers', () => {
     expect(markers.length).toBe(2);
     for (const marker of markers) {
       expect((marker as unknown as { messageCount: number }).messageCount).toBe(1);
+    }
+  });
+
+  // Review round 3, R3-3: the thread's DisplayZoneController re-renders the
+  // date divider when the preference changes after mount — pin it, since
+  // deleting the controller left every other test in this suite green.
+  it('re-renders the date divider zone label after a mounted thread outlives a preference change', async () => {
+    try {
+      const el = await mountAgentDM({
+        interagent: [makeIaMessage({ id: 'ia-1', createdAt: '2026-09-23T15:00:00Z' })],
+      });
+
+      const dividerBefore = el.shadowRoot!.querySelector('.date-divider');
+      expect(dividerBefore?.textContent).toContain('UTC'); // Auto, pinned ambient zone
+
+      setPreferredTimeZone('Asia/Tokyo');
+      await el.updateComplete;
+
+      const dividerAfter = el.shadowRoot!.querySelector('.date-divider');
+      expect(dividerAfter?.textContent).toContain('Asia/Tokyo');
+      expect(dividerAfter?.textContent).not.toContain('UTC');
+    } finally {
+      setPreferredTimeZone('');
     }
   });
 });
