@@ -359,6 +359,19 @@ func TestAgentStore_SetAgentRuntimeTarget(t *testing.T) {
 		assert.Equal(t, "docker", got.AppliedConfig.RuntimeTargetCandidate)
 	})
 
+	t.Run("JSON null applied config", func(t *testing.T) {
+		a := create(t, "set-json-null-config", nil)
+		_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).SetAppliedConfig("null").Save(ctx)
+		require.NoError(t, err)
+		written, err := s.SetAgentRuntimeTarget(ctx, a.ID, a.StateVersion, "", "docker")
+		require.NoError(t, err)
+		assert.True(t, written)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.AppliedConfig)
+		assert.Equal(t, "docker", got.AppliedConfig.RuntimeTargetCandidate)
+	})
+
 	t.Run("unknown agent", func(t *testing.T) {
 		written, err := s.SetAgentRuntimeTarget(ctx, "00000000-0000-0000-0000-00000000abcd", 1, "docker", "")
 		require.NoError(t, err)
@@ -454,6 +467,91 @@ func TestAgentStore_ClearAgentRuntimeTarget_WriteMiss(t *testing.T) {
 			assert.False(t, cleared)
 			assert.Contains(t, err.Error(), "changed concurrently")
 			assert.Equal(t, 5, calls, "retries are bounded")
+		})
+	}
+}
+
+// TestAgentStore_SetAgentRuntimeTarget_Guards pins each guard of the target
+// write on its own: the read skips soft-deleted rows and returns early on a
+// version mismatch (the write is never reached), and the conditional write
+// misses when state_version, applied_config or deleted_at changed between the
+// read and the write.
+func TestAgentStore_SetAgentRuntimeTarget_Guards(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	const target = "kubernetes|context=c|namespace=n"
+
+	create := func(t *testing.T, name string) *store.Agent {
+		t.Helper()
+		a := makeAgent(projectID, name)
+		a.AppliedConfig = &store.AgentAppliedConfig{Image: "example/image:1", RuntimeTarget: target}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		return got
+	}
+	hookCalls := func(t *testing.T, change func(context.Context, *ent.Tx, uuid.UUID)) *int {
+		t.Helper()
+		calls := 0
+		setRuntimeTargetHook = func(ctx context.Context, tx *ent.Tx, id uuid.UUID) {
+			calls++
+			if change != nil {
+				change(ctx, tx, id)
+			}
+		}
+		t.Cleanup(func() { setRuntimeTargetHook = nil })
+		return &calls
+	}
+
+	t.Run("version mismatch returns before the write", func(t *testing.T) {
+		a := create(t, "guard-early-version")
+		calls := hookCalls(t, nil)
+		written, err := s.SetAgentRuntimeTarget(ctx, a.ID, a.StateVersion+1, "", "docker")
+		require.NoError(t, err)
+		assert.False(t, written)
+		assert.Equal(t, 0, *calls, "the read's version check returns before the write")
+	})
+
+	t.Run("soft-deleted row is not read", func(t *testing.T) {
+		a := create(t, "guard-read-deleted")
+		_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).SetDeletedAt(time.Now()).Save(ctx)
+		require.NoError(t, err)
+		calls := hookCalls(t, nil)
+		written, err := s.SetAgentRuntimeTarget(ctx, a.ID, a.StateVersion, "", "docker")
+		require.NoError(t, err)
+		assert.False(t, written)
+		assert.Equal(t, 0, *calls, "the read skips a soft-deleted row")
+	})
+
+	for _, tc := range []struct {
+		name   string
+		change func(context.Context, *ent.Tx, uuid.UUID) error
+	}{
+		{"state_version changed", func(ctx context.Context, tx *ent.Tx, id uuid.UUID) error {
+			return tx.Agent.UpdateOneID(id).AddStateVersion(1).Exec(ctx)
+		}},
+		{"applied_config changed", func(ctx context.Context, tx *ent.Tx, id uuid.UUID) error {
+			return tx.Agent.UpdateOneID(id).SetAppliedConfig(`{"image":"example/image:2","runtimeTarget":"` + target + `"}`).Exec(ctx)
+		}},
+		{"soft-deleted", func(ctx context.Context, tx *ent.Tx, id uuid.UUID) error {
+			return tx.Agent.UpdateOneID(id).SetDeletedAt(time.Now()).Exec(ctx)
+		}},
+	} {
+		t.Run("write misses when "+tc.name+" after the read", func(t *testing.T) {
+			a := create(t, "guard-write-"+strings.ReplaceAll(tc.name, " ", "-"))
+			uid := uuid.MustParse(a.ID)
+			calls := hookCalls(t, func(ctx context.Context, tx *ent.Tx, id uuid.UUID) {
+				require.NoError(t, tc.change(ctx, tx, id))
+			})
+			written, err := s.SetAgentRuntimeTarget(ctx, a.ID, a.StateVersion, "", "docker")
+			require.NoError(t, err)
+			assert.False(t, written)
+			assert.Equal(t, 1, *calls)
+			// The miss rolls the transaction back, so no target write (and
+			// not the injected change either) is visible.
+			after, err := s.client.Agent.Get(ctx, uid)
+			require.NoError(t, err)
+			assert.NotContains(t, after.AppliedConfig, "runtimeTargetCandidate")
 		})
 	}
 }

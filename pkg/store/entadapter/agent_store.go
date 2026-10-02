@@ -1502,6 +1502,11 @@ func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID
 // write miss.
 var clearRuntimeTargetHook func(ctx context.Context, tx *ent.Tx, id uuid.UUID)
 
+// setRuntimeTargetHook, when set by a test, runs inside the
+// SetAgentRuntimeTarget transaction after the read and its checks, just
+// before the conditional write, so a test can change the row in between.
+var setRuntimeTargetHook func(ctx context.Context, tx *ent.Tx, id uuid.UUID)
+
 // clearRuntimeTargetAttempts bounds ClearAgentRuntimeTarget's re-read and
 // retry loop.
 const clearRuntimeTargetAttempts = 5
@@ -1667,6 +1672,9 @@ func (s *AgentStore) SetAgentRuntimeTarget(ctx context.Context, id string, expec
 		if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
 			return false, fmt.Errorf("set runtime target for agent %s: %w", id, err)
 		}
+		if raw == nil { // the stored value was the JSON literal null
+			raw = map[string]json.RawMessage{}
+		}
 	}
 	for key, value := range map[string]string{"runtimeTarget": target, "runtimeTargetCandidate": candidate} {
 		if value == "" {
@@ -1682,6 +1690,9 @@ func (s *AgentStore) SetAgentRuntimeTarget(ctx context.Context, id string, expec
 	updated, err := json.Marshal(raw)
 	if err != nil {
 		return false, err
+	}
+	if setRuntimeTargetHook != nil {
+		setRuntimeTargetHook(ctx, tx, uid)
 	}
 	n, err := tx.Agent.Update().
 		Where(
