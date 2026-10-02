@@ -129,3 +129,124 @@ func TestDetectRepoRoot_NoGitAnywhere(t *testing.T) {
 		t.Fatalf("no git anywhere: got repoRoot %q, want \"\"", got)
 	}
 }
+
+// TestValidateProvisionedWorktreeRepoRoot_ValidWorktree is the accept case: a
+// real git repo root with a workspace nested under root/worktrees/<id>, the
+// exact layout tryProvisionWorktree creates.
+func TestValidateProvisionedWorktreeRepoRoot_ValidWorktree(t *testing.T) {
+	root := t.TempDir()
+	setupGitRepo(t, root)
+	worktree := filepath.Join(root, "worktrees", "agent-1")
+	if err := os.MkdirAll(worktree, 0755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+
+	got := validateProvisionedWorktreeRepoRoot(root, worktree)
+	if want := eval(t, root); got != want {
+		t.Fatalf("validateProvisionedWorktreeRepoRoot(root, worktree) = %q, want %q", got, want)
+	}
+}
+
+// TestValidateProvisionedWorktreeRepoRoot_RejectsNonGitRoot is the direct
+// regression test for the round-1 review's PoC (C1): a candidate root with no
+// .git directory at all — standing in for the review's literal "/etc" and "/"
+// examples without touching real system paths — must be rejected rather than
+// mounted.
+func TestValidateProvisionedWorktreeRepoRoot_RejectsNonGitRoot(t *testing.T) {
+	root := t.TempDir() // no git repo here
+	worktree := filepath.Join(root, "worktrees", "agent-1")
+	if err := os.MkdirAll(worktree, 0755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+
+	if got := validateProvisionedWorktreeRepoRoot(root, worktree); got != "" {
+		t.Fatalf("non-git root: got %q, want \"\" (must not trust a root with no .git)", got)
+	}
+}
+
+// TestValidateProvisionedWorktreeRepoRoot_RejectsWorkspaceOutsideRoot covers
+// the review's "workspace outside root" case: even a real git repo root must
+// be rejected if the workspace it's paired with isn't actually inside it —
+// otherwise a stale or mismatched pairing could still reach the full-root
+// mount branch in pkg/runtime/common.go.
+func TestValidateProvisionedWorktreeRepoRoot_RejectsWorkspaceOutsideRoot(t *testing.T) {
+	root := t.TempDir()
+	setupGitRepo(t, root)
+	outside := t.TempDir() // sibling, not under root at all
+
+	if got := validateProvisionedWorktreeRepoRoot(root, outside); got != "" {
+		t.Fatalf("workspace outside root: got %q, want \"\"", got)
+	}
+}
+
+// TestValidateProvisionedWorktreeRepoRoot_RejectsWorkspaceAtRoot covers the
+// case where the workspace IS the root itself (rel == "."): this is not the
+// worktrees/<id> layout tryProvisionWorktree creates, and letting it through
+// would put the whole repo root at risk of the common.go "shared workspace"
+// or full-root-mount branches for a signal that is supposed to be scoped to
+// a single worktree subdirectory.
+func TestValidateProvisionedWorktreeRepoRoot_RejectsWorkspaceAtRoot(t *testing.T) {
+	root := t.TempDir()
+	setupGitRepo(t, root)
+
+	if got := validateProvisionedWorktreeRepoRoot(root, root); got != "" {
+		t.Fatalf("workspace == root: got %q, want \"\"", got)
+	}
+}
+
+// TestValidateProvisionedWorktreeRepoRoot_RejectsWorkspaceOutsideWorktreesSubdir
+// covers a workspace that IS inside root, but not under the worktrees/
+// subdirectory — e.g. root/some-other-dir. Only the exact layout
+// tryProvisionWorktree creates should validate.
+func TestValidateProvisionedWorktreeRepoRoot_RejectsWorkspaceOutsideWorktreesSubdir(t *testing.T) {
+	root := t.TempDir()
+	setupGitRepo(t, root)
+	notWorktrees := filepath.Join(root, "some-other-dir")
+	if err := os.MkdirAll(notWorktrees, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	if got := validateProvisionedWorktreeRepoRoot(root, notWorktrees); got != "" {
+		t.Fatalf("workspace outside worktrees/ subdir: got %q, want \"\"", got)
+	}
+}
+
+// TestValidateProvisionedWorktreeRepoRoot_EmptyInputsRejected covers the
+// trivial empty cases.
+func TestValidateProvisionedWorktreeRepoRoot_EmptyInputsRejected(t *testing.T) {
+	root := t.TempDir()
+	setupGitRepo(t, root)
+	worktree := filepath.Join(root, "worktrees", "agent-1")
+	if err := os.MkdirAll(worktree, 0755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+
+	if got := validateProvisionedWorktreeRepoRoot("", worktree); got != "" {
+		t.Fatalf("empty root: got %q, want \"\"", got)
+	}
+	if got := validateProvisionedWorktreeRepoRoot(root, ""); got != "" {
+		t.Fatalf("empty workspace: got %q, want \"\"", got)
+	}
+}
+
+// TestValidateProvisionedWorktreeRepoRoot_RejectsNonexistentPaths covers
+// paths that don't resolve at all (EvalSymlinks failure) — e.g. a persisted
+// value pointing at a since-deleted directory.
+func TestValidateProvisionedWorktreeRepoRoot_RejectsNonexistentPaths(t *testing.T) {
+	root := t.TempDir()
+	setupGitRepo(t, root)
+	worktree := filepath.Join(root, "worktrees", "agent-1")
+	if err := os.MkdirAll(worktree, 0755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+
+	nonexistentRoot := filepath.Join(t.TempDir(), "does-not-exist")
+	if got := validateProvisionedWorktreeRepoRoot(nonexistentRoot, worktree); got != "" {
+		t.Fatalf("nonexistent root: got %q, want \"\"", got)
+	}
+
+	nonexistentWorkspace := filepath.Join(root, "worktrees", "no-such-agent")
+	if got := validateProvisionedWorktreeRepoRoot(root, nonexistentWorkspace); got != "" {
+		t.Fatalf("nonexistent workspace: got %q, want \"\"", got)
+	}
+}

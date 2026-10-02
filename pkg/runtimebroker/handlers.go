@@ -1007,15 +1007,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx = withHubAgentDefaults(ctx, req.Config)
 
 	// Carry the broker-provisioned-worktree signal (set above inside
-	// buildStartContext's tryProvisionWorktree call) into provisioning/start,
-	// so pkg/agent's Start/ProvisionAgent can resolve RepoRoot directly for
-	// this workspace instead of routing it through detectRepoRoot's
-	// user-`--workspace`-override skip. No-op unless tryProvisionWorktree
-	// actually provisioned a worktree for this dispatch. Applied before the
-	// async-launch branch below so a launch that goes async still carries
-	// the signal into its own goroutine via ctx.
-	if sc.ProvisionedWorktreeRoot != "" {
-		ctx = api.ContextWithProvisionedWorktree(ctx, sc.ProvisionedWorktreeRoot)
+	// buildStartContext's tryProvisionWorktree call) into provisioning/start.
+	// See api.ContextWithProvisionedWorktreeRepoRoot for what this unlocks.
+	// No-op unless tryProvisionWorktree actually provisioned a worktree for
+	// this dispatch. Applied before the async-launch branch below so a
+	// launch that goes async still carries the signal into its own
+	// goroutine via ctx.
+	if sc.ProvisionedWorktreeRepoRoot != "" {
+		ctx = api.ContextWithProvisionedWorktreeRepoRoot(ctx, sc.ProvisionedWorktreeRepoRoot)
 	}
 
 	// Non-blocking create (design t1-async-create-v11.md §3.8.2, §7 P1b-1).

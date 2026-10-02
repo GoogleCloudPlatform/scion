@@ -999,11 +999,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Check for git clone mode from context
 	gitClone := api.GitCloneFromContext(ctx)
 
-	// Non-empty when `workspace` is a broker-PROVISIONED worktree-per-agent
+	// Non-empty when `workspace` is a broker-provisioned worktree-per-agent
 	// checkout (tryProvisionWorktree in pkg/runtimebroker), not a user
-	// --workspace override. Persisted below alongside ExplicitWorkspace so
-	// run.go's Start can resolve RepoRoot directly on resume, when the broker
-	// does not re-run tryProvisionWorktree and ctx carries no fresh signal.
+	// --workspace override. Persisted below on AgentInfo (agent-info.json),
+	// never on ScionConfig — see AgentInfo.ProvisionedWorktreeRepoRoot for why.
 	provisionedWorktreeRepoRoot := api.ProvisionedWorktreeRepoRootFromContext(ctx)
 
 	// Reject relative workspace for git-clone projects early, before the
@@ -1805,9 +1804,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if explicitWorkspace {
 		finalScionCfg.ExplicitWorkspace = true
 	}
-	if provisionedWorktreeRepoRoot != "" {
-		finalScionCfg.ProvisionedWorktreeRepoRoot = provisionedWorktreeRepoRoot
-	}
 
 	// Update agent-specific scion-agent.json
 	if finalScionCfg == nil {
@@ -1823,14 +1819,15 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	projectID, _ := config.ReadProjectID(projectDir)
 	info := &api.AgentInfo{
-		Project:               projectName,
-		ProjectID:             projectID,
-		ProjectPath:           projectDir,
-		Name:                  agentName,
-		Template:              displayTemplateName,
-		HarnessConfig:         harnessConfigName,
-		HarnessConfigRevision: config.ComputeHarnessConfigRevision(hcDir.Path),
-		Profile:               profileName,
+		Project:                     projectName,
+		ProjectID:                   projectID,
+		ProjectPath:                 projectDir,
+		Name:                        agentName,
+		Template:                    displayTemplateName,
+		HarnessConfig:               harnessConfigName,
+		HarnessConfigRevision:       config.ComputeHarnessConfigRevision(hcDir.Path),
+		Profile:                     profileName,
+		ProvisionedWorktreeRepoRoot: provisionedWorktreeRepoRoot,
 	}
 	if optionalStatus != "" {
 		info.Phase = optionalStatus

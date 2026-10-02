@@ -3815,11 +3815,13 @@ func TestGetAgent_RelativeWorkspaceResume(t *testing.T) {
 // TestProvisionAgent_ProvisionedWorktreePersistsRepoRoot is the regression
 // guard for the ExplicitWorkspace-misclassification risk called out for the
 // broker-provisioned worktree fix: ProvisionAgent must persist
-// ProvisionedWorktreeRepoRoot (in addition to ExplicitWorkspace, which stays
-// true for both this case and a user --workspace override) whenever ctx
-// carries api.ContextWithProvisionedWorktree, so run.go's Start can
-// recover RepoRoot on resume/restart — dispatches where the broker does not
-// re-run tryProvisionWorktree and ctx carries no fresh signal.
+// AgentInfo.ProvisionedWorktreeRepoRoot (in addition to ExplicitWorkspace,
+// which stays true for both this case and a user --workspace override)
+// whenever ctx carries api.ContextWithProvisionedWorktreeRepoRoot, so run.go's
+// Start can recover RepoRoot on resume/restart — dispatches where the broker
+// does not re-run tryProvisionWorktree and ctx carries no fresh signal. It is
+// persisted on AgentInfo, not ScionConfig, precisely so no template or inline
+// config can set or overwrite it (round-1 review finding C1).
 func TestProvisionAgent_ProvisionedWorktreePersistsRepoRoot(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -3852,7 +3854,7 @@ func TestProvisionAgent_ProvisionedWorktreePersistsRepoRoot(t *testing.T) {
 	_ = os.MkdirAll(worktree, 0755)
 	repoRoot := filepath.Join(tmpDir, "shared-base")
 
-	ctx := api.ContextWithProvisionedWorktree(context.Background(), repoRoot)
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), repoRoot)
 
 	agentName := "provisioned-wt-agent"
 	_, ws, cfg, err := ProvisionAgent(ctx, agentName, "claude", "", "", projectScionDir, "", "", "", worktree)
@@ -3865,8 +3867,8 @@ func TestProvisionAgent_ProvisionedWorktreePersistsRepoRoot(t *testing.T) {
 	if !cfg.ExplicitWorkspace {
 		t.Error("expected ExplicitWorkspace to be true (needed for GetAgent's resume-recovery skip)")
 	}
-	if cfg.ProvisionedWorktreeRepoRoot != repoRoot {
-		t.Errorf("ProvisionedWorktreeRepoRoot = %q, want %q", cfg.ProvisionedWorktreeRepoRoot, repoRoot)
+	if cfg.Info == nil || cfg.Info.ProvisionedWorktreeRepoRoot != repoRoot {
+		t.Errorf("cfg.Info.ProvisionedWorktreeRepoRoot = %+v, want %q", cfg.Info, repoRoot)
 	}
 
 	// Resume: no fresh ctx signal (the broker does not re-run
@@ -3879,15 +3881,15 @@ func TestProvisionAgent_ProvisionedWorktreePersistsRepoRoot(t *testing.T) {
 	if !resumeCfg.ExplicitWorkspace {
 		t.Error("expected ExplicitWorkspace to persist across resume")
 	}
-	if resumeCfg.ProvisionedWorktreeRepoRoot != repoRoot {
-		t.Errorf("resume ProvisionedWorktreeRepoRoot = %q, want %q", resumeCfg.ProvisionedWorktreeRepoRoot, repoRoot)
+	if resumeCfg.Info == nil || resumeCfg.Info.ProvisionedWorktreeRepoRoot != repoRoot {
+		t.Errorf("resume cfg.Info.ProvisionedWorktreeRepoRoot = %+v, want %q", resumeCfg.Info, repoRoot)
 	}
 }
 
 // TestProvisionAgent_UserWorkspaceOverrideLeavesRepoRootUnset confirms the
-// counterpart: a plain user --workspace (no ContextWithProvisionedWorktree on
-// ctx) must NOT persist ProvisionedWorktreeRepoRoot, so run.go's Start falls
-// through to detectRepoRoot and keeps RepoRoot "" for this case.
+// counterpart: a plain user --workspace (no ContextWithProvisionedWorktreeRepoRoot
+// on ctx) must NOT persist AgentInfo.ProvisionedWorktreeRepoRoot, so run.go's
+// Start falls through to detectRepoRoot and keeps RepoRoot "" for this case.
 func TestProvisionAgent_UserWorkspaceOverrideLeavesRepoRootUnset(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -3924,7 +3926,116 @@ func TestProvisionAgent_UserWorkspaceOverrideLeavesRepoRootUnset(t *testing.T) {
 	if !cfg.ExplicitWorkspace {
 		t.Error("expected ExplicitWorkspace to be true for a user --workspace override")
 	}
-	if cfg.ProvisionedWorktreeRepoRoot != "" {
-		t.Errorf("expected ProvisionedWorktreeRepoRoot to stay empty for a user --workspace override, got %q", cfg.ProvisionedWorktreeRepoRoot)
+	if cfg.Info != nil && cfg.Info.ProvisionedWorktreeRepoRoot != "" {
+		t.Errorf("expected ProvisionedWorktreeRepoRoot to stay empty for a user --workspace override, got %q", cfg.Info.ProvisionedWorktreeRepoRoot)
+	}
+}
+
+// TestProvisionAgent_TemplateInjectedRepoRootIsInert is the C1 regression
+// test (round-1 review): a template's scion-agent.json setting
+// "provisioned_worktree_repo_root" (the old, now-removed ScionConfig field
+// name) or "provisionedWorktreeRepoRoot" (AgentInfo's on-wire field name)
+// must have no effect. ScionConfig has no field for either key, and
+// ScionConfig.Info carries json:"-", so neither key can ever populate
+// anything ProvisionAgent or run.go trusts — proven here by asserting the
+// resulting AgentInfo carries no such value for a plain --workspace agent.
+func TestProvisionAgent_TemplateInjectedRepoRootIsInert(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
+
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	// The PoC from the round-1 review: a template that tries to set the repo
+	// root to "/" via both the old and new field names.
+	tplDir := filepath.Join(globalTemplatesDir, "claude")
+	_ = os.MkdirAll(tplDir, 0755)
+	tplConfig := `{
+		"default_harness_config": "claude",
+		"provisioned_worktree_repo_root": "/",
+		"provisionedWorktreeRepoRoot": "/"
+	}`
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	userWorkspace := filepath.Join(tmpDir, "operators-own-dir")
+	_ = os.MkdirAll(userWorkspace, 0755)
+
+	// Plain user --workspace, no broker ctx signal — the attack surface the
+	// review PoC exploited (any hub user or template author can reach this).
+	_, _, cfg, err := ProvisionAgent(context.Background(), "template-injection-agent", "claude", "", "", projectScionDir, "", "", "", userWorkspace)
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+	if cfg.Info != nil && cfg.Info.ProvisionedWorktreeRepoRoot != "" {
+		t.Fatalf("template-injected repo root leaked into AgentInfo: %q (want empty)", cfg.Info.ProvisionedWorktreeRepoRoot)
+	}
+}
+
+// TestProvisionAgent_InlineConfigInjectedRepoRootIsInert is C1's inline-config
+// variant of the same PoC: an inline config (as sent by the hub for
+// CreateAgentRequest.Config or --config) setting the same two field names
+// must also have no effect.
+func TestProvisionAgent_InlineConfigInjectedRepoRootIsInert(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
+
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	tplDir := filepath.Join(globalTemplatesDir, "claude")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "claude"}`), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	userWorkspace := filepath.Join(tmpDir, "operators-own-dir")
+	_ = os.MkdirAll(userWorkspace, 0755)
+
+	// Simulate the hub forwarding a user-supplied inline config document
+	// (the exact shape CreateAgentRequest.Config/InlineConfig arrives in):
+	// unmarshal untrusted JSON into api.ScionConfig, exactly like
+	// config.ParseScionAgentConfig does, then pass the result through as the
+	// inline config ProvisionAgent merges over the template.
+	rawInline := []byte(`{
+		"provisioned_worktree_repo_root": "/etc",
+		"provisionedWorktreeRepoRoot": "/etc"
+	}`)
+	var inline api.ScionConfig
+	if err := json.Unmarshal(rawInline, &inline); err != nil {
+		t.Fatalf("unmarshal inline config: %v", err)
+	}
+
+	_, _, cfg, err := ProvisionAgent(context.Background(), "inline-injection-agent", "claude", "", "", projectScionDir, "", "", "", userWorkspace, &inline)
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+	if cfg.Info != nil && cfg.Info.ProvisionedWorktreeRepoRoot != "" {
+		t.Fatalf("inline-config-injected repo root leaked into AgentInfo: %q (want empty)", cfg.Info.ProvisionedWorktreeRepoRoot)
 	}
 }

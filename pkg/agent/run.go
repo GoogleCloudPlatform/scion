@@ -1075,22 +1075,47 @@ authDone:
 	// A broker-provisioned worktree-per-agent workspace (runtimebroker's
 	// tryProvisionWorktree) already knows its own repo root — resolve it
 	// directly instead of routing through detectRepoRoot, whose
-	// explicit-workspace skip exists for a user's own --workspace override
-	// and must not swallow the broker's own worktree provisioning too
-	// (that would leave in-container git broken: no /repo-root/.git mount).
-	// Priority: a fresh signal on ctx (this dispatch just ran
-	// tryProvisionWorktree) beats the persisted value (recovered on
-	// resume/restart, when the broker does not re-run tryProvisionWorktree and
-	// ctx carries nothing fresh). A user --workspace override sets neither, so
-	// it always falls through to detectRepoRoot and stays "".
-	var repoRoot string
-	switch {
-	case api.ProvisionedWorktreeRepoRootFromContext(ctx) != "":
-		repoRoot = api.ProvisionedWorktreeRepoRootFromContext(ctx)
-	case finalScionCfg != nil && finalScionCfg.ProvisionedWorktreeRepoRoot != "":
-		repoRoot = finalScionCfg.ProvisionedWorktreeRepoRoot
-	default:
+	// explicit-workspace skip exists for a user's own --workspace override and
+	// must not swallow the broker's own worktree provisioning too. See
+	// api.ContextWithProvisionedWorktreeRepoRoot for the full rationale.
+	//
+	// Priority: a fresh ctx signal (this dispatch just ran
+	// tryProvisionWorktree) beats the value persisted on AgentInfo (recovered
+	// on resume/restart, when the broker does not re-run tryProvisionWorktree).
+	// Either source is re-validated against the real filesystem below before
+	// being trusted — see validateProvisionedWorktreeRepoRoot. A user
+	// --workspace override supplies neither, so it always falls through to
+	// detectRepoRoot and stays "".
+	ctxRepoRoot := api.ProvisionedWorktreeRepoRootFromContext(ctx)
+	persistedRepoRoot := ""
+	if finalScionCfg != nil && finalScionCfg.Info != nil {
+		persistedRepoRoot = finalScionCfg.Info.ProvisionedWorktreeRepoRoot
+	}
+	candidateRepoRoot := ctxRepoRoot
+	if candidateRepoRoot == "" {
+		candidateRepoRoot = persistedRepoRoot
+	}
+	repoRoot := validateProvisionedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
+	if repoRoot == "" {
 		repoRoot = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
+	}
+
+	// A fresh ctx signal always wins over whatever is already persisted, but
+	// GetAgent skips ProvisionAgent (and so never writes AgentInfo) when the
+	// agent directory already exists on disk — e.g. a leftover from a deleted
+	// hub agent recreated under the same name. In that case this dispatch's
+	// signal would never reach agent-info.json, and a later resume/restart
+	// (which has no fresh ctx signal of its own) would fall back to
+	// detectRepoRoot and lose RepoRoot again. Persist it here whenever it's
+	// fresh and different, independent of whether ProvisionAgent ran this
+	// time; a no-op on the normal first-provision path, where ProvisionAgent
+	// already wrote the same value.
+	if ctxRepoRoot != "" && ctxRepoRoot != persistedRepoRoot {
+		if err := updateSavedAgentInfo(opts.Name, opts.ProjectPath, func(info *api.AgentInfo) {
+			info.ProvisionedWorktreeRepoRoot = ctxRepoRoot
+		}); err != nil {
+			util.Debugf("Start: failed to persist ProvisionedWorktreeRepoRoot for %s: %v", opts.Name, err)
+		}
 	}
 
 	// Reject a workspace source that is not an allowed workspace path before
@@ -1747,6 +1772,56 @@ func workspaceSharesProjectRepo(projectDir, workspace string) bool {
 		return false
 	}
 	return resolvedProjectCommonDir == resolvedWorkspaceCommonDir
+}
+
+// provisionedWorktreesSubdir is the fixed layout tryProvisionWorktree and
+// provision.WorktreePath use for a broker-provisioned worktree:
+// <repoRoot>/worktrees/<agentID>.
+const provisionedWorktreesSubdir = "worktrees"
+
+// validateProvisionedWorktreeRepoRoot re-checks a candidate broker-provisioned
+// repo root (sourced from ctx or from the persisted AgentInfo) against the
+// real filesystem before Start trusts it for a host bind-mount. This is an
+// independent, second check: the value can only be set by
+// pkg/agent/provision.go's own code (see AgentInfo.ProvisionedWorktreeRepoRoot)
+// — never by a template, hub inline config, --config file, or
+// applyInlineConfigUpdate — but a wrong or stale value here would still let
+// pkg/runtime/common.go bind-mount an unintended host path read-write into
+// the container. Returns "" on any failure, which routes the caller back to
+// detectRepoRoot.
+//
+// All checks are required:
+//   - root and effectiveWorkspace are both non-empty and resolve (EvalSymlinks
+//     both, so a symlink can't disguise either path);
+//   - <root>/.git is a directory (root is actually a git repo, not e.g. /etc
+//     or /);
+//   - effectiveWorkspace is strictly inside root, under root/worktrees/ — the
+//     exact layout tryProvisionWorktree creates.
+func validateProvisionedWorktreeRepoRoot(root, effectiveWorkspace string) string {
+	if root == "" || effectiveWorkspace == "" {
+		return ""
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return ""
+	}
+	resolvedWorkspace, err := filepath.EvalSymlinks(effectiveWorkspace)
+	if err != nil {
+		return ""
+	}
+	gitDirInfo, err := os.Stat(filepath.Join(resolvedRoot, ".git"))
+	if err != nil || !gitDirInfo.IsDir() {
+		return ""
+	}
+	rel, err := filepath.Rel(resolvedRoot, resolvedWorkspace)
+	if err != nil || rel == "." || rel == ".." ||
+		strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return ""
+	}
+	if rel != provisionedWorktreesSubdir && !strings.HasPrefix(rel, provisionedWorktreesSubdir+string(filepath.Separator)) {
+		return ""
+	}
+	return resolvedRoot
 }
 
 // extractWorkspaceFromVolumes finds a volume mounted to /workspace and returns its source path.

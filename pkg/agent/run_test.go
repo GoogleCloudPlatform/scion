@@ -3231,12 +3231,12 @@ profiles:
 }
 
 // TestStartUserWorkspaceOverrideYieldsEmptyRepoRoot is the required
-// counterpart to the broker-provisioned-worktree RepoRoot stitching fix
-// (ptone/scion#2062): a user-supplied --workspace (opts.Workspace set with no
-// api.ContextWithProvisionedWorktree signal on ctx) must still produce an
-// empty RunConfig.RepoRoot, exactly like before the fix — even when the
-// workspace happens to sit inside a git repo, which is the case #642 added
-// the explicit-workspace skip for in the first place.
+// counterpart to the broker-provisioned-worktree RepoRoot stitching fix: a
+// user-supplied --workspace (opts.Workspace set with no
+// api.ContextWithProvisionedWorktreeRepoRoot signal on ctx) must still
+// produce an empty RunConfig.RepoRoot, exactly like before the fix — even
+// when the workspace happens to sit inside a git repo, which is the case
+// #642 added the explicit-workspace skip for in the first place.
 func TestStartUserWorkspaceOverrideYieldsEmptyRepoRoot(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -3313,8 +3313,9 @@ profiles:
 	}
 
 	mgr := NewManager(mockRT)
-	// context.Background(): no api.ContextWithProvisionedWorktree signal —
-	// this is the plain CLI/local dispatch shape for a user --workspace flag.
+	// context.Background(): no api.ContextWithProvisionedWorktreeRepoRoot
+	// signal — this is the plain CLI/local dispatch shape for a user
+	// --workspace flag.
 	_, err = mgr.Start(context.Background(), api.StartOptions{
 		Name:        "test-agent",
 		ProjectPath: projectScionDir,
@@ -3334,6 +3335,127 @@ profiles:
 	}
 	if capturedConfig.Workspace != userWorkspace {
 		t.Fatalf("RunConfig.Workspace = %q, want %q", capturedConfig.Workspace, userWorkspace)
+	}
+}
+
+// TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkipped
+// is the round-1 review's O1 regression guard: GetAgent skips ProvisionAgent
+// entirely once an agent directory already exists on disk (e.g. a leftover
+// from a deleted hub agent recreated under the same name), so a fresh ctx
+// signal on that dispatch would otherwise never reach agent-info.json —
+// stranding RepoRoot on the very next resume, which has no ctx signal of its
+// own. Start must persist the fresh value itself whenever it differs from
+// what's already on disk, independent of whether ProvisionAgent ran.
+func TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkipped(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir to tmpDir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatalf("failed to set HOME: %v", err)
+	}
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+		t.Fatalf("failed to create project .scion dir: %v", err)
+	}
+	settingsYAML := `schema_version: "1"
+active_profile: local
+harness_configs:
+  test-harness:
+    harness: gemini
+    user: scion
+    image: test-image:latest
+profiles:
+  local:
+    runtime: docker
+`
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
+	if err := os.MkdirAll(hcDir, 0755); err != nil {
+		t.Fatalf("failed to create harness-config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644); err != nil {
+		t.Fatalf("failed to write harness config: %v", err)
+	}
+	tplDir := filepath.Join(projectScionDir, "templates", "default")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatalf("failed to create template dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644); err != nil {
+		t.Fatalf("failed to write template: %v", err)
+	}
+
+	userWorkspace := filepath.Join(tmpDir, "operators-own-dir")
+	if err := os.MkdirAll(userWorkspace, 0755); err != nil {
+		t.Fatalf("failed to create user workspace dir: %v", err)
+	}
+
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+	env := map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"}
+
+	// Step 1: create the agent normally (e.g. a plain --workspace agent —
+	// the exact provisioning shape doesn't matter here, only that the agent
+	// directory now exists on disk with no ProvisionedWorktreeRepoRoot set).
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: userWorkspace, Env: env,
+	}); err != nil {
+		t.Fatalf("initial Start failed: %v", err)
+	}
+
+	// Step 2: a later dispatch for the SAME agent name whose ctx carries a
+	// fresh broker-provisioned-worktree signal. Because the agent directory
+	// already exists, GetAgent's "agent dir exists" branch skips
+	// ProvisionAgent entirely — the only way this value can reach disk is the
+	// persistence added to Start for exactly this case.
+	sharedBase := t.TempDir()
+	setupGitRepo(t, sharedBase)
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), sharedBase)
+	if _, err := mgr.Start(ctx, api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: userWorkspace, Env: env,
+	}); err != nil {
+		t.Fatalf("second Start failed: %v", err)
+	}
+
+	agentHome := config.GetAgentHomePath(projectScionDir, "agent-a")
+	data, err := os.ReadFile(filepath.Join(agentHome, "agent-info.json"))
+	if err != nil {
+		t.Fatalf("reading agent-info.json: %v", err)
+	}
+	var info api.AgentInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		t.Fatalf("unmarshal agent-info.json: %v", err)
+	}
+	gotRoot, err := filepath.EvalSymlinks(info.ProvisionedWorktreeRepoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(persisted ProvisionedWorktreeRepoRoot=%q): %v", info.ProvisionedWorktreeRepoRoot, err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(sharedBase)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(sharedBase): %v", err)
+	}
+	if gotRoot != wantRoot {
+		t.Fatalf("persisted AgentInfo.ProvisionedWorktreeRepoRoot = %q, want %q — the fresh ctx signal was not written to agent-info.json when ProvisionAgent was skipped", gotRoot, wantRoot)
 	}
 }
 
