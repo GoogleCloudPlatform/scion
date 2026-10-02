@@ -506,12 +506,13 @@ func TestUnknownIdentityKindDeniesCreate(t *testing.T) {
 	}
 }
 
-// Every DenyCause the delegation ceiling adds reaches the client as a 403
-// carrying details.denied_by="delegation_ceiling", at create and at mint.
+// Every delegation-ceiling DenyCause reaches the client as a 403 carrying
+// details.denied_by="delegation_ceiling", at create and at mint.
 // ceiling_unrecorded is reached at mint: at create the UAT scope gate
-// denies an unknown ceiling version first. ceiling_resource_missing has no
-// producer in this phase.
-func TestAllNewCeilingDenialsCarryDeniedBy(t *testing.T) {
+// denies an unknown ceiling version first. ceiling_resource_missing is
+// reserved for the service-account parent-ceiling evaluator and has no
+// emitter in this package.
+func TestAllCeilingDenyCausesCarryDeniedBy(t *testing.T) {
 	f := newUATCreateFixture(t, "denied-by")
 	cases := []struct {
 		cause    DenyCause

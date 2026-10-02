@@ -524,8 +524,8 @@ func TestMixedChainMintKeepsScopeWalkDeniesAtUse(t *testing.T) {
 	child.Ancestry = []string{f.userID, parent.ID}
 	require.NoError(t, f.store.UpdateAgent(ctx, child))
 	f.edge(t, store.DelegationPrincipalUser, f.userID, parent.ID, store.EffectCeiling{}, store.AuthorityProvenance{})
-	f.edge(t, store.DelegationPrincipalAgent, parent.ID, child.ID,
-		boundedCeiling("project.read", "gcp_service_account.assign", "agent.create"), provAgent)
+	childCeiling := boundedCeiling("project.read", "gcp_service_account.assign", "agent.create")
+	f.edge(t, store.DelegationPrincipalAgent, parent.ID, child.ID, childCeiling, provAgent)
 	require.True(t, recordedProvenanceRequired["gcp_service_account.assign"])
 
 	chain, err := f.srv.authzService.chainEffectCeiling(ctx, child)
@@ -537,6 +537,17 @@ func TestMixedChainMintKeepsScopeWalkDeniesAtUse(t *testing.T) {
 	require.NoError(t, err)
 	claims := f.tokenClaims(t, token)
 	assert.Contains(t, claims.Scopes, ScopeAgentSAAssign, "the mint does not strip the scope")
+
+	// The mixed chain issues no more than the all-unrecorded chain above it:
+	// every child scope is in the parent's minted set (same role and config)
+	// and inside the child's bounded edge ceiling.
+	parentToken, err := f.srv.GenerateAgentTokenForAgent(ctx, parent)
+	require.NoError(t, err)
+	parentScopes := f.tokenClaims(t, parentToken).Scopes
+	for _, sc := range claims.Scopes {
+		assert.Contains(t, parentScopes, sc, "child scope %s outside the all-unrecorded parent mint", sc)
+		assert.True(t, ceilingAllowsScope(childCeiling, sc), "child scope %s outside the child's edge ceiling", sc)
+	}
 
 	identity := &agentIdentityWrapper{AgentTokenClaims: claims}
 	actx := contextWithIdentity(ctx, identity)
