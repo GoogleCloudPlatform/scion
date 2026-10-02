@@ -552,3 +552,37 @@ D002|PM1|ProjectMember|Catalog|Classif|AST'`, `go test ./pkg/hub/authzop/
 head, which was rebased onto a fresh `upstream-main` afterward. Per the P1
 broker throttle, the full `make test-hub-sqlite`/`make ci` were not run
 locally for this round either; they run in the PR's GitHub CI.
+
+## Review round 6 fixes
+
+Review r5 (ptone/scion#2529 P1, mmr-em dispositions): every finding fixed.
+- **R5-1**: reevaluateActorTx's in-transaction hub-override revalidation is
+  now pinned by `TestSetMemberRoles_TOCTOU_HubAuthorityRevokedBetweenPhases`
+  (RemoveAll, `needDelete`) and its `_Create` twin, an owner -> member
+  demotion where the actor keeps a delete-only system role (`needCreate`).
+  A hub admin with no project role loses the hub-admin binding between
+  Phase P and the lock, and gets 403 `role_assignment_forbidden` with
+  nothing written. The dispositions first expected 409; mmr-em corrected
+  this to 403, the existing behaviour, because this guard runs before
+  `actorAuthorityChanged`, which cannot see this change.
+- **R5-2**: a created custom role deleted between Phase P and the in-tx
+  re-fetch now returns 400 `invalid_role_set` +
+  `details.roleDefinitionId`, the same shape as Phase P, instead of a raw
+  500. This uses a typed `roleDefinitionRefetchError` plus
+  `errors.Is(err, store.ErrNotFound)`.
+- **R5-3**: the applyRolePlanTx guard matches every identifier reference
+  (calls, method values, method expressions), and the enclosing function
+  must be the `SetMemberRoles` method on `*ProjectMembershipService`.
+- **R5-4, R5-5, R5-7**: comment accuracy. The PR #127 port header names
+  the 9 owner / hub-admin scenarios and the 3 inverted project-admin ones.
+  A double citation is removed. The refetch comments state that the
+  project lock does not cover role definitions (FYI-2 residual).
+- **R5-6**: five commit messages that cited a design document not in this
+  repo were reworded non-interactively over `upstream-main..HEAD`. The
+  PR #127 `Co-authored-by` trailer was preserved.
+
+Mutation-sensitivity was proven for R5-1 (each branch disabled in turn),
+R5-2 (the not-found mapping disabled) and R5-3 (two probe references in a
+temporary file); details are in the scratchpad closure table. The same
+throttled gate set as round 5 passes on the rebased head. The full
+`make test-hub-sqlite` and `make ci` run in the PR's GitHub CI.
