@@ -488,7 +488,13 @@ func resourceProjectScope(r Resource) string {
 	return ""
 }
 
-// getCachedDelegationEdges retrieves delegation edges with request-scoped caching.
+// getCachedDelegationEdges retrieves delegation edges with request-scoped
+// caching. It consults, in order: the existing per-decision
+// delegationCeilingCache (unchanged); then the phase-wide edges memo (see
+// authz_request_inputs.go), whose key is untouched by maskAuthzInputs, so
+// this is the one input the delegation ceiling shares across decisions in a
+// phase; then the store. A store error is returned directly and is never
+// stored in either cache.
 func (a *AuthzService) getCachedDelegationEdges(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
 	cache := getDelegationCeilingCache(ctx)
 	key := delegateType + ":" + delegateID
@@ -497,6 +503,41 @@ func (a *AuthzService) getCachedDelegationEdges(ctx context.Context, delegateTyp
 		if edges, ok := cache.edges[key]; ok {
 			return edges, nil
 		}
+	}
+
+	// Phase-wide edges memo: bypassed entirely on a done ctx, so a
+	// cancelled request falls straight through to the store call below
+	// exactly as it does with no memo installed. Success only — an
+	// edge-load error is returned directly and never stored, so it can
+	// never manufacture an error the store did not itself produce.
+	if memo := delegationEdgesMemoFromContext(ctx); memo != nil && ctx.Err() == nil {
+		memo.mu.Lock()
+		if edges, ok := memo.edges[key]; ok {
+			memo.mu.Unlock()
+			if cache != nil {
+				cache.edges[key] = edges
+			}
+			return edges, nil
+		}
+		memo.mu.Unlock()
+
+		edges, err := a.store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
+		if err != nil {
+			return nil, err
+		}
+
+		memo.mu.Lock()
+		if existing, ok := memo.edges[key]; ok {
+			edges = existing
+		} else {
+			memo.edges[key] = edges
+		}
+		memo.mu.Unlock()
+
+		if cache != nil {
+			cache.edges[key] = edges
+		}
+		return edges, nil
 	}
 
 	edges, err := a.store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
