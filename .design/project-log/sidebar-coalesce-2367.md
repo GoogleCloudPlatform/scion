@@ -302,8 +302,10 @@ below); the publish guard also bails out on it for *both* legs of the
 attempt, not only the one that stopped — otherwise a single-page
 leg whose own `shouldContinue` check had already passed before the
 conversation opened would complete normally and publish once
-`Promise.allSettled` resolves, even though it belongs to the same
-now-defunct attempt as the stopped leg. `_runHubMembersLoad`'s loop treats
+`Promise.allSettled` resolves. That leg's data is for the hub view still on
+screen, but the attempt is re-run regardless, so publishing it would publish
+the same list twice, from two different attempts; skipping it keeps each
+publish to a single attempt. `_runHubMembersLoad`'s loop treats
 that result the same as a queued refresh and runs the walk once more, so a
 caller that joined the walk still ends up with a complete list instead of a
 stale one that never gets corrected until the next periodic poll. This
@@ -335,7 +337,7 @@ correctly leaves the walk stale before it ever issues a request.
 | --- | --- |
 | `web/src/client/paginate-all.ts` | `shouldContinue` returning false now rejects with a new `PaginationStoppedError` (carrying the partial list) instead of resolving with it. |
 | `web/src/client/paginate-all.test.ts` | Updated the two `shouldContinue`-stops-the-walk tests for the rejection; added coverage for the partial list attached to the rejection. |
-| `web/src/components/pages/chat.ts` | `_fetchHubMembersOnce` records when either leg rejects with `PaginationStoppedError`, and its publish guard also bails out on it — for *both* legs, not only the one that stopped, so a single-page leg whose own `shouldContinue` check already passed before the conversation opened can't publish stale data for an attempt that is about to be re-run; `_runHubMembersLoad`'s loop re-runs on it the same as a queued refresh; `loadHubMembers` captures the generation at schedule time rather than reading it inside the queued callback; doc comments on `_hubMembersGeneration`, `loadHubMembers`, `_runHubMembersLoad`, and `_fetchHubMembersOnce` updated to describe the fix and reworded to say the generation bumps on any truthy `v2Conversation` assignment, not only on "opening a conversation". |
+| `web/src/components/pages/chat.ts` | `_fetchHubMembersOnce` records when either leg rejects with `PaginationStoppedError`, and its publish guard also bails out on it — for *both* legs, not only the one that stopped, so a single-page leg whose own `shouldContinue` check already passed before the conversation opened doesn't publish the same list twice, from two different attempts (its data is for the hub view still on screen, and the re-run publishes both lists); `_runHubMembersLoad`'s loop re-runs on it the same as a queued refresh; `loadHubMembers` captures the generation at schedule time rather than reading it inside the queued callback; doc comments on `_hubMembersGeneration`, `loadHubMembers`, `_runHubMembersLoad`, and `_fetchHubMembersOnce` updated to describe the fix and reworded to say the generation bumps on any truthy `v2Conversation` assignment, not only on "opening a conversation". |
 | `web/src/components/pages/chat-hub-members-coalesce.test.ts` | New regression test reproducing the same-Lit-batch open/close truncation and asserting the full list publishes with the expected request count; new regression test isolating the generation check from the stopped-leg handling (both legs single-page, so neither ever stops, yet a conversation opening and closing in two separate update batches must still discard the stale result); new regression test for a walk scheduled just before a disconnect in the same microtask drain, asserting it issues no requests. |
 
 ### Scenarios covered (tests)
@@ -387,17 +389,18 @@ and two in the single-page repro).
 
 Two-page users and agents lists, first users request held so the trigger lands
 mid-walk. Counts are users/agents requests; the same scenarios were run
-against 40a7abed for comparison.
+against the branch as it stood before an early stop rejected instead of
+resolving, for comparison.
 
-| Trigger | 40a7abed | Now | Published lists |
+| Trigger | Before early stops rejected | Now | Published lists |
 | --- | --- | --- | --- |
 | Cold mount | 2/2 | 2/2 | full |
 | Open a conversation, return to `/chat` (separate update batches) | 3/4 | 3/4 | full |
-| Open and close within one update batch | 1/2 | 3/4 | full now; truncated users list at 40a7abed |
+| Open and close within one update batch | 1/2 | 3/4 | full now; truncated users list before early stops rejected |
 | Disconnect and reconnect | 3/4 | 3/4 | full |
 | Fallback poll, three refresh calls | 4/4 | 4/4 | full (one trailing walk) |
 
-The one difference is the same-batch case: at 40a7abed the stopped users leg
+The one difference is the same-batch case: before early stops rejected, the stopped users leg
 resolved with its partial list and was published; now it rejects, and the
 attempt re-runs once (one users page from the stopped attempt plus two pages
 each from the re-run).

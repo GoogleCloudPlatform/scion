@@ -28,6 +28,10 @@
  * `chat-palette-data.ts`'s `fetchAllPaletteAgents`/`fetchAllPaletteUsers`;
  * it is factored out here so other full-list consumers (for example
  * `chat.ts`'s hub members sidebar) don't hand-roll the same cursor loop.
+ *
+ * The existing generic helper `apiFetchAllPages` (`api.ts`) is not reused
+ * because it returns a partial list when a later page fails, silently stops
+ * after 50 pages, and offers no way to stop the walk early.
  */
 
 import { apiFetch } from './api.js';
