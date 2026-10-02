@@ -63,3 +63,37 @@ the production `FOR UPDATE` path and the deterministic final 1,000-row window.
 `make ci` and `make ci-full` were not run because the campaign brief prohibits
 them. `npm ci` reported the lockfile-existing three advisories (one low, two
 high); this validation changed neither manifest nor lockfile.
+
+## Milestone-wide review round 1 disposition
+
+Round 1's sole Required finding is closed by test-only commit
+`04b6be7316177acbaa346f432fd5267ee0d8993b`. The existing
+`TestConstraintAuditHistory_InvalidTokensFailBeforeHistoryQuery` table now
+exercises each previously uncited fail-closed decoder branch while preserving
+all earlier invalid-token cases:
+
+- `unknown field` sends an otherwise valid cursor object with an additional
+  JSON member;
+- `trailing JSON value` sends a valid cursor object followed by a second JSON
+  object;
+- `encoded token over 2048 characters` sends a 2,049-character encoded token.
+
+Every table case requires HTTP 400 and immediately asserts that the spy store's
+`ListConstraintHistory` call count remains zero. No production code changed.
+Because the production decoder already implemented all three rejection
+branches, this is direct branch-execution coverage rather than a production
+red/green repair.
+
+Exact verification for the round-1 delta:
+
+- `timeout 10m go test -count=1 -p 2 ./pkg/hub -run '^TestConstraintAuditHistory_InvalidTokensFailBeforeHistoryQuery$'`
+  — PASS (`ok`, 1.032s test execution after the cold compile).
+- `timeout 10m go test -v -count=1 -p 2 ./pkg/hub -run '^TestConstraintAuditHistory_'`
+  — PASS (all focused endpoint/history tests; `ok`, 4.049s).
+- `gofmt -l pkg/hub/handlers_access_constraint_audit_history_test.go` — PASS,
+  no output.
+- `git diff --check` — PASS.
+
+The prior long Hub race, scoped lint, broad vet/build, and other milestone gates
+were intentionally not rerun for this test-only delta. Their statuses and the
+accepted unchanged evidence above remain unchanged.
