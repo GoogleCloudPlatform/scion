@@ -307,8 +307,8 @@ func TestBuildPod_NFSBackend_InitContainer_Present_NonGit(t *testing.T) {
 	}
 
 	ic := pod.Spec.InitContainers[0]
-	assert.Equal(t, []string{"sciontool", "provision"}, ic.Command,
-		"non-git init container should run plain provision, no clone flags")
+	assert.Equal(t, []string{"sciontool", "provision", "--uid", "1000", "--gid", "1000"}, ic.Command,
+		"non-git init container should run plain provision with ownership flags only, no clone flags")
 	var hasProjectID bool
 	for _, env := range ic.Env {
 		if env.Name == "SCION_CLONE_URL" || env.Name == "SCION_CLONE_BRANCH" {
