@@ -729,11 +729,12 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	// as on GET (stripPreferencesForViewer; used by getUser and listUsers).
 	// Computed independently here rather than reusing the
 	// needsCrossUserUpdate decision above, because that permission check
-	// does not run for every request shape that can reach this point.
-	if identity := GetIdentityFromContext(ctx); identity != nil {
-		cap := s.authzService.ComputeCapabilities(ctx, identity, userResource(user))
-		stripPreferencesForViewer(ctx, user, cap)
-	}
+	// does not run for every request shape that can reach this point. Uses
+	// actor (already established above) rather than a fresh
+	// GetIdentityFromContext lookup, so this call is unconditional rather
+	// than defaulting to "skip the strip" were that lookup ever nil.
+	cap := s.authzService.ComputeCapabilities(ctx, actor, userResource(user))
+	stripPreferencesForViewer(ctx, user, cap)
 
 	writeJSON(w, http.StatusOK, user)
 }

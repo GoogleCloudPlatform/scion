@@ -251,6 +251,25 @@ func TestUpdateUser_Preferences_LocalRejected(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 }
 
+// TestUpdateUser_Preferences_RightPosixPrefixRejected verifies that a
+// "right/" or "posix/" prefixed name is rejected at the PATCH endpoint, not
+// just in validateUserTimezone's own table test above: time.LoadLocation
+// resolves against the host's zoneinfo directory, so these names succeed on
+// a host whose tree has them, which is exactly the host-dependent
+// non-portability "Local" and "posixrules" are already denied for.
+func TestUpdateUser_Preferences_RightPosixPrefixRejected(t *testing.T) {
+	srv, s := testServer(t)
+	devUser := getDevUser(t, srv, s)
+
+	for _, tz := range []string{"right/Asia/Tokyo", "posix/Asia/Tokyo"} {
+		t.Run(tz, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+devUser.ID,
+				map[string]any{"preferences": map[string]any{"timezone": tz}})
+			assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		})
+	}
+}
+
 // TestListUsers_PreferencesVisibility verifies that a member listing users
 // does not see another user's preferences, but does see their own, and an
 // admin sees everyone's.
