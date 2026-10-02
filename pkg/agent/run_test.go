@@ -4345,7 +4345,7 @@ func TestRepoRootComparisonMatrix(t *testing.T) {
 	}
 }
 
-// TestStartRepoRootSurvivesResumeAfterAMismatchedFirstDispatch is R3-N1: a
+// TestStartRepoRootSurvivesResumeAfterAMismatchedFirstDispatch covers a
 // single dispatch whose root and workspace values arrive in two different
 // spellings (root reached through a symlinked ancestor, workspace already
 // resolved) still agrees between RunConfig.RepoRoot and the persisted value,
@@ -4420,17 +4420,17 @@ func TestStartRepoRootSurvivesResumeAfterAMismatchedFirstDispatch(t *testing.T) 
 	}
 }
 
-// TestStartPersistsLeafAliasRootAsGiven is R3-N2: the leaf-alias analogue of
+// TestStartPersistsLeafAliasRootAsGiven is the leaf-alias analogue of
 // TestStartPersistsTheAliasNotTheResolvedBase. See that test's own comment
 // for why an ancestor-alias root does not discriminate against persisting a
 // resolved form (every real version of the persistence gate in this
 // package's history has always written its root argument exactly as given,
 // so a root reached through an ancestor alias was never actually at risk of
 // being persisted resolved). A root whose OWN final path element is a
-// symlink exercises the identical property against the fuller fix this
-// round adds (resolving the root for comparison purposes only): this test
-// would fail if the comparison's resolved form were ever written instead of
-// the original.
+// symlink exercises the identical property against the fuller resolution
+// validatedWorktreeRepoRoot now applies for comparison purposes only: this
+// test would fail if the comparison's resolved form were ever written
+// instead of the original.
 func TestStartPersistsLeafAliasRootAsGiven(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	tmpDir := t.TempDir()
@@ -4474,8 +4474,8 @@ func TestStartPersistsLeafAliasRootAsGiven(t *testing.T) {
 	}
 }
 
-// TestValidatedWorktreeRepoRootAcceptsAliasedRootAgainstResolvedWorkspace is
-// R3-Nit1: the workspace-storage-backend re-validation in Start (triggered
+// TestValidatedWorktreeRepoRootAcceptsAliasedRootAgainstResolvedWorkspace
+// covers the workspace-storage-backend re-validation in Start (triggered
 // when a non-local backend replaces effectiveWorkspace with its own mount
 // host path, already fully resolved) calls the exact same shared comparison
 // as every other call site in this file. This exercises that comparison
