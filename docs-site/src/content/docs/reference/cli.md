@@ -62,6 +62,17 @@ starting a **stopped** or **error** agent runs a fresh session. See
     - `--broker <string>`: Preferred runtime broker ID or name for execution.
     - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). Defaults to `project`. See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--notify`: Get notified via the browser or system when the spawned agent reaches a terminal state.
+    - `--no-wait`: *(Hub mode)* Return as soon as the Hub accepts the launch instead of waiting for the agent to reach `running`. Ignored with `--attach`.
+    - `--wait-timeout <duration>`: *(Hub mode)* How long to wait for the agent to start (for example `10m`). The default is the Hub's remaining launch budget plus 30 seconds, or 5 minutes when the Hub does not advertise one. Raise it if the Hub's launch timeout has been raised.
+
+In Hub mode, `start` waits until the agent is running and prints each launch
+step to stderr (nothing extra under `--format json`). If the wait times out, or
+you press Ctrl-C, only the wait stops: the launch continues on the Hub, and
+re-running `scion start <agent-name>` resumes waiting. Ctrl-C exits with status
+130; a failed launch or a timeout exits 1. If the agent's create did not
+complete (for example the image could not be pulled), the error shows the
+stored template and task; recreate the agent with `scion delete <agent-name>`
+followed by `scion start`.
 
 ### `scion stop`
 
@@ -104,6 +115,7 @@ session.
 - **Flags:**
     - `-a, --attach`: Attach to the agent immediately.
     - `-f, --force`: Force resume an agent in the `error` phase. This attempts an in-place restart of a crashed or interrupted session, preserving the prior harness conversation state instead of starting fresh.
+    - `--no-wait`, `--wait-timeout <duration>`: *(Hub mode)* Same as for [`scion start`](#scion-start-or-run).
 
 ### `scion attach`
 

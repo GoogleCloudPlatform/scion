@@ -92,6 +92,22 @@ When writing a brief, make the Reporting row explicit enough that the agent
 knows who to message for decisions. If different questions go to different
 people, say so.
 
+### Waiting for the agent to start
+
+In Hub mode `scion start` waits until the agent is running (or its launch
+fails) before returning. The default wait is the Hub's remaining launch budget
+plus 30 seconds, or 5 minutes when the Hub does not report one.
+
+- Pass `--wait-timeout <duration>` (for example `--wait-timeout 15m`) to wait
+  longer — needed if the Hub's launch timeout has been raised.
+- If the wait times out, the launch keeps going on the Hub. Re-run
+  `scion start <name>` to resume waiting; it does not start a second agent.
+- Pass `--no-wait` to return as soon as the Hub accepts the launch; check
+  progress later with `scion look <name>` or `scion list`.
+- If the error says the create did not complete, the agent cannot be
+  restarted: recreate it with `scion delete <name>` and `scion start` with the
+  same template and task (both are shown in the error).
+
 For shell-escaping rules when passing prompts, see the `scion-cli-operations` skill —
 do not improvise quoting.
 

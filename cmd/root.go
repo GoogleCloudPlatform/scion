@@ -4,6 +4,7 @@ Copyright © 2025 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -286,6 +287,10 @@ func Execute() {
 		fmt.Fprintf(os.Stderr, "\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset)
 		if shouldShowUsageOnError(cmd, autoHelp) {
 			_ = cmd.Usage()
+		}
+		var ec exitCoder
+		if errors.As(err, &ec) && ec.ExitCode() > 0 {
+			os.Exit(ec.ExitCode())
 		}
 		os.Exit(1)
 	}

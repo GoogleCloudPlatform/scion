@@ -886,6 +886,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		Notify:          !startNoNotify,
 		AgentRole:       agentRoleFlag,
 		MessageMode:     messageModeFlag,
+		// Opt in to a non-blocking launch; the CLI waits for it below. A
+		// Hub without async launch ignores this and answers synchronously.
+		AcceptAsyncLaunch: true,
 	}
 
 	// Wire --service-account flag into the GCP identity assignment.
@@ -1012,6 +1015,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		if debugMode {
 			util.Debugf("[env-gather] startAgentViaHub: create request failed: %v", err)
 		}
+		if apiErr, ok := asIncompleteCreate(err); ok {
+			return incompleteCreateError(agentName, apiErr)
+		}
 		return wrapHubError(fmt.Errorf("failed to start agent via Hub: %w", err))
 	}
 
@@ -1108,6 +1114,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	}
 
 	// Workspace bootstrap: upload files and finalize
+	workspaceFinalized := false
 	if len(workspaceFiles) > 0 && len(resp.UploadURLs) == 0 {
 		statusln("Using local workspace on broker.")
 	}
@@ -1133,61 +1140,68 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 
 		finalizeResp, err := hubCtx.Client.Workspace().FinalizeSyncTo(ctx, agentSlug, manifest)
 		if err != nil {
+			if apiErr, ok := asIncompleteCreate(err); ok {
+				return incompleteCreateError(agentName, apiErr)
+			}
 			return fmt.Errorf("failed to finalize workspace bootstrap: %w", err)
 		}
 		statusf("Workspace uploaded: %d files\n", finalizeResp.FilesApplied)
+		workspaceFinalized = true
+	}
 
-		// Poll until agent is running
+	// Decide whether to wait for the agent to reach running:
+	//   - after a workspace finalize, which dispatches the start;
+	//   - when the Hub accepted the create for an asynchronous launch;
+	//   - with --attach, which needs a running agent.
+	// A synchronous answer from a Hub without async launch needs no wait,
+	// exactly as before. --no-wait returns once the Hub has accepted.
+	needWait := workspaceFinalized || launchActive(resp.Agent) || (attach && !isJSONOutput())
+	if startNoWait && !attach {
+		needWait = false
+	}
+
+	finalAgent := resp.Agent
+	if needWait {
 		statusf("Waiting for agent '%s' to start...\n", agentName)
-		pollCtx, pollCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer pollCancel()
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-pollCtx.Done():
-				return fmt.Errorf("timed out waiting for agent '%s' to start", agentName)
-			case <-ticker.C:
-				agent, err := hubCtx.Client.ProjectAgents(projectID).Get(pollCtx, agentName)
-				if err != nil {
-					continue
-				}
-				agentPhase, _ := hubAgentPhaseActivity(agent.Phase, agent.Activity, agent.Status)
-				if agentPhase == string(state.PhaseRunning) {
-					statusf("Agent '%s' started via Hub.\n", agentName)
-					if !attach {
-						return nil
-					}
-					if err := attachUnsupportedErr(pollCtx, hubCtx, agent.Runtime, agent.RuntimeBrokerID, agentProfileName(agent)); err != nil {
-						return err
-					}
-					// Fall through to attach logic below
-					agentID := agent.ID
-					if agentID == "" {
-						agentID = agentName
-					}
-					attachOpts, transportSrc, err := resolveAttachOptions()
-					if err != nil {
-						return err
-					}
-					token := getHubAccessToken(hubCtx.Endpoint)
-					if token == "" && transportSrc == nil {
-						return fmt.Errorf("no access token found for Hub\n\nPlease login first: scion hub auth login")
-					}
-					statusf("Attaching to agent '%s' via Hub...\n", agentName)
-					return wsclient.AttachToAgent(context.Background(), hubCtx.Endpoint, token, agentID, attachOpts...)
-				}
-				if agentPhase == string(state.PhaseError) || agentPhase == string(state.PhaseStopped) {
-					return fmt.Errorf("agent '%s' failed to start (phase: %s)", agentName, agentPhase)
-				}
-			}
+		var progress io.Writer
+		if !isJSONOutput() {
+			progress = os.Stderr
 		}
+		// The create response's agent seeds the wait budget unless it was
+		// superseded by a workspace finalize.
+		budgetFrom := resp.Agent
+		if workspaceFinalized {
+			budgetFrom = nil
+		}
+		// Ctrl-C stops waiting only; the launch continues on the Hub.
+		waitCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		waited, err := waitForAgentLaunch(waitCtx, launchWaitOptions{
+			AgentName:  agentName,
+			BudgetFrom: budgetFrom,
+			Get: func(ctx context.Context) (*hubclient.Agent, error) {
+				return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
+			},
+			Timeout:  startWaitTimeout,
+			Progress: progress,
+		})
+		stopSignals()
+		if err != nil {
+			for _, w := range resp.Warnings {
+				fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+			}
+			return err
+		}
+		finalAgent = waited
 	}
 
 	displayStatus := "started"
 	if resume {
 		displayStatus = "resumed"
+	}
+	launching := !needWait && launchActive(finalAgent)
+	message := fmt.Sprintf("Agent '%s' %s via Hub.", agentName, displayStatus)
+	if launching {
+		message = fmt.Sprintf("Agent '%s' accepted by Hub and launching.", agentName)
 	}
 
 	if isJSONOutput() {
@@ -1195,29 +1209,38 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 			Status:   "success",
 			Command:  "start",
 			Agent:    agentName,
-			Message:  fmt.Sprintf("Agent '%s' %s via Hub.", agentName, displayStatus),
+			Message:  message,
 			Warnings: resp.Warnings,
 			Details:  map[string]interface{}{},
 		}
-		if resp.Agent != nil {
-			result.Details["slug"] = resp.Agent.Slug
-			phase, activity := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
+		if finalAgent != nil {
+			result.Details["slug"] = finalAgent.Slug
+			phase, activity := hubAgentPhaseActivity(finalAgent.Phase, finalAgent.Activity, finalAgent.Status)
 			result.Details["phase"] = phase
 			if activity != "" {
 				result.Details["activity"] = activity
 			}
-			if resp.Agent.RuntimeBrokerID != "" {
-				result.Details["runtimeBrokerId"] = resp.Agent.RuntimeBrokerID
+			if finalAgent.RuntimeBrokerID != "" {
+				result.Details["runtimeBrokerId"] = finalAgent.RuntimeBrokerID
+			}
+			if launching {
+				result.Details["launchId"] = finalAgent.Launch.ID
+				if finalAgent.Launch.Deadline != nil {
+					result.Details["launchDeadline"] = finalAgent.Launch.Deadline.UTC().Format(time.RFC3339)
+				}
 			}
 		}
 		return outputJSON(result)
 	}
 
-	statusf("Agent '%s' %s via Hub.\n", agentName, displayStatus)
-	if resp.Agent != nil {
-		statusf("Agent Slug: %s\n", resp.Agent.Slug)
-		phase, _ := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
+	statusf("%s\n", message)
+	if finalAgent != nil {
+		statusf("Agent Slug: %s\n", finalAgent.Slug)
+		phase, _ := hubAgentPhaseActivity(finalAgent.Phase, finalAgent.Activity, finalAgent.Status)
 		statusf("Phase: %s\n", phase)
+	}
+	if launching {
+		statusf("Follow the launch with: scion start %s (waits until it is running)\n", agentName)
 	}
 	for _, w := range resp.Warnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
@@ -1227,65 +1250,31 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		return nil
 	}
 
-	// Attach mode: wait for agent to be running, then attach via WebSocket
+	// Attach mode: the wait above returned a running agent.
 	agentID := ""
-	agentRuntime := ""
-	agentBrokerID := ""
-	agentProfile := ""
 	if resp.Agent != nil {
 		agentID = resp.Agent.ID
+	}
+	// agentID keeps the create response's ID unless the fetch returned a
+	// non-empty one. Runtime, broker and profile always take the fetched
+	// value, even if empty: "" is itself a meaningful attach-is-supported
+	// value to attachUnsupportedErr.
+	var agentRuntime, agentBrokerID, agentProfile string
+	if finalAgent != nil {
+		if finalAgent.ID != "" {
+			agentID = finalAgent.ID
+		}
+		agentRuntime = finalAgent.Runtime
+		agentBrokerID = finalAgent.RuntimeBrokerID
+		agentProfile = agentProfileName(finalAgent)
 	}
 	if agentID == "" {
 		agentID = agentName
 	}
 
-	// Poll until the agent is running
-	statusf("Waiting for agent '%s' to be ready...\n", agentName)
-	pollCtx, pollCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer pollCancel()
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-pollCtx.Done():
-			return fmt.Errorf("timed out waiting for agent '%s' to become ready", agentName)
-		case <-ticker.C:
-			agent, err := hubCtx.Client.ProjectAgents(projectID).Get(pollCtx, agentName)
-			if err != nil {
-				continue // Retry on transient errors
-			}
-			agentPhase, _ := hubAgentPhaseActivity(agent.Phase, agent.Activity, agent.Status)
-			if agentPhase == string(state.PhaseRunning) {
-				// agentID keeps its prior value (the create response's ID, or
-				// agentName) unless this fetch returned a non-empty one, since
-				// an empty ID here would be a regression, not new information.
-				if agent.ID != "" {
-					agentID = agent.ID
-				}
-				// agentRuntime, agentBrokerID and agentProfile always take
-				// this fetch's value, even if empty: unlike agentID there is
-				// no better fallback to protect, and "" is itself a
-				// meaningful attach-is-supported value to
-				// attachUnsupportedErr below.
-				agentRuntime = agent.Runtime
-				agentBrokerID = agent.RuntimeBrokerID
-				agentProfile = agentProfileName(agent)
-				goto ready
-			}
-			if agentPhase == string(state.PhaseError) || agentPhase == string(state.PhaseStopped) {
-				statusInfo := agent.Status
-				if agent.ContainerStatus != "" {
-					statusInfo += fmt.Sprintf(", container: %s", agent.ContainerStatus)
-				}
-				return fmt.Errorf("agent '%s' failed to start (phase: %s)", agentName, statusInfo)
-			}
-		}
-	}
-
-ready:
-	if err := attachUnsupportedErr(pollCtx, hubCtx, agentRuntime, agentBrokerID, agentProfile); err != nil {
+	attachCtx, attachCancel := context.WithTimeout(context.Background(), launchFetchTimeout)
+	defer attachCancel()
+	if err := attachUnsupportedErr(attachCtx, hubCtx, agentRuntime, agentBrokerID, agentProfile); err != nil {
 		return err
 	}
 
