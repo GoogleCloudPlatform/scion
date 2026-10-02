@@ -31,7 +31,7 @@ Every agent operates on the same repository history but has an independent worki
 
 - **Isolation:** per-agent working tree; shared history.
 - **Requires git:** yes.
-- **Availability:** supported in **local mode** and on **Hub-managed projects** (requires git 2.48 or later on the broker).
+- **Availability:** supported in **local mode** and on **Hub-managed projects** (requires git 2.48 or later on the broker; on Kubernetes, the NFS workspace backend).
 - **Best for:** local git projects where multiple agents work in parallel on the same repository.
 
 ### Clone-per-agent
