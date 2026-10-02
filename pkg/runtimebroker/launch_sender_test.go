@@ -497,3 +497,71 @@ func TestLaunchSender_FanOut401DoesNotPinButOthersStillConsulted(t *testing.T) {
 		t.Fatalf("OwnerHub = %q, want hub-b (401 from hub-a must not pin)", got)
 	}
 }
+
+// TestLaunchSender_ClaimEndsBackoffWhenAbortRecorded covers SendClaim's
+// backoff wait: with the hub unreachable, an abort recorded while the first
+// attempt is in flight must end the claim from inside the backoff, well
+// before reportMinBackoff (1s) elapses and the next attempt's own pre-check
+// would notice it.
+func TestLaunchSender_ClaimEndsBackoffWhenAbortRecorded(t *testing.T) {
+	var attempts int32
+	var s *launchSender
+	rtb := &mockRuntimeBrokerService{
+		launchReportFunc: func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+			if atomic.AddInt32(&attempts, 1) == 1 {
+				s.recordKeepaliveAbort(gateAbortCleanup, &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonDeleted})
+			}
+			return nil, errors.New("simulated unreachable")
+		},
+	}
+	s = newTestLaunchSender(t, rtb, time.Hour)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := s.SendClaim(ctx)
+	elapsed := time.Since(start)
+	if !errors.Is(err, errAbortedByKeepalive) {
+		t.Fatalf("SendClaim error = %v, want errAbortedByKeepalive", err)
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("SendClaim took %v to notice the recorded abort; want it to end the backoff wait immediately (< 500ms, below reportMinBackoff)", elapsed)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Fatalf("expected exactly one attempt, got %d", got)
+	}
+}
+
+// TestLaunchSender_TerminalNotEndedByAbortRecordedDuringIt covers
+// SendTerminal ignoring an abort recorded while it is retrying: from the
+// terminal's first attempt on, only the terminal's own answer decides the
+// outcome (design §3.8.5). Attempt 1 is unreachable and an abort is recorded
+// during it; attempt 2 must still happen and its answer be returned.
+func TestLaunchSender_TerminalNotEndedByAbortRecordedDuringIt(t *testing.T) {
+	var attempts int32
+	var s *launchSender
+	rtb := &mockRuntimeBrokerService{
+		launchReportFunc: func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+			if atomic.AddInt32(&attempts, 1) == 1 {
+				s.recordKeepaliveAbort(gateAbortCleanup, &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonDeleted})
+				return nil, errors.New("simulated unreachable")
+			}
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		},
+	}
+	s = newTestLaunchSender(t, rtb, time.Hour)
+
+	// reportMaxBackoff (10s) plus slack for the second attempt.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	result, err := s.SendTerminal(ctx, false, "launching", "runtime_error", "boom", nil)
+	if err != nil {
+		t.Fatalf("SendTerminal error = %v, want the second attempt's answer (an abort recorded during the terminal must not end it)", err)
+	}
+	if result == nil || result.Result != hubclient.AgentLaunchReportResultApplied {
+		t.Fatalf("SendTerminal result = %+v, want applied from the second attempt", result)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 2 {
+		t.Fatalf("expected exactly two attempts, got %d", got)
+	}
+}

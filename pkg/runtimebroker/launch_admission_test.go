@@ -49,6 +49,7 @@ type asyncManager struct {
 	startErr       error
 	startCalls     int
 	startBlock     chan struct{} // if non-nil, Start waits on it (or ctx) before returning
+	startCancelErr error         // if non-nil, returned instead of ctx.Err() when ctx ends a blocked Start
 	cleanupCalls   int
 	cleanupLast    []agent.ResourceHandle
 	cleanupBlock   chan struct{} // if non-nil, CleanupLaunch waits on it (or ctx) before returning
@@ -84,12 +85,16 @@ func (m *asyncManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	m.lastStartCtx = ctx
 	block := m.startBlock
 	startErr := m.startErr
+	cancelErr := m.startCancelErr
 	m.mu.Unlock()
 
 	if block != nil {
 		select {
 		case <-block:
 		case <-ctx.Done():
+			if cancelErr != nil {
+				return nil, cancelErr
+			}
 			return nil, ctx.Err()
 		}
 	}

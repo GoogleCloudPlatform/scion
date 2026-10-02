@@ -17,10 +17,13 @@ package runtimebroker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -602,4 +605,250 @@ func assertNoHTTPRequestField(t *testing.T, typ reflect.Type) {
 			t.Fatalf("%s.%s has type %s; the launch goroutine must never retain *http.Request", typ.Name(), f.Name, f.Type)
 		}
 	}
+}
+
+// killedCLIError returns the error an exec-based runtime (docker, podman,
+// apple) hands back when ctx' is cancelled while its CLI is running:
+// exec.CommandContext kills the process and Wait reports the process's own
+// *exec.ExitError ("signal: killed"), not context.Canceled, wrapped with %w
+// the way pkg/runtime wraps command failures.
+func killedCLIError(t *testing.T) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", "kill -9 $$").Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected an *exec.ExitError from a killed shell, got %T: %v", err, err)
+	}
+	wrapped := fmt.Errorf("failed to start container: %w", err)
+	if errors.Is(wrapped, context.Canceled) {
+		t.Fatal("the killed-CLI error must not match context.Canceled, or it does not exercise the ctx'-based check")
+	}
+	return wrapped
+}
+
+// assertNoTerminal fails the test if any succeeded or failed report was sent.
+func assertNoTerminal(t *testing.T, rtb *mockRuntimeBrokerService, what string) {
+	t.Helper()
+	for _, r := range rtb.getLaunchReports() {
+		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded || r.Report.State == hubclient.AgentLaunchReportStateFailed {
+			t.Fatalf("%s must send no terminal, got %+v", what, r.Report)
+		}
+	}
+}
+
+// TestRunLaunch_LocalCancelDuringStart_ExitErrorSendsNoTerminal covers a
+// local stop/delete during Start on an exec-based runtime: Start returns the
+// killed CLI's *exec.ExitError rather than context.Canceled, and the launch
+// must still be treated as locally cancelled (no terminal), not reported as
+// runtime_error.
+func TestRunLaunch_LocalCancelDuringStart_ExitErrorSendsNoTerminal(t *testing.T) {
+	mgr := newAsyncManager()
+	mgr.startBlock = make(chan struct{}) // Start blocks until ctx' is cancelled
+	mgr.startCancelErr = killedCLIError(t)
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	rec := newLaunchRecord("L-cancel-exit-err", "agent-cancel-exit-err", store.LaunchKindCreate, "", time.Now().Add(time.Hour), cancel)
+	lc := launchCtx{
+		opts: api.StartOptions{Name: "agent-cancel-exit-err"},
+		mgr:  mgr,
+		key:  launchKey{Slug: "agent-cancel-exit-err"},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		srv.runLaunch(ctx, rec, lc)
+		close(done)
+	}()
+
+	if !waitUntil(t, 2*time.Second, func() bool { return mgr.StartCallCount() >= 1 }) {
+		t.Fatal("expected Start to be called (and then blocked)")
+	}
+	rec.CancelLocal()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runLaunch did not return after a local cancel during Start")
+	}
+	assertNoTerminal(t, rtb, "a local cancel during Start that surfaces as an exec exit error")
+}
+
+// TestRunLaunch_LocalCancelDuringDownload_SendsNoTerminal covers a local
+// stop/delete during the GCS download step, whose error (whatever its value)
+// must not be reported as runtime_error either.
+func TestRunLaunch_LocalCancelDuringDownload_SendsNoTerminal(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	downloadStarted := make(chan struct{})
+	var downloadStartedOnce sync.Once
+	ctx, cancel := context.WithCancel(context.Background())
+	rec := newLaunchRecord("L-cancel-download", "agent-cancel-download", store.LaunchKindCreate, "", time.Now().Add(time.Hour), cancel)
+	lc := launchCtx{
+		opts: api.StartOptions{Name: "agent-cancel-download"},
+		mgr:  mgr,
+		key:  launchKey{Slug: "agent-cancel-download"},
+		downloadWorkspaceFromGCS: func(ctx context.Context, req CreateAgentRequest, opts api.StartOptions) (api.StartOptions, string, string, error) {
+			downloadStartedOnce.Do(func() { close(downloadStarted) })
+			<-ctx.Done()
+			return opts, "failed to download workspace from GCS", "Failed to download workspace from GCS: interrupted",
+				errors.New("failed to download workspace from GCS: interrupted")
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		srv.runLaunch(ctx, rec, lc)
+		close(done)
+	}()
+
+	select {
+	case <-downloadStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected the download to start")
+	}
+	rec.CancelLocal()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runLaunch did not return after a local cancel during the download")
+	}
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called after a local cancel during the download, got %d calls", n)
+	}
+	assertNoTerminal(t, rtb, "a local cancel during the download")
+}
+
+// TestRunLaunch_DeadlineDuringWaitSuperseded_FailsLaunchingWithLaunchTimeout
+// covers ctx' reaching its deadline while the launch is still waiting on a
+// superseded predecessor that never finishes: exactly one failed terminal,
+// launch_timeout, under the launching step (the claim was already applied),
+// and Start is never called.
+func TestRunLaunch_DeadlineDuringWaitSuperseded_FailsLaunchingWithLaunchTimeout(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	key := launchKey{Slug: "agent-deadline-wait-superseded"}
+	oldRec := newLaunchRecord("L-old-deadline-wait", "agent-old-deadline-wait", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
+	srv.launchRegistry.Begin(key, oldRec) // never released by this test
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	newRec := newLaunchRecord("L-new-deadline-wait", "agent-new-deadline-wait", store.LaunchKindCreate, "", time.Now().Add(time.Hour), cancel)
+	supersededDone := srv.launchRegistry.Begin(key, newRec)
+	if supersededDone == nil {
+		t.Fatal("expected Begin to return the predecessor's still-open done channel")
+	}
+	projectDir := t.TempDir()
+	lc := launchCtx{
+		opts:           api.StartOptions{Name: "agent-deadline-wait-superseded", ProjectPath: projectDir},
+		mgr:            mgr,
+		key:            key,
+		supersededDone: supersededDone,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		srv.runLaunch(ctx, newRec, lc)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runLaunch did not return after ctx' reached its deadline during WaitSuperseded")
+	}
+
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called when ctx' expires during WaitSuperseded, got %d calls", n)
+	}
+	var terminals []*hubclient.AgentLaunchReport
+	for _, r := range rtb.getLaunchReports() {
+		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded || r.Report.State == hubclient.AgentLaunchReportStateFailed {
+			terminals = append(terminals, r.Report)
+		}
+	}
+	if len(terminals) != 1 {
+		t.Fatalf("expected exactly one terminal, got %d: %+v", len(terminals), terminals)
+	}
+	got := terminals[0]
+	if got.State != hubclient.AgentLaunchReportStateFailed {
+		t.Fatalf("terminal state = %q, want failed", got.State)
+	}
+	if got.ErrorCode != "launch_timeout" {
+		t.Fatalf("terminal error code = %q, want launch_timeout", got.ErrorCode)
+	}
+	if got.Step != "launching" {
+		t.Fatalf("terminal step = %q, want launching (the claim was already applied)", got.Step)
+	}
+	if !strings.Contains(got.Message, "superseded launch") {
+		t.Fatalf("terminal message = %q, want it to name the superseded launch", got.Message)
+	}
+	if readLaunchMarker(projectDir, false, "agent-deadline-wait-superseded") != "" {
+		t.Fatal("expected no marker to have been written (the deadline hit before that step)")
+	}
+}
+
+// TestRunLaunch_AbortRecordedAfterStartSelected_CleansUpWithoutTerminal
+// covers the IsAborted check right after runLaunch's select has taken
+// Start's result: an abort recorded at exactly that point (pinned with the
+// launchCtx.afterStartSelected test seam, since a real keepalive can only
+// land there by chance) must clean up once and send no terminal, rather than
+// reporting the successful Start.
+func TestRunLaunch_AbortRecordedAfterStartSelected_CleansUpWithoutTerminal(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	var hookCalls int
+	rec := newLaunchRecord("L-abort-after-start", "agent-abort-after-start", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
+	lc := launchCtx{
+		opts: api.StartOptions{Name: "agent-abort-after-start"},
+		mgr:  mgr,
+		key:  launchKey{Slug: "agent-abort-after-start"},
+		afterStartSelected: func(sender *launchSender) {
+			hookCalls++
+			sender.recordKeepaliveAbort(gateAbortCleanup, &hubclient.AgentLaunchReportResult{
+				HTTPStatus: http.StatusConflict,
+				Code:       hubclient.AgentLaunchReportCodeStaleLaunch,
+				Reason:     hubclient.AgentLaunchReportReasonDeleted,
+			})
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		srv.runLaunch(context.Background(), rec, lc)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runLaunch did not return")
+	}
+
+	if hookCalls != 1 {
+		t.Fatalf("expected the afterStartSelected seam to run once, got %d", hookCalls)
+	}
+	if n := mgr.StartCallCount(); n != 1 {
+		t.Fatalf("expected Start to be called once, got %d", n)
+	}
+	if n := mgr.CleanupCallCount(); n != 1 {
+		t.Fatalf("expected exactly one cleanup for the abort recorded after Start was selected, got %d", n)
+	}
+	assertNoTerminal(t, rtb, "an abort recorded right after Start's result was selected")
 }
