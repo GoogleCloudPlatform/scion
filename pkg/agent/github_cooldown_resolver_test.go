@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -276,5 +278,91 @@ func TestGitHubSkillResolver_SharedIdentityRateLimitFailsRestFast(t *testing.T) 
 	// Only ref a's three requests went out: c was held back.
 	if calls.Load() != 3 {
 		t.Errorf("expected 3 requests for ref a only, got %d", calls.Load())
+	}
+}
+
+// TestGitHubSkillResolver_CooldownWritesNothingToDisk: during a cooldown,
+// neither a stale entry served from a reloaded cache file nor a
+// rate_limited error is stored, so the cache file is left exactly as it
+// was. Three refs share the cooldown credential: one with an acceptable
+// stale entry (served), one whose stale entry has no file content (not
+// usable without the install credential, so it is resolved again and fails
+// fast), and one with no entry (fails fast).
+func TestGitHubSkillResolver_CooldownWritesNothingToDisk(t *testing.T) {
+	var calls atomic.Int64
+	mux := http.NewServeMux()
+	serveTestCommit(mux, "owner", "repo", &calls)
+	for _, name := range []string{"stale", "nocontent", "miss"} {
+		serveTestSkill(mux, "owner", "repo", name, &calls)
+	}
+	clock := newFakeClock()
+	r := newCooldownTestResolver(t, mux, clock)
+
+	keyFor := func(uri string) string {
+		ref, err := ParseGitHubSkillURI(uri)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resolutionCacheKey(ref, r.token)
+	}
+	const (
+		staleURI     = "gh://owner/repo/stale@main"
+		noContentURI = "gh://owner/repo/nocontent@main"
+		missURI      = "gh://owner/repo/miss@main"
+	)
+	now := time.Now()
+	dir := t.TempDir()
+	original := writeCacheFile(t, dir, map[string]*resolutionCacheEntry{
+		keyFor(staleURI): {
+			Skill:    ResolvedSkill{Name: "stale", URI: staleURI, Version: "stale"},
+			CachedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour), IsBranchRef: true,
+		},
+		keyFor(noContentURI): {
+			Skill: ResolvedSkill{Name: "nocontent", URI: noContentURI, Version: "stale",
+				Files: []ResolvedFile{{Path: "SKILL.md"}}},
+			CachedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour), IsBranchRef: true,
+		},
+	})
+	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.resolutionCache = cache
+	r.cooldown.record(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
+
+	res, err := r.Resolve(context.Background(), []api.SkillReference{
+		{URI: staleURI}, {URI: noContentURI}, {URI: missURI},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(res.Resolved) != 1 || res.Resolved[0].Version != "stale" {
+		t.Fatalf("expected only the stale entry to resolve, got %+v", res.Resolved)
+	}
+	if len(res.Errors) != 2 {
+		t.Fatalf("expected two errors, got %+v", res.Errors)
+	}
+	for _, e := range res.Errors {
+		if e.Code != GitHubRateLimitedCode {
+			t.Errorf("expected %s, got %+v", GitHubRateLimitedCode, e)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Errorf("expected no GitHub requests, got %d", calls.Load())
+	}
+
+	cache.Flush()
+	if n := cache.saveCount.Load(); n != 0 {
+		t.Errorf("expected no cache file rewrite during a cooldown, got %d", n)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, resolutionCacheFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Error("cache file changed during a cooldown")
+	}
+	if _, ok := cache.Get(keyFor(missURI)); ok {
+		t.Error("a rate_limited error must not be stored as a resolution")
 	}
 }
