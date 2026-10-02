@@ -87,3 +87,27 @@ sits at the pre-transaction branch, with a pointer to it from
   in-transaction denials as `governance:STATUS:REASON` strings, parsed by
   `isGovernanceError`. They could move to `governanceDenialError` and drop
   the string parser.
+
+## Addendum: cleanup review r1 fixes
+
+Review r1 on ptone/scion#2688 found two Low findings and one Nit. All three
+are fixed here, plus one test-hygiene FYI. Tests and comments only; no
+behaviour change.
+
+- **C1-1:** added `TestAddMember_LegacyPOST_NoProjectRoleUnderLockRefusal`.
+  A non-member super-admin passes the pre-transaction checks, the
+  `mmrAuthoritySwapStore` seam revokes its system super-admin binding before
+  the lock, and AddMember must return the exact under-lock decision with no
+  binding created. Mutating AddMember's under-lock decision to
+  `{x, y, 418}` makes the test fail, so the path is now pinned.
+- **C1-2:** reworded the `memberRoleDecision` header and the AssignableRoles
+  comment. What is shared is the per-check logic and the refusal
+  constructors. The fixed order binds only AssignableRoles, which is also
+  the only caller of the Credential and ActorAuthority checks. The PUT's
+  stage order lives in SetMemberRoles and is pinned by
+  `TestAssignableRoles_ConsistentWithPut`. The optional rewrite into
+  per-check helpers was declined to keep churn down.
+- **C1-3:** marked Phase T's fallback `return err` as defensive. The error
+  text is unchanged.
+- **FYI-3:** added `require.NotNil(t, d)` before reading `d.Details` in
+  `TestSetMemberRoles_MemberRoleDecision_CheckSelectionAndOrder`.
