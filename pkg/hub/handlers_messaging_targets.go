@@ -199,7 +199,8 @@ func (s *Server) findLiveProjectAgent(ctx context.Context, projectID, ref string
 		return nil, err
 	}
 	// The slug lookup excludes soft-deleted agents; the ID lookup does not.
-	if !agent.DeletedAt.IsZero() {
+	// A (nil, nil) result from the store is treated as not found.
+	if agent == nil || !agent.DeletedAt.IsZero() {
 		return nil, nil
 	}
 	return agent, nil

@@ -316,3 +316,37 @@ func markAgentSoftDeleted(t *testing.T, s store.Store, agentID string) {
 	a.DeletedAt = time.Now()
 	require.NoError(t, s.UpdateAgent(ctx, a))
 }
+
+// nilAgentLookupStore returns (nil, nil) from GetAgentBySlug for slugRef,
+// simulating a store that reports "no row" without ErrNotFound.
+type nilAgentLookupStore struct {
+	store.Store
+	slugRef string
+}
+
+func (n *nilAgentLookupStore) GetAgentBySlug(ctx context.Context, projectID, slug string) (*store.Agent, error) {
+	if slug == n.slugRef {
+		return nil, nil
+	}
+	return n.Store.GetAgentBySlug(ctx, projectID, slug)
+}
+
+// A (nil, nil) lookup result must be treated as not found, not dereferenced.
+func TestMessagingTargetsLookup_NilAgentResult_Returns404(t *testing.T) {
+	srv, s, _, _, _, _, _, _ := cpmSetup(t)
+	srv.store = &nilAgentLookupStore{Store: s, slugRef: "agent-beta"}
+
+	rr := targetsResolveAsAgentA(srv, "project=project-b&agent=agent-beta")
+	require.Equal(t, http.StatusNotFound, rr.Code, "body: %s", rr.Body.String())
+}
+
+func TestConversationResolveLookup_NilAgentResult_NotExists(t *testing.T) {
+	srv, s, _, projectB, _, _, _, _ := cpmSetup(t)
+	srv.store = &nilAgentLookupStore{Store: s, slugRef: "agent-beta"}
+
+	rr := conversationResolveAsAgentA(srv, "reference=@agent-beta&project_id="+projectB)
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var resp conversationResolveResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.False(t, resp.Exists)
+}
