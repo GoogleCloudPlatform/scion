@@ -270,13 +270,50 @@ scan test failed on fork CI's `ubuntu-latest` runner.** This dev container's
 measurement note); GitHub's runner ships the fuller package, which includes
 those two whole-tree duplicates (`right/` with leap seconds baked in,
 `posix/` without) under a path prefix that isn't itself part of any IANA
-zone name — `"right/Africa/Abidjan"` isn't a name `time.LoadLocation`
-accepts either. The scan correctly walked into them and found 596 "false
+zone name. The scan correctly walked into them and found 596 "false
 rejects" that were not actually false: `isValidTimeZone` was right to
-reject a string that isn't a real zone name. Fixed by excluding the `right`
-and `posix` top-level directory names from the scan. Verified against a
-throwaway directory tree mimicking the structure, since this container
-can't reproduce it directly.
+reject a string that isn't a real zone name. Fixed (at the time) by
+excluding the `right` and `posix` top-level directory names from the scan.
+Verified against a throwaway directory tree mimicking the structure, since
+this container can't reproduce it directly. **Round 4 (R4-2) found the
+rationale given here was wrong — see below; the fix itself (excluding the
+two directories from the scan) was correct and unaffected.**
+
+### Round 4 review fixes
+
+**R4-1 [Low] — the zoneinfo scan skipped silently on a listing error, and
+would have failed on macOS.** The `try { ... } catch { return; }` around
+`listSystemZoneNames` made any error (a missing directory, `EACCES`, or
+anything else) a silent vitest pass instead of a visible skip — a CI image
+without tzdata would quietly lose the guard. Separately, the name-exclusion
+list (`zone.tab`, `leapseconds`, etc.) is itself "a hand-picked list that is
+always incomplete" — exactly what R3-1 fixed `isValidTimeZone` to stop
+being — and macOS ships `/usr/share/zoneinfo/+VERSION`, which that list
+didn't exclude, so `npm test` would fail for a macOS developer. Fixed by
+switching from a name-exclusion list to a content check: an entry counts as
+a zone only if it's a file (or a symlink to one) whose first 4 bytes are
+the TZif magic (RFC 8536 §3.1) — this drops every metadata/index file
+(`*.tab`, `leap*`, `tzdata.zi`, macOS's `+VERSION`) generically, on any
+distro, with no per-file naming. `it.skipIf(!existsSync(...))` replaces the
+try/catch, so a missing directory is a visible skip, not a silent pass.
+Re-measured on this container with the new approach: 484 entries (matching
+the round-4 reviewer's own measurement exactly), 0 false rejects.
+
+**R4-2 [Low] — wrong claim that `time.LoadLocation` rejects `right/...` and
+`posix/...` names; the server-side denylist didn't actually reject them.**
+`time.LoadLocation` resolves against the *host's* zoneinfo directory, so
+`LoadLocation("right/Asia/Tokyo")` succeeds wherever that tree exists
+(GitHub's `ubuntu-latest` runner included) — the opposite of what the R3-1
+scan's comment and this log's "CI-discovered fix" paragraph above claimed.
+So on such a host, `validateIANATimezone` actually accepted `right/...` and
+`posix/...` names through the API or `settings.yaml`, exactly the kind of
+host-dependent, non-portable name the denylist exists to stop. Fixed:
+`validateIANATimezone` (`pkg/hub/timezone_validate.go`) now also rejects
+any name with a `right/` or `posix/` prefix, alongside the existing
+`nonPortableTimezoneNames` denylist. Added cases to both handler test
+tables (`TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected`,
+`TestValidateUserTimezone`). Corrected the wrong claim in both this log (the
+paragraph above) and the `time.test.ts` comment.
 
 ### Note on ICU canonicalization
 
@@ -297,14 +334,15 @@ Documented in `time.test.ts` and exercised by the picker's R1-4 tests.
 | `pkg/hub/operational_settings.go` | `BuildLayer1SnapshotFromFile` now sets `DefaultTimezone`; doc comments corrected (R1-1) |
 | `pkg/hub/hub_agent_defaults.go` | Corrected `hubAgentDefaults()`'s stale file-mode doc comment (R1-1) |
 | `pkg/hub/admin_settings.go` | Added `validateDefaultTimezone` + file-mode 422 call site (R1-2); delegates to the shared `validateIANATimezone` (R2-1); collapsed to a direct delegation, no redundant wrapping (R3-3) |
-| `pkg/hub/timezone_validate.go` | New: shared `nonPortableTimezoneNames` denylist and `validateIANATimezone`, extracted so this PR and tz-refactor task 10 don't each declare their own copy (R2-1) |
+| `pkg/hub/timezone_validate.go` | New: shared `nonPortableTimezoneNames` denylist and `validateIANATimezone`, extracted so this PR and tz-refactor task 10 don't each declare their own copy (R2-1); also rejects a `right/`/`posix/` prefix (R4-2) |
 | `pkg/hub/handlers_users_core.go` | Task 10's `validateUserTimezone` now delegates to the shared `validateIANATimezone` instead of its own copy of the denylist (R2-1) |
 | `pkg/hub/admin_settings_db.go` | DB-mode 422 now calls the shared `validateDefaultTimezone` (R1-2, "On Local") |
 | `pkg/hub/admin_settings_test.go` | New file-mode tests: persisted+applied, clear round-trip, invalid-rejected (incl. denylist), valid-persisted (incl. aliases) |
-| `pkg/hub/admin_settings_db_test.go` | New: `TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected` |
+| `pkg/hub/admin_settings_db_test.go` | New: `TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected`; added `right/`/`posix/` cases (R4-2) |
+| `pkg/hub/handlers_users_timezone_test.go` | tz-refactor task 10's `TestValidateUserTimezone`: added `right/`/`posix/` cases (R4-2) |
 | `pkg/hub/httpdispatcher_test.go` | New: `TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode`, the dispatcher-level R1-1 proof; re-dispatches after the clear to assert `TZ` is absent (R2-6) |
 | `web/src/utils/time.ts` | Added `browserTimeZone`, `isValidTimeZone`, `listTimeZones`; `isValidTimeZone` tightened (R1-3); replaced with the exact-match-or-known-alias rule (R2-2), then with the `IANA_NAME_SHAPE` rule, dropping the alias set entirely (R3-1) |
-| `web/src/utils/time.test.ts` | Unit tests for the three helpers, incl. R1-3's case/offset cases, R2-2's lowercase-alias cases, R3-1's real-canonical-name cases and the `/usr/share/zoneinfo` scan; R1-7 comment fix |
+| `web/src/utils/time.test.ts` | Unit tests for the three helpers, incl. R1-3's case/offset cases, R2-2's lowercase-alias cases, R3-1's real-canonical-name cases and the `/usr/share/zoneinfo` scan; R1-7 comment fix; R4-1's TZif-magic rework (`skipIf`, content check) and R4-2's comment correction |
 | `web/src/components/shared/timezone-picker.ts` | New `<scion-timezone-picker>` shared component; R1-4/R1-5/R1-7 fixes; R2-3's `willUpdate` resync fix, then R3-2's first-render/`emptyLabel`-change fix |
 | `web/src/components/shared/timezone-picker.test.ts` | Unit tests for the picker, incl. R1-4/R1-5/R1-7 cases, R2-2's lowercase-alias case, R2-3's external-value-after-selection cases, R3-1's real-canonical-name case, and R3-2's first-render case |
 | `web/src/components/pages/admin-server-config.ts` | Added the Default Timezone field; fixed `handleSaveError`'s nested-error-shape bug (R1-2 addendum) |
@@ -403,6 +441,22 @@ fixer's new commits land on top of it).
   package (see "CI-discovered fix" above). Fixed, pushed, and the full web
   suite re-run locally (118 files / 3431 tests, all passing) plus the Go
   build/vet/lint selection above, all re-confirmed clean after the fix.
+
+## Round 4 test evidence
+
+Rebased onto `scion/tz-t10`'s head again (`21360ff` → `014a5cf`, the
+task-10 preference-visibility security fix — see that task's own project
+log for detail) at tz-em's instruction. Clean rebase, no conflicts.
+
+- `npm run typecheck` — clean. `go build -buildvcs=false -p 2 ./...` —
+  clean.
+- `npx vitest run src/utils/time.test.ts` — 18 passed, including the R4-1
+  TZif-magic scan (484 entries on this container, 0 false rejects —
+  matching the round-4 reviewer's own measurement exactly).
+- `gofmt -l` / `go vet -buildvcs=false ./pkg/hub/...` — clean.
+- `TZ=Asia/Tokyo go test -buildvcs=false -p 2 ./pkg/hub -run
+  'TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected|TestValidateUserTimezone|TestHandlePutServerConfig_DefaultTimezone'`
+  — all pass, including the new `right/`/`posix/` cases in both tables.
 
 ## Deferred / out of scope
 
