@@ -47,6 +47,7 @@ import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-events.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
+import { TERMINAL_PALETTE_OPEN_REQUEST_EVENT } from '../../client/terminal-palette-events.js';
 import { touchMenuItemStyles } from './touch-styles.js';
 import './notification-tray.js';
 import './inbox-tray.js';
@@ -361,7 +362,7 @@ export class ScionHeader extends LitElement {
     }
 
     /* Scoped to hover-capable devices, the same as .palette-option:hover in
-       chat-switcher.ts and for the same reason: on touch, :hover sticks
+       quick-palette.ts and for the same reason: on touch, :hover sticks
        after a tap until the next tap lands elsewhere — it would still be
        showing when the palette closes and focus returns to this button. */
     @media (hover: hover) {
@@ -877,36 +878,49 @@ export class ScionHeader extends LitElement {
   }
 
   // =========================================================================
-  // Palette button -- opens the chat quick switcher from the header
+  // Palette button -- opens a quick palette from the header: the chat quick
+  // switcher on a chat route, or the terminal view's agents-only "Jump to
+  // agent" palette on /terminals. One button, one render path, shared by
+  // both hosts -- see renderPaletteButton's own doc comment.
   // =========================================================================
 
   /**
-   * The header's quick-switcher button. Renders as a single element shared
-   * by every responsive tier (positioned via `.header-right`'s own flex
-   * layout, see the render() call site) rather than duplicated per tier.
-   * Visible on every width when signed in on a chat route: narrow screens
-   * need it most since they have no keyboard shortcut, but desktop keeps it
-   * too, both to discover the shortcut (via the tooltip) and for a
+   * The header's palette button. Renders as a single element shared by every
+   * responsive tier (positioned via `.header-right`'s own flex layout, see
+   * the render() call site) rather than duplicated per tier. Visible on
+   * every width when signed in on a route with a palette to open: narrow
+   * screens need it most since they have no keyboard shortcut, but desktop
+   * keeps it too, both to discover the shortcut (via the tooltip) and for a
    * pointer/trackpad user who would rather click than reach for a chord.
+   *
+   * Which route owns the click is resolved once here (`isChat`) and threaded
+   * through to the click handler, rather than re-resolved there: the route
+   * could otherwise change between render and click (unlikely for a header
+   * button, but this keeps the two in sync by construction rather than by
+   * coincidence).
    */
   private renderPaletteButton(): TemplateResult | typeof nothing {
     if (!this.user) return nothing;
-    if (!this.isChatView()) return nothing;
+    const isChat = this.isChatView();
+    const isTerminal = this.isTerminalView();
+    if (!isChat && !isTerminal) return nothing;
 
     const isTouch = this.touchPrimary.isTouch;
     const isMac = isMacPlatform();
     const shortcutLabel = isMac ? '⌘K' : 'Ctrl+K';
     const ariaKeyshortcuts = isMac ? 'Meta+K' : 'Control+K';
+    const label = isChat ? 'Quick switcher' : 'Jump to agent';
+    const ariaLabel = isChat ? 'Open quick switcher' : 'Open Jump to agent';
 
     return html`
-      <sl-tooltip content=${`Quick switcher (${shortcutLabel})`} ?disabled=${isTouch}>
+      <sl-tooltip content=${`${label} (${shortcutLabel})`} ?disabled=${isTouch}>
         <button
           type="button"
           class="palette-button"
-          aria-label="Open quick switcher"
+          aria-label=${ariaLabel}
           aria-haspopup="dialog"
           aria-keyshortcuts=${isTouch ? nothing : ariaKeyshortcuts}
-          @click=${(e: Event): void => this.handlePaletteButtonClick(e)}
+          @click=${(e: Event): void => this.handlePaletteButtonClick(e, isChat)}
         >
           <sl-icon name="compass" aria-hidden="true"></sl-icon>
         </button>
@@ -916,17 +930,20 @@ export class ScionHeader extends LitElement {
 
   /**
    * iOS and macOS Safari do not focus a `<button>` on click, so without this
-   * the deep active element the chat page captures as "what to restore
+   * the deep active element the owning host captures as "what to restore
    * focus to" would be whatever was focused before the click — which could
-   * be the composer, popping the on-screen keyboard back open the instant
-   * the palette closes. Focusing the button explicitly first, before
+   * be the chat composer, popping the on-screen keyboard back open the
+   * instant the palette closes. Focusing the button explicitly first, before
    * dispatching, makes capture reliably see this button instead.
    */
-  private handlePaletteButtonClick(e: Event): void {
+  private handlePaletteButtonClick(e: Event, isChat: boolean): void {
     const btn = e.currentTarget as HTMLElement;
     btn.focus({ preventScroll: true });
     this.dispatchEvent(
-      new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+      new CustomEvent(
+        isChat ? CHAT_PALETTE_OPEN_REQUEST_EVENT : TERMINAL_PALETTE_OPEN_REQUEST_EVENT,
+        { bubbles: true, composed: true }
+      )
     );
   }
 
@@ -1286,7 +1303,11 @@ export class ScionHeader extends LitElement {
   }
 
   private isTerminalView(): boolean {
-    const path = this.currentPath || window.location.pathname;
+    // Strip the query string first: `currentPath` is the router's raw path
+    // argument, which — for the multi-pane URL form (`/terminals?lv=1&...`)
+    // — still carries it, and `=== '/terminals'` would otherwise never
+    // match a bare multi-pane URL at all.
+    const path = (this.currentPath || window.location.pathname).split('?')[0];
     return path === '/terminals' || path.startsWith('/terminals/');
   }
 

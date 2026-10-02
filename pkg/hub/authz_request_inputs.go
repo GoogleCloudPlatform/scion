@@ -217,7 +217,8 @@ func (m *authzInputMemo) entryFor(key principalKey) *memoEntry {
 // or query a different ref set — authz_candelegate.go, authz_boundary.go's
 // project-scoped grant resolvers, hasActiveSystemRole, getEffectivePermissions
 // — must NOT use it; they keep their own direct loads, which this design
-// does not touch.
+// does not touch. ProjectMembershipEvidence uses it (via inputsForPrincipal)
+// because it issues exactly this unfiltered closure-plus-bindings query.
 //
 // A handle is used for exactly one decision (or one ResolveListScopes call)
 // and must not be reused across decisions or shared between goroutines.
@@ -252,6 +253,25 @@ func (a *AuthzService) inputsFor(ctx context.Context, identity Identity) *princi
 		h.key = principalKey{normType: NormalizePrincipalType(identity.Type()), id: identity.ID()}
 	}
 	h.memo = authzInputMemoFromContext(ctx)
+	return h
+}
+
+// inputsForPrincipal returns a memo-backed handle for principal, or nil when
+// no memo is visible in ctx, principal carries no Identity, the principal
+// type is not memoized, or principal.Identity does not resolve to the same
+// principalKey as principal.Kind/ID. A nil return means the caller keeps its
+// own direct load. Used by ProjectMembershipEvidence (authz_boundary.go),
+// whose closure and unscoped-bindings query is the same shape this memo
+// serves for decide.
+func (a *AuthzService) inputsForPrincipal(ctx context.Context, principal PrincipalContext) *principalInputs {
+	if principal.Identity == nil || authzInputMemoFromContext(ctx) == nil {
+		return nil
+	}
+	h := a.inputsFor(ctx, principal.Identity)
+	want := principalKey{normType: NormalizePrincipalType(string(principal.Kind)), id: principal.ID}
+	if h.key != want || !h.memoEligible() {
+		return nil
+	}
 	return h
 }
 

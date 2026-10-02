@@ -3196,15 +3196,14 @@ func isWorkspaceEmpty(path string) bool {
 		return true
 	}
 	// Filter out known marker entries that don't indicate a real workspace
+	// (provisioning markers and shared-dir mount points; see
+	// api.IsWorkspaceMarker).
 	for _, e := range entries {
-		switch e.Name() {
-		case ".scion", ".scion-volumes", ".agents":
-			// Provisioning marker / shared-dir mount directory — ignore
+		if api.IsWorkspaceMarker(e.Name()) {
 			continue
-		default:
-			log.Debug("Workspace not empty: found %q in %s", e.Name(), path)
-			return false
 		}
+		log.Debug("Workspace not empty: found %q in %s", e.Name(), path)
+		return false
 	}
 	return true
 }

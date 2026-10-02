@@ -242,38 +242,29 @@ func TestGitHubSkillResolver_RateLimit(t *testing.T) {
 	if len(result.Errors) != 1 {
 		t.Fatalf("expected 1 error, got %d", len(result.Errors))
 	}
+	if result.Errors[0].Code != GitHubRateLimitedCode {
+		t.Errorf("expected code %q, got %q", GitHubRateLimitedCode, result.Errors[0].Code)
+	}
 	if !strings.Contains(result.Errors[0].Message, "rate limit") {
 		t.Errorf("expected error to mention rate limit, got %s", result.Errors[0].Message)
 	}
-	if !strings.Contains(result.Errors[0].Message, "GITHUB_TOKEN") {
-		t.Errorf("expected error to mention GITHUB_TOKEN, got %s", result.Errors[0].Message)
+	if !strings.Contains(result.Errors[0].Message, "gh://owner/repo/my-skill@main") {
+		t.Errorf("expected error to name the ref, got %s", result.Errors[0].Message)
 	}
-	// Verify retries happened before the final rate-limit error
-	if attempts > 1 {
-		t.Logf("retried %d times before giving up (expected with backoff)", attempts-1)
+	// A rate-limit response starts a cooldown instead of being retried.
+	if attempts != 1 {
+		t.Errorf("expected exactly 1 attempt, got %d", attempts)
 	}
 }
 
-func TestGitHubSkillResolver_RetryOn429(t *testing.T) {
+func TestGitHubSkillResolver_NoRetryOn429(t *testing.T) {
 	server, mux := newTestGitHubServer(t)
 
 	attempts := 0
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, r *http.Request) {
 		attempts++
-		if attempts <= 2 {
-			w.Header().Set("Retry-After", "0")
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		_, _ = w.Write([]byte(testCommitSHA))
-	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
-			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
-		})
-	})
-	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("hello"))
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
 	})
 
 	resolver := newTestGitHubResolver(server)
@@ -285,14 +276,11 @@ func TestGitHubSkillResolver_RetryOn429(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
-	if len(result.Errors) != 0 {
-		t.Fatalf("unexpected errors: %v", result.Errors)
+	if len(result.Errors) != 1 || result.Errors[0].Code != GitHubRateLimitedCode {
+		t.Fatalf("expected one rate_limited error, got %+v", result.Errors)
 	}
-	if len(result.Resolved) != 1 {
-		t.Fatalf("expected 1 resolved skill, got %d", len(result.Resolved))
-	}
-	if attempts < 3 {
-		t.Errorf("expected at least 3 attempts, got %d", attempts)
+	if attempts != 1 {
+		t.Errorf("expected exactly 1 attempt, got %d", attempts)
 	}
 }
 

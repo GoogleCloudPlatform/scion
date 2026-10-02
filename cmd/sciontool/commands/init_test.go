@@ -15,6 +15,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1844,6 +1845,88 @@ func TestRequirePrivilegeDropOrFail_EnforcedRefusesRootUIDWithNonRootGID(t *test
 	}
 }
 
+// TestGitCloneWorkspace_FailedCloneKeepsWorkspaceDir covers a workspace
+// that is the root of a mount, as on Kubernetes where /workspace is a
+// volume mount: the directory itself cannot be removed or replaced. A
+// failed clone must clean up only the directory's contents, leaving the
+// same directory (same inode) and anything that was already in it, so a
+// retry clones into it again.
+func TestGitCloneWorkspace_FailedCloneKeepsWorkspaceDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	originDir := t.TempDir()
+	runGitForTest(t, originDir, "init", "-b", "main")
+	runGitForTest(t, originDir, "config", "user.email", "test@example.com")
+	runGitForTest(t, originDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(originDir, "README.md"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, originDir, "add", "README.md")
+	runGitForTest(t, originDir, "commit", "-m", "init")
+
+	// The workspace directory exists before the clone, with a marker
+	// directory in it, as the mount and the runtime leave it.
+	workspacePath := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(filepath.Join(workspacePath, ".scion-volumes"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the directory open, so a removed directory's inode stays in use
+	// and cannot be handed to a new directory at the same path.
+	handle, err := os.Open(workspacePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = handle.Close() })
+	before, err := handle.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("SCION_GIT_CLONE_URL", "file://"+originDir)
+	t.Setenv("SCION_GIT_BRANCH", "main")
+	t.Setenv("SCION_GIT_DEPTH", "")
+	t.Setenv("SCION_AGENT_NAME", "test-agent")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("SCION_WORKSPACE_PATH", workspacePath)
+	t.Setenv("SCION_AGENT_BRANCH", "")
+
+	badAgentHome := filepath.Join(t.TempDir(), "does-not-exist", "nested")
+	if err := gitCloneWorkspace(0, 0, badAgentHome, false); err == nil {
+		t.Fatal("expected gitCloneWorkspace to fail")
+	}
+
+	after, err := os.Stat(workspacePath)
+	if err != nil {
+		t.Fatalf("workspace directory removed by the cleanup: %v", err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("workspace directory was replaced by the cleanup, want the same directory")
+	}
+	entries, err := os.ReadDir(workspacePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != ".scion-volumes" {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Fatalf("want only the pre-existing .scion-volumes after cleanup, found: %v", names)
+	}
+
+	if err := gitCloneWorkspace(0, 0, t.TempDir(), false); err != nil {
+		t.Fatalf("retry after cleanup failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspacePath, "README.md")); err != nil {
+		t.Fatalf("expected README.md after the retry: %v", err)
+	}
+	retried, err := os.Stat(workspacePath)
+	if err != nil || !os.SameFile(before, retried) {
+		t.Fatalf("retry replaced the workspace directory (err %v)", err)
+	}
+}
+
 // TestPostPreStartOwnershipFixup_ForwardsRequirePrivilegeDrop proves that,
 // with euid stubbed to 0, the body of postPreStartOwnershipFixup forwards its own
 // requirePrivilegeDrop, unchanged, to chownTreeRootOwned for every directory
@@ -3113,8 +3196,6 @@ func TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit(t *testing.T) {
 	}
 }
 
-var startProcreapReaperOnce sync.Once
-
 // TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD is the
 // regression test for the property that configureSharedWorkspaceGit's
 // internal runGitConfig closure must invoke git through procreap's managed
@@ -3138,8 +3219,17 @@ var startProcreapReaperOnce sync.Once
 // TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD
 // ./cmd/sciontool/commands/`; with procreap.CombinedOutputManaged in place
 // it passes reliably.
+//
+// The reaper runs until its process exits and reaps every child that is not
+// started through procreap, so this test runs in a child copy of the test
+// binary (see runInReaperChild). Started in this process, it would keep
+// reaping the git children of the tests that run after it.
 func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testing.T) {
-	startProcreapReaperOnce.Do(procreap.StartReaper)
+	if os.Getenv(reaperChildEnv) != "1" {
+		runInReaperChild(t)
+		return
+	}
+	procreap.StartReaper()
 
 	// log.Init() runs first because the logger's lazy initialization is not concurrency-safe.
 	log.Init()
@@ -3529,4 +3619,25 @@ func TestNewLifecycleManager_WiresEnforcedModeConsistently(t *testing.T) {
 // without duplicating NewLifecycleManager's own resolution logic here.
 func defaultHooksDirsForTest() []string {
 	return hooks.NewLifecycleManager().HooksDirs
+}
+
+// reaperChildEnv is set in the child test process that runInReaperChild
+// starts.
+const reaperChildEnv = "SCION_TEST_REAPER_CHILD"
+
+// runInReaperChild runs the calling test alone in a child copy of the test
+// binary, with reaperChildEnv set, and fails the test if it fails there. A
+// test that starts the procreap reaper uses it so the reaper ends with the
+// child process.
+func runInReaperChild(t *testing.T) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run", "^"+regexp.QuoteMeta(t.Name())+"$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), reaperChildEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s in a child test process: %v\n%s", t.Name(), err, out)
+	}
+	if !strings.Contains(string(out), "--- PASS: "+t.Name()) {
+		t.Fatalf("%s did not run in the child test process:\n%s", t.Name(), out)
+	}
 }

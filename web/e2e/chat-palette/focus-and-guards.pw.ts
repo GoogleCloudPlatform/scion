@@ -48,11 +48,11 @@ function composerTextarea(page: Page) {
 }
 
 function paletteDialog(page: Page) {
-  return page.locator('scion-chat-switcher sl-dialog[label="Quick switcher"]');
+  return page.locator('scion-quick-palette sl-dialog[label="Quick switcher"]');
 }
 
 function paletteInput(page: Page) {
-  return page.locator('scion-chat-switcher #palette-query-input');
+  return page.locator('scion-quick-palette #palette-query-input');
 }
 
 test('Ctrl+K opens the palette and focuses its input without touching the composer draft', async ({
@@ -262,7 +262,7 @@ test('backdrop click restores deep focus', async ({ page }) => {
   await expect(paletteDialog(page)).toBeVisible();
   // Click the dialog's backdrop (::part(overlay)), not the panel content.
   await page
-    .locator('scion-chat-switcher sl-dialog')
+    .locator('scion-quick-palette sl-dialog')
     .locator('[part~="overlay"]')
     .click({
       position: { x: 5, y: 5 },

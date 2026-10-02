@@ -277,30 +277,48 @@ type AgentStore interface {
 	// Returns ErrNotFound if the agent doesn't exist.
 	DeleteAgent(ctx context.Context, id string) error
 
-	// ListAgents returns agents matching the filter criteria.
+	// ListAgents returns agents matching the filter criteria. With
+	// opts.SortBy empty this is the legacy path (ORDER BY created DESC, id
+	// DESC, opts.Cursor/CursorBinding decoded via the legacy cursor codec).
+	// With opts.SortBy set to "created" or "updated", this is the real-SQL
+	// sorted-mode total order: a keyset WHERE predicate bound to
+	// opts.SortCursor (page 0 when nil), a limit+1 probe for NextCursor
+	// exactly like the legacy path, and NextCursor minted as a v2 cursor via
+	// EncodeAgentCursor using opts.CursorBinding. An unrecognized
+	// opts.SortBy or opts.SortDir, or a non-empty legacy opts.Cursor, fails
+	// closed with ErrInvalidInput. Used directly by the global endpoint's
+	// sorted mode, which has no per-row read filter and so needs no narrow
+	// AgentMember projection — unlike the project endpoint's
+	// candidate-bounded ListAgentMembers above.
 	ListAgents(ctx context.Context, filter AgentFilter, opts ListOptions) (*ListResult[Agent], error)
 
 	// CountAgents returns the number of agents matching filter, applying the
 	// exact predicate ListAgents does for its total count, but without
 	// loading any rows. Used by the project sorted-mode candidate ceiling
-	// (design lists-graph.md 5.3 step 0) as a cheap pre-check before any
-	// member row is read.
+	// as a cheap pre-check before any member row is read.
 	CountAgents(ctx context.Context, filter AgentFilter) (int, error)
 
 	// ListAgentMembers returns up to max agents matching filter, in the
-	// sorted-mode total order for (sort, dir) (design lists-graph.md 4.2):
-	// sort="updated" orders by COALESCE(last_activity_event, updated) dir,
-	// then created DESC, id DESC; sort="created" orders by created dir, then
-	// id DESC. Each row carries exactly the fields agentResource
-	// (pkg/hub/capabilities.go) reads, plus Phase/Created/Updated/
-	// LastActivityEvent for positioning and stats — see AgentMember.
+	// sorted-mode total order for (sort, dir): sort="updated" orders by
+	// COALESCE(last_activity_event, updated) dir, then created DESC, id
+	// DESC; sort="created" orders by created dir, then id DESC. Each row
+	// carries exactly the fields agentResource (pkg/hub/capabilities.go)
+	// reads, plus Phase/Created/Updated/LastActivityEvent for positioning
+	// and stats — see AgentMember.
 	//
 	// max bounds the read so a candidate pool that grew past the caller's
-	// ceiling check is still detected (design 5.3 step 1): when the true
+	// ceiling check is still detected by the member read: when the true
 	// candidate count exceeds max, exactly max rows are returned (the exact
 	// order among untaken rows is unspecified in that case, since the
 	// caller's only use of an over-max result is to refuse the request).
 	ListAgentMembers(ctx context.Context, filter AgentFilter, sort, dir string, max int) ([]AgentMember, error)
+
+	// CountAgentsByPhaseIDs returns the id and phase of every agent matching
+	// filter, with no per-row authorization decision: it backs the global
+	// endpoint's sorted-mode "stats" population. Callers pass filter with
+	// Phase cleared, matching CountAgents/ListAgentMembers' "stats"
+	// convention.
+	CountAgentsByPhaseIDs(ctx context.Context, filter AgentFilter) ([]IDPhase, error)
 
 	// ListAgentsWithStaleNonTerminalReincarnationState returns every agent
 	// whose reincarnation_state is non-terminal and whose row has not been
@@ -567,18 +585,18 @@ type AgentFilter struct {
 	LineageRootID string
 }
 
-// AgentMember is the narrow projection ListAgentMembers reads for sorted-mode
-// candidate evaluation (design lists-graph.md 5.1). It carries exactly
-// the fields pkg/hub's agentResource(*Agent) reads — ID, OwnerID, ProjectID,
-// Labels, Ancestry — plus Phase, Created, Updated and LastActivityEvent for
-// positioning (pkg/store/agentsort) and stats.
+// AgentMember is the narrow projection ListAgentMembers reads for
+// sorted-mode candidate evaluation. It carries exactly the fields pkg/hub's
+// agentResource(*Agent) reads — ID, OwnerID, ProjectID, Labels, Ancestry —
+// plus Phase, Created, Updated and LastActivityEvent for positioning
+// (pkg/store/agentsort) and stats.
 //
 // The projection is defined as "exactly the fields agentResource reads", not
 // as an independently maintained field list: ToAgent is the single
 // construction path a caller must use to build a Resource from a member, so
-// that a future agentResource input agentResource gains but AgentMember lacks
-// is caught by the equality gate described on ToAgent, rather than silently
-// widening what a race can miss (design 5.3 step 5a; the hub-side
+// that a future agentResource input agentResource gains but AgentMember
+// lacks is caught by the equality gate described on ToAgent, rather than
+// silently widening what the hub's race re-check can miss (the hub-side
 // non-waivable member/full equality test is the gate that exercises this).
 type AgentMember struct {
 	ID        string
@@ -597,8 +615,8 @@ type AgentMember struct {
 // zero. It is the one construction path for building an authorization
 // Resource from a member row: callers must derive it as
 // agentResource(m.ToAgent()), never by hand-listing AgentMember's fields, so
-// that comparing that Resource against agentResource(fullRow) (design 5.3
-// step 5a) actually proves the two rows agree on every input the kernel
+// that comparing that Resource against agentResource(fullRow) in the hub's
+// race re-check actually proves the two rows agree on every input the kernel
 // reads, not just the ones some earlier author remembered to copy here.
 func (m AgentMember) ToAgent() *Agent {
 	return &Agent{
@@ -612,6 +630,13 @@ func (m AgentMember) ToAgent() *Agent {
 		Updated:           m.Updated,
 		LastActivityEvent: m.LastActivityEvent,
 	}
+}
+
+// IDPhase is one row of CountAgentsByPhaseIDs' narrow projection: an agent id
+// and its phase, with no other column read.
+type IDPhase struct {
+	ID    string
+	Phase string
 }
 
 // AgentHealthAggregate holds pre-computed counts and short lists used by the
@@ -1602,6 +1627,14 @@ type ScheduleStore interface {
 
 	// ListSchedules returns schedules matching the filter criteria.
 	ListSchedules(ctx context.Context, filter ScheduleFilter, opts ListOptions) (*ListResult[Schedule], error)
+
+	// ListActiveZonePrefixedSchedules returns up to limit active schedules,
+	// across all projects, whose cron expression starts with a zone prefix
+	// (CRON_TZ= or TZ=), ordered by ID and skipping the IDs in excludeIDs.
+	// It does not page on created, so it is unaffected by how timestamps are
+	// stored. The prefix match may be case-insensitive on some backends;
+	// callers must re-check the prefix exactly.
+	ListActiveZonePrefixedSchedules(ctx context.Context, limit int, excludeIDs []string) ([]Schedule, error)
 
 	// UpdateSchedule writes the schedule's mutable fields named by `fields`
 	// (name, cron_expr, event_type, payload, status, next_run_at) from

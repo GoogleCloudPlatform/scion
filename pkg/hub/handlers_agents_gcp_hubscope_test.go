@@ -716,6 +716,7 @@ func createdAgentIdentityOrNil(t *testing.T, f *bypassAgentsFixture, name string
 // because authorizeSAAssignment enforces mode coupling (D4) and Hub policy.
 func TestAgentCreate_HubScopedProjectDefault_IsApplied(t *testing.T) {
 	f := bypassAgentsSetup(t)
+	bindFixtureOwner(t, f)
 	// P10: mode=enforce + hub membership required for hub-scoped default
 	setMode(f.srv, SAAssignCheckEnforce)
 	f.srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub@test.iam.gserviceaccount.com"})

@@ -287,6 +287,31 @@ type AgentAppliedConfig struct {
 	// into $HOME/.scion/hooks/pre-start.d/30-project-custom before container start.
 	ProjectPreStartHookScript string `json:"projectPreStartHookScript,omitempty"`
 
+	// ExplicitTimezone is the agent's pinned container timezone (an IANA
+	// name such as "Europe/Paris"). It is the first rung of the hub's agent
+	// TZ chain (see resolveAgentTZ in pkg/hub) and outranks hub env-var
+	// storage and agent_defaults.default_timezone. Empty means "not pinned".
+	// It is written only by explicit acts: the create pipeline (a TZ from
+	// the request config, the hub template or the hub harness config), the
+	// agent PATCH's top-level explicitTimezone field, legacy adoption of a
+	// TZ persisted in Env before this field existed, and the reincarnate
+	// carry-forward. TZ never lives in Env or InlineConfig.Env once this
+	// field is in use.
+	ExplicitTimezone string `json:"explicitTimezone,omitempty"`
+
+	// ExplicitTimezoneLegacy records that ExplicitTimezone was adopted from
+	// a TZ persisted in Env (or InlineConfig.Env) by an older hub, rather
+	// than set by an explicit act. It is provenance only: the resolver
+	// reports such a pin with the source "legacy". Any PATCH of
+	// explicitTimezone clears it.
+	ExplicitTimezoneLegacy bool `json:"explicitTimezoneLegacy,omitempty"`
+
+	// ExplicitTimezoneUnpinned records an explicit unpin (a PATCH with
+	// explicitTimezone ""). It stops the create pipeline from re-pinning a
+	// template or create-time TZ, including on reincarnate. A non-empty
+	// explicitTimezone write clears it.
+	ExplicitTimezoneUnpinned bool `json:"explicitTimezoneUnpinned,omitempty"`
+
 	// CreateInputs snapshots the explicit request-level inputs: the ones
 	// captured at create time, before any template/harness-config/hub-default
 	// derivation ran, PLUS any later PATCH /api/v1/agents/{id} edit that
@@ -1340,8 +1365,22 @@ type ListOptions struct {
 	// Stores reject a cursor whose binding does not match.
 	CursorBinding string
 	Labels        map[string]string // Label selectors
-	SortBy        string            // Sort field (interpretation is store-specific)
-	SortDir       string            // Sort direction: "asc" or "desc" (default depends on field)
+	// SortBy and SortDir select the agent list's sorted mode: "created" or
+	// "updated", with "asc" or "desc". Empty SortBy is the legacy path
+	// (ORDER BY created DESC, id DESC), which AgentStore.ListAgents leaves
+	// byte-identical to today. Unknown non-empty values fail closed with
+	// ErrInvalidInput.
+	SortBy  string // Sort field (interpretation is store-specific)
+	SortDir string // Sort direction: "asc" or "desc" (default depends on field)
+	// SortCursor is the decoded v2 sorted-mode position, consulted only
+	// when SortBy is non-empty, in place of Cursor: the caller decodes and
+	// validates the opaque cursor itself via store.DecodeAgentCursor before
+	// any store call, so this carries the already-trusted position rather
+	// than requiring the store to decode an opaque string a second time.
+	// nil means page 0. A non-empty Cursor in sorted mode is rejected with
+	// ErrInvalidInput. CursorBinding above is still consulted in sorted
+	// mode, to mint NextCursor via store.EncodeAgentCursor.
+	SortCursor *AgentCursor
 }
 
 // ListResult is a generic result container for list operations.

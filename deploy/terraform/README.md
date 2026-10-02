@@ -571,6 +571,11 @@ prevent (see hub-identity's IAM scope rule comment).
 - **Agent create returns a 503 even though the agent goes on to start** —
   likely a cold Autopilot node exceeding the hub's upstream client timeout,
   not a real failure. See "Cold start" above.
+- **A hub apply fails with `persistentvolumes "<hub_name>-nfs" already
+  exists`** after an NFS server or share path change. This is a manual
+  migration; see the agent runbook's [Operational
+  Traps](../../docs/deploy/agent-runbook-terraform-ha.md#11-operational-traps)
+  ("Changing a hub's NFS endpoint is a manual migration").
 - **Creating a user or project secret fails with** "the Hub service account
   lacks the required Secret Manager permission. Grant
   `roles/secretmanager.admin` to the Hub Runner service account" — this

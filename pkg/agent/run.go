@@ -1264,11 +1264,36 @@ authDone:
 	nfsSubPath := ""
 	nfsStorageClass := ""
 	nfsWorkspacePreCreated := false
+	nfsWorktreeName := ""
+	nfsWorktreeBranch := ""
+	nfsAgentDirName := ""
+	nfsAgentBranch := ""
 
 	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
 		sharingMode := store.SharingModeWorktreePerAgent
 		if opts.SharedWorkspace || opts.GitClone != nil {
 			sharingMode = store.SharingModeSharedPlain
+		}
+		// On Kubernetes, a git project dispatched in worktree-per-agent mode
+		// gets its own worktree under the shared checkout. Shared-plain and
+		// every other runtime keep the layout above.
+		// A git project dispatched in clone-per-agent mode gets its own
+		// agent directory next to the project's workspace path instead,
+		// with a workspace the agent container clones into. Paths are
+		// still resolved from the project's workspace path (shared-plain).
+		var worktreeName, worktreeBranch, agentDirName, agentBranch string
+		if isKubernetesRuntime(m.Runtime.Name()) {
+			worktreeName, worktreeBranch = nfsWorktreeSelection(opts.Env, opts.GitClone, opts.Name)
+			if settings.Server.WorkspaceStorage.Backend == "nfs" {
+				var selErr error
+				agentDirName, agentBranch, selErr = nfsAgentDirSelection(opts.Env, opts.GitClone, opts.Name)
+				if selErr != nil {
+					return nil, selErr
+				}
+			}
+		}
+		if worktreeName != "" {
+			sharingMode = store.SharingModeWorktreePerAgent
 		}
 		backend := runtime.SelectWorkspaceBackend(settings.Server.WorkspaceStorage, sharingMode)
 		if backend.Name() == "nfs" {
@@ -1303,9 +1328,24 @@ authDone:
 			if sharedDirStorage == nil {
 				claimSharedDirNames = sharedDirNames
 			}
-			nfsWorkspacePreCreated, err = ensureNFSWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames)
+			if agentDirName != "" && mount.PVClaimName != "" {
+				nfsWorkspacePreCreated, err = ensureNFSAgentWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, agentDirName)
+				nfsAgentDirName = agentDirName
+				nfsAgentBranch = agentBranch
+			} else {
+				nfsWorkspacePreCreated, err = ensureNFSWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames)
+			}
 			if err != nil {
 				return nil, err
+			}
+			if worktreeName != "" && mount.PVClaimName != "" {
+				worktreePreCreated, err := ensureNFSWorktreeLeaf(m.Runtime.Name(), resolvedWorkspace, mount.PVClaimName, worktreeName)
+				if err != nil {
+					return nil, err
+				}
+				nfsWorkspacePreCreated = nfsWorkspacePreCreated && worktreePreCreated
+				nfsWorktreeName = worktreeName
+				nfsWorktreeBranch = worktreeBranch
 			}
 
 			workspaceBackendName = backend.Name()
@@ -1314,6 +1354,12 @@ authDone:
 			}
 			if mount.Target != "" {
 				containerWorkspace = mount.Target
+			}
+			if nfsWorktreeName != "" {
+				// The agent works in its worktree, mounted next to the
+				// shared .git the same way as on the local runtimes. The
+				// pod mounts both by subPath (see buildPod).
+				containerWorkspace = runtime.NFSWorktreeContainerPath(nfsWorktreeName)
 			}
 			nfsPVClaimName = mount.PVClaimName
 			nfsSubPath = mount.SubPath
@@ -1347,6 +1393,15 @@ authDone:
 		// Lets the provisioning init container treat a failed chown as a
 		// warning for a workspace directory the broker created.
 		NFSWorkspacePreCreated: nfsWorkspacePreCreated,
+		// Set only for worktree-per-agent git projects on the NFS backend:
+		// the agent mounts worktrees/<agentID> and the shared .git instead
+		// of the shared checkout.
+		NFSWorktreeName:   nfsWorktreeName,
+		NFSWorktreeBranch: nfsWorktreeBranch,
+		// Set only for clone-per-agent git projects on the NFS backend: the
+		// agent mounts agents/<agent name>/workspace and clones into it.
+		NFSAgentDirName: nfsAgentDirName,
+		NFSAgentBranch:  nfsAgentBranch,
 		// F-111 (design §9): drives the k8s runtime's NFS init container's
 		// clone-vs-plain-provision choice (nfsProvisionCommand), not whether
 		// provisioning happens at all — the init container is now gated

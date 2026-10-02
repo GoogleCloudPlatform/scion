@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { setPreferredTimeZone } from '../../utils/time.js';
 
 // ── Mock API responses ──
 
@@ -329,5 +330,31 @@ describe('scion-page-admin-role-bindings create dialog', () => {
       expect(body.scopeId).toBe('proj-uuid-from-picker');
       expect(body.scopeType).toBe('project');
     }
+  });
+});
+
+describe('scion-page-admin-role-bindings lifecycle zone label (review R4-1)', () => {
+  afterEach(() => {
+    setPreferredTimeZone('');
+  });
+
+  it('updates the "Times in" label when the effective zone changes after mount', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createComponent(handler);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+
+    comp.showCreateDialog = true;
+    comp.showAdvanced = true;
+    comp.requestUpdate();
+    await comp.updateComplete;
+
+    expect(query(el, '.lifecycle-hint')?.textContent).toContain('UTC');
+
+    setPreferredTimeZone('Asia/Tokyo');
+    await comp.updateComplete;
+
+    expect(query(el, '.lifecycle-hint')?.textContent).toContain('Asia/Tokyo');
+    expect(query(el, '.lifecycle-hint')?.textContent).not.toContain('UTC');
   });
 });

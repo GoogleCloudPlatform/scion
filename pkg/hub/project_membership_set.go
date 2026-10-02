@@ -881,7 +881,7 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			authorized = false
 		}
 		if !authorized {
-			return nil, &MembershipDecision{Allowed: false, DenialCode: ErrCodeRoleAssignmentForbidden, Reason: "actor has no project role", HTTPStatus: 403}
+			return nil, noProjectRoleDecision()
 		}
 		hubOverridePre = true
 	}
@@ -937,14 +937,19 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 				ScopeID:          req.ProjectID,
 			})
 			if !delDecision.Allowed {
-				return nil, &MembershipDecision{
-					Allowed: false, DenialCode: ErrCodeTargetRoleProtected,
-					Reason:     "actor cannot delegate the requested role: " + delDecision.Reason,
-					HTTPStatus: 403,
-					Details:    map[string]interface{}{"roleDefinitionId": d.ID, "roleName": d.Name, "reason": delDecision.Reason},
-				}
+				return nil, canDelegateRefusal(d, delDecision.Reason)
 			}
 			canDelegateReasons[d.ID] = delDecision.Reason
+		}
+	}
+
+	// The addressed principal must exist before a binding is created for it.
+	// Without this the binding create inside the transaction failed with the
+	// store's not-found and surfaced as a 500 (ptone/scion#2529). Checked
+	// last in Phase P, so every earlier refusal keeps its code.
+	if len(plan0.Create) > 0 {
+		if d := svc.principalExistsDecision(ctx, req.PrincipalType, req.PrincipalID); d != nil {
+			return nil, d
 		}
 	}
 
@@ -1210,4 +1215,51 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		"actor", req.Actor.Email(), "created", result.Created)
 
 	return &result, nil
+}
+
+// noProjectRoleDecision is the refusal for an actor with no project role and
+// no hub role_binding.* authority for the requested operation. Shared by
+// SetMemberRoles and AssignableRoles so both report it identically.
+func noProjectRoleDecision() *MembershipDecision {
+	return &MembershipDecision{Allowed: false, DenialCode: ErrCodeRoleAssignmentForbidden, Reason: "actor has no project role", HTTPStatus: 403}
+}
+
+// canDelegateRefusal is the refusal for a created binding of rd that
+// CanDelegate denied with reason. Shared by SetMemberRoles and
+// AssignableRoles so both report the same code, reason and details.
+func canDelegateRefusal(rd *store.RoleDefinition, reason string) *MembershipDecision {
+	return &MembershipDecision{
+		Allowed: false, DenialCode: ErrCodeTargetRoleProtected,
+		Reason:     "actor cannot delegate the requested role: " + reason,
+		HTTPStatus: 403,
+		Details:    map[string]interface{}{"roleDefinitionId": rd.ID, "roleName": rd.Name, "reason": reason},
+	}
+}
+
+// principalExistsDecision refuses a user or agent principal ID that names no
+// record with the 400 invalid_request an unknown email already gets on the
+// members PUT. Only the addressed principal's not-found is mapped; any other
+// store error is a 500. Groups are looked up during address resolution, so
+// they pass through.
+func (svc *ProjectMembershipService) principalExistsDecision(ctx context.Context, principalType, principalID string) *MembershipDecision {
+	var err error
+	switch principalType {
+	case store.RoleBindingPrincipalUser:
+		_, err = svc.store.GetUser(ctx, principalID)
+	case store.RoleBindingPrincipalAgent:
+		_, err = svc.store.GetAgent(ctx, principalID)
+	default:
+		return nil
+	}
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return &MembershipDecision{
+			Allowed: false, DenialCode: ErrCodeInvalidRequest,
+			Reason:     principalType + " not found: " + principalID,
+			HTTPStatus: 400,
+		}
+	}
+	return &MembershipDecision{Allowed: false, DenialCode: ErrCodeInternalError, Reason: err.Error(), HTTPStatus: 500}
 }

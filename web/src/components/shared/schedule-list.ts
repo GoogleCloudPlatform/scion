@@ -45,6 +45,21 @@ interface Schedule {
   createdBy?: string;
 }
 
+/**
+ * Label shown on a schedule whose cron expression carries a zone prefix.
+ * Schedules are evaluated in UTC only; the hub rejects such expressions and
+ * pauses existing rows that use one.
+ */
+export const ZONE_PREFIX_BADGE_LABEL = 'Zone prefix not supported — edit to UTC';
+
+/**
+ * Reports whether a cron expression begins with a CRON_TZ= or TZ= zone prefix.
+ * Mirrors the hub's check: case-sensitive, on the untrimmed expression.
+ */
+export function hasCronZonePrefix(expr: string): boolean {
+  return expr.startsWith('CRON_TZ=') || expr.startsWith('TZ=');
+}
+
 interface ListResponse {
   schedules: Schedule[];
   totalCount?: number;
@@ -84,6 +99,13 @@ export class ScionScheduleList extends LitElement {
   static override styles = [
     resourceStyles,
     css`
+      .badge.zone-prefix {
+        background: var(--sl-color-warning-100, #fef3c7);
+        color: var(--sl-color-warning-700, #b45309);
+        margin-left: 0.375rem;
+        white-space: nowrap;
+      }
+
       .detail-row {
         padding: 0.375rem 0;
         font-size: 0.875rem;
@@ -333,6 +355,13 @@ export class ScionScheduleList extends LitElement {
     }
   }
 
+  private renderZonePrefixBadge(sched: Schedule) {
+    if (!hasCronZonePrefix(sched.cronExpr)) return nothing;
+    return html`<span class="badge zone-prefix" title="Cron expressions are evaluated in UTC"
+      >${ZONE_PREFIX_BADGE_LABEL}</span
+    >`;
+  }
+
   override render() {
     if (this.compact) {
       return this.renderCompact();
@@ -465,6 +494,7 @@ export class ScionScheduleList extends LitElement {
             style="font-family: var(--scion-font-mono, monospace); font-size: 0.8125rem;"
             >${sched.cronExpr}</span
           >
+          ${this.renderZonePrefixBadge(sched)}
         </td>
         <td><span class="meta-text">${nextRun}</span></td>
         <td><span class="badge ${this.statusBadgeClass(sched.status)}">${sched.status}</span></td>
@@ -648,7 +678,9 @@ export class ScionScheduleList extends LitElement {
             <strong>Status:</strong>
             <span class="badge ${this.statusBadgeClass(sched.status)}">${sched.status}</span>
           </div>
-          <div class="detail-row"><strong>Cron:</strong> ${sched.cronExpr}</div>
+          <div class="detail-row">
+            <strong>Cron:</strong> ${sched.cronExpr} ${this.renderZonePrefixBadge(sched)}
+          </div>
           <div class="detail-row"><strong>Event Type:</strong> ${sched.eventType}</div>
           <div class="detail-row"><strong>Target Agent:</strong> ${agent}</div>
           ${sched.eventType === 'message' && payloadDetails.message

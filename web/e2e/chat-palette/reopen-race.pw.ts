@@ -53,15 +53,15 @@ async function gotoChat(page: Page, route?: string): Promise<void> {
 }
 
 function paletteInput(page: Page) {
-  return page.locator('scion-chat-switcher #palette-query-input');
+  return page.locator('scion-quick-palette #palette-query-input');
 }
 
 function paletteDialog(page: Page) {
-  return page.locator('scion-chat-switcher sl-dialog[label="Quick switcher"]');
+  return page.locator('scion-quick-palette sl-dialog[label="Quick switcher"]');
 }
 
 function paletteOptions(page: Page) {
-  return page.locator('scion-chat-switcher .palette-option');
+  return page.locator('scion-quick-palette .palette-option');
 }
 
 /** Deep-query into the real composer's native textarea, through both shadow roots. */

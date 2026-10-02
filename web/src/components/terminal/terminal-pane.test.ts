@@ -7,7 +7,7 @@ const showToast = vi.fn();
 vi.mock('../../utils/toast.js', () => ({ showToast }));
 
 const terminal = vi.hoisted(() => ({
-  instances: [] as Array<{ dispose: ReturnType<typeof vi.fn>; reset: ReturnType<typeof vi.fn> }>,
+  instances: [] as Array<Record<'dispose' | 'reset' | 'focus' | 'blur', ReturnType<typeof vi.fn>>>,
 }));
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -420,7 +420,7 @@ describe('bind-after-mount still arms frontmost', () => {
       hubUrl: window.location.origin,
       accountId: 'account-r3',
     });
-    const page2 = document.createElement('scion-terminal-pane') as ScionTerminalPane;
+    const page2 = document.createElement('scion-terminal-pane');
     // connectedCallback runs with no session bound yet — the exact order that
     // pages/terminal.ts uses (mount the shell, then open()).
     document.body.append(page2);
@@ -749,8 +749,9 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
 
   function scopeDialog(): HTMLElement | null {
     return (
-      page.shadowRoot?.querySelector<HTMLElement>('sl-dialog[label="Capture Auth — Choose Scope"]') ??
-      null
+      page.shadowRoot?.querySelector<HTMLElement>(
+        'sl-dialog[label="Capture Auth — Choose Scope"]'
+      ) ?? null
     );
   }
 
@@ -784,7 +785,7 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     await makeCaptureEligible();
     let execBody: { command: string[] } | null = null;
     fetcher.mockImplementation((url) => {
-      const path = typeof url === 'string' ? url : url.toString();
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
       if (path.includes('/api/v1/settings/public')) {
         return Promise.resolve(json({ agentSecretsUserScopeOnly: false }));
       }
@@ -798,12 +799,12 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
 
     expect(radio('project')?.hasAttribute('disabled')).toBe(false);
     expect(radio('user')?.hasAttribute('disabled')).toBe(false);
-    expect(
-      (page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope
-    ).toBe('project');
+    expect((page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope).toBe(
+      'project'
+    );
 
     fetcher.mockImplementation((url, init) => {
-      const path = typeof url === 'string' ? url : url.toString();
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
       if (path.includes('/exec')) {
         execBody = JSON.parse(init!.body as string) as { command: string[] };
         return Promise.resolve(json({ output: '', exitCode: 0 }));
@@ -824,7 +825,7 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     (page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope = 'project';
     let execBody: { command: string[] } | null = null;
     fetcher.mockImplementation((url) => {
-      const path = typeof url === 'string' ? url : url.toString();
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
       if (path.includes('/api/v1/settings/public')) {
         return Promise.resolve(json({ agentSecretsUserScopeOnly: true }));
       }
@@ -838,15 +839,15 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
 
     expect(radio('project')?.hasAttribute('disabled')).toBe(true);
     expect(radio('user')?.hasAttribute('disabled')).toBe(false);
-    expect(
-      (page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope
-    ).toBe('user');
+    expect((page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope).toBe(
+      'user'
+    );
     expect(scopeDialog()?.textContent ?? '').toContain(
       'Disabled by your hub administrator: captured credentials can only be stored in'
     );
 
     fetcher.mockImplementation((url, init) => {
-      const path = typeof url === 'string' ? url : url.toString();
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
       if (path.includes('/exec')) {
         execBody = JSON.parse(init!.body as string) as { command: string[] };
         return Promise.resolve(json({ output: '', exitCode: 0 }));
@@ -863,7 +864,7 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
   it('settings fetch fails: dialog shows unrestricted state (fail open)', async () => {
     await makeCaptureEligible();
     fetcher.mockImplementation((url) => {
-      const path = typeof url === 'string' ? url : url.toString();
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
       if (path.includes('/api/v1/settings/public')) {
         return Promise.resolve(new Response('', { status: 500 }));
       }
@@ -874,9 +875,9 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
 
     expect(radio('project')?.hasAttribute('disabled')).toBe(false);
     expect(radio('user')?.hasAttribute('disabled')).toBe(false);
-    expect(
-      (page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope
-    ).toBe('project');
+    expect((page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope).toBe(
+      'project'
+    );
   });
 
   // Design §10 test 9: a secret_scope_restricted rejection shows the policy
@@ -884,7 +885,7 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
   it('rejection: secret_scope_restricted shows the policy toast, not the conflict dialog', async () => {
     await makeCaptureEligible();
     fetcher.mockImplementation((url) => {
-      const path = typeof url === 'string' ? url : url.toString();
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
       if (path.includes('/api/v1/settings/public')) {
         return Promise.resolve(json({ agentSecretsUserScopeOnly: false }));
       }
@@ -931,7 +932,7 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     await makeCaptureEligible();
     const pending = deferred<Response>();
     fetcher.mockImplementation((url) => {
-      const path = typeof url === 'string' ? url : url.toString();
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
       if (path.includes('/api/v1/settings/public')) {
         return pending.promise;
       }
@@ -974,7 +975,7 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     const second = deferred<Response>();
     let call = 0;
     fetcher.mockImplementation((url) => {
-      const path = typeof url === 'string' ? url : url.toString();
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
       if (path.includes('/api/v1/settings/public')) {
         call += 1;
         return call === 1 ? first.promise : second.promise;
@@ -988,8 +989,7 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
 
     // Close and reopen before the first fetch resolves — this starts the
     // second (fast) fetch while the first is still pending.
-    (page as unknown as { captureAuthScopeDialogOpen: boolean }).captureAuthScopeDialogOpen =
-      false;
+    (page as unknown as { captureAuthScopeDialogOpen: boolean }).captureAuthScopeDialogOpen = false;
     await page.updateComplete;
     captureAuthButton()!.click();
     await vi.waitFor(() => expect(scopeDialog()).not.toBeNull());
@@ -1004,9 +1004,9 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     expect(
       (page as unknown as { agentSecretsUserScopeOnly: boolean }).agentSecretsUserScopeOnly
     ).toBe(true);
-    expect(
-      (page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope
-    ).toBe('user');
+    expect((page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope).toBe(
+      'user'
+    );
 
     // The first (stale) request now resolves, with the setting off. It must
     // not overwrite the newer result or re-enable loading.
@@ -1034,7 +1034,7 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     const second = deferred<Response>();
     let call = 0;
     fetcher.mockImplementation((url) => {
-      const path = typeof url === 'string' ? url : url.toString();
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
       if (path.includes('/api/v1/settings/public')) {
         call += 1;
         return call === 1 ? first.promise : second.promise;
@@ -1047,8 +1047,7 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     await vi.waitFor(() => expect(scopeDialog()).not.toBeNull());
 
     // Close and reopen before it resolves — starts the second (newer) fetch.
-    (page as unknown as { captureAuthScopeDialogOpen: boolean }).captureAuthScopeDialogOpen =
-      false;
+    (page as unknown as { captureAuthScopeDialogOpen: boolean }).captureAuthScopeDialogOpen = false;
     await page.updateComplete;
     captureAuthButton()!.click();
     await vi.waitFor(() => expect(scopeDialog()).not.toBeNull());
@@ -1068,9 +1067,9 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     expect(
       (page as unknown as { agentSecretsUserScopeOnly: boolean }).agentSecretsUserScopeOnly
     ).toBe(false);
-    expect(
-      (page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope
-    ).toBe('project');
+    expect((page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope).toBe(
+      'project'
+    );
     expect(radio('project')?.hasAttribute('disabled')).toBe(true); // still loading
     expect(radio('user')?.hasAttribute('disabled')).toBe(true); // still loading
 
@@ -1089,10 +1088,31 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     expect(
       (page as unknown as { agentSecretsUserScopeOnly: boolean }).agentSecretsUserScopeOnly
     ).toBe(true);
-    expect(
-      (page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope
-    ).toBe('user');
+    expect((page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope).toBe(
+      'user'
+    );
     expect(radio('project')?.hasAttribute('disabled')).toBe(true); // restricted
     expect(radio('user')?.hasAttribute('disabled')).toBe(false);
+  });
+});
+
+describe('focusTerminal()', () => {
+  it('focuses the terminal once it exists', async () => {
+    await mountToFrame();
+    const xt = terminal.instances[0];
+    xt.focus.mockClear();
+
+    page.focusTerminal();
+
+    expect(xt.focus).toHaveBeenCalledTimes(1);
+  });
+
+  it('focuses the pane itself before the terminal exists, so the terminal can take focus on connect', () => {
+    document.body.append(page);
+    expect(terminal.instances).toHaveLength(0);
+
+    page.focusTerminal();
+
+    expect(document.activeElement).toBe(page);
   });
 });
