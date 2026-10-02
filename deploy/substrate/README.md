@@ -375,15 +375,15 @@ The Deployment passes `--host=0.0.0.0` so the broker's own API (port 9800,
 used by the `readinessProbe`/`livenessProbe`) binds to all interfaces, not
 just loopback. Without it, a standalone broker in `--hosted` mode (no
 `--enable-hub`) binds to `127.0.0.1` by default — a safety net
-(`cmd/server_foreground.go:915-920`) so a *fresh* broker with no HMAC keys
-yet can still be reached locally by `scion runtime-broker register` before
-those keys exist. kubelet's probes connect to the **pod IP**, not to
-`127.0.0.1` inside the container's own network namespace, so that default
-would make both probes fail with connection-refused.
+(`loadAndReconcileConfig`, `cmd/server_foreground.go`) so a *fresh* broker
+with no HMAC keys yet can still be reached locally by `scion runtime-broker
+register` before those keys exist. kubelet's probes connect to the **pod
+IP**, not to `127.0.0.1` inside the container's own network namespace, so
+that default would make both probes fail with connection-refused.
 
 **This is safe because the broker's own HMAC auth is unconditionally
 "strict mode."** The live `ServerConfig` built for this deployment
-(`cmd/server_foreground.go:2536-2537`) hardcodes `BrokerAuthEnabled: true,
+(`startRuntimeBroker`, `cmd/server_foreground.go`) hardcodes `BrokerAuthEnabled: true,
 BrokerAuthStrictMode: true` and, more importantly, **refuses to start at
 all** on a non-loopback host unless valid HMAC keys are already loaded
 (`validateBrokerAuthStartup`, `pkg/runtimebroker/server.go`). It does not
@@ -440,15 +440,21 @@ raw-body limit `sciontool substrate-serve`'s bootstrap handler enforces
 cap fails the run with an error naming only the cap and the total size,
 never a path or file content.
 
-**A separate, in-actor secrets path has its own symlink refusal.**
-Independent of the `POST /scion/v1/bootstrap` delivery above, `sciontool
-init` also decodes and writes any `SCION_STAGED_SECRETS` payload directly
-inside the actor (`pkg/stagedsecrets`) — the mechanism every runtime, not
-just substrate, uses to stage file and variable secrets without bind-mounting
-them from the host. On this path too, a staged secret's parent directory is
-resolved with a no-follow walk from the filesystem root; any symlinked path
-component is refused, for every target — not only targets under the agent
-home — and init refuses the write rather than following one.
+**A separate, in-actor secrets path has its own symlink rule — not the same
+rule as above.** Independent of the `POST /scion/v1/bootstrap` delivery
+above, `sciontool init` also decodes and writes any `SCION_STAGED_SECRETS`
+payload directly inside the actor (`pkg/stagedsecrets`) — the mechanism every
+runtime, not just substrate, uses to stage file and variable secrets without
+bind-mounting them from the host. This path has no "must resolve under the
+agent home" rule at all (unlike the bootstrap targets above, any destination
+is allowed), and its symlink handling is narrower than a blanket refusal: a
+staged secret's parent directory is resolved component-by-component
+(`dirfd.EnsureDirTrustedAncestorFollow`), and a symlink is followed, not
+refused, when both it and its containing directory are root-owned and not
+group/other-writable — a system-configured alias like `/var/run -> /run`
+that no workload can have planted or redirected. Any symlink that doesn't
+meet that trusted-ownership bar is refused, and init refuses the write
+rather than following it.
 
 ## Verification commands (once applied to a real cluster)
 

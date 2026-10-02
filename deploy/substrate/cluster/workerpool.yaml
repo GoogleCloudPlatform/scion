@@ -18,10 +18,13 @@
 # resolves to these workers only. See deploy/substrate/cluster/README.md.
 #
 # This is a plain manifest, like broker.yaml: every dollar-brace placeholder
-# is resolved with `envsubst` (or equivalent) before `kubectl apply`. It uses
-# the SAME placeholder names as broker.yaml's ConfigMap
-# (SUBSTRATE_WORKER_NAMESPACE, WORKER_SELECTOR_KEY, WORKER_SELECTOR_VALUE) --
-# resolve both manifests with one shared set of exported values.
+# is resolved with `envsubst` (or equivalent) before `kubectl apply`. Only
+# two of its placeholder names are actually SHARED with broker.yaml's
+# ConfigMap -- WORKER_SELECTOR_KEY and WORKER_SELECTOR_VALUE, which must
+# match so `worker_selector` resolves to these workers. SUBSTRATE_WORKER_NAMESPACE
+# is this manifest's own placeholder only; broker.yaml does not reference it.
+# Resolve both manifests with one shared set of exported values regardless,
+# so the shared two never drift apart between them.
 #
 # WorkerPool is a Substrate CRD (apiVersion ate.dev/v1alpha1), not a builtin
 # Kubernetes type -- it only exists once Substrate itself is installed on

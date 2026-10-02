@@ -125,7 +125,7 @@ var execSiteAllowlist = map[string]string{
 	// ever returning — see execAsUserCmd's own doc comment. The call site
 	// here indexes into that already-resolved slice, which this guard's
 	// static check cannot itself follow across the function-call boundary.
-	"pkg/sciontool/substrate/exec.go:84": "suCmd[0]/suCmd[1:] come from execAsUserCmd, which resolves via rootexec.Resolve",
+	"pkg/sciontool/substrate/exec.go:85": "suCmd[0]/suCmd[1:] come from execAsUserCmd, which resolves via rootexec.Resolve",
 }
 
 // aliasKind records what kind of exec constructor a package-level var

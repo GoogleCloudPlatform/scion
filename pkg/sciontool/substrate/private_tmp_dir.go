@@ -65,12 +65,19 @@ const privateRootTmpDirMode = 0o700
 func ensurePrivateTmpDir() error {
 	if _, err := mkdirAllTracked(privateRootTmpDir, 0o755); err != nil {
 		var symErr *errSymlinkComponent
-		var dirErr *errNonDirComponent
-		if errors.As(err, &symErr) || errors.As(err, &dirErr) {
+		if errors.As(err, &symErr) {
 			return &bootstrapPathError{
 				code:   codeBootstrapPathSymlink,
 				path:   privateRootTmpDir,
-				detail: "private root tmp directory chain contains a symlink or non-directory component",
+				detail: "private root tmp directory chain contains a symlink",
+			}
+		}
+		var dirErr *errNonDirComponent
+		if errors.As(err, &dirErr) {
+			return &bootstrapPathError{
+				code:   codeBootstrapPathInvalid,
+				path:   privateRootTmpDir,
+				detail: "private root tmp directory chain contains a non-directory component",
 			}
 		}
 		return fmt.Errorf("ensure %s: %w", privateRootTmpDir, err)

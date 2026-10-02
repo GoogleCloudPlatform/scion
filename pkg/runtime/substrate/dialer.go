@@ -145,7 +145,7 @@ func hostOnly(endpoint string) string {
 // tokenSource mints and caches a bearer token for the ateapi TokenRequest
 // audience, refreshing it before it expires. It implements
 // credentials.PerRPCCredentials (google.golang.org/grpc/credentials) via
-// GetRequestMetadata/RequireTransportSecurity, defined in dialer_grpc.go so
+// GetRequestMetadata/RequireTransportSecurity, defined in grpc.go so
 // this file has no direct grpc dependency beyond what Dial needs.
 type tokenSource struct {
 	client    kubernetes.Interface

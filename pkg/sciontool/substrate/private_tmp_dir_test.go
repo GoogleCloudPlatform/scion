@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -131,5 +132,50 @@ func TestBootstrap_PrivateTmpDirSymlinkedAncestorRejectedWith422(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(real, "run")); !os.IsNotExist(err) {
 		t.Errorf("expected nothing created through the symlinked ancestor, stat err=%v", err)
+	}
+}
+
+// TestBootstrap_PrivateTmpDirNonDirComponentRejectedWithDistinctCode is the
+// regression test for ensurePrivateTmpDir reporting a non-directory
+// ancestor (a plain file sitting where a parent directory needs to be) with
+// codeBootstrapPathInvalid, not the symlink code — the same code/case split
+// clearEnforcedHooksDir and writeBootstrapFile both already make, which
+// ensurePrivateTmpDir previously collapsed into one.
+func TestBootstrap_PrivateTmpDirNonDirComponentRejectedWithDistinctCode(t *testing.T) {
+	base := realTempDir(t)
+	blocker := filepath.Join(base, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("i am a file, not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(blocker, "run", "scion", "tmp")
+
+	restore := SetPrivateRootTmpDirForTest(dir)
+	t.Cleanup(restore)
+
+	initCalled := make(chan struct{}, 1)
+	req := BootstrapRequest{
+		StartCmd:     "true",
+		ControlToken: "tok",
+	}
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int {
+			initCalled <- struct{}{}
+			return 0
+		}),
+	)
+
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("bootstrap status = %d, want 422 (a non-directory private-tmp-dir ancestor is a bootstrapPathError)", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), codeBootstrapPathInvalid) {
+		t.Errorf("body = %q, want it to carry code %q, not the symlink code", rec.Body.String(), codeBootstrapPathInvalid)
+	}
+	if strings.Contains(rec.Body.String(), codeBootstrapPathSymlink) {
+		t.Errorf("body = %q, must not report a non-directory component as a symlink", rec.Body.String())
+	}
+	if waitInitCalled(initCalled) {
+		t.Error("init must never start when the private tmp dir chain contains a non-directory component")
 	}
 }

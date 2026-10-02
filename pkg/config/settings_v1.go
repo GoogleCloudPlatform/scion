@@ -1328,9 +1328,10 @@ type V1SubstrateConfig struct {
 	// SnapshotStorage is the configured bucket/prefix used for the
 	// ActorTemplate's snapshotsConfig storage, e.g. "gs://bucket/prefix/".
 	SnapshotStorage string `json:"snapshot_storage,omitempty" yaml:"snapshot_storage,omitempty" koanf:"snapshot_storage"`
-	// EgressAllow lists additional hostnames/CIDRs allowed through the
-	// per-actor EgressPolicy, beyond the hub/git/model/telemetry hosts the
-	// runtime always adds.
+	// EgressAllow lists additional hostnames allowed through the per-actor
+	// EgressPolicy, beyond the hub/git/model/telemetry hosts the runtime
+	// always adds. Despite the field's own shape (a bare string list), no
+	// IP addresses or CIDRs are accepted here — see below.
 	//
 	// Only public FQDNs are accepted here — no IP addresses or CIDRs at
 	// all (Substrate's own HostnameRule, which is where every entry ends

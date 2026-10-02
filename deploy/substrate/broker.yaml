@@ -264,7 +264,7 @@ spec:
             - "--runtime-broker-port=9800"
             # Without an explicit --host, a standalone broker in --hosted mode
             # (no --enable-hub) binds to 127.0.0.1 by design
-            # (cmd/server_foreground.go:915-920 — a safety net so a fresh
+            # (loadAndReconcileConfig, cmd/server_foreground.go — a safety net so a fresh
             # broker can be reached by `scion runtime-broker register` on
             # loopback before HMAC keys exist). That default breaks the
             # readinessProbe/livenessProbe below: kubelet connects to the pod
