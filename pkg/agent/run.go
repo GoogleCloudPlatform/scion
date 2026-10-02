@@ -1127,6 +1127,7 @@ authDone:
 	if rootsErr != nil {
 		return nil, rootsErr
 	}
+	preValidationWorkspace := effectiveWorkspace
 	resolvedWorkspace, err := runtime.ValidateWorkspaceSource(effectiveWorkspace, roots...)
 	if err != nil {
 		// A global agent provisioned before <projectDir>/workspace existed
@@ -1145,11 +1146,36 @@ authDone:
 	}
 	effectiveWorkspace = resolvedWorkspace
 
+	// ValidateWorkspaceSource always returns effectiveWorkspace fully
+	// resolved (symlink-free), so if its spelling actually changed here (a
+	// symlinked ancestor, most commonly), a repoRoot already validated
+	// against the pre-resolution value above may now be lexically
+	// inconsistent with it: provision.ValidateWorktreeForBase's lexical
+	// check compares base and candidate as given, so an unresolved
+	// candidateRepoRoot paired with a now-resolved effectiveWorkspace can
+	// fail that comparison even though both name the same real worktree.
+	// Re-run the full validation — not a cosmetic EvalSymlinks reassignment
+	// — against a resolved candidateRepoRoot and the resolved
+	// effectiveWorkspace, so both the lexical and resolved halves of
+	// ValidateWorktreeForBase (including the admin-directory back-link
+	// proof) fire again on a pair that is actually consistent. This keeps
+	// RunConfig.RepoRoot and RunConfig.Workspace resolved-consistent with
+	// each other, which is what pkg/runtime/common.go's lexical
+	// filepath.Rel(RepoRoot, Workspace) mount-branch decision requires.
+	if effectiveWorkspace != preValidationWorkspace && candidateRepoRoot != "" {
+		if resolvedCandidateRoot, evalErr := filepath.EvalSymlinks(candidateRepoRoot); evalErr == nil {
+			if reRoot := validatedWorktreeRepoRoot(resolvedCandidateRoot, effectiveWorkspace); reRoot != "" {
+				repoRoot = reRoot
+			}
+		}
+	}
+
 	// Resolve repoRoot through any symlinks so the mount layout below
 	// (ResolveContainerWorkspace and RunConfig.RepoRoot) is computed from the
 	// same real, symlink-free spelling as effectiveWorkspace — otherwise a
 	// symlinked repo path changes the container-side layout depending on
-	// which of the two happens to still contain the symlink.
+	// which of the two happens to still contain the symlink. A harmless
+	// no-op when repoRoot was already resolved just above.
 	if repoRoot != "" {
 		resolvedRepoRoot, err := filepath.EvalSymlinks(repoRoot)
 		if err != nil {

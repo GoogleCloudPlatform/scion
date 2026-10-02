@@ -630,12 +630,18 @@ func jsonStr(s string) string {
 // TestTryProvisionWorktree_Start_SymlinkedBase_ContainerWorkspaceStaysConsistent
 // is a regression guard: when the broker's project path runs through a
 // symlink (a symlinked $HOME, a symlinked projects dir, or macOS's
-// /var -> /private/var), the repo root that provision.ValidateWorktreeForBase
-// accepts must stay lexically consistent with the unresolved
-// RunConfig.Workspace, or pkg/runtime/common.go's
+// /var -> /private/var), RunConfig.RepoRoot and RunConfig.Workspace must
+// stay consistent with EACH OTHER, or pkg/runtime/common.go's
 // filepath.Rel(RepoRoot, Workspace) breaks and misroutes the mount into the
 // full-root fallback branch (ContainerWorkspace == "/workspace" instead of
 // "/repo-root/worktrees/<id>", and in-container git breaks again).
+//
+// runtime.ValidateWorkspaceSource (pkg/agent/run.go's Start) always returns
+// Workspace fully resolved (symlink-free), so "consistent" here means both
+// resolved, not both lexical: RepoRoot must be re-validated and resolved
+// against the already-resolved Workspace — see run.go's re-validation after
+// ValidateWorkspaceSource — rather than kept at its original, pre-resolution
+// spelling.
 func TestTryProvisionWorktree_Start_SymlinkedBase_ContainerWorkspaceStaysConsistent(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
@@ -711,11 +717,29 @@ func TestTryProvisionWorktree_Start_SymlinkedBase_ContainerWorkspaceStaysConsist
 	if wantContainerWorkspace := "/repo-root/worktrees/agent-a"; capturedConfig.ContainerWorkspace != wantContainerWorkspace {
 		t.Fatalf("RunConfig.ContainerWorkspace = %q, want %q — RepoRoot and Workspace are lexically inconsistent on a symlinked broker path", capturedConfig.ContainerWorkspace, wantContainerWorkspace)
 	}
-	// RepoRoot itself must stay lexically identical to the value
-	// tryProvisionWorktree produced (through the symlink), not
-	// EvalSymlinks'd — that lexical identity is exactly what keeps
-	// filepath.Rel(RepoRoot, Workspace) correct in common.go.
-	if capturedConfig.RepoRoot != repoRoot {
-		t.Fatalf("RunConfig.RepoRoot = %q, want the original (unresolved) %q", capturedConfig.RepoRoot, repoRoot)
+	// RepoRoot must be the RESOLVED (symlink-free) form, matching the
+	// resolved Workspace Start actually used — not the original, symlinked
+	// spelling tryProvisionWorktree produced. Both resolved is what keeps
+	// filepath.Rel(RepoRoot, Workspace) correct in common.go now that
+	// ValidateWorkspaceSource resolves Workspace unconditionally.
+	wantRepoRoot, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(repoRoot): %v", err)
+	}
+	if capturedConfig.RepoRoot != wantRepoRoot {
+		t.Fatalf("RunConfig.RepoRoot = %q, want the resolved %q", capturedConfig.RepoRoot, wantRepoRoot)
+	}
+	if strings.Contains(capturedConfig.RepoRoot, linkDir) {
+		t.Fatalf("RunConfig.RepoRoot = %q, must not still contain the symlinked component %q", capturedConfig.RepoRoot, linkDir)
+	}
+	// The resolved-consistent property the mount routing actually depends
+	// on: Workspace must resolve to a clean "worktrees/<id>" relative path
+	// under the (also resolved) RepoRoot.
+	rel, err := filepath.Rel(capturedConfig.RepoRoot, capturedConfig.Workspace)
+	if err != nil {
+		t.Fatalf("filepath.Rel(RepoRoot, Workspace): %v", err)
+	}
+	if wantRel := filepath.Join("worktrees", "agent-a"); rel != wantRel {
+		t.Fatalf("filepath.Rel(RepoRoot, Workspace) = %q, want %q (RepoRoot and Workspace are not resolved-consistent)", rel, wantRel)
 	}
 }
