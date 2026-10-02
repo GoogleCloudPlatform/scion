@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"testing"
 
@@ -624,4 +625,90 @@ func TestGetAgent_AdoptsLegacyTZInResponse(t *testing.T) {
 	stored, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "Europe/Paris", stored.AppliedConfig.Env["TZ"], "GET does not write")
+}
+
+// --- template TZ (AC9) -----------------------------------------------------
+
+// updateTZTemplateEnv rewrites the env of the template createTZTemplate made.
+func updateTZTemplateEnv(t *testing.T, s store.Store, slug string, env map[string]string) {
+	t.Helper()
+	ctx := context.Background()
+	tmpl, err := s.GetTemplate(ctx, tid("template-"+slug+"-"+t.Name()))
+	require.NoError(t, err)
+	tmpl.Config.Env = env
+	tmpl.ContentHash = "feedd00d"
+	require.NoError(t, s.UpdateTemplate(ctx, tmpl))
+}
+
+// TestCreateAgent_TemplateTZUnaffectedByLaterTemplateEdit covers AC9: a
+// template TZ is captured as a pin on create, and a later edit of the
+// template's TZ does not move the agent, on start or on reincarnate.
+func TestCreateAgent_TemplateTZUnaffectedByLaterTemplateEdit(t *testing.T) {
+	ctx := context.Background()
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTimezone: "America/Denver"})
+	createTZTemplate(t, s, "tz-tmpl", "", map[string]string{"TZ": "Europe/Paris"})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "tz-tmpl-agent", ProjectID: project.ID, Task: "x", Template: "tz-tmpl",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	agent, err := s.GetAgent(ctx, resp.Agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, "Europe/Paris", agent.AppliedConfig.ExplicitTimezone, "the template TZ is captured as a pin")
+	assert.Empty(t, legacyEnvTZ(agent.AppliedConfig))
+
+	updateTZTemplateEnv(t, s, "tz-tmpl", map[string]string{"TZ": "Asia/Tokyo"})
+
+	agent, err = s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Europe/Paris", agent.AppliedConfig.ExplicitTimezone, "the stored pin is unchanged")
+	assert.Equal(t, agentTZ{TZ: "Europe/Paris", Source: TZSourceExplicit}, srv.agentTZ(ctx, agent))
+
+	d := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, slog.Default())
+	d.SetHubAgentDefaultsProvider(srv.hubAgentDefaults)
+	assert.Equal(t, "Europe/Paris", d.buildStartEnv(ctx, agent, "test", "start").env["TZ"], "a start sends the pinned zone")
+
+	fresh, _, err := srv.buildFreshAppliedConfig(ctx, agent, project, "")
+	require.NoError(t, err)
+	assert.Equal(t, "Europe/Paris", fresh.ExplicitTimezone, "reincarnate carries the pin over the edited template")
+	assert.Empty(t, legacyEnvTZ(fresh))
+}
+
+// TestReincarnate_TemplateTZ covers the AC9 reincarnate bullets with a
+// template that carries TZ: an unpinned agent stays unpinned, and an agent
+// with no pin re-derives the current template zone as a pin.
+func TestReincarnate_TemplateTZ(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name         string
+		unpinned     bool
+		wantPin      string
+		wantUnpinned bool
+	}{
+		{name: "unpinned template agent stays unpinned", unpinned: true, wantUnpinned: true},
+		{name: "no pin re-derives the current template zone", wantPin: "Asia/Tokyo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
+			// Created from the template while it said Paris; it says Tokyo now.
+			createTZTemplate(t, s, "tz-tmpl", "", map[string]string{"TZ": "Asia/Tokyo"})
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Template = "tz-tmpl"
+				a.AppliedConfig.ExplicitTimezoneUnpinned = tc.unpinned
+			})
+			fresh, _, err := srv.buildFreshAppliedConfig(ctx, agent, project, "")
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPin, fresh.ExplicitTimezone)
+			assert.Equal(t, tc.wantUnpinned, fresh.ExplicitTimezoneUnpinned)
+			assert.False(t, fresh.ExplicitTimezoneLegacy)
+			assert.Empty(t, fresh.Env[agentTZEnvKey], "no TZ in Env")
+			if fresh.InlineConfig != nil {
+				assert.Empty(t, fresh.InlineConfig.Env[agentTZEnvKey], "no TZ in InlineConfig.Env")
+			}
+		})
+	}
 }
