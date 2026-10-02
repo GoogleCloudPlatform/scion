@@ -123,7 +123,20 @@ export class ScionTimezonePicker extends LitElement {
     // where it still matters — gating the blur handler's commitTyped() call
     // below, so a dropdown mousedown selection followed by a blur event
     // doesn't re-emit the same value a second time.
-    if (changed.has('value') && this.value !== this.valueFor(this.searchQuery.trim())) {
+    //
+    // Also resync unconditionally on the very first update
+    // (`!this.hasUpdated`, true throughout willUpdate on that first call —
+    // Lit flips it only after update() commits), and whenever `emptyLabel`
+    // itself changes (tz-refactor task 12 review round 3, R3-2 — a
+    // regression from the R2-3 fix above): on the first render, `value`
+    // defaults to `''` and `searchQuery` also starts `''`, so
+    // `valueFor('') === ''` trivially matches `this.value` and the
+    // value-comparison guard alone never fires — the empty-label row
+    // ("UTC", "Auto", ...) silently never appeared.
+    if (
+      (changed.has('value') || changed.has('emptyLabel')) &&
+      (!this.hasUpdated || this.value !== this.valueFor(this.searchQuery.trim()))
+    ) {
       this.searchQuery = this.displayValue(this.value);
       this.selectedViaDropdown = false;
     }

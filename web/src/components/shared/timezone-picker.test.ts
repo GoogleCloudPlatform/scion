@@ -71,6 +71,24 @@ describe('scion-timezone-picker', () => {
     expect(input?.getAttribute('value')).toBe('Asia/Tokyo');
   });
 
+  // tz-refactor task 12 review round 3, R3-2: a regression from the R2-3
+  // fix. willUpdate's resync compared `value` against `valueFor(searchQuery)`
+  // and skipped when they already matched — which on the very first render,
+  // with `value` still at its default `''` and `searchQuery` also `''`, is
+  // trivially true (`valueFor('') === ''`), so the empty-label row never
+  // appeared: the field rendered blank instead of showing "UTC". Set
+  // emptyLabel *before* first connection, matching a real caller
+  // (admin-server-config.ts sets `empty-label="UTC"` as a template
+  // attribute, present from the first render).
+  it('shows the empty-label entry on first render with the default value', async () => {
+    const el = new TimezonePickerCtor();
+    el.emptyLabel = 'UTC';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('UTC');
+  });
+
   it('omits the empty entry when empty-label is unset', async () => {
     const el = await createElement();
     (el as Record<string, unknown>)['searchOpen'] = true;
@@ -167,6 +185,22 @@ describe('scion-timezone-picker', () => {
 
     const filtered = (el as Record<string, unknown>)['filteredZones'] as string[];
     expect(filtered).not.toContain('asia/kolkata');
+  });
+
+  // tz-refactor task 12 review round 3, R3-1: round 2's isValidTimeZone fix
+  // falsely rejected real IANA names outside its 7-entry hand-picked alias
+  // set — including current canonical names, not just backward-compat
+  // links. "America/Nuuk" was never in any such list and isn't a case
+  // variant of anything; it's just an ordinary zone name.
+  it('typing a real IANA name outside any hand-picked alias list still offers it', async () => {
+    const el = await createElement();
+    (el as Record<string, (...args: unknown[]) => void>)['handleSearchInput']({
+      target: { value: 'America/Nuuk' },
+    } as unknown as Event);
+    await el.updateComplete;
+
+    const filtered = (el as Record<string, unknown>)['filteredZones'] as string[];
+    expect(filtered).toContain('America/Nuuk');
   });
 
   it('a known alternate-name search term surfaces its canonical zone (Kolkata, Kyiv, Kathmandu)', async () => {
