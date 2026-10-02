@@ -2014,7 +2014,13 @@ func (s *Server) createAgentInProject(
 					"agent", agent.Name, "broker", agent.RuntimeBrokerID)
 				created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
 				envReqs := created.EnvRequirements()
-				if err != nil {
+				if errors.Is(err, ErrLaunchInvalidPhase) {
+					// A stop or delete reached the record before the launch
+					// began. Nothing was sent to the broker; the record is
+					// left to that operation.
+					writeLaunchInvalidPhase(w)
+					return
+				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
 					// and delete the agent record so orphaned local files don't
 					// trigger spurious sync-registration attempts. No revoke here:
@@ -2023,6 +2029,10 @@ func (s *Server) createAgentInProject(
 					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, dispatchDeleteFailedCreate(dispatcher, agent))
 					dispatchCreateErrorResponse(w, err)
 					return
+				} else if created.AcceptedLaunch() != nil {
+					// Accepted for asynchronous launch: the row is already
+					// provisioning; persist only the non-status fields.
+					warnings = append(warnings, s.adoptAcceptedLaunch(ctx, agent)...)
 				} else if envReqs != nil {
 					// Broker returned 202: needs env gather
 					agent.Phase = string(state.PhaseProvisioning)
@@ -2053,7 +2063,13 @@ func (s *Server) createAgentInProject(
 			} else {
 				created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
 				envReqs := created.EnvRequirements()
-				if err != nil {
+				if errors.Is(err, ErrLaunchInvalidPhase) {
+					// A stop or delete reached the record before the launch
+					// began. Nothing was sent to the broker; the record is
+					// left to that operation.
+					writeLaunchInvalidPhase(w)
+					return
+				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
 					// and delete the agent record so orphaned local files don't
 					// trigger spurious sync-registration attempts. No revoke here:
@@ -2062,6 +2078,10 @@ func (s *Server) createAgentInProject(
 					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, dispatchDeleteFailedCreate(dispatcher, agent))
 					dispatchCreateErrorResponse(w, err)
 					return
+				} else if created.AcceptedLaunch() != nil {
+					// Accepted for asynchronous launch: the row is already
+					// provisioning; persist only the non-status fields.
+					warnings = append(warnings, s.adoptAcceptedLaunch(ctx, agent)...)
 				} else if envReqs != nil && len(envReqs.Needs) > 0 {
 					// Broker reported missing required env vars — fail the dispatch.
 					// Clean up the provisioning agent and its files so orphaned
@@ -2126,6 +2146,34 @@ func (s *Server) createAgentInProject(
 		Agent:    redactedAgentCopy(ctx, s, agent),
 		Warnings: append(warnings, dispatchWarns.Warnings()...),
 	})
+}
+
+// adoptAcceptedLaunch persists an accepted asynchronous launch's dispatched
+// copy (design §3.5 accepted branch) and replaces *agent with the persisted
+// row, so callers respond with the provisioning phase and the launch. It
+// returns a warning when the write failed.
+func (s *Server) adoptAcceptedLaunch(ctx context.Context, agent *store.Agent) []string {
+	persisted, err := s.persistAcceptedLaunch(ctx, agent)
+	if persisted != nil && persisted != agent {
+		*agent = *persisted
+	}
+	if err != nil {
+		s.agentLifecycleLog.Warn("Failed to persist agent after accepted launch", "agent_id", agent.ID, "error", err)
+		return []string{"Failed to update agent after launch was accepted: " + err.Error()}
+	}
+	return nil
+}
+
+// launchInFlightInputsWarning is the Warnings entry for a request that found
+// a launch already in flight and therefore did not apply its inputs.
+const launchInFlightInputsWarning = "agent is already launching; request inputs were not applied"
+
+// writeLaunchInvalidPhase answers a create, env submit or workspace finalize
+// whose launch could not begin because the agent left the created and
+// provisioning phases (for example it was stopped meanwhile).
+func writeLaunchInvalidPhase(w http.ResponseWriter) {
+	writeError(w, http.StatusConflict, "invalid_state",
+		"agent is no longer in a phase that can be launched (it may have been stopped or deleted)", nil)
 }
 
 // preserveTerminalPhase re-reads the agent from the database and, if a
@@ -2406,6 +2454,18 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		}
 	}
 
+	// A launch is already in flight (for example a duplicate submit): answer
+	// with the current agent and do not dispatch again (design §3.5 row E).
+	if agent.IsInFlight() {
+		project, _ := s.store.GetProject(ctx, projectID)
+		s.enrichAgent(ctx, agent, project, nil)
+		writeJSON(w, http.StatusOK, CreateAgentResponse{
+			Agent:    redactedAgentCopy(ctx, s, agent),
+			Warnings: []string{launchInFlightInputsWarning},
+		})
+		return
+	}
+
 	// Verify agent is in a state that expects env submission
 	if agent.Phase != string(state.PhaseProvisioning) && agent.Phase != string(state.PhaseCreated) {
 		writeError(w, http.StatusConflict, "invalid_state",
@@ -2422,7 +2482,12 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	}
 
 	ctx, dispatchWarns := withDispatchWarnings(ctx)
-	if _, err := dispatcher.DispatchFinalizeEnv(ctx, agent, req.Env); err != nil {
+	finalized, err := dispatcher.DispatchFinalizeEnv(ctx, agent, req.Env)
+	if errors.Is(err, ErrLaunchInvalidPhase) {
+		writeLaunchInvalidPhase(w)
+		return
+	}
+	if err != nil {
 		var stillMissing *ErrEnvStillMissing
 		if errors.As(err, &stillMissing) {
 			MissingEnvVars(w, stillMissing.Requirements.Needs,
@@ -2433,12 +2498,19 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 
-	// Update agent phase from broker response
-	if agent.Phase == string(state.PhaseProvisioning) || agent.Phase == string(state.PhaseCreated) {
-		agent.Phase = string(state.PhaseRunning)
-	}
-	if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
-		s.agentLifecycleLog.Warn("Failed to update agent phase after env submit", "agent_id", agent.ID, "error", err)
+	var warnings []string
+	if finalized.AcceptedLaunch() != nil {
+		// Accepted for asynchronous launch: the launch reports move the
+		// phase on; do not write running here.
+		warnings = s.adoptAcceptedLaunch(ctx, agent)
+	} else {
+		// Update agent phase from broker response
+		if agent.Phase == string(state.PhaseProvisioning) || agent.Phase == string(state.PhaseCreated) {
+			agent.Phase = string(state.PhaseRunning)
+		}
+		if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
+			s.agentLifecycleLog.Warn("Failed to update agent phase after env submit", "agent_id", agent.ID, "error", err)
+		}
 	}
 
 	// Enrich and return
@@ -2447,7 +2519,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 
 	writeJSON(w, http.StatusOK, CreateAgentResponse{
 		Agent:    redactedAgentCopy(ctx, s, agent),
-		Warnings: dispatchWarns.Warnings(),
+		Warnings: append(dispatchWarns.Warnings(), warnings...),
 	})
 }
 
