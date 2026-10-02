@@ -295,9 +295,43 @@ func TestHeartbeatExitCode_PreemptedEvictedMessage(t *testing.T) {
 	})
 }
 
-// TestHeartbeatExitCode_GracefulPreemptionAfterPlainStop covers the #2528
-// race H1: preemption and the eviction API delete the pod gracefully
-// (SIGTERM), so sciontool reports a plain clean stop directly to the Hub
+// TestHeartbeatExitCode_CommittedDisruptionWhileRunning covers the other
+// ordering for ptone/scion#2528: scheduler preemption and the eviction API
+// usually delete the pod object outright once termination completes, often
+// before any heartbeat ever sees a terminal phase. List() reports the
+// disruption reason ahead of that, while the pod still has Phase=running
+// (a deletionTimestamp plus a live DisruptionTarget condition). The hub
+// must record that reason immediately, without treating the agent as
+// stopped, so it is already on record once a later terminal report lands.
+func TestHeartbeatExitCode_CommittedDisruptionWhileRunning(t *testing.T) {
+	srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+	code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+		Slug:       agentSlug,
+		Phase:      "running",
+		ExitReason: "preempted",
+	})
+	assert.Equal(t, http.StatusOK, code)
+
+	mid := getAgentState(t, s, agentSlug, projectID)
+	assert.Equal(t, "running", mid.Phase, "phase must not change while the agent has not stopped yet")
+	assert.Equal(t, "preempted", mid.ExitReason, "the reason must be recorded ahead of the pod actually stopping")
+
+	// sciontool's own direct stop report lands later — a graceful SIGTERM
+	// deletion usually lets sciontool report a plain stop before the
+	// broker's next heartbeat even runs.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+mid.ID+"/status",
+		map[string]string{"phase": "stopped", "message": "Agent stopped"})
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	final := getAgentState(t, s, agentSlug, projectID)
+	assert.Equal(t, "stopped", final.Phase)
+	assert.Equal(t, "preempted", final.ExitReason, "the reason recorded while running must survive the terminal transition")
+}
+
+// TestHeartbeatExitCode_GracefulPreemptionAfterPlainStop covers the ordering
+// in ptone/scion#2528: preemption and the eviction API delete the pod
+// gracefully (SIGTERM), so sciontool reports a plain clean stop directly to the Hub
 // before the broker's next heartbeat can observe the pod's disruption
 // signal. By the time that heartbeat arrives the agent is already in a
 // terminal phase (the agentInTerminalPhase branch), which previously
@@ -324,6 +358,54 @@ func TestHeartbeatExitCode_GracefulPreemptionAfterPlainStop(t *testing.T) {
 		assert.Equal(t, "stopped", got.Phase, "phase must stay untouched")
 		assert.Equal(t, "preempted", got.ExitReason)
 		assert.Equal(t, "Agent pod was preempted", got.Message)
+		require.NotNil(t, got.ExitCode, "ExitCode must be backfilled, not just ExitReason")
+		assert.Equal(t, 0, *got.ExitCode)
+	})
+
+	t.Run("a heartbeat phase differing from the stored phase does not move it", func(t *testing.T) {
+		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+		agent := getAgentState(t, s, agentSlug, projectID)
+		agent.Phase = "stopped"
+		agent.Message = "Agent stopped"
+		require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+		ec := 137
+		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+			Slug:       agentSlug,
+			Phase:      "error",
+			ExitCode:   &ec,
+			ExitReason: "preempted",
+		})
+		assert.Equal(t, http.StatusOK, code)
+
+		got := getAgentState(t, s, agentSlug, projectID)
+		assert.Equal(t, "stopped", got.Phase, "the stored phase must win even though the heartbeat reports a different one")
+		assert.Equal(t, "preempted", got.ExitReason)
+		require.NotNil(t, got.ExitCode)
+		assert.Equal(t, 137, *got.ExitCode)
+	})
+
+	t.Run("a non-disruption reason is not backfilled", func(t *testing.T) {
+		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+		agent := getAgentState(t, s, agentSlug, projectID)
+		agent.Phase = "stopped"
+		agent.Message = "Agent stopped"
+		require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+		ec := 0
+		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+			Slug:       agentSlug,
+			Phase:      "stopped",
+			ExitCode:   &ec,
+			ExitReason: "crashed",
+		})
+		assert.Equal(t, http.StatusOK, code)
+
+		got := getAgentState(t, s, agentSlug, projectID)
+		assert.Equal(t, "", got.ExitReason, "only preempted/evicted are backfilled through this path")
+		assert.Equal(t, "Agent stopped", got.Message, "an unrelated reason must not touch the generic message either")
 	})
 
 	t.Run("a non-generic stored message is preserved while ExitReason still backfills", func(t *testing.T) {
@@ -408,8 +490,8 @@ func TestHeartbeatExitCode_LegacyCleanExit(t *testing.T) {
 	assert.Equal(t, "stopped", got.Phase, "legacy clean exit should keep stopped phase")
 }
 
-// TestHeartbeatExitCode_NilExitCodeStillRecordsDisruption covers L1: a
-// terminal pod can carry a disruption signal (preempted/evicted) with no
+// TestHeartbeatExitCode_NilExitCodeStillRecordsDisruption covers the legacy
+// nil-ExitCode path: a terminal pod can carry a disruption signal (preempted/evicted) with no
 // structured ExitCode and no ContainerStatus string that parses to a
 // non-zero code — for example a pod evicted or preempted before its agent
 // container ever started, or one with no container statuses at all. The

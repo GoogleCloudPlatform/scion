@@ -2662,6 +2662,18 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			if reason := k8sDisruptionExitReason(p); reason != "" {
 				exitReason = reason
 			}
+		} else if p.DeletionTimestamp != nil {
+			// Scheduler preemption and Eviction API deletions remove the pod
+			// object outright once termination completes — often before any
+			// heartbeat observes a terminal phase at all, since List() polls
+			// rather than watches. A pod with a deletionTimestamp and a live
+			// DisruptionTarget condition is already committed to that
+			// termination, so report the reason now, ahead of it actually
+			// stopping. agentStatus (the reported Phase) is deliberately
+			// left alone — this pod has not stopped yet.
+			if reason := k8sDisruptionExitReason(p); reason != "" {
+				exitReason = reason
+			}
 		}
 
 		projectPath := projectkeys.ProjectPathFromLabels(p.Annotations)

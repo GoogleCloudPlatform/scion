@@ -198,7 +198,12 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			return &ErrorRuntime{Err: err}
 		}
 		rt := NewKubernetesRuntime(k8sClient)
-		applyKubernetesRuntimeConfig(rt, rtConfig, k8sClient.IsGKE())
+		// Skip the discovery round trip when GKE mode is already explicit:
+		// IsGKE() calls Discovery().ServerVersion(), a network call that
+		// applyKubernetesRuntimeConfig only needs for auto-detection, not
+		// when rtConfig.GKE already decides the outcome.
+		isGKE := !rtConfig.GKE && k8sClient.IsGKE()
+		applyKubernetesRuntimeConfig(rt, rtConfig, isGKE)
 		return rt
 	case "cloudrun":
 		cfg := rtConfig.CloudRun

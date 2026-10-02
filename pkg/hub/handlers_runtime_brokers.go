@@ -914,6 +914,24 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 								statusUpdate.Message = exitStatusMessage(state.ExitReason(statusUpdate.ExitReason), agentHB.ExitCode)
 							}
 						}
+					} else {
+						// The pod is still running (not yet Stopped/Error) but
+						// the broker already observed a committed Kubernetes
+						// disruption (List() reports preempted/evicted ahead of
+						// the pod actually terminating — a deletionTimestamp
+						// plus a live DisruptionTarget condition, since
+						// scheduler preemption and the eviction API usually
+						// delete the pod object outright once it does
+						// terminate, often before any heartbeat sees a
+						// terminal phase). Record the reason now so it is not
+						// lost; leave phase and message for the eventual
+						// terminal report to set, same as the
+						// agentInTerminalPhase backfill above.
+						hbExitReason := state.ExitReason(agentHB.ExitReason)
+						isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
+						if isDisruption && agent.ExitReason == "" {
+							statusUpdate.ExitReason = agentHB.ExitReason
+						}
 					}
 
 					if curPhase.IsActivePhase() && hbPhase.IsActivePhase() &&

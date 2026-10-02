@@ -144,7 +144,7 @@ func TestBuildPod_PriorityClassName_Invalid(t *testing.T) {
 }
 
 func TestBuildPod_PriorityClassName_InvalidRuntimeDefault_NamesRuntimeSource(t *testing.T) {
-	// N1: when the bad value came from the runtime-level default rather than
+	// When the bad value came from the runtime-level default rather than
 	// the template/agent config, the error must name that source instead of
 	// always blaming kubernetes.priorityClassName.
 	rt, _, _ := newTestK8sRuntime()
@@ -279,6 +279,48 @@ func TestList_ExitReason_DisruptionTargetOnRunningPod_NotYetTerminal(t *testing.
 	info := listSingleAgent(t, pod)
 	if info.ExitReason != "" {
 		t.Errorf("expected no ExitReason while pod is still running, got %q", info.ExitReason)
+	}
+}
+
+func TestList_ExitReason_CommittedDisruption_RunningWithDeletionTimestamp(t *testing.T) {
+	// Scheduler preemption and the eviction API delete the pod object
+	// outright once termination completes, often before any heartbeat
+	// observes a terminal phase (List() polls, it does not watch). Once the
+	// pod has a deletionTimestamp and a live DisruptionTarget condition, it
+	// is already committed to that termination, so List must report the
+	// reason ahead of the pod actually stopping — without claiming the
+	// agent has stopped.
+	now := metav1.Now()
+	pod := newPodForDisruptionTest("agent-committed-disruption", corev1.PodRunning)
+	pod.DeletionTimestamp = &now
+	pod.Status.Conditions = []corev1.PodCondition{
+		{
+			Type:   corev1.DisruptionTarget,
+			Status: corev1.ConditionTrue,
+			Reason: "PreemptionByScheduler",
+		},
+	}
+
+	info := listSingleAgent(t, pod)
+	if info.ExitReason != string(state.ExitReasonPreempted) {
+		t.Errorf("expected ExitReason %q, got %q", state.ExitReasonPreempted, info.ExitReason)
+	}
+	if info.Phase != "" {
+		t.Errorf("expected no Phase (agent has not stopped), got %q", info.Phase)
+	}
+}
+
+func TestList_ExitReason_DeletionTimestampWithoutDisruptionTarget_Ignored(t *testing.T) {
+	// A deletionTimestamp alone (an ordinary scion rm / stop delete) must
+	// not be mistaken for a disruption — only a live DisruptionTarget
+	// condition makes it one.
+	now := metav1.Now()
+	pod := newPodForDisruptionTest("agent-ordinary-delete", corev1.PodRunning)
+	pod.DeletionTimestamp = &now
+
+	info := listSingleAgent(t, pod)
+	if info.ExitReason != "" {
+		t.Errorf("expected no ExitReason for an ordinary delete, got %q", info.ExitReason)
 	}
 }
 
