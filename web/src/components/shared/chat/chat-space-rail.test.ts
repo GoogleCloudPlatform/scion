@@ -186,7 +186,6 @@ describe('space rail — new thread name entry', () => {
     const el = await mount();
     el.collapsedSpaces = new Set([SPACE.projectId]);
     await el.updateComplete;
-    const focus = vi.spyOn(HTMLElement.prototype, 'focus');
 
     el.startCreateThread(SPACE.projectId);
     await el.updateComplete;
@@ -194,7 +193,9 @@ describe('space rail — new thread name entry', () => {
 
     const input = el.shadowRoot.querySelector('.thread-list .create-thread sl-input');
     expect(input).not.toBeNull();
-    expect(focus.mock.contexts).toContain(input);
+    // activeElement retargets to the sl-input host even when focus lands on
+    // the native input inside its shadow root.
+    expect(el.shadowRoot.activeElement).toBe(input);
   });
 
   it('refocuses the open row, keeping its text, when New thread is asked for again', async () => {
@@ -203,17 +204,20 @@ describe('space rail — new thread name entry', () => {
     await el.updateComplete;
     el.newThreadName = 'half-typed';
     await el.updateComplete;
-    // Wait for the first request's focus to land before watching for another.
+    // Wait for the first request's focus to land, then move focus away, as
+    // the menu that issues a repeat New thread would.
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+    const input = el.shadowRoot.querySelector('.thread-list .create-thread sl-input');
+    expect(input).not.toBeNull();
+    input.blur();
+    expect(el.shadowRoot.activeElement).not.toBe(input);
 
     el.startCreateThread(SPACE.projectId);
     await el.updateComplete;
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    const input = el.shadowRoot.querySelector('.thread-list .create-thread sl-input');
-    expect(input).not.toBeNull();
-    expect(focus.mock.contexts).toContain(input);
+    expect(el.shadowRoot.querySelector('.thread-list .create-thread sl-input')).toBe(input);
+    expect(el.shadowRoot.activeElement).toBe(input);
     expect(el.newThreadName).toBe('half-typed');
   });
 
