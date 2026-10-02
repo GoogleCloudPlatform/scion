@@ -1496,55 +1496,95 @@ func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID
 	return entAgentToStore(updated), nil
 }
 
+// clearRuntimeTargetHook, when set by a test, runs inside each
+// ClearAgentRuntimeTarget attempt between the read and the conditional write,
+// with the attempt's transaction, so the test can change the row and make the
+// write miss.
+var clearRuntimeTargetHook func(ctx context.Context, tx *ent.Tx, id uuid.UUID)
+
+// clearRuntimeTargetAttempts bounds ClearAgentRuntimeTarget's re-read and
+// retry loop.
+const clearRuntimeTargetAttempts = 5
+
 // ClearAgentRuntimeTarget implements store.AgentStore. See the interface for
 // the contract.
+//
+// Each attempt reads and conditionally writes inside one transaction, with
+// the row locked (SELECT ... FOR UPDATE) where the dialect supports it, so a
+// concurrent writer cannot slip in between. The write is additionally
+// conditional on the stored applied config being unchanged; if it still
+// misses, the row is re-read and the clear retried, up to
+// clearRuntimeTargetAttempts times, after which an error is returned.
 func (s *AgentStore) ClearAgentRuntimeTarget(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	const attempts = 3
-	for i := 0; i < attempts; i++ {
-		row, err := s.client.Agent.Query().
-			Where(agent.IDEQ(uid), agent.DeletedAtIsNil()).
-			Select(agent.FieldAppliedConfig).
-			Only(ctx)
-		if err != nil {
-			if ent.IsNotFound(err) {
-				return nil
-			}
-			return mapError(err)
-		}
-		if row.AppliedConfig == "" {
-			return nil
-		}
-		// Edit the raw JSON object rather than round-tripping it through
-		// store.AgentAppliedConfig, so every other stored key is kept
-		// exactly as written.
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
-			return fmt.Errorf("clear runtime target for agent %s: %w", id, err)
-		}
-		if _, ok := raw["runtimeTarget"]; !ok {
-			return nil
-		}
-		delete(raw, "runtimeTarget")
-		cleared, err := json.Marshal(raw)
-		if err != nil {
+	// Prime dialect detection before opening a transaction (see
+	// UpdateAgentStatus).
+	useLock := s.usesRowLocks(ctx)
+	for i := 0; i < clearRuntimeTargetAttempts; i++ {
+		done, err := s.clearRuntimeTargetOnce(ctx, uid, id, useLock)
+		if err != nil || done {
 			return err
 		}
-		n, err := s.client.Agent.Update().
-			Where(agent.IDEQ(uid), agent.DeletedAtIsNil(), agent.AppliedConfigEQ(row.AppliedConfig)).
-			SetAppliedConfig(string(cleared)).
-			Save(ctx)
-		if err != nil {
-			return mapError(err)
-		}
-		if n > 0 {
-			return nil
-		}
 	}
-	return fmt.Errorf("clear runtime target for agent %s: applied config changed concurrently %d times", id, attempts)
+	return fmt.Errorf("clear runtime target for agent %s: applied config changed concurrently %d times", id, clearRuntimeTargetAttempts)
+}
+
+// clearRuntimeTargetOnce is one ClearAgentRuntimeTarget attempt. It reports
+// done=false only when the conditional write matched no row because the
+// applied config changed after it was read.
+func (s *AgentStore) clearRuntimeTargetOnce(ctx context.Context, uid uuid.UUID, id string, useLock bool) (bool, error) {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil())
+	if useLock {
+		q = q.ForUpdate()
+	}
+	row, err := q.Select(agent.FieldAppliedConfig).Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return true, nil
+		}
+		return false, mapError(err)
+	}
+	if row.AppliedConfig == "" {
+		return true, nil
+	}
+	// Edit the raw JSON object rather than round-tripping it through
+	// store.AgentAppliedConfig, so every other stored key is kept exactly
+	// as written.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
+		return false, fmt.Errorf("clear runtime target for agent %s: %w", id, err)
+	}
+	if _, ok := raw["runtimeTarget"]; !ok {
+		return true, nil
+	}
+	delete(raw, "runtimeTarget")
+	cleared, err := json.Marshal(raw)
+	if err != nil {
+		return false, err
+	}
+	if clearRuntimeTargetHook != nil {
+		clearRuntimeTargetHook(ctx, tx, uid)
+	}
+	n, err := tx.Agent.Update().
+		Where(agent.IDEQ(uid), agent.DeletedAtIsNil(), agent.AppliedConfigEQ(row.AppliedConfig)).
+		SetAppliedConfig(string(cleared)).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+	return true, tx.Commit()
 }
 
 // stalledExcluded lists the activities that disqualify a running agent from

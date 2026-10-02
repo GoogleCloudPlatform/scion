@@ -349,9 +349,11 @@ type AgentStore interface {
 	// ClearAgentRuntimeTarget removes the runtime target recorded in an
 	// agent's applied config (AgentAppliedConfig.RuntimeTarget) and changes
 	// nothing else; it does not bump state_version. The write is conditional
-	// on the stored applied config being unchanged since it was read, and is
-	// retried when a concurrent write wins. It is a no-op when no target is
-	// recorded or the agent does not exist.
+	// on the stored applied config being unchanged since it was read (and the
+	// row is locked for the read where supported); when a concurrent write
+	// wins, the config is re-read and the clear retried a bounded number of
+	// times, after which an error is returned. It is a no-op when no target
+	// is recorded or the agent does not exist.
 	ClearAgentRuntimeTarget(ctx context.Context, id string) error
 
 	// FindOrphanedAgents returns agents whose RuntimeBrokerID references a broker

@@ -27,6 +27,7 @@ import (
 	"entgo.io/ent/dialect"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -211,5 +212,67 @@ func TestAgentStore_ClearAgentRuntimeTarget(t *testing.T) {
 
 	t.Run("unknown agent is a no-op", func(t *testing.T) {
 		require.NoError(t, s.ClearAgentRuntimeTarget(ctx, "00000000-0000-0000-0000-00000000abcd"))
+	})
+}
+
+// TestAgentStore_ClearAgentRuntimeTarget_WriteMiss covers the conditional
+// write missing because applied_config changed between the read and the
+// write: the clear re-reads and retries, and gives up with an error after a
+// bounded number of attempts.
+func TestAgentStore_ClearAgentRuntimeTarget_WriteMiss(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	create := func(t *testing.T, name string) *store.Agent {
+		t.Helper()
+		a := makeAgent(projectID, name)
+		a.AppliedConfig = &store.AgentAppliedConfig{
+			Image:         "example/image:1",
+			RuntimeTarget: "kubernetes|context=c|namespace=n",
+		}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		return a
+	}
+	// changeConfig rewrites applied_config inside the attempt's transaction,
+	// so the conditional write that follows matches no row.
+	changeConfig := func(ctx context.Context, tx *ent.Tx, id uuid.UUID, n int) {
+		cfg := fmt.Sprintf(`{"image":"example/image:%d","runtimeTarget":"kubernetes|context=c|namespace=n"}`, n+2)
+		_, err := tx.Agent.UpdateOneID(id).SetAppliedConfig(cfg).Save(ctx)
+		require.NoError(t, err)
+	}
+
+	t.Run("one miss then retry clears the target", func(t *testing.T) {
+		a := create(t, "miss-once")
+		calls := 0
+		clearRuntimeTargetHook = func(ctx context.Context, tx *ent.Tx, id uuid.UUID) {
+			if calls == 0 {
+				changeConfig(ctx, tx, id, calls)
+			}
+			calls++
+		}
+		t.Cleanup(func() { clearRuntimeTargetHook = nil })
+
+		require.NoError(t, s.ClearAgentRuntimeTarget(ctx, a.ID))
+		assert.Equal(t, 2, calls, "the clear re-read and retried once")
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.AppliedConfig)
+		assert.Empty(t, got.AppliedConfig.RuntimeTarget)
+		assert.Equal(t, "example/image:1", got.AppliedConfig.Image)
+	})
+
+	t.Run("persistent miss returns an error", func(t *testing.T) {
+		a := create(t, "miss-always")
+		calls := 0
+		clearRuntimeTargetHook = func(ctx context.Context, tx *ent.Tx, id uuid.UUID) {
+			changeConfig(ctx, tx, id, calls)
+			calls++
+		}
+		t.Cleanup(func() { clearRuntimeTargetHook = nil })
+
+		err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "changed concurrently")
+		assert.Equal(t, clearRuntimeTargetAttempts, calls, "retries are bounded")
 	})
 }
