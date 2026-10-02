@@ -996,6 +996,7 @@ func backfillProjectOwnerRoleBindings(ctx context.Context, s store.Store) error 
 
 		for i := range projects.Items {
 			p := &projects.Items[i]
+			warnOwnerOnlyLegacyProject(ctx, s, p, ownerRoleDef.ID)
 			if p.CreatedBy == "" {
 				continue
 			}
@@ -1054,6 +1055,55 @@ func projectHasOwnerBinding(ctx context.Context, s store.Store, projectID, owner
 		}
 	}
 	return false, nil
+}
+
+// warnOwnerOnlyLegacyProject logs, once per project per startup, a project
+// whose OwnerID is not backed by a project-owner binding. Project.OwnerID is
+// not an authorization source (ptone/scion#2586), so it grants nothing; this
+// only logs and never grants. Two shapes warn:
+//   - OwnerID set, CreatedBy empty, and no project-owner binding at all: the
+//     project has no owner until an admin grants one.
+//   - OwnerID set, CreatedBy set but different, and OwnerID itself holds no
+//     project-owner binding: the named owner has no access through OwnerID.
+//
+// A project where OwnerID equals CreatedBy never warns; the backfill grants
+// CreatedBy.
+func warnOwnerOnlyLegacyProject(ctx context.Context, s store.Store, p *store.Project, ownerRoleDefID string) {
+	if p.OwnerID == "" || p.OwnerID == p.CreatedBy {
+		return
+	}
+	if p.CreatedBy == "" {
+		hasOwner, err := projectHasOwnerBinding(ctx, s, p.ID, ownerRoleDefID)
+		if err != nil {
+			slog.Warn("failed to check project owner bindings for owner-only legacy project; skipping",
+				"project_id", p.ID, "error", err)
+			return
+		}
+		if hasOwner {
+			return // any owner binding: the project has an owner
+		}
+		slog.Warn("project has OwnerID but no CreatedBy and no project-owner binding; OwnerID grants no access, an admin must add an owner",
+			"project_id", p.ID, "owner_id", p.OwnerID)
+		return
+	}
+	// OwnerID differs from a non-empty CreatedBy. projectHasOwnerBinding
+	// answers "does anyone own the project", which is not this question:
+	// the backfill grants CreatedBy, so check that OwnerID itself holds a
+	// project-owner binding.
+	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, p.ID)
+	if err != nil {
+		slog.Warn("failed to check project owner bindings for owner-only legacy project; skipping",
+			"project_id", p.ID, "error", err)
+		return
+	}
+	for _, b := range bindings {
+		if b != nil && b.RoleDefinitionID == ownerRoleDefID &&
+			b.PrincipalType == store.RoleBindingPrincipalUser && b.PrincipalID == p.OwnerID {
+			return
+		}
+	}
+	slog.Warn("project OwnerID differs from CreatedBy and holds no project-owner binding; OwnerID grants no access",
+		"project_id", p.ID, "owner_id", p.OwnerID, "created_by", p.CreatedBy)
 }
 
 // ReconcileSuperAdminBindings ensures bidirectional consistency between

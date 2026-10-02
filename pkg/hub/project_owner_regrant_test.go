@@ -107,18 +107,22 @@ func addProjectOwner(t *testing.T, srv *Server, s store.Store, actor, user *stor
 }
 
 // A creator removed by a co-owner (no transfer, so project.OwnerID is still
-// the creator and the resource-owner rule still grants resource-owner access:
-// read/update/manage/register/set_messaging_policy/clone/list/secret_read)
-// must not become owner again by reading the project. That residual access is
-// a known gap tracked separately; this test pins only the no-re-grant fix.
+// the creator) must not become owner again by reading the project, and has no
+// access through OwnerID: Project.OwnerID grants nothing on a project resource
+// (ptone/scion#2586), so the GET itself is denied.
 func TestGetProject_RemovedCreatorSelfGETStaysRemoved(t *testing.T) {
 	srv, s, alice, bob, project := setupDemoPolicyTest(t)
 
 	addProjectOwner(t, srv, s, alice, bob, project.ID)
 	removeAllProjectBindings(t, srv, s, bob, project.ID, alice.ID)
 
+	got, err := s.GetProject(context.Background(), project.ID)
+	require.NoError(t, err)
+	require.Equal(t, alice.ID, got.OwnerID, "precondition: no transfer, OwnerID still names the creator")
+
 	rec := doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/projects/"+project.ID, nil)
-	t.Logf("removed creator GET -> %d", rec.Code)
+	assert.Contains(t, []int{http.StatusNotFound, http.StatusForbidden}, rec.Code,
+		"removed creator named only in OwnerID must not read the project; body=%s", rec.Body.String())
 
 	assert.Empty(t, projectBindingsFor(t, s, project.ID, alice.ID),
 		"GET by a removed creator must not re-grant any project binding")
