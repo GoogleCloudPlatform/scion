@@ -61,7 +61,8 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
   /**
    * The zone `notBeforeLocal`/`expiresAtLocal` were last derived for.
    * `willUpdate` compares this against the current effective zone on every
-   * update to detect a change (review R4-1).
+   * update to detect a change (review R4-1). Refreshed in
+   * `connectedCallback` too (review R5-1) — see that method.
    */
   private _renderedZone = effectiveTimeZone();
 
@@ -71,6 +72,17 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // Record the zone the strings below are about to be (re-)derived in —
+    // every time this method runs, not just once at construction (review
+    // R5-1). `DisplayZoneController`'s listener is only active while
+    // connected, so a zone change while this editor was detached, or
+    // before it was ever connected, is invisible to `willUpdate` until
+    // reconnection. Without this line, `_renderedZone` would still hold
+    // the zone captured at construction, and `willUpdate`'s first
+    // post-reconnect pass would treat the strings this method is about to
+    // populate in the *current* zone as if they were still in that stale
+    // zone — shifting them a second time.
+    this._renderedZone = this.viewerTimeZone;
     // Initialize local fields from props
     if (this.notBefore || this.expiresAt) {
       this.hasSchedule = true;

@@ -169,7 +169,13 @@ export function listTimeZones(): string[] {
 // it through the *previous* zone back to an ISO instant, then back to a
 // wall-clock string in the *new* zone — in `willUpdate`, not just call
 // `requestUpdate()`. See `access-boundary-schedule-editor.ts`'s `willUpdate`
-// for the reference implementation.
+// for the reference implementation. Track the zone those strings were
+// derived in, and update it everywhere you (re)derive them from an instant
+// (e.g. `connectedCallback`, a prop-change handler), not only in
+// `willUpdate` (review R5-1) — otherwise a zone change while the component
+// is detached, or before it is ever connected, is applied twice once it
+// reconnects: `willUpdate` compares against a zone that is now stale on
+// both sides.
 // ---------------------------------------------------------------------------
 
 /** The user's `preferences.timezone`, or `''` for Auto. */

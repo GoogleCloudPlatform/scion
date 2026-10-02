@@ -151,3 +151,62 @@ describe('scion-access-boundary-schedule-editor — late zone arrival (review R4
     expect(displayedValue(notBeforeInput(el))).toBe('2026-09-23T18:00');
   });
 });
+
+// Review round 5, R5-1: a zone change while the editor is detached (or
+// before it is ever connected) is invisible to DisplayZoneController, since
+// its listener is only active while connected. connectedCallback already
+// re-derives the cached strings in the *current* zone when it reconnects —
+// but if it doesn't also refresh `_renderedZone`, willUpdate's first
+// post-reconnect pass treats those freshly-current strings as if they were
+// still in the stale (pre-detach) zone, and shifts them a second time.
+describe('scion-access-boundary-schedule-editor — zone change while detached (review R5-1)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    setPreferredTimeZone('');
+  });
+
+  it('does not double-shift an untouched field when the zone changes while detached and the editor reconnects', async () => {
+    const el = await mount({
+      notBefore: '2026-09-23T15:00:00.000Z',
+      expiresAt: '2026-09-30T15:00:00.000Z',
+    });
+
+    el.remove();
+    setPreferredTimeZone('Asia/Tokyo');
+    document.body.appendChild(el); // reconnect — re-runs connectedCallback
+    await el.updateComplete;
+
+    // Same instant as at mount, displayed once in the new zone — not
+    // shifted a second time by willUpdate treating it as still-UTC.
+    expect(displayedValue(notBeforeInput(el))).toBe('2026-09-24T00:00');
+    expect(label(el)).toContain('Asia/Tokyo');
+
+    let detail: ScheduleChangeDetail | null = null;
+    el.addEventListener('schedule-change', (e) => {
+      detail = (e as CustomEvent<ScheduleChangeDetail>).detail;
+    });
+    const expiresInput = expiresAtInput(el);
+    (expiresInput as unknown as { value: string }).value = '2026-10-01T09:00';
+    expiresInput.dispatchEvent(new Event('sl-input'));
+    await el.updateComplete;
+
+    expect(detail).not.toBeNull();
+    expect(detail!.notBefore).toBe('2026-09-23T15:00:00.000Z');
+    expect(detail!.expiresAt).toBe('2026-10-01T00:00:00.000Z');
+  });
+
+  it('does not double-shift when the zone changes between construction and the first connection', async () => {
+    const el = document.createElement(
+      'scion-access-boundary-schedule-editor'
+    ) as ScionAccessBoundaryScheduleEditor;
+    el.notBefore = '2026-09-23T15:00:00.000Z';
+    el.expiresAt = '2026-09-30T15:00:00.000Z';
+
+    setPreferredTimeZone('Asia/Tokyo'); // zone changes before the element ever connects
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    expect(displayedValue(notBeforeInput(el))).toBe('2026-09-24T00:00');
+    expect(label(el)).toContain('Asia/Tokyo');
+  });
+});
