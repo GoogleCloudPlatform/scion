@@ -1895,6 +1895,13 @@ func (s *Server) createAgentInProject(
 					// Broker reported missing required env vars — fail the dispatch.
 					// Clean up the provisioning agent and its files so orphaned
 					// local state doesn't trigger spurious sync-registration.
+					//
+					// DispatchAgentCreateWithGather returned this as a value, not
+					// an error, so its own revoke-on-failure defer did not fire —
+					// the credential it minted is revoked here instead, before the
+					// row is deleted (ptone/scion#1956: a create that fails after
+					// the mint must not leave the credential valid for its full TTL).
+					revokeAgentCredentialsBestEffort(ctx, s.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 					_ = dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
 					_ = s.store.DeleteAgent(ctx, agent.ID)
 					s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
@@ -2025,6 +2032,16 @@ func mergeDispatchedAgent(dst, src *store.Agent) {
 	}
 	if src.RuntimeState != "" {
 		dst.RuntimeState = src.RuntimeState
+	}
+	// A resume that hit a version conflict re-reads the row as dst and
+	// retries with src (the in-memory agent the dispatch already ran
+	// against, including the caller's clear of a stale exit reason/code
+	// from the prior generation). Carry that clear through for a running
+	// resume, the same as the other running-phase fields above — otherwise
+	// the retry's full-row write would keep dst's stale values instead.
+	if src.Phase == string(state.PhaseRunning) {
+		dst.ExitReason = src.ExitReason
+		dst.ExitCode = src.ExitCode
 	}
 }
 
@@ -3144,7 +3161,7 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 	}
 
 	// Revoke all credentials for the deleted agent (best-effort, Phase 1H)
-	if _, err := s.store.RevokeAgentCredentialsByAgent(ctx, agent.ID, "system", "agent_deleted"); err != nil {
+	if _, err := s.store.RevokeAgentCredentialsByAgent(ctx, agent.ID, "system", agentCredentialRevokeReasonDeleted); err != nil {
 		slog.Warn("Failed to revoke agent credentials on delete", "agent_id", agent.ID, "error", err)
 	}
 

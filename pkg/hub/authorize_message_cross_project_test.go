@@ -94,7 +94,7 @@ func crossProjectSetup(t *testing.T) crossProjectFixture {
 		Updated:   time.Now(),
 	}
 	require_NoError(t, s.CreateProject(ctx, projB))
-	srv.createProjectMembersGroup(ctx, projB)
+	srv.seedProjectCreatorMembership(ctx, projB)
 
 	// Add ownerB as member of project B.
 	msgAuthzAddProjectMember(t, s, ownerB.ID, projectB, "project-b", store.GroupMemberRoleOwner)

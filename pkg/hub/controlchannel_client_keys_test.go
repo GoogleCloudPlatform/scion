@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
 // TestControlChannelBrokerClient_ExecuteKeys_Dispatched proves the
@@ -260,5 +262,128 @@ func TestControlChannelBrokerClient_ExecuteKeys_SignerFailureIsNotDispatched(t *
 	}
 	if tunnel.calls != 0 {
 		t.Fatalf("expected zero tunnel attempts when signing fails, got %d", tunnel.calls)
+	}
+}
+
+// TestControlChannelBrokerClient_ExecuteKeys_CtxCancelledMidTunnel_UnknownAndSingleSend
+// covers: when the caller's ctx is cancelled (or the Hub's own
+// dispatch timeout elapses) while a keys request is in flight over a *real*
+// control-channel tunnel (BrokerConnection.TunnelRequest, ptone/scion#1886),
+// the outcome must classify as keys_outcome_unknown (502,
+// pinned generically for every Outcome by agentkeys.HTTPStatus), exactly one
+// request envelope must have been sent to the broker, and exactly one cancel
+// frame must follow it. It also proves there is no resend: after the
+// BrokerConnection gives up, the pending-request bookkeeping is cleared and
+// nothing else arrives on the wire for this RequestID (contract §4.3 "no
+// tunnel-reconnect resend" — a stale response or a second attempt would
+// break single-attempt dispatch).
+func TestControlChannelBrokerClient_ExecuteKeys_CtxCancelledMidTunnel_UnknownAndSingleSend(t *testing.T) {
+	hubSide, brokerSide, cleanup := newHubWSPair(t)
+	defer cleanup()
+
+	mgr := NewControlChannelManager(ControlChannelConfig{RequestTimeout: 30 * time.Second}, slog.Default())
+	hc := &BrokerConnection{
+		brokerID:        "broker-1",
+		conn:            hubSide,
+		config:          mgr.config,
+		log:             slog.Default(),
+		pendingRequests: make(map[string]chan *wsprotocol.ResponseEnvelope),
+		ctx:             context.Background(),
+	}
+	mgr.connections["broker-1"] = hc
+
+	signer := &mockBrokerSigner{}
+	client := &ControlChannelBrokerClient{manager: mgr, signer: signer}
+
+	// Simulate a broker that received the request but never answers (e.g.
+	// busy with a slow create, or the connection is about to drop) — the
+	// same shape as TestTunnelRequest_CallerCtxCancelledSendsCancelToBroker.
+	readDone := make(chan wsprotocol.RequestEnvelope, 1)
+	go func() {
+		var got wsprotocol.RequestEnvelope
+		if err := brokerSide.ReadJSON(&got); err == nil {
+			readDone <- got
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := client.ExecuteKeys(ctx, "broker-1", "unused", "test-agent", agentkeys.BrokerRequest{
+			ProjectID:     "project-1",
+			AgentID:       "agent-1",
+			OperationID:   "op-1",
+			ExecuteBefore: time.Now().Add(time.Minute),
+			Keys:          "Enter",
+		})
+		resultCh <- err
+	}()
+
+	var sentReq wsprotocol.RequestEnvelope
+	select {
+	case sentReq = <-readDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("broker side never received the tunneled keys request")
+	}
+	if sentReq.Path != "/api/v1/agents/test-agent/keys" {
+		t.Fatalf("unexpected tunneled path: %s", sentReq.Path)
+	}
+
+	// Give ExecuteKeys a moment to reach its select before cancelling, as the
+	// existing ctx-cancellation tests in this package do.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	var gotErr error
+	select {
+	case gotErr = <-resultCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ExecuteKeys did not return after ctx cancellation")
+	}
+	if gotErr == nil {
+		t.Fatal("expected an error after ctx cancellation mid-tunnel")
+	}
+	if errors.Is(gotErr, agentkeys.ErrNotDispatched) {
+		t.Fatalf("a mid-tunnel ctx cancellation must not be reported as ErrNotDispatched (the request may have reached the broker), got %v", gotErr)
+	}
+	if got := agentkeys.ClassifyDispatchError(gotErr); got != agentkeys.OutcomeKeysOutcomeUnknown {
+		t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysOutcomeUnknown)
+	}
+	if status, ok := agentkeys.HTTPStatus(agentkeys.OutcomeKeysOutcomeUnknown); !ok || status != http.StatusBadGateway {
+		t.Fatalf("HTTPStatus(OutcomeKeysOutcomeUnknown) = (%d, %v), want (502, true)", status, ok)
+	}
+
+	// Exactly one cancel frame must follow, for the same RequestID.
+	var cancelMsg wsprotocol.CancelMessage
+	envDone := make(chan error, 1)
+	go func() { envDone <- brokerSide.ReadJSON(&cancelMsg) }()
+	select {
+	case err := <-envDone:
+		if err != nil {
+			t.Fatalf("broker side failed to read cancel message: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("broker side never received a cancel message after ctx cancellation")
+	}
+	if cancelMsg.Type != wsprotocol.TypeCancel {
+		t.Errorf("expected cancel message type %q, got %q", wsprotocol.TypeCancel, cancelMsg.Type)
+	}
+	if cancelMsg.RequestID != sentReq.RequestID {
+		t.Errorf("cancel RequestID = %q, want %q (the same request that was sent)", cancelMsg.RequestID, sentReq.RequestID)
+	}
+
+	// No resend: the pending-request entry must be cleaned up, and nothing
+	// further arrives on the wire for this request within a short window.
+	hc.pendingMu.Lock()
+	_, stillPending := hc.pendingRequests[sentReq.RequestID]
+	hc.pendingMu.Unlock()
+	if stillPending {
+		t.Error("expected the pending-request entry to be removed once ExecuteKeys returned")
+	}
+
+	_ = brokerSide.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	var extra wsprotocol.RequestEnvelope
+	if err := brokerSide.ReadJSON(&extra); err == nil {
+		t.Fatalf("unexpected second message on the wire after the cancel: %+v", extra)
 	}
 }

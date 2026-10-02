@@ -77,6 +77,10 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   @state() private auditNextToken: PageToken | undefined;
   @state() private auditTotalCount = 0;
   @state() private loadingAudit = false;
+  @state() private auditError = '';
+  private auditResourceId = '';
+  private auditRequestGeneration = 0;
+  private consumedAuditTokens = new Set<PageToken>();
 
   // Delete flow
   @state() private showDeletePreview = false;
@@ -601,6 +605,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   private async loadBoundary(): Promise<void> {
     this.phase = 'loading';
     this.errorMessage = '';
+    this.resetAuditState(this.boundaryId);
 
     try {
       const boundary = await accessBoundariesApi.get(this.boundaryId);
@@ -652,23 +657,66 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   }
 
   private async loadAuditEvents(pageToken?: PageToken): Promise<void> {
+    const resourceId = this.boundaryId;
+    if (!resourceId) return;
+    if (this.auditResourceId !== resourceId || !pageToken) {
+      this.resetAuditState(resourceId);
+    }
+    if (pageToken && this.consumedAuditTokens.has(pageToken)) {
+      this.auditNextToken = undefined;
+      return;
+    }
+    if (pageToken) this.consumedAuditTokens.add(pageToken);
+
+    const generation = ++this.auditRequestGeneration;
     this.loadingAudit = true;
+    this.auditError = '';
     try {
       const auditParams: { pageToken?: PageToken; pageSize?: number } = { pageSize: 20 };
       if (pageToken) auditParams.pageToken = pageToken;
-      const page = await accessBoundariesApi.listAudit(this.boundaryId, auditParams);
+      const page = await accessBoundariesApi.listAudit(resourceId, auditParams);
+      if (generation !== this.auditRequestGeneration || resourceId !== this.boundaryId) return;
+      const safeItems = page.items.filter((item) => item.constraintId === resourceId);
       if (pageToken) {
-        this.auditEvents = [...this.auditEvents, ...page.items];
+        const known = new Set(this.auditEvents.map((item) => item.id));
+        this.auditEvents = [
+          ...this.auditEvents,
+          ...safeItems.filter((item) => !known.has(item.id)),
+        ];
       } else {
-        this.auditEvents = page.items;
+        this.auditEvents = safeItems;
       }
-      this.auditNextToken = page.nextPageToken;
+      this.auditNextToken =
+        page.nextPageToken &&
+        page.nextPageToken !== pageToken &&
+        !this.consumedAuditTokens.has(page.nextPageToken)
+          ? page.nextPageToken
+          : undefined;
       this.auditTotalCount = page.totalCount;
     } catch (err) {
-      console.error('Failed to load audit events:', err);
+      if (generation !== this.auditRequestGeneration || resourceId !== this.boundaryId) return;
+      if (err instanceof accessBoundariesApi.StaleResponseError) return;
+      this.auditEvents = [];
+      this.auditNextToken = undefined;
+      this.auditTotalCount = 0;
+      this.auditError =
+        err instanceof accessBoundariesApi.AccessBoundaryAPIError && err.httpStatus === 404
+          ? 'Audit history is unavailable.'
+          : 'Unable to load audit history. Try again.';
     } finally {
-      this.loadingAudit = false;
+      if (generation === this.auditRequestGeneration) this.loadingAudit = false;
     }
+  }
+
+  private resetAuditState(resourceId: string): void {
+    this.auditRequestGeneration++;
+    this.auditResourceId = resourceId;
+    this.auditEvents = [];
+    this.auditNextToken = undefined;
+    this.auditTotalCount = 0;
+    this.auditError = '';
+    this.loadingAudit = false;
+    this.consumedAuditTokens.clear();
   }
 
   // ---------------------------------------------------------------------------
@@ -1282,6 +1330,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
             .nextPageToken=${this.auditNextToken}
             .totalCount=${this.auditTotalCount}
             .loading=${this.loadingAudit}
+            .errorMessage=${this.auditError}
             @audit-page-request=${(e: CustomEvent<AuditPageRequestDetail>) =>
               this.handleAuditPageRequest(e)}
           ></scion-access-boundary-audit-timeline>

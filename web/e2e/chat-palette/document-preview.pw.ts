@@ -119,16 +119,16 @@ function binaryAttachmentInput() {
 }
 
 function paletteInput(page: Page) {
-  return page.locator('scion-chat-switcher #palette-query-input');
+  return page.locator('scion-quick-palette #palette-query-input');
 }
 
 function paletteDialog(page: Page) {
-  return page.locator('scion-chat-switcher sl-dialog[label="Quick switcher"]');
+  return page.locator('scion-quick-palette sl-dialog[label="Quick switcher"]');
 }
 
 function groupOptions(page: Page, group: string) {
   return page.locator(
-    `scion-chat-switcher [aria-labelledby="palette-heading-${group}"] .palette-option`
+    `scion-quick-palette [aria-labelledby="palette-heading-${group}"] .palette-option`
   );
 }
 
@@ -203,7 +203,7 @@ test('Tab/Shift+Tab cycle through all four groups, including Documents, in readi
   // Empty query: the only real-activity candidate is AGENT_WITH_DM (its DM
   // has lastActivityAt), so it starts as the global best.
   await expect(
-    page.locator('scion-chat-switcher .palette-option').filter({ hasText: AGENT_WITH_DM.name })
+    page.locator('scion-quick-palette .palette-option').filter({ hasText: AGENT_WITH_DM.name })
   ).toHaveClass(/active/);
 
   await page.keyboard.press('Tab'); // -> Threads (empty, skipped) -> People (empty, skipped) -> Documents
@@ -211,7 +211,7 @@ test('Tab/Shift+Tab cycle through all four groups, including Documents, in readi
 
   await page.keyboard.press('Tab'); // wraps back to Agents
   await expect(
-    page.locator('scion-chat-switcher .palette-option').filter({ hasText: AGENT_WITH_DM.name })
+    page.locator('scion-quick-palette .palette-option').filter({ hasText: AGENT_WITH_DM.name })
   ).toHaveClass(/active/);
 
   await page.keyboard.press('Shift+Tab'); // wraps backward to Documents
@@ -295,7 +295,7 @@ test('the palette panel and the preview dialog are never both visible in the sam
     const tick = () => {
       const switcher = document
         .querySelector('scion-page-chat')
-        ?.shadowRoot?.querySelector('scion-chat-switcher');
+        ?.shadowRoot?.querySelector('scion-quick-palette');
       const panel = switcher?.shadowRoot
         ?.querySelector('sl-dialog')
         ?.shadowRoot?.querySelector('[part=panel]') as HTMLElement | null;
@@ -413,8 +413,11 @@ test('a stale document target (its identity replaced by a group refresh before t
   // replacing the underlying record out from under it.
   const staleTarget = await page.evaluate(
     () =>
-      (document.querySelector('scion-page-chat') as unknown as { v2PaletteGroups: any })
-        .v2PaletteGroups.documents.candidates[0].target
+      (
+        document.querySelector('scion-page-chat') as unknown as {
+          v2PaletteGroups: { documents: { candidates: { target: unknown }[] } };
+        }
+      ).v2PaletteGroups.documents.candidates[0].target
   );
 
   // Replace the record with a same-named one at a different path (a
@@ -448,7 +451,7 @@ test('a stale document target (its identity replaced by a group refresh before t
   await page.evaluate((target) => {
     const switcher = document
       .querySelector('scion-page-chat')!
-      .shadowRoot!.querySelector('scion-chat-switcher')!;
+      .shadowRoot!.querySelector('scion-quick-palette')!;
     switcher.dispatchEvent(
       new CustomEvent('palette-select', { detail: { target }, bubbles: true, composed: true })
     );

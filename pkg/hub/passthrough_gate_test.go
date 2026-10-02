@@ -86,7 +86,7 @@ func setupPassthroughServer(t *testing.T, owner *store.User, hostSAEmail, hostPr
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// The user must exist before createProjectMembersGroup so that
+	// The user must exist before seedProjectCreatorMembership so that
 	// the FK constraint on the group owner succeeds and the user is added to
 	// the project members group.
 	require.NoError(t, s.CreateUser(ctx, owner))
@@ -102,7 +102,7 @@ func setupPassthroughServer(t *testing.T, owner *store.User, hostSAEmail, hostPr
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	broker := &store.RuntimeBroker{
 		ID:                         tid("broker-pt"),
@@ -420,7 +420,7 @@ func TestPassthrough_NonOwnerNonAdmin_Create_Denied(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Broker owned by someone else, auto-provide so dispatch is allowed.
 	brokerOwnerID := tid("user-pt-broker-real-owner")
@@ -880,7 +880,7 @@ func TestPassthrough_EmbeddedBroker_AdminRoleUser_Allowed(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Embedded broker with NO CreatedBy (simulates registerGlobalProjectAndBroker).
 	broker := &store.RuntimeBroker{
@@ -955,7 +955,7 @@ func TestPassthrough_EmbeddedBroker_NonAdminUser_Denied(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	broker := &store.RuntimeBroker{
 		ID:                         tid("broker-pt-embedded-deny"),
@@ -1022,7 +1022,7 @@ func TestPassthrough_NonEmbeddedBroker_AdminRoleWithoutBinding_Denied(t *testing
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Non-embedded broker owned by someone else, no embedded label.
 	broker := &store.RuntimeBroker{

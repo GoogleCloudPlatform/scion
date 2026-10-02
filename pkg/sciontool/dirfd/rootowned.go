@@ -36,7 +36,8 @@ const trustedChainModeBits = 0o022
 // every component's result themselves by requiring it of all of them. Kept
 // as a pure function of already-fetched values (not one that stats anything
 // itself), so it can be exercised by a test with fabricated ownership/mode
-// values, without requiring the test process itself to be root or to own a
+// values, the same way pkg/sciontool/hooks.NodeOwnership.rootProtected is
+// tested, without requiring the test process itself to be root or to own a
 // real root-owned directory.
 func chainIsTrusted(uid uint32, mode uint32, selfUID uint32) bool {
 	return (uid == 0 || uid == selfUID) && mode&trustedChainModeBits == 0

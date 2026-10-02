@@ -143,8 +143,12 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 		if hubErr == nil && hctx != nil && hctx.Client != nil {
 			hubResolver := agent.NewHubSkillResolver(hctx.Client.Skills())
 			resolver := agent.NewRoutingSkillResolver(hubResolver)
-			ghResolver := agent.NewGitHubSkillResolverWithCredentials(os.Getenv("GITHUB_TOKEN"), nil, nil)
+			ghToken := os.Getenv("GITHUB_TOKEN")
+			ghResolver := agent.NewGitHubSkillResolverWithCredentials(ghToken, nil, nil)
 			resolver.Register("gh", ghResolver)
+			// Write resolutions to the disk cache before this process exits,
+			// rather than relying on the cache's delayed write.
+			defer ghResolver.FlushCache()
 
 			registrySvc := hctx.Client.SkillRegistries()
 			gcpLookup := func(ctx context.Context, name string) (*agent.RegistryLookupResult, error) {
@@ -165,6 +169,10 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 			resolver.Register("gcp-skill", agent.NewGCPSkillResolver(gcpLookup))
 
 			ctx = agent.ContextWithSkillResolver(ctx, resolver)
+			// Credentials for install-phase downloads of gh:// skills: the
+			// default for skills the Hub resolved, and the GitHub resolver's
+			// own lookup for skills it served from its disk cache.
+			ctx = ghResolver.WithInstallCredentials(ctx, ghToken)
 			if hctx.ProjectID != "" {
 				ctx = agent.ContextWithResolveProjectID(ctx, hctx.ProjectID)
 			}

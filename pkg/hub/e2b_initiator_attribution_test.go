@@ -685,7 +685,7 @@ func setupTwoScheduleUsers(t *testing.T, srv *Server, s store.Store, projectID s
 
 	project, err := s.GetProject(ctx, projectID)
 	require.NoError(t, err)
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, userA.ID))
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, userB.ID))
 	return userA, userB
@@ -1115,7 +1115,7 @@ func TestCancelScheduledEvent_EmitsMutationAudit(t *testing.T) {
 func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	ctx := context.Background()
-	f.srv.createProjectMembersGroup(ctx, f.proj)
+	f.srv.seedProjectCreatorMembership(ctx, f.proj)
 	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
 	f.srv.scheduler = NewScheduler(f.store, slog.Default())
 	f.srv.scheduler.RegisterEventHandler("dispatch_agent", f.srv.dispatchAgentEventHandler())

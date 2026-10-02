@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -167,7 +168,7 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	// agent — reincarnate with NoAuth reset to false and regain injected
 	// secrets on its next start. This is OR'd, never overwritten: nothing
 	// here can flip a true back to false.
-	if createInputs.NoAuth || fresh.HarnessAuth == "none" || fresh.AgentRole == string(AgentRoleNone) {
+	if createInputs.NoAuth || harness.IsNoAuthType(fresh.HarnessAuth) || fresh.AgentRole == string(AgentRoleNone) {
 		fresh.NoAuth = true
 	}
 

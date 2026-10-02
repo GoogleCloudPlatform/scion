@@ -136,6 +136,17 @@ The Hub's project file handlers serve project workspaces and shared directories.
 - **Untrusted content isolation**: Workspace and shared-directory files are written by users and agents, not by the Hub. Responses that serve them, including `?view=true` previews, the project WebDAV endpoint, and chat attachments, carry a `Content-Security-Policy: sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads` header and `X-Content-Type-Options: nosniff`. The sandbox omits `allow-same-origin`, so a sandboxed document gets an opaque origin: `allow-scripts` lets its scripts run, so generated HTML reports keep working in the file browser's preview, but it cannot act with the viewer's Hub session. WebDAV reads (`GET`, `HEAD`) are served as attachments, so browsers download them instead of rendering them.
 - **NFS shared directories**: With `server.shared_dir_storage.backend: nfs`, shared-directory operations use an `O_NOFOLLOW` component walk anchored on the project tree's inode. See [Shared Directory Storage](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage).
 
+### 3.6 Workspace Host-Path Validation
+
+Before a Runtime Broker bind-mounts, syncs (for example, to GCS), uploads, or recursively `chown`s a workspace or agent-home host path, it resolves the path through any symlinks and validates the result. The check runs on every runtime and fails closed: a path that cannot be resolved, including when the home directory cannot be determined, is refused. The Runtime Broker then acts on the resolved path, not the original one. The following are always refused:
+
+- The filesystem root (`/`, or a Windows volume root).
+- Critical system directories.
+- The user's home directory, or any ancestor of it.
+- The scion home (`~/.scion`) or any ancestor of it, and anything under `~/.scion` except the subtrees that legitimately hold workspaces and agent homes, such as Hub-managed project workspaces under `~/.scion/projects/<slug>`.
+
+Where the broker knows the project's root, the resolved path must also fall under it, so a symlink inside a project that points elsewhere is judged by where it leads.
+
 ## 4. Secret Management
 
 Scion provides a typed, scope-aware secret management system. Secret values are never stored in plaintext in the Hub database. For a user-facing guide, see [Secret Management](/scion/hosted/user/secrets/).
@@ -181,6 +192,7 @@ For headless environments (CI/CD, automation), Scion supports **user access toke
 - Tokens are prefixed with `scion_pat_` (a legacy artifact of the older "personal access token" name).
 - Only the SHA-256 hash of the token is stored in the database; the original value is never persisted.
 - Tokens can be scoped to specific permissions and projects, and revoked instantly via the dashboard or CLI.
+- Each token row records an explicit boundary (`boundary_kind`, default `project`). A project-boundary token must carry a `project_id`, and a database CHECK constraint enforces the pairing. At startup, the Hub logs the IDs (never the token or project) of any rows that break this rule, and such tokens are rejected when used, while valid tokens keep working. On SQLite, a hand-edited row whose `project_id` is not a UUID fails the schema migration, so correct or delete it before upgrading.
 - A token's selected scopes are a ceiling, not a grant: minting a token with a scope records it as
   a restriction on what the token may do, and grants no access by itself. Every request the token
   later makes is independently authorized against the holder's *current* authority on the specific

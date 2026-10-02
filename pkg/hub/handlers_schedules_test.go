@@ -148,7 +148,7 @@ func setupScopedDispatchAgentOwner(t *testing.T, srv *Server, s store.Store, pro
 
 	project, err := s.GetProject(ctx, projectID)
 	require.NoError(t, err)
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, userID))
 
 	return ownerUser

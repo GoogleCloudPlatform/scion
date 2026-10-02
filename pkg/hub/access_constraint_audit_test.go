@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -55,7 +56,7 @@ func auditTestSetupWithEvents(t *testing.T) (*GovernanceService, *PreviewService
 // ---------------------------------------------------------------------------
 
 func TestAudit_CommitProducesAuditID(t *testing.T) {
-	gs, ps, _, s, aw := auditTestSetup(t)
+	gs, ps, _, s, _ := auditTestSetup(t)
 	ctx := context.Background()
 
 	// Seed an admin user.
@@ -97,22 +98,21 @@ func TestAudit_CommitProducesAuditID(t *testing.T) {
 	// The commit must produce a non-empty audit ID.
 	assert.NotEmpty(t, commitResult.AuditID, "commit must produce a durable audit ID")
 
-	// The audit writer must have recorded the entry.
-	entries := aw.GetEntries()
-	require.Len(t, entries, 1, "expected exactly one audit entry")
-	assert.Equal(t, commitResult.AuditID, entries[0].ID)
+	entries, err := s.ListConstraintHistory(ctx, commitResult.Constraint.ID)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "expected exactly one durable history entry")
+	assert.Equal(t, commitResult.AuditID, entries[0].EventID)
 	assert.Equal(t, "create", entries[0].Operation)
 	assert.Equal(t, adminID, entries[0].ActorID)
 	assert.Equal(t, ClassificationTighten, entries[0].Classification)
-	assert.NotEmpty(t, entries[0].StateFingerprint)
-	assert.False(t, entries[0].Timestamp.IsZero())
+	assert.False(t, entries[0].OccurredAt.IsZero())
 }
 
 // ---------------------------------------------------------------------------
 // 2. Audit write failure rolls back the mutation conceptually
 // ---------------------------------------------------------------------------
 
-func TestAudit_WriteFailureReturnsError(t *testing.T) {
+func TestAudit_LegacyWriterFailureDoesNotAffectTransactionalCreate(t *testing.T) {
 	gs, ps, _, s, aw := auditTestSetup(t)
 	ctx := context.Background()
 
@@ -145,21 +145,25 @@ func TestAudit_WriteFailureReturnsError(t *testing.T) {
 	}
 
 	// Commit should fail because audit write fails.
-	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+	commitResult, err := gs.CommitBoundaryChange(ctx, CommitRequest{
 		Operation:    "create",
 		Draft:        draft,
 		PreviewToken: result.PreviewToken,
 		Actor:        actor,
 	})
-	require.Error(t, err, "commit must fail when audit write fails")
-	assert.Contains(t, err.Error(), "audit write failed")
+	require.NoError(t, err)
+	require.NotNil(t, commitResult.Constraint)
+	entries, err := s.ListConstraintHistory(ctx, commitResult.Constraint.ID)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, commitResult.AuditID, entries[0].EventID)
 }
 
 // ---------------------------------------------------------------------------
 // 2b. Audit failure compensating action: create is rolled back
 // ---------------------------------------------------------------------------
 
-func TestAudit_CompensatingAction_CreateRolledBack(t *testing.T) {
+func TestAudit_LegacyWriterFailureDoesNotCompensateCommittedCreate(t *testing.T) {
 	gs, ps, _, s, aw := auditTestSetup(t)
 	ctx := context.Background()
 
@@ -189,23 +193,29 @@ func TestAudit_CompensatingAction_CreateRolledBack(t *testing.T) {
 	// Inject audit failure.
 	aw.failFunc = func() error { return assert.AnError }
 
-	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+	commitResult, err := gs.CommitBoundaryChange(ctx, CommitRequest{
 		Operation:    "create",
 		Draft:        draft,
 		PreviewToken: result.PreviewToken,
 		Actor:        actor,
 	})
-	require.Error(t, err, "commit must fail when audit write fails")
-	assert.Contains(t, err.Error(), "audit write failed")
+	require.NoError(t, err)
+	require.NotNil(t, commitResult.Constraint)
 
-	// After audit failure, the constraint must NOT be in the store — the
-	// compensating action should have deleted it.
+	// CREATE no longer uses the legacy compensating writer. Its live row and
+	// history commit atomically before the structured sink is dispatched.
 	constraints, listErr := s.ListAccessConstraints(ctx, 100, 0)
 	require.NoError(t, listErr)
+	found := false
 	for _, c := range constraints {
-		assert.NotEqual(t, "comp-create-boundary", c.Name,
-			"constraint created before audit failure must be removed by compensating action")
+		if c.Name == "comp-create-boundary" {
+			found = true
+		}
 	}
+	assert.True(t, found)
+	entries, err := s.ListConstraintHistory(ctx, commitResult.Constraint.ID)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -283,8 +293,10 @@ func TestAudit_CompensatingAction_UpdateRestored(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAudit_RedactionNoSensitiveData(t *testing.T) {
-	gs, ps, _, s, aw := auditTestSetup(t)
+	gs, ps, _, s, _ := auditTestSetup(t)
 	ctx := context.Background()
+	capture := auditevent.NewCaptureSink()
+	gs.auditSink = capture
 
 	adminID := govSeedAdminUser(t, s, "redact-admin")
 	actor := PrincipalContext{Kind: "user", ID: adminID}
@@ -309,7 +321,7 @@ func TestAudit_RedactionNoSensitiveData(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+	commitResult, err := gs.CommitBoundaryChange(ctx, CommitRequest{
 		Operation:    "create",
 		Draft:        draft,
 		PreviewToken: result.PreviewToken,
@@ -317,10 +329,13 @@ func TestAudit_RedactionNoSensitiveData(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	entries := aw.GetEntries()
+	entries, err := s.ListConstraintHistory(ctx, commitResult.Constraint.ID)
+	require.NoError(t, err)
 	require.Len(t, entries, 1)
 
 	entry := entries[0]
+	records := capture.Records()
+	require.Len(t, records, 1)
 
 	// ---------------------------------------------------------------------------
 	// Field-level sensitive data assertions (R2): verify that every field in
@@ -352,19 +367,12 @@ func TestAudit_RedactionNoSensitiveData(t *testing.T) {
 			"DraftHash must not contain PII pattern %q", pat)
 	}
 
-	// StateFingerprint should not contain principal or group identifiers.
-	for _, pat := range piiPatterns {
-		assert.NotContains(t, entry.StateFingerprint, pat,
-			"StateFingerprint must not contain PII pattern %q", pat)
+	// The configured structured sink receives only the approved opaque IDs and
+	// typed payload; names, purpose text, and subject details stay out.
+	structured := string(records[0])
+	for _, sensitive := range []string{"redact-admin", "redact-target", draft.Name, draft.Purpose} {
+		assert.NotContains(t, structured, sensitive)
 	}
-
-	// ImpactCounts are numeric — verify they are non-negative (safe by type).
-	assert.GreaterOrEqual(t, entry.ImpactCounts.AffectedPrincipals, 0,
-		"AffectedPrincipals must be non-negative")
-	assert.GreaterOrEqual(t, entry.ImpactCounts.PermissionsAdded, 0,
-		"PermissionsAdded must be non-negative")
-	assert.GreaterOrEqual(t, entry.ImpactCounts.PermissionsRemoved, 0,
-		"PermissionsRemoved must be non-negative")
 }
 
 // ---------------------------------------------------------------------------
