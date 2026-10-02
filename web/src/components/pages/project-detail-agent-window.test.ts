@@ -883,6 +883,10 @@ describe('project-detail — agent list window', () => {
       await el.updateComplete;
 
       expect(internals(el).agentWindow.items.some((a) => a.id === agents[0].id)).toBe(false);
+      // Page 0 also carries `stats` (`wantStats` is true at index 0), so
+      // this also pins `fetchAgentsPage`'s own `freshStats` call, not just
+      // its `agents` field.
+      expect(internals(el).agentStats.total).toBe(4);
     });
 
     it('an off-page change that newly passes the active phase filter raises the chip', async () => {
