@@ -158,19 +158,18 @@ type tzFixture struct {
 }
 
 // locationsUnderTest returns the non-UTC *time.Time locations the two tests
-// above run against (review round 1, R1-5): a named zone with an hour
-// offset, a nameless zone with a sub-hour offset (Kathmandu-style, which a
-// four-digit numeric abbreviation like "+0545" can trip up naive parsers --
-// see dsn/findings on numeric zone abbreviations), and time.Local itself.
+// above run against: a named zone with an hour offset, a nameless zone with
+// a sub-hour offset (Kathmandu-style: a nameless, sub-hour zone prints a
+// four-digit numeric abbreviation such as "+0545", which a naive
+// "-0700 MST"-style parser rejects), and time.Local itself.
 //
-// Before this fix, both tests used only a fixed +9h JST zone, so running
-// them under TZ=Asia/Tokyo or TZ=Asia/Kathmandu changed nothing: the
-// fixture's *time.Time location is independent of the process's TZ
-// environment variable. Including time.Local closes that gap -- under the
-// required TZ=Asia/Tokyo and TZ=Asia/Kathmandu runs it *is* driven by the
-// environment, and it is also the production shape: a value from an
-// unpinned time.Now(), or from store read-back before the SQLite store
-// boundary fix (tz-refactor task 2) lands.
+// A fixed-zone *time.Time's location is independent of the process's TZ
+// environment variable, so the two fixed zones give fixed, CI-independent
+// coverage of the bug class under any TZ, including plain `go test` with no
+// TZ override. Including time.Local as a third case additionally exercises
+// the production shape: a value from an unpinned time.Now(), or from store
+// read-back before the SQLite store boundary fix (tz-refactor task 2)
+// lands -- both of which depend on the process's TZ.
 func locationsUnderTest() []tzFixture {
 	return []tzFixture{
 		{"JST(+9h,named)", time.FixedZone("JST", 9*60*60)},

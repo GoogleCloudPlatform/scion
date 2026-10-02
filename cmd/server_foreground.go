@@ -121,9 +121,9 @@ func chdirHomeIfAtFilesystemRoot() {
 // disable it (see TestMain in main_test.go). Running the real pin inside a
 // test would race goroutines leaked by earlier tests (both read and write
 // time.Local) and would silently switch every later test in the binary to
-// UTC regardless of TZ, masking real timezone bugs (tz-refactor task 1
-// review round 1, R1-3). Placement of every call to this seam is enforced
-// by the AST test in pin_process_utc_test.go, not by this comment.
+// UTC regardless of TZ, masking real timezone bugs. Placement of every call
+// to this seam is enforced by the AST test in pin_process_utc_test.go, not
+// by this comment.
 var pinProcessUTC = util.PinProcessUTC
 
 func runServerStart(cmd *cobra.Command, args []string) error {

@@ -183,8 +183,7 @@ func init() {
 func runSecretMigrateNames(cmd *cobra.Command, args []string) error {
 	// Offline hub-store writer: opens the hub database directly
 	// (openMigrateNamesStore below) and writes rows, so it is pinned like the
-	// other offline store-writing subcommands (tz-refactor task 1 review
-	// round 1, R1-4).
+	// other offline store-writing subcommands.
 	pinProcessUTC()
 
 	if migrateNamesProject == "" {

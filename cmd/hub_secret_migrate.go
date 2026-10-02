@@ -83,7 +83,7 @@ func init() {
 func runSecretMigrate(cmd *cobra.Command, args []string) error {
 	// Offline hub-store writer: opens the hub database directly (entc.OpenSQLite
 	// below) and writes rows, so it is pinned like the other offline
-	// store-writing subcommands (tz-refactor task 1 review round 1, R1-4).
+	// store-writing subcommands.
 	pinProcessUTC()
 
 	if migrateProject == "" {

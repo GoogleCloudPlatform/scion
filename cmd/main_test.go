@@ -24,10 +24,9 @@ import (
 // Production run functions pin time.Local to UTC; in the shared test binary
 // that would race leaked goroutines (other tests' background work reads
 // time.Local concurrently) and would silently turn every later TZ=... test
-// in this binary into a UTC test, masking real timezone bugs (tz-refactor
-// task 1 review round 1, R1-3). pkg/util's TestPinProcessUTC keeps covering
-// PinProcessUTC itself, and pin_process_utc_test.go's AST test covers where
-// the seam is called from.
+// in this binary into a UTC test, masking real timezone bugs. pkg/util's
+// TestPinProcessUTC keeps covering PinProcessUTC itself, and
+// pin_process_utc_test.go's AST test covers where the seam is called from.
 func TestMain(m *testing.M) {
 	pinProcessUTC = func() {}
 	os.Exit(m.Run())

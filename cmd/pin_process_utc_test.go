@@ -25,12 +25,11 @@ import (
 )
 
 // pinProcessUTCAllowedFuncs is the exact set of run functions allowed to
-// call the pinProcessUTC seam, as the first statement of their body
-// (tz-refactor task 1, design §2.1.1/§2.1.2). runServerStart covers
-// `scion server start` (foreground and daemon) and
+// call the pinProcessUTC seam, as the first statement of their body.
+// runServerStart covers `scion server start` (foreground and daemon) and
 // `scion runtime-broker start --foreground`. The rest are offline
 // store-writing subcommands, including the two hub secret-migrate commands,
-// which open the hub database directly (review round 1, R1-4).
+// which open the hub database directly.
 var pinProcessUTCAllowedFuncs = map[string]bool{
 	"runServerStart":        true,
 	"runServerMigrate":      true,
@@ -43,11 +42,10 @@ var pinProcessUTCAllowedFuncs = map[string]bool{
 }
 
 // TestPinProcessUTC_CallSitesAreExactlyTheAllowList is a static (AST) test
-// that replaces TestRunServerStart_PinsUTCBeforeAnyOtherWork (deleted; it
-// only proved that pinProcessUTC ran before one other seam in one function,
-// not that it was the first statement, and it exercised no offline command
-// and no "never in a PersistentPreRun / CLI command" rule — tz-refactor
-// task 1 review round 1, R1-2).
+// that enforces where and how the pinProcessUTC seam may be called, which a
+// plain ordering test cannot: ordering alone does not rule out a stray call
+// from a CLI command, a PersistentPreRun(E), or a position later than the
+// function's first statement.
 //
 // It parses every non-test cmd/ source file and asserts:
 //   - util.PinProcessUTC is referenced exactly once in the whole package,
