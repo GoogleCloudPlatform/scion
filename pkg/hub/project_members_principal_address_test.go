@@ -179,3 +179,60 @@ func TestSetMemberRoles_NonCanonicalPrincipalIDIsCanonicalised(t *testing.T) {
 		assert.Empty(t, mmrBindingsFor(t, f.store, principalType, id, f.projectID), "%s: DELETE by the upper-case ID removes the binding", principalType)
 	}
 }
+
+// TestSetMemberRoles_PrincipalExistenceCheckedAfterAuthorization pins where
+// the existence check sits in the pre-transaction phase: after governance
+// and CanDelegate. An actor who may not make the grant at all gets the same
+// refusal for a nonexistent principal as for an existing one, so the check
+// tells only an actor entitled to the grant that the principal is missing.
+func TestSetMemberRoles_PrincipalExistenceCheckedAfterAuthorization(t *testing.T) {
+	f := setupMMRFixture(t)
+	missing := tid(t.Name() + "-missing")
+
+	rec := putMemberRoles(t, f.srv, f.admin, f.projectID, "user", missing, []string{f.ownerRD.ID}, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, ErrCodeTargetRoleProtected, mmrErrorCode(t, rec.Body.Bytes()))
+
+	rec = putMemberRoles(t, f.srv, f.admin, f.projectID, "user", missing, []string{f.beyondCeiling.ID}, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, ErrCodeRoleAssignmentForbidden, mmrErrorCode(t, rec.Body.Bytes()))
+
+	assert.Empty(t, mmrBindingsFor(t, f.store, "user", missing, f.projectID))
+}
+
+// TestSetMemberRoles_OrphanedPrincipalRemovalOnlyPUT: the existence check
+// runs only when the plan creates a binding. Bindings left behind for an
+// agent whose record has been deleted can still be pruned by a PUT that only
+// removes; it does not refuse with "agent not found".
+func TestSetMemberRoles_OrphanedPrincipalRemovalOnlyPUT(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+	agentID := tid(t.Name() + "-agent")
+	require.NoError(t, f.store.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: agentID, Name: "orphan-agent", ProjectID: f.projectID,
+		Phase: "running", CreatedBy: f.owner.ID, OwnerID: f.owner.ID, Ancestry: []string{f.owner.ID},
+	}))
+	// Seeded through the store: the members PUT never grants a custom role
+	// to an agent, but such a binding can predate that rule.
+	for _, rdID := range []string{f.memberRD.ID, f.withinCeiling.ID} {
+		_, err := f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rdID,
+			PrincipalType:    store.RoleBindingPrincipalAgent,
+			PrincipalID:      agentID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          f.projectID,
+			CreatedBy:        "test",
+		})
+		require.NoError(t, err)
+	}
+	require.NoError(t, f.store.DeleteAgent(ctx, agentID))
+	_, err := f.store.GetAgent(ctx, agentID)
+	require.ErrorIs(t, err, store.ErrNotFound)
+	require.Len(t, mmrBindingsFor(t, f.store, "agent", agentID, f.projectID), 2, "deleting the agent leaves its bindings")
+
+	rec := putMemberRoles(t, f.srv, f.owner, f.projectID, "agent", agentID, []string{f.memberRD.ID}, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	bindings := mmrBindingsFor(t, f.store, "agent", agentID, f.projectID)
+	require.Len(t, bindings, 1)
+	assert.Equal(t, f.memberRD.ID, bindings[0].RoleDefinitionID)
+}
