@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -130,6 +131,17 @@ func (s *Server) captureCreateTimezone(ctx context.Context, agent *store.Agent, 
 		}
 	}
 	captureCreateTZ(ac, hcTZ)
+}
+
+// phaseHasLiveContainer reports whether an agent in the given phase has a
+// container that is coming up or running, and so keeps its current TZ until
+// the next start.
+func phaseHasLiveContainer(phase string) bool {
+	switch state.Phase(phase) {
+	case state.PhaseCloning, state.PhaseStarting, state.PhaseRunning:
+		return true
+	}
+	return false
 }
 
 // applyExplicitTimezoneEdit is writer (b) of ExplicitTimezone: the agent

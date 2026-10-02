@@ -377,6 +377,37 @@ func TestPatchAgent_ExplicitTimezone(t *testing.T) {
 		got, err := s.GetAgent(ctx, agent.ID)
 		require.NoError(t, err)
 		assert.Equal(t, "Europe/Paris", got.AppliedConfig.ExplicitTimezone, "accepted in any phase")
+
+		// Re-sending the same zone changes nothing, so it does not warn.
+		code, resp = patchAgentTZ(t, srv, agent.ID, map[string]interface{}{"explicitTimezone": "Europe/Paris"})
+		require.Equal(t, http.StatusOK, code)
+		assert.Empty(t, resp.Warnings, "re-PATCHing the same zone gives no warning")
+	})
+
+	t.Run("next-start warning only under a live container", func(t *testing.T) {
+		for _, tc := range []struct {
+			phase state.Phase
+			warn  bool
+		}{
+			{state.PhaseRunning, true},
+			{state.PhaseStarting, true},
+			{state.PhaseCloning, true},
+			{state.PhaseCreated, false},
+			{state.PhaseProvisioning, false},
+			{state.PhaseSuspended, false},
+			{state.PhaseStopping, false},
+			{state.PhaseStopped, false},
+			{state.PhaseError, false},
+		} {
+			srv, _, agent := tzPatchServer(t, string(tc.phase), nil)
+			code, resp := patchAgentTZ(t, srv, agent.ID, map[string]interface{}{"explicitTimezone": "Europe/Paris"})
+			require.Equal(t, http.StatusOK, code, tc.phase)
+			if tc.warn {
+				assert.Equal(t, []string{explicitTimezoneNextStartWarning}, resp.Warnings, tc.phase)
+			} else {
+				assert.Empty(t, resp.Warnings, tc.phase)
+			}
+		}
 	})
 
 	t.Run("invalid zone is rejected and changes nothing", func(t *testing.T) {

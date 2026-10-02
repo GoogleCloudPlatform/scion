@@ -3063,13 +3063,14 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		if agent.AppliedConfig == nil {
 			agent.AppliedConfig = &store.AgentAppliedConfig{}
 		}
-		if _, err := applyExplicitTimezoneEdit(agent.AppliedConfig, *updates.ExplicitTimezone); err != nil {
+		changed, err := applyExplicitTimezoneEdit(agent.AppliedConfig, *updates.ExplicitTimezone)
+		if err != nil {
 			ValidationError(w, err.Error(), map[string]interface{}{"field": "explicitTimezone"})
 			return
 		}
-		switch state.Phase(agent.Phase) {
-		case state.PhaseCreated, state.PhaseStopped, state.PhaseError:
-		default:
+		// Warn only when the pin actually changed under a live container;
+		// any other phase picks the new zone up at its next start anyway.
+		if changed && phaseHasLiveContainer(agent.Phase) {
 			warnings = append(warnings, explicitTimezoneNextStartWarning)
 		}
 	}
