@@ -47,12 +47,12 @@ func rawTimeColumn(t *testing.T, s *ScheduleStore, table, column, id string) (ty
 
 // TestCreateScheduledEvent_OffsetFireAtRoundTrips reproduces ptone/scion#2473:
 // a fireAt parsed from an offset RFC 3339 timestamp carries a nameless
-// FixedZone. Before the store normalised every write to UTC, the modernc
+// FixedZone. Without UTC normalisation at the store boundary, the modernc
 // SQLite driver (v1.53.0) persisted that zone's numeric abbreviation
 // (e.g. "+0200 +0200") as literal TEXT, which its own read-side layout could
 // not parse back — breaking Get and List for the row (and, through ent, the
-// whole query). This test fails on main with a Scan error; it passes once
-// schedule_store.go normalises fireAt with .UTC() at the write boundary.
+// whole query). entc.OpenSQLite's UTC handling (GoogleCloudPlatform/scion#2252)
+// fixes this; the test fails with a Scan error if that handling is removed.
 func TestCreateScheduledEvent_OffsetFireAtRoundTrips(t *testing.T) {
 	s := newTestScheduleStore(t)
 	ctx := context.Background()
@@ -101,9 +101,9 @@ func withLocal(t *testing.T, loc *time.Location) {
 // tzdata entry has no letter abbreviation — its Zone() name is the literal
 // numeric offset "+0545", the same shape that broke fire_at reads) and
 // Asia/Tokyo (a normally-abbreviated zone, "JST", included as a control that
-// already round-tripped before this fix). Both must return exactly the due,
-// active schedules once "now" is normalised to UTC before being bound into
-// the WHERE predicate.
+// that round-trips but must still compare correctly). Both must return
+// exactly the due, active schedules, which requires "now" to be bound into
+// the WHERE predicate as UTC text.
 func TestListDueSchedules_NonUTCLocal(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -377,8 +377,8 @@ func TestPurgeOldScheduledEvents_NonUTCLocal(t *testing.T) {
 // TestCreateScheduledEvent_FireInUnderNonUTCLocalRoundTrips mirrors the
 // handler's fireIn computation (time.Now().Add(duration) —
 // pkg/hub/handlers_scheduled_events.go) under the numeric-abbreviation
-// Asia/Kathmandu time.Local. Before this fix, a fireIn-derived time.Time
-// inherited time.Now()'s un-normalised Local zone and hit the same
+// Asia/Kathmandu time.Local. Without UTC normalisation, a fireIn-derived
+// time.Time carries time.Now()'s Local zone and hits the same
 // unparseable-TEXT failure on read as an offset fireAt.
 //
 // This lives at the store level rather than pkg/hub's HTTP handler tests:

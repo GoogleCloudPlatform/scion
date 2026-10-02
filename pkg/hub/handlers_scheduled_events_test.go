@@ -186,9 +186,9 @@ func TestScheduledEvent_CreateWithFireAt(t *testing.T) {
 
 // TestScheduledEvent_CreateWithOffsetFireAt covers ptone/scion#2473 at the
 // HTTP boundary: an offset RFC 3339 fireAt (not "Z"/UTC) parses into a
-// time.Time with a nameless FixedZone. Before the UTC normalisation fix (in
-// the handler and at the entadapter store boundary), persisting this event
-// and then reading it back broke with a Scan error on SQLite. This exercises
+// time.Time with a nameless FixedZone. Without UTC normalisation at the
+// SQLite store boundary, persisting this event and then reading it back
+// breaks with a Scan error. This exercises
 // the full create -> get round trip through the HTTP handlers, not just the
 // store directly.
 func TestScheduledEvent_CreateWithOffsetFireAt(t *testing.T) {

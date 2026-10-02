@@ -266,17 +266,12 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 
 	var fireAt time.Time
 	if req.FireAt != "" {
-		parsed, err := time.Parse(time.RFC3339, req.FireAt)
+		var err error
+		fireAt, err = time.Parse(time.RFC3339, req.FireAt)
 		if err != nil {
 			ValidationError(w, "fireAt must be a valid ISO 8601 / RFC 3339 timestamp", nil)
 			return
 		}
-		// time.Parse(time.RFC3339, ...) on an offset timestamp (e.g.
-		// "+02:00") yields a time.Time in a nameless FixedZone. Normalise to
-		// UTC here too (defense in depth on top of the store boundary fix in
-		// entadapter.CreateScheduledEvent) so every time.Time this handler
-		// hands downstream is already UTC.
-		fireAt = parsed.UTC()
 		if fireAt.Before(time.Now()) {
 			ValidationError(w, "fireAt must be in the future", nil)
 			return
@@ -291,7 +286,7 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 			ValidationError(w, "fireIn must be a positive duration", nil)
 			return
 		}
-		fireAt = time.Now().Add(duration).UTC()
+		fireAt = time.Now().Add(duration)
 	}
 
 	// Build payload

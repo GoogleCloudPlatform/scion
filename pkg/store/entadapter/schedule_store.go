@@ -169,10 +169,10 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sc *store.Schedule) 
 		create.SetPayload(sc.Payload)
 	}
 	if sc.NextRunAt != nil {
-		create.SetNextRunAt(sc.NextRunAt.UTC())
+		create.SetNextRunAt(*sc.NextRunAt)
 	}
 	if sc.LastRunAt != nil {
-		create.SetLastRunAt(sc.LastRunAt.UTC())
+		create.SetLastRunAt(*sc.LastRunAt)
 	}
 	if sc.LastRunStatus != "" {
 		create.SetLastRunStatus(sc.LastRunStatus)
@@ -183,22 +183,12 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sc *store.Schedule) 
 	if sc.CreatedBy != "" {
 		create.SetCreatedBy(sc.CreatedBy)
 	}
-	// created/updated are always set explicitly here (rather than left to the
-	// ent schema's bare time.Now defaults) so every value written to these
-	// columns is normalised to UTC — a non-UTC time.Now (e.g. a nameless
-	// numeric-offset time.Local, common in minimal containers) would
-	// otherwise store unparseable zone text on SQLite, same as an un-UTC'd
-	// caller-supplied fireAt.
-	createdAt := sc.CreatedAt
-	if createdAt.IsZero() {
-		createdAt = time.Now()
+	if !sc.CreatedAt.IsZero() {
+		create.SetCreated(sc.CreatedAt)
 	}
-	create.SetCreated(createdAt.UTC())
-	updatedAt := sc.UpdatedAt
-	if updatedAt.IsZero() {
-		updatedAt = createdAt
+	if !sc.UpdatedAt.IsZero() {
+		create.SetUpdated(sc.UpdatedAt)
 	}
-	create.SetUpdated(updatedAt.UTC())
 	setScheduleInitiatorAttribution(create, sc.InitiatorAttribution)
 
 	created, err := create.Save(ctx)
@@ -355,7 +345,7 @@ func (s *ScheduleStore) UpdateSchedule(
 	}
 	if fields.NextRunAt {
 		if sc.NextRunAt != nil {
-			update = update.SetNextRunAt(sc.NextRunAt.UTC())
+			update = update.SetNextRunAt(*sc.NextRunAt)
 		} else {
 			update = update.ClearNextRunAt()
 		}
@@ -363,11 +353,6 @@ func (s *ScheduleStore) UpdateSchedule(
 	if attribution != nil {
 		update = setScheduleAttributionUpdate(update, *attribution)
 	}
-	// Always set "updated" explicitly to a UTC time.Now rather than letting
-	// ent's UpdateDefault(time.Now) hook run — the hook's bare time.Now is
-	// not UTC-normalised and would otherwise reintroduce the unparseable
-	// zone-text bug for this column.
-	update = update.SetUpdated(time.Now().UTC())
 
 	affected, err := update.Save(ctx)
 	if err != nil {
@@ -445,10 +430,7 @@ func (s *ScheduleStore) UpdateScheduleStatus(ctx context.Context, id string, sta
 	if err != nil {
 		return err
 	}
-	err = s.client.Schedule.UpdateOneID(uid).
-		SetStatus(status).
-		SetUpdated(time.Now().UTC()).
-		Exec(ctx)
+	err = s.client.Schedule.UpdateOneID(uid).SetStatus(status).Exec(ctx)
 	if err != nil {
 		return mapError(err)
 	}
@@ -464,9 +446,8 @@ func (s *ScheduleStore) UpdateScheduleAfterRun(ctx context.Context, id string, r
 	}
 
 	update := s.client.Schedule.UpdateOneID(uid).
-		SetLastRunAt(ranAt.UTC()).
-		SetNextRunAt(nextRunAt.UTC()).
-		SetUpdated(time.Now().UTC()).
+		SetLastRunAt(ranAt).
+		SetNextRunAt(nextRunAt).
 		AddRunCount(1)
 
 	if errMsg != "" {
@@ -527,10 +508,6 @@ func (s *ScheduleStore) DeleteSchedulesByProject(ctx context.Context, projectID 
 // Postgres so two replicas never pick up the same schedule, and falls back to a
 // plain SELECT on SQLite (single writer, no SKIP LOCKED support).
 func (s *ScheduleStore) ListDueSchedules(ctx context.Context, now time.Time) ([]store.Schedule, error) {
-	// now is bound into a WHERE predicate against next_run_at, a UTC-text
-	// column: an un-normalised now (e.g. a numeric-abbreviation time.Local)
-	// would compare incorrectly as TEXT against the UTC-normalised column.
-	now = now.UTC()
 	ids, err := s.skipLockedIDs(ctx, schedule.Table, func(sel *entsql.Selector) {
 		sel.Where(entsql.And(
 			entsql.EQ(schedule.FieldStatus, store.ScheduleStatusActive),
@@ -610,7 +587,7 @@ func (s *ScheduleStore) CreateScheduledEvent(ctx context.Context, event *store.S
 		SetID(uid).
 		SetProjectID(pid).
 		SetEventType(event.EventType).
-		SetFireAt(event.FireAt.UTC()).
+		SetFireAt(event.FireAt).
 		SetPayload(event.Payload).
 		SetStatus(event.Status)
 
@@ -618,7 +595,7 @@ func (s *ScheduleStore) CreateScheduledEvent(ctx context.Context, event *store.S
 		create.SetCreatedBy(event.CreatedBy)
 	}
 	if event.FiredAt != nil {
-		create.SetFiredAt(event.FiredAt.UTC())
+		create.SetFiredAt(*event.FiredAt)
 	}
 	if event.Error != "" {
 		create.SetError(event.Error)
@@ -626,13 +603,9 @@ func (s *ScheduleStore) CreateScheduledEvent(ctx context.Context, event *store.S
 	if event.ScheduleID != "" {
 		create.SetScheduleID(event.ScheduleID)
 	}
-	// created is always set explicitly (see CreateSchedule's comment above
-	// for why the bare ent schema default is not UTC-safe).
-	createdAt := event.CreatedAt
-	if createdAt.IsZero() {
-		createdAt = time.Now()
+	if !event.CreatedAt.IsZero() {
+		create.SetCreated(event.CreatedAt)
 	}
-	create.SetCreated(createdAt.UTC())
 	setScheduledEventInitiatorAttribution(create, event.InitiatorAttribution)
 
 	created, err := create.Save(ctx)
@@ -728,7 +701,7 @@ func (s *ScheduleStore) UpdateScheduledEventStatus(ctx context.Context, id strin
 		SetStatus(status)
 
 	if firedAt != nil {
-		update.SetFiredAt(firedAt.UTC())
+		update.SetFiredAt(*firedAt)
 	} else {
 		update.ClearFiredAt()
 	}
@@ -767,7 +740,7 @@ func (s *ScheduleStore) ClaimScheduledEvent(ctx context.Context, id string, clai
 			scheduledevent.StatusEQ(store.ScheduledEventPending),
 		).
 		SetStatus(claimedStatus).
-		SetFiredAt(time.Now().UTC()).
+		SetFiredAt(time.Now()).
 		Save(ctx)
 	if err != nil {
 		return false, mapError(err)
@@ -858,12 +831,10 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 
 // PurgeOldScheduledEvents removes non-pending events older than cutoff.
 func (s *ScheduleStore) PurgeOldScheduledEvents(ctx context.Context, cutoff time.Time) (int, error) {
-	// cutoff is bound into a WHERE predicate against the UTC-text created
-	// column; an un-normalised cutoff would compare incorrectly as TEXT.
 	n, err := s.client.ScheduledEvent.Delete().
 		Where(
 			scheduledevent.StatusNEQ(store.ScheduledEventPending),
-			scheduledevent.CreatedLT(cutoff.UTC()),
+			scheduledevent.CreatedLT(cutoff),
 		).
 		Exec(ctx)
 	if err != nil {
