@@ -88,36 +88,58 @@ func (p PoolConfig) apply(db *sql.DB) {
 // option is force-replaced because modernc honours only the first value for
 // a repeated key, so a naive append would leave the operator's value in
 // effect.
+//
+// If the caller's query string fails to parse, dsn is returned unchanged
+// rather than rewritten with every other option dropped: modernc's own
+// sql.Open/applyQueryParams calls url.ParseQuery on the same string and will
+// surface the same error at open time, which is the caller's error to see,
+// not something this rewrite should mask by silently opening a different
+// database (e.g. dropping "mode=memory" and landing on disk instead).
 func withUTCTimezone(dsn string) string {
-	base, rawQuery, _ := strings.Cut(dsn, "?")
+	base, rawQuery, hasQuery := strings.Cut(dsn, "?")
+	if !hasQuery {
+		return dsn + "?_timezone=UTC"
+	}
 	values, err := url.ParseQuery(rawQuery)
 	if err != nil {
-		// An unparsable query string is already an error modernc itself will
-		// surface at open time; don't mask it by discarding it here.
-		values = url.Values{}
+		return dsn
 	}
 	values.Set("_timezone", "UTC")
 	return base + "?" + values.Encode()
 }
 
 // UTCTimeHook is an Ent mutation hook that converts every time.Time field
-// value being set in a mutation (explicit or defaulted) to UTC before it is
-// persisted. It is redundant with the SQLite DSN "_timezone=UTC" option for
-// values that reach the database through a connection opened by OpenSQLite
-// (modernc formats an already-UTC time.Time as canonical "... +0000 UTC"
-// text even with no "_timezone" option set, since formatTime only adjusts
-// the value's Location when one is configured), but it also normalises what
-// a create/update echoes back to the caller, and it is the only one of the
-// two mechanisms that does anything on Postgres (field.Time maps to
-// timestamptz there, so the hook's only effect is the echoed-back value; see
-// tz-refactor design §2.1.2).
+// value set in a mutation (explicit or defaulted — ent fills in defaults
+// before hooks run) to UTC before it is persisted. On SQLite this makes a
+// value canonical even with no "_timezone" DSN option, because modernc only
+// adjusts a bound value's Location when one is configured and otherwise
+// formats it as-is — so a value this hook has already converted still comes
+// out as canonical "... +0000 UTC" text. On Postgres (field.Time maps to
+// timestamptz, which is already instant-correct regardless of Location) the
+// hook's only effect is that a create/update no longer echoes a non-UTC
+// Location back to the caller. See tz-refactor design §2.1.2.
 //
-// Exported so callers that build an *ent.Client around a driver other than
-// OpenSQLite/OpenPostgres (for example a test harness that must keep working
-// under the "no_sqlite" build tag, where only a generic cgo SQLite driver —
-// not modernc, so not OpenSQLite's "_timezone" DSN option — is available)
-// can still register it with client.Use(entc.UTCTimeHook) and get the same
-// write-side normalisation.
+// Registered by OpenSQLite, OpenSQLiteReadOnly and openPostgres. Exported so
+// a caller that builds an *ent.Client around some other driver — for example
+// a test harness that must keep working under the "no_sqlite" build tag,
+// where modernc (and so OpenSQLite's "_timezone" option) is unavailable —
+// can still register it directly with client.Use(entc.UTCTimeHook).
+//
+// What it does not cover, because a mutation hook never sees these:
+//   - predicate arguments, e.g. a bare time.Now() passed to a generated
+//     XxxLT/XxxGTE predicate. On SQLite this binds as local-zone text under
+//     a non-UTC time.Local (a numeric-abbreviation zone such as Kathmandu's
+//     "+0545 +0545" compares wrong, and may not even Scan back); callers on
+//     modernc should also set the DSN "_timezone=UTC" option (OpenSQLite
+//     does this) or convert the predicate argument themselves. On Postgres,
+//     timestamptz comparisons are correct regardless;
+//   - values set via OnConflict(...).Update(func(u *XUpsert){...}), which
+//     bypasses mutation hooks entirely — same SQLite/Postgres split as above;
+//   - raw SQL;
+//   - time.Time values embedded inside a JSON field (e.g.
+//     PolicyConditions.ValidFrom/ValidUntil, ExposedPort.ExposedAt) — out of
+//     reach of a field-level hook; normalised at the ingest call site
+//     instead (tz-refactor task #4).
 func UTCTimeHook(next ent.Mutator) ent.Mutator {
 	return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
 		for _, name := range m.Fields() {

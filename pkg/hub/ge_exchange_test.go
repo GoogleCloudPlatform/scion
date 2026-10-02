@@ -298,6 +298,24 @@ func newTestExchangeServiceWithExtStore(validator GoogleCredentialValidator, use
 	)
 }
 
+// sqliteTimezoneDSNOption returns the DSN query parameter that forces the
+// named SQLite driver to canonicalise every bound and scanned time.Time to
+// UTC, so a test harness that cannot use entc.OpenSQLite (because it must
+// also build under the "no_sqlite" tag, where modernc is unavailable) can
+// still get the same store-boundary coverage as production for predicate
+// arguments and other values entc.UTCTimeHook cannot reach (see its doc).
+// Returns "" for an unrecognised driver name.
+func sqliteTimezoneDSNOption(driverName string) string {
+	switch driverName {
+	case "sqlite": // modernc.org/sqlite
+		return "_timezone=UTC"
+	case "sqlite3": // mattn/go-sqlite3 (cgo); its own equivalent option
+		return "_loc=UTC"
+	default:
+		return ""
+	}
+}
+
 // newPersistentTestExchangeService creates a GEExchangeService backed by a
 // real ent/SQLite store at the given path. Each call opens an independent
 // ent.Client to the same database file — callers can use two instances to
@@ -309,17 +327,21 @@ func newTestExchangeServiceWithExtStore(validator GoogleCredentialValidator, use
 // — and so entc.OpenSQLite's hardcoded "sqlite" driver — is unavailable;
 // driverName is whatever SQLite driver the build actually links (modernc's
 // "sqlite", or the cgo "sqlite3" some webchat test files register even
-// under no_sqlite). entc.OpenSQLite's "_timezone=UTC" DSN option is
-// modernc-specific and so can't travel with it, but entc.UTCTimeHook is
-// driver-agnostic (it converts the Go time.Time value before it is ever
-// bound), so it's registered explicitly below to get the same write-side
-// normalisation (tz-refactor design §2.1.2): a raw sql.Open with no hook
-// previously let a bare time.Now() default (e.g. ExternalIdentity.CreatedAt)
-// store a numeric-zone-abbreviation wall clock under a Kathmandu-like
-// time.Local, which ent then failed to Scan back.
+// under no_sqlite). sqliteTimezoneDSNOption adds that driver's own
+// UTC-canonicalisation option to the DSN, and entc.UTCTimeHook (registered
+// below) is driver-agnostic on top of it, so this harness gets the same
+// store-boundary coverage as entc.OpenSQLite under either driver
+// (tz-refactor design §2.1.2): a raw sql.Open with neither previously let a
+// bare time.Now() default (e.g. ExternalIdentity.CreatedAt) store a
+// numeric-zone-abbreviation wall clock under a Kathmandu-like time.Local,
+// which ent then failed to Scan back.
 func newPersistentTestExchangeService(t *testing.T, dbPath, driverName string) (*GEExchangeService, store.Store, ExternalIdentityStore) {
 	t.Helper()
-	db, err := sql.Open(driverName, "file:"+dbPath)
+	dsn := "file:" + dbPath + "?_journal_mode=WAL&_busy_timeout=5000"
+	if tz := sqliteTimezoneDSNOption(driverName); tz != "" {
+		dsn += "&" + tz
+	}
+	db, err := sql.Open(driverName, dsn)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

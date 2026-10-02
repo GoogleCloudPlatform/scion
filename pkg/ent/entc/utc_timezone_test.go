@@ -97,6 +97,39 @@ func TestWithUTCTimezone(t *testing.T) {
 	}
 }
 
+// TestWithUTCTimezone_MalformedQueryIsNotMasked covers review finding R1-1:
+// a query string url.ParseQuery can't parse must not be silently replaced
+// with a bare "_timezone=UTC", which would drop every other option (e.g.
+// "mode=memory", turning an in-memory database into an on-disk file) and
+// mask the error modernc's own url.ParseQuery call would otherwise surface
+// at open time. withUTCTimezone must return dsn unchanged in that case.
+func TestWithUTCTimezone_MalformedQueryIsNotMasked(t *testing.T) {
+	tests := []struct {
+		name string
+		dsn  string
+	}{
+		{
+			name: "invalid percent-encoding",
+			dsn:  "file:/d/h.db?mode=ro&_pragma=foo%zz",
+		},
+		{
+			name: "semicolon breaks url.ParseQuery",
+			dsn:  "file:/data/hub.db?mode=ro&_pragma=busy_timeout(5000);x",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, rawQuery, _ := strings.Cut(tc.dsn, "?")
+			_, err := url.ParseQuery(rawQuery)
+			require.Error(t, err, "test fixture must actually be malformed")
+
+			got := withUTCTimezone(tc.dsn)
+			assert.Equal(t, tc.dsn, got, "a malformed query must be returned unchanged, not masked")
+		})
+	}
+}
+
 // sqlDBFromClient reaches through the ent.Client's dialect.Driver to the
 // underlying *sql.DB, so tests can read a column's raw stored text with
 // CAST(col AS TEXT) — the only way to see modernc's stored bytes without the
