@@ -943,6 +943,16 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		}
 	}
 
+	// The addressed principal must exist before a binding is created for it.
+	// Without this the binding create inside the transaction failed with the
+	// store's not-found and surfaced as a 500 (ptone/scion#2529). Checked
+	// last in Phase P, so every earlier refusal keeps its code.
+	if len(plan0.Create) > 0 {
+		if d := svc.principalExistsDecision(ctx, req.PrincipalType, req.PrincipalID); d != nil {
+			return nil, d
+		}
+	}
+
 	// --- Phase T: inside the transaction -----------------------------------
 
 	result := SetMemberRolesResult{Created: len(current0) == 0}
@@ -1224,4 +1234,32 @@ func canDelegateRefusal(rd *store.RoleDefinition, reason string) *MembershipDeci
 		HTTPStatus: 403,
 		Details:    map[string]interface{}{"roleDefinitionId": rd.ID, "roleName": rd.Name, "reason": reason},
 	}
+}
+
+// principalExistsDecision refuses a user or agent principal ID that names no
+// record with the 400 invalid_request an unknown email already gets on the
+// members PUT. Only the addressed principal's not-found is mapped; any other
+// store error is a 500. Groups are looked up during address resolution, so
+// they pass through.
+func (svc *ProjectMembershipService) principalExistsDecision(ctx context.Context, principalType, principalID string) *MembershipDecision {
+	var err error
+	switch principalType {
+	case store.RoleBindingPrincipalUser:
+		_, err = svc.store.GetUser(ctx, principalID)
+	case store.RoleBindingPrincipalAgent:
+		_, err = svc.store.GetAgent(ctx, principalID)
+	default:
+		return nil
+	}
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return &MembershipDecision{
+			Allowed: false, DenialCode: ErrCodeInvalidRequest,
+			Reason:     principalType + " not found: " + principalID,
+			HTTPStatus: 400,
+		}
+	}
+	return &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: err.Error(), HTTPStatus: 500}
 }
