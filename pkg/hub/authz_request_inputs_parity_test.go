@@ -356,7 +356,6 @@ func assertDecisionsEqual(t *testing.T, ref, cand Decision, msgAndArgs ...interf
 // constraints, which A7/A7'/X7 all
 // depend on.
 type a1Fixture struct {
-	authz       *AuthzService
 	store       store.Store
 	projectID   string
 	otherProjID string
@@ -397,17 +396,6 @@ func newA1Fixture(t *testing.T, s store.Store, name string) *a1Fixture {
 		agent:       dcAgentIdentity(agentID, projectID, AgentRoleFull),
 		resource:    Resource{Type: "agent", ID: targetID, ParentType: "project", ParentID: projectID, OwnerID: delegatorID},
 	}
-}
-
-// agentAllActions returns every (resource action, scope action) pair A1-A8
-// cover: all 8 ResourceActions["agent"] plus all 4 ScopeActions["agent"].
-// Scope actions are evaluated against a Resource carrying only the parent
-// project, matching ComputeScopeCapabilities's shape.
-func agentAllActions() []Action {
-	var out []Action
-	out = append(out, ResourceActions["agent"]...)
-	out = append(out, ScopeActions["agent"]...)
-	return out
 }
 
 // p1Fixture is an ordinary hub member reached only through a group binding
@@ -1105,7 +1093,7 @@ func newOffsetFaultStore(s store.Store, failOffset int) *offsetFaultStore {
 
 func (o *offsetFaultStore) ListAccessConstraints(ctx context.Context, limit, offset int) ([]*store.AccessConstraint, error) {
 	o.memoTestStore.mu.Lock()
-	o.memoTestStore.counts["ListAccessConstraints"]++
+	o.counts["ListAccessConstraints"]++
 	o.memoTestStore.mu.Unlock()
 	if offset == o.failOffset {
 		o.mu.Lock()
@@ -1113,7 +1101,7 @@ func (o *offsetFaultStore) ListAccessConstraints(ctx context.Context, limit, off
 		o.mu.Unlock()
 		return nil, fmt.Errorf("injected offset-%d fault: %w", offset, errInjected)
 	}
-	return o.memoTestStore.Store.ListAccessConstraints(ctx, limit, offset)
+	return o.Store.ListAccessConstraints(ctx, limit, offset)
 }
 
 func (o *offsetFaultStore) hasFired() bool {
@@ -3381,15 +3369,15 @@ func (b *blockOnceStore) GetEffectiveGroups(ctx context.Context, userID string) 
 			close(b.blocked)
 		}
 		<-release
-		if err := b.memoTestStore.call(ctx, "GetEffectiveGroups"); err != nil {
+		if err := b.call(ctx, "GetEffectiveGroups"); err != nil {
 			return nil, err
 		}
 		return b.overrideGroups, nil
 	}
-	if err := b.memoTestStore.call(ctx, "GetEffectiveGroups"); err != nil {
+	if err := b.call(ctx, "GetEffectiveGroups"); err != nil {
 		return nil, err
 	}
-	return b.memoTestStore.Store.GetEffectiveGroups(ctx, userID)
+	return b.Store.GetEffectiveGroups(ctx, userID)
 }
 
 // TestParity_X2c_DeterministicLostRace is row X2c: two handles, hA
