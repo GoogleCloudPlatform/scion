@@ -239,3 +239,33 @@ func TestBackfillProjectOwnerRoleBindings_SkipsProjectsWithAnOwner(t *testing.T)
 	requireSingleOwnerBinding(t, s, project.ID, bob.ID)
 	requireSingleOwnerBinding(t, s, legacy.ID, alice.ID)
 }
+
+// nilBindingScopeStore is a stub store whose ListRoleBindingsForScope
+// returns a slice containing a nil element.
+type nilBindingScopeStore struct {
+	store.Store
+	bindings []*store.RoleBinding
+}
+
+func (s nilBindingScopeStore) ListRoleBindingsForScope(context.Context, string, string) ([]*store.RoleBinding, error) {
+	return s.bindings, nil
+}
+
+// TestProjectHasOwnerBinding_SkipsNilBindings covers the Gemini review on
+// GoogleCloudPlatform/scion#2274: a nil element in the listed bindings must
+// be skipped, not dereferenced.
+func TestProjectHasOwnerBinding_SkipsNilBindings(t *testing.T) {
+	ctx := context.Background()
+
+	var has bool
+	var err error
+	require.NotPanics(t, func() {
+		has, err = projectHasOwnerBinding(ctx, nilBindingScopeStore{bindings: []*store.RoleBinding{nil}}, "p1", "owner-rd")
+	})
+	require.NoError(t, err)
+	assert.False(t, has)
+
+	has, err = projectHasOwnerBinding(ctx, nilBindingScopeStore{bindings: []*store.RoleBinding{nil, {RoleDefinitionID: "owner-rd"}}}, "p1", "owner-rd")
+	require.NoError(t, err)
+	assert.True(t, has, "a real owner binding after a nil element must still be found")
+}

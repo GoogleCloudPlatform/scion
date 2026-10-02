@@ -1049,7 +1049,7 @@ func projectHasOwnerBinding(ctx context.Context, s store.Store, projectID, owner
 		return false, err
 	}
 	for _, b := range bindings {
-		if b.RoleDefinitionID == ownerRoleDefID {
+		if b != nil && b.RoleDefinitionID == ownerRoleDefID {
 			return true, nil
 		}
 	}
