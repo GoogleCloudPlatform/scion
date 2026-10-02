@@ -118,6 +118,15 @@ var (
 	// substrateAgentRecords maps actor UID to the label/metadata record
 	// synthesised at Run (substrate-runtime.md §4: keyed by actor UID).
 	substrateAgentRecords = make(map[string]*substrateAgentRecord)
+	// substrateExecSecrets maps "<atespace>/<actor>" (the same id
+	// substrateControlTokens is keyed by, set and deleted alongside it) to
+	// that actor's substrateSecretCandidates, captured once at Run. Exec and
+	// ExecWithStdin have no RunConfig of their own to redact against — only
+	// id — so this is what lets them run a doExec failure (which can embed
+	// the command's own stderr, or an HTTP error body) through the same
+	// redactEnvValues scrubbing Run's own errors get via SubstrateRuntime.redact,
+	// instead of returning it to the caller unredacted.
+	substrateExecSecrets = make(map[string]map[string]string)
 )
 
 // substrateRuntimesMu and substrateRuntimes memoize SubstrateRuntime
@@ -249,13 +258,14 @@ func SetSubstrateRuntimeBuilderForTest(builder func(config.V1SubstrateConfig) (*
 // t.Cleanup) to restore the previous contents.
 func WipeSubstrateAgentStateForTest() (restore func()) {
 	substrateAgentStateMu.Lock()
-	prevTokens, prevRecords := substrateControlTokens, substrateAgentRecords
+	prevTokens, prevRecords, prevSecrets := substrateControlTokens, substrateAgentRecords, substrateExecSecrets
 	substrateControlTokens = make(map[string]string)
 	substrateAgentRecords = make(map[string]*substrateAgentRecord)
+	substrateExecSecrets = make(map[string]map[string]string)
 	substrateAgentStateMu.Unlock()
 	return func() {
 		substrateAgentStateMu.Lock()
-		substrateControlTokens, substrateAgentRecords = prevTokens, prevRecords
+		substrateControlTokens, substrateAgentRecords, substrateExecSecrets = prevTokens, prevRecords, prevSecrets
 		substrateAgentStateMu.Unlock()
 	}
 }
@@ -520,6 +530,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 
 	substrateAgentStateMu.Lock()
 	substrateControlTokens[id] = controlToken
+	substrateExecSecrets[id] = substrateSecretCandidates(cfg)
 	substrateAgentRecords[actorUID] = &substrateAgentRecord{
 		Labels: cfg.Labels,
 		// scion.harness_config is the same label key
@@ -586,6 +597,7 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, id string) error {
 
 	substrateAgentStateMu.Lock()
 	delete(substrateControlTokens, id)
+	delete(substrateExecSecrets, id)
 	if uid != "" {
 		delete(substrateAgentRecords, uid)
 	}
@@ -1015,7 +1027,7 @@ func (r *SubstrateRuntime) Exec(ctx context.Context, id string, cmd []string) (s
 
 	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, nil, r.ExecUser(), defaultExecTimeout)
 	if err != nil {
-		return "", err
+		return "", r.redactExecErr(id, err)
 	}
 	return res.Stdout, nil
 }
@@ -1078,14 +1090,14 @@ func (r *SubstrateRuntime) ExecWithStdin(ctx context.Context, id string, cmd []s
 			// (a transport error, an auth rejection, "true" missing from
 			// the image) has nothing to do with version skew and must not
 			// be reported as if it did.
-			return "", fmt.Errorf("substrate: stdin capability probe failed for %s: control server may be running an image older than the reset-auth stdin change; upgrade the actor's sciontool image: %w", id, err)
+			return "", r.redactExecErr(id, fmt.Errorf("substrate: stdin capability probe failed for %s: control server may be running an image older than the reset-auth stdin change; upgrade the actor's sciontool image: %w", id, err))
 		}
-		return "", fmt.Errorf("substrate: stdin capability probe failed for %s: %w", id, err)
+		return "", r.redactExecErr(id, fmt.Errorf("substrate: stdin capability probe failed for %s: %w", id, err))
 	}
 
 	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, data, r.ExecUser(), defaultExecTimeout)
 	if err != nil {
-		return "", err
+		return "", r.redactExecErr(id, err)
 	}
 	return res.Stdout, nil
 }
@@ -1175,6 +1187,28 @@ func (r *SubstrateRuntime) redact(cfg RunConfig, err error) error {
 		return nil
 	}
 	return errors.New(redactEnvValues(err.Error(), substrateSecretCandidates(cfg)))
+}
+
+// redactExecErr is redact's counterpart for Exec and ExecWithStdin, which
+// have no RunConfig of their own at call time — only id. It looks up the
+// secret candidates substrateExecSecrets cached for id at Run (see that
+// map's own doc comment) and redacts err the same way redact does; if id has
+// no cached entry (its actor was deleted, or never bootstrapped by this
+// process — mirroring the "no control token cached" case the caller already
+// handles separately), err is returned unredacted rather than dropped,
+// since doExec's own error text never includes the one piece of id-less
+// secret material this path guards against going further.
+func (r *SubstrateRuntime) redactExecErr(id string, err error) error {
+	if err == nil {
+		return nil
+	}
+	substrateAgentStateMu.Lock()
+	secrets, ok := substrateExecSecrets[id]
+	substrateAgentStateMu.Unlock()
+	if !ok {
+		return err
+	}
+	return errors.New(redactEnvValues(err.Error(), secrets))
 }
 
 // isDigestPinned reports whether image is pinned by digest

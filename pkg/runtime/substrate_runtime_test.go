@@ -1292,6 +1292,72 @@ func TestSubstrateExec_Success(t *testing.T) {
 	}
 }
 
+// TestSubstrateExec_StderrTruncatedInError is the regression test for
+// bounding how much of a failed command's stderr doExec embeds directly in
+// an error: without truncateForError, a command that fills the control
+// server's own 4 MiB per-stream cap would turn one failed Exec call into a
+// multi-megabyte error message.
+func TestSubstrateExec_StderrTruncatedInError(t *testing.T) {
+	rec := &callRecorder{}
+	rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	id := "scion-proj/agent-a"
+	substrateAgentStateMu.Lock()
+	substrateControlTokens[id] = "tok-123"
+	substrateAgentStateMu.Unlock()
+
+	hugeStderr := strings.Repeat("x", maxEmbeddedErrorBytes*2)
+	fa.execResp = execResponse{Stderr: hugeStderr, ExitCode: 1}
+
+	_, err := rt.Exec(context.Background(), id, []string{"nope"})
+	if err == nil {
+		t.Fatal("Exec() expected an error for a non-zero exit code, got nil")
+	}
+	if len(err.Error()) >= len(hugeStderr) {
+		t.Errorf("Exec() error length = %d, want it bounded well under the full %d-byte stderr", len(err.Error()), len(hugeStderr))
+	}
+	if !strings.Contains(err.Error(), "truncated") {
+		t.Errorf("Exec() error = %v, want a truncation marker", err.Error())
+	}
+}
+
+// TestSubstrateExec_RedactsCachedSecretFromError proves Exec's error path
+// redacts a secret value the same way Run's own errors do, via the
+// substrateExecSecrets cache Run populates alongside the control token:
+// a command's stderr that happens to echo back a secret value from the
+// agent's own bootstrap env must never reach the caller verbatim.
+func TestSubstrateExec_RedactsCachedSecretFromError(t *testing.T) {
+	rec := &callRecorder{}
+	rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	id := "scion-proj/agent-a"
+	const secret = "sk-ultra-secret-credential-value"
+	substrateAgentStateMu.Lock()
+	substrateControlTokens[id] = "tok-123"
+	substrateExecSecrets[id] = map[string]string{"ANTHROPIC_API_KEY": secret}
+	substrateAgentStateMu.Unlock()
+	t.Cleanup(func() {
+		substrateAgentStateMu.Lock()
+		delete(substrateExecSecrets, id)
+		substrateAgentStateMu.Unlock()
+	})
+
+	fa.execResp = execResponse{Stderr: "failed: key=" + secret, ExitCode: 1}
+
+	_, err := rt.Exec(context.Background(), id, []string{"nope"})
+	if err == nil {
+		t.Fatal("Exec() expected an error for a non-zero exit code, got nil")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("Exec() error = %v, leaked the cached secret value", err)
+	}
+	if !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
+		t.Errorf("Exec() error = %v, want it to name the redacted key", err)
+	}
+}
+
 // -----------------------------------------------------------------------
 // ExecWithStdin: secret delivered via stdin, never via argv
 // -----------------------------------------------------------------------
