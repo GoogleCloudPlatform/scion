@@ -1668,11 +1668,6 @@ class TestResolveModel(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Original API preserved
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # Thinking level resolution
 # ---------------------------------------------------------------------------
 
@@ -1800,6 +1795,14 @@ class TestResolveThinking(unittest.TestCase):
         self.assertEqual(warns, ["thinking_level='abc' is not a valid integer; value=medium (default)"])
         self.assertEqual(infos, [])
 
+    def test_invalid_logs_stripped_value(self):
+        ctx, _, warns = self._ctx({"thinking": _CODEX_THINKING})
+        self.assertEqual(sh.resolve_thinking(ctx, "  abc \n"), "medium")
+        self.assertEqual(warns, ["thinking_level='abc' is not a valid integer; value=medium (default)"])
+        ctx, infos, _ = self._ctx({})
+        self.assertIsNone(sh.resolve_thinking(ctx, " x "))
+        self.assertEqual(infos, ["thinking_level='x' ignored (harness has no thinking map)"])
+
     def test_unset_without_default_returns_none(self):
         cfg = {"levels": [{"max": 100, "value": "high"}]}
         ctx, infos, warns = self._ctx({"thinking": cfg})
@@ -1850,6 +1853,11 @@ class TestResolveThinking(unittest.TestCase):
         ctx = sh.ProvisionContext("test", manifest)
         ctx.info = lambda _m: None  # type: ignore[method-assign]
         self.assertEqual(sh.resolve_thinking(ctx, "76"), "xhigh")
+
+
+# ---------------------------------------------------------------------------
+# Original API preserved
+# ---------------------------------------------------------------------------
 
 
 class TestOriginalAPI(unittest.TestCase):

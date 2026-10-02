@@ -934,13 +934,13 @@ def resolve_thinking(ctx: "ProvisionContext", raw: str | None = None) -> str | N
         if level is not None:
             ctx.info(f"thinking_level={level} ignored (harness has no thinking map)")
         elif invalid:
-            ctx.info(f"thinking_level={raw!r} ignored (harness has no thinking map)")
+            ctx.info(f"thinking_level={raw.strip()!r} ignored (harness has no thinking map)")
         return None
 
     _, default = parsed
     default_label = default or "<cli default>"
     if invalid:
-        ctx.warn(f"thinking_level={raw!r} is not a valid integer; value={default_label} (default)")
+        ctx.warn(f"thinking_level={raw.strip()!r} is not a valid integer; value={default_label} (default)")
         return default
     if level is None:
         ctx.info(f"thinking_level=<unset>, value={default_label} (default)")
