@@ -522,8 +522,9 @@ type StopAllAgentsResponse struct {
 }
 
 // handleStopAllAgents stops all running agents, optionally scoped to a project.
-// Global (projectID=="") requires platform admin. Project-scoped allows any project
-// member: owners/admins stop all agents, regular members stop only their own.
+// Global (projectID=="") requires agent.stop_all on the hub. Project-scoped
+// allows any project member by role binding: holders of agent.stop_all on the
+// project (owners/admins) stop all agents, other members stop only their own.
 func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -546,35 +547,35 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 		Phase:     string(state.PhaseRunning),
 	}
 
-	isAdmin := s.authzService.Decide(ctx, AuthzRequest{
+	// agent.stop_all is decided against the hub for global stop-all and
+	// against the project-scoped agent collection for a project, so
+	// project-owner and project-admin role bindings count. This is the
+	// same resource the project's stop_all scope capability is computed on.
+	resource := Resource{Type: "agent", ID: "hub"}
+	if projectID != "" {
+		resource = Resource{Type: "agent", ParentType: "project", ParentID: projectID}
+	}
+	canStopAll := s.authzService.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(userIdent),
 		Credential: credentialContextForIdentity(userIdent),
-		Resource:   Resource{Type: "agent", ID: "hub"},
-		Action:     Action("stop_all"),
+		Resource:   resource,
+		Action:     ActionStopAll,
 		Permission: "agent.stop_all",
 	}).Allowed
-	if projectID == "" {
-		// Global stop-all: requires agent.stop_all permission
-		if !isAdmin {
+	if !canStopAll {
+		if projectID == "" {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"Only admins can stop all agents", nil)
 			return
 		}
-	} else {
-		// Project-scoped stop-all: any project member allowed
-		if !isAdmin {
-			projectRole := s.resolveUserProjectRole(ctx, projectID, userIdent.ID())
-			if projectRole == "" {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"You are not a member of this project", nil)
-				return
-			}
-			// Regular members can only stop their own agents
-			if projectRole != store.GroupMemberRoleOwner && projectRole != store.GroupMemberRoleAdmin {
-				filter.OwnerID = userIdent.ID()
-				scope = "own"
-			}
+		// Other project members (by role binding) stop only their own agents.
+		if !s.isActiveMember(ctx, userIdent.ID(), projectID) {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You are not a member of this project", nil)
+			return
 		}
+		filter.OwnerID = userIdent.ID()
+		scope = "own"
 	}
 
 	result, err := s.store.ListAgents(ctx, filter, store.ListOptions{
@@ -674,25 +675,4 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 		Scope:   scope,
 		Results: results,
 	})
-}
-
-// resolveUserProjectRole returns the user's role in the project's members group.
-// Returns "" if the user is not a member of the project.
-func (s *Server) resolveUserProjectRole(ctx context.Context, projectID, userID string) string {
-	groups, err := s.store.ListGroups(ctx, store.GroupFilter{
-		ProjectID: projectID,
-		GroupType: store.GroupTypeExplicit,
-	}, store.ListOptions{Limit: 10})
-	if err != nil || len(groups.Items) == 0 {
-		return ""
-	}
-
-	for _, g := range groups.Items {
-		membership, err := s.store.GetGroupMembership(ctx, g.ID, store.GroupMemberTypeUser, userID)
-		if err != nil {
-			continue
-		}
-		return membership.Role
-	}
-	return ""
 }

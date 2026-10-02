@@ -211,15 +211,10 @@ func TestStopAllAgents_ProjectMember_StopsOnlyOwnAgents(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, carol))
 	ensureHubMembership(ctx, s, carol.ID)
 
-	// Add carol as a regular member of the project's members group
-	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
+	// Add carol as a project-member role binding through the members API
+	alice, err := s.GetUser(ctx, tid("user-alice"))
 	require.NoError(t, err)
-	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
-		GroupID:    membersGroup.ID,
-		MemberType: store.GroupMemberTypeUser,
-		MemberID:   carol.ID,
-		Role:       store.GroupMemberRoleMember,
-	}))
+	addProjectMemberViaAPI(t, srv, s, alice, project.ID, carol.ID, store.ProjectRoleMember)
 
 	// Create agents owned by carol and by alice
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
@@ -312,4 +307,89 @@ func TestStopAllAgents_ScopeCapabilities_ProjectMember(t *testing.T) {
 		"/api/v1/projects/"+project.ID+"/agents", nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"non-member should be denied the project agent list outright; got: %s", rec.Body.String())
+}
+
+// addProjectMemberViaAPI grants userID the named built-in project role by
+// calling POST /api/v1/projects/{id}/members as actor, which creates a role
+// binding (the membership source of truth).
+func addProjectMemberViaAPI(t *testing.T, srv *Server, s store.Store, actor *store.User, projectID, userID, roleName string) {
+	t.Helper()
+	rd, err := s.GetRoleDefinitionByName(context.Background(), roleName, store.RoleScopeProject)
+	require.NoError(t, err)
+	rec := doRequestAsUser(t, srv, actor, http.MethodPost,
+		"/api/v1/projects/"+projectID+"/members",
+		addProjectMemberRequest{
+			RoleDefinitionID: rd.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      userID,
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, "add member: %s", rec.Body.String())
+}
+
+func TestStopAllAgents_ProjectAdminViaMembersAPI_StopsAllAgents(t *testing.T) {
+	srv, s, alice, bob, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	addProjectMemberViaAPI(t, srv, s, alice, project.ID, bob.ID, store.ProjectRoleAdmin)
+
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: tid("alice-agent"), Slug: tid("alice-agent"), Name: "Alice Agent",
+		ProjectID: project.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: tid("bob-agent"), Slug: tid("bob-agent"), Name: "Bob Agent",
+		ProjectID: project.ID, OwnerID: bob.ID, Phase: string(state.PhaseRunning),
+	}))
+
+	// Bob holds project-admin through a role binding only (he is not in the
+	// project's legacy members group) and so has agent.stop_all.
+	rec := doRequestAsUser(t, srv, bob, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp StopAllAgentsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "all", resp.Scope)
+	assert.Equal(t, 2, resp.Stopped)
+
+	for _, id := range []string{tid("alice-agent"), tid("bob-agent")} {
+		a, err := s.GetAgent(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseStopped), a.Phase, id)
+	}
+}
+
+func TestStopAllAgents_MembersGroupOnly_Forbidden(t *testing.T) {
+	srv, s, alice, bob, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	// Bob is in an explicit group carrying the project's ID but holds no
+	// project role binding, so he is not a project member.
+	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
+	require.NoError(t, err)
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    membersGroup.ID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   bob.ID,
+		Role:       store.GroupMemberRoleOwner,
+	}))
+
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: tid("alice-agent"), Slug: tid("alice-agent"), Name: "Alice Agent",
+		ProjectID: project.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: tid("bob-agent"), Slug: tid("bob-agent"), Name: "Bob Agent",
+		ProjectID: project.ID, OwnerID: bob.ID, Phase: string(state.PhaseRunning),
+	}))
+
+	rec := doRequestAsUser(t, srv, bob, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	for _, id := range []string{tid("alice-agent"), tid("bob-agent")} {
+		a, err := s.GetAgent(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseRunning), a.Phase, id)
+	}
 }
