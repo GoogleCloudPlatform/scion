@@ -30,23 +30,8 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
 import { formatChatDate, renderDateDivider, chatDateDividerStyles } from './chat-date-divider.js';
+import { formatInstant } from '../../../utils/time.js';
 import type { Message } from '../../../shared/types.js';
-
-/** Compact 24-hour time label, matching `chat-message.ts`'s `MESSAGE_TIME_FORMAT`. */
-const IA_TIME_FORMAT = new Intl.DateTimeFormat('en', {
-  hour12: false,
-  hour: '2-digit',
-  minute: '2-digit',
-});
-
-/** Fuller date+time label for the full-content dialog, e.g. "Sep 23, 14:15". */
-const IA_DATETIME_FORMAT = new Intl.DateTimeFormat('en', {
-  month: 'short',
-  day: 'numeric',
-  hour12: false,
-  hour: '2-digit',
-  minute: '2-digit',
-});
 
 @customElement('scion-chat-interagent-marker')
 export class ScionChatInteragentMarker extends LitElement {
@@ -387,16 +372,12 @@ export class ScionChatInteragentMarker extends LitElement {
 
   /** Compact time-only label for the two-line expanded row, e.g. "14:15". */
   private formatTime(iso: string): string {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return '';
-    return IA_TIME_FORMAT.format(d);
+    return formatInstant(iso, 'time');
   }
 
   /** Fuller date+time label for the full-content dialog, e.g. "Sep 23, 14:15". */
   private formatDateTime(iso: string): string {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return '';
-    return IA_DATETIME_FORMAT.format(d);
+    return formatInstant(iso, 'datetime');
   }
 
   /** Render a single expanded inter-agent message row (header + body). */

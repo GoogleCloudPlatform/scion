@@ -28,6 +28,7 @@ import { srOnlyStyles } from './styles.js';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { Iso8601 } from '../../shared/access-boundaries.js';
+import { effectiveTimeZone, parseWallClock, toWallClockInput } from '../../utils/time.js';
 
 export interface ScheduleChangeDetail {
   notBefore: Iso8601 | undefined;
@@ -48,11 +49,7 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
   @state() private validationError = '';
 
   private get viewerTimeZone(): string {
-    try {
-      return Intl.DateTimeFormat().resolvedOptions().timeZone;
-    } catch {
-      return 'UTC';
-    }
+    return effectiveTimeZone();
   }
 
   override connectedCallback(): void {
@@ -179,41 +176,19 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
   ];
 
   private isoToLocalDatetime(iso: Iso8601): string {
-    try {
-      const date = new Date(iso);
-      if (isNaN(date.getTime())) return '';
-      // Format as YYYY-MM-DDTHH:MM for datetime-local input
-      const year = date.getFullYear();
-      const month = String(date.getMonth() + 1).padStart(2, '0');
-      const day = String(date.getDate()).padStart(2, '0');
-      const hours = String(date.getHours()).padStart(2, '0');
-      const minutes = String(date.getMinutes()).padStart(2, '0');
-      return `${year}-${month}-${day}T${hours}:${minutes}`;
-    } catch {
-      return '';
-    }
+    return toWallClockInput(iso, this.viewerTimeZone);
   }
 
   private localDatetimeToIso(localValue: string): Iso8601 | undefined {
     if (!localValue) return undefined;
-    try {
-      const date = new Date(localValue);
-      if (isNaN(date.getTime())) return undefined;
-      return date.toISOString();
-    } catch {
-      return undefined;
-    }
+    const iso = parseWallClock(localValue, this.viewerTimeZone);
+    return iso || undefined;
   }
 
   private formatUtcPreview(localValue: string): string {
-    if (!localValue) return '';
-    try {
-      const date = new Date(localValue);
-      if (isNaN(date.getTime())) return '';
-      return date.toISOString().replace('T', ' ').replace('.000Z', ' UTC');
-    } catch {
-      return '';
-    }
+    const iso = this.localDatetimeToIso(localValue);
+    if (!iso) return '';
+    return iso.replace('T', ' ').replace('.000Z', ' UTC');
   }
 
   private validate(): void {
@@ -292,7 +267,7 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
           ? html`
               <div class="timezone-label">
                 <sl-icon name="clock"></sl-icon>
-                Times shown in: ${this.viewerTimeZone}
+                Times in: ${this.viewerTimeZone}
               </div>
 
               <fieldset>

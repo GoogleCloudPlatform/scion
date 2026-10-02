@@ -26,6 +26,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
+import { effectiveTimeZone, parseWallClock } from '../../utils/time.js';
 
 interface ScheduledEvent {
   id: string;
@@ -134,9 +135,15 @@ export class ScionScheduledEventList extends LitElement {
       if (this.dialogTimingMode === 'in') {
         body.fireIn = this.dialogDuration;
       } else {
-        // Convert local datetime to ISO 8601 UTC
-        const dt = new Date(this.dialogDatetime);
-        body.fireAt = dt.toISOString();
+        // Interpret the datetime-local value as wall-clock time in the
+        // effective display zone (not the browser's zone, which is what
+        // `new Date(value).toISOString()` would use).
+        const iso = parseWallClock(this.dialogDatetime, effectiveTimeZone());
+        if (!iso) {
+          this.dialogError = 'Enter a valid date and time';
+          return;
+        }
+        body.fireAt = iso;
       }
 
       const response = await apiFetch(
@@ -458,6 +465,7 @@ export class ScionScheduledEventList extends LitElement {
             : html`
                 <sl-input
                   label="Date & Time"
+                  help-text="Times in: ${effectiveTimeZone()}"
                   type="datetime-local"
                   .value=${this.dialogDatetime}
                   @sl-input=${(e: Event) =>

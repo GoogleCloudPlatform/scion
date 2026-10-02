@@ -24,21 +24,15 @@
 
 import { html, css } from 'lit';
 import type { TemplateResult } from 'lit';
-
-/** Date-only label for date separators, e.g. "Sep 23, 2026". */
-const CHAT_DATE_FORMAT = new Intl.DateTimeFormat('en', {
-  year: 'numeric',
-  month: 'short',
-  day: 'numeric',
-});
+import { formatInstant } from '../../../utils/time.js';
 
 /**
- * Format an ISO timestamp into the shared date-separator label (local time),
- * or '' if the timestamp is invalid.
+ * Format an ISO timestamp into the shared date-separator label (the
+ * effective display zone, e.g. "Sep 23, 2026"), or '' if the timestamp is
+ * invalid.
  */
 export function formatChatDate(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? '' : CHAT_DATE_FORMAT.format(d);
+  return formatInstant(iso, 'date');
 }
 
 /** Render the shared date-separator row for a given date label. */

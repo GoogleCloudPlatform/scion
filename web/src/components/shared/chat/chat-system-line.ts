@@ -23,6 +23,7 @@
 
 import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
+import { formatInstant } from '../../../utils/time.js';
 
 @customElement('scion-chat-system-line')
 export class ScionChatSystemLine extends LitElement {
@@ -99,16 +100,7 @@ export class ScionChatSystemLine extends LitElement {
 
   private formatTime(): string {
     if (!this.timestamp) return '';
-    try {
-      const d = new Date(this.timestamp);
-      return d.toLocaleTimeString('en', {
-        hour12: false,
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-    } catch {
-      return '';
-    }
+    return formatInstant(this.timestamp, 'time');
   }
 }
 

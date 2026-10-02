@@ -45,6 +45,7 @@ import {
   formatDateTime,
   getPrincipalIcon,
 } from '../shared/role-binding-utils.js';
+import { effectiveTimeZone, parseWallClock } from '../../utils/time.js';
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -708,12 +709,13 @@ export class ScionPageAdminRoleBindings extends LitElement {
         scopeId: this.formScopeType === 'project' ? this.formScopeId.trim() : '',
       };
 
-      // Include lifecycle fields only when set
+      // Include lifecycle fields only when set. Interpreted as wall-clock
+      // time in the effective display zone, not the browser's zone.
       if (this.formNotBefore) {
-        body.notBefore = new Date(this.formNotBefore).toISOString();
+        body.notBefore = parseWallClock(this.formNotBefore, effectiveTimeZone());
       }
       if (this.formExpiresAt) {
-        body.expiresAt = new Date(this.formExpiresAt).toISOString();
+        body.expiresAt = parseWallClock(this.formExpiresAt, effectiveTimeZone());
       }
 
       const res = await apiFetch('/api/v1/admin/role-bindings', {
@@ -1262,6 +1264,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
         ${this.showAdvanced
           ? html`
               <div class="advanced-content">
+                <div class="lifecycle-hint">Times in: ${effectiveTimeZone()}</div>
                 <div class="form-group">
                   <sl-input
                     label="Activate After (Not Before)"

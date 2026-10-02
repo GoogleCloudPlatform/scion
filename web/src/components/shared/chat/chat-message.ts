@@ -32,6 +32,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
+import { formatInstant } from '../../../utils/time.js';
 import { getLanguageFromPath } from '../code-editor.js';
 import { hashColor, getInitials } from './chat-avatar.js';
 import {
@@ -61,12 +62,6 @@ export interface AttachmentRefInfo {
 
 /** Image MIME types rendered inline. */
 const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
-
-const MESSAGE_TIME_FORMAT = new Intl.DateTimeFormat('en', {
-  hour12: false,
-  hour: '2-digit',
-  minute: '2-digit',
-});
 
 /** Non-`text/*` MIME types whose bytes are still text. */
 const TEXT_MIMES = new Set([
@@ -2439,12 +2434,8 @@ export class ScionChatMessage extends LitElement {
 
   private formatTime(): string {
     if (!this.timestamp) return '';
-    try {
-      const d = new Date(this.timestamp);
-      return Number.isNaN(d.getTime()) ? 'Invalid Date' : MESSAGE_TIME_FORMAT.format(d);
-    } catch {
-      return '';
-    }
+    const formatted = formatInstant(this.timestamp, 'time');
+    return formatted || 'Invalid Date';
   }
 
   /** Deterministic colour from the sender ID (preferred) or slug/name fallback. */
