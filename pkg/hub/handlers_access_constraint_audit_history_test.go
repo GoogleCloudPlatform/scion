@@ -23,9 +23,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -268,4 +270,49 @@ func TestConstraintAuditHistory_StoreUnavailableIsExplicit(t *testing.T) {
 		"/api/v1/admin/access-constraints/"+constraint.ID+"/audit", nil)
 	assert.Equal(t, http.StatusInternalServerError, resp.Code, "body: %s", resp.Body.String())
 	assert.NotContains(t, resp.Body.String(), `"items":[]`)
+}
+
+func TestConstraintAuditHistory_CreateIdentityFlowsThroughEndpoint(t *testing.T) {
+	srv, s := b7TestServer(t)
+	targetUserID := pvSeedUser(t, s, "endpoint-history-target")
+	principalType := "user"
+	draft := &store.AccessConstraint{
+		Name:                 "endpoint-history-create",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &principalType,
+		SubjectPrincipalID:   &targetUserID,
+		ScopeType:            store.RoleScopeSystem,
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "prove retained endpoint identity",
+		CreatedBy:            DevUserID,
+	}
+	operation, err := auditevent.NewOperationContext("request-audit-create")
+	require.NoError(t, err)
+	ctx := auditevent.ContextWithOperation(t.Context(), operation)
+	result, err := commitAuditedConstraint(t, ctx, srv.governanceService, srv.previewService,
+		draft, pvTestActor(DevUserID))
+	require.NoError(t, err)
+
+	response := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/access-constraints/"+result.Constraint.ID+"/audit", nil)
+	require.Equal(t, http.StatusOK, response.Code, "body: %s", response.Body.String())
+	page := decodeAuditPage(t, response.Body.Bytes())
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, result.AuditID, page.Items[0].ID)
+	assert.Equal(t, result.Constraint.ID, page.Items[0].ConstraintID)
+	assert.Equal(t, "create", page.Items[0].Operation)
+	assert.Equal(t, result.Constraint.Revision, mustParseRevision(t, page.Items[0].AfterRevision))
+
+	history, err := s.ListConstraintHistory(t.Context(), result.Constraint.ID)
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	assert.Equal(t, history[0].EventID, page.Items[0].ID)
+}
+
+func mustParseRevision(t *testing.T, revision *string) int64 {
+	t.Helper()
+	require.NotNil(t, revision)
+	parsed, err := strconv.ParseInt(*revision, 10, 64)
+	require.NoError(t, err)
+	return parsed
 }

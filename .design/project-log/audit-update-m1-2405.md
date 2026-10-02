@@ -80,3 +80,41 @@ authorization-operation route registry, not the frozen audit-event catalog.
 The corrected targeted run passed:
 
 - `go test -count=1 -p 2 ./pkg/hub ./pkg/hub/authzop -run '^(TestConstraintAuditHistory_|TestB7_GetConstraintAudit|TestB7_RouteMetadata_ReadPermission|TestEntryPointsCoverRouteMetadata|TestStaleExemptionDetection)$'` — PASS.
+
+## Resumed full-stack integration
+
+The shared-auth dependency was approved at exact head
+`b4b2d7bb27de6bf3a8cd75ef21cb3e47fd070fbd`. Its exact-route response
+normalizer makes authentication-produced 400/401/403 responses outwardly
+identical to the canonical access-constraint 404 while preserving authenticated
+downstream responses and infrastructure failures. The approved auth files were
+frozen and remain unchanged by the resumed work.
+
+Exactly one existing view path is now wired: the API client's `listAudit`
+contract, `scion-access-boundary-audit-timeline`, and its existing use on the
+admin access-boundary detail page. The former speculative generic-envelope type
+and fixture were replaced with the actual purpose-specific retained fields. The
+timeline renders operation, time, actor kind/ID, revision, classification,
+preview/audit/correlation IDs, and typed impact counts. It deliberately does not
+render draft hashes, credential data, raw payloads, internal scope, or raw error
+text.
+
+Initial loads clear prior rows. Resource changes invalidate earlier requests,
+and generation/resource checks prevent late responses from replacing the new
+resource state. Pagination consumes `nextPageToken`, filters rows to the active
+constraint, removes duplicate event IDs, and stops repeated cursors. A 404
+clears rows and renders the non-enumerating `Audit history is unavailable.`;
+other failures clear rows and render an explicit bounded service-error message.
+Loading and genuinely empty retained history remain distinct states.
+
+Focused resume evidence before the implementation checkpoint:
+
+- `npm test -- --run src/client/access-boundaries-api.test.ts src/components/shared/access-boundary-audit-timeline.test.ts src/components/pages/admin-access-boundary-detail-audit.test.ts src/shared/access-boundaries.test.ts` — PASS, 4 files / 68 tests. The runner emitted non-failing localhost:3000 connection noise from imported app infrastructure.
+- `npm run typecheck` — PASS.
+- `go test -count=1 -p 2 ./pkg/hub -run '^TestConstraintAuditHistory_CreateIdentityFlowsThroughEndpoint$'` — PASS. The approved create path's audit event ID is identical in the retained store row and authorized history response, whose typed shape is the one consumed by the client/timeline tests.
+
+The first focused web attempt could not load the project Vitest configuration
+because dependencies were absent. `npm ci` installed the lockfile-pinned tree;
+no package or lockfile changed. Its audit summary reported three pre-existing
+dependency findings (one low, two high); dependency remediation is outside this
+unit and no dependency was added or upgraded.
