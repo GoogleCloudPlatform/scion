@@ -205,7 +205,7 @@ Access to the proxy and port registration APIs requires authentication, verified
 * **Accessing Proxied Ports**:
   * An agent can only access its own port registrations.
   * A user must be authenticated and must hold the **`ActionPortAccess`** (or `ActionRead`) permission for that specific agent. Unauthorized users are blocked with an HTTP `403 Forbidden` response.
-  * When authenticating with a [user access token](/hosted/user/personal-access-tokens/), the
+  * When authenticating with a [user access token](/scion/hosted/user/personal-access-tokens/), the
     token must have the `agent:port_access` scope selected, and the holder must currently have
     access to that specific agent — your own agents and their descendants. Selecting the scope at
     mint time is not by itself access to any agent; it is re-checked on every request.

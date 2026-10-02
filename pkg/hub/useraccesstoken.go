@@ -298,6 +298,12 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 	// and (2) token minting only reads authority state, it does not mutate
 	// it. See O1 documentation in rs4_credential_test.go.
 	identity := GetIdentityFromContext(ctx)
+	// enforceSessionCredential above already rejects a missing identity;
+	// this keeps the mint path fail-closed on its own rather than relying
+	// on that ordering.
+	if isNilIdentity(identity) {
+		return "", nil, ErrUATProjectForbidden
+	}
 	principal := principalContextForIdentity(identity)
 	boundary := TokenBoundary{Kind: BoundaryKindProject, ProjectID: params.ProjectID}
 	eligibility, err := s.authz.CanMintSelector(ctx, principal, boundary, expanded)

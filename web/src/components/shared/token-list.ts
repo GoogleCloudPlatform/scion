@@ -914,11 +914,12 @@ export class ScionTokenList extends LitElement {
         if (a.isAlias !== b.isAlias) return a.isAlias ? -1 : 1;
         return a.value.localeCompare(b.value);
       });
-      if (scopes.length > 0) {
-        this.scopesCache.set(cacheKey, scopes);
-        this.availableScopes = scopes;
-        this.scopesErrorProjectId = null;
-      }
+      // Apply the result even when it is empty, so a project with no
+      // eligible scopes replaces the previous project's list instead of
+      // leaving it on screen.
+      this.scopesCache.set(cacheKey, scopes);
+      this.availableScopes = scopes;
+      this.scopesErrorProjectId = null;
     } catch {
       if (seq !== this.scopesRequestSeq) return; // superseded before the catch
       this.availableScopes = this.scopesCache.get('') ?? [...FALLBACK_SCOPES];

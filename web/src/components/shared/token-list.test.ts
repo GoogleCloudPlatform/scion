@@ -362,6 +362,28 @@ describe('scion-token-list — project eligibility (ptone/scion#2122)', () => {
     expect((el as any).scopesErrorProjectId).toBe('proj-b');
   });
 
+  it('an empty eligibility list for a newly selected project replaces the previous project list', async () => {
+    const el = await createComponent(
+      baseFetch({
+        scopes: (url) => {
+          if (url.includes('projectId=proj-a')) return jsonResponse(eligibilityResponse('proj-a'));
+          if (url.includes('projectId=proj-b')) return jsonResponse({ scopes: [], aliases: [] });
+          return jsonResponse(CATALOG_RESPONSE);
+        },
+      })
+    );
+
+    await (el as any).loadScopes('proj-a');
+    await el.updateComplete;
+    expect((el as any).availableScopes.length).toBeGreaterThan(0); // sanity: project A loaded
+
+    await (el as any).loadScopes('proj-b');
+    await el.updateComplete;
+
+    expect((el as any).availableScopes).toEqual([]);
+    expect((el as any).scopesErrorProjectId).toBeNull();
+  });
+
   it('an older, slower project response cannot overwrite a newer one that already resolved', async () => {
     const gateA = deferred<Response>();
     const el = await createComponent(
