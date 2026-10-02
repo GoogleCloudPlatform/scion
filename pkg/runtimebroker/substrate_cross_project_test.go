@@ -550,12 +550,19 @@ func TestSubstrateBroker_StopAbsentSlugInProject_RecordlessOwnAtespace_IdentityU
 	}
 }
 
-// TestSubstrateBroker_DeleteProbeError_ExplicitFailureNot404 covers the
-// probe itself failing (a ListActors error inside RecordlessActors): this
-// must surface as an explicit 5xx failure, never as the ordinary
-// not-found/idempotent-success path, since a failed probe proves nothing
-// about whether the actor exists.
-func TestSubstrateBroker_DeleteProbeError_ExplicitFailureNot404(t *testing.T) {
+// TestSubstrateBroker_DeleteAllListCallsFail_ExplicitFailureNot404 covers
+// every ListActors call failing (both the resolve-time unscoped List and
+// the atespace-scoped record-less-actor probe): this must surface as an
+// explicit 5xx failure, never as the ordinary not-found/idempotent-success
+// path, since a failed lookup proves nothing about whether the actor
+// exists. This test's own fc.listActorsErr fails unconditionally, so it
+// actually exercises the EARLIER resolve-time list-error path, returning
+// before the probe itself is ever reached — despite this test's former
+// name ("...ProbeError..."), which claimed otherwise. See
+// TestSubstrateBroker_ProbeOnlyError_ExplicitFailure
+// (substrate_restart_gaps_test.go) for the probe-specific case: only the
+// atespace-scoped call fails, with the unscoped one succeeding.
+func TestSubstrateBroker_DeleteAllListCallsFail_ExplicitFailureNot404(t *testing.T) {
 	const projBID = "bbbbbbbbbbbb"
 
 	srv, fc := newTestSubstrateBrokerServer(t)
