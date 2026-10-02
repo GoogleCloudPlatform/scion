@@ -36,6 +36,7 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 - **Markdown & Rich Rendering**: Chat messages support fully-featured real-time **Markdown rendering** inside chat bubbles (including syntax-highlighted code fences, tables, and nested lists) for highly readable development chats.
 - **GitHub References**: `owner/repo#N` references in a message automatically link to the corresponding GitHub issue or pull request.
 - **Clickable File Paths**: File paths starting with `/workspace/...` or `/scion-volumes/...` render as interactive links. Clicking them immediately opens an on-demand file viewer dialog, fetching the current file content directly from the existing workspace and shared-directory APIs without leaving the chat context.
+- **Clickable `gs://` Links**: A `gs://bucket/object` reference posted by an agent likewise opens the same on-demand viewer, fetching the object through the sending agent's own assigned GCP identity. See [gs:// links in chat](/scion/hosted/single-node/hub-server/#gs-links-in-chat) for what links, which identity is used, size limits, and error behavior.
 - **iOS & Platform Tailoring**: The layout incorporates specific styling adjustments for iOS devices, delivering polished rendering and input behavior under Safari and other mobile browsers.
 - **Config Toggle**: Top-level native chat can be turned on or off globally by administrators using a single configuration key (`web.native_chat` feature flag) or via the Admin interface.
 
