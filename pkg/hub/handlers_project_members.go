@@ -756,30 +756,56 @@ func validatePrincipalType(w http.ResponseWriter, principalType string) bool {
 	}
 }
 
+// canonicalMemberPrincipalID returns the canonical spelling of a member
+// principal address and whether it is well formed. A user ID or agent ID is
+// returned as uuid.UUID.String() (lower-case, dashed), so the alternative
+// spellings uuid.Parse also accepts (upper case, "urn:uuid:", braces, no
+// dashes) address the same principal instead of storing a second,
+// non-canonical principal_id that grants nothing, slips past the
+// one-built-in check and cannot be removed by the canonical ID
+// (ptone/scion#2529). A user email and any group address are returned
+// unchanged; the resolver handles them.
+func canonicalMemberPrincipalID(principalType, principalID string) (string, bool) {
+	switch principalType {
+	case store.RoleBindingPrincipalUser:
+		if strings.Contains(principalID, "@") {
+			return principalID, true
+		}
+		u, err := uuid.Parse(principalID)
+		if err != nil {
+			return "", false
+		}
+		return u.String(), true
+	case store.RoleBindingPrincipalAgent:
+		u, err := uuid.Parse(principalID)
+		if err != nil {
+			return "", false
+		}
+		return u.String(), true
+	}
+	return principalID, true
+}
+
 // validateMemberPrincipalAddress rejects a user principal addressed by
 // something that is neither an email nor a well-formed user ID, and an agent
 // principal addressed by anything but a well-formed agent ID, writing a 400
 // invalid_request (the code P1 already uses for unresolvable principal
 // addressing) and returning false. Without it the malformed ID reached the
 // store, whose validation error surfaced as a 500 on PUT (ptone/scion#2529,
-// review r2 L-500) and as "no bindings" 404 on DELETE.
-func validateMemberPrincipalAddress(w http.ResponseWriter, principalType, principalID string) bool {
-	switch principalType {
-	case store.RoleBindingPrincipalUser:
-		if strings.Contains(principalID, "@") {
-			return true
-		}
-		if _, err := uuid.Parse(principalID); err != nil {
-			BadRequest(w, "user principal must be addressed by user ID or email: "+principalID)
-			return false
-		}
-	case store.RoleBindingPrincipalAgent:
-		if _, err := uuid.Parse(principalID); err != nil {
-			BadRequest(w, "agent principal must be addressed by agent ID: "+principalID)
-			return false
-		}
+// review r2 L-500) and as "no bindings" 404 on DELETE. On success it returns
+// the canonical address (see canonicalMemberPrincipalID), which the caller
+// must use in place of the raw path segment.
+func validateMemberPrincipalAddress(w http.ResponseWriter, principalType, principalID string) (string, bool) {
+	canonical, ok := canonicalMemberPrincipalID(principalType, principalID)
+	if ok {
+		return canonical, true
 	}
-	return true
+	if principalType == store.RoleBindingPrincipalAgent {
+		BadRequest(w, "agent principal must be addressed by agent ID: "+principalID)
+	} else {
+		BadRequest(w, "user principal must be addressed by user ID or email: "+principalID)
+	}
+	return "", false
 }
 
 func (s *Server) putProjectMemberPrincipal(w http.ResponseWriter, r *http.Request, projectID, principalType, principalID string) {
@@ -814,7 +840,8 @@ func (s *Server) putProjectMemberPrincipal(w http.ResponseWriter, r *http.Reques
 	if !validatePrincipalType(w, principalType) {
 		return
 	}
-	if !validateMemberPrincipalAddress(w, principalType, principalID) {
+	principalID, ok = validateMemberPrincipalAddress(w, principalType, principalID)
+	if !ok {
 		return
 	}
 
@@ -903,7 +930,8 @@ func (s *Server) deleteProjectMemberPrincipal(w http.ResponseWriter, r *http.Req
 	if !validatePrincipalType(w, principalType) {
 		return
 	}
-	if !validateMemberPrincipalAddress(w, principalType, principalID) {
+	principalID, ok = validateMemberPrincipalAddress(w, principalType, principalID)
+	if !ok {
 		return
 	}
 

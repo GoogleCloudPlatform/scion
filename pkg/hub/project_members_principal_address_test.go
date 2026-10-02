@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -118,5 +119,63 @@ func TestSetMemberRoles_PrincipalLookupStoreErrorIs500(t *testing.T) {
 		rec := putMemberRoles(t, f.srv, f.owner, f.projectID, principalType, failID, []string{f.memberRD.ID}, nil)
 		assert.Equal(t, http.StatusInternalServerError, rec.Code, "PUT %s: %s", principalType, rec.Body.String())
 		assert.Equal(t, ErrCodeInternalError, mmrErrorCode(t, rec.Body.Bytes()), "PUT %s", principalType)
+	}
+}
+
+// TestSetMemberRoles_NonCanonicalPrincipalIDIsCanonicalised: uuid.Parse
+// accepts several spellings of one ID (upper case, "urn:uuid:", braces, no
+// dashes). The members PUT and DELETE address the principal by the canonical
+// lower-case dashed ID whichever spelling the path uses, so no second,
+// non-canonical binding is ever stored: such a binding granted nothing,
+// slipped past the one-built-in check and survived a DELETE by the canonical
+// ID (ptone/scion#2529).
+func TestSetMemberRoles_NonCanonicalPrincipalIDIsCanonicalised(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+
+	userID := tid(t.Name() + "-user")
+	require.NoError(t, f.store.CreateUser(ctx, &store.User{
+		ID: userID, Email: userID + "@test.com", DisplayName: "Canon", Role: "member", Status: "active",
+	}))
+	agentID := tid(t.Name() + "-agent")
+	require.NoError(t, f.store.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: agentID, Name: "canon-agent", ProjectID: f.projectID,
+		Phase: "running", CreatedBy: f.owner.ID, OwnerID: f.owner.ID, Ancestry: []string{f.owner.ID},
+	}))
+
+	for principalType, id := range map[string]string{"user": userID, "agent": agentID} {
+		upper := strings.ToUpper(id)
+		variants := []string{
+			"urn:uuid:" + id,
+			"{" + id + "}",
+			strings.ReplaceAll(id, "-", ""),
+		}
+
+		assertCanonical := func(rec int, body []byte, wantStatus int, label string) {
+			t.Helper()
+			require.Equal(t, wantStatus, rec, "%s %s: %s", principalType, label, body)
+			var resp projectMemberGroupMutationResponse
+			require.NoError(t, json.Unmarshal(body, &resp), string(body))
+			assert.Equal(t, id, resp.PrincipalID, "%s %s: principalId", principalType, label)
+			bindings := mmrBindingsFor(t, f.store, principalType, id, f.projectID)
+			require.Len(t, bindings, 1, "%s %s: one binding under the canonical ID", principalType, label)
+			assert.Equal(t, f.memberRD.ID, bindings[0].RoleDefinitionID)
+		}
+
+		rec := putMemberRoles(t, f.srv, f.owner, f.projectID, principalType, upper, []string{f.memberRD.ID}, nil)
+		assertCanonical(rec.Code, rec.Body.Bytes(), http.StatusCreated, "PUT upper")
+		for _, v := range variants {
+			// The same principal already holds member, so each further
+			// spelling is an idempotent no-op on that binding, not a create.
+			rec = putMemberRoles(t, f.srv, f.owner, f.projectID, principalType, v, []string{f.memberRD.ID}, nil)
+			assertCanonical(rec.Code, rec.Body.Bytes(), http.StatusOK, "PUT "+v)
+		}
+		for _, raw := range append([]string{upper}, variants...) {
+			assert.Empty(t, mmrBindingsFor(t, f.store, principalType, raw, f.projectID), "%s: no binding stored under %q", principalType, raw)
+		}
+
+		rec = deleteMemberRoles(t, f.srv, f.owner, f.projectID, principalType, upper)
+		require.Equal(t, http.StatusNoContent, rec.Code, "%s DELETE upper: %s", principalType, rec.Body.String())
+		assert.Empty(t, mmrBindingsFor(t, f.store, principalType, id, f.projectID), "%s: DELETE by the upper-case ID removes the binding", principalType)
 	}
 }
