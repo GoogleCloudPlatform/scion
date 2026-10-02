@@ -262,6 +262,11 @@ func (s *Server) memberListCapabilities(ctx context.Context, projectID string) *
 	if !ok {
 		return nil
 	}
+	// Capabilities are advisory: with no membership service (as every
+	// sibling handler guards for) omit them rather than panic.
+	if s.membershipService == nil {
+		return nil
+	}
 	return s.membershipService.ComputeCapabilities(ctx, user.ID(), projectID)
 }
 
