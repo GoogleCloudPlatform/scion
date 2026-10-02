@@ -5333,6 +5333,76 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			t.Errorf("TrustedHubEndpoint = %q, want \"\" — a tenant-controllable opts.Env value must never feed egress trust", capturedConfig.TrustedHubEndpoint)
 		}
 	})
+
+	// Non-broker mode (BrokerMode: false — a local CLI start, not a
+	// broker-dispatched one): trustedHubEndpoint falls back to
+	// callerHubEndpoint (opts.Env, captured before any override),
+	// then projectSettingsHubEndpoint (the project's own settings.yaml
+	// hub.endpoint — an operator-controlled file). Neither of these two
+	// non-broker cases was exercised anywhere before this test: every
+	// other case above sets BrokerMode: true.
+	t.Run("non-broker mode: caller-supplied env hub endpoint is trusted", func(t *testing.T) {
+		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-6", agentLevelHubEndpoint, templateEnvHubEndpoint)
+		const callerHubEndpoint = "http://caller-hub:9810"
+		var capturedConfig runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				capturedConfig = cfg
+				return "mock-id", nil
+			},
+		}
+		mgr := NewManager(mockRT)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:        "agent-6",
+			ProjectPath: projectScionDir,
+			BrokerMode:  false,
+			NoAuth:      true,
+			Env:         map[string]string{"SCION_HUB_ENDPOINT": callerHubEndpoint},
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if capturedConfig.TrustedHubEndpoint != callerHubEndpoint {
+			t.Errorf("TrustedHubEndpoint = %q, want %q (the caller-supplied opts.Env value, agent-level config and template env must never win)", capturedConfig.TrustedHubEndpoint, callerHubEndpoint)
+		}
+	})
+
+	t.Run("non-broker mode: falls back to project settings hub endpoint when the caller supplies none", func(t *testing.T) {
+		// Neither an agent-level hub.endpoint nor a template env override:
+		// either would set opts.Env["SCION_HUB_ENDPOINT"] itself (run.go's
+		// earlier agent-level-hub-config branch), which would skip the
+		// project-settings branch entirely (its own guard is "only if
+		// opts.Env[\"SCION_HUB_ENDPOINT\"] isn't already set") before
+		// trustedHubEndpoint's fallback is ever reached.
+		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-7", "", "")
+		const projectSettingsHubEndpoint = "http://project-settings:9810" // set by setupTrustedHubEndpointTestProject's settings.yaml fixture.
+		var capturedConfig runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				capturedConfig = cfg
+				return "mock-id", nil
+			},
+		}
+		mgr := NewManager(mockRT)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:        "agent-7",
+			ProjectPath: projectScionDir,
+			BrokerMode:  false,
+			NoAuth:      true,
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if capturedConfig.TrustedHubEndpoint != projectSettingsHubEndpoint {
+			t.Errorf("TrustedHubEndpoint = %q, want %q (project settings' own hub.endpoint, with no caller-supplied value present)", capturedConfig.TrustedHubEndpoint, projectSettingsHubEndpoint)
+		}
+	})
 }
 
 func TestProfileEnvVisibleInAuthOverlay(t *testing.T) {
