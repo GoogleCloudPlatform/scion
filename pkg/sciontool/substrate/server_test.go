@@ -646,6 +646,13 @@ func TestWriteBootstrapFile_RejectsSymlinkAtFirstComponentUnderHome(t *testing.T
 	if err := os.MkdirAll(outsideTarget, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Without this, agentHomeDir stays the real "/home/scion" (or whatever
+	// util.GetHomeDir("scion") resolves to), fakeHome is NOT under it, and
+	// targetPath below is rejected by the outside-home check before
+	// mkdirAllTracked's symlink walk ever runs — passing this test for the
+	// wrong reason (see TestIsWithinAgentHome's own doc comment for the
+	// class of defect this would otherwise mask).
+	withAgentHomeFixture(t, fakeHome)
 
 	configLink := filepath.Join(fakeHome, ".config")
 	if err := os.Symlink(outsideTarget, configLink); err != nil {
@@ -659,8 +666,9 @@ func TestWriteBootstrapFile_RejectsSymlinkAtFirstComponentUnderHome(t *testing.T
 		Mode:       0o600,
 		ContentB64: base64.StdEncoding.EncodeToString([]byte("must-not-land-outside")),
 	})
-	if err == nil {
-		t.Fatal("writeBootstrapFile through a symlink at the first component under home: expected an error, got nil")
+	var pathErr *bootstrapPathError
+	if !errors.As(err, &pathErr) || pathErr.code != codeBootstrapPathSymlink {
+		t.Fatalf("writeBootstrapFile through a symlink at the first component under home: err = %v, want a *bootstrapPathError with code %q", err, codeBootstrapPathSymlink)
 	}
 	if _, statErr := os.Stat(filepath.Join(outsideTarget, "x")); statErr == nil {
 		t.Error("the bootstrap file was written through the symlink into outsideTarget")
