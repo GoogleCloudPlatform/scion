@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -1722,7 +1723,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			// RunAsUser the agent runs as, gid is the NFS fsGroup. The
 			// configured NFS uid is not applied to RunAsUser, so it is not
 			// passed here either.
-			initCommand = nfsProvisionCommand(config.GitCloneForInit, int(containerUID), int(fsGroupGID))
+			initCommand = nfsProvisionCommand(config.GitCloneForInit, containerUID, fsGroupGID)
 		}
 
 		// F-111: shared dirs served from the workspace PVC by subPath
@@ -3323,16 +3324,16 @@ const containerUID int64 = 1000
 // RunAsUser (containerUID) and gid is the pod fsGroup (the resolved
 // workspace_storage.nfs gid). A zero value omits the flag, so sciontool's
 // own default of 1000 applies.
-func nfsProvisionCommand(gc *api.GitCloneConfig, uid, gid int) []string {
+func nfsProvisionCommand(gc *api.GitCloneConfig, uid, gid int64) []string {
 	cmd := []string{"sciontool", "provision"}
 	if gc != nil && gc.URL != "" && gc.Depth != nil {
 		cmd = append(cmd, "--depth", fmt.Sprintf("%d", *gc.Depth))
 	}
 	if uid != 0 {
-		cmd = append(cmd, "--uid", fmt.Sprintf("%d", uid))
+		cmd = append(cmd, "--uid", strconv.FormatInt(uid, 10))
 	}
 	if gid != 0 {
-		cmd = append(cmd, "--gid", fmt.Sprintf("%d", gid))
+		cmd = append(cmd, "--gid", strconv.FormatInt(gid, 10))
 	}
 	return cmd
 }

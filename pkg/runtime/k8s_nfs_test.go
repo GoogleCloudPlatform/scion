@@ -490,8 +490,8 @@ func TestNFSProvisionCommand_UIDGID(t *testing.T) {
 	tests := []struct {
 		name string
 		gc   *api.GitCloneConfig
-		uid  int
-		gid  int
+		uid  int64
+		gid  int64
 		want []string
 	}{
 		{
