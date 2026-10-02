@@ -342,6 +342,38 @@ func TestAgentStore_UpdateAgentExposedPorts(t *testing.T) {
 	assert.ErrorIs(t, s.UpdateAgentExposedPorts(ctx, uuid.NewString(), ports), store.ErrNotFound)
 }
 
+// TestAgentStore_ExposedPortsStoredUTC checks that ExposedAt, a time embedded
+// in the agents.exposed_ports JSON column (out of reach of the ent UTC
+// mutation hook), is stored in UTC by both writers, at the same instant, and
+// that the caller's slice is not modified.
+func TestAgentStore_ExposedPortsStoredUTC(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	plus2 := time.Date(2030, 1, 1, 12, 0, 0, 500, time.FixedZone("", 2*3600))
+	a := makeAgent(projectID, "ports-utc")
+	a.ExposedPorts = []store.ExposedPort{{Port: 3000, ExposedAt: plus2, ExposedBy: "agent"}}
+	require.NoError(t, s.CreateAgent(ctx, a))
+	assert.Equal(t, plus2.Location(), a.ExposedPorts[0].ExposedAt.Location(), "CreateAgent must not modify the caller's slice")
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.Len(t, got.ExposedPorts, 1)
+	assert.Equal(t, time.UTC, got.ExposedPorts[0].ExposedAt.Location(), "CreateAgent: ExposedAt location")
+	assert.True(t, got.ExposedPorts[0].ExposedAt.Equal(plus2), "CreateAgent: ExposedAt instant")
+
+	kathmandu := time.Date(2030, 6, 1, 9, 45, 0, 0, time.FixedZone("+0545", 5*3600+45*60))
+	ports := []store.ExposedPort{{Port: 4000, ExposedAt: kathmandu, ExposedBy: "agent"}}
+	require.NoError(t, s.UpdateAgentExposedPorts(ctx, a.ID, ports))
+	assert.Equal(t, kathmandu.Location(), ports[0].ExposedAt.Location(), "UpdateAgentExposedPorts must not modify the caller's slice")
+
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.Len(t, got.ExposedPorts, 1)
+	assert.Equal(t, time.UTC, got.ExposedPorts[0].ExposedAt.Location(), "UpdateAgentExposedPorts: ExposedAt location")
+	assert.Equal(t, "2030-06-01T04:00:00Z", got.ExposedPorts[0].ExposedAt.Format(time.RFC3339Nano))
+}
+
 // TestAgentStore_TerminalPhaseClearsStalledActivity verifies that transitioning
 // to a terminal phase (stopped/error) without an explicit activity clears a
 // lingering live activity such as "stalled", while preserving terminal

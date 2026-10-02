@@ -15,6 +15,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -3113,8 +3114,6 @@ func TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit(t *testing.T) {
 	}
 }
 
-var startProcreapReaperOnce sync.Once
-
 // TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD is the
 // regression test for the property that configureSharedWorkspaceGit's
 // internal runGitConfig closure must invoke git through procreap's managed
@@ -3138,8 +3137,17 @@ var startProcreapReaperOnce sync.Once
 // TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD
 // ./cmd/sciontool/commands/`; with procreap.CombinedOutputManaged in place
 // it passes reliably.
+//
+// The reaper runs until its process exits and reaps every child that is not
+// started through procreap, so this test runs in a child copy of the test
+// binary (see runInReaperChild). Started in this process, it would keep
+// reaping the git children of the tests that run after it.
 func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testing.T) {
-	startProcreapReaperOnce.Do(procreap.StartReaper)
+	if os.Getenv(reaperChildEnv) != "1" {
+		runInReaperChild(t)
+		return
+	}
+	procreap.StartReaper()
 
 	// log.Init() runs first because the logger's lazy initialization is not concurrency-safe.
 	log.Init()
@@ -3529,4 +3537,25 @@ func TestNewLifecycleManager_WiresEnforcedModeConsistently(t *testing.T) {
 // without duplicating NewLifecycleManager's own resolution logic here.
 func defaultHooksDirsForTest() []string {
 	return hooks.NewLifecycleManager().HooksDirs
+}
+
+// reaperChildEnv is set in the child test process that runInReaperChild
+// starts.
+const reaperChildEnv = "SCION_TEST_REAPER_CHILD"
+
+// runInReaperChild runs the calling test alone in a child copy of the test
+// binary, with reaperChildEnv set, and fails the test if it fails there. A
+// test that starts the procreap reaper uses it so the reaper ends with the
+// child process.
+func runInReaperChild(t *testing.T) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run", "^"+regexp.QuoteMeta(t.Name())+"$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), reaperChildEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s in a child test process: %v\n%s", t.Name(), err, out)
+	}
+	if !strings.Contains(string(out), "--- PASS: "+t.Name()) {
+		t.Fatalf("%s did not run in the child test process:\n%s", t.Name(), out)
+	}
 }

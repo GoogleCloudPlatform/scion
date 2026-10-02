@@ -104,6 +104,7 @@ func buildTestTree() *cobra.Command {
 	hubToken.AddCommand(&cobra.Command{Use: "list"})
 	hubToken.AddCommand(&cobra.Command{Use: "revoke"})
 	hubToken.AddCommand(&cobra.Command{Use: "delete"})
+	hubToken.AddCommand(&cobra.Command{Use: "scopes"})
 	hub.AddCommand(hubToken)
 
 	hubBrk := &cobra.Command{Use: "brokers"}
@@ -241,7 +242,7 @@ func TestApplyModeRestrictions_Assistant(t *testing.T) {
 	// These commands should be removed
 	removed := []string{
 		"hub.auth", "hub.auth.login", "hub.auth.logout",
-		"hub.token", "hub.token.create", "hub.token.list", "hub.token.revoke", "hub.token.delete",
+		"hub.token", "hub.token.create", "hub.token.list", "hub.token.revoke", "hub.token.delete", "hub.token.scopes",
 		"hub.secret.migrate-names",
 		"project.reconnect",
 		"config.migrate", "config.cd-config", "config.cd-project",
@@ -450,7 +451,7 @@ func TestAgentAllowedList(t *testing.T) {
 		"config.set", "config.validate", "config.migrate",
 		"config.list", "config.get", "config.dir", "config.schema",
 		"hub.enable", "hub.disable", "hub.link", "hub.unlink",
-		"hub.auth", "hub.token", "hub.brokers",
+		"hub.auth", "hub.token", "hub.token.scopes", "hub.brokers",
 		"hub.env", "hub.secret", "hub.status", "hub.notifications",
 		"messages.read",
 		"shared-dir.create", "shared-dir.remove",
@@ -615,6 +616,39 @@ func TestApplyModeRestrictions_AgentRealSkillTree(t *testing.T) {
 	assert.Equal(t, []string{"skill", "skill.list", "skills", "skills.list", "skills.show"},
 		collectCommandNames(root),
 		"agent mode must keep exactly the read-only skill browse verbs")
+}
+
+// TestHubTokenScopesCommand_ModeRestricted pins the mode-availability
+// decision for "scion hub token scopes" (ptone/scion#2122): although it is
+// read-only, token management stays session-only, so it inherits "human
+// only" from its parent hub.token rather than getting its own allowlist
+// entry -- consistent with every other hub.token subcommand.
+func TestHubTokenScopesCommand_ModeRestricted(t *testing.T) {
+	require.NotNil(t, resolveCommandPath(rootCmd, "hub.token.scopes"),
+		"hub.token.scopes must exist in the real command tree in human mode")
+
+	t.Run("assistant mode removes it along with its parent", func(t *testing.T) {
+		root := &cobra.Command{Use: "scion"}
+		real := resolveCommandPath(rootCmd, "hub")
+		require.NotNil(t, real)
+		root.AddCommand(cloneCommandShape(real))
+		t.Setenv("SCION_CLI_MODE", "assistant")
+		applyModeRestrictions(root)
+		assert.Nil(t, resolveCommandPath(root, "hub.token.scopes"))
+		assert.Nil(t, resolveCommandPath(root, "hub.token"))
+	})
+
+	t.Run("agent mode removes it: not in agentAllowed", func(t *testing.T) {
+		assert.False(t, agentAllowed["hub.token.scopes"],
+			"agentAllowed must NOT contain hub.token.scopes: it stays human-only like the rest of hub.token")
+		root := &cobra.Command{Use: "scion"}
+		real := resolveCommandPath(rootCmd, "hub")
+		require.NotNil(t, real)
+		root.AddCommand(cloneCommandShape(real))
+		t.Setenv("SCION_CLI_MODE", "agent")
+		applyModeRestrictions(root)
+		assert.Nil(t, resolveCommandPath(root, "hub.token.scopes"))
+	})
 }
 
 // TestAgentModeAllowsKeys covers the A.6 gap: pins, against the real command

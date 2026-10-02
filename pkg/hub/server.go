@@ -39,6 +39,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -61,7 +62,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
-	"github.com/robfig/cron/v3"
 )
 
 const (
@@ -1257,6 +1257,12 @@ type Server struct {
 	// refreshGitHubSkillInBackground and ghRefreshFailureBackoff).
 	ghRefreshFailMu      sync.Mutex
 	ghLastRefreshFailure map[string]time.Time
+
+	// ghCooldown holds gh:// resolution requests back per credential
+	// identity after a GitHub rate-limit response (see agent.GitHubCooldown).
+	// Nil means the process-wide agent.SharedGitHubCooldown, the same
+	// tracker the broker-side resolver uses; tests set their own.
+	ghCooldown *agent.GitHubCooldown
 
 	// nonceCacheStore is the DB-backed HMAC nonce replay cache (nil when entClient is nil).
 	// When set, it replaces the in-memory NonceCache in BrokerAuthService for
@@ -4504,9 +4510,23 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		"schedule_id", sched.ID, "schedule_name", sched.Name,
 		"project_id", sched.ProjectID)
 
+	// Backstop for zone-prefixed expressions that reach the evaluator anyway
+	// (for example a row written after the startup pass, or by an older
+	// replica): pause the row instead of recording an invalid-expression
+	// error on every tick.
+	if hasCronZonePrefix(sched.CronExpr) {
+		if err := s.store.UpdateScheduleStatus(ctx, sched.ID, store.ScheduleStatusPaused); err != nil {
+			log.Error("schedule-evaluator: failed to pause schedule with unsupported zone prefix",
+				"cron_expr", sched.CronExpr, "error", err)
+			return
+		}
+		log.Warn("schedule paused: cron zone prefixes are not supported; edit the expression to UTC and resume",
+			"cron_expr", sched.CronExpr)
+		return
+	}
+
 	// Compute next run time
-	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-	cronSchedule, err := parser.Parse(sched.CronExpr)
+	cronSchedule, err := parseScheduleCron(sched.CronExpr)
 	if err != nil {
 		log.Error("schedule-evaluator: invalid cron expression",
 			"cron_expr", sched.CronExpr, "error", err)
@@ -4710,7 +4730,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler = NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
 	s.registerSchedulerHandlers()
 
-	s.scheduler.Start(ctx)
+	// Pause schedules whose cron expression carries an unsupported zone
+	// prefix before the evaluator's first tick, so it never runs them.
+	s.startScheduler(ctx)
 
 	// Start the DB connection-pool stats sampler (P3-6 -> P0-5 gauges). It is a
 	// no-op unless an enabled recorder was wired via SetDBMetrics and the store

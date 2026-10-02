@@ -1306,12 +1306,25 @@ authDone:
 	nfsSubPath := ""
 	nfsStorageClass := ""
 	nfsWorkspacePreCreated := false
+	nfsWorktreeName := ""
+	nfsWorktreeBranch := ""
 
 	preBackendWorkspace := effectiveWorkspace
 	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
 		sharingMode := store.SharingModeWorktreePerAgent
 		if opts.SharedWorkspace || opts.GitClone != nil {
 			sharingMode = store.SharingModeSharedPlain
+		}
+		// On Kubernetes, a git project dispatched in worktree-per-agent mode
+		// gets its own worktree under the shared checkout. Every other mode,
+		// including clone-per-agent, and every other runtime keep the
+		// layout above.
+		var worktreeName, worktreeBranch string
+		if isKubernetesRuntime(m.Runtime.Name()) {
+			worktreeName, worktreeBranch = nfsWorktreeSelection(opts.Env, opts.GitClone, opts.Name)
+		}
+		if worktreeName != "" {
+			sharingMode = store.SharingModeWorktreePerAgent
 		}
 		backend := runtime.SelectWorkspaceBackend(settings.Server.WorkspaceStorage, sharingMode)
 		if backend.Name() == "nfs" {
@@ -1350,6 +1363,15 @@ authDone:
 			if err != nil {
 				return nil, err
 			}
+			if worktreeName != "" && mount.PVClaimName != "" {
+				worktreePreCreated, err := ensureNFSWorktreeLeaf(m.Runtime.Name(), resolvedWorkspace, mount.PVClaimName, worktreeName)
+				if err != nil {
+					return nil, err
+				}
+				nfsWorkspacePreCreated = nfsWorkspacePreCreated && worktreePreCreated
+				nfsWorktreeName = worktreeName
+				nfsWorktreeBranch = worktreeBranch
+			}
 
 			workspaceBackendName = backend.Name()
 			if mount.HostPath != "" {
@@ -1357,6 +1379,12 @@ authDone:
 			}
 			if mount.Target != "" {
 				containerWorkspace = mount.Target
+			}
+			if nfsWorktreeName != "" {
+				// The agent works in its worktree, mounted next to the
+				// shared .git the same way as on the local runtimes. The
+				// pod mounts both by subPath (see buildPod).
+				containerWorkspace = runtime.NFSWorktreeContainerPath(nfsWorktreeName)
 			}
 			nfsPVClaimName = mount.PVClaimName
 			nfsSubPath = mount.SubPath
@@ -1372,14 +1400,26 @@ authDone:
 	// effectiveWorkspace with a backend-managed path — real for
 	// worktree-per-agent when server.workspace_storage.backend is
 	// explicitly configured to something other than local. Only the nfs
-	// backend sets a host path at all; its host path has worktree shape
+	// backend sets a host path at all, and that host path (ResolvedWorkspace
+	// .HostPath / nfsBackend.Resolve's workspaceRelPath) is always
+	// <subpath_root>/<project ID>/workspace — the shared base, never
+	// worktree-shaped — regardless of sharing mode; it takes worktree shape
 	// (base/worktrees/<name>) only when the configured subpath_root and
-	// project ID happen to produce that layout. The repoRoot computed
-	// earlier was validated against the PRE-backend path, so if the backend
-	// actually changed it, re-resolve against the value RunConfig will use,
-	// through the same validatedWorktreeRepoRoot comparison used above and
-	// in the persistence gate — not a separate, inline comparison of this
-	// layout's own.
+	// project ID happen to coincide with one. On Kubernetes, a worktree-
+	// per-agent git project additionally selects a per-agent worktree
+	// (nfsWorktreeName/nfsWorktreeBranch, above) and mounts it in-container
+	// at /repo-root/worktrees/<name> alongside /repo-root/.git — entirely
+	// through containerWorkspace and the NFS* RunConfig fields below, not
+	// through effectiveWorkspace or repoRoot. candidateRepoRoot itself is
+	// also only ever non-empty for a broker-provisioned Docker worktree (the
+	// ctx signal and the persisted file are both written only by that path),
+	// so on Kubernetes this re-validation reliably yields an empty repoRoot,
+	// matching RunConfig.RepoRoot going unused by the Kubernetes runtime's
+	// own mount building. The repoRoot computed earlier was validated
+	// against the PRE-backend path, so if the backend actually changed it,
+	// re-resolve against the value RunConfig will use, through the same
+	// validatedWorktreeRepoRoot comparison used above and in the persistence
+	// gate — not a separate, inline comparison of this layout's own.
 	if effectiveWorkspace != preBackendWorkspace {
 		repoRoot = validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
 		if repoRoot == "" {
@@ -1422,6 +1462,11 @@ authDone:
 		// Lets the provisioning init container treat a failed chown as a
 		// warning for a workspace directory the broker created.
 		NFSWorkspacePreCreated: nfsWorkspacePreCreated,
+		// Set only for worktree-per-agent git projects on the NFS backend:
+		// the agent mounts worktrees/<agentID> and the shared .git instead
+		// of the shared checkout.
+		NFSWorktreeName:   nfsWorktreeName,
+		NFSWorktreeBranch: nfsWorktreeBranch,
 		// F-111 (design §9): drives the k8s runtime's NFS init container's
 		// clone-vs-plain-provision choice (nfsProvisionCommand), not whether
 		// provisioning happens at all — the init container is now gated

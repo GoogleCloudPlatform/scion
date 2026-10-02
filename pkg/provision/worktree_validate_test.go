@@ -17,6 +17,7 @@ package provision
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -373,5 +374,60 @@ func TestWorktreeIsLexicallyUnderBase_RejectsEmptyOrRelativeInputs(t *testing.T)
 				t.Fatalf("WorktreeIsLexicallyUnderBase(%q, %q) = true, want false", tc.base, tc.candidate)
 			}
 		})
+	}
+}
+
+// TestIsValidJoinWorktree_AcceptsMountedWorktreeLayout confirms this
+// package's join validator and sharer registry treat a worktree created by
+// the Kubernetes/NFS provisioning flow (ProvisionShared with
+// MountedWorktree set) the same as one created by the local flow: both call
+// the same `git worktree add --relative-paths` into the same
+// base/worktrees/<name> layout, so a genuine MountedWorktree worktree must
+// validate, and a later, plain (non-Mounted) dispatch for a second agent on
+// the same branch must join it rather than refuse it or create a duplicate.
+func TestIsValidJoinWorktree_AcceptsMountedWorktreeLayout(t *testing.T) {
+	origin := initBareGitRepo(t)
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := ProvisionShared(mountedWorktreeInput(workspace, origin, "agent-1", "agent-one")); err != nil {
+		t.Fatalf("ProvisionShared (MountedWorktree): %v", err)
+	}
+
+	worktree := WorktreePath(workspace, "agent-1")
+	if err := IsValidJoinWorktree(workspace, worktree); err != nil {
+		t.Fatalf("IsValidJoinWorktree rejected a genuine MountedWorktree worktree: %v", err)
+	}
+	if err := ValidateWorktreeForBase(workspace, worktree); err != nil {
+		t.Fatalf("ValidateWorktreeForBase rejected a genuine MountedWorktree worktree: %v", err)
+	}
+
+	sharers, existingWtPath, err := ListSharers(workspace, "", "agent-one")
+	if err != nil {
+		t.Fatalf("ListSharers: %v", err)
+	}
+	if existingWtPath != worktree {
+		t.Fatalf("ListSharers worktreePath = %q, want %q", existingWtPath, worktree)
+	}
+	if !slices.Contains(sharers, "agent-1") {
+		t.Fatalf("expected agent-1 in sharers, got %v", sharers)
+	}
+
+	// A plain (non-Mounted) dispatch for a second agent asking for the same
+	// branch joins the worktree the Mounted path created, instead of
+	// refusing it or creating a duplicate.
+	joinInput := mountedWorktreeInput(workspace, origin, "agent-2", "agent-one")
+	joinInput.MountedWorktree = false
+	if err := ProvisionShared(joinInput); err != nil {
+		t.Fatalf("ProvisionShared (join, non-Mounted): %v", err)
+	}
+
+	sharers, existingWtPath, err = ListSharers(workspace, "", "agent-one")
+	if err != nil {
+		t.Fatalf("ListSharers after join: %v", err)
+	}
+	if existingWtPath != worktree {
+		t.Fatalf("after join, ListSharers worktreePath = %q, want %q (joined, not recreated)", existingWtPath, worktree)
+	}
+	if !slices.Contains(sharers, "agent-1") || !slices.Contains(sharers, "agent-2") {
+		t.Fatalf("expected both agent-1 and agent-2 in sharers, got %v", sharers)
 	}
 }

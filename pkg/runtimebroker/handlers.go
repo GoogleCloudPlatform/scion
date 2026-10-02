@@ -1800,6 +1800,20 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 		return
 	}
 
+	// Worktree-per-agent on the NFS workspace: the agent's worktree lives on
+	// the export rather than in the agent's files, so remove it here too.
+	// A failure does not fail the delete; the worktree is then left in
+	// place, and an agent created again with the same name reuses it. The
+	// agent's branch is always kept, whatever removeBranch says.
+	if filesToDelete && agentProjectID != "" {
+		if remover, ok := target.mgr.(nfsWorktreeRemover); ok {
+			if wtPath, rmErr := remover.RemoveNFSWorktree(ctx, projectPath, agentProjectID, target.name); rmErr != nil {
+				s.agentLifecycleLog.Warn("Agent delete: could not remove the agent's worktree on the NFS workspace; left in place",
+					"agent_id", id, "project_id", agentProjectID, "path", wtPath, "error", rmErr)
+			}
+		}
+	}
+
 	if softDelete {
 		s.agentLifecycleLog.Info("Agent soft-deleted",
 			"agent_id", id, "project_id", agentProjectID,
@@ -4459,6 +4473,14 @@ var errDeleteTargetNotFound = errors.New("agent not found in project")
 // errDeleteTargetUnknown means the agent could not be resolved because a
 // runtime listing failed.
 var errDeleteTargetUnknown = errors.New("could not list agents to resolve delete target")
+
+// nfsWorktreeRemover is implemented by agent managers that can remove an
+// agent's worktree from the NFS workspace export on delete.
+type nfsWorktreeRemover interface {
+	RemoveNFSWorktree(ctx context.Context, projectPath, projectID, agentName string) (path string, err error)
+}
+
+var _ nfsWorktreeRemover = (*agent.AgentManager)(nil)
 
 // deleteTarget is the single, project-matched agent a delete acts on.
 type deleteTarget struct {

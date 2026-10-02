@@ -477,7 +477,7 @@ func TestGHListContents_PermanentURLs(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, err := ghListContents(context.Background(), srv.URL, "https://raw.githubusercontent.com",
+	entries, err := ghListContents(context.Background(), agent.NewGitHubCooldown(nil), "anon", srv.URL, "https://raw.githubusercontent.com",
 		"acme", "skills", "skills/deploy", commitSHA, "")
 	require.NoError(t, err)
 
@@ -511,7 +511,7 @@ func TestGHListContents_RawBaseOverride(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, err := ghListContents(context.Background(), srv.URL, "https://raw.ghe.example.com",
+	entries, err := ghListContents(context.Background(), agent.NewGitHubCooldown(nil), "anon", srv.URL, "https://raw.ghe.example.com",
 		"acme", "skills", "s", commitSHA, "")
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
