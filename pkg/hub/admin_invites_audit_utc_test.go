@@ -59,19 +59,21 @@ func TestAdminInvitesCreate_AuditLogExpiresAtIsUTC(t *testing.T) {
 		cmd.Env = append(os.Environ(), "SCION_TZ_CHILD=1", "TZ=Asia/Tokyo")
 		out, err := cmd.CombinedOutput()
 		switch {
+		case err != nil:
+			t.Fatalf("child process (TZ=Asia/Tokyo) failed: %v\n%s", err, out)
 		case bytes.Contains(out, []byte("--- SKIP: "+t.Name())):
 			// Propagate a skip from the child (e.g. the sqlite driver isn't
 			// registered in this build) instead of masking it as either a
-			// pass or a failure.
+			// pass or a failure. Checked only once a zero exit status rules
+			// out a crash or a race report that happens to print SKIP text
+			// on its way down.
 			t.Skip("child process skipped:\n" + string(out))
-		case err != nil:
-			t.Fatalf("child process (TZ=Asia/Tokyo) failed: %v\n%s", err, out)
 		case !bytes.Contains(out, []byte("--- PASS: "+t.Name())):
-			// The child exited 0 but never reported running this test --
-			// e.g. -test.run matched nothing, which "go test" treats as
-			// success. Without this check a renamed test (whose Name()
-			// still builds a now-nonmatching pattern against a non-renamed
-			// sibling) would pass vacuously.
+			// The child exited 0 but its output never reported running this
+			// test by name -- e.g. -test.run matched no tests, which
+			// "go test" treats as success ("testing: warning: no tests to
+			// run"). Catches that case regardless of why the pattern or
+			// flags stopped matching.
 			t.Fatalf("child process did not report running %s (pattern %q matched nothing?):\n%s", t.Name(), pattern, out)
 		}
 		return
@@ -80,11 +82,13 @@ func TestAdminInvitesCreate_AuditLogExpiresAtIsUTC(t *testing.T) {
 	// Sanity-check that TZ=Asia/Tokyo actually took effect, so a silent
 	// zone-lookup failure (e.g. no zoneinfo and no embedded tzdata) fails
 	// loudly instead of leaving expiresAt already UTC and passing
-	// vacuously. time.Local can't be compared to time.UTC by identity: when
-	// a TZ lookup fails, Go leaves time.Local as a *Location with no name
-	// clash, not time.UTC, so that comparison is always false -- check the
-	// actual UTC offset instead. The _ "time/tzdata" import above also
-	// means this child never depends on the host having system zoneinfo.
+	// vacuously. time.Local can't be compared to time.UTC by identity:
+	// time.Local always points at the same *Location value, and a failed
+	// TZ lookup leaves that value holding UTC data named "UTC" rather than
+	// repointing time.Local at the time.UTC pointer, so the two never
+	// compare equal either way -- check the actual UTC offset instead. The
+	// _ "time/tzdata" import above also means this child never depends on
+	// the host having system zoneinfo.
 	if _, off := time.Now().Zone(); off != 9*60*60 {
 		t.Fatalf("expected TZ=Asia/Tokyo (+09:00) in the child process, got time.Local=%q offset=%ds", time.Local, off)
 	}

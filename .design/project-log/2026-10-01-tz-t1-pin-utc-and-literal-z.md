@@ -168,12 +168,13 @@ findings, all in tests and documentation, none in production behavior:
   real regression protection in CI: dropping `.UTC()` at `:177` passed under
   `TZ=UTC` and only failed under a manual `TZ=Asia/Tokyo` run. Fixed by
   re-executing the test in a child process pinned to `TZ=Asia/Tokyo`
-  (`os/exec`, filtered to just this test by name), with a sanity check in
-  the child that the effective UTC offset is actually `+09:00`, so a silent
-  `TZ` lookup failure fails loudly instead of passing vacuously again (see
-  round 3 below for a correction to this check). This adds no write to
-  `time.Local` in the shared test binary, so it does not reintroduce the
-  R1-3 race class. `TZ=Asia/Kathmandu` is not used for the re-exec:
+  (`os/exec`, filtered to just this test by name), with a
+  `time.Local == time.UTC` sanity check in the child (which could never
+  fire; replaced by an offset check in round 3, see below) so a silent `TZ`
+  lookup failure was meant to fail loudly instead of passing vacuously
+  again. This adds no write to `time.Local` in the shared test binary, so
+  it does not reintroduce the R1-3 race class. `TZ=Asia/Kathmandu` is not
+  used for the re-exec:
   `newTestStore`'s migration hits the known pre-existing baseline
   (tz-refactor task 2) before the handler under test ever runs. Verified
   with the same mutation as before (drop `.UTC()` at `:177`): the test now
