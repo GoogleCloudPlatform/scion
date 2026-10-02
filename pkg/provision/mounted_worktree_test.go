@@ -473,6 +473,25 @@ func TestProvisionShared_MountedWorktree_InvalidBranch(t *testing.T) {
 	}
 }
 
+// checkBranchName reports a name as invalid only when git rejects it. When
+// git cannot be run, the error says so and does not call the name invalid.
+func TestCheckBranchName(t *testing.T) {
+	base := initBareGitRepo(t)
+	require.NoError(t, checkBranchName(t.Context(), base, "feature/login"))
+
+	err := checkBranchName(t.Context(), base, "a..b")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is not a valid branch name")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err = checkBranchName(ctx, base, "feature/login")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Contains(t, err.Error(), "running git check-ref-format")
+	assert.NotContains(t, err.Error(), "is not a valid branch name")
+}
+
 // A kept worktree on another branch is not reused for a different
 // requested branch, and the requested branch is not registered for it.
 func TestProvisionShared_MountedWorktree_KeptWorktreeOnOtherBranch(t *testing.T) {

@@ -2811,10 +2811,18 @@ func mountedDisplayPath(in ProvisionInput, path string) string {
 // checkBranchName checks that name is a valid branch name, as git itself
 // would accept it for a new branch, and returns an error naming it if not.
 // It runs in the shared checkout at base. A name git expands to another
-// one there (such as @{-1}) is refused as well.
+// one there (such as @{-1}) is refused as well. Only git exiting with an
+// error status means the name is invalid; git failing to start or to be
+// waited on is returned as an error running git.
 func checkBranchName(ctx context.Context, base, name string) error {
 	out, err := exec.CommandContext(ctx, "git", "-C", base, "check-ref-format", "--branch", name).Output()
-	if err != nil || strings.TrimSpace(string(out)) != name {
+	var exitErr *exec.ExitError
+	switch {
+	case errors.As(err, &exitErr):
+		return fmt.Errorf("ProvisionShared: %q is not a valid branch name", name)
+	case err != nil:
+		return fmt.Errorf("ProvisionShared: checking branch name %q: running git check-ref-format: %w", name, err)
+	case strings.TrimSpace(string(out)) != name:
 		return fmt.Errorf("ProvisionShared: %q is not a valid branch name", name)
 	}
 	return nil
