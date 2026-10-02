@@ -718,7 +718,15 @@ func RunInit(args []string, opts InitRunOptions) int {
 		workingDir, err := opts.ResolveWorkingDir()
 		if err != nil {
 			log.Error("%v", err)
-			reportInitFailure(agentHome, err)
+			// Wrapped with a fixed prefix, like every other reportInitFailure
+			// call site below, rather than passed through directly: err's
+			// own text is bounded (ResolveWorkingDir's implementations only
+			// ever name candidate paths and uids tried — see
+			// resolveSubstrateHarnessCwd's doc comment), but reportInitFailure's
+			// own contract is "callers only pass fixed, secret-free errors",
+			// and passing a resolver's own err straight through reads like an
+			// exception to that rule rather than an instance of it.
+			reportInitFailure(agentHome, fmt.Errorf("failed to resolve harness working directory: %w", err))
 			return exitCodeNoUsableHarnessCwd
 		}
 		opts.WorkingDir = workingDir

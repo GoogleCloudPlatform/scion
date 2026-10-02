@@ -136,7 +136,11 @@ func fstatRequireTrusted(fd int, displayPath string, selfUID uint32) error {
 //
 // Used by cmd/sciontool/commands' substrate rootfs-fixup and serve paths to
 // verify a destination file is safe to open (never a workload-planted
-// symlink or hardlink) before root reads or writes through it.
+// symlink, and never reached through a workload-writable or
+// non-root-owned parent directory) before root reads or writes through
+// it. This does not check the file's link count: a hardlink to an
+// otherwise-legitimate root-owned file, planted before this process ever
+// reaches it, is not detected or refused here.
 func OpenNoFollowRootOwnedFile(path string) (*os.File, error) {
 	dirFd, leaf, err := OpenParentNoFollowRootOwned(path)
 	if err != nil {

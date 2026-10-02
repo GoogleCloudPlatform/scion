@@ -172,8 +172,13 @@ func TestRunInit_ResolveWorkingDirError_ReturnsExitCode18AndNeverStartsHarness(t
 	if info.Phase != string(state.PhaseError) {
 		t.Errorf("agent-info.json phase = %q, want %q", info.Phase, state.PhaseError)
 	}
-	if info.Detail.Message != resolverErr.Error() {
-		t.Errorf("agent-info.json detail.message = %q, want %q", info.Detail.Message, resolverErr.Error())
+	// Contains, not exact-equals: reportInitFailure's callers wrap the
+	// underlying error with a fixed, descriptive prefix (every call site
+	// does this except the two with their own "no secrets in this error"
+	// justification), so the resolver's own message is a substring of the
+	// reported one, not the whole of it.
+	if !strings.Contains(info.Detail.Message, resolverErr.Error()) {
+		t.Errorf("agent-info.json detail.message = %q, want it to contain %q", info.Detail.Message, resolverErr.Error())
 	}
 }
 
@@ -283,8 +288,8 @@ func TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch
 	if reported.Phase != string(state.PhaseError) {
 		t.Errorf("hub-reported phase = %q, want %q", reported.Phase, state.PhaseError)
 	}
-	if reported.Message != resolverErr.Error() {
-		t.Errorf("hub-reported message = %q, want %q", reported.Message, resolverErr.Error())
+	if !strings.Contains(reported.Message, resolverErr.Error()) {
+		t.Errorf("hub-reported message = %q, want it to contain %q", reported.Message, resolverErr.Error())
 	}
 	if strings.Contains(string(req.body), testStagedSecretKey) {
 		t.Error("hub request body names the requested secret key; the failure report must not name the requested secret keys")
