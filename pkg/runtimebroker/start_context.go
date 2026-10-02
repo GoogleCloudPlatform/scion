@@ -736,7 +736,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// is git-backed, provision a shared base clone + per-agent worktree on
 	// the host BEFORE the container starts, then dual-mount it. This avoids
 	// the full in-container clone. Falls through to clone-per-agent on error
-	// or if git is too old (< 2.47) — but only when this call has not yet
+	// or if git is too old (< 2.48) — but only when this call has not yet
 	// created the agent's own worktree; see tryProvisionWorktree.
 	worktreeProvisioned := false
 	var provisionedWorktreeRoot string
