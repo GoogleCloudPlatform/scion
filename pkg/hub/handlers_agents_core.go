@@ -2673,6 +2673,11 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
 	ctx := r.Context()
 
+	// Show a TZ that an older hub persisted in the env records as the legacy
+	// pin it becomes, so the configure page never round-trips it as an env
+	// entry. In memory only: the next write persists the adoption.
+	adoptLegacyTZ(agent.AppliedConfig)
+
 	// Enrich agent with project and broker names
 	s.enrichAgent(ctx, agent, nil, nil)
 	resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)
