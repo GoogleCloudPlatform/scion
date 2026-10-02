@@ -801,6 +801,16 @@ func TestEgressAllowCovers(t *testing.T) {
 		{"wildcard does not cover the bare suffix itself", []string{"*.example.com"}, "example.com", false},
 		{"wildcard does not cover two labels under", []string{"*.example.com"}, "a.b.example.com", false},
 		{"wildcard does not cover an unrelated suffix", []string{"*.example.com"}, "api.example.org", false},
+		// Label-boundary regression cases: egressAllowEntryCovers checks
+		// strings.CutSuffix(host, "."+remainder), not a bare
+		// strings.HasSuffix(host, remainder) — the leading dot is what
+		// makes "evilexample.com" (which ends in the literal characters
+		// "example.com" but has no label boundary before them) distinct
+		// from "api.example.com". Without the dot, a mutation that drops
+		// it would let a wildcard or exact entry cover a same-suffix
+		// domain it was never meant to.
+		{"wildcard does not cover a suffix look-alike with no label boundary", []string{"*.example.com"}, "evilexample.com", false},
+		{"exact entry does not cover a suffix look-alike with no label boundary", []string{"hub.example.com"}, "evilhub.example.com", false},
 		{"first of several entries matches", []string{"example.com", "other.com"}, "example.com", true},
 		{"second of several entries matches", []string{"other.com", "example.com"}, "example.com", true},
 		{"empty entry list covers nothing", nil, "example.com", false},
