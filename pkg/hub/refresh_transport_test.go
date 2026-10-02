@@ -20,11 +20,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -116,4 +118,60 @@ func TestAgentRefresh_NoTransportMinterOmitsField(t *testing.T) {
 	resp := runTransportRefresh(t, nil, "")
 	assert.Empty(t, transportEntries(resp))
 	assert.Empty(t, resp.TransportError)
+}
+
+type staticTokenGenerator struct{ token string }
+
+func (g staticTokenGenerator) GenerateAgentToken(string, string, []string, AgentRole, []AgentTokenScope) (string, error) {
+	return g.token, nil
+}
+
+func newResetAuthDispatcher(t *testing.T) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent) {
+	t.Helper()
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	require.NoError(t, memStore.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: tid("host-1"), Name: "test-host", Slug: "test-host",
+		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
+	}))
+	mockClient := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	d.SetTokenGenerator(staticTokenGenerator{token: "fake-app-value"})
+	agent := &store.Agent{
+		ID: tid("agent-1"), Name: "test-agent", Slug: "test-agent",
+		ProjectID: tid("project-1"), RuntimeBrokerID: tid("host-1"),
+	}
+	return d, mockClient, agent
+}
+
+func TestDispatchAgentResetAuth_PushesTransportToken(t *testing.T) {
+	d, mockClient, agent := newResetAuthDispatcher(t)
+	d.SetTransportMinter(&fakeTransportMinter{token: "fake-transport-value"}, "https://hub.example.test", "iap")
+
+	require.NoError(t, d.DispatchAgentResetAuth(context.Background(), agent))
+	assert.True(t, mockClient.resetAuthCalled)
+	assert.Equal(t, "fake-app-value", mockClient.lastResetToken)
+	assert.Equal(t, "fake-transport-value", mockClient.lastResetTransportToken)
+}
+
+func TestDispatchAgentResetAuth_MintFailureStillResetsAppToken(t *testing.T) {
+	d, mockClient, agent := newResetAuthDispatcher(t)
+	d.SetTransportMinter(&fakeTransportMinter{err: errors.New("mint failed")}, "https://hub.example.test", "iap")
+
+	require.NoError(t, d.DispatchAgentResetAuth(context.Background(), agent))
+	assert.Equal(t, "fake-app-value", mockClient.lastResetToken)
+	assert.Empty(t, mockClient.lastResetTransportToken)
+}
+
+func TestDispatchAgentResetAuth_NoMinterNoTransportToken(t *testing.T) {
+	d, mockClient, agent := newResetAuthDispatcher(t)
+
+	require.NoError(t, d.DispatchAgentResetAuth(context.Background(), agent))
+	assert.Equal(t, "fake-app-value", mockClient.lastResetToken)
+	assert.Empty(t, mockClient.lastResetTransportToken)
+}
+
+func TestResetAuthBody(t *testing.T) {
+	assert.Equal(t, map[string]string{"token": "a"}, resetAuthBody("a", ""))
+	assert.Equal(t, map[string]string{"token": "a", "transportToken": "b"}, resetAuthBody("a", "b"))
 }

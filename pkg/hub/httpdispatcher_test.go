@@ -63,6 +63,9 @@ type mockRuntimeBrokerClient struct {
 	deleteCalled               bool
 	messageCalled              bool
 	cleanupCalled              bool
+	resetAuthCalled            bool
+	lastResetToken             string
+	lastResetTransportToken    string
 	lastBrokerID               string
 	lastEndpoint               string
 	lastAgentID                string
@@ -161,7 +164,10 @@ func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, br
 	return m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, _ string) error {
+func (m *mockRuntimeBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, token, transportToken string) error {
+	m.resetAuthCalled = true
+	m.lastResetToken = token
+	m.lastResetTransportToken = transportToken
 	return m.returnErr
 }
 

@@ -60,8 +60,8 @@ func (c *AuthenticatedBrokerClient) RestartAgent(ctx context.Context, brokerID, 
 }
 
 // ResetAuthAgent injects a fresh auth token into a running agent with HMAC authentication.
-func (c *AuthenticatedBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error {
-	return c.transport.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token)
+func (c *AuthenticatedBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token, transportToken string) error {
+	return c.transport.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token, transportToken)
 }
 
 // DeleteAgent deletes an agent from a remote runtime broker with HMAC authentication.

@@ -1654,6 +1654,39 @@ func SeedTransportTokenFile(token string, uid, gid int) (string, error) {
 	return path, WriteTransportTokenFile(token, uid, gid)
 }
 
+// AdoptTransportTokenFile re-reads the transport token file after it was
+// written from outside this process (reset-auth writes it through the
+// broker), rewrites it so its mode and ownership are 0600 and uid:gid
+// (uid <= 0 skips the chown), and hands the value to this client's
+// transport source. It returns false, with no error, when there is no
+// transport token file or the client does not use a hub-provided transport
+// token.
+func (c *Client) AdoptTransportTokenFile(uid, gid int) (bool, error) {
+	if !c.hasHubProvidedTransport() {
+		return false, nil
+	}
+	tok, err := readTransportTokenFile(TransportTokenFilePath())
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	tok = strings.TrimSpace(tok)
+	if tok == "" {
+		return false, nil
+	}
+	if err := WriteTransportTokenFile(tok, uid, gid); err != nil {
+		return false, err
+	}
+	expiry, err := transportauth.ParseTokenExpiry(tok)
+	if err != nil {
+		expiry = time.Now().Add(transportauth.DefaultTTL)
+	}
+	c.oidcSource.SetToken(tok, expiry)
+	return true, nil
+}
+
 // RemoveTransportTokenFile removes the transport token file, resolving its
 // parent directories without following symlinks. A missing file is not an
 // error. It returns true if a file was removed.

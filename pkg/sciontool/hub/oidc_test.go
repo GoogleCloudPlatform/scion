@@ -577,3 +577,52 @@ func TestRefreshToken_NoTransportNoStatus(t *testing.T) {
 	_, ok := ReadTransportRefreshStatus()
 	assert.False(t, ok)
 }
+
+// TestAdoptTransportTokenFile covers reset-auth: a transport token written
+// into the file from outside replaces the expired one in use, and the file
+// is rewritten 0600.
+func TestAdoptTransportTokenFile(t *testing.T) {
+	home := t.TempDir()
+	t.Cleanup(SetTokenHome(home))
+	cleanup := overrideGCPDetection(false)
+	defer cleanup()
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+	t.Setenv(transportauth.EnvTransportToken, makeTestJWT(time.Now().Add(-5*time.Minute)))
+
+	c := NewClientWithConfig("https://hub.example.com", "app", "agent-1")
+	c.configureOIDCTransport()
+	require.NotNil(t, c.oidcSource)
+
+	// No file yet: nothing adopted.
+	adopted, err := c.AdoptTransportTokenFile(0, 0)
+	require.NoError(t, err)
+	assert.False(t, adopted)
+
+	// Simulate the broker's write (broader mode than we want).
+	fresh := makeTestJWT(time.Now().Add(time.Hour))
+	path := filepath.Join(home, ".scion", transportauth.TransportTokenFileName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0700))
+	require.NoError(t, os.WriteFile(path, []byte(fresh+"\n"), 0644))
+
+	adopted, err = c.AdoptTransportTokenFile(0, 0)
+	require.NoError(t, err)
+	assert.True(t, adopted)
+
+	got, err := c.oidcSource.Token()
+	require.NoError(t, err)
+	assert.Equal(t, fresh, got)
+	fi, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), fi.Mode().Perm())
+}
+
+// TestAdoptTransportTokenFile_NoHubProvidedTransport verifies a file is not
+// adopted by a client that does not use a hub-provided transport token.
+func TestAdoptTransportTokenFile_NoHubProvidedTransport(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
+	require.NoError(t, WriteTransportTokenFile(makeTestJWT(time.Now().Add(time.Hour)), 0, 0))
+	c := NewClientWithConfig("https://hub.example.com", "app", "agent-1")
+	adopted, err := c.AdoptTransportTokenFile(0, 0)
+	require.NoError(t, err)
+	assert.False(t, adopted)
+}

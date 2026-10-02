@@ -83,8 +83,8 @@ func (c *HTTPRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, br
 	return c.transport.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv, extras)
 }
 
-func (c *HTTPRuntimeBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error {
-	return c.transport.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token)
+func (c *HTTPRuntimeBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token, transportToken string) error {
+	return c.transport.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token, transportToken)
 }
 
 func (c *HTTPRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
@@ -2938,7 +2938,22 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 		return fmt.Errorf("DispatchAgentResetAuth: no token generated for agent %s", agent.ID)
 	}
 
-	return d.client.ResetAuthAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, token)
+	// Also push a fresh transport token when the hub mints them, so a
+	// reset recovers an agent whose transport token has already expired
+	// (its own refresh cannot reach the hub through the platform guard).
+	// A mint failure does not block the app-token reset.
+	var transportToken string
+	if d.transportMinter != nil && d.transportAudience != "" {
+		tToken, _, tErr := d.transportMinter.MintIDToken(ctx, d.transportAudience)
+		if tErr != nil {
+			d.log.Warn("DispatchAgentResetAuth: failed to mint transport token; resetting app token only",
+				"agent_id", agent.ID, "error", tErr)
+		} else {
+			transportToken = tToken
+		}
+	}
+
+	return d.client.ResetAuthAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, token, transportToken)
 }
 
 // DispatchAgentDelete deletes an agent from the runtime broker.
