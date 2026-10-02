@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -56,7 +57,7 @@ func newMockMountChecker() *mockMountChecker {
 	}
 }
 
-func (m *mockMountChecker) IsMountpoint(path string) (bool, error) {
+func (m *mockMountChecker) IsMountpoint(_ context.Context, path string) (bool, error) {
 	if err, ok := m.isMountpointErr[path]; ok {
 		return false, err
 	}
@@ -75,7 +76,7 @@ func (m *mockMountChecker) MountInfo(path string) (string, error) {
 	return se, nil
 }
 
-func (m *mockMountChecker) Mount(server, export, target, options string) error {
+func (m *mockMountChecker) Mount(_ context.Context, server, export, target, options string) error {
 	m.mountCalls = append(m.mountCalls, mountCall{server, export, target, options})
 	if m.mountErr != nil {
 		return m.mountErr
@@ -84,7 +85,7 @@ func (m *mockMountChecker) Mount(server, export, target, options string) error {
 	return nil
 }
 
-func (m *mockMountChecker) Unmount(target string) error {
+func (m *mockMountChecker) Unmount(_ context.Context, target string) error {
 	m.unmountCalls = append(m.unmountCalls, target)
 	if m.unmountErr != nil {
 		return m.unmountErr
@@ -120,7 +121,7 @@ func TestReconcile_MountAbsent_MkdirAndMount(t *testing.T) {
 	cfg := testNFSConfig()
 	r := NewNFSMountReconciler(cfg, mc, nil)
 
-	if err := r.Reconcile(); err != nil {
+	if err := r.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
@@ -157,7 +158,7 @@ func TestReconcile_AlreadyMountedCorrectly_NoOp(t *testing.T) {
 	cfg := testNFSConfig()
 	r := NewNFSMountReconciler(cfg, mc, nil)
 
-	if err := r.Reconcile(); err != nil {
+	if err := r.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
@@ -182,7 +183,7 @@ func TestReconcile_WrongServerExport_Remount(t *testing.T) {
 	cfg := testNFSConfig()
 	r := NewNFSMountReconciler(cfg, mc, nil)
 
-	if err := r.Reconcile(); err != nil {
+	if err := r.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
@@ -218,7 +219,7 @@ func TestReconcile_MultipleShares(t *testing.T) {
 	}
 	r := NewNFSMountReconciler(cfg, mc, nil)
 
-	if err := r.Reconcile(); err != nil {
+	if err := r.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
@@ -245,7 +246,7 @@ func TestReconcile_MountFailure_UnhealthySignal(t *testing.T) {
 	r := NewNFSMountReconciler(cfg, mc, nil)
 
 	// Reconcile itself does not return an error for individual share failures
-	if err := r.Reconcile(); err != nil {
+	if err := r.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
@@ -263,7 +264,7 @@ func TestReconcile_NilConfig_Error(t *testing.T) {
 	mc := newMockMountChecker()
 	r := NewNFSMountReconciler(nil, mc, nil)
 
-	if err := r.Reconcile(); err == nil {
+	if err := r.Reconcile(context.Background()); err == nil {
 		t.Error("expected error for nil config")
 	}
 }
@@ -276,7 +277,7 @@ func TestReconcile_NoShares_Error(t *testing.T) {
 	}
 	r := NewNFSMountReconciler(cfg, mc, nil)
 
-	if err := r.Reconcile(); err == nil {
+	if err := r.Reconcile(context.Background()); err == nil {
 		t.Error("expected error for no shares")
 	}
 }
@@ -287,7 +288,7 @@ func TestReconcile_Idempotent_DoubleCall(t *testing.T) {
 	r := NewNFSMountReconciler(cfg, mc, nil)
 
 	// First call: mounts the share
-	if err := r.Reconcile(); err != nil {
+	if err := r.Reconcile(context.Background()); err != nil {
 		t.Fatalf("first Reconcile: %v", err)
 	}
 	if len(mc.mountCalls) != 1 {
@@ -295,7 +296,7 @@ func TestReconcile_Idempotent_DoubleCall(t *testing.T) {
 	}
 
 	// Second call: share is already mounted correctly — no-op
-	if err := r.Reconcile(); err != nil {
+	if err := r.Reconcile(context.Background()); err != nil {
 		t.Fatalf("second Reconcile: %v", err)
 	}
 	if len(mc.mountCalls) != 1 {
@@ -309,7 +310,7 @@ func TestEnsureShareMounted_Healthy(t *testing.T) {
 	cfg := testNFSConfig()
 	r := NewNFSMountReconciler(cfg, mc, nil)
 
-	if err := r.EnsureShareMounted("ws1"); err != nil {
+	if err := r.EnsureShareMounted(context.Background(), "ws1"); err != nil {
 		t.Fatalf("EnsureShareMounted: %v", err)
 	}
 
@@ -324,7 +325,7 @@ func TestEnsureShareMounted_UnknownShare(t *testing.T) {
 	cfg := testNFSConfig()
 	r := NewNFSMountReconciler(cfg, mc, nil)
 
-	if err := r.EnsureShareMounted("nonexistent"); err == nil {
+	if err := r.EnsureShareMounted(context.Background(), "nonexistent"); err == nil {
 		t.Error("expected error for unknown share ID")
 	}
 }
@@ -336,7 +337,7 @@ func TestEnsureShareMounted_MountFailure(t *testing.T) {
 	cfg := testNFSConfig()
 	r := NewNFSMountReconciler(cfg, mc, nil)
 
-	if err := r.EnsureShareMounted("ws1"); err == nil {
+	if err := r.EnsureShareMounted(context.Background(), "ws1"); err == nil {
 		t.Error("expected error when mount fails")
 	}
 }
@@ -347,7 +348,7 @@ func TestHealthCheckString_Healthy(t *testing.T) {
 	r := NewNFSMountReconciler(cfg, mc, nil)
 
 	// Mount the share
-	_ = r.Reconcile()
+	_ = r.Reconcile(context.Background())
 
 	got := r.HealthCheckString()
 	if got != "healthy" {
@@ -361,7 +362,7 @@ func TestHealthCheckString_Unhealthy(t *testing.T) {
 
 	cfg := testNFSConfig()
 	r := NewNFSMountReconciler(cfg, mc, nil)
-	_ = r.Reconcile()
+	_ = r.Reconcile(context.Background())
 
 	got := r.HealthCheckString()
 	if got == "healthy" {
@@ -381,7 +382,7 @@ func TestReconcile_DefaultMountOptions(t *testing.T) {
 	}
 	r := NewNFSMountReconciler(cfg, mc, nil)
 
-	if err := r.Reconcile(); err != nil {
+	if err := r.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 

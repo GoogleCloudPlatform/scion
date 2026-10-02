@@ -32,18 +32,20 @@ import (
 // server:export verify, idempotency) without real NFS.
 type MountChecker interface {
 	// IsMountpoint returns true if the given path is currently a mountpoint.
-	IsMountpoint(path string) (bool, error)
+	// ctx bounds the check (a hung NFS mount can block it).
+	IsMountpoint(ctx context.Context, path string) (bool, error)
 
 	// MountInfo returns the server:export (e.g. "10.0.0.2:/scion-workspaces")
 	// for a given mountpoint. Returns ("", nil) if the path is not mounted.
 	MountInfo(path string) (serverExport string, err error)
 
 	// Mount executes the NFS mount command.
-	// Requires mount privilege (root or CAP_SYS_ADMIN/sudo).
-	Mount(server, export, target, options string) error
+	// Requires mount privilege (mount.nfs requires root). ctx bounds the
+	// mount command.
+	Mount(ctx context.Context, server, export, target, options string) error
 
 	// Unmount unmounts the given mountpoint so it can be remounted.
-	Unmount(target string) error
+	Unmount(ctx context.Context, target string) error
 
 	// MkdirAll creates the directory tree for the mountpoint.
 	MkdirAll(path string, perm os.FileMode) error
@@ -68,10 +70,12 @@ type NFSMountReconciler struct {
 	checker MountChecker
 	log     *slog.Logger
 
-	// reconcileMu serializes share reconciliation so the background loop
-	// and a dispatch-time EnsureShareMounted never mount the same target
-	// concurrently.
-	reconcileMu sync.Mutex
+	// reconcileSem (capacity 1) serializes share reconciliation so the
+	// background loop and a dispatch-time EnsureShareMounted never mount
+	// the same target concurrently. It is a channel rather than a mutex so
+	// a dispatch waiting behind a slow background mount gives up when its
+	// request context is done.
+	reconcileSem chan struct{}
 
 	mu       sync.RWMutex
 	statuses map[string]ShareMountStatus // keyed by share ID
@@ -81,6 +85,13 @@ type NFSMountReconciler struct {
 // only checks them (false).
 func (r *NFSMountReconciler) AutoMount() bool {
 	return r.cfg != nil && r.cfg.AutoMount
+}
+
+// mountPrivilegeChecker is implemented by MountCheckers that can tell in
+// advance that this process cannot mount (for example, not running as
+// root). The reconciler then reports the share without shelling out.
+type mountPrivilegeChecker interface {
+	MountPrivilegeError() error
 }
 
 // ShareMountStatus tracks the health of a single NFS share mount.
@@ -98,10 +109,11 @@ func NewNFSMountReconciler(cfg *config.V1NFSConfig, checker MountChecker, log *s
 		log = slog.Default()
 	}
 	return &NFSMountReconciler{
-		cfg:      cfg,
-		checker:  checker,
-		log:      log,
-		statuses: make(map[string]ShareMountStatus),
+		cfg:          cfg,
+		checker:      checker,
+		log:          log,
+		statuses:     make(map[string]ShareMountStatus),
+		reconcileSem: make(chan struct{}, 1),
 	}
 }
 
@@ -118,7 +130,7 @@ func NewNFSMountReconciler(cfg *config.V1NFSConfig, checker MountChecker, log *s
 // Returns an error only if no shares are configured. Individual share failures
 // are tracked in per-share status (unhealthy) and logged, but do not block
 // other shares from mounting.
-func (r *NFSMountReconciler) Reconcile() error {
+func (r *NFSMountReconciler) Reconcile(ctx context.Context) error {
 	if r.cfg == nil {
 		return fmt.Errorf("NFS config is nil")
 	}
@@ -132,17 +144,29 @@ func (r *NFSMountReconciler) Reconcile() error {
 	}
 
 	for _, share := range r.cfg.Shares {
-		r.reconcileShare(share, mountOpts)
+		if err := r.reconcileShare(ctx, share, mountOpts); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-// reconcileShare handles a single share's mount reconciliation.
-func (r *NFSMountReconciler) reconcileShare(share config.V1NFSShare, mountOpts string) {
-	r.reconcileMu.Lock()
-	defer r.reconcileMu.Unlock()
+// reconcileShare handles a single share's mount reconciliation. It returns
+// an error only when ctx is done before the share could be checked; mount
+// problems are recorded in the share's status.
+func (r *NFSMountReconciler) reconcileShare(ctx context.Context, share config.V1NFSShare, mountOpts string) error {
+	select {
+	case r.reconcileSem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-r.reconcileSem }()
+	r.reconcileShareLocked(ctx, share, mountOpts)
+	return nil
+}
 
+func (r *NFSMountReconciler) reconcileShareLocked(ctx context.Context, share config.V1NFSShare, mountOpts string) {
 	target := filepath.Join(r.cfg.MountRoot, share.ID)
 	wantServerExport := fmt.Sprintf("%s:%s", share.Server, share.Export)
 
@@ -151,7 +175,7 @@ func (r *NFSMountReconciler) reconcileShare(share config.V1NFSShare, mountOpts s
 		"server", share.Server, "export", share.Export,
 		"autoMount", r.cfg.AutoMount)
 
-	mounted, err := r.checker.IsMountpoint(target)
+	mounted, err := r.checker.IsMountpoint(ctx, target)
 	if err != nil {
 		r.setStatus(share.ID, target, false,
 			fmt.Sprintf("failed to check mountpoint: %v", err))
@@ -165,6 +189,11 @@ func (r *NFSMountReconciler) reconcileShare(share config.V1NFSShare, mountOpts s
 	}
 
 	if !mounted {
+		if err := r.mountPrivilegeError(); err != nil {
+			r.setStatus(share.ID, target, false,
+				fmt.Sprintf("not mounted (expected %s) and auto_mount cannot mount it: %v", wantServerExport, err))
+			return
+		}
 		// Not mounted — create directory and mount.
 		if err := r.checker.MkdirAll(target, 0755); err != nil {
 			r.setStatus(share.ID, target, false,
@@ -172,7 +201,7 @@ func (r *NFSMountReconciler) reconcileShare(share config.V1NFSShare, mountOpts s
 			return
 		}
 
-		if err := r.checker.Mount(share.Server, share.Export, target, mountOpts); err != nil {
+		if err := r.checker.Mount(ctx, share.Server, share.Export, target, mountOpts); err != nil {
 			r.setStatus(share.ID, target, false,
 				fmt.Sprintf("mount failed: %v", err))
 			return
@@ -205,17 +234,23 @@ func (r *NFSMountReconciler) reconcileShare(share config.V1NFSShare, mountOpts s
 		return
 	}
 
+	if err := r.mountPrivilegeError(); err != nil {
+		r.setStatus(share.ID, target, false,
+			fmt.Sprintf("mounted from %s, expected %s, and auto_mount cannot remount it: %v", currentServerExport, wantServerExport, err))
+		return
+	}
+
 	// Wrong server:export — remount.
 	r.log.Warn("NFS share mounted with wrong source, remounting",
 		"shareID", share.ID, "target", target,
 		"current", currentServerExport, "expected", wantServerExport)
 
-	if err := r.checker.Unmount(target); err != nil {
+	if err := r.checker.Unmount(ctx, target); err != nil {
 		r.setStatus(share.ID, target, false,
 			fmt.Sprintf("failed to unmount for remount: %v", err))
 		return
 	}
-	if err := r.checker.Mount(share.Server, share.Export, target, mountOpts); err != nil {
+	if err := r.checker.Mount(ctx, share.Server, share.Export, target, mountOpts); err != nil {
 		r.setStatus(share.ID, target, false,
 			fmt.Sprintf("remount failed: %v", err))
 		return
@@ -223,6 +258,15 @@ func (r *NFSMountReconciler) reconcileShare(share config.V1NFSShare, mountOpts s
 
 	r.setStatus(share.ID, target, true, "remounted with correct source")
 	r.log.Info("NFS share remounted", "shareID", share.ID, "target", target)
+}
+
+// mountPrivilegeError returns why this process cannot mount, when the
+// checker can tell in advance; nil otherwise.
+func (r *NFSMountReconciler) mountPrivilegeError() error {
+	if pc, ok := r.checker.(mountPrivilegeChecker); ok {
+		return pc.MountPrivilegeError()
+	}
+	return nil
 }
 
 // setStatus records the health status of a share. A change of state is
@@ -266,7 +310,7 @@ func (r *NFSMountReconciler) Run(ctx context.Context, interval time.Duration, fi
 	if interval <= 0 {
 		interval = DefaultNFSReconcileInterval
 	}
-	if err := r.Reconcile(); err != nil {
+	if err := r.Reconcile(ctx); err != nil && ctx.Err() == nil {
 		r.log.Warn("NFS mount reconciliation returned error", "error", err)
 	}
 	if firstPassDone != nil {
@@ -279,7 +323,7 @@ func (r *NFSMountReconciler) Run(ctx context.Context, interval time.Duration, fi
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := r.Reconcile(); err != nil {
+			if err := r.Reconcile(ctx); err != nil && ctx.Err() == nil {
 				r.log.Warn("NFS mount reconciliation returned error", "error", err)
 			}
 		}
@@ -344,8 +388,10 @@ func (r *NFSMountReconciler) HealthCheckString() string {
 
 // EnsureShareMounted is called before each NFS-backed dispatch to verify
 // the share for a given share ID is still mounted. It re-reconciles if needed.
-// Returns an error if the share cannot be verified or mounted.
-func (r *NFSMountReconciler) EnsureShareMounted(shareID string) error {
+// Returns an error if the share cannot be verified or mounted, or if ctx
+// (the dispatch request's context) is done first; ctx also bounds any mount
+// command it runs.
+func (r *NFSMountReconciler) EnsureShareMounted(ctx context.Context, shareID string) error {
 	if r.cfg == nil {
 		return fmt.Errorf("NFS config is nil")
 	}
@@ -357,7 +403,12 @@ func (r *NFSMountReconciler) EnsureShareMounted(shareID string) error {
 
 	for _, share := range r.cfg.Shares {
 		if share.ID == shareID {
-			r.reconcileShare(share, mountOpts)
+			if err := r.reconcileShare(ctx, share, mountOpts); err != nil {
+				return fmt.Errorf("NFS share %q not checked: %w", shareID, err)
+			}
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("NFS share %q not checked: %w", shareID, err)
+			}
 
 			r.mu.RLock()
 			status, ok := r.statuses[shareID]

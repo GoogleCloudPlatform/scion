@@ -381,7 +381,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	}
 
 	// Initialize NFS mount reconciler when NFS storage is configured.
-	// This only constructs the reconciler; Reconcile() is called in Start().
+	// This only constructs the reconciler; its loop is started in Start().
 	if cfg.NFSConfig != nil && len(cfg.NFSConfig.Shares) > 0 {
 		nfsLog := logging.Subsystem("broker.nfs-mount")
 		checker := cfg.NFSMountChecker
@@ -395,6 +395,12 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 			"shares", len(cfg.NFSConfig.Shares),
 			"mountRoot", cfg.NFSConfig.MountRoot,
 			"autoMount", cfg.NFSConfig.AutoMount)
+		if cfg.NFSConfig.AutoMount {
+			if err := srv.nfsMountReconciler.mountPrivilegeError(); err != nil {
+				slog.Warn("server.workspace_storage.nfs.auto_mount is on but the broker cannot mount; shares are checked only",
+					"reason", err)
+			}
+		}
 	}
 
 	// Initialize Hub integration if enabled

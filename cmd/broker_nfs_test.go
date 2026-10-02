@@ -133,7 +133,7 @@ func TestServerForeground_WiresBrokerNFSConfig(t *testing.T) {
 	var nfsIdent string
 	literals := 0
 	assignedFrom := map[string]string{} // ident -> called function
-	calls := map[string]bool{}
+	brokerNFSArg := ""
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.CompositeLit:
@@ -177,8 +177,10 @@ func TestServerForeground_WiresBrokerNFSConfig(t *testing.T) {
 				}
 			}
 		case *ast.CallExpr:
-			if sel, ok := n.Fun.(*ast.SelectorExpr); ok {
-				calls[sel.Sel.Name] = true
+			if fn, ok := n.Fun.(*ast.Ident); ok && fn.Name == "brokerNFSConfig" && len(n.Args) == 1 {
+				if arg, ok := n.Args[0].(*ast.Ident); ok {
+					brokerNFSArg = arg.Name
+				}
 			}
 		}
 		return true
@@ -193,8 +195,12 @@ func TestServerForeground_WiresBrokerNFSConfig(t *testing.T) {
 	if got := assignedFrom[nfsIdent]; got != "brokerNFSConfig" {
 		t.Fatalf("NFSConfig is set from %q, which is assigned from %q; want brokerNFSConfig", nfsIdent, got)
 	}
-	if !calls["LoadGlobalSettings"] {
-		t.Error("server_foreground.go must load the broker's NFS settings with config.LoadGlobalSettings")
+	if brokerNFSArg == "" {
+		t.Fatal("brokerNFSConfig is not called with a settings variable")
+	}
+	if got := assignedFrom[brokerNFSArg]; got != "LoadGlobalSettings" {
+		t.Errorf("brokerNFSConfig(%s): %s is assigned from %q; want config.LoadGlobalSettings (global settings only)",
+			brokerNFSArg, brokerNFSArg, got)
 	}
 }
 

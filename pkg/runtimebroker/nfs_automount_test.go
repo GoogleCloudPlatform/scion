@@ -18,9 +18,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -61,7 +64,7 @@ func (m *syncMountChecker) counts() (mounts, mkdirs, unmounts int) {
 	return m.mounts, m.mkdirs, m.unmounts
 }
 
-func (m *syncMountChecker) IsMountpoint(path string) (bool, error) {
+func (m *syncMountChecker) IsMountpoint(_ context.Context, path string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, ok := m.mountpoints[path]
@@ -74,7 +77,7 @@ func (m *syncMountChecker) MountInfo(path string) (string, error) {
 	return m.mountpoints[path], nil
 }
 
-func (m *syncMountChecker) Mount(server, export, target, options string) error {
+func (m *syncMountChecker) Mount(ctx context.Context, server, export, target, options string) error {
 	m.mu.Lock()
 	m.mounts++
 	block, enter, mountErr := m.block, m.mountEnter, m.mountErr
@@ -86,7 +89,11 @@ func (m *syncMountChecker) Mount(server, export, target, options string) error {
 		}
 	}
 	if block != nil {
-		<-block
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return fmt.Errorf("mount cancelled: %w", ctx.Err())
+		}
 	}
 	if mountErr != nil {
 		return mountErr
@@ -95,7 +102,7 @@ func (m *syncMountChecker) Mount(server, export, target, options string) error {
 	return nil
 }
 
-func (m *syncMountChecker) Unmount(target string) error {
+func (m *syncMountChecker) Unmount(_ context.Context, target string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.unmounts++
@@ -135,7 +142,7 @@ func TestReconcile_CheckOnly_NotMounted_NoMountAttempt(t *testing.T) {
 	mc := newMockMountChecker()
 	r := NewNFSMountReconciler(nfsCfg(false), mc, nil)
 
-	if err := r.Reconcile(); err != nil {
+	if err := r.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if len(mc.mountCalls) != 0 || len(mc.mkdirCalls) != 0 || len(mc.unmountCalls) != 0 {
@@ -155,7 +162,7 @@ func TestReconcile_CheckOnly_MountedCorrectly_Healthy(t *testing.T) {
 	mc.mountpoints[filepath.Join("/mnt/nfs", "ws1")] = "10.0.0.2:/scion-workspaces"
 	r := NewNFSMountReconciler(nfsCfg(false), mc, nil)
 
-	_ = r.Reconcile()
+	_ = r.Reconcile(context.Background())
 	if !r.IsHealthy() {
 		t.Fatalf("expected healthy, got %q", r.HealthCheckString())
 	}
@@ -169,7 +176,7 @@ func TestReconcile_CheckOnly_WrongSource_NoRemount(t *testing.T) {
 	mc.mountpoints[filepath.Join("/mnt/nfs", "ws1")] = "10.9.9.9:/other"
 	r := NewNFSMountReconciler(nfsCfg(false), mc, nil)
 
-	_ = r.Reconcile()
+	_ = r.Reconcile(context.Background())
 	if r.IsHealthy() {
 		t.Fatal("expected unhealthy for a share mounted from the wrong source")
 	}
@@ -188,7 +195,7 @@ func TestEnsureNFSMountsReady_AutoMountOff_NoGate(t *testing.T) {
 		config:             ServerConfig{NFSConfig: cfg},
 		nfsMountReconciler: NewNFSMountReconciler(cfg, mc, nil),
 	}
-	if err := srv.ensureNFSMountsReady(); err != nil {
+	if err := srv.ensureNFSMountsReady(context.Background()); err != nil {
 		t.Fatalf("ensureNFSMountsReady with auto_mount off = %v, want nil", err)
 	}
 	if len(mc.mountCalls) != 0 {
@@ -233,6 +240,36 @@ func startTestBroker(t *testing.T, srv *Server) (context.CancelFunc, <-chan erro
 	return cancel, done
 }
 
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+// getUntilServing polls url until the listener accepts a request, failing
+// the test if it is not serving within 5 seconds.
+func getUntilServing(t *testing.T, url string) (int, string) {
+	t.Helper()
+	client := &http.Client{Timeout: time.Second}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err := client.Get(url)
+		if err == nil {
+			b, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			return resp.StatusCode, string(b)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("broker is not serving %s: %v", url, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // TestServer_Start_NFSReconcileInBackground_StartAndStop verifies that Start
 // does not wait on a slow mount, that the loop's first pass mounts the share
 // with the injected (fake) mounter, and that cancelling stops the loop.
@@ -240,7 +277,10 @@ func TestServer_Start_NFSReconcileInBackground_StartAndStop(t *testing.T) {
 	mc := newSyncMountChecker()
 	mc.block = make(chan struct{})
 	mc.mountEnter = make(chan struct{}, 1)
-	srv := New(ServerConfig{Host: "127.0.0.1", Port: 0, NFSConfig: nfsCfg(true), NFSMountChecker: mc},
+	release := sync.OnceFunc(func() { close(mc.block) })
+	t.Cleanup(release)
+	port := freePort(t)
+	srv := New(ServerConfig{Host: "127.0.0.1", Port: port, NFSConfig: nfsCfg(true), NFSMountChecker: mc},
 		nil, &runtime.MockRuntime{NameFunc: func() string { return "mock" }})
 
 	cancel, done := startTestBroker(t, srv)
@@ -256,15 +296,14 @@ func TestServer_Start_NFSReconcileInBackground_StartAndStop(t *testing.T) {
 		t.Fatal("first pass reported done while the mount is still blocked")
 	default:
 	}
-	// While the mount is blocked, the broker answers health requests and
-	// reports the share as not yet reconciled.
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "not reconciled") {
-		t.Fatalf("healthz during blocked mount = %d %s", rec.Code, rec.Body.String())
+	// While the mount is blocked, the broker's listener is up and answers
+	// health requests, reporting the share as not yet reconciled.
+	code, body := getUntilServing(t, fmt.Sprintf("http://127.0.0.1:%d/healthz", port))
+	if code != http.StatusOK || !strings.Contains(body, "not reconciled") {
+		t.Fatalf("healthz during blocked mount = %d %s", code, body)
 	}
 
-	close(mc.block)
+	release()
 	waitClosed(t, srv.nfsStartupReconcileDone, "first reconcile pass")
 	if got := srv.GetHealthInfo(context.Background()).Checks["nfs_mounts"]; got != "healthy" {
 		t.Fatalf("nfs_mounts after mount = %q, want healthy", got)
@@ -431,7 +470,7 @@ func TestCheckNFSForDispatch(t *testing.T) {
 			} else {
 				writeSettings(t, projectPath, "schema_version: \"1\"\n")
 			}
-			err := srv.checkNFSForDispatch("agent-1", filepath.Join(projectPath, ".scion"), "", "")
+			err := srv.checkNFSForDispatch(context.Background(), "agent-1", filepath.Join(projectPath, ".scion"), "", "")
 			if (err != nil) != tc.wantRefused {
 				t.Fatalf("checkNFSForDispatch err = %v, wantRefused %v", err, tc.wantRefused)
 			}
@@ -445,7 +484,7 @@ func TestCheckNFSForDispatch(t *testing.T) {
 
 func TestCheckNFSForDispatch_NoNFSConfig(t *testing.T) {
 	srv := New(ServerConfig{Host: "127.0.0.1"}, nil, nil)
-	if err := srv.checkNFSForDispatch("a", "", "", ""); err != nil {
+	if err := srv.checkNFSForDispatch(context.Background(), "a", "", "", ""); err != nil {
 		t.Fatalf("checkNFSForDispatch without NFS config = %v, want nil", err)
 	}
 }
@@ -465,5 +504,168 @@ func TestCreateAgent_NFSGate_Returns503(t *testing.T) {
 
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "nfs_unavailable") {
 		t.Fatalf("create = %d %s, want 503 nfs_unavailable", rec.Code, rec.Body.String())
+	}
+}
+
+// --- Health: when NFS degrades the overall status ---
+
+func TestHealth_NFSDegradesOnlyWhenBrokerOwnsMounts(t *testing.T) {
+	cases := []struct {
+		name       string
+		autoMount  bool
+		pending    bool
+		runtime    string
+		wantStatus string
+	}{
+		{name: "auto_mount off", autoMount: false, runtime: "docker", wantStatus: "healthy"},
+		{name: "auto_mount on, first pass pending", autoMount: true, pending: true, runtime: "docker", wantStatus: "healthy"},
+		{name: "auto_mount on, kubernetes runtime", autoMount: true, runtime: "kubernetes", wantStatus: "healthy"},
+		{name: "auto_mount on, local-container runtime", autoMount: true, runtime: "docker", wantStatus: "degraded"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := newSyncMountChecker()
+			mc.mountErr = errors.New("mount failed")
+			rtName := tc.runtime
+			srv := New(ServerConfig{Host: "127.0.0.1", NFSConfig: nfsCfg(tc.autoMount), NFSMountChecker: mc},
+				nil, &runtime.MockRuntime{NameFunc: func() string { return rtName }})
+			if !tc.pending {
+				_ = srv.nfsMountReconciler.Reconcile(context.Background())
+				close(srv.nfsStartupReconcileDone)
+			}
+			health := srv.GetHealthInfo(context.Background())
+			if health.Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q (checks %v)", health.Status, tc.wantStatus, health.Checks)
+			}
+			if got := health.Checks["nfs_mounts"]; got == "" || got == "healthy" {
+				t.Errorf("nfs_mounts = %q, want the per-share problem reported", got)
+			}
+		})
+	}
+}
+
+// --- Request-context bounds on dispatch-time mounts ---
+
+// TestEnsureShareMounted_RequestCtxCancelsMount verifies that a mount run
+// at dispatch time receives the request context and stops when it is
+// cancelled.
+func TestEnsureShareMounted_RequestCtxCancelsMount(t *testing.T) {
+	mc := newSyncMountChecker()
+	mc.block = make(chan struct{}) // never released: only ctx can end the mount
+	r := NewNFSMountReconciler(nfsCfg(true), mc, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := r.EnsureShareMounted(ctx, "ws1")
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("EnsureShareMounted = %v, want a cancellation error", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("EnsureShareMounted took %s after the request ctx ended", elapsed)
+	}
+}
+
+// TestEnsureShareMounted_RequestCtxCancelsWait verifies that a dispatch
+// waiting behind a slow background mount gives up when its request context
+// ends, without touching the share's status.
+func TestEnsureShareMounted_RequestCtxCancelsWait(t *testing.T) {
+	mc := newSyncMountChecker()
+	mc.block = make(chan struct{})
+	mc.mountEnter = make(chan struct{}, 1)
+	release := sync.OnceFunc(func() { close(mc.block) })
+	defer release()
+	r := NewNFSMountReconciler(nfsCfg(true), mc, nil)
+
+	bgDone := make(chan struct{})
+	go func() {
+		defer close(bgDone)
+		_ = r.Reconcile(context.Background())
+	}()
+	select {
+	case <-mc.mountEnter:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background reconcile never reached Mount")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- r.EnsureShareMounted(ctx, "ws1") }()
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("EnsureShareMounted = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dispatch kept waiting after its request ctx was cancelled")
+	}
+	if mounts, _, _ := mc.counts(); mounts != 1 {
+		t.Errorf("mounts = %d, want 1 (only the background attempt)", mounts)
+	}
+	release()
+	<-bgDone
+}
+
+// TestExecRunCommand_ParentCtxCancels verifies that the exec layer kills a
+// running command when the parent (request) context is cancelled, well
+// before mountCommandTimeout.
+func TestExecRunCommand_ParentCtxCancels(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := execRunCommand(ctx, "sleep", "30")
+	if err == nil || !strings.Contains(err.Error(), "cancelled") || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("execRunCommand = %v, want a cancellation error wrapping the parent ctx error", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("command ran for %s after the parent ctx ended", elapsed)
+	}
+}
+
+// --- Non-root brokers ---
+
+func TestExecMountChecker_NonRoot_NoShellOut(t *testing.T) {
+	checker := NewExecMountChecker(nil)
+	checker.geteuid = func() int { return 1000 }
+	var ran []string
+	checker.runCommand = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		ran = append(ran, name)
+		return nil, &exec.ExitError{} // mountpoint: not a mountpoint
+	}
+
+	if err := checker.Mount(context.Background(), "10.0.0.2", "/x", "/mnt/nfs/ws1", "vers=3"); err == nil || !strings.Contains(err.Error(), "requires root") {
+		t.Errorf("Mount as non-root = %v, want a requires-root error", err)
+	}
+	if err := checker.Unmount(context.Background(), "/mnt/nfs/ws1"); err == nil || !strings.Contains(err.Error(), "requires root") {
+		t.Errorf("Unmount as non-root = %v, want a requires-root error", err)
+	}
+	if len(ran) != 0 {
+		t.Fatalf("ran %v as non-root, want nothing", ran)
+	}
+
+	// Through the reconciler: only the read-only mountpoint check runs, no
+	// mount directory is created, and the share reports why.
+	root := t.TempDir()
+	cfg := nfsCfg(true)
+	cfg.MountRoot = root
+	r := NewNFSMountReconciler(cfg, checker, nil)
+	_ = r.Reconcile(context.Background())
+	if strings.Join(ran, ",") != "mountpoint" {
+		t.Errorf("commands run = %v, want only mountpoint", ran)
+	}
+	if _, err := os.Stat(filepath.Join(root, "ws1")); !os.IsNotExist(err) {
+		t.Errorf("mount directory created as non-root (stat err %v)", err)
+	}
+	if hc := r.HealthCheckString(); !strings.Contains(hc, "requires root") || !strings.Contains(hc, "uid 1000") {
+		t.Errorf("HealthCheckString = %q, want the requires-root reason", hc)
+	}
+}
+
+func TestExecMountChecker_Root_Mounts(t *testing.T) {
+	checker := NewExecMountChecker(nil)
+	checker.geteuid = func() int { return 0 }
+	if err := checker.MountPrivilegeError(); err != nil {
+		t.Fatalf("MountPrivilegeError as root = %v", err)
 	}
 }

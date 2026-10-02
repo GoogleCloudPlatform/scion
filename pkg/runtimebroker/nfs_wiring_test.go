@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // TestServer_NFSReconcilerWired_WhenNFSConfigured verifies that the
@@ -96,7 +97,7 @@ func TestServer_HealthIncludesNFS(t *testing.T) {
 		},
 	}
 
-	srv := New(cfg, nil, nil)
+	srv := New(cfg, nil, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
 
 	// Before reconciliation: shares are unreconciled → unhealthy
 	health := srv.GetHealthInfo(context.Background())
@@ -109,8 +110,9 @@ func TestServer_HealthIncludesNFS(t *testing.T) {
 	if nfsCheck == "healthy" {
 		t.Error("expected unhealthy before reconciliation")
 	}
-	if health.Status != "degraded" {
-		t.Errorf("overall status = %q, want degraded (NFS unhealthy before reconciliation)", health.Status)
+	// Pending, and auto_mount off: reported per share only.
+	if health.Status != "healthy" {
+		t.Errorf("overall status = %q, want healthy (NFS state is reported per share only)", health.Status)
 	}
 }
 
@@ -135,13 +137,13 @@ func TestServer_HealthExcludesNFS_WhenLocal(t *testing.T) {
 func TestServer_EnsureNFSMountsReady_NilReconciler(t *testing.T) {
 	srv := New(ServerConfig{Port: 0, Host: "127.0.0.1"}, nil, nil)
 
-	if err := srv.ensureNFSMountsReady(); err != nil {
+	if err := srv.ensureNFSMountsReady(context.Background()); err != nil {
 		t.Fatalf("ensureNFSMountsReady with no NFS should return nil, got: %v", err)
 	}
 }
 
 // TestServer_EnsureNFSMountsReady_WithReconciler verifies that the dispatch
-// guard calls EnsureShareMounted for each configured share.
+// guard ensures the first share (the one the nfs workspace backend uses).
 func TestServer_EnsureNFSMountsReady_WithReconciler(t *testing.T) {
 	nfsCfg := &config.V1NFSConfig{
 		MountRoot:    "/mnt/nfs",
@@ -163,12 +165,12 @@ func TestServer_EnsureNFSMountsReady_WithReconciler(t *testing.T) {
 		nfsMountReconciler: NewNFSMountReconciler(nfsCfg, mc, nil),
 	}
 
-	if err := srv.ensureNFSMountsReady(); err != nil {
+	if err := srv.ensureNFSMountsReady(context.Background()); err != nil {
 		t.Fatalf("ensureNFSMountsReady: %v", err)
 	}
 
-	// Both shares should have been mounted
-	if len(mc.mountCalls) != 2 {
-		t.Errorf("mountCalls = %d, want 2 (one per share)", len(mc.mountCalls))
+	// Only the first share backs nfs workspaces, so only it is mounted.
+	if len(mc.mountCalls) != 1 || mc.mountCalls[0].Target != "/mnt/nfs/ws1" {
+		t.Errorf("mountCalls = %+v, want one mount of /mnt/nfs/ws1", mc.mountCalls)
 	}
 }

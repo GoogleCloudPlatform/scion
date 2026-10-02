@@ -96,16 +96,21 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		checks["runtime"] = "unavailable"
 	}
 
-	// NFS mount health
-	if s.nfsMountReconciler != nil {
-		checks["nfs_mounts"] = s.nfsMountReconciler.HealthCheckString()
-	}
-
 	status := "healthy"
 	for _, v := range checks {
 		if v != "available" && v != "healthy" {
 			status = "degraded"
 			break
+		}
+	}
+
+	// NFS mount health is always reported per share. It degrades the
+	// overall status only when the broker owns the mounts and a dispatch
+	// would be refused: see nfsHealthDegradesStatus.
+	if s.nfsMountReconciler != nil {
+		checks["nfs_mounts"] = s.nfsMountReconciler.HealthCheckString()
+		if s.nfsHealthDegradesStatus() {
+			status = "degraded"
 		}
 	}
 
@@ -115,6 +120,31 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		Uptime:  time.Since(s.startTime).Round(time.Second).String(),
 		Checks:  checks,
 	}
+}
+
+// nfsHealthDegradesStatus reports whether an unhealthy NFS share should
+// mark the broker degraded. It does only when auto_mount is on, the first
+// reconcile pass has finished (a pending check is not a failure), the
+// default runtime is not Kubernetes (where the kubelet mounts the export
+// and dispatch is not gated), and a share is unhealthy. With auto_mount
+// off the broker only verifies mounts it does not manage, so a missing
+// mount is reported in nfs_mounts without changing the overall status.
+func (s *Server) nfsHealthDegradesStatus() bool {
+	r := s.nfsMountReconciler
+	if r == nil || !r.AutoMount() || r.IsHealthy() {
+		return false
+	}
+	if s.nfsStartupReconcileDone != nil {
+		select {
+		case <-s.nfsStartupReconcileDone:
+		default:
+			return false // first pass still pending
+		}
+	}
+	if s.runtime != nil && isKubernetesRuntimeName(s.runtime.Name()) {
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -936,7 +966,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if req.Config != nil {
 		nfsProfile = req.Config.Profile
 	}
-	if err := s.checkNFSForDispatch(req.Name, req.ProjectPath, req.ProjectSlug, nfsProfile); err != nil {
+	if err := s.checkNFSForDispatch(r.Context(), req.Name, req.ProjectPath, req.ProjectSlug, nfsProfile); err != nil {
 		markAttemptFailed(http.StatusServiceUnavailable, "NFS mount check failed: "+err.Error())
 		span.SetStatus(codes.Error, "NFS workspace storage is not available: "+err.Error())
 		writeError(w, http.StatusServiceUnavailable, "nfs_unavailable",
@@ -4967,7 +4997,7 @@ func isLocalhostEndpoint(endpoint string) bool {
 // A Kubernetes dispatch is only warned about: there the kubelet can create
 // the workspace subPath itself when the broker does not have the export
 // mounted (see the Kubernetes NFS workspace docs).
-func (s *Server) checkNFSForDispatch(name, projectPath, projectSlug, profile string) error {
+func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, projectSlug, profile string) error {
 	if s.nfsMountReconciler == nil || !s.nfsMountReconciler.AutoMount() {
 		return nil
 	}
@@ -4975,7 +5005,7 @@ func (s *Server) checkNFSForDispatch(name, projectPath, projectSlug, profile str
 	if !dispatchUsesNFSWorkspace(projectDir) {
 		return nil
 	}
-	err := s.ensureNFSMountsReady()
+	err := s.ensureNFSMountsReady(ctx)
 	if err == nil {
 		return nil
 	}
@@ -5020,14 +5050,15 @@ func dispatchUsesNFSWorkspace(projectDir string) bool {
 		vs.Server.WorkspaceStorage.Backend == "nfs"
 }
 
-// ensureNFSMountsReady verifies that all configured NFS shares are mounted
-// before dispatching an agent. This is a pre-flight check (N1-7):
-// the reconciler may have mounted them at startup, but a transient
-// unmount (network blip, manual intervention) should block dispatches.
-// Returns an error if any configured share cannot be mounted — the caller
+// ensureNFSMountsReady verifies that the NFS share the nfs workspace backend
+// uses (the first configured share) is mounted before dispatching an agent,
+// mounting it if needed. The reconciler may have mounted it at startup, but
+// a transient unmount (network blip, manual intervention) should be caught
+// here. ctx (the request context) bounds the wait and any mount command.
+// Returns an error if the share cannot be mounted — the caller
 // decides whether to reject the dispatch (see checkNFSForDispatch). A no-op
 // unless NFS is configured with auto_mount on.
-func (s *Server) ensureNFSMountsReady() error {
+func (s *Server) ensureNFSMountsReady(ctx context.Context) error {
 	if s.nfsMountReconciler == nil || !s.nfsMountReconciler.AutoMount() {
 		return nil // NFS not configured, or mounts managed externally.
 	}
@@ -5037,12 +5068,9 @@ func (s *Server) ensureNFSMountsReady() error {
 		return nil
 	}
 
-	for _, share := range nfsCfg.Shares {
-		if err := s.nfsMountReconciler.EnsureShareMounted(share.ID); err != nil {
-			return err
-		}
-	}
-	return nil
+	// The nfs workspace backend places workspaces on the first share only
+	// (runtime.NFSWorkspaceBackend), so that is the share a dispatch needs.
+	return s.nfsMountReconciler.EnsureShareMounted(ctx, nfsCfg.Shares[0].ID)
 }
 
 // preResolvedHubEndpoint picks the Hub base URL used to absolutize the
