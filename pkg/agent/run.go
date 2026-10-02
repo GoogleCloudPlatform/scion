@@ -615,6 +615,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// standing up a full agent; see resolveAuthEnvOverlay.
 	authEnvOverlay, droppedBrokerEnvVars := resolveAuthEnvOverlay(&opts, settings, profileName, harnessConfigName)
 
+	// Agents created in no-auth mode persist auth_selectedType "none". The
+	// start, restart, resume and wake paths may reach here without NoAuth
+	// set, so treat "none" as a request for no-auth mode instead of an auth
+	// type. An explicit opts.HarnessAuth other than "none" still wins over
+	// the persisted value.
+	if isNoAuthSelection(opts.HarnessAuth, finalScionCfg) {
+		opts.NoAuth = true
+	}
+
 	canFallbackToNoAuth := func() bool {
 		return opts.HarnessAuth == "" && noAuthConfig != nil &&
 			(noAuthConfig.Behavior == "drop-to-shell" || noAuthConfig.Behavior == "allow")
@@ -1254,6 +1263,7 @@ authDone:
 	nfsPVClaimName := ""
 	nfsSubPath := ""
 	nfsStorageClass := ""
+	nfsWorkspacePreCreated := false
 
 	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
 		sharingMode := store.SharingModeWorktreePerAgent
@@ -1283,6 +1293,19 @@ authDone:
 			})
 			if err != nil {
 				return nil, fmt.Errorf("realize workspace backend %q: %w", backend.Name(), err)
+			}
+			// Create the workspace subPath directory, and the directories of
+			// shared dirs served from the same claim, before the pod exists,
+			// so the kubelet does not have to (ptone/scion#2530). Shared dirs
+			// with their own storage (sharedDirStorage set) are not on this
+			// claim.
+			var claimSharedDirNames []string
+			if sharedDirStorage == nil {
+				claimSharedDirNames = sharedDirNames
+			}
+			nfsWorkspacePreCreated, err = ensureNFSWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames)
+			if err != nil {
+				return nil, err
 			}
 
 			workspaceBackendName = backend.Name()
@@ -1321,6 +1344,9 @@ authDone:
 		NFSPVClaimName:       nfsPVClaimName,
 		NFSSubPath:           nfsSubPath,
 		NFSStorageClass:      nfsStorageClass,
+		// Lets the provisioning init container treat a failed chown as a
+		// warning for a workspace directory the broker created.
+		NFSWorkspacePreCreated: nfsWorkspacePreCreated,
 		// F-111 (design §9): drives the k8s runtime's NFS init container's
 		// clone-vs-plain-provision choice (nfsProvisionCommand), not whether
 		// provisioning happens at all — the init container is now gated
@@ -1922,6 +1948,17 @@ func buildAuthEnvOverlay(baseEnv map[string]string, secrets []api.ResolvedSecret
 		}
 	}
 	return overlay
+}
+
+// isNoAuthSelection reports whether the effective auth selection for a
+// start is the no-auth sentinel. A valid explicit harnessAuth decides on
+// its own; otherwise the auth_selectedType persisted in scion-agent.json
+// (cfg) is used. Harness implementation names are ignored as corrupted.
+func isNoAuthSelection(harnessAuth string, cfg *api.ScionConfig) bool {
+	if harnessAuth != "" && !harness.IsHarnessImplementationName(harnessAuth) {
+		return harness.IsNoAuthType(harnessAuth)
+	}
+	return cfg != nil && harness.IsNoAuthType(cfg.AuthSelectedType)
 }
 
 // autoDetectAuthSelectedType sets auth.SelectedType when nothing explicit has

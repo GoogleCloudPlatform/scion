@@ -11,6 +11,7 @@ export default defineConfig({
     'url-layout.pw.ts',
     'url-nav-guard.pw.ts',
     'persistence.pw.ts',
+    'jump-to-agent.pw.ts',
   ],
   workers: 1,
   timeout: 30000,

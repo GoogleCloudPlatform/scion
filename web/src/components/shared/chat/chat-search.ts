@@ -126,6 +126,15 @@ export class ScionChatSearch extends LitElement {
       color: var(--scion-text-muted, #94a3b8);
     }
 
+    /* Stop iOS/Android focus-zoom: this is a native <input>, not a
+       Shoelace component, so it is not covered by the app-wide
+       --sl-input-font-size-* rule. */
+    @media (pointer: coarse) {
+      .search-input {
+        font-size: max(16px, var(--chat-fs-md));
+      }
+    }
+
     .close-btn {
       flex-shrink: 0;
     }

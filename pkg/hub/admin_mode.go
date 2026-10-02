@@ -152,7 +152,7 @@ func (ws *WebServer) adminModeWebMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Allow static assets (required for login page).
-		if strings.HasPrefix(path, "/assets/") || strings.HasPrefix(path, "/shoelace/") || path == "/favicon.ico" {
+		if strings.HasPrefix(path, "/assets/") || strings.HasPrefix(path, "/shoelace/") || isAppIconPath(path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -176,6 +176,26 @@ func (ws *WebServer) adminModeWebMiddleware(next http.Handler) http.Handler {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = fmt.Fprint(w, maintenancePageHTML(ws.maintenance.Message()))
 	})
+}
+
+// appIconPaths are the root-level app icon and web app manifest files
+// from web/public/. Browsers fetch them without credentials (the
+// manifest is a CORS request with no cookies), so they must load on the
+// maintenance-mode login page too. Keep this list exact rather than
+// allowing every root-level file.
+var appIconPaths = map[string]bool{
+	"/favicon.ico":           true,
+	"/favicon.svg":           true,
+	"/apple-touch-icon.png":  true,
+	"/icon-192.png":          true,
+	"/icon-512.png":          true,
+	"/icon-maskable-512.png": true,
+	"/manifest.webmanifest":  true,
+}
+
+// isAppIconPath reports whether path is one of appIconPaths.
+func isAppIconPath(path string) bool {
+	return appIconPaths[path]
 }
 
 // handleAdminMaintenance handles GET and PUT /api/v1/admin/maintenance.

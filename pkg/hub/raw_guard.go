@@ -220,3 +220,126 @@ func rejectRawScheduledPayload(payload string) error {
 	}
 	return nil
 }
+
+// validateScheduledPayloadShape rejects a payload that is not, at the top
+// level, a JSON object — a bare array, string, number, boolean, or `null`,
+// or syntactically invalid JSON outright.
+//
+// A bare `null` needs its own check because it is not a decode error:
+// encoding/json treats a JSON `null` as a no-op for any destination type,
+// struct or map alike, so `json.Unmarshal([]byte("null"), &anything)`
+// returns a nil error without touching the destination. Decoding into
+// `map[string]json.RawMessage` surfaces this directly — the map comes back
+// nil with no error — which a struct decode (as used further down the
+// validation sequence) cannot distinguish from "decoded, all fields zero".
+//
+// This is step 1 of the three-step validation order and must
+// run before both the raw-key tombstone probe and the event-type struct
+// decode, so that "not an object at all" is reported as a single, sanitized
+// 400 regardless of what either later step would have made of the value.
+func (s *Server) validateScheduledPayloadShape(w http.ResponseWriter, payload string) bool {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &m); err != nil || m == nil {
+		BadRequest(w, "payload must be a valid JSON object")
+		return false
+	}
+	return true
+}
+
+// validateScheduledEventPayloadJSON rejects an advanced Payload whose fields
+// don't match the event type's payload struct (ptone/scion#2200: "a
+// malformed payload gets a sanitized 400 before persistence"). Without this,
+// a mistyped-field payload reaches storage unvalidated:
+// authorizeScheduledMessageAuthoring's own decode for target resolution
+// tolerates a parse failure by design (it falls back to convenience fields
+// when the payload doesn't yield a target), and rejectRawScheduledPayload
+// likewise treats a decode failure as "nothing more to do here" — neither
+// one is the authoritative shape check.
+//
+// This function only catches field-type mismatches (e.g. {"agentName":5}).
+// Top-level shape (non-object, null, syntax errors) is the responsibility of
+// validateScheduledPayloadShape, which callers must run first — see
+// validateAndRejectScheduledPayload, which runs both in the ruling's
+// required order. Calling this function alone on a non-object payload would
+// still report a decode error for most non-object payloads — but not for a
+// bare `null`, which is a silent no-op here for the same reason it is one in
+// validateScheduledPayloadShape (see that function's doc comment). Ordering
+// also matters for the "raw" key: see below.
+//
+// Unknown fields are accepted (plain encoding/json.Unmarshal semantics, no
+// DisallowUnknownFields): a "raw" key is not a field on either payload
+// struct, so this function alone would decode a payload like
+// {"raw":true,"agentName":5} as a *type* mismatch (400) even though the
+// ruling requires 422 for any valid-JSON payload carrying "raw" — which is
+// exactly why validateAndRejectScheduledPayload runs the raw-key tombstone
+// before this struct decode, not after.
+//
+// Writes a sanitized 400 (never echoing the malformed body back) and
+// returns false on a decode failure; returns true for an empty payload
+// (nothing to validate) or a payload that decodes cleanly into the event
+// type's struct (regardless of which optional fields it set — field-level
+// *requirements* such as "message is required" are a different, weaker
+// class of check that this function does not perform at all: an advanced
+// Payload of "{}" decodes cleanly here and is persisted, with the
+// "message is required" check only ever applied on the separate
+// convenience-field branch in handlers_scheduled_events.go.)
+func (s *Server) validateScheduledEventPayloadJSON(w http.ResponseWriter, eventType, payload string) bool {
+	if payload == "" {
+		return true
+	}
+	var decodeErr error
+	switch eventType {
+	case "message":
+		var p MessageEventPayload
+		decodeErr = json.Unmarshal([]byte(payload), &p)
+	case "dispatch_agent":
+		var p DispatchAgentEventPayload
+		decodeErr = json.Unmarshal([]byte(payload), &p)
+	default:
+		// Every caller validates eventType against the closed
+		// {message, dispatch_agent} set before reaching here, so this branch
+		// is unreachable in practice. Fail closed for an unrecognized event
+		// type rather than falling back to a lenient syntax-only check: if a
+		// future event type is ever added to the closed set without a
+		// matching case here, its payload must not silently skip structural
+		// validation.
+		decodeErr = fmt.Errorf("unsupported event type: %s", eventType)
+	}
+	if decodeErr != nil {
+		BadRequest(w, "payload must be a valid JSON object for the "+eventType+" event type")
+		return false
+	}
+	return true
+}
+
+// validateAndRejectScheduledPayload runs the full payload-validation
+// sequence in the order the ruling requires:
+//
+//  1. validateScheduledPayloadShape: syntax + top-level-object shape -> 400
+//  2. rejectRawScheduledPayload: the "raw" key tombstone -> 422
+//  3. validateScheduledEventPayloadJSON: the event-type struct decode -> 400
+//
+// The order matters: a valid JSON object carrying "raw" plus some unrelated
+// mistyped field (e.g. {"raw":true,"agentName":5}) must stop at step 2 with
+// 422, not fall through to step 3's 400. Running the struct decode before
+// the raw probe — as an earlier revision of this validation did — collapsed
+// that case into a generic 400, contradicting "valid JSON carrying a raw key
+// stays 422."
+//
+// Returns true, writing nothing, when payload is empty (nothing to
+// validate) or passes all three steps; returns false after writing the
+// appropriate error response otherwise.
+func (s *Server) validateAndRejectScheduledPayload(w http.ResponseWriter, eventType, payload string) bool {
+	if payload == "" {
+		return true
+	}
+	if !s.validateScheduledPayloadShape(w, payload) {
+		return false
+	}
+	if err := rejectRawScheduledPayload(payload); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeUnsupportedCapability, err.Error(),
+			map[string]interface{}{"reason": string(MessageDenialRawSchedulingUnsupported)})
+		return false
+	}
+	return s.validateScheduledEventPayloadJSON(w, eventType, payload)
+}

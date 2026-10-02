@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -130,15 +131,15 @@ const (
 
 // CredentialKind describes the authentication material that established a principal.
 // Credential constraints are caveats: they may narrow authority but never grant it.
-type CredentialKind string
+type CredentialKind = credentialmeta.Kind
 
 const (
-	CredentialKindInteractive CredentialKind = "interactive"
-	CredentialKindUAT         CredentialKind = "uat"
-	CredentialKindAgentJWT    CredentialKind = "agent_jwt"
-	CredentialKindFederation  CredentialKind = "federation"
-	CredentialKindBroker      CredentialKind = "broker"
-	CredentialKindDev         CredentialKind = "dev"
+	CredentialKindInteractive = credentialmeta.KindInteractive
+	CredentialKindUAT         = credentialmeta.KindUAT
+	CredentialKindAgentJWT    = credentialmeta.KindAgentJWT
+	CredentialKindFederation  = credentialmeta.KindFederation
+	CredentialKindBroker      = credentialmeta.KindBroker
+	CredentialKindDev         = credentialmeta.KindDev
 
 	// CredentialKindHubDelivery is the internal credential a hub-side
 	// material delivery caller presents (ptone/scion#2228 part 2). It is

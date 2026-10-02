@@ -154,6 +154,8 @@ These harness-specific env vars are injected at agent start time via the harness
 
 Agent logs are written to `/home/scion/agent.log` inside the container. The sciontool logging system writes to both stderr and this file.
 
+Each `agent.log` line starts with a UTC RFC 3339 timestamp, followed by `[sciontool] [LEVEL]`, an optional `[TAG]`, and the message, for example `2026-10-02T00:30:15.123456789Z [sciontool] [INFO] [LIMITS_EXCEEDED] Agent stopped: ...`. Per-service `<name>.lifecycle.log` lines use the same timestamp in brackets: `[2026-10-02T00:30:15.123456789Z] message`. Timestamps are always UTC, whatever `TZ` the agent runs with; the agent process itself keeps its own `TZ`.
+
 ### Cloud Log Viewer & Hub API
 
 Scion provides a built-in Cloud Log Viewer in the Web UI to stream agent logs in real-time. This is backed by the Hub API, which retrieves logs directly from the active runtime broker or from the persisted `agent.log` file, ensuring comprehensive visibility into agent execution regardless of its current state.

@@ -141,6 +141,23 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// A "failed" report the store actually applied (HTTPStatus==0, not a
+	// conflict/stale-launch rejection, and Result==Applied rather than
+	// Completed) means this launch ended in a broker-confirmed failure before
+	// ever reaching running — see ApplyLaunchReportPreRunning/
+	// applyLaunchReportActive's Failed branches and the timed_out/lost+
+	// phase=error refine case in entadapter/launch_report.go. Revoke the
+	// credential the Hub minted for this create (ptone/scion#1956). This
+	// condition is deliberately narrower than "State==failed": a stray
+	// failed report once the agent is already Running returns
+	// Result=Completed (the agent did start; nothing to revoke), and a
+	// failed report arriving during a stop/suspend returns a Conflict
+	// HTTPStatus — in both of those cases the agent may still be relying on
+	// its current credential.
+	if sr.State == store.LaunchReportStateFailed && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied {
+		revokeAgentCredentialsBestEffort(ctx, s.store, agentID, agentCredentialRevokeReasonCreateFailed)
+	}
+
 	if answer.HTTPStatus != 0 {
 		if answer.HTTPStatus == http.StatusForbidden {
 			Forbidden(w)

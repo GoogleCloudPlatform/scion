@@ -72,7 +72,7 @@ async function gotoHiddenChatWithTerminalUnderShell(page: Page) {
 }
 
 function paletteDialog(page: Page) {
-  return page.locator('scion-chat-switcher sl-dialog[label="Quick switcher"]');
+  return page.locator('scion-quick-palette sl-dialog[label="Quick switcher"]');
 }
 
 test('under ?shell=1, Ctrl+K in the terminal still reaches the PTY and makes zero palette state/fetch changes', async ({

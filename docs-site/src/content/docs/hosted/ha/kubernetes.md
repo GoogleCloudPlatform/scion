@@ -29,6 +29,7 @@ runtimes:
     namespace: scion-agents        # target namespace (default: "default")
     gke: false                     # enable GKE-specific features
     list_all_namespaces: false     # list agents across all namespaces
+    priority_class_name: scion-agent-priority  # default PriorityClass for agent pods (optional)
 
 profiles:
   default:
@@ -45,6 +46,7 @@ kubernetes:
   context: alternate-context           # override runtime context
   serviceAccountName: agent-sa         # Workload Identity / IRSA
   runtimeClassName: gvisor             # sandboxed runtime (gVisor, Kata, etc.)
+  priorityClassName: scion-agent-priority  # overrides the runtime-level default, if any
   imagePullPolicy: IfNotPresent        # Always, IfNotPresent, or Never
   nodeSelector:
     pool: agents
@@ -104,6 +106,54 @@ or declare them in broker `settings.yaml`, under `harness_configs.<name>.env` (o
 Runtime Brokers use the same Workload Identity mechanism for OIDC transport tokens when connecting to an IAP-protected Hub. The broker's GSA needs `roles/iap.httpsResourceAccessor` on the Hub backend service (or `roles/run.invoker` for Cloud Run invoker mode) — this is separate from the agent dispatch transport SA. See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) for the full setup.
 :::
 
+### Pod Priority and Preemption
+
+By default, agent pods have no `priorityClassName`, which puts them at priority 0 — the first choice when the scheduler needs to evict something to make room for a higher-priority pod (for example a `system-cluster-critical` pod like `kube-dns` being rescheduled during a node scale-down). On GKE Autopilot and Standard this is a real, observed failure mode: an agent pod can be preempted mid-run with no indication beyond a plain stop.
+
+Set a priority class so agent pods are not the default eviction target compared to other ordinary (priority-0) workloads. Scion does not create the `PriorityClass` object itself — create one on the cluster first:
+
+```yaml
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: scion-agent-priority
+value: 1000           # above the default (0), below cluster-critical classes
+preemptionPolicy: Never # don't let this class preempt other pods to schedule
+globalDefault: false
+description: "Priority class for Scion agent pods"
+```
+
+Then reference it by name, either as a runtime-level default or per template/agent (the per-template value wins if both are set):
+
+```yaml
+runtimes:
+  k8s:
+    type: kubernetes
+    priority_class_name: scion-agent-priority
+```
+
+```yaml
+kubernetes:
+  priorityClassName: scion-agent-priority
+```
+
+The name must be a valid DNS-1123 subdomain and must already exist on the cluster; an unset value (the default) leaves pods at priority 0, today's behaviour.
+
+A user `PriorityClass` like the one above cannot protect agent pods against `system-cluster-critical` or `system-node-critical` pods (priority values around 2×10⁹) — those can still preempt a lower-priority agent pod regardless of this setting. It only changes the outcome among ordinary workloads, making a ready-to-preempt-anything priority-0 pod no longer the first choice. Avoiding the kube-dns case specifically is a matter of cluster capacity headroom (for example Autopilot's balloon pods, or keeping spare node capacity), not pod priority.
+
+#### Preempted and evicted status
+
+Scion also distinguishes a Kubernetes-initiated disruption from a plain stop or a crash. When the runtime observes a pod that was removed by the scheduler or the kubelet rather than exiting normally, the agent's exit reason reflects it instead of reading as a generic crash:
+
+| Signal observed on the pod | Exit reason |
+|---|---|
+| Pod status reason `Evicted` (kubelet node-pressure eviction) | `evicted` |
+| `DisruptionTarget` condition, reason `PreemptionByScheduler` | `preempted` |
+| `DisruptionTarget` condition, reason `TerminationByKubelet` or `EvictionByEvictionAPI` | `evicted` |
+| `DisruptionTarget` condition, any other reason (for example a taint-manager or pod-GC removal) | `evicted` |
+
+This is reported as soon as either signal is observed: a pod still `Running` but already committed to termination (it has a `deletionTimestamp` and a live `DisruptionTarget` condition — most of what preemption and the Eviction API delete this way), or a pod that has actually reached a terminal state (`Failed`/`Succeeded`) while still carrying the signal. A `DisruptionTarget` condition with no `deletionTimestamp` yet is not reported — that pod is still finishing its grace period and has not stopped. It depends on the runtime observing one of these two states before the pod object is removed from the API server entirely; if the pod disappears between polls without either ever being observed, the agent may instead be reported through a different, more generic terminal path rather than as preempted/evicted. Docker and other non-Kubernetes runtimes are unaffected.
+
 ## Architecture & Security
 
 ### Native Client & In-Cluster Authentication
@@ -122,6 +172,9 @@ Scion's Kubernetes runtime actively monitors pod phases and reconciles terminal 
 ### GKE Autopilot Auto-Detection
 When running on GKE Autopilot, Scion automatically detects the environment and applies the correct scheduling tolerations required by Autopilot to seamlessly provision workloads without manual node selector configuration.
 
+### Exec Readiness on New Nodes
+On a node that has just scaled up from zero, such as on GKE Autopilot, the API server's exec tunnel to the kubelet can take tens of seconds to come up after the container starts. Before its first exec into a new pod, the runtime probes the tunnel and retries transient failures (for example, `error dialing backend: No agent available`) with exponential backoff for up to about 90 seconds. If the tunnel still is not ready, the start fails with `pod exec tunnel not ready`.
+
 ## Support Matrix
 
 ### Volume Types
@@ -131,7 +184,18 @@ When running on GKE Autopilot, Scion automatically detects the environment and a
 | EmptyDir (workspace) | Supported | Default workspace volume, always created |
 | GCS FUSE CSI | Supported | Requires `gcsfuse.csi.storage.gke.io` CSI driver; GKE only |
 | Local/bind-mount | Not supported | Logged as warning, skipped. Use tar sync instead |
-| PersistentVolumeClaim | Supported | Used for the NFS-backed shared `workspace_storage` backend; requires a pre-provisioned PV/PVC (for example, Filestore-backed) and `workspace_storage.backend: nfs` in `settings.yaml` |
+| PersistentVolumeClaim | Supported | Used for the NFS-backed shared `workspace_storage` backend; requires a pre-provisioned PV/PVC (for example, Filestore-backed) and `workspace_storage.backend: nfs` in `settings.yaml`. See [NFS workspace export requirements](#nfs-workspace-export-requirements) |
+
+### NFS Workspace Export Requirements
+
+With `workspace_storage.backend: nfs`, each project's workspace is mounted into the agent Pod from the shared volume at the subPath `<subpath_root>/<project-id>/workspace` (`subpath_root` defaults to `projects`). When `shared_dir_storage` is unset or `local`, the project's shared directories are mounted from the same volume at `<subpath_root>/<project-id>/shared-dirs/<name>`. These directories have to exist before the Pod starts. How they get created depends on whether the broker that creates the Pod has the export mounted at `workspace_storage.nfs.mount_root/<share id>`:
+
+- **Broker has the export mounted (recommended).** Before it creates the Pod, the broker creates the workspace directory and each of those shared directories itself, the same way it creates shared-directory leaves: missing parent directories get mode `2755`, and each new directory gets mode `2775` (setgid) with a default ACL that gives the group write access. Existing directories and their contents are left as they are. For this to help on exports that map root or all users to an anonymous user, the broker's writes must not be mapped to an anonymous user that cannot write in `<subpath_root>/<project-id>`. If the broker is not allowed to create a directory (permission denied or a read-only mount, for example a broker that does not run as root where `<subpath_root>/<project-id>` is owned by root), it logs a warning and leaves that directory to the kubelet, as described in the next item. If the path cannot be used at all (a symlink or a regular file where a directory should be, or an export mount path that is not a directory), agent create fails straight away with an error that names the export requirement, rather than timing out while the Pod waits.
+- **Broker does not have the export mounted.** The kubelet creates the directories when the Pod starts. This only works on exports that let root create directories (`no_root_squash`, the Filestore default). On exports that map root to an anonymous user (`root_squash` or `all_squash`), the kubelet's mkdir is denied and the Pod stays in `CreateContainerConfigError` ("failed to create subPath directory for volumeMount workspace"). Mount the export on the broker, or use `no_root_squash`.
+
+`mount_root/<share id>` must be the mounted export itself, not a parent of the mount point or an ordinary directory. The broker treats it as the export once it exists: if the export is not actually mounted there, the directories are created on the broker's local disk, and the Pod still depends on the kubelet creating them on the export.
+
+On exports that map root or all users to an anonymous user, the workspace provisioning init container cannot change file ownership, because the NFS server decides ownership changes. When the broker created all of these directories, or found them already in place with setgid and group write (for example `2775`), the provisioning step tries to set ownership to `workspace_storage.nfs.uid`/`gid`, logs a warning if that is not allowed, and continues. If any of them already exists without setgid and group write (for example a root-owned `0755` directory left by an earlier kubelet mkdir), or was left to the kubelet, a failed ownership change still stops the Pod; fix that directory's group and mode on the export. Agents get access through the directories' group: set `workspace_storage.nfs.gid` to the group that owns `<subpath_root>/<project-id>` on the export (the agent Pod uses it as its `fsGroup`), so files created under the setgid directories stay writable by the agent.
 
 ### Secret Modes
 
@@ -143,6 +207,17 @@ When running on GKE Autopilot, Scion automatically detects the environment and a
 | ResolvedAuth files | Supported | Injected via K8s Secret volumes (not hostPath) |
 
 Secrets are composable: `ResolvedAuth` and `ResolvedSecrets` are applied independently (not mutually exclusive).
+
+### Hub Transport Credential
+
+When the Hub uses transport auth (see [Auth Proxy (IAP)](/scion/hosted/ha/auth-proxy-iap/)), it sends the initial transport credential as `SCION_TRANSPORT_TOKEN` with each start, resume, and restart. On Kubernetes, the runtime does not write this value into the Pod spec as a plain environment value. Instead it:
+
+- stores it in the agent's per-agent Secret (`scion-agent-<agent>`) under the key `scion-transport-credential`, and
+- sets `SCION_TRANSPORT_TOKEN` in the container with `valueFrom.secretKeyRef` pointing at that key.
+
+The per-agent Secret is created even when the agent has no other secrets. It is rebuilt on every start, resume, and restart, so the new Pod always reads the value the Hub sent for that dispatch. In GKE mode the value is stored in this Kubernetes Secret, not in the SecretProviderClass. If a user or project secret also targets `SCION_TRANSPORT_TOKEN`, the value from the Hub is used and the other secret is skipped, with a warning in the broker log. A secret named `scion-transport-credential` is also skipped, because that key is reserved. `SCION_TRANSPORT_TOKEN_EXPIRY` and `SCION_TRANSPORT_AUDIENCE` stay plain environment values. Docker and the other runtimes are unchanged.
+
+No extra RBAC is needed: this uses the same `secrets` create, list, and delete permissions the runtime already needs for agent Secrets (see [Required Permissions](#required-permissions)).
 
 ### Sync Modes
 
@@ -162,6 +237,7 @@ Tar sync includes retry with exponential backoff (1s, 2s, 4s — up to 3 retries
 | Ephemeral storage (disk) | Supported (requests + limits) |
 | RuntimeClassName | Supported |
 | ServiceAccountName | Supported |
+| PriorityClassName | Supported (runtime default and per-template/agent override; the class must already exist on the cluster) |
 | NodeSelector | Supported |
 | Tolerations | Supported |
 | ImagePullPolicy | Supported (Always, IfNotPresent, Never) |
@@ -255,6 +331,8 @@ This checks:
 
 Use `scion doctor --format json` for machine-readable output.
 
+To find out where agent start time goes, check the structured logs from the Kubernetes runtime, the agent manager, the Hub dispatcher, and `sciontool init`. Start-phase records carry millisecond timings (fields ending in `_ms`, such as `wait_ready_ms`, `scheduled_ms`, `sync_ms`, and `chown_ms`) and byte counts where data is copied.
+
 ## Error Handling
 
 The Kubernetes runtime provides structured error messages with remediation hints:
@@ -263,7 +341,7 @@ The Kubernetes runtime provides structured error messages with remediation hints
 |---|---|
 | ImagePullBackOff / ErrImagePull | Verify image name and registry access; check `imagePullPolicy` |
 | InvalidImageName | Check image name format |
-| CreateContainerConfigError | Check secret references and volume mounts |
+| CreateContainerConfigError | Check secret references and volume mounts. For "failed to create subPath directory" on the NFS workspace, see [NFS workspace export requirements](#nfs-workspace-export-requirements) |
 | CrashLoopBackOff | Check container logs with `scion logs` |
 | Unschedulable | Check node selectors, tolerations, and resource availability |
 | Invalid resource values | Error includes the field name and invalid value |

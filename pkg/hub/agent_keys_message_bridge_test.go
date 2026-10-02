@@ -872,10 +872,10 @@ func TestAgentKeysMessageBridge_MigrationHeaders(t *testing.T) {
 	}
 }
 
-// TestAgentKeysMessageBridge_AuditRouteTag pins contract §5's "route (keys
-// or transitional raw)" requirement: a bridge-handled request's audit
-// record is tagged distinctly from a direct /keys request's, even though
-// decision/outcome are otherwise identical.
+// TestAgentKeysMessageBridge_AuditRouteTag pins contract §5's "route (\"keys\"
+// ... or \"message_raw_bridge\" for the temporary raw bridge)" requirement: a
+// bridge-handled request's audit record is tagged distinctly from a direct
+// /keys request's, even though decision/outcome are otherwise identical.
 func TestAgentKeysMessageBridge_AuditRouteTag(t *testing.T) {
 	for _, shape := range messageRouteShapes {
 		t.Run(shape.name, func(t *testing.T) {
@@ -980,4 +980,40 @@ func TestAgentKeysMessageBridge_MutationCheck_ReachesAndRespectsAuthorizeAgentKe
 	assertKeysDenialOutcome(t, "must reach and respect authorizeAgentKeys", rec, http.StatusForbidden, "keys_denied")
 	require.Equal(t, 0, d.callCount())
 	assertNoKeysSideEffects(t, storeSpy, events)
+}
+
+// TestAgentKeysMessageBridge_RawBodyNeverReachesHandleAgentMessage covers:
+// handleAgentMessage's own internal raw guards
+// (handlers_agent_messaging.go, now unreachable from the routers) are dead
+// code reached only when a test calls srv.handleAgentMessage directly, as
+// raw_guard_test.go's TestHandleAgentMessage_RawGuard_* tests do. This test
+// instead drives a raw request through the real, full router
+// (srv.Handler().ServeHTTP, the production entry point for both T and P)
+// and proves the response is the bridge's, never handleAgentMessage's own:
+// handleAgentMessage has no knowledge of the Deprecation/Link/
+// X-Scion-Keys-Migration headers (grep confirms zero occurrences in
+// handlers_agent_messaging.go) or of agentkeys.Response's shape, so their
+// presence here is proof the request never fell through to it.
+func TestAgentKeysMessageBridge_RawBodyNeverReachesHandleAgentMessage(t *testing.T) {
+	for _, shape := range messageRouteShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			f, d, storeSpy, events := newExecuteAgentKeysFixture(t)
+			token := f.agentToken(t, tid("router-dead-code-"+shape.name), f.projectA.ID, ScopeAgentLifecycle)
+
+			rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, shape.path(f.agentInA), rawTopLevelBody("C-c"), token)
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+			require.Equal(t, 1, d.callCount(), "must dispatch exactly once, through ExecuteAgentKeys")
+
+			// handleAgentMessage never sets these; only the bridge does.
+			require.Equal(t, "true", rec.Header().Get("Deprecation"))
+			require.Contains(t, rec.Header().Get("Link"), "/keys")
+			require.NotEmpty(t, rec.Header().Get("X-Scion-Keys-Migration"))
+
+			var resp agentkeys.Response
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.NotEmpty(t, resp.OperationID, "body must be the keys/bridge response shape, not handleAgentMessage's own MessageDeliveryResponse")
+
+			assertNoKeysSideEffects(t, storeSpy, events)
+		})
+	}
 }

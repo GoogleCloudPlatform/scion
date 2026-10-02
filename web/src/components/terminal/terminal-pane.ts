@@ -881,6 +881,20 @@ export class ScionTerminalPane extends LitElement {
     return this.session!;
   }
 
+  /**
+   * Moves focus into this pane: the terminal when it exists, otherwise the
+   * pane itself, so the terminal takes focus once it connects (see
+   * `shouldAutoFocusTerminal`).
+   */
+  focusTerminal(): void {
+    if (this.terminal) {
+      this.terminal.focus();
+      return;
+    }
+    if (!this.hasAttribute('tabindex')) this.tabIndex = -1;
+    this.focus();
+  }
+
   /** Presentation only. Output continues to be parsed by the same xterm. */
   setVisible(visible: boolean): void {
     this.hidden = !visible;

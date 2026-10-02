@@ -78,11 +78,8 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 		"agent.status_update", "agent.log_append", "agent.notify",
 		"agent.token_refresh", "agent.port_forward", "agent.identity_token",
 	},
-	{"owner", "user", "project"}: {
-		"project.create", "project.read", "project.update", "project.delete",
-		"project.manage", "project.register", "project.set_messaging_policy",
-		"project.clone", "project.list", "project.secret_read",
-	},
+	// No {"owner", "user", "project"} cell: Project.OwnerID grants nothing
+	// (ptone/scion#2586); see TestRelationshipCharacterization_OwnerProjectGrantsNothing.
 	{"owner", "user", "template"}: {
 		"template.create", "template.read", "template.update", "template.delete", "template.list",
 	},
@@ -208,7 +205,6 @@ func TestRelationshipCharacterization_Owner(t *testing.T) {
 		resource Resource
 	}{
 		{"agent", agentResource(&store.Agent{ID: tid("relchar-agent"), ProjectID: projectID, OwnerID: owner.ID()})},
-		{"project", projectResource(&store.Project{ID: projectID, OwnerID: owner.ID()})},
 		{"template", templateResource(&store.Template{ID: tid("relchar-tpl"), OwnerID: owner.ID(), Scope: store.TemplateScopeUser, ScopeID: owner.ID()})},
 		{"harness_config", harnessConfigResource(&store.HarnessConfig{ID: tid("relchar-hc"), OwnerID: owner.ID(), Scope: store.HarnessConfigScopeUser, ScopeID: owner.ID()})},
 		{"group", groupResource(&store.Group{ID: tid("relchar-group"), OwnerID: owner.ID()})},
@@ -246,6 +242,29 @@ func TestRelationshipCharacterization_Owner(t *testing.T) {
 			continue
 		}
 		assert.Equal(t, want[p.ID], d.Allowed, "hub-scoped SA owner %s: reason %q", p.ID, d.Reason)
+	}
+}
+
+// TestRelationshipCharacterization_OwnerProjectGrantsNothing pins
+// ptone/scion#2586: Project.OwnerID is not an authorization source. A user
+// named as the project's OwnerID but holding no project role binding (for
+// example a creator removed without an ownership transfer) is denied every
+// project permission, and no owner relationship candidate is accepted.
+func TestRelationshipCharacterization_OwnerProjectGrantsNothing(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	owner := createCharacterizationUser(t, s, tid("relchar-proj-owner"))
+	project := projectResource(&store.Project{ID: tid("relchar-proj"), OwnerID: owner.ID()})
+
+	assert.Empty(t, characterizedSet(relationshipAllowKey{"owner", "user", "project"}))
+	perms := sameTypeRegistryPermissions("project")
+	require.NotEmpty(t, perms)
+	for _, p := range perms {
+		t.Run(p.ID, func(t *testing.T) {
+			d := decideExplicit(t, authz, owner, project, p)
+			assert.False(t, d.Allowed, "OwnerID-only %s: reason %q", p.ID, d.Reason)
+			assert.NotEqual(t, "owner", d.MatchedGrant, "no owner relationship grant may match")
+			assert.NotEqual(t, ScopeTypeRelationship, d.Scope, "no relationship rule may decide")
+		})
 	}
 }
 

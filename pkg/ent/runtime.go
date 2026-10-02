@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstrainthistory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
@@ -114,6 +115,16 @@ func init() {
 	accessconstraintDescID := accessconstraintFields[0].Descriptor()
 	// accessconstraint.DefaultID holds the default value on creation for the id field.
 	accessconstraint.DefaultID = accessconstraintDescID.Default.(func() uuid.UUID)
+	accessconstrainthistoryFields := schema.AccessConstraintHistory{}.Fields()
+	_ = accessconstrainthistoryFields
+	// accessconstrainthistoryDescOperation is the schema descriptor for operation field.
+	accessconstrainthistoryDescOperation := accessconstrainthistoryFields[3].Descriptor()
+	// accessconstrainthistory.OperationValidator is a validator for the "operation" field. It is called by the builders before save.
+	accessconstrainthistory.OperationValidator = accessconstrainthistoryDescOperation.Validators[0].(func(string) error)
+	// accessconstrainthistoryDescID is the schema descriptor for id field.
+	accessconstrainthistoryDescID := accessconstrainthistoryFields[0].Descriptor()
+	// accessconstrainthistory.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	accessconstrainthistory.IDValidator = accessconstrainthistoryDescID.Validators[0].(func(string) error)
 	accesspolicyFields := schema.AccessPolicy{}.Fields()
 	_ = accesspolicyFields
 	// accesspolicyDescName is the schema descriptor for name field.

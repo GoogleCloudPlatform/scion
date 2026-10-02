@@ -9,6 +9,9 @@ import (
 // AccessConstraint is the predicate function for accessconstraint builders.
 type AccessConstraint func(*sql.Selector)
 
+// AccessConstraintHistory is the predicate function for accessconstrainthistory builders.
+type AccessConstraintHistory func(*sql.Selector)
+
 // AccessPolicy is the predicate function for accesspolicy builders.
 type AccessPolicy func(*sql.Selector)
 

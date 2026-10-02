@@ -57,11 +57,11 @@ async function waitForCountToSettle(
 }
 
 function paletteOptions(page: Page) {
-  return page.locator('scion-chat-switcher .palette-option');
+  return page.locator('scion-quick-palette .palette-option');
 }
 
 function agentsLoading(page: Page) {
-  return page.locator('scion-chat-switcher [data-palette-group="agents"] .palette-loading');
+  return page.locator('scion-quick-palette [data-palette-group="agents"] .palette-loading');
 }
 
 /** Dispatch the same invalidation a real per-agent status SSE event produces. */

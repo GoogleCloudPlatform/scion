@@ -97,6 +97,9 @@ var decorationGuardAllowed = map[string]bool{
 	"audit_actor.go:auditActorFromContext":    true,
 	"audit_authz.go:BuildDecisionAuditRecord": true,
 	"audit.go:credentialLogAttr":              true,
+	// Builds validated descriptive metadata for the typed audit envelope only;
+	// it neither receives nor returns an authorization decision.
+	"access_constraint_governance_auditevent.go:accessConstraintAuditCredential": true,
 
 	// E.2b (ptone/scion#2127, plan §3.5): same rule as the E.2a group above —
 	// this renders a bounded, sanitized snapshot of decoration for the

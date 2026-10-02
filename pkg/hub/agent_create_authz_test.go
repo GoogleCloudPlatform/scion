@@ -471,7 +471,7 @@ func TestAgentCreate_AgentCreatorDefaultServiceAccountScope(t *testing.T) {
 		t.Run("scheduled/"+tc.name, func(t *testing.T) {
 			f := agentCreatorDefaultSAFixture(t, tc.hubScoped)
 			ctx := context.Background()
-			f.srv.createProjectMembersGroup(ctx, f.proj)
+			f.srv.seedProjectCreatorMembership(ctx, f.proj)
 			require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
 			err := f.srv.dispatchAgentEventHandler()(ctx, store.ScheduledEvent{
 				ID: "evt-dsa", ProjectID: f.proj.ID, EventType: "dispatch_agent",

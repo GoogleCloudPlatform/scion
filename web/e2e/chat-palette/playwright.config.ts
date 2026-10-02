@@ -15,7 +15,7 @@
 import { defineConfig } from '@playwright/test';
 
 // Isolated fixture for the native chat quick command palette. Mounts the
-// real scion-page-chat, scion-chat-switcher and
+// real scion-page-chat, scion-quick-palette and
 // scion-terminal-pane components with endpoint-shaped request interception —
 // no live Hub, no project agents or credentials. See e2e/terminal-pane for
 // the sibling pattern this follows.
