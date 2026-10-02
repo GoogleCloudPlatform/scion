@@ -80,13 +80,25 @@ func newGKECleanupTestRuntime(t *testing.T) (*KubernetesRuntime, *k8sfake.Client
 	return rt, clientset, dynClient
 }
 
-// runUntilPodSubmitted drives Run(config) until it submits the pod Create
-// call, then cancels the context so waitForPodReady returns immediately
+// failPodReadiness makes every pod Get on clientset fail with a plain
+// (non-context) error, so Run's waitForPodReady returns at its first poll
 // instead of polling for up to 10 minutes against a fake API server that
-// will never report the pod Ready. Returns the pod as submitted.
+// never reports the pod Ready. A plain error, rather than cancelling Run's
+// context, models a start that failed but was not abandoned, so Run keeps
+// the pod and its Secrets for the test to inspect (an abandoned start
+// removes them; see TestRun_CancelledWhilePending_RemovesPodAndSecrets).
+func failPodReadiness(clientset *k8sfake.Clientset) {
+	clientset.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, fmt.Errorf("simulated readiness failure")
+	})
+}
+
+// runUntilPodSubmitted drives Run(config) until it submits the pod Create
+// call and then fails readiness (see failPodReadiness). Returns the pod as
+// submitted.
 func runUntilPodSubmitted(t *testing.T, rt *KubernetesRuntime, clientset *k8sfake.Clientset, config RunConfig) *corev1.Pod {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	var (
@@ -98,9 +110,9 @@ func runUntilPodSubmitted(t *testing.T, rt *KubernetesRuntime, clientset *k8sfak
 		mu.Lock()
 		pod = p.DeepCopy()
 		mu.Unlock()
-		cancel()
 		return false, nil, nil // let the default reactor actually store the pod
 	})
+	failPodReadiness(clientset)
 
 	_, _ = rt.Run(ctx, config)
 

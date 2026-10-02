@@ -209,9 +209,9 @@ func TestRun_TransportCredential_WithOtherSecrets(t *testing.T) {
 }
 
 // Restart/resume both re-enter Run with a freshly minted value; the Secret
-// must carry the new value and the pod must still reference it. With the
-// production labels the Secret from the first run is still present, so this
-// also covers the recreate-on-AlreadyExists path in createAgentSecret.
+// must carry the new value and the pod must still reference it. The first
+// run's Secret does not carry over: Run removes it, both when that start is
+// cancelled and in the pre-clean of the second run.
 func TestRun_TransportCredential_SecondRunReplacesValue(t *testing.T) {
 	rt, clientset := newTransportTestRuntime(false)
 
@@ -243,6 +243,23 @@ func TestRun_TransportCredential_GKEPath(t *testing.T) {
 		{Name: "TLS_CERT", Type: "file", Target: "/etc/ssl/cert.pem", Value: "cert-data", Source: "user", Ref: "projects/p/secrets/tls-cert"},
 	}
 
+	// Read the SecretProviderClass as it exists when the pod is created:
+	// runUntilPodCreated cancels the start at that point, and Run then
+	// removes the objects of that start, the SecretProviderClass included.
+	var (
+		spcMu   sync.Mutex
+		spc     *unstructured.Unstructured
+		spcErr  error
+		spcRead bool
+	)
+	clientset.PrependReactor("create", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		got, err := rt.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace("default").Get(context.Background(), testAgentSecretName, metav1.GetOptions{})
+		spcMu.Lock()
+		spc, spcErr, spcRead = got, err, true
+		spcMu.Unlock()
+		return false, nil, nil
+	})
+
 	pod, secret := runUntilPodCreated(t, rt, clientset, config)
 
 	assertTransportViaSecretKeyRef(t, pod)
@@ -262,9 +279,13 @@ func TestRun_TransportCredential_GKEPath(t *testing.T) {
 		t.Error("file-type secret must not be copied into the K8s Secret on the GKE path")
 	}
 
-	spc, err := rt.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace("default").Get(context.Background(), testAgentSecretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("expected SecretProviderClass: %v", err)
+	spcMu.Lock()
+	defer spcMu.Unlock()
+	if !spcRead {
+		t.Fatal("SecretProviderClass was not read at pod creation")
+	}
+	if spcErr != nil {
+		t.Fatalf("expected SecretProviderClass: %v", spcErr)
 	}
 	params, _, _ := unstructured.NestedString(spc.Object, "spec", "parameters", "secrets")
 	if strings.Contains(params, transportCredentialSecretKey) || strings.Contains(params, testTransportValue) {

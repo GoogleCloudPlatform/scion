@@ -3021,6 +3021,17 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 // Returns true if the broker is available (or no broker is assigned).
 // Returns false and writes a 503 error response if the broker is offline.
 func (s *Server) checkBrokerAvailability(w http.ResponseWriter, r *http.Request, agent *store.Agent) bool {
+	if s.brokerReachable(r.Context(), agent) {
+		return true
+	}
+	RuntimeBrokerUnavailable(w, agent.RuntimeBrokerID, nil)
+	return false
+}
+
+// brokerReachable reports whether the agent's runtime broker looks reachable,
+// without writing a response. It returns true when no broker is assigned, and
+// when the broker status cannot be read.
+func (s *Server) brokerReachable(ctx context.Context, agent *store.Agent) bool {
 	if agent.RuntimeBrokerID == "" {
 		return true
 	}
@@ -3031,19 +3042,14 @@ func (s *Server) checkBrokerAvailability(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Fall back to DB status check (covers co-located mode where there's no WebSocket)
-	broker, err := s.store.GetRuntimeBroker(r.Context(), agent.RuntimeBrokerID)
+	broker, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Failed to check broker status", "brokerID", agent.RuntimeBrokerID, "error", err)
 		// If we can't verify, let it through rather than blocking
 		return true
 	}
 
-	if broker.Status == store.BrokerStatusOnline {
-		return true
-	}
-
-	RuntimeBrokerUnavailable(w, agent.RuntimeBrokerID, nil)
-	return false
+	return broker.Status == store.BrokerStatusOnline
 }
 
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id string) {
@@ -3115,16 +3121,21 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		}
 	}
 
-	// Phase-aware delete: agents in "created" phase were never provisioned on the
-	// broker — no container, no workspace, no branch. Skip broker dispatch entirely
-	// and go straight to hub-side cleanup. This prevents hanging on a stale broker
-	// for agents that never left the creation phase.
-	skipBrokerDispatch := agent.Phase == string(state.PhaseCreated)
+	// Phase-aware delete: an agent still in the "created" phase has not
+	// reported back from its broker. A start may still have been dispatched
+	// (for example when the creating request timed out before the broker
+	// answered), so the broker can hold a pod, Secrets or workspace files
+	// for it. Dispatch the delete on a best-effort basis: only when the
+	// broker looks reachable, and a dispatch error does not block removing
+	// the hub record. This keeps a stale broker from blocking the delete of
+	// an agent that never left the creation phase.
+	createdPhase := agent.Phase == string(state.PhaseCreated)
+	skipBrokerDispatch := createdPhase && !s.brokerReachable(ctx, agent)
 
 	// Verify broker is reachable before deleting to avoid orphaned containers.
 	// Force mode bypasses this check so stuck agents can always be cleaned up.
-	// Created-phase agents skip this check since they have nothing on the broker.
-	if !isManagedAgentRuntime(agent.Runtime) && !skipBrokerDispatch && !force && !s.checkBrokerAvailability(w, r, agent) {
+	// Created-phase agents skip this check: their dispatch is best-effort.
+	if !isManagedAgentRuntime(agent.Runtime) && !createdPhase && !force && !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}
 
@@ -3134,10 +3145,15 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 	now := time.Now()
 
 	// If a dispatcher is available, dispatch the deletion to the runtime broker.
-	// Skip dispatch for created-phase agents — they were never provisioned.
+	// Skip dispatch for created-phase agents whose broker is not reachable.
 	if dispatcher := s.GetDispatcher(); dispatcher != nil && agent.RuntimeBrokerID != "" && !skipBrokerDispatch {
 		if err := dispatcher.DispatchAgentDelete(ctx, agent, deleteFiles, removeBranch, softDelete, now); err != nil {
-			if force {
+			if createdPhase {
+				// Created phase: the dispatch is best-effort, continue with
+				// hub record deletion.
+				s.agentLifecycleLog.Warn("Failed to dispatch created-phase agent delete to broker (continuing)",
+					"agent_id", agent.ID, "error", err)
+			} else if force {
 				// Force mode: log warning and continue with hub record deletion
 				s.agentLifecycleLog.Warn("Failed to dispatch agent delete to broker (force=true, continuing)",
 					"agent_id", agent.ID, "error", err)
