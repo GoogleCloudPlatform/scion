@@ -618,10 +618,10 @@ describe('eligibility', () => {
 });
 
 // ---------------------------------------------------------------------------
-// FYI-1: assignable-roles is principal-agnostic and evaluated as an add
+// assignable-roles is principal-agnostic and evaluated as an add
 // ---------------------------------------------------------------------------
 
-describe('FYI-1', () => {
+describe('assignable-roles is principal-agnostic', () => {
   it('Edit mode does not disable a built-in radio because grantable=false', async () => {
     const catalog = [
       R_OWNER,
@@ -692,7 +692,7 @@ describe('FYI-1', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Tiers (§3.5)
+// Tiers (admins manage members only)
 // ---------------------------------------------------------------------------
 
 describe('tiers', () => {
@@ -750,7 +750,7 @@ describe('tiers', () => {
     });
   });
 
-  it('admin row actions follow §3.5', async () => {
+  it('admin row actions: edit and remove member-tier rows only', async () => {
     expect(canEditRow(DAVE, ADMIN_CAPS)).toBe(true);
     expect(canEditRow(CAROL, ADMIN_CAPS)).toBe(true); // built-in none
     expect(canEditRow(ERIN, ADMIN_CAPS)).toBe(true);
@@ -863,10 +863,10 @@ describe('save', () => {
 });
 
 // ---------------------------------------------------------------------------
-// D2 and 409 membership_changed
+// Add mode for an existing member, and 409 membership_changed
 // ---------------------------------------------------------------------------
 
-describe('D2: Add mode for an existing member', () => {
+describe('Add mode for an existing member switches to Edit', () => {
   it('picking an existing member switches to Edit, pre-filled, without saving', () => {
     const el = makeEditor(OWNER_CAPS);
     el.openAddDialog();

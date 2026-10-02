@@ -1635,7 +1635,7 @@ export class ScionProjectMembersEditor extends LitElement {
   private renderCustomRoles() {
     const held = new Set(this.dlgHeldCustom.map((b) => b.roleDefinitionId));
 
-    // D1: no new custom roles for agents. Held ones are shown read-only and
+    // Agents get no new custom roles here. Held ones are shown read-only and
     // kept in the PUT set.
     if (this.dlgPrincipalType === 'agent') {
       if (this.dlgHeldCustom.length === 0) return nothing;

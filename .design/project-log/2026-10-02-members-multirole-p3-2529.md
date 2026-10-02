@@ -34,7 +34,7 @@ PR #127's per-binding POST/DELETE sequence.
     - checkboxes for custom roles.
     - Each disabled option shows its inline reason, taken from the tier rules
       and the server's `grantable`/`reason`.
-  - **D2.** Picking a principal who is already a member switches the dialog
+  - **Existing member in Add mode.** Picking a principal who is already a member switches the dialog
     to Edit and prefills it. Nothing is sent.
   - **Save.** Exactly one `PUT /members/principals/{type}/{id}`, with
     `{roleDefinitionIds, expectedRoleDefinitionIds}`.
@@ -48,7 +48,7 @@ PR #127's per-binding POST/DELETE sequence.
     - 400 `invalid_role_set`: reload the role list, because it is stale.
     - 403 ceiling or forbidden: shown in the dialog through
       `describeCustomRoleError`.
-  - **Admin tier rules** (design §3.5):
+  - **Admin tier rules** (admins manage the member tier only):
     - Owner and Admin options are disabled, and the owner and admin rows have
       no actions.
     - Custom roles are read-only. A member who holds custom roles cannot be
@@ -62,7 +62,8 @@ PR #127's per-binding POST/DELETE sequence.
   - **Transfer Ownership** is unchanged.
 - **Tests** (`project-members-editor.test.ts`): 49 vitest cases.
   - They cover the pure helpers and component behaviour: paging, read-only
-    and hub-override modes, defaults, eligibility, tiers, save payloads, D2,
+    and hub-override modes, defaults, eligibility, tiers, save payloads, the
+    switch from Add to Edit for an existing member,
     both 409 causes, `invalid_role_set`, delete and transfer.
   - A deliberate mutation confirmed that the tests catch regressions.
 - **Docs** (`docs-site/.../hosted/ha/permissions.md`): Role & Binding
@@ -73,13 +74,14 @@ PR #127's per-binding POST/DELETE sequence.
 - **assignable-roles is fetched after the list, not in parallel.** The editor
   only knows from the list's `_capabilities` whether the viewer can edit.
   A read-only viewer would otherwise get a 403 on every page load.
-- **"Edit instead" link replaced by D2 auto-switch.** Picking an existing
+- **"Edit instead" link replaced by an automatic switch to Edit.** Picking an existing
   member opens Edit directly. Typed emails that do not resolve client-side
   reach the same state through the 409 `principal_roles_changed` path.
 - **Errors are parsed with the existing `parseApiError`**, not a new
   `extractApiError`. It already exposes `code` and `details`.
-- **"Remove member" from an empty selection** is offered only when the
-  viewer may remove that row. Otherwise only the warning is shown.
+- **"Remove member" from an empty selection** is enabled only when the
+  viewer may remove that row. When the viewer may not remove that row, the
+  button is shown disabled with the reason.
 
 ## Validation
 
@@ -94,10 +96,10 @@ PR #127's per-binding POST/DELETE sequence.
   - Two custom roles: one within an owner's delegation ceiling and one
     beyond it.
   - The real UI, driven in Chromium, as the owner and as an admin.
-  - Covered: add, edit, custom grant, ceiling refusal, D2, last-owner lock,
+  - Covered: add, edit, custom grant, ceiling refusal, the switch from Add
+    to Edit for an existing member, last-owner lock,
     admin tier rules, and remove-all.
-  - The text transcript is in the team scratchpad
-    (`p3-validation-transcript.md`).
+  - Validated manually; the transcript is kept outside the repo.
   - The ceiling and admin-custom refusals can only be reached by
     force-enabling a disabled control, because the UI pre-disables them.
 
