@@ -125,14 +125,14 @@ const SPAWN_SUFFIX_LENGTH = 4;
 /**
  * Default /spawn name: `<template>-<suffix>`. The template part is
  * truncated so the whole name fits the hub's length limit, and trailing
- * hyphens are dropped so the result stays a valid slug. The suffix is
- * padded because a short base36 float (or 0) yields fewer characters.
+ * hyphens are dropped so the result stays a valid slug. The suffix is a
+ * random integer below 36^length in base36, left-padded with zeros, so
+ * it is always exactly SPAWN_SUFFIX_LENGTH characters of [0-9a-z].
  */
 function defaultSpawnName(template: string): string {
-  const suffix = Math.random()
+  const suffix = Math.floor(Math.random() * 36 ** SPAWN_SUFFIX_LENGTH)
     .toString(36)
-    .slice(2, 2 + SPAWN_SUFFIX_LENGTH)
-    .padEnd(SPAWN_SUFFIX_LENGTH, '0');
+    .padStart(SPAWN_SUFFIX_LENGTH, '0');
   const maxBase = MAX_AGENT_NAME_LENGTH - SPAWN_SUFFIX_LENGTH - 1;
   const base = Array.from(template).slice(0, maxBase).join('').replace(/-+$/, '');
   return `${base}-${suffix}`;

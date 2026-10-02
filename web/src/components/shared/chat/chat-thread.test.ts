@@ -6032,6 +6032,32 @@ describe('scion-chat-thread /spawn slash command', () => {
     expect(calls[0]?.name).toBe(`${'a'.repeat(57)}-i000`);
   });
 
+  /**
+   * The suffix is exactly four base36 characters at the extremes of
+   * Math.random: a tiny value pads with leading zeros, a value just
+   * below 1 maps to the largest suffix.
+   */
+  it.each([
+    [1e-10, '0000'],
+    [0, '0000'],
+    [1 - Number.EPSILON, 'zzzz'],
+  ])('keeps a 4-char base36 suffix when Math.random is %s', async (value, suffix) => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce(created({ slug: 'x', name: 'x' }));
+    const random = vi.spyOn(Math, 'random').mockReturnValue(value);
+
+    try {
+      await (el as unknown as SpawnInternals).handleSlashSpawn('coder');
+    } finally {
+      random.mockRestore();
+    }
+
+    const name = String(createCalls()[0]?.name);
+    expect(name).toMatch(/^coder-[0-9a-z]{4}$/);
+    expect(name).toBe(`coder-${suffix}`);
+  });
+
   /** The hub returns `{ agent }`; the reported name is the agent's slug. */
   it('reports the slug from the wrapped agent in the response', async () => {
     const el = await mount();
