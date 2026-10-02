@@ -114,11 +114,11 @@ func (d *HTTPAgentDispatcher) resolveAgentTZ(ctx context.Context, agent *store.A
 		// Rung 1 wins outright; skip the storage and settings reads.
 		return chooseAgentTZ(ac, agentTZ{}, "", forGatherAnswer)
 	}
-	if legacy := legacyEnvTZ(ac); legacy != "" && d.log != nil {
+	if legacy := legacyEnvTZ(ac); legacy != "" {
 		// Every caller must adopt a legacy env TZ first. The result is
 		// unchanged (the agent's Env is not a rung); the log makes a missed
 		// adoption visible instead of silently dropping the agent's zone.
-		d.log.Warn("unadopted legacy TZ in agent env; adoptLegacyTZ must run before resolveAgentTZ",
+		d.warnTZ("unadopted legacy TZ in agent env; adoptLegacyTZ must run before resolveAgentTZ",
 			"agentID", agent.ID, "tz", legacy)
 	}
 	storage := d.resolveStorageTZ(ctx, agent)
@@ -127,6 +127,15 @@ func (d *HTTPAgentDispatcher) resolveAgentTZ(ctx context.Context, agent *store.A
 		hubDefault = d.hubAgentDefaultsProvider().DefaultTimezone
 	}
 	return chooseAgentTZ(ac, storage, hubDefault, forGatherAnswer)
+}
+
+// warnTZ logs a TZ resolution warning. The resolver also runs on
+// dispatchers built without a logger, so a nil log is skipped rather than
+// dereferenced; a failed read still falls through to the next rung.
+func (d *HTTPAgentDispatcher) warnTZ(msg string, args ...any) {
+	if d.log != nil {
+		d.log.Warn(msg, args...)
+	}
 }
 
 // legacyEnvTZ returns the TZ an older hub persisted in the agent's env
@@ -166,7 +175,7 @@ func (d *HTTPAgentDispatcher) resolveStorageTZ(ctx context.Context, agent *store
 		filter.Key = agentTZEnvKey
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
-			d.log.Warn("resolveStorageTZ: failed to list env vars", "scope", filter.Scope, "scope_id", filter.ScopeID, "error", err)
+			d.warnTZ("resolveStorageTZ: failed to list env vars", "scope", filter.Scope, "scope_id", filter.ScopeID, "error", err)
 			continue
 		}
 		for _, v := range vars {
@@ -183,7 +192,7 @@ func (d *HTTPAgentDispatcher) resolveStorageTZ(ctx context.Context, agent *store
 	if len(agent.Ancestry) > 1 {
 		progenyVars, err := d.store.ListProgenyEnvVars(ctx, agent.Ancestry)
 		if err != nil {
-			d.log.Warn("resolveStorageTZ: failed to list progeny env vars", "agent_id", agent.ID, "error", err)
+			d.warnTZ("resolveStorageTZ: failed to list progeny env vars", "agent_id", agent.ID, "error", err)
 			return result
 		}
 		for _, v := range progenyVars {

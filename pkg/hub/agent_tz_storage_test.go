@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -282,4 +283,67 @@ func TestResolveAgentTZ_UnadoptedLegacyEnvTZ(t *testing.T) {
 	if buf.Len() != 0 {
 		t.Fatalf("pinned agent logged %q", buf.String())
 	}
+}
+
+// tzErrStore fails the env-var reads the TZ storage rung makes: ListEnvVars
+// for the scopes in failScopes (every scope when failScopes is nil), and
+// ListProgenyEnvVars always.
+type tzErrStore struct {
+	store.Store
+	failScopes map[string]bool
+}
+
+func (s *tzErrStore) ListEnvVars(ctx context.Context, filter store.EnvVarFilter) ([]store.EnvVar, error) {
+	if s.failScopes == nil || s.failScopes[filter.Scope] {
+		return nil, errors.New("simulated env var read failure")
+	}
+	return s.Store.ListEnvVars(ctx, filter)
+}
+
+func (s *tzErrStore) ListProgenyEnvVars(context.Context, []string) ([]store.EnvVar, error) {
+	return nil, errors.New("simulated progeny env var read failure")
+}
+
+// TestResolveAgentTZ_StoreErrorsWithNilLog checks a failed storage read is
+// skipped, never a panic, on a dispatcher without a logger, and that the
+// resolver falls through to the next rung.
+func TestResolveAgentTZ_StoreErrorsWithNilLog(t *testing.T) {
+	newAgent := func() *store.Agent {
+		agent := envScopeTestAgent()
+		// Ancestry of more than one entry makes the resolver read progeny vars.
+		agent.Ancestry = []string{"user-ancestor-1", "agent-parent-1"}
+		// An unadopted legacy env TZ exercises the third warning site.
+		agent.AppliedConfig = &store.AgentAppliedConfig{Env: map[string]string{"TZ": "Europe/Paris"}}
+		return agent
+	}
+
+	for _, tc := range []struct {
+		name       string
+		hubDefault string
+		want       agentTZ
+	}{
+		{name: "falls through to the hub default", hubDefault: "Asia/Tokyo", want: agentTZ{TZ: "Asia/Tokyo", Source: TZSourceHubDefault}},
+		{name: "falls through to none", want: agentTZ{Source: TZSourceNone}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, s := tzTestDispatcher(t, tc.hubDefault)
+			tzTestEnvVar(t, s, store.EnvVar{Value: "Europe/Berlin", Scope: store.ScopeUser, ScopeID: envScopeTestScopeID(t, store.ScopeUser)})
+			d.store = &tzErrStore{Store: s}
+			d.log = nil
+			if got := d.resolveAgentTZ(context.Background(), newAgent(), false); got != tc.want {
+				t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("a failed scope is skipped and a later scope still wins", func(t *testing.T) {
+		d, s := tzTestDispatcher(t, "Asia/Tokyo")
+		tzTestEnvVar(t, s, store.EnvVar{Value: "Europe/Berlin", Scope: store.ScopeUser, ScopeID: envScopeTestScopeID(t, store.ScopeUser)})
+		tzTestEnvVar(t, s, store.EnvVar{Value: "America/Denver", Scope: store.ScopeProject, ScopeID: envScopeTestScopeID(t, store.ScopeProject)})
+		d.store = &tzErrStore{Store: s, failScopes: map[string]bool{store.ScopeUser: true}}
+		d.log = nil
+		if got, want := d.resolveAgentTZ(context.Background(), newAgent(), false), (agentTZ{TZ: "America/Denver", Source: TZSourceProject}); got != want {
+			t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, want)
+		}
+	})
 }
