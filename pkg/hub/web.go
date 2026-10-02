@@ -111,6 +111,11 @@ type webSessionUser struct {
 	Name      string `json:"displayName"`
 	AvatarURL string `json:"avatarUrl,omitempty"`
 	Role      string `json:"role,omitempty"`
+
+	// Preferences is populated only by handleAuthMe, from a live store read,
+	// never cached on the session. It is nil wherever webSessionUser is
+	// built or read for purposes other than that response.
+	Preferences *store.UserPreferences `json:"preferences,omitempty"`
 }
 
 // getWebSessionUser retrieves the web session user from the request context.
@@ -2719,9 +2724,11 @@ func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 // Route: GET /auth/me
 func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	// Check context first (set by devAuthMiddleware or sessionAuthMiddleware)
-	if user := getWebSessionUser(r.Context()); user != nil {
+	if sessUser := getWebSessionUser(r.Context()); sessUser != nil {
+		resp := *sessUser
+		resp.Preferences = loadUserPreferences(r.Context(), ws.store, sessUser.UserID)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(user)
+		_ = json.NewEncoder(w).Encode(resp)
 		return
 	}
 
@@ -2749,6 +2756,7 @@ func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		AvatarURL: sessionString(session, sessKeyUserAvatar),
 		Role:      sessionString(session, sessKeyUserRole),
 	}
+	user.Preferences = loadUserPreferences(r.Context(), ws.store, uid)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(user)
