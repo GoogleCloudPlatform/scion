@@ -77,7 +77,7 @@ func TestSubstrateRestart_RecordlessActors_ReportsOnlyUnrecorded(t *testing.T) {
 	defer closeServer()
 
 	const projectID = "550e8400-e29b-41d4-a716-446655440000"
-	const wantAtespace = "scion-550e8400-e29"
+	wantAtespace := substrateAtespaceName(projectID)
 
 	if _, err := rt.Run(context.Background(), restartTestRunConfig(projectID, "pre-restart-agent")); err != nil {
 		t.Fatalf("Run(pre-restart-agent) error = %v", err)
@@ -158,7 +158,7 @@ func TestSubstrateRestart_RecordlessActors_ExcludesGoldenAtespace(t *testing.T) 
 	defer closeServer()
 
 	const projectID = "550e8400-e29b-41d4-a716-446655440000"
-	const wantAtespace = "scion-550e8400-e29"
+	wantAtespace := substrateAtespaceName(projectID)
 	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
 		return &ateapipb.ListActorsResponse{
 			Actors: []*ateapipb.Actor{
@@ -229,7 +229,7 @@ func TestSubstrateRestart_RecordlessActors_ExcludesDeletingState(t *testing.T) {
 	defer closeServer()
 
 	const projectID = "550e8400-e29b-41d4-a716-446655440000"
-	const wantAtespace = "scion-550e8400-e29"
+	wantAtespace := substrateAtespaceName(projectID)
 	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
 		return &ateapipb.ListActorsResponse{
 			Actors: []*ateapipb.Actor{

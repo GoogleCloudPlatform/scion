@@ -439,7 +439,7 @@ func TestSubstrateRun_HappyPath(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	wantID := "scion-550e8400-e29/test-agent"
+	wantID := substrateAtespaceName(testSubstrateRunConfig().ProjectID) + "/test-agent"
 	if id != wantID {
 		t.Errorf("Run() id = %q, want %q", id, wantID)
 	}
@@ -488,6 +488,58 @@ func TestSubstrateRun_HappyPath(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
+// substrateAtespaceName: collision resistance
+// -----------------------------------------------------------------------
+
+// TestSubstrateAtespaceName_SharedPrefixDoesNotCollide proves two project
+// IDs that share the first 12 characters — the exact shape the prior
+// "scion-"+projectID[:12] scheme collided on — produce different
+// atespaces now that the full ID is hashed. A shared atespace would let
+// two unrelated projects' record-less-actor counts, and whatever else the
+// atespace boundary is meant to isolate, leak into each other.
+func TestSubstrateAtespaceName_SharedPrefixDoesNotCollide(t *testing.T) {
+	const shared12 = "550e8400-e29"
+	idA := shared12 + "b-41d4-a716-446655440000"
+	idB := shared12 + "b-99999-ffffffffffff-zzzz"
+
+	if idA[:12] != idB[:12] {
+		t.Fatalf("test bug: idA and idB do not actually share a 12-char prefix (%q vs %q)", idA[:12], idB[:12])
+	}
+
+	gotA := substrateAtespaceName(idA)
+	gotB := substrateAtespaceName(idB)
+	if gotA == gotB {
+		t.Fatalf("substrateAtespaceName(%q) == substrateAtespaceName(%q) == %q, want distinct atespaces for distinct project IDs sharing a 12-char prefix", idA, idB, gotA)
+	}
+}
+
+// TestSubstrateAtespaceName_Deterministic proves the same project ID always
+// hashes to the same atespace (Run/RecordlessActors/List must all agree on
+// one project's atespace across calls and restarts) and that the result is
+// a valid k8s-short-name: lowercase hex plus the fixed "scion-" prefix,
+// starting and ending with an alphanumeric character, comfortably under
+// the 63-character limit.
+func TestSubstrateAtespaceName_Deterministic(t *testing.T) {
+	const projectID = "550e8400-e29b-41d4-a716-446655440000"
+	got1 := substrateAtespaceName(projectID)
+	got2 := substrateAtespaceName(projectID)
+	if got1 != got2 {
+		t.Fatalf("substrateAtespaceName(%q) is not deterministic: %q vs %q", projectID, got1, got2)
+	}
+	if !strings.HasPrefix(got1, "scion-") {
+		t.Errorf("substrateAtespaceName(%q) = %q, want the \"scion-\" prefix", projectID, got1)
+	}
+	if len(got1) > 63 {
+		t.Errorf("substrateAtespaceName(%q) = %q, length %d exceeds the 63-char k8s-short-name limit", projectID, got1, len(got1))
+	}
+	for _, r := range got1 {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
+			t.Errorf("substrateAtespaceName(%q) = %q contains invalid k8s-short-name character %q", projectID, got1, r)
+		}
+	}
+}
+
+// -----------------------------------------------------------------------
 // Run: non-digest image error
 // -----------------------------------------------------------------------
 
@@ -515,6 +567,31 @@ func TestSubstrateRun_NonDigestImageError(t *testing.T) {
 		if c == "CreateActor" || c == "CreateActorTemplate" {
 			t.Errorf("Run() called %s before failing the digest check", c)
 		}
+	}
+}
+
+// TestSubstrateRun_EmptyProjectIDRejected proves Run refuses an empty
+// ProjectID outright rather than silently hashing it into one fixed
+// atespace shared by every such caller (substrateAtespaceName has no other
+// input to distinguish them). Must fail before touching the control plane
+// at all — no CreateAtespace call.
+func TestSubstrateRun_EmptyProjectIDRejected(t *testing.T) {
+	rec := &callRecorder{}
+	rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	cfg := testSubstrateRunConfig()
+	cfg.ProjectID = ""
+
+	_, err := rt.Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Run() expected an error for an empty ProjectID, got nil")
+	}
+	if !strings.Contains(err.Error(), "ProjectID") {
+		t.Errorf("error = %v, want it to mention ProjectID", err)
+	}
+	if len(rec.list()) != 0 {
+		t.Errorf("Run() made control-plane calls %v before rejecting the empty ProjectID, want none", rec.list())
 	}
 }
 
@@ -1963,7 +2040,8 @@ func TestSubstrateList_RecordlessActorsNeverMatchedBySlug(t *testing.T) {
 // recovering the slug from the actor name cannot be made to fail closed
 // against every project-scoped caller.
 func TestSubstrateList_RecordlessActorNotMatchedEvenWhenProjectScoped(t *testing.T) {
-	const projAID = "aaaaaaaaaaaa" // substrateAtespaceName("aaaaaaaaaaaa") == "scion-aaaaaaaaaaaa"
+	const projAID = "aaaaaaaaaaaa"
+	atespaceA := substrateAtespaceName(projAID)
 
 	rec := &callRecorder{}
 	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
@@ -1972,14 +2050,10 @@ func TestSubstrateList_RecordlessActorNotMatchedEvenWhenProjectScoped(t *testing
 	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
 		return &ateapipb.ListActorsResponse{
 			Actors: []*ateapipb.Actor{
-				{Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-aaaaaaaaaaaa", Name: "projA--dev", Uid: "uid-a"},
+				{Metadata: &ateapipb.ResourceMetadata{Atespace: atespaceA, Name: "projA--dev", Uid: "uid-a"},
 					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
 			},
 		}, nil
-	}
-
-	if got := substrateAtespaceName(projAID); got != "scion-aaaaaaaaaaaa" {
-		t.Fatalf("substrateAtespaceName(%q) = %q, want %q (test bug)", projAID, got, "scion-aaaaaaaaaaaa")
 	}
 
 	agents, err := rt.List(context.Background(), map[string]string{"scion.project_id": projAID})

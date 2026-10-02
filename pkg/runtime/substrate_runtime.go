@@ -19,6 +19,8 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -348,6 +350,14 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 	// skipped it.
 	if err := substrate.Validate(&r.cfg); err != nil {
 		return "", err
+	}
+	if cfg.ProjectID == "" {
+		// An empty ProjectID would hash to the same atespace for every
+		// such agent (substrateAtespaceName has no other input), colliding
+		// every caller that ever reaches Run without a real project
+		// identity onto one shared atespace. Reject outright rather than
+		// let that collision happen silently.
+		return "", fmt.Errorf("substrate: RunConfig.ProjectID must not be empty")
 	}
 
 	atespace := substrateAtespaceName(cfg.ProjectID)
@@ -1169,41 +1179,32 @@ func isDigestPinned(image string) bool {
 	return strings.Contains(image, "@sha256:")
 }
 
-// substrateAtespaceName computes "scion-<first 12 chars of projectID>"
-// (substrate-runtime.md §4), sanitised to a valid Kubernetes short name
-// (ResourceMetadata.atespace's k8s-short-name format: lowercase alphanumeric
-// and '-', starting and ending with an alphanumeric character). A UUID
-// project ID is already valid as-is; this defends against any other project
-// ID shape (uppercase letters, underscores, a trailing '-' from truncating
-// mid-segment) producing an invalid atespace name.
-func substrateAtespaceName(projectID string) string {
-	s := projectID
-	if len(s) > 12 {
-		s = s[:12]
-	}
-	return "scion-" + sanitizeK8sShortNameFragment(s)
-}
+// substrateAtespaceNameHashLen is the number of hex characters of the full
+// project ID's SHA-256 digest substrateAtespaceName keeps. 32 hex chars is
+// 128 bits — collision-resistant at any realistic project-count scale —
+// while leaving "scion-" (6 chars) plus the hash comfortably inside the
+// 63-character Kubernetes short-name limit (ResourceMetadata.atespace's
+// k8s-short-name format).
+const substrateAtespaceNameHashLen = 32
 
-// sanitizeK8sShortNameFragment lowercases s and replaces every character
-// that isn't a lowercase letter, digit, or '-' with '-', then trims leading
-// and trailing '-' (a k8s-short-name segment must start and end with an
-// alphanumeric character). An all-invalid or empty input becomes "x" so the
-// result is never empty.
-func sanitizeK8sShortNameFragment(s string) string {
-	s = strings.ToLower(s)
-	var b strings.Builder
-	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
-			b.WriteRune(r)
-		} else {
-			b.WriteRune('-')
-		}
-	}
-	trimmed := strings.Trim(b.String(), "-")
-	if trimmed == "" {
-		return "x"
-	}
-	return trimmed
+// substrateAtespaceName computes "scion-<32 hex chars of sha256(projectID)>".
+// Hashing the FULL project ID (not truncating it directly) means two
+// project IDs that merely share a prefix — or differ only in case, or in
+// characters sanitizeK8sShortNameFragment would otherwise collapse to the
+// same '-' — produce different atespaces instead of colliding onto one.
+// Colliding here is more than a naming nit: two projects sharing an
+// atespace share whatever isolation the atespace boundary provides, and
+// RecordlessActors (and the record-less-actor 409 path it feeds) would
+// start reporting one project's actor count and identity-unknown state to
+// the other. The result is already a valid k8s-short-name (lowercase hex
+// plus the fixed "scion-" prefix), so no further sanitization is needed.
+//
+// See Run's empty-ProjectID rejection: this function assumes projectID is
+// non-empty, since an empty ID would otherwise hash to one fixed atespace
+// shared by every such caller.
+func substrateAtespaceName(projectID string) string {
+	sum := sha256.Sum256([]byte(projectID))
+	return "scion-" + hex.EncodeToString(sum[:])[:substrateAtespaceNameHashLen]
 }
 
 // splitSubstrateID splits a runtime ID of the form "<atespace>/<actor>",

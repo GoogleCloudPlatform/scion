@@ -24,7 +24,8 @@ import (
 )
 
 const probeEdgeProjectID = "550e8400-e29b-41d4-a716-446655440000"
-const probeEdgeAtespace = "scion-550e8400-e29"
+
+var probeEdgeAtespace = substrateAtespaceName(probeEdgeProjectID)
 
 func probeEdgeActor(name, uid string, status *ateapipb.ActorStatus) *ateapipb.Actor {
 	return &ateapipb.Actor{
