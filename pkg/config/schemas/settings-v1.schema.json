@@ -457,23 +457,49 @@
           "$ref": "#/$defs/harnessNoAuthConfig",
           "description": "Behavior when an agent starts without credentials (NoAuth mode)."
         },
-        "thinking_budget_map": {
-          "type": "object",
-          "additionalProperties": { "type": "integer" },
-          "description": "Maps model identifiers to their thinking-budget token limits."
-        },
-        "thinking_budget_flag": {
-          "type": "string",
-          "description": "CLI flag name used to pass the thinking budget to the harness (e.g., '--thinking-budget')."
-        },
-        "thinking_budget_config_key": {
-          "type": "string",
-          "description": "Harness-native config key used to set the thinking budget in a config file."
+        "thinking": {
+          "$ref": "#/$defs/harnessThinking",
+          "description": "Maps the canonical 0-100 thinking level (SCION_THINKING_LEVEL) to harness-native values. Applied in-container by scion_harness.resolve_thinking."
         },
         "dialect": {
           "type": "object",
           "description": "Optional hook dialect metadata.",
           "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "harnessThinking": {
+      "type": "object",
+      "required": ["levels"],
+      "properties": {
+        "levels": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Ordered by strictly ascending max. A level L (0-100) maps to the value of the first entry whose max >= L. The last entry must have max: 100.",
+          "items": {
+            "type": "object",
+            "required": ["max", "value"],
+            "properties": {
+              "max": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Inclusive upper bound of the thinking level range mapped to value."
+              },
+              "value": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Harness-native thinking value (e.g. low, medium, high)."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "default": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Value emitted when SCION_THINKING_LEVEL is unset, blank or not an integer. Omit to emit nothing so the CLI's own default applies."
         }
       },
       "additionalProperties": false

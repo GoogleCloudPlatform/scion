@@ -1363,6 +1363,10 @@ type HarnessConfigEntry struct {
 	// model field; the alias is resolved to the concrete name at provision time.
 	ModelAliases map[string]string `json:"model_aliases,omitempty" yaml:"model_aliases,omitempty" koanf:"model_aliases"`
 
+	// Thinking maps the canonical 0-100 thinking level to harness-native values.
+	// Applied in-container by scion_harness.resolve_thinking.
+	Thinking *HarnessThinkingConfig `json:"thinking,omitempty" yaml:"thinking,omitempty" koanf:"thinking"`
+
 	Provisioner       *HarnessProvisionerConfig        `json:"provisioner,omitempty" yaml:"provisioner,omitempty" koanf:"provisioner"`
 	ConfigDir         string                           `json:"config_dir,omitempty" yaml:"config_dir,omitempty" koanf:"config_dir"`
 	SkillsDir         string                           `json:"skills_dir,omitempty" yaml:"skills_dir,omitempty" koanf:"skills_dir"`
@@ -1379,6 +1383,51 @@ type HarnessConfigEntry struct {
 	NoAuthConfig      *HarnessNoAuthConfig             `json:"no_auth,omitempty" yaml:"no_auth,omitempty" koanf:"no_auth"`
 	MCP               *HarnessMCPConfig                `json:"mcp,omitempty" yaml:"mcp,omitempty" koanf:"mcp"`
 	Dialect           map[string]interface{}           `json:"dialect,omitempty" yaml:"dialect,omitempty" koanf:"dialect"`
+}
+
+// HarnessThinkingConfig maps the canonical 0-100 thinking level
+// (SCION_THINKING_LEVEL) to harness-native values. A level L maps to the Value
+// of the first entry in Levels whose Max >= L. Default is emitted when the
+// level is unset or invalid; when empty, nothing is emitted and the harness
+// CLI's own default applies. The mapping is resolved in-container by
+// scion_harness.resolve_thinking; Go only carries and validates it.
+type HarnessThinkingConfig struct {
+	Levels  []HarnessThinkingLevel `json:"levels" yaml:"levels" koanf:"levels"`
+	Default string                 `json:"default,omitempty" yaml:"default,omitempty" koanf:"default"`
+}
+
+// HarnessThinkingLevel is one entry of a HarnessThinkingConfig: Max is the
+// inclusive upper bound (0-100) of the level range that maps to Value.
+type HarnessThinkingLevel struct {
+	Max   int    `json:"max" yaml:"max" koanf:"max"` // no omitempty: 0 is meaningful
+	Value string `json:"value" yaml:"value" koanf:"value"`
+}
+
+// Validate checks the ordering rules the JSON schema cannot express: Levels
+// must be non-empty, each Max must be strictly greater than the previous one,
+// and the last Max must be 100 so every clamped level maps to a value.
+func (t *HarnessThinkingConfig) Validate() error {
+	if t == nil {
+		return nil
+	}
+	if len(t.Levels) == 0 {
+		return fmt.Errorf("thinking.levels must not be empty")
+	}
+	for i, lvl := range t.Levels {
+		if lvl.Max < 0 || lvl.Max > 100 {
+			return fmt.Errorf("thinking.levels[%d].max must be between 0 and 100, got %d", i, lvl.Max)
+		}
+		if lvl.Value == "" {
+			return fmt.Errorf("thinking.levels[%d].value must not be empty", i)
+		}
+		if i > 0 && lvl.Max <= t.Levels[i-1].Max {
+			return fmt.Errorf("thinking.levels[%d].max (%d) must be greater than thinking.levels[%d].max (%d)", i, lvl.Max, i-1, t.Levels[i-1].Max)
+		}
+	}
+	if last := t.Levels[len(t.Levels)-1].Max; last != 100 {
+		return fmt.Errorf("thinking.levels last max must be 100, got %d", last)
+	}
+	return nil
 }
 
 // HarnessProvisionerConfig declares how a harness-config is provisioned.
