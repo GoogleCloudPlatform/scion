@@ -143,6 +143,14 @@ describe('agent detail header actions order', () => {
     );
   });
 
+  it('URL-encodes the project and agent IDs in the graph link', () => {
+    const agent = makeAgent({ id: 'a 1&x', projectId: 'p/1?y' });
+    const first = renderHeaderActions(agent).firstElementChild!;
+    expect(first.querySelector('a')!.getAttribute('href')).toBe(
+      '/agents/graph?project=p%2F1%3Fy&focus=a%201%26x'
+    );
+  });
+
   it('puts the graph link before a disabled Message in its own tooltip', () => {
     const agent = makeAgent({
       phase: 'running',

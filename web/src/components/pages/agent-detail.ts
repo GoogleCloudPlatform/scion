@@ -1245,7 +1245,9 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="header-actions">
           <sl-tooltip content="See this agent in graph">
             <a
-              href="/agents/graph?project=${agent.projectId}&focus=${this.agentId}"
+              href="/agents/graph?project=${encodeURIComponent(
+                agent.projectId
+              )}&focus=${encodeURIComponent(this.agentId)}"
               style="text-decoration: none;"
             >
               <sl-button variant="default" size="small">
