@@ -44,7 +44,9 @@ the existing per-binding `POST`/`PATCH`/`DELETE /members[/{bindingID}]` API
     `role_binding.*` is refused for every actor, including the hub
     `role_binding.*` override, which `CanDelegate` cannot refuse on its own
     (that actor's own ceiling already includes it). Checked pre-transaction
-    and re-checked in-transaction from the same resolved role definitions.
+    and re-checked in-transaction from role definitions re-fetched through
+    `tx` (not the pre-transaction snapshot), so a definition edited between
+    the two checks is caught by the second one too (A-path review r1 A-O2).
   - `applyRolePlanTx` (in `project_membership_service.go`): the one
     purpose-named step that applies a `rolePlan`'s delete-then-create, so the
     new engine never calls `tx.CreateRoleBinding`/`tx.DeleteRoleBinding`
@@ -314,8 +316,11 @@ closed, and no new High/Medium/Critical surfaced). No declines:
   every call site's literal.
 - **R2-8** (Nit): the concurrent-PUT test accepted any combination of `{200,
   409}` for its two racing requests, including both returning 409 — which
-  would mean the lock rejected both instead of serializing them. Added an
-  assertion that at least one request succeeds, per §12 P1.
+  would mean the lock rejected both instead of serializing them. Per the
+  design's concurrency rule for this endpoint (two goroutines PUTting
+  conflicting sets for the same principal: one succeeds, the other gets 200
+  with the serialized result or 409 `membership_changed`, never a D4
+  violation), added an assertion that at least one request succeeds.
 
 FYI-A and FYI-B required no action (consistent with Part 0 by design); FYI-C
 and FYI-D (round 1's accepted residuals) still apply unchanged.
@@ -362,7 +367,8 @@ escalation-guard mutation probe found a gap). No declines:
 - **R3-4** (Nit): the concurrent-PUT test's assertion message said "exactly
   one of the two conflicting PUTs must succeed" but the assertion itself
   checks "at least one" (both can legitimately return 200 under full
-  serialization, per §12 P1). Fixed the message to match the assertion.
+  serialization, per the same concurrency rule restated at R2-8 above).
+  Fixed the message to match the assertion.
 - **R3-5** (Nit): this file's base SHA had gone stale again after the
   round-2 rebase; rephrased as "based on upstream main (see PR)" so a future
   rebase cannot make it stale again. The R2-6 bullet said "5 places"; the
@@ -464,3 +470,85 @@ and a scoped `golangci-lint run --new-from-rev=upstream-main` on
 `upstream-main` afterward. Per the P1 broker throttle, the full
 `make test-hub-sqlite`/`make ci` were not run locally for this round either;
 they run in the PR's GitHub CI.
+
+## Review round 5 (authz A-review r1) fixes
+
+The first A-path review (an authorization-focused review of the
+`pkg/hub/authzop/catalog.go` exemptions and the SetMemberRoles
+authorization, independent of rounds 1-4 above) found 0 Critical, 2
+Required, 2 Optional, 1 Nit. All open items closed; one declined by the
+design owner:
+
+- **A-R1** (Required): `CanDelegate` on the built-in-role paths (the
+  `needsCanDelegate` guard around a new built-in grant and a built-in
+  upgrade swap, `project_membership_set.go`) had no test proving it
+  actually runs rather than being skipped — the existing hub-override
+  ceiling test only covers the custom-role path. Added
+  `TestSetMemberRoles_HubAdminBuiltInGrant_CeilingRefused` (new grant, no
+  `BuiltInChange`) and `TestSetMemberRoles_HubAdminBuiltInUpgrade_
+  CeilingRefused` (upgrade swap, `BuiltInChange` set), both using a hub
+  admin acting on a project where they hold no project role of their own:
+  the hub override passes the entry gate, but the delegation ceiling
+  refuses because hub-admin holds `role_binding.create`/`.delete` but none
+  of the project-member permission set — so no AccessConstraint-limited-
+  owner fallback was needed. Each test was confirmed to fail under a local
+  forced `needsCanDelegate = false` mutation on its own code path (m2b,
+  m2c), reverted after confirming.
+- **A-R2** (Required): `actorAuthorityChanged` treated an asked-permission-
+  set mismatch between Phase P and Phase T as unchanged (`continue`),
+  which fails open in exactly the case the guard exists to catch. Changed
+  to `return true`. Flipped `TestActorAuthorityChanged`'s "perm asked pre
+  but not post" case to `want: true` and added its mirror (asked post but
+  not pre); both remain unreached in production today (`plan1 == plan0` by
+  construction), same as the guard's other two sub-checks.
+- **A-O1** (Optional, lead's call: fix): `applyRolePlanTx`'s two catalog
+  exemptions and the existing `TestMutationClassificationBidirectional`/
+  `TestRS1_AST_BypassPathsDocumented` guards all key off the
+  `CreateRoleBinding`/`DeleteRoleBinding` calls inside `applyRolePlanTx`,
+  not off calls to it, so a second caller would pass both silently. Added
+  a new file (not `rs1_extended_test.go` or any other `rs*`/`d002*`/`pm1*`
+  file) with an AST test asserting every call to `applyRolePlanTx` is
+  textually inside `SetMemberRoles`. Confirmed it fails when a second
+  caller is temporarily added, reverted after confirming.
+- **A-O2** (Optional, lead's call: fix, option (a)): the in-tx
+  `role_binding.*` re-check reused the pre-transaction `desiredDefs`
+  snapshot, so it could never refuse anything the pre-tx guard had not
+  already refused. Added `refetchRoleDefinitionsTx`, which re-fetches each
+  created role definition through `tx` by ID, and run the structural guard
+  against the re-fetched definitions, using the same error as the pre-tx
+  guard. Added `TestSetMemberRoles_InTxRoleBindingGuard_
+  CatchesDefinitionEditedBetweenPhases`, reusing the `mmrAuthoritySwapStore`
+  seam to edit a created role definition's permissions immediately before
+  the transaction; confirmed it fails when the re-fetch is reverted to the
+  old snapshot (m3b), reverted after confirming.
+- **A-N1** (Nit): **declined by the design owner.** The
+  `TestSetMemberRoles_Escalation_*` names are the issue author's verbatim
+  spec list and stay as-is; the five neutral "bypass" comment hits
+  (`project_membership_set.go:385`, `project_membership_set_test.go:545/
+  579/753`, this file's own text above) are not narrative or exploit-style
+  and stay unchanged.
+- **EM-1** (fix): a round-3 commit message (`docs(project-log): close P1
+  review r3 R3-2, R3-5 ...`) had its own backticked bare issue number,
+  introduced ironically while describing the R2-4 fix that removed one.
+  Reworded non-interactively, without reintroducing a bare number, to
+  describe it as a "quoted bare issue number" rather than quoting it
+  again.
+- **EM-2** (fix): this file's R2-8 and R3-4 bullets still cited a dangling
+  "§12 P1" section reference (a design document not in this repo). Both
+  now restate the concurrency rule inline: two goroutines PUTting
+  conflicting sets for the same principal — one succeeds, the other gets
+  200 with the serialized result or 409 `membership_changed`, never a D4
+  violation.
+
+Mutation-sensitivity was proven for all four new/changed tests (A-R1's two
+tests, A-R2's table case, A-O1's AST test, A-O2's new test) with a temporary
+local edit to the corresponding guard, confirmed to fail, then reverted; see
+the round's closure table (scratchpad only, per the containment rule) for
+the per-finding detail. The same throttled gate set as prior rounds (`go
+test ./pkg/hub/ -run 'SetMemberRoles|RoleSet|Escalation|OwnerCustom|RS|
+D002|PM1|ProjectMember|Catalog|Classif|AST'`, `go test ./pkg/hub/authzop/
+...`, `gofmt -l`, `go vet`, and a scoped `golangci-lint run
+--new-from-rev=upstream-main` on `./pkg/hub/...`) all pass on the fixed
+head, which was rebased onto a fresh `upstream-main` afterward. Per the P1
+broker throttle, the full `make test-hub-sqlite`/`make ci` were not run
+locally for this round either; they run in the PR's GitHub CI.
