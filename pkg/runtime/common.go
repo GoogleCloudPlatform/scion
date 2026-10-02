@@ -646,7 +646,7 @@ func isHubManagedWorktreeBase(repoRoot string) bool {
 // so in-container `git commit` must still be able to write loose objects and
 // update refs. Only the admin subpaths above are narrowed — the container
 // never legitimately needs to write them (identity and credentials are
-// injected via $HOME/.gitconfig, not .git/config, and there is no
+// supplied via $HOME/.gitconfig, not .git/config, and there is no
 // in-container `git config --local` write).
 //
 // Each subpath is mounted read-only only if it currently exists, so a

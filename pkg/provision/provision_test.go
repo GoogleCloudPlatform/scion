@@ -3892,7 +3892,8 @@ func TestHardenedGitCommand_RefusesCommondirRedirect(t *testing.T) {
 	// for the base's own gitdir as much as for any linked worktree. Its
 	// presence would otherwise redirect every HardenedGitCommand
 	// invocation's config/hooks resolution away from the mounted,
-	// host-managed .git admin surface to an arbitrary writable location —
+	// host-managed .git admin surface to a writable location outside the
+	// read-only mount —
 	// this is exactly the gap narrowGitAdminMounts' read-only mount alone
 	// does not close, since it never inspects commondir.
 	base := t.TempDir()
@@ -4095,7 +4096,7 @@ func TestHardenedGitCommand_TrustedHookAndGlobalFilterStillRun(t *testing.T) {
 
 func TestHardenedGitCommand_DoesNotClobberCredentialHelperEnv(t *testing.T) {
 	// pkg/util/git.go's PullSharedWorkspace authenticates via a one-shot
-	// credential helper injected through GIT_CONFIG_COUNT/KEY_0/VALUE_0 env
+	// credential helper supplied through GIT_CONFIG_COUNT/KEY_0/VALUE_0 env
 	// vars. A caller combining that technique with HardenedGitCommand must
 	// APPEND to cmd.Env (not replace it), or the GIT_COMMON_DIR pin would be
 	// lost along with the ambient environment.
