@@ -1314,8 +1314,9 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		_, regPath, listErr := provision.ListSharers(result.ProjectRoot, "", branch)
 		if listErr != nil {
 			// The registry read boundary refused this branch's marker outright
-			// (an escape/symlink smell, not merely a stale or foreign value —
-			// see provision.readMarker) rather than silently discarding it.
+			// (a non-canonical or symlink-crossing form, not merely a stale
+			// or foreign value — see provision.readMarker) rather than
+			// silently discarding it.
 			// That is a deliberate signal, not an ordinary "nothing registered
 			// yet" absence: surface it as a hard failure here too, the same as
 			// ProvisionShared itself will if this call fell through instead.

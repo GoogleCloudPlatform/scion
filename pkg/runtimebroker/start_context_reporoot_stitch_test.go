@@ -622,7 +622,8 @@ func TestCreateAgent_ProvisionOnlyThenStart_RepoRootSurvives(t *testing.T) {
 }
 
 // jsonStr quotes s as a JSON string literal, for building request bodies
-// containing filesystem paths (which may need escaping on some platforms).
+// containing filesystem paths (whose characters may need quoting on some
+// platforms).
 func jsonStr(s string) string {
 	return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
 }

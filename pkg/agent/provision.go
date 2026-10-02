@@ -157,7 +157,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 				return branchDeleted, fmt.Errorf("delete: UnregisterSharer for branch %s agent %s: %w", branch, agentName, unregErr)
 			}
 			if len(remaining) == 0 {
-				// Defense-in-depth: re-check wtPath's unresolved/lexical form
+				// Additional check: re-check wtPath's unresolved/lexical form
 				// against a scion-created shape immediately before acting on
 				// it, rather than trusting that UnregisterSharer's return
 				// value is still exactly what the read boundary validated.
