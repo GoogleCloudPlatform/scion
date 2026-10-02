@@ -19,9 +19,9 @@
  *
  * The chat sidebar's hub-members load has several call sites (route parse,
  * `initV2`'s no-conversation branch, a rail-data re-parse, `handleResetView`,
- * and a fallback poll) and used to fetch only the first page of users/agents
- * with no in-flight coalescing — a cold `/chat` open could issue several
- * overlapping full-list requests.
+ * and a fallback poll). Calls that overlap must share one walk rather than
+ * each issuing its own full-list requests, and each walk must follow every
+ * page of users and agents.
  *
  * Most of these tests exercise the private `loadHubMembers` method directly
  * (the element is never appended, so `connectedCallback`/`initV2` never
@@ -417,7 +417,7 @@ describe('loadHubMembers view-change race', () => {
     // returns to /chat before the slower agents leg settles, the stale walk
     // must not publish that truncated users list as the full hub roster.
     // This uses a real mount (`document.body.appendChild`) rather than
-    // `createPage()`, since the fix depends on `updated()` actually running
+    // `createPage()`, since this behaviour depends on `updated()` actually running
     // to bump the hub-members generation when `v2Conversation` is assigned.
     window.history.pushState({}, '', '/chat');
 
@@ -514,12 +514,12 @@ describe('loadHubMembers view-change race', () => {
     // value of `v2Conversation`, so it never bumps the generation at all.
     // `shouldContinue`, a live field read, still observes the conversation
     // as open for the one microtask in between and stops the users leg's
-    // second page there — a genuine, intentional truncation that the old
-    // design would have published because the generation never moved. The
-    // fix instead has `paginateAll` reject that leg (see
-    // `PaginationStoppedError`) so it can never be published, and
-    // `_hubMembersInFlightStopped` makes the walk re-run once on its own so
-    // the sidebar still ends up with the full list.
+    // second page there — a genuine, intentional truncation that the
+    // generation check alone cannot catch, because the generation never
+    // moved. `paginateAll` rejects that leg (see `PaginationStoppedError`)
+    // so it can never be published, and the stopped result
+    // `_fetchHubMembersOnce` returns makes the walk re-run once on its own
+    // so the sidebar still ends up with the full list.
     window.history.pushState({}, '', '/chat');
 
     let userCall = 0;
@@ -576,9 +576,8 @@ describe('loadHubMembers view-change race', () => {
 
       await flush();
 
-      // The generation must never have bumped — this is exactly the gap
-      // that makes the old design's safety net (the generation check) miss
-      // this case.
+      // The generation must never have bumped — this is exactly the case
+      // the generation check cannot catch on its own.
       expect(page._hubMembersGeneration).toBe(generationBefore);
       // The walk re-ran itself once it saw the stopped leg, and the re-run
       // published the full list — never the truncated ['u1'].
@@ -600,7 +599,7 @@ describe('loadHubMembers view-change race', () => {
     // Isolates the generation check from the stopped-leg handling above: both
     // legs here are single-page, so each leg's only `shouldContinue` check
     // already ran (and passed) before the conversation ever opens — neither
-    // leg ever stops, so `_hubMembersInFlightStopped` stays false and cannot
+    // leg ever stops, so the attempt's stopped result stays false and cannot
     // be what protects this case. Opening and closing the conversation in two
     // separate `flush()`-separated Lit update batches (unlike the "one
     // batch" test above) lets `updated()` bump the generation normally. Only
@@ -891,12 +890,12 @@ describe('loadHubMembers reconnect handling', () => {
   it('a walk scheduled just before a disconnect in the same microtask drain issues no requests', async () => {
     // Regression test for loadHubMembers capturing the generation at
     // schedule time: `loadHubMembers` queues `_runHubMembersLoad` via
-    // `queueMicrotask`, so a `disconnectedCallback` landing synchronously
-    // right after — before that queued callback ever runs — used to mean
-    // the walk read `_hubMembersGeneration` for the first time *after* the
-    // disconnect had already bumped it, making the walk believe it was the
-    // (only) legitimate walk for the post-disconnect generation and letting
-    // it fetch and publish into a page that is no longer connected.
+    // `queueMicrotask`, so a `disconnectedCallback` can land synchronously
+    // right after, before that queued callback ever runs. If the walk read
+    // `_hubMembersGeneration` only inside that callback, it would read the
+    // value the disconnect had already bumped, believe it was the (only)
+    // legitimate walk for the post-disconnect generation, and fetch and
+    // publish into a page that is not connected.
     window.history.pushState({}, '', '/chat');
 
     vi.mocked(apiFetch).mockImplementation(
@@ -995,4 +994,319 @@ describe('loadHubMembers walk cancellation', () => {
 
     expect(userCall).toBe(2);
   });
+});
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+function requestCounts(): { users: number; agents: number } {
+  const calls = vi.mocked(apiFetch).mock.calls.map((c) => c[0] as string);
+  return {
+    users: calls.filter((u) => u.startsWith('/api/v1/users')).length,
+    agents: calls.filter((u) => u.startsWith('/api/v1/agents')).length,
+  };
+}
+
+function mountPage(): any {
+  window.history.pushState({}, '', '/chat');
+  const page = document.createElement('scion-page-chat') as any;
+  page.pageData = { user: { id: 'user-me' } };
+  document.body.appendChild(page);
+  return page;
+}
+
+describe('loadHubMembers stopped state is per attempt', () => {
+  it('a superseded walk stopping after a conversation opens and closes does not make the fresh walk re-run or discard its result', async () => {
+    const staleUsers = deferred<Response>();
+    const freshUsers = deferred<Response>();
+    let userCall = 0;
+    let agentCall = 0;
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => {
+          userCall++;
+          if (userCall === 1) return staleUsers.promise;
+          if (userCall === 2) return freshUsers.promise;
+          return usersPage(['u-rerun']);
+        },
+        () => {
+          agentCall++;
+          if (agentCall === 1) return agentsPage(['a-stale']);
+          if (agentCall === 2) return agentsPage(['a-fresh']);
+          return agentsPage(['a-rerun']);
+        }
+      )
+    );
+
+    const page = mountPage();
+    // Cold-mount walk (generation 0): its users page 1 is held.
+    await flush();
+
+    try {
+      // Open a project in its own update batch (bumps the generation), then
+      // return to /chat, which starts a fresh walk for the new generation.
+      page.v2Conversation = { projectId: 'p1' };
+      await flush();
+      page.v2Conversation = null;
+      page.loadHubMembers();
+      await flush();
+      expect(userCall).toBe(2);
+
+      // The stale walk's page 1 lands with a cursor; it stops at that page
+      // boundary because its generation is superseded.
+      staleUsers.resolve(usersPage(['u-stale'], 'u-cursor'));
+      await flush();
+
+      // The fresh walk's own single page lands.
+      freshUsers.resolve(usersPage(['u-fresh']));
+      await flush();
+
+      expect(requestCounts()).toEqual({ users: 2, agents: 2 });
+      expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u-fresh']);
+      expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a-fresh']);
+    } finally {
+      document.body.removeChild(page);
+    }
+  });
+
+  it('a superseded walk stopping after a disconnect and reconnect does not make the fresh walk re-run or discard its result', async () => {
+    const staleUsers = deferred<Response>();
+    const freshUsers = deferred<Response>();
+    let userCall = 0;
+    let agentCall = 0;
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => {
+          userCall++;
+          if (userCall === 1) return staleUsers.promise;
+          if (userCall === 2) return freshUsers.promise;
+          return usersPage(['u-rerun']);
+        },
+        () => {
+          agentCall++;
+          if (agentCall === 1) return agentsPage(['a-stale']);
+          if (agentCall === 2) return agentsPage(['a-fresh']);
+          return agentsPage(['a-rerun']);
+        }
+      )
+    );
+
+    const page = mountPage();
+    await flush();
+
+    // Disconnect and reconnect: bumps the generation and starts a fresh walk.
+    document.body.removeChild(page);
+    document.body.appendChild(page);
+    await flush();
+
+    try {
+      expect(userCall).toBe(2);
+
+      staleUsers.resolve(usersPage(['u-stale'], 'u-cursor'));
+      await flush();
+
+      freshUsers.resolve(usersPage(['u-fresh']));
+      await flush();
+
+      expect(requestCounts()).toEqual({ users: 2, agents: 2 });
+      expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u-fresh']);
+      expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a-fresh']);
+    } finally {
+      document.body.removeChild(page);
+    }
+  });
+
+  it('a completed leg is not published from an attempt whose other leg stopped; the re-run publishes both', async () => {
+    // Same one-batch open+close shape as the view-change race test above:
+    // the users leg stops before its second page, while the single-page
+    // agents leg completes within the same attempt.
+    const usersPage1 = deferred<Response>();
+    const rerunAgents = deferred<Response>();
+    let userCall = 0;
+    let agentCall = 0;
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => {
+          userCall++;
+          return userCall === 1 ? usersPage1.promise : usersPage(['u1', 'u2']);
+        },
+        () => {
+          agentCall++;
+          return agentCall === 1 ? agentsPage(['a-first']) : rerunAgents.promise;
+        }
+      )
+    );
+
+    const page = mountPage();
+    await flush();
+
+    try {
+      usersPage1.resolve(usersPage(['u1'], 'u-cursor'));
+      for (let i = 0; i < 3; i++) {
+        await Promise.resolve();
+      }
+      queueMicrotask(() => {
+        page.v2Conversation = null;
+        page.loadHubMembers();
+      });
+      page.v2Conversation = { projectId: 'p1', conversationKey: 'p1', isDM: false };
+      await flush();
+
+      // The attempt with the stopped users leg has settled and the re-run's
+      // agents request is held: nothing from the stopped attempt, including
+      // its completed agents leg, has been published.
+      expect(agentCall).toBe(2);
+      expect(page.v2HumanMembers).toEqual([]);
+      expect(page.v2AgentMembers).toEqual([]);
+
+      rerunAgents.resolve(agentsPage(['a2']));
+      await flush();
+
+      expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u1', 'u2']);
+      expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a2']);
+      expect(requestCounts()).toEqual({ users: 2, agents: 2 });
+    } finally {
+      document.body.removeChild(page);
+    }
+  });
+});
+
+describe('loadHubMembers request counts per trigger', () => {
+  /**
+   * Both lists have two pages: a request without a cursor returns page 1
+   * (with a cursor), a request with a cursor returns the final page 2. The
+   * first users request can be held so a trigger can land mid-walk; it is
+   * later resolved as a page 1 carrying a cursor.
+   */
+  function twoPageResponder(
+    holdFirstUsers?: Deferred<Response>
+  ): (url: string) => Promise<Response> {
+    let userCall = 0;
+    return routeByPath(
+      (url) => {
+        userCall++;
+        if (userCall === 1 && holdFirstUsers) return holdFirstUsers.promise;
+        return url.includes('cursor=') ? usersPage(['u2']) : usersPage(['u1'], 'u-cursor');
+      },
+      (url) => (url.includes('cursor=') ? agentsPage(['a2']) : agentsPage(['a1'], 'a-cursor'))
+    );
+  }
+
+  const cases: Array<{
+    trigger: string;
+    run: (held: Deferred<Response>) => Promise<any>;
+    users: number;
+    agents: number;
+  }> = [
+    {
+      trigger: 'cold mount',
+      run: async (held) => {
+        const page = mountPage();
+        await flush();
+        held.resolve(usersPage(['u1'], 'u-cursor'));
+        await flush();
+        return page;
+      },
+      // One walk: two pages of each list.
+      users: 2,
+      agents: 2,
+    },
+    {
+      trigger: 'open a conversation, then return to /chat mid-walk (separate update batches)',
+      run: async (held) => {
+        const page = mountPage();
+        await flush();
+        page.v2Conversation = { projectId: 'p1' };
+        await flush();
+        page.v2Conversation = null;
+        page.loadHubMembers();
+        await flush();
+        held.resolve(usersPage(['u-stale'], 'u-cursor'));
+        await flush();
+        return page;
+      },
+      // Superseded walk: users page 1 only (stopped), agents both pages
+      // (completed before the conversation opened). Fresh walk: 2 + 2.
+      users: 3,
+      agents: 4,
+    },
+    {
+      trigger: 'open and close a conversation within one update batch mid-walk',
+      run: async (held) => {
+        const page = mountPage();
+        await flush();
+        held.resolve(usersPage(['u-stale'], 'u-cursor'));
+        for (let i = 0; i < 3; i++) {
+          await Promise.resolve();
+        }
+        queueMicrotask(() => {
+          page.v2Conversation = null;
+          page.loadHubMembers();
+        });
+        page.v2Conversation = { projectId: 'p1', conversationKey: 'p1', isDM: false };
+        await flush();
+        return page;
+      },
+      // Stopped attempt: users page 1 only, agents both pages. Re-run: 2 + 2.
+      users: 3,
+      agents: 4,
+    },
+    {
+      trigger: 'disconnect and reconnect mid-walk',
+      run: async (held) => {
+        const page = mountPage();
+        await flush();
+        document.body.removeChild(page);
+        document.body.appendChild(page);
+        await flush();
+        held.resolve(usersPage(['u-stale'], 'u-cursor'));
+        await flush();
+        return page;
+      },
+      // Superseded walk: users page 1 only, agents both pages. Fresh walk: 2 + 2.
+      users: 3,
+      agents: 4,
+    },
+    {
+      trigger: 'fallback poll (three refresh calls) mid-walk',
+      run: async (held) => {
+        const page = mountPage();
+        await flush();
+        page.loadHubMembers({ refresh: true });
+        page.loadHubMembers({ refresh: true });
+        page.loadHubMembers({ refresh: true });
+        held.resolve(usersPage(['u1'], 'u-cursor'));
+        await flush();
+        return page;
+      },
+      // The walk plus exactly one trailing walk: 2 + 2 of each list.
+      users: 4,
+      agents: 4,
+    },
+  ];
+
+  for (const c of cases) {
+    it(`${c.trigger}: ${c.users} users and ${c.agents} agents requests, full lists published`, async () => {
+      const held = deferred<Response>();
+      vi.mocked(apiFetch).mockImplementation(twoPageResponder(held));
+      const page = await c.run(held);
+      try {
+        expect(requestCounts()).toEqual({ users: c.users, agents: c.agents });
+        expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u1', 'u2']);
+        expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a1', 'a2']);
+      } finally {
+        if (page.isConnected) document.body.removeChild(page);
+      }
+    });
+  }
 });

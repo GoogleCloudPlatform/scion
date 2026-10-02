@@ -359,26 +359,6 @@ export class ScionPageChat extends LitElement {
   private _hubMembersInFlightGeneration = 0;
   private _hubMembersReloadQueued = false;
   /**
-   * Set by {@link _fetchHubMembersOnce} when either leg of the current
-   * walk's attempt stopped early via `shouldContinue` (a
-   * {@link PaginationStoppedError}, not a request failure) rather than
-   * running to completion. `_runHubMembersLoad`'s loop treats this the same
-   * as a queued refresh: it re-runs the walk once more instead of leaving a
-   * caller that joined this walk with no complete result to show.
-   *
-   * This exists because `v2Conversation` opening and closing again — or the
-   * element disconnecting and reconnecting — within a single Lit update
-   * batch retires a walk's leg (via the live `this.v2Conversation`/
-   * generation reads `shouldContinue` makes) without `updated()` ever
-   * bumping {@link _hubMembersGeneration}, since `updated()` only sees the
-   * batch's *final* value. A join arriving in that window would otherwise
-   * see the same (unbumped) generation and assume the in-flight walk will
-   * publish a usable result for it, when that walk's stopped leg can now
-   * never be published (see {@link PaginationStoppedError}) — re-running
-   * closes that gap without depending on the generation ever having bumped.
-   */
-  private _hubMembersInFlightStopped = false;
-  /**
    * Bumped on `disconnectedCallback` (same pattern as `_unreadDMRequestId`
    * below) and whenever `v2Conversation` is assigned a truthy value (see
    * `updated()`'s `v2Conversation` branch) — both retire any hub-members
@@ -401,8 +381,9 @@ export class ScionPageChat extends LitElement {
    * batch of `v2Conversation` writes to be truthy — a batch that opens and
    * closes a conversation again before `updated()` runs reads clear there
    * and is not bumped. That gap is covered separately, and robustly against
-   * however Lit happens to batch the writes, by
-   * {@link _hubMembersInFlightStopped} rather than by this generation.
+   * however Lit happens to batch the writes, by the per-attempt stopped
+   * result {@link _fetchHubMembersOnce} returns rather than by this
+   * generation.
    */
   private _hubMembersGeneration = 0;
   private _onDMPromoted = this.handleDMPromoted.bind(this);
@@ -1201,7 +1182,7 @@ export class ScionPageChat extends LitElement {
     }
     // A message arriving in the conversation already on screen should not
     // also pop a desktop notification about it. Reported from updated()
-    // rather than from each of the twenty places v2Conversation is assigned.
+    // rather than from each of the many places v2Conversation is assigned.
     if (changedProperties.has('v2Conversation')) {
       chatNotifications.setActiveConversation(this.v2Conversation?.conversationKey ?? null);
 
@@ -1218,7 +1199,7 @@ export class ScionPageChat extends LitElement {
       // (racy) current value of v2Conversation at publish time — see
       // _hubMembersGeneration's doc comment. Reported from updated(), the
       // same centralized spot as the notification handling above, rather
-      // than from each of the twenty places v2Conversation is assigned.
+      // than from each of the many places v2Conversation is assigned.
       if (this.v2Conversation) {
         ++this._hubMembersGeneration;
       }
@@ -2339,12 +2320,6 @@ export class ScionPageChat extends LitElement {
    * load — passes `{ refresh: true }` to queue a trailing walk when one is
    * already running.
    *
-   * A join also forces the trailing walk `{ refresh: true }` would, if
-   * `_hubMembersInFlightStopped` says the walk it would otherwise just join
-   * already had a leg stop early this attempt — see that field's doc
-   * comment. Without this, a join landing in that window would wait on a
-   * walk that can now never publish a usable result for it.
-   *
    * The generation is captured here, at schedule time, rather than read
    * fresh by `_runHubMembersLoad` once its `queueMicrotask` callback
    * actually runs — a call that schedules the walk and is then followed by
@@ -2352,12 +2327,19 @@ export class ScionPageChat extends LitElement {
    * its walk start under the *post-disconnect* generation (read late,
    * inside the callback) instead of the one active when it was requested,
    * defeating the disconnect's own invalidation.
+   *
+   * A consequence of that capture: a further synchronous call landing after
+   * such a disconnect, in the same microtask drain and before the scheduled
+   * callback runs, coalesces into the walk already scheduled (captured with
+   * the pre-disconnect generation) and is therefore dropped along with it.
+   * The reconnect path reaches this method only after `initV2` awaits its
+   * lazy imports, so it cannot land in that window as the code stands.
    */
   private loadHubMembers(options?: { refresh?: boolean }): void {
     const inFlightForThisGeneration =
       this._hubMembersInFlight && this._hubMembersInFlightGeneration === this._hubMembersGeneration;
     if (inFlightForThisGeneration) {
-      if (options?.refresh || this._hubMembersInFlightStopped) this._hubMembersReloadQueued = true;
+      if (options?.refresh) this._hubMembersReloadQueued = true;
       return;
     }
     if (this._hubMembersScheduled) return;
@@ -2386,7 +2368,7 @@ export class ScionPageChat extends LitElement {
    * from under the fresh walk the reconnect started.
    *
    * Also re-runs, the same as a queued refresh, when
-   * `_fetchHubMembersOnce` reports that one of this attempt's legs stopped
+   * `_fetchHubMembersOnce` returns true — one of this attempt's legs stopped
    * early rather than completing — that attempt's result is never published
    * (see {@link PaginationStoppedError}), so without a re-run here nothing
    * would publish a usable list for however many callers joined this walk.
@@ -2401,12 +2383,12 @@ export class ScionPageChat extends LitElement {
     this._hubMembersInFlight = true;
     this._hubMembersInFlightGeneration = generation;
     try {
+      let stopped: boolean;
       do {
         this._hubMembersReloadQueued = false;
-        this._hubMembersInFlightStopped = false;
-        await this._fetchHubMembersOnce(generation);
+        stopped = await this._fetchHubMembersOnce(generation);
       } while (
-        (this._hubMembersReloadQueued || this._hubMembersInFlightStopped) &&
+        (this._hubMembersReloadQueued || stopped) &&
         generation === this._hubMembersGeneration &&
         !this.v2Conversation
       );
@@ -2420,9 +2402,9 @@ export class ScionPageChat extends LitElement {
   /**
    * One full users+agents walk. Publishes each list only once its own walk
    * completes, and only on success — a failed walk (any page) leaves that
-   * list exactly as it was, per today's no-blank-on-error behaviour, while
-   * the other list (fetched in parallel, same as before) still updates on
-   * its own success. Mirrors the original method's blanket try/catch: an
+   * list exactly as it was, so the sidebar never blanks on error, while
+   * the other list (fetched in parallel) still updates on its own success.
+   * A blanket try/catch wraps the publish: an
    * unexpected failure anywhere in the assignment below (not just a rejected
    * walk) leaves both lists exactly as they were rather than throwing out of
    * this `queueMicrotask`-scheduled call, where nothing would catch it.
@@ -2463,19 +2445,26 @@ export class ScionPageChat extends LitElement {
    * conversation was open. A leg stopped that way rejects with
    * {@link PaginationStoppedError} rather than resolving with its partial
    * result, so the `status === 'fulfilled'` checks below already can't
-   * publish *that* leg — but the guard below also bails out of publishing
-   * the *other*, otherwise-successful leg once `_hubMembersInFlightStopped`
-   * is set. Without that, a single-page leg whose own `shouldContinue` check
-   * ran (and passed) before the conversation opened would complete normally
-   * and publish once this method's `Promise.allSettled` finally resolves,
-   * even though it raced the same now-defunct attempt as the stopped leg —
-   * a transient, if self-correcting, publish of stale data into a view that
-   * does not belong to this attempt. `_hubMembersInFlightStopped` (set
-   * unconditionally below, before either guard, from this attempt's results)
-   * also records that this attempt needs a re-run regardless of which guard
-   * below does or doesn't fire.
+   * publish *that* leg.
+   *
+   * The guard below also skips publishing the *other* leg when this
+   * attempt had a stopped leg. That leg (for example a single-page one whose
+   * only `shouldContinue` check passed before the conversation opened) did
+   * complete, and its data is for the hub view that is still on screen —
+   * but this attempt is going to be re-run regardless, and the re-run
+   * publishes both lists. Publishing the completed leg now would only
+   * publish that list twice, once from this abandoned attempt and once from
+   * the re-run, with the two lists in between coming from different
+   * attempts. Skipping it keeps each publish to a single attempt in which
+   * both legs ran to their end (completed or failed).
+   *
+   * Returns whether either leg stopped early via `shouldContinue`, computed
+   * from this attempt's own results only. {@link _runHubMembersLoad} uses it
+   * to decide whether to re-run. It is a per-attempt value rather than
+   * shared state, so a superseded walk stopping at a page boundary cannot
+   * affect the decisions of a fresh walk running for the current generation.
    */
-  private async _fetchHubMembersOnce(generation: number): Promise<void> {
+  private async _fetchHubMembersOnce(generation: number): Promise<boolean> {
     const shouldContinue = (): boolean =>
       !this.v2Conversation && generation === this._hubMembersGeneration;
     const [usersResult, agentsResult] = await Promise.allSettled([
@@ -2495,25 +2484,16 @@ export class ScionPageChat extends LitElement {
       }),
     ]);
 
-    // Recorded unconditionally, before either guard below, so a stop is
-    // never missed regardless of which guard (if any) goes on to return
-    // early — see this method's doc comment.
-    const stopped = (r: PromiseSettledResult<unknown>): boolean =>
+    const isStopped = (r: PromiseSettledResult<unknown>): boolean =>
       r.status === 'rejected' && r.reason instanceof PaginationStoppedError;
-    if (stopped(usersResult) || stopped(agentsResult)) {
-      this._hubMembersInFlightStopped = true;
-    }
+    const stopped = isStopped(usersResult) || isStopped(agentsResult);
 
     try {
       // The hub view this walk is for may no longer be on screen by the time
       // it finishes, or this attempt had a leg stop early and will be
       // re-run — see the doc comment above.
-      if (
-        this.v2Conversation ||
-        generation !== this._hubMembersGeneration ||
-        this._hubMembersInFlightStopped
-      ) {
-        return;
+      if (this.v2Conversation || generation !== this._hubMembersGeneration || stopped) {
+        return stopped;
       }
 
       if (usersResult.status === 'fulfilled') {
@@ -2572,7 +2552,7 @@ export class ScionPageChat extends LitElement {
 
       // Also populate legacy v2Members for thread @-mention support — rebuilt
       // from whatever the current v2HumanMembers/v2AgentMembers are, so a
-      // partial failure above (old list kept) is reflected here too.
+      // partial failure above (existing list kept) is reflected here too.
       this.v2Members = [
         ...this.v2HumanMembers.map((h) => ({
           id: h.id,
@@ -2591,6 +2571,7 @@ export class ScionPageChat extends LitElement {
     } catch {
       // Non-critical — sidebar keeps whatever it already had.
     }
+    return stopped;
   }
 
   /**
