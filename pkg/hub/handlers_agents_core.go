@@ -950,18 +950,26 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, agent *store.Agent, ru
 		// Detaches from ctx and applies its own timeout internally.
 		revokeAgentCredentialsBestEffort(ctx, s.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 	}
+	// Each step's detached context is scoped to its own closure so its
+	// deferred cancel fires when that step ends, not when the whole cleanup
+	// does.
 	if deleteRuntime != nil {
-		rctx, cancel := detachedCleanupContext(ctx, createCleanupRuntimeTimeout)
-		if err := deleteRuntime(rctx); err != nil {
-			s.agentLifecycleLog.Warn("Create-failure cleanup: runtime delete failed", "agent_id", agent.ID, "error", err)
+		func() {
+			rctx, cancel := detachedCleanupContext(ctx, createCleanupRuntimeTimeout)
+			defer cancel()
+			if err := deleteRuntime(rctx); err != nil {
+				s.agentLifecycleLog.Warn("Create-failure cleanup: runtime delete failed", "agent_id", agent.ID, "error", err)
+			}
+		}()
+	}
+	func() {
+		sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
+		defer cancel()
+		if err := s.store.DeleteAgent(sctx, agent.ID); err != nil {
+			s.agentLifecycleLog.Warn("Create-failure cleanup: agent row delete failed", "agent_id", agent.ID, "error", err)
 		}
-		cancel()
-	}
-	sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
-	if err := s.store.DeleteAgent(sctx, agent.ID); err != nil {
-		s.agentLifecycleLog.Warn("Create-failure cleanup: agent row delete failed", "agent_id", agent.ID, "error", err)
-	}
-	cancel()
+	}()
+	// Detaches from ctx and applies its own timeout internally.
 	s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 }
 
