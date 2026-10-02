@@ -269,6 +269,39 @@ describe('paginateAll page timeout', () => {
     const err = await settled;
     expect(err).toBeInstanceOf(PaginationError);
     expect((err as Error).message).toBe('/api/v1/things page request timed out after 60000ms');
+    expect(vi.mocked(apiFetch).mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('rejects a walk stopped by shouldContinue before page 2 and leaves no pending timer', async () => {
+    vi.useFakeTimers();
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'a' }], nextCursor: 'c1' }))
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'b' }] }));
+
+    let pagesAllowed = 1;
+    const err = await paginateAll({
+      path: '/api/v1/things',
+      pageSize: 100,
+      parsePage,
+      pageTimeoutMs: 5000,
+      shouldContinue: () => pagesAllowed-- > 0,
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(PaginationStoppedError);
+    expect((err as PaginationStoppedError<Item>).items).toEqual([{ id: 'a' }]);
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('leaves no pending timer after a page body that is not an object', async () => {
+    vi.useFakeTimers();
+    vi.mocked(apiFetch).mockResolvedValueOnce(jsonResponse(['not', 'an', 'object']));
+
+    await expect(
+      paginateAll({ path: '/api/v1/things', pageSize: 100, parsePage, label: 'things list' })
+    ).rejects.toThrow('things list response body was not an object');
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('completes a normal multi-page walk and leaves no pending timer', async () => {
