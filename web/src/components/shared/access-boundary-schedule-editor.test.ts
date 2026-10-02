@@ -86,7 +86,7 @@ describe('scion-access-boundary-schedule-editor — late zone arrival (review R4
   // (simulating a slow /auth/me resolving after first render, review R3-1),
   // then the user edits ONLY the expiration field. The untouched
   // `notBefore` must still round-trip to its original instant.
-  it('does not shift an untouched field\'s instant after a late zone change and an edit to the other field', async () => {
+  it("does not shift an untouched field's instant after a late zone change and an edit to the other field", async () => {
     const el = await mount({
       notBefore: '2026-09-23T15:00:00.000Z',
       expiresAt: '2026-09-30T15:00:00.000Z',
@@ -208,5 +208,58 @@ describe('scion-access-boundary-schedule-editor — zone change while detached (
 
     expect(displayedValue(notBeforeInput(el))).toBe('2026-09-24T00:00');
     expect(label(el)).toContain('Asia/Tokyo');
+  });
+});
+
+// Review round 6, R6-1: a regression in the R5-1 fix. connectedCallback
+// marked _renderedZone as the current zone unconditionally, but only
+// re-derived a cached string when its *backing prop* was set. A string with
+// no backing prop (typed into an uncontrolled instance, with no host to
+// round-trip it back through a prop) was left holding old-zone text while
+// the tracker claimed it was already current-zone — so it was never
+// rebased, and the next emit parsed it in the wrong zone.
+describe('scion-access-boundary-schedule-editor — retained typed value with no backing prop across a detach (review R6-1)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    setPreferredTimeZone('');
+  });
+
+  it('rebases a typed value with no backing prop before marking the tracker current, across a detach/reconnect', async () => {
+    // notBefore has a backing prop; expiresAt does not — simulating an
+    // uncontrolled instance (no host listening on `schedule-change` to
+    // round-trip the typed value back through the `expiresAt` prop).
+    const el = await mount({ notBefore: '2026-09-23T15:00:00.000Z' });
+
+    const expiresInput = expiresAtInput(el);
+    (expiresInput as unknown as { value: string }).value = '2026-10-01T09:00';
+    expiresInput.dispatchEvent(new Event('sl-input'));
+    await el.updateComplete;
+    expect(displayedValue(expiresInput)).toBe('2026-10-01T09:00');
+
+    el.remove();
+    setPreferredTimeZone('Asia/Tokyo');
+    document.body.appendChild(el); // reconnect — re-runs connectedCallback
+    await el.updateComplete;
+
+    // The untouched-by-props expiresAt must be rebased into the new zone
+    // too, same as the prop-backed notBefore is.
+    expect(displayedValue(notBeforeInput(el))).toBe('2026-09-24T00:00');
+    expect(displayedValue(expiresAtInput(el))).toBe('2026-10-01T18:00');
+    expect(label(el)).toContain('Asia/Tokyo');
+
+    // Editing the (prop-backed) sibling field must emit the *rebased*
+    // expiresAt instant, not the one its stale wall-clock text would give
+    // if parsed in the new zone without ever having been rebased.
+    let detail: ScheduleChangeDetail | null = null;
+    el.addEventListener('schedule-change', (e) => {
+      detail = (e as CustomEvent<ScheduleChangeDetail>).detail;
+    });
+    const notBeforeInputEl = notBeforeInput(el);
+    (notBeforeInputEl as unknown as { value: string }).value = '2026-09-24T00:00';
+    notBeforeInputEl.dispatchEvent(new Event('sl-input'));
+    await el.updateComplete;
+
+    expect(detail).not.toBeNull();
+    expect(detail!.expiresAt).toBe('2026-10-01T09:00:00.000Z');
   });
 });

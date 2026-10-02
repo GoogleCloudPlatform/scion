@@ -168,14 +168,20 @@ export function listTimeZones(): string[] {
 // re-derive each cached string from the instant it represents — round-trip
 // it through the *previous* zone back to an ISO instant, then back to a
 // wall-clock string in the *new* zone — in `willUpdate`, not just call
-// `requestUpdate()`. See `access-boundary-schedule-editor.ts`'s `willUpdate`
-// for the reference implementation. Track the zone those strings were
-// derived in, and update it everywhere you (re)derive them from an instant
-// (e.g. `connectedCallback`, a prop-change handler), not only in
-// `willUpdate` (review R5-1) — otherwise a zone change while the component
-// is detached, or before it is ever connected, is applied twice once it
-// reconnects: `willUpdate` compares against a zone that is now stale on
-// both sides.
+// `requestUpdate()`. See `access-boundary-schedule-editor.ts`'s
+// `rebaseCachedStrings` for the reference implementation. Track the zone
+// those strings were derived in, and keep that tracked zone in sync at
+// *every* lifecycle point that touches the cached strings (`willUpdate`,
+// `connectedCallback`, a prop-change handler, ...) — not just `willUpdate`
+// (review R5-1) — by always doing the same two things together, not one
+// without the other (review R6-1): first round-trip any string you are
+// *keeping* from the tracked zone to the current one, then (re)derive the
+// rest from their instants, and only then record the current zone as
+// tracked. A lifecycle point that updates the tracked zone without also
+// rebasing a string it leaves untouched — e.g. a retained, uncommitted
+// typed value with no backing prop — marks that string as already current
+// without converting it, which silently corrupts it on the very next zone
+// change.
 // ---------------------------------------------------------------------------
 
 /** The user's `preferences.timezone`, or `''` for Auto. */
@@ -420,7 +426,14 @@ function utcMsFromFields(
 }
 
 function utcMsFromParts(parts: WallClockParts): number {
-  return utcMsFromFields(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return utcMsFromFields(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second
+  );
 }
 
 /**

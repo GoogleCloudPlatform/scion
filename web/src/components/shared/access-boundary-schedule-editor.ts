@@ -72,17 +72,13 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    // Record the zone the strings below are about to be (re-)derived in —
-    // every time this method runs, not just once at construction (review
-    // R5-1). `DisplayZoneController`'s listener is only active while
-    // connected, so a zone change while this editor was detached, or
-    // before it was ever connected, is invisible to `willUpdate` until
-    // reconnection. Without this line, `_renderedZone` would still hold
-    // the zone captured at construction, and `willUpdate`'s first
-    // post-reconnect pass would treat the strings this method is about to
-    // populate in the *current* zone as if they were still in that stale
-    // zone — shifting them a second time.
-    this._renderedZone = this.viewerTimeZone;
+    // Rebase whatever is already cached (review R6-1) *before* overwriting
+    // from props below — see `rebaseCachedStrings`'s doc comment for why a
+    // bare `_renderedZone = this.viewerTimeZone` assignment here (R5-1's
+    // original fix) was wrong: it marked a retained, not-about-to-be-
+    // overwritten string (one with no backing prop) as already being in
+    // the current zone without actually converting it.
+    this.rebaseCachedStrings();
     // Initialize local fields from props
     if (this.notBefore || this.expiresAt) {
       this.hasSchedule = true;
@@ -97,27 +93,45 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
 
   /**
    * Re-derives the cached `datetime-local` strings when the effective zone
-   * changes between updates (review R4-1).
-   *
-   * `notBeforeLocal`/`expiresAtLocal` are wall-clock strings cached in
-   * state — populated from the `notBefore`/`expiresAt` ISO props at mount,
-   * then overwritten directly by the user typing into the fields. Neither
-   * path re-runs when the zone later changes (e.g. a slow `/auth/me`
-   * resolving after this component already rendered, review R3-1), so
-   * without this, the *displayed* strings stay in the old zone while
-   * `localDatetimeToIso`/`emitChange` parse them in the *new* one on the
-   * next edit — silently shifting the instant of a field the user never
-   * touched, and interpreting a field they are actively editing under a
-   * zone label that no longer matches.
-   *
-   * The fix re-parses each non-empty cached string in the *previous* zone
-   * (recovering the instant it represented) and re-formats that instant in
-   * the *new* zone — a round trip that leaves the instant unchanged and
-   * only changes its displayed representation, for both an untouched field
-   * and one with an uncommitted edit in progress.
+   * changes between updates (review R4-1). See `rebaseCachedStrings` for
+   * what this actually does; `willUpdate` is just one of its two call
+   * sites (`connectedCallback` is the other, review R6-1).
    */
   override willUpdate(changed: PropertyValues<this>): void {
     super.willUpdate(changed);
+    this.rebaseCachedStrings();
+  }
+
+  /**
+   * Keeps `notBeforeLocal`/`expiresAtLocal` — wall-clock strings cached in
+   * state, populated from the `notBefore`/`expiresAt` ISO props at connect
+   * and then overwritten directly by the user typing into the fields —
+   * valid against whatever the effective zone is *right now*, by rebasing
+   * each one still in `_renderedZone` the moment that tracker is about to
+   * move on. Called from both `willUpdate` (a zone change while mounted)
+   * and `connectedCallback` (one while detached, or before the first
+   * connection — review R5-1).
+   *
+   * **Why "rebase what you keep" must come before "overwrite from props",
+   * not just "update the tracker along with whatever you overwrite"
+   * (review R6-1).** `connectedCallback`'s R5-1 fix set `_renderedZone` to
+   * the current zone unconditionally, then re-derived only the strings
+   * whose prop was actually set. A string with **no** backing prop — a
+   * value typed into an uncontrolled instance of this editor, still
+   * present across a detach/reconnect — was left holding old-zone text
+   * while the tracker now claimed it was already current-zone. From then
+   * on `willUpdate` saw `zone === _renderedZone` and never rebased it, so
+   * `emitChange` parsed stale wall-clock text in the wrong zone — a wrong
+   * instant, not just a display glitch. Folding the rebase into one method
+   * that both call sites invoke *before* anything else touches
+   * `_renderedZone` means every cached string is always either rebased
+   * (kept) or re-derived from an instant (overwritten) before the tracker
+   * moves on — never silently relabelled.
+   *
+   * No-op if the zone hasn't changed since the last call, so calling it
+   * unconditionally from both lifecycle points is cheap and idempotent.
+   */
+  private rebaseCachedStrings(): void {
     const zone = this.viewerTimeZone;
     if (zone === this._renderedZone) return;
     const previousZone = this._renderedZone;
