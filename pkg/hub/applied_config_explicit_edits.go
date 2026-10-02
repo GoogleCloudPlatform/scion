@@ -216,25 +216,66 @@ func thinkingLevelEqual(a, b *int) bool {
 	return *a == *b
 }
 
+// autoExposeEnvKeys mirrors AUTO_EXPOSE_ENV_KEYS in agent-configure.ts: the
+// four env keys the dedicated auto-expose UI controls own. populateForm
+// reads these per key with InlineConfig.Env taking precedence over
+// AppliedConfig.Env (R4-2) -- the OPPOSITE precedence from every other env
+// key, which the page reads from AppliedConfig.Env first and falls back to
+// InlineConfig.Env only when AppliedConfig.Env is entirely empty. See
+// pageVisibleEnvValue, which this diff-baseline precedence mirrors
+// (ptone/scion#2493 R6-1).
+var autoExposeEnvKeys = map[string]bool{
+	"SCION_AUTO_EXPOSE_PORTS":      true,
+	"SCION_AUTO_EXPOSE_MODE":       true,
+	"SCION_AUTO_EXPOSE_PORTS_LIST": true,
+	"SCION_AUTO_EXPOSE_INTERVAL":   true,
+}
+
+// pageVisibleEnvValue returns the value (and whether one exists at all)
+// that agent-configure.ts's populateForm would have read for env key k,
+// given the live AppliedConfig.Env (oldEnv) and InlineConfig.Env
+// (oldInlineEnv) -- the same two maps diffExplicitEnvKeys' caller already
+// has. The rule of thumb this and diffExplicitEnvKeys exist to uphold: a
+// diff's baseline must always equal whatever the page actually read the
+// value from (R5-1's framing, sharpened by R6-1).
+//
+// Two different precedence orders apply, because the page itself reads env
+// two different ways:
+//   - The four autoExposeEnvKeys are read per key by the dedicated
+//     auto-expose controls, with InlineConfig.Env winning (R4-2) --
+//     resolveDerivedConfig's project/hub auto-expose default is stamped
+//     into InlineConfig.Env only, and the controls must show it even when
+//     AppliedConfig.Env happens to hold a different value for the same key
+//     (e.g. a template's own env, merged into AppliedConfig.Env only).
+//   - Every other key is read by the custom env-row editor as a whole map,
+//     ac.env || ic.env: AppliedConfig.Env wins outright whenever it is
+//     non-empty, and InlineConfig.Env is consulted per key only as a
+//     fallback for a key AppliedConfig.Env doesn't have at all (R5-1) --
+//     this is not a literal model of "ac.env entirely, else ic.env
+//     entirely" (reproducing that exactly would need the full key sets, not
+//     a per-key decision), but it gives the identical answer for every key
+//     ac.env actually holds, which is the only case the page's own
+//     all-or-nothing read can ever disagree with a naive oldEnv-only
+//     baseline about.
+func pageVisibleEnvValue(k string, oldEnv, oldInlineEnv map[string]string) (string, bool) {
+	first, second := oldEnv, oldInlineEnv
+	if autoExposeEnvKeys[k] {
+		first, second = oldInlineEnv, oldEnv
+	}
+	if v, ok := first[k]; ok {
+		return v, true
+	}
+	v, ok := second[k]
+	return v, ok
+}
+
 // diffExplicitEnvKeys compares a request's env map against the live env it
 // would replace, per §5 of ptone/scion#2493's options.md, as refined by
-// review round 5 (R5-1): added returns every key in newEnv that is missing
-// from, or whose value differs from, the PAGE-VISIBLE baseline for that key
-// -- oldEnv[k] (AppliedConfig.Env) when present there, else
-// oldInlineEnv[k] (AppliedConfig.InlineConfig.Env) when oldEnv lacks it.
-//
-// The fallback to oldInlineEnv exists because some env keys are stamped by
-// resolveDerivedConfig into InlineConfig.Env ONLY -- never mirrored into
-// AppliedConfig.Env -- most notably the project/hub SCION_AUTO_EXPOSE_PORTS
-// default (handlers_agent_create_helpers.go). agent-configure.ts's
-// populateForm reads the auto-expose controls from a per-key merge of both
-// maps (R4-2) specifically so the page can display that stamp, and
-// buildConfig re-sends it verbatim whenever env is sent for any other
-// reason (R2-1's "re-send the loaded auto-expose keys" rule). Comparing that
-// echo against oldEnv alone -- which never had the key -- misread it as an
-// "added" key and froze a project/hub default into CreateInputs as if the
-// user had typed it (R5-1). The rule of thumb: this function's baseline
-// must always equal whatever the page actually read the value from.
+// review rounds 5 and 6 (R5-1, R6-1): added returns every key in newEnv
+// that is missing from, or whose value differs from, pageVisibleEnvValue's
+// answer for that key -- the value (if any) the configure page would
+// actually have loaded and therefore could legitimately echo back
+// unedited.
 //
 // removed returns every key oldEnv has that newEnv does not, EXCEPT
 // GITHUB_TOKEN, which is never reported as removed: store.AgentAppliedConfig's
@@ -243,13 +284,14 @@ func thinkingLevelEqual(a, b *int) bool {
 // client can ever legitimately echo it back -- its absence from a request is
 // therefore never evidence that the user removed it, only that the response
 // never contained it to begin with. removed is deliberately NOT given the
-// oldInlineEnv fallback: every removal candidate must already be absent from
-// oldEnv to be considered at all, and oldEnv is also the map the live write
-// (`agent.AppliedConfig.Env = cfg.Env`) actually replaces, so it is already
-// the correct single baseline for "did the user delete this".
+// oldInlineEnv fallback and does not use pageVisibleEnvValue: every removal
+// candidate must already be absent from oldEnv to be considered at all, and
+// oldEnv is also the map the live write (`agent.AppliedConfig.Env =
+// cfg.Env`) actually replaces, so it is already the correct single baseline
+// for "did the user delete this" -- unaffected by either round's fix.
 //
-// A key present in both with an unchanged value (by either baseline)
-// appears in neither return.
+// A key present in both maps with an unchanged page-visible value appears
+// in neither return.
 //
 // Deliberately separate from reincarnate_config.go's diffEnvKeys, which
 // compares key names only (never values, since it feeds a user-facing plan
@@ -258,17 +300,8 @@ func thinkingLevelEqual(a, b *int) bool {
 // edited one.
 func diffExplicitEnvKeys(oldEnv, oldInlineEnv, newEnv map[string]string) (added map[string]string, removed []string) {
 	for k, v := range newEnv {
-		if oldV, ok := oldEnv[k]; ok {
-			if oldV != v {
-				if added == nil {
-					added = make(map[string]string)
-				}
-				added[k] = v
-			}
+		if b, ok := pageVisibleEnvValue(k, oldEnv, oldInlineEnv); ok && b == v {
 			continue
-		}
-		if oldInlineV, ok := oldInlineEnv[k]; ok && oldInlineV == v {
-			continue // page-visible via InlineConfig.Env only; echoed verbatim, not an edit
 		}
 		if added == nil {
 			added = make(map[string]string)
