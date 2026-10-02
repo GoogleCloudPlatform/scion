@@ -124,20 +124,55 @@ than the startup migration backfill — so a distinct bug, not the
 baseline, and per dev-common.md's "any Kathmandu failure that is NOT
 this baseline error is yours to fix," in scope here.
 
-Fixed (commit `fb3fe12`) by routing both harnesses through
+First fix (commit `fb3fe12`) routed both harnesses through
 `entc.OpenSQLite`. Their hand-rolled `_journal_mode=WAL&_busy_timeout=5000`
 DSN query params were never modernc-recognised keys (modernc only reads
 `_dqs`, `_error_rc`, `_pragma`, `_time_format`, `_time_integer_format`,
 `_timezone`, `_txlock`, `_inttotime`, `_texttotime`), so they were
-already no-ops — `entc.OpenSQLite`'s explicit `PRAGMA foreign_keys`/
-`PRAGMA journal_mode = WAL` calls replace them with something that
-actually works, in addition to adding `_timezone=UTC` and the hook.
-Confirmed no other `pkg/hub` test file wraps a raw `sql.Open` in an
-`ent.Client` — grepped every other `sql.Open(` site in `pkg/hub/*_test.go`
-(about 20 files); all are the raw `webchat_*` stores, task #3 (U2b)
-territory, untouched. All 15 tests pass individually after the fix
-(`go test -p 2 -count=1 -timeout 120s -v -run <names>` under
-`TZ=Asia/Kathmandu`).
+already no-ops.
+
+That broke fork CI's "Build & Test" job (`make test-fast`, i.e. `go test
+-tags no_sqlite`; caught via `gh run view 36942107974 --job
+110635763894 --log-failed`): `ge_exchange_signin_policy_test.go` carries
+a `//go:build !no_sqlite` constraint, so it's unaffected, but
+`ge_exchange_test.go` has no build tag and is compiled under
+`no_sqlite` too. Several unrelated `webchat_*` test files in the same
+package import `mattn/go-sqlite3` without a build-tag guard, registering
+the cgo `"sqlite3"` driver even when modernc is excluded. So
+`ge_exchange_test.go`'s own runtime check (`sqliteDriverName()`, which
+just looks for *any* registered SQLite driver) found `"sqlite3"` and let
+the test proceed instead of skipping, straight into `entc.OpenSQLite`'s
+hardcoded `sql.Open("sqlite", ...)` — `"sqlite"` (modernc) isn't linked
+under `no_sqlite`, so: `sql: unknown driver "sqlite" (forgotten
+import?)`.
+
+Corrected (commit `35c9516`): `ge_exchange_test.go`'s
+`newPersistentTestExchangeService` reverts to the flexible
+`sql.Open(driverName, dsn)` that adapts to whichever driver the build
+actually links, and instead registers the hook directly —
+`client.Use(entc.UTCTimeHook)` — which required exporting
+`utcTimeHook` as `entc.UTCTimeHook`. The hook alone is sufficient for
+this fix: it converts a mutation's `time.Time` to UTC *before* the SQL
+driver ever formats it for binding, so the resulting text is canonical
+regardless of the connection's own timezone handling (modernc's
+`formatTime` only adjusts a bound value's location when `_timezone` is
+set — `conn.go:207-211`,`219-221` — so an already-`.UTC()`-converted
+value formats as canonical `"... +0000 UTC"` either way).
+`ge_exchange_signin_policy_test.go` is untouched by this correction;
+its build tag guarantees modernc is always linked when it compiles, so
+`entc.OpenSQLite` was never wrong there.
+
+Verified: `go build -buildvcs=false -p 2 ./...`; `go test -tags
+no_sqlite -p 2 -count=1 ./pkg/hub/...` (reproduces and then passes the
+CI failure, including `TestGEExchange_ConcurrentFirstLinkage_PersistentStore`
+specifically, confirmed actually running via `-v`, not silently
+skipped); all 15 originally-failing tests still pass individually under
+`TZ=Asia/Kathmandu`; `gofmt -l` clean on both changed files;
+`golangci-lint run --new-from-rev=upstream/main --concurrency=1
+./pkg/ent/entc/... ./pkg/hub/...` — 0 issues. Confirmed no other
+`pkg/hub` test file wraps a raw `sql.Open` in an `ent.Client` — grepped
+every other `sql.Open(` site in `pkg/hub/*_test.go` (about 20 files);
+all are the raw `webchat_*` stores, task #3 (U2b) territory, untouched.
 
 ## Decided: no change at the other predicate sites (tz-lead ruling, 2026-10-01)
 
