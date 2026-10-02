@@ -262,22 +262,6 @@ func (s *Server) memberListCapabilities(ctx context.Context, projectID string) *
 	return s.membershipService.ComputeCapabilities(ctx, user.ID(), projectID)
 }
 
-// projectMemberGroupTier ranks a principal's built-in role for the grouped
-// list order: owner, admin, member, then principals with no built-in role
-// (custom roles only).
-func projectMemberGroupTier(builtInRoleName string) int {
-	switch builtInRoleName {
-	case store.ProjectRoleOwner:
-		return 0
-	case store.ProjectRoleAdmin:
-		return 1
-	case store.ProjectRoleMember:
-		return 2
-	default:
-		return 3
-	}
-}
-
 // writeProjectMemberGroups writes GET …/members?groupBy=principal
 // (ptone/scion#2529): one projectMemberGroup per principal holding any
 // project-scope binding, paginated by principal.
@@ -292,68 +276,28 @@ func (s *Server) writeProjectMemberGroups(w http.ResponseWriter, r *http.Request
 
 	type principalKey struct{ principalType, principalID string }
 
-	roleNames := make(map[string]string)    // roleDefinitionID → roleName
-	displayNames := make(map[string]string) // principalType + ":" + principalID → display name
-	displayName := func(principalType, principalID string) string {
-		k := principalType + ":" + principalID
-		if name, ok := displayNames[k]; ok {
-			return name
-		}
-		name := s.resolveGroupMemberDisplayName(ctx, principalType, principalID)
-		displayNames[k] = name
-		return name
-	}
-
-	groups := make(map[principalKey]*projectMemberGroup)
+	enrich := newProjectMemberEnricher(s)
+	var order []principalKey
+	byPrincipal := make(map[principalKey][]*store.RoleBinding)
 	for _, b := range bindings {
 		if b == nil {
 			continue
 		}
-		roleName, ok := roleNames[b.RoleDefinitionID]
-		if !ok {
-			if rd, rdErr := s.store.GetRoleDefinition(ctx, b.RoleDefinitionID); rdErr == nil && rd != nil {
-				roleName = rd.Name
-			}
-			roleNames[b.RoleDefinitionID] = roleName
-		}
-
 		key := principalKey{b.PrincipalType, b.PrincipalID}
-		g := groups[key]
-		if g == nil {
-			g = &projectMemberGroup{
-				PrincipalType:        b.PrincipalType,
-				PrincipalID:          b.PrincipalID,
-				PrincipalDisplayName: displayName(b.PrincipalType, b.PrincipalID),
-			}
-			groups[key] = g
+		if _, seen := byPrincipal[key]; !seen {
+			order = append(order, key)
 		}
-
-		info := projectMemberInfo{
-			RoleBinding:          *b,
-			RoleName:             roleName,
-			Source:               "direct",
-			RoleKind:             projectRoleKind(roleName),
-			PrincipalDisplayName: g.PrincipalDisplayName,
-			CreatedByDisplayName: displayName(store.GroupMemberTypeUser, b.CreatedBy),
-		}
-		// A principal holds at most one built-in role per project (the D4
-		// partial unique index); if legacy data ever carries more than one,
-		// the group reports the highest.
-		if info.RoleKind == roleKindBuiltIn && projectRoleLevel(roleName) > projectRoleLevel(g.BuiltInRoleName) {
-			g.BuiltInRoleName = roleName
-		}
-		g.Bindings = append(g.Bindings, info)
+		byPrincipal[key] = append(byPrincipal[key], b)
 	}
 
-	all := make([]projectMemberGroup, 0, len(groups))
-	for _, g := range groups {
-		sortProjectMemberBindings(g.Bindings)
-		all = append(all, *g)
+	all := make([]projectMemberGroup, 0, len(order))
+	for _, key := range order {
+		all = append(all, *s.buildProjectMemberGroup(ctx, enrich, key.principalType, key.principalID, byPrincipal[key]))
 	}
 	sort.Slice(all, func(i, j int) bool {
 		a, b := all[i], all[j]
-		if ta, tb := projectMemberGroupTier(a.BuiltInRoleName), projectMemberGroupTier(b.BuiltInRoleName); ta != tb {
-			return ta < tb
+		if la, lb := projectRoleLevel(a.BuiltInRoleName), projectRoleLevel(b.BuiltInRoleName); la != lb {
+			return la > lb
 		}
 		if la, lb := strings.ToLower(a.PrincipalDisplayName), strings.ToLower(b.PrincipalDisplayName); la != lb {
 			return la < lb
@@ -374,9 +318,10 @@ func (s *Server) writeProjectMemberGroups(w http.ResponseWriter, r *http.Request
 	if offset > totalCount {
 		offset = totalCount
 	}
-	end := offset + limit
-	if end > totalCount {
-		end = totalCount
+	// Written so a huge limit cannot overflow offset+limit.
+	end := totalCount
+	if limit < totalCount-offset {
+		end = offset + limit
 	}
 
 	writeJSON(w, http.StatusOK, listProjectMemberGroupsResponse{
@@ -894,7 +839,7 @@ func (s *Server) putProjectMemberPrincipal(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	group := s.buildProjectMemberGroup(ctx, principalType, resolvedPrincipalID, result.After)
+	group := s.buildProjectMemberGroup(ctx, newProjectMemberEnricher(s), principalType, resolvedPrincipalID, result.After)
 
 	status := http.StatusOK
 	if result.Created {
@@ -960,38 +905,70 @@ func (s *Server) deleteProjectMemberPrincipal(w http.ResponseWriter, r *http.Req
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// buildProjectMemberGroup assembles the projectMemberGroup response for the
-// PUT/DELETE principal endpoints from the principal's post-state bindings.
-// Bindings are ordered built-in first, then custom roles alphabetically by
-// name.
-func (s *Server) buildProjectMemberGroup(ctx context.Context, principalType, principalID string, bindings []*store.RoleBinding) *projectMemberGroup {
-	group := &projectMemberGroup{
-		PrincipalType: principalType,
-		PrincipalID:   principalID,
+// projectMemberEnricher resolves the role names and display names a member
+// binding is enriched with, caching each lookup for the life of one request.
+type projectMemberEnricher struct {
+	s            *Server
+	roleNames    map[string]string // roleDefinitionID → roleName ("" if unresolved)
+	displayNames map[string]string // principalType + ":" + principalID → display name
+}
+
+func newProjectMemberEnricher(s *Server) *projectMemberEnricher {
+	return &projectMemberEnricher{s: s, roleNames: map[string]string{}, displayNames: map[string]string{}}
+}
+
+func (e *projectMemberEnricher) roleName(ctx context.Context, roleDefinitionID string) string {
+	if name, ok := e.roleNames[roleDefinitionID]; ok {
+		return name
 	}
-	group.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, principalType, principalID)
+	name := ""
+	if rd, err := e.s.store.GetRoleDefinition(ctx, roleDefinitionID); err == nil && rd != nil {
+		name = rd.Name
+	}
+	e.roleNames[roleDefinitionID] = name
+	return name
+}
+
+func (e *projectMemberEnricher) displayName(ctx context.Context, principalType, principalID string) string {
+	k := principalType + ":" + principalID
+	if name, ok := e.displayNames[k]; ok {
+		return name
+	}
+	name := e.s.resolveGroupMemberDisplayName(ctx, principalType, principalID)
+	e.displayNames[k] = name
+	return name
+}
+
+// buildProjectMemberGroup assembles one principal's projectMemberGroup from
+// its project-scope bindings. It is the single group builder for the grouped
+// members GET and the PUT principal endpoint. Bindings are ordered built-in
+// first, then custom roles alphabetically by name. A principal holds at most
+// one built-in role per project (the D4 partial unique index); if legacy data
+// ever carries more than one, the group reports the highest.
+func (s *Server) buildProjectMemberGroup(ctx context.Context, enrich *projectMemberEnricher, principalType, principalID string, bindings []*store.RoleBinding) *projectMemberGroup {
+	group := &projectMemberGroup{
+		PrincipalType:        principalType,
+		PrincipalID:          principalID,
+		PrincipalDisplayName: enrich.displayName(ctx, principalType, principalID),
+	}
 
 	infos := make([]projectMemberInfo, 0, len(bindings))
 	for _, b := range bindings {
 		if b == nil {
 			continue
 		}
-		roleName, roleKind := "", roleKindCustom
-		if rd, err := s.store.GetRoleDefinition(ctx, b.RoleDefinitionID); err == nil && rd != nil {
-			roleName = rd.Name
-			roleKind = projectRoleKind(rd.Name)
-			if roleKind == roleKindBuiltIn {
-				group.BuiltInRoleName = rd.Name
-			}
-		}
+		roleName := enrich.roleName(ctx, b.RoleDefinitionID)
 		info := projectMemberInfo{
-			RoleBinding: *b,
-			RoleName:    roleName,
-			Source:      "direct",
-			RoleKind:    roleKind,
+			RoleBinding:          *b,
+			RoleName:             roleName,
+			Source:               "direct",
+			RoleKind:             projectRoleKind(roleName),
+			PrincipalDisplayName: group.PrincipalDisplayName,
+			CreatedByDisplayName: enrich.displayName(ctx, store.GroupMemberTypeUser, b.CreatedBy),
 		}
-		info.PrincipalDisplayName = group.PrincipalDisplayName
-		info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
+		if info.RoleKind == roleKindBuiltIn && projectRoleLevel(roleName) > projectRoleLevel(group.BuiltInRoleName) {
+			group.BuiltInRoleName = roleName
+		}
 		infos = append(infos, info)
 	}
 

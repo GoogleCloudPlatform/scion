@@ -329,3 +329,37 @@ func TestProjectMembersGrouped_ReadableByMemberWithCapabilities(t *testing.T) {
 	require.NotNil(t, ownerBody.Capabilities)
 	assert.True(t, ownerBody.Capabilities.CanManageCustomRoles)
 }
+
+// TestProjectMembersGrouped_HugeLimitDoesNotOverflow: a limit near
+// math.MaxInt must not overflow offset+limit and panic the request.
+func TestProjectMembersGrouped_HugeLimitDoesNotOverflow(t *testing.T) {
+	f := setupMMRFixture(t)
+	all := getGroupedMembers(t, f, f.owner, "")
+	require.Greater(t, all.TotalCount, 1)
+
+	body := getGroupedMembers(t, f, f.owner, "&limit=9223372036854775807&offset=1")
+	assert.Equal(t, all.TotalCount, body.TotalCount)
+	assert.Len(t, body.Items, all.TotalCount-1, "the page runs from offset to the end")
+	assert.Equal(t, all.Items[1:], body.Items)
+}
+
+// TestProjectMembersGrouped_MatchesPutResponseGroup: the grouped GET and the
+// PUT principal endpoint build a principal's group the same way.
+func TestProjectMembersGrouped_MatchesPutResponseGroup(t *testing.T) {
+	f := setupMMRFixture(t)
+	target := grpUser(t, f.store, t.Name()+"-target", "Target")
+	rec := putMemberRoles(t, f.srv, f.owner, f.projectID, "user", target.ID, []string{f.withinCeiling.ID, f.adminRD.ID}, &[]string{})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var put projectMemberGroupMutationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &put))
+
+	got := findGroup(getGroupedMembers(t, f, f.owner, "&limit=500").Items, "user", target.ID)
+	require.NotNil(t, got)
+	assert.Equal(t, put.projectMemberGroup.BuiltInRoleName, got.BuiltInRoleName)
+	assert.Equal(t, store.ProjectRoleAdmin, got.BuiltInRoleName)
+	want, err := json.Marshal(put.projectMemberGroup)
+	require.NoError(t, err)
+	gotJSON, err := json.Marshal(got)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(want), string(gotJSON))
+}
