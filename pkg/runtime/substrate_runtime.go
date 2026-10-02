@@ -419,7 +419,11 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 	// Run; r.cfg is immutable for the lifetime of this call, so revalidating
 	// it here would only ever re-check the same result.)
 	env := buildBootstrapEnv(cfg)
-	hostnames := substrateEgressHostnames(cfg, env, r.cfg)
+	hostnames, err := substrateEgressHostnames(cfg, env, r.cfg)
+	if err != nil {
+		cleanup()
+		return "", r.redact(cfg, fmt.Errorf("substrate: resolve egress hosts for %s: %w", id, err))
+	}
 	if _, err := r.client.CreateActorEgressPolicy(ctx, buildEgressPolicy(atespace, actorName, hostnames)); err != nil {
 		cleanup()
 		return "", r.redact(cfg, fmt.Errorf("substrate: create egress policy for %s: %w", id, err))

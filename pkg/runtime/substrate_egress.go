@@ -15,8 +15,10 @@
 package runtime
 
 import (
+	"fmt"
 	"log/slog"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -26,15 +28,88 @@ import (
 )
 
 // hardcodedModelEgressHosts are the harness model API hosts this runtime
-// hardcodes (substrate-runtime.md §7): Anthropic, plus Google auth and
-// Vertex. "*.googleapis.com" also happens to cover the telemetry default
-// (cloudtrace.googleapis.com, substrate-runtime.md §7), but substrateEgressHostnames
-// adds the actual configured telemetry endpoint as its own rule too — see
-// the telemetry section below.
+// hardcodes (substrate-runtime.md §7): direct Anthropic API access, and the
+// Google OAuth2 token endpoint every GCP-authenticated call (including
+// Vertex) needs regardless of region. This deliberately does NOT include a
+// "*.googleapis.com" wildcard: that covers every Google API — GCS, Compute,
+// BigQuery, and hundreds more — not just the ones this runtime actually
+// calls, and would let an actor exfiltrate to any GCS bucket or any
+// project's Google API. The Vertex AI endpoint itself is added separately,
+// by substrateEgressHostnames, derived from the agent's own configured
+// region (see addVertexAIHost) rather than hardcoded here, since the
+// correct host depends on CLOUD_ML_REGION. The configured telemetry
+// endpoint host is likewise added as its own rule from the actual env var
+// in play, not assumed from this list — see the telemetry section below.
 var hardcodedModelEgressHosts = []string{
 	"api.anthropic.com",
 	"oauth2.googleapis.com",
-	"*.googleapis.com",
+}
+
+// vertexRegionLabelPattern matches a single valid DNS label (lowercase
+// letters, digits, and interior hyphens only — RFC 1123, not starting or
+// ending with a hyphen). CLOUD_ML_REGION must match this exactly, or
+// addVertexAIHost refuses it: this is the security-load-bearing check for
+// the whole function, not a formatting nicety. A region of "*" fed
+// unchecked into "<region>-aiplatform.googleapis.com" would construct
+// "*-aiplatform.googleapis.com" — a wildcard host, exactly the class of
+// grant hardcodedModelEgressHosts's doc comment explains removing
+// "*.googleapis.com" to avoid. A region containing "." could construct an
+// extra label Google's own regional endpoints never have. Uppercase is
+// refused rather than silently lowercased, since CLOUD_ML_REGION reaching
+// here with the wrong case indicates a misconfiguration worth surfacing,
+// not papering over.
+var vertexRegionLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+// addVertexAIHost adds the Vertex AI regional endpoint host
+// ("<region>-aiplatform.googleapis.com", or the bare "aiplatform.googleapis.com"
+// for the global/unset region) when the resolved env indicates Vertex AI
+// auth is in play (CLAUDE_CODE_USE_VERTEX, set by
+// pkg/harness/container_script_harness.go's vertex-ai translation, or
+// ANTHROPIC_VERTEX_PROJECT_ID/CLOUD_ML_REGION directly, for a harness that
+// sets them without going through that translation). Added via add (not
+// addTenantHost): the region is agent/template-configurable, but once
+// validated against vertexRegionLabelPattern the result always terminates
+// in the fixed ".googleapis.com" suffix — a tenant can only choose which
+// Google-owned regional endpoint is reached, never redirect to
+// infrastructure outside Google's own, so this needs no egress_allow
+// coverage gate, the same trust basis as the other entries in
+// hardcodedModelEgressHosts. An invalid region is a config error, not a
+// silent skip: returning one here must fail Run closed (see its caller),
+// since silently dropping the Vertex host would leave a Vertex-configured
+// agent unable to reach its model API at all, an availability failure
+// that's easier to diagnose as a refused Run than as an opaque egress
+// timeout.
+//
+// This covers ONLY the Claude harness's Vertex AI integration — the sole
+// one substrate currently wires through container_script_harness.go's
+// vertex-ai env translation (substrate-runtime.md §7). A harness with its
+// own model-API host (Vertex-backed or otherwise) needs the same two-part
+// treatment — a validated, fixed-Google-suffix host via add(), or a tenant
+// host via addTenantHost's coverage gate — added here when that harness is
+// wired for substrate.
+func addVertexAIHost(add func(string), env map[string]string) error {
+	usesVertex := env["CLAUDE_CODE_USE_VERTEX"] != "" ||
+		env["ANTHROPIC_VERTEX_PROJECT_ID"] != "" ||
+		env["CLOUD_ML_REGION"] != ""
+	if !usesVertex {
+		return nil
+	}
+	region := env["CLOUD_ML_REGION"]
+	var host string
+	if region == "" || region == "global" {
+		host = "aiplatform.googleapis.com"
+	} else {
+		if !vertexRegionLabelPattern.MatchString(region) {
+			return fmt.Errorf("CLOUD_ML_REGION %q is not a single valid DNS label; refusing to construct a Vertex AI egress host from it", region)
+		}
+		host = region + "-aiplatform.googleapis.com"
+	}
+	normalized, err := substrate.NormalizeEgressAllowEntry(host)
+	if err != nil {
+		return fmt.Errorf("constructed Vertex AI host %q failed validation: %w", host, err)
+	}
+	add(normalized)
+	return nil
 }
 
 // substrateEgressHostnames collects the hostname patterns for the actor's
@@ -71,7 +146,7 @@ var hardcodedModelEgressHosts = []string{
 //     rejects every IP-literal/CIDR form (loopback, link-local including
 //     the cloud metadata address, private, and any other numeric address)
 //     via its own looksLikeIPAttempt check.
-func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1SubstrateConfig) []string {
+func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1SubstrateConfig) ([]string, error) {
 	seen := make(map[string]struct{})
 	var hosts []string
 	add := func(h string) {
@@ -170,14 +245,13 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 		addTenantHost(h)
 	}
 
-	// The configured telemetry endpoint host (substrate-runtime.md §7).
-	// *.googleapis.com below happens to cover the Cloud Trace
-	// default (substrate-runtime.md §7), but that's a coincidence of the default,
-	// not a rule: a self-hosted OTLP collector or the hub's own endpoint
-	// needs its own rule, so check every env var scion's telemetry stack
-	// actually uses rather than relying on the wildcard. Checked
-	// independently, not via a single hostFromURLEnv call, because a
-	// deployment could point different signals at different collectors.
+	// The configured telemetry endpoint host (substrate-runtime.md §7). No
+	// wildcard covers a default here (hardcodedModelEgressHosts carries no
+	// "*.googleapis.com" entry): a self-hosted OTLP collector, the hub's
+	// own endpoint, or the GCP default Cloud Trace exporter all need their
+	// own explicit coverage. Checked independently, not via a single
+	// hostFromURLEnv call, because a deployment could point different
+	// signals at different collectors.
 	for _, key := range []string{
 		"SCION_OTEL_ENDPOINT",                // pkg/sciontool/telemetry, pkg/util/logging: scion's own var.
 		"OTEL_EXPORTER_OTLP_ENDPOINT",        // OTel SDK standard var, if a harness sets it directly.
@@ -188,8 +262,21 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 		}
 	}
 
+	// ANTHROPIC_VERTEX_BASE_URL (or any other model base-URL override a
+	// harness forwards) is NOT a fixed Google host the way
+	// addVertexAIHost's constructed endpoint is: it is a URL an
+	// agent/template can set outright, so its host goes through
+	// addTenantHost's coverage gate like the git-clone and telemetry hosts
+	// above, never add().
+	if h := hostFromURLEnv(env, "ANTHROPIC_VERTEX_BASE_URL"); h != "" {
+		addTenantHost(h)
+	}
+
 	for _, h := range hardcodedModelEgressHosts {
 		add(h)
+	}
+	if err := addVertexAIHost(add, env); err != nil {
+		return nil, err
 	}
 
 	// operatorEgressAllow already holds every sc.EgressAllow entry in the
@@ -201,7 +288,7 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 	}
 
 	sort.Strings(hosts)
-	return hosts
+	return hosts, nil
 }
 
 // hostFromURLEnv returns the hostname portion of the first non-empty env

@@ -57,7 +57,10 @@ func TestSubstrateEgressHostnames_TelemetryHost(t *testing.T) {
 			// TestSubstrateEgressHostnames_TenantHostRequiresEgressAllowCoverage
 			// for that).
 			sc := config.V1SubstrateConfig{EgressAllow: []string{tc.want}}
-			hosts := substrateEgressHostnames(RunConfig{}, tc.env, sc)
+			hosts, hostsErr := substrateEgressHostnames(RunConfig{}, tc.env, sc)
+			if hostsErr != nil {
+				t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+			}
 			if !containsHost(hosts, tc.want) {
 				t.Errorf("substrateEgressHostnames() = %v, want it to contain %q (from %s)", hosts, tc.want, tc.name)
 			}
@@ -73,7 +76,10 @@ func TestSubstrateEgressHostnames_TelemetryHostsAreIndependent(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_ENDPOINT": "self-hosted-otel.example.com:4318",
 	}
 	sc := config.V1SubstrateConfig{EgressAllow: []string{"cloud-otel.example.com", "self-hosted-otel.example.com"}}
-	hosts := substrateEgressHostnames(RunConfig{}, env, sc)
+	hosts, hostsErr := substrateEgressHostnames(RunConfig{}, env, sc)
+	if hostsErr != nil {
+		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+	}
 	if !containsHost(hosts, "cloud-otel.example.com") {
 		t.Errorf("substrateEgressHostnames() = %v, missing SCION_OTEL_ENDPOINT host", hosts)
 	}
@@ -83,12 +89,154 @@ func TestSubstrateEgressHostnames_TelemetryHostsAreIndependent(t *testing.T) {
 }
 
 func TestSubstrateEgressHostnames_NoTelemetryEnv(t *testing.T) {
-	hosts := substrateEgressHostnames(RunConfig{}, map[string]string{}, config.V1SubstrateConfig{})
-	// The hardcoded model hosts (including *.googleapis.com, which happens
-	// to cover the Cloud Trace default) are always present regardless.
-	if !containsHost(hosts, "*.googleapis.com") {
+	hosts, hostsErr := substrateEgressHostnames(RunConfig{}, map[string]string{}, config.V1SubstrateConfig{})
+	if hostsErr != nil {
+		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+	}
+	// The hardcoded model hosts are always present regardless of telemetry
+	// env.
+	if !containsHost(hosts, "oauth2.googleapis.com") {
 		t.Errorf("substrateEgressHostnames() = %v, want the hardcoded model hosts present even with no telemetry env", hosts)
 	}
+}
+
+// TestSubstrateEgressHostnames_NoWildcardGoogleapis proves the runtime no
+// longer grants blanket access to every Google API: a "*.googleapis.com"
+// entry would admit GCS, Compute, BigQuery, and hundreds of other services
+// this runtime has no business reaching, not just the oauth2/Vertex hosts
+// it actually uses.
+func TestSubstrateEgressHostnames_NoWildcardGoogleapis(t *testing.T) {
+	hosts, hostsErr := substrateEgressHostnames(RunConfig{}, map[string]string{}, config.V1SubstrateConfig{})
+	if hostsErr != nil {
+		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+	}
+	if containsHost(hosts, "*.googleapis.com") {
+		t.Errorf("substrateEgressHostnames() = %v, must not contain the *.googleapis.com wildcard", hosts)
+	}
+}
+
+// TestSubstrateEgressHostnames_VertexAIHost proves the Vertex AI endpoint
+// is derived from the agent's own configured region, added only when
+// Vertex auth is actually in play — never a blanket grant to every Google
+// API, and never present at all for a plain (non-Vertex) Anthropic API
+// agent.
+func TestSubstrateEgressHostnames_VertexAIHost(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "CLAUDE_CODE_USE_VERTEX with region",
+			env:  map[string]string{"CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": "us-east5"},
+			want: "us-east5-aiplatform.googleapis.com",
+		},
+		{
+			name: "ANTHROPIC_VERTEX_PROJECT_ID with region",
+			env:  map[string]string{"ANTHROPIC_VERTEX_PROJECT_ID": "my-project", "CLOUD_ML_REGION": "us-central1"},
+			want: "us-central1-aiplatform.googleapis.com",
+		},
+		{
+			name: "Vertex indicated with no region set",
+			env:  map[string]string{"CLAUDE_CODE_USE_VERTEX": "1"},
+			want: "aiplatform.googleapis.com",
+		},
+		{
+			name: "explicit global region",
+			env:  map[string]string{"CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": "global"},
+			want: "aiplatform.googleapis.com",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hosts, hostsErr := substrateEgressHostnames(RunConfig{}, tc.env, config.V1SubstrateConfig{})
+			if hostsErr != nil {
+				t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+			}
+			if !containsHost(hosts, tc.want) {
+				t.Errorf("substrateEgressHostnames() = %v, want %q present", hosts, tc.want)
+			}
+		})
+	}
+}
+
+// TestSubstrateEgressHostnames_NoVertexHostWithoutVertexAuth proves a
+// plain (non-Vertex, direct Anthropic API) agent gets no aiplatform host
+// at all — not even the bare global one.
+func TestSubstrateEgressHostnames_NoVertexHostWithoutVertexAuth(t *testing.T) {
+	hosts, hostsErr := substrateEgressHostnames(RunConfig{}, map[string]string{}, config.V1SubstrateConfig{})
+	if hostsErr != nil {
+		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+	}
+	for _, h := range hosts {
+		if strings.Contains(h, "aiplatform") {
+			t.Errorf("substrateEgressHostnames() = %v, must not contain an aiplatform host without Vertex auth indicated", hosts)
+		}
+	}
+}
+
+// TestSubstrateEgressHostnames_InvalidVertexRegionRefused is the
+// security-load-bearing proof for addVertexAIHost's region validation: an
+// invalid CLOUD_ML_REGION must fail Run closed — never silently construct
+// a malformed or wildcard-shaped host, and never silently skip the Vertex
+// host while admitting the rest of the egress policy. "*" is the
+// specifically dangerous case: fed unchecked into
+// "<region>-aiplatform.googleapis.com", it would construct
+// "*-aiplatform.googleapis.com", a wildcard host — exactly the class of
+// grant item 4 exists to remove.
+func TestSubstrateEgressHostnames_InvalidVertexRegionRefused(t *testing.T) {
+	cases := []struct {
+		name   string
+		region string
+	}{
+		{name: "wildcard", region: "*"},
+		{name: "embedded dot", region: "a.b"},
+		{name: "uppercase", region: "US-EAST1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": tc.region}
+			hosts, err := substrateEgressHostnames(RunConfig{}, env, config.V1SubstrateConfig{})
+			if err == nil {
+				t.Fatalf("substrateEgressHostnames() with CLOUD_ML_REGION=%q: expected an error, got hosts = %v", tc.region, hosts)
+			}
+			for _, h := range hosts {
+				if strings.Contains(h, "*") {
+					t.Errorf("a wildcard host %q leaked into the result despite the error", h)
+				}
+			}
+		})
+	}
+}
+
+// TestSubstrateEgressHostnames_VertexBaseURLOverrideGoesThroughCoverageGate
+// proves ANTHROPIC_VERTEX_BASE_URL — a model base-URL override an
+// agent/template can set outright, unlike the fixed-suffix host
+// addVertexAIHost constructs — is treated as a tenant host: admitted only
+// when an operator egress_allow entry covers it, dropped otherwise.
+func TestSubstrateEgressHostnames_VertexBaseURLOverrideGoesThroughCoverageGate(t *testing.T) {
+	env := map[string]string{"ANTHROPIC_VERTEX_BASE_URL": "https://attacker-controlled.example.com/v1"}
+
+	t.Run("uncovered, dropped", func(t *testing.T) {
+		hosts, hostsErr := substrateEgressHostnames(RunConfig{}, env, config.V1SubstrateConfig{})
+		if hostsErr != nil {
+			t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+		}
+		if containsHost(hosts, "attacker-controlled.example.com") {
+			t.Errorf("substrateEgressHostnames() = %v, want the uncovered ANTHROPIC_VERTEX_BASE_URL host dropped", hosts)
+		}
+	})
+
+	t.Run("covered, added", func(t *testing.T) {
+		sc := config.V1SubstrateConfig{EgressAllow: []string{"attacker-controlled.example.com"}}
+		hosts, hostsErr := substrateEgressHostnames(RunConfig{}, env, sc)
+		if hostsErr != nil {
+			t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+		}
+		if !containsHost(hosts, "attacker-controlled.example.com") {
+			t.Errorf("substrateEgressHostnames() = %v, want the operator-covered ANTHROPIC_VERTEX_BASE_URL host present", hosts)
+		}
+	})
 }
 
 // TestSubstrateEgressHostnames_SendsNormalizedEgressAllowEntries confirms
@@ -99,7 +247,10 @@ func TestSubstrateEgressHostnames_NoTelemetryEnv(t *testing.T) {
 // instead would validate fine locally and then fail at the Substrate API.
 func TestSubstrateEgressHostnames_SendsNormalizedEgressAllowEntries(t *testing.T) {
 	sc := config.V1SubstrateConfig{EgressAllow: []string{"GitHub.COM.", "  Registry.NPMJS.org  "}}
-	hosts := substrateEgressHostnames(RunConfig{}, map[string]string{}, sc)
+	hosts, hostsErr := substrateEgressHostnames(RunConfig{}, map[string]string{}, sc)
+	if hostsErr != nil {
+		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+	}
 
 	if containsHost(hosts, "GitHub.COM.") || containsHost(hosts, "  Registry.NPMJS.org  ") {
 		t.Errorf("substrateEgressHostnames() = %v, sent an unnormalized egress_allow entry", hosts)
@@ -126,7 +277,10 @@ func TestSubstrateEgressHostnames_RejectsIPShapedEgressAllow(t *testing.T) {
 		"2001:4860:4860::8888",
 		"api.example.com",
 	}}
-	hosts := substrateEgressHostnames(RunConfig{}, map[string]string{}, sc)
+	hosts, hostsErr := substrateEgressHostnames(RunConfig{}, map[string]string{}, sc)
+	if hostsErr != nil {
+		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+	}
 
 	for _, h := range hosts {
 		if _, err := netip.ParseAddr(h); err == nil {
@@ -184,7 +338,10 @@ func TestSubstrateEgressPolicy_EndToEndNoIPPatterns(t *testing.T) {
 		"10.0.0.0/8",
 		"GitHub.COM.",
 	}}
-	hosts := substrateEgressHostnames(RunConfig{}, map[string]string{}, sc)
+	hosts, hostsErr := substrateEgressHostnames(RunConfig{}, map[string]string{}, sc)
+	if hostsErr != nil {
+		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+	}
 	req := buildEgressPolicy("scion-proj", "agent-a", hosts)
 	patterns := req.GetEgressPolicy().GetRules()[0].GetHostnames().GetPatterns()
 
@@ -231,7 +388,10 @@ func TestSubstrateEgressHostnames_TenantSourcesDropInvalidHosts(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			hosts := substrateEgressHostnames(tc.cfg, tc.env, config.V1SubstrateConfig{})
+			hosts, hostsErr := substrateEgressHostnames(tc.cfg, tc.env, config.V1SubstrateConfig{})
+			if hostsErr != nil {
+				t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+			}
 			if containsHost(hosts, tc.refused) {
 				t.Errorf("substrateEgressHostnames() = %v, must refuse tenant-derived host %q", hosts, tc.refused)
 			}
@@ -246,7 +406,10 @@ func TestSubstrateEgressHostnames_TenantSourcesDropInvalidHosts(t *testing.T) {
 // the hub host is never routed through that validator.
 func TestSubstrateEgressHostnames_InClusterHubStillAllowed(t *testing.T) {
 	cfg := RunConfig{TrustedHubEndpoint: "https://hub.scion-system.svc.cluster.local:8443"}
-	hosts := substrateEgressHostnames(cfg, map[string]string{}, config.V1SubstrateConfig{})
+	hosts, hostsErr := substrateEgressHostnames(cfg, map[string]string{}, config.V1SubstrateConfig{})
+	if hostsErr != nil {
+		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+	}
 	if !containsHost(hosts, "hub.scion-system.svc.cluster.local") {
 		t.Errorf("substrateEgressHostnames() = %v, want the trusted in-cluster hub host present", hosts)
 	}
@@ -275,7 +438,10 @@ func TestSubstrateEgressHostnames_HubEndpointOverrideIgnored(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := RunConfig{TrustedHubEndpoint: trusted}
 			env := map[string]string{"SCION_HUB_ENDPOINT": tc.override}
-			hosts := substrateEgressHostnames(cfg, env, config.V1SubstrateConfig{})
+			hosts, hostsErr := substrateEgressHostnames(cfg, env, config.V1SubstrateConfig{})
+			if hostsErr != nil {
+				t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+			}
 			if containsHost(hosts, tc.refused) {
 				t.Errorf("substrateEgressHostnames() = %v, must not add the overridden hub host %q", hosts, tc.refused)
 			}
@@ -293,7 +459,10 @@ func TestSubstrateEgressHostnames_HubEndpointOverrideIgnored(t *testing.T) {
 func TestSubstrateEgressHostnames_HubEndpointOverrideEqualToTrustedNoDup(t *testing.T) {
 	cfg := RunConfig{TrustedHubEndpoint: "https://hub.scion-system.svc.cluster.local:8443"}
 	env := map[string]string{"SCION_HUB_ENDPOINT": "https://hub.scion-system.svc.cluster.local:8443"}
-	hosts := substrateEgressHostnames(cfg, env, config.V1SubstrateConfig{})
+	hosts, hostsErr := substrateEgressHostnames(cfg, env, config.V1SubstrateConfig{})
+	if hostsErr != nil {
+		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+	}
 	count := 0
 	for _, h := range hosts {
 		if h == "hub.scion-system.svc.cluster.local" {
@@ -318,7 +487,10 @@ func TestSubstrateEgressHostnames_EmptyTrustedHubAddsNoHubHost(t *testing.T) {
 		"SCION_HUB_ENDPOINT": "http://169.254.169.254/",
 		"SCION_HUB_URL":      "https://kubernetes.default.svc",
 	}
-	hosts := substrateEgressHostnames(cfg, env, config.V1SubstrateConfig{})
+	hosts, hostsErr := substrateEgressHostnames(cfg, env, config.V1SubstrateConfig{})
+	if hostsErr != nil {
+		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+	}
 	for _, refused := range []string{"169.254.169.254", "kubernetes.default.svc"} {
 		if containsHost(hosts, refused) {
 			t.Errorf("substrateEgressHostnames() = %v, must not add env hub host %q when TrustedHubEndpoint is empty", hosts, refused)
@@ -340,7 +512,10 @@ func TestSubstrateEgressHostnames_EmptyTrustedHubAddsNoHubHost(t *testing.T) {
 func TestSubstrateEgressHostnames_ValidPublicOTELHostAllowed(t *testing.T) {
 	env := map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://Otel-Collector.Example.COM:4318"}
 	sc := config.V1SubstrateConfig{EgressAllow: []string{"otel-collector.example.com"}}
-	hosts := substrateEgressHostnames(RunConfig{}, env, sc)
+	hosts, hostsErr := substrateEgressHostnames(RunConfig{}, env, sc)
+	if hostsErr != nil {
+		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+	}
 	if !containsHost(hosts, "otel-collector.example.com") {
 		t.Errorf("substrateEgressHostnames() = %v, want the normalized public OTEL host present", hosts)
 	}
@@ -357,7 +532,10 @@ func TestSubstrateEgressHostnames_TenantHostRequiresEgressAllowCoverage(t *testi
 	env := map[string]string{"SCION_GIT_CLONE_URL": "https://uncovered.example.com/repo.git"}
 	// No egress_allow entry covers uncovered.example.com.
 	sc := config.V1SubstrateConfig{EgressAllow: []string{"covered.example.com"}}
-	hosts := substrateEgressHostnames(RunConfig{}, env, sc)
+	hosts, hostsErr := substrateEgressHostnames(RunConfig{}, env, sc)
+	if hostsErr != nil {
+		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+	}
 	if containsHost(hosts, "uncovered.example.com") {
 		t.Errorf("substrateEgressHostnames() = %v, want uncovered.example.com dropped (no egress_allow entry covers it)", hosts)
 	}
@@ -371,7 +549,10 @@ func TestSubstrateEgressHostnames_TenantHostCoveredByEgressAllow(t *testing.T) {
 	t.Run("exact match", func(t *testing.T) {
 		env := map[string]string{"SCION_GIT_CLONE_URL": "https://git.example.com/repo.git"}
 		sc := config.V1SubstrateConfig{EgressAllow: []string{"git.example.com"}}
-		hosts := substrateEgressHostnames(RunConfig{}, env, sc)
+		hosts, hostsErr := substrateEgressHostnames(RunConfig{}, env, sc)
+		if hostsErr != nil {
+			t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+		}
 		if !containsHost(hosts, "git.example.com") {
 			t.Errorf("substrateEgressHostnames() = %v, want git.example.com present (exact egress_allow match)", hosts)
 		}
@@ -379,7 +560,10 @@ func TestSubstrateEgressHostnames_TenantHostCoveredByEgressAllow(t *testing.T) {
 	t.Run("wildcard match", func(t *testing.T) {
 		env := map[string]string{"SCION_GIT_CLONE_URL": "https://git.example.com/repo.git"}
 		sc := config.V1SubstrateConfig{EgressAllow: []string{"*.example.com"}}
-		hosts := substrateEgressHostnames(RunConfig{}, env, sc)
+		hosts, hostsErr := substrateEgressHostnames(RunConfig{}, env, sc)
+		if hostsErr != nil {
+			t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+		}
 		if !containsHost(hosts, "git.example.com") {
 			t.Errorf("substrateEgressHostnames() = %v, want git.example.com present (covered by the *.example.com wildcard)", hosts)
 		}
@@ -404,14 +588,20 @@ func TestSubstrateEgressHostnames_NipIoStyleHostRequiresCoverage(t *testing.T) {
 			env := map[string]string{"SCION_GIT_CLONE_URL": "https://" + tc.host + "/repo.git"}
 
 			t.Run("uncovered, dropped", func(t *testing.T) {
-				hosts := substrateEgressHostnames(RunConfig{}, env, config.V1SubstrateConfig{})
+				hosts, hostsErr := substrateEgressHostnames(RunConfig{}, env, config.V1SubstrateConfig{})
+				if hostsErr != nil {
+					t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+				}
 				if containsHost(hosts, tc.host) {
 					t.Errorf("substrateEgressHostnames() = %v, want %q dropped (not covered by any egress_allow entry)", hosts, tc.host)
 				}
 			})
 			t.Run("covered, added", func(t *testing.T) {
 				sc := config.V1SubstrateConfig{EgressAllow: []string{tc.host}}
-				hosts := substrateEgressHostnames(RunConfig{}, env, sc)
+				hosts, hostsErr := substrateEgressHostnames(RunConfig{}, env, sc)
+				if hostsErr != nil {
+					t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+				}
 				if !containsHost(hosts, tc.host) {
 					t.Errorf("substrateEgressHostnames() = %v, want %q present (operator explicitly covered it)", hosts, tc.host)
 				}
@@ -426,7 +616,10 @@ func TestSubstrateEgressHostnames_NipIoStyleHostRequiresCoverage(t *testing.T) {
 // the binary, never tenant-derived, and are always present regardless of
 // egress_allow.
 func TestSubstrateEgressHostnames_HardcodedModelHostsUnaffectedByCoverage(t *testing.T) {
-	hosts := substrateEgressHostnames(RunConfig{}, map[string]string{}, config.V1SubstrateConfig{})
+	hosts, hostsErr := substrateEgressHostnames(RunConfig{}, map[string]string{}, config.V1SubstrateConfig{})
+	if hostsErr != nil {
+		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+	}
 	for _, want := range hardcodedModelEgressHosts {
 		if !containsHost(hosts, want) {
 			t.Errorf("substrateEgressHostnames() = %v, want hardcoded model host %q present with no egress_allow entries at all", hosts, want)

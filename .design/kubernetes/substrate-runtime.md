@@ -569,15 +569,28 @@ for:
   `ANTHROPIC_VERTEX_PROJECT_ID`, or `CLOUD_ML_REGION`) — the Vertex endpoint
   for that agent's own configured region (`<region>-aiplatform.googleapis.com`,
   or the bare `aiplatform.googleapis.com` for an empty or `"global"`
-  region). There is deliberately no `*.googleapis.com` wildcard: that would
-  cover every Google API (GCS, Compute, BigQuery, and hundreds more), not
-  just the ones this runtime actually calls. One consequence: GCP's own
-  default Cloud Trace auto-export (`cloudtrace.googleapis.com`), which the
-  old wildcard happened to also cover, now fails closed like any other
-  uncovered host unless an operator explicitly lists it in `egress_allow`
-  — the actual configured telemetry endpoint (via `SCION_OTEL_ENDPOINT` or
-  the `OTEL_EXPORTER_OTLP_*` vars) is always subject to the tenant-host
-  coverage rule above regardless;
+  region). **These defaults cover the Claude harness's own Vertex AI
+  integration only** (`pkg/harness/container_script_harness.go`'s
+  `c.entry.Harness == "claude"` vertex-ai env translation is the sole
+  wiring) — a different harness with its own model-API host needs the same
+  two-part treatment added for it: a validated, fixed-Google-suffix host
+  via the trusted path, or the tenant-host coverage gate, whichever its
+  trust shape matches. `CLOUD_ML_REGION` is validated as a single DNS
+  label (`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`) before being used to build the
+  Vertex host; anything else — notably `*`, which would otherwise build a
+  wildcard host — fails Run closed with a config error rather than being
+  silently skipped or passed through. `ANTHROPIC_VERTEX_BASE_URL` (a model
+  base-URL override an agent/template can set outright, unlike the
+  constructed Vertex host) goes through the tenant-host coverage gate, not
+  the trusted path. There is deliberately no `*.googleapis.com` wildcard:
+  that would cover every Google API (GCS, Compute, BigQuery, and hundreds
+  more), not just the ones this runtime actually calls. One consequence:
+  GCP's own default Cloud Trace auto-export (`cloudtrace.googleapis.com`),
+  which the old wildcard happened to also cover, now fails closed like any
+  other uncovered host unless an operator explicitly lists it in
+  `egress_allow` — the actual configured telemetry endpoint (via
+  `SCION_OTEL_ENDPOINT` or the `OTEL_EXPORTER_OTLP_*` vars) is always
+  subject to the tenant-host coverage rule above regardless;
 - `egress_allow` entries from settings (§2), added directly (an
   operator-supplied entry is its own coverage).
 
