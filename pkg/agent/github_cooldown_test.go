@@ -228,7 +228,7 @@ func TestGitHubCooldown_ClearsOnSuccessAfterT(t *testing.T) {
 	)
 
 	_, err := doGet(t, c, srv, "id")
-	requireRateLimit(t, err)
+	_ = requireRateLimit(t, err)
 
 	clock.Advance(30 * time.Second)
 	resp, err := doGet(t, c, srv, "id")
@@ -263,7 +263,7 @@ func TestGitHubCooldown_IdentitiesAreIndependent(t *testing.T) {
 	}
 
 	_, err := doGet(t, c, srv, a)
-	requireRateLimit(t, err)
+	_ = requireRateLimit(t, err)
 
 	for _, id := range []string{b, anon} {
 		resp, err := doGet(t, c, srv, id)
