@@ -140,6 +140,16 @@ export class ScionChatSwitcher extends LitElement {
         padding: 0.25rem 0;
       }
 
+      /* Stop iOS/Android focus-zoom: this is a native <input>, so it is not
+         covered by the app-wide --sl-input-font-size-* rule, and a coarse
+         pointer isn't limited to narrow viewports (an iPad is coarse-pointer
+         at any width). */
+      @media (pointer: coarse) {
+        #palette-query-input {
+          font-size: max(16px, var(--chat-fs-xl));
+        }
+      }
+
       .palette-results {
         max-height: 50vh;
         overflow-y: auto;

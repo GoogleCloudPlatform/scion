@@ -58,6 +58,7 @@ export class ScionChatShell extends LitElement {
       display: flex;
       height: var(--scion-app-height, 100dvh);
       background: var(--scion-bg, #f8fafc);
+      touch-action: manipulation;
     }
 
     .main {

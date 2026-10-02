@@ -47,6 +47,7 @@ import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-events.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
+import { touchMenuItemStyles } from './touch-styles.js';
 import './notification-tray.js';
 import './inbox-tray.js';
 
@@ -156,6 +157,8 @@ export class ScionHeader extends LitElement {
   private touchPrimary = new TouchPrimaryController(this);
 
   static override styles = css`
+    ${touchMenuItemStyles}
+
     /* ------------------------------------------------------------------ */
     /* Grid: three-tier responsive                                         */
     /*   Wide  (>1100px):  3-col -- title | mode-switch | actions+user      */
@@ -1218,16 +1221,17 @@ export class ScionHeader extends LitElement {
   }
 
   /**
-   * Apply visually-hidden styles to the tray trigger buttons so they are
-   * invisible but remain functional for programmatic clicks. The panels
-   * (siblings of the buttons in the tray's shadow DOM) are unaffected.
+   * Hide the tray trigger buttons from layout, focus and the accessibility
+   * tree, while leaving them functional for programmatic clicks (a
+   * synthetic `.click()` still fires on a `display: none` element). The
+   * panels (siblings of the buttons in the tray's shadow DOM) are
+   * unaffected — the header's own icon buttons are the only visible,
+   * properly-sized trigger for these actions.
    */
   private hideTrayTriggers(): void {
     const hide = (el: HTMLElement | null): void => {
       if (!el) return;
-      el.style.cssText =
-        'position:absolute;width:1px;height:1px;overflow:hidden;' +
-        'clip:rect(0,0,0,0);white-space:nowrap;border:0;padding:0;margin:-1px;';
+      el.style.display = 'none';
     };
 
     const inboxTray = this.shadowRoot?.querySelector('scion-inbox-tray');

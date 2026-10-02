@@ -139,12 +139,21 @@ func TestSPAShellMobileFrameCSS(t *testing.T) {
 	assert.Contains(t, block, "html.scion-app-frame")
 	assert.Contains(t, block, "height: 100%; min-height: 0;")
 
-	// The pointer:coarse input-font-size rule and touch-action:manipulation
-	// land in a later change — this one must not ship them early. (This
-	// will deliberately start failing once that later change adds them;
-	// delete these two lines then.)
-	assert.NotContains(t, html, "pointer: coarse")
-	assert.NotContains(t, html, "touch-action: manipulation")
+	// Touch targets: no double-tap zoom (pinch stays available), and every
+	// Shoelace input/textarea computes at 16px or more on a coarse pointer
+	// so focusing one never triggers iOS/Android focus-zoom. The selector
+	// is "html:root", not a bare ":root": Shoelace's own theme sets these
+	// same custom properties on a selector list that includes a bare
+	// ":root" (light.css/dark.css) at the same specificity, so a bare
+	// ":root" here would depend on stylesheet load order to win. Asserting
+	// the raised-specificity selector by name catches a regression back to
+	// the order-dependent form, which `Contains` on the property/value
+	// pair alone would not.
+	assert.Contains(t, block, "touch-action: manipulation;")
+	assert.Contains(t, block, "@media (pointer: coarse)")
+	assert.Contains(t, block, "html:root {")
+	assert.Contains(t, block, "--sl-input-font-size-small: 16px;")
+	assert.Contains(t, block, "--sl-input-font-size-medium: 16px;")
 }
 
 // TestSPAShellIndexHTMLParity guards the requirement that web.go and
