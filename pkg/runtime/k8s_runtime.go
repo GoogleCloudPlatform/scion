@@ -1652,6 +1652,15 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 
 		initEnv := nfsProvisionEnv(config.GitCloneForInit)
+		// SCION_PROJECT_ID lets the init container's own provisioning logs
+		// (cmd/sciontool/commands/provision.go) identify which project they're
+		// provisioning, instead of falling back to "unknown" — unconditional
+		// and independent of GitCloneForInit, since every NFS-backed pod has a
+		// ProjectID regardless of whether the project is git-backed.
+		initEnv = append(initEnv, corev1.EnvVar{
+			Name:  "SCION_PROJECT_ID",
+			Value: config.ProjectID,
+		})
 		if len(sharedDirPairs) > 0 {
 			initEnv = append(initEnv, corev1.EnvVar{
 				Name:  "SCION_SHARED_DIR_PATHS",
