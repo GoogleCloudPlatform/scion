@@ -346,7 +346,8 @@ func hubDeliveryDelegationScopes() []AgentTokenScope {
 // custom role over every registry permission (and the empty permission
 // set), group membership, project membership, and agent delegation with
 // AgentRoleNone and no AgentScopes plus every AgentRole with every known
-// scope. Every case is denied with "delivery credential cannot delegate".
+// scope. Every case is denied with "delivery credential cannot delegate",
+// for a constructed actor and for a typed-nil *hubDeliveryIdentity actor.
 func TestCanDelegate_HubDeliveryActorDenied(t *testing.T) {
 	authz, s := setupCanDelegateTest(t)
 	ctx := context.Background()
@@ -436,11 +437,25 @@ func TestCanDelegate_HubDeliveryActorDenied(t *testing.T) {
 		require.True(t, seenGrantTypes[gt], "no denied case for GrantType %q", gt)
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := authz.CanDelegate(ctx, actor, tc.grant)
-			assert.False(t, got.Allowed, "Allowed")
-			assert.Equal(t, "delivery credential cannot delegate", got.Reason, "Reason")
-		})
+	// A typed-nil *hubDeliveryIdentity is a non-nil Identity interface
+	// value, so it passes the missing-actor check and is denied by the
+	// concrete-type check that follows it.
+	var typedNil *hubDeliveryIdentity
+	actors := []struct {
+		name  string
+		actor Identity
+	}{
+		{"actor", actor},
+		{"typed_nil_actor", typedNil},
+	}
+
+	for _, a := range actors {
+		for _, tc := range cases {
+			t.Run(a.name+"/"+tc.name, func(t *testing.T) {
+				got := authz.CanDelegate(ctx, a.actor, tc.grant)
+				assert.False(t, got.Allowed, "Allowed")
+				assert.Equal(t, "delivery credential cannot delegate", got.Reason, "Reason")
+			})
+		}
 	}
 }
