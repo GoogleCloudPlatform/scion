@@ -71,12 +71,12 @@ describe('scion-timezone-picker', () => {
     expect(input?.getAttribute('value')).toBe('Asia/Tokyo');
   });
 
-  // tz-refactor task 12 review round 3, R3-2: a regression from the R2-3
-  // fix. willUpdate's resync compared `value` against `valueFor(searchQuery)`
-  // and skipped when they already matched — which on the very first render,
-  // with `value` still at its default `''` and `searchQuery` also `''`, is
-  // trivially true (`valueFor('') === ''`), so the empty-label row never
-  // appeared: the field rendered blank instead of showing "UTC". Set
+  // willUpdate's resync compares `value` against `valueFor(searchQuery)` and
+  // skips when they already match — which on the very first render, with
+  // `value` still at its default `''` and `searchQuery` also `''`, is
+  // trivially true (`valueFor('') === ''`), so a naive resync would never
+  // show the empty-label row: the field would render blank instead of
+  // showing "UTC". Set
   // emptyLabel *before* first connection, matching a real caller
   // (admin-server-config.ts sets `empty-label="UTC"` as a template
   // attribute, present from the first render).
@@ -126,9 +126,8 @@ describe('scion-timezone-picker', () => {
     expect(events[events.length - 1].timezone).toBe('');
   });
 
-  // tz-refactor task 12 review round 1, R1-5: listTimeZones() always
-  // contains the real "UTC", so empty-label="UTC" must not produce two
-  // "UTC" rows in the dropdown.
+  // listTimeZones() always contains the real "UTC", so empty-label="UTC"
+  // must not produce two "UTC" rows in the dropdown.
   it('does not duplicate a real zone name that collides with empty-label', async () => {
     const el = await createElement();
     el.emptyLabel = 'UTC';
@@ -141,10 +140,10 @@ describe('scion-timezone-picker', () => {
     expect(utcRows.length).toBe(1);
   });
 
-  // tz-refactor task 12 review round 1, R1-4: a stored alias Intl's
-  // canonical list omits (listTimeZones() has "Asia/Katmandu", not
-  // "Asia/Kathmandu") must still be listed when the field is focused,
-  // instead of the dropdown claiming no match for the field's own value.
+  // A stored alias Intl's canonical list omits (listTimeZones() has
+  // "Asia/Katmandu", not "Asia/Kathmandu") must still be listed when the
+  // field is focused, instead of the dropdown claiming no match for the
+  // field's own value.
   it('lists a stored alias value even though it is absent from the canonical zone list', async () => {
     const el = await createElement();
     el.value = 'Asia/Kathmandu';
@@ -173,9 +172,9 @@ describe('scion-timezone-picker', () => {
     expect(filtered).toContain('Asia/Kolkata');
   });
 
-  // tz-refactor task 12 review round 2, R2-2: a lowercase alias used to
-  // slip through isValidTimeZone and get prepended as if it were a real,
-  // selectable zone name; Go's time.LoadLocation rejects it.
+  // A lowercase alias that slips through isValidTimeZone would get
+  // prepended as if it were a real, selectable zone name; Go's
+  // time.LoadLocation rejects it, so the picker must not offer it either.
   it('typing a lowercase alias Go rejects does not offer it', async () => {
     const el = await createElement();
     (el as Record<string, (...args: unknown[]) => void>)['handleSearchInput']({
@@ -187,11 +186,11 @@ describe('scion-timezone-picker', () => {
     expect(filtered).not.toContain('asia/kolkata');
   });
 
-  // tz-refactor task 12 review round 3, R3-1: round 2's isValidTimeZone fix
-  // falsely rejected real IANA names outside its 7-entry hand-picked alias
-  // set — including current canonical names, not just backward-compat
-  // links. "America/Nuuk" was never in any such list and isn't a case
-  // variant of anything; it's just an ordinary zone name.
+  // A rule that only accepts names in a hand-picked alias set falsely
+  // rejects real IANA names outside it — including current canonical
+  // names, not just backward-compat links. "America/Nuuk" isn't in any
+  // such list and isn't a case variant of anything; it's just an ordinary
+  // zone name.
   it('typing a real IANA name outside any hand-picked alias list still offers it', async () => {
     const el = await createElement();
     (el as Record<string, (...args: unknown[]) => void>)['handleSearchInput']({
@@ -225,11 +224,11 @@ describe('scion-timezone-picker', () => {
     expect((el as Record<string, unknown>)['filteredZones'] as string[]).toContain('Asia/Katmandu');
   });
 
-  // tz-refactor task 12 review round 1, R1-7: selecting from the dropdown
-  // must not leave the field looking like it needs to be re-resolved (the
-  // previous unconditional reset in willUpdate was a no-op dressed up as a
-  // guard; this exercises the actual sequence that matters — select, then
-  // the parent round-trips the same value back down as a prop update).
+  // Selecting from the dropdown must not leave the field looking like it
+  // needs to be re-resolved. This exercises the sequence that matters:
+  // select, then the parent round-trips the same value back down as a prop
+  // update (an unconditional reset in willUpdate would otherwise clobber
+  // the display text on that round-trip).
   it('keeps the selected display text when the parent round-trips the same value back as a prop', async () => {
     const el = await createElement();
     (el as Record<string, (...args: unknown[]) => void>)['selectZone']('Asia/Tokyo');
@@ -245,13 +244,12 @@ describe('scion-timezone-picker', () => {
     expect((el as Record<string, unknown>)['searchQuery']).toBe('Asia/Tokyo');
   });
 
-  // tz-refactor task 12 review round 2, R2-3: a regression from R1-7's fix.
-  // selectedViaDropdown stayed true after a selection (by design, to gate
-  // the blur handler), but willUpdate's resync was gated on that same flag,
-  // so once ANY dropdown selection had been made, every later external
-  // `.value` change was silently ignored until the user typed or cleared —
-  // including unrelated changes made well after the selection, not just the
-  // selection's own round-trip.
+  // selectedViaDropdown stays true after a selection (by design, to gate the
+  // blur handler). If willUpdate's resync were gated on that same flag,
+  // once ANY dropdown selection had been made, every later external
+  // `.value` change would be silently ignored until the user typed or
+  // cleared — including unrelated changes made well after the selection,
+  // not just the selection's own round-trip.
   it('resyncs on an external value change after a dropdown selection, to a different zone', async () => {
     const el = await createElement();
     (el as Record<string, (...args: unknown[]) => void>)['selectZone']('Asia/Tokyo');

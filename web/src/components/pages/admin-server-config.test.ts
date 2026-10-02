@@ -863,9 +863,9 @@ describe('scion-page-admin-server-config', () => {
       expect(shadowText(element)).toContain('Something went terribly wrong');
     });
 
-    // tz-refactor task 12 review round 1, R1-2 addendum: handleSaveError's
-    // default case previously only handled a flat {error: "<string>", ...}
-    // shape. The real Go writeError() helper (pkg/hub/errors.go), used by
+    // handleSaveError's default case must handle more than a flat
+    // {error: "<string>", ...} shape. The real Go writeError() helper
+    // (pkg/hub/errors.go), used by
     // every plain field-validation 400/422 on this page — including
     // default_timezone's — responds with {error: {code, message, details}}.
     // Before the fix, body.error being an object meant the switch never

@@ -257,6 +257,14 @@ func TestUpdateUser_Preferences_LocalRejected(t *testing.T) {
 // resolves against the host's zoneinfo directory, so these names succeed on
 // a host whose tree has them, which is exactly the host-dependent
 // non-portability "Local" and "posixrules" are already denied for.
+//
+// The assertion checks the response body for the denylist branch's own
+// "is not allowed" wording (validateUserTimezone's wrapping of
+// errNonPortableTimezone), not just the 400 status: on a host without the
+// right/ and posix/ zoneinfo trees, time.LoadLocation already fails on
+// these names for an unrelated reason ("invalid timezone ...: unknown time
+// zone ..."), which would also produce 400 and let a removed prefix check
+// go unnoticed.
 func TestUpdateUser_Preferences_RightPosixPrefixRejected(t *testing.T) {
 	srv, s := testServer(t)
 	devUser := getDevUser(t, srv, s)
@@ -266,6 +274,7 @@ func TestUpdateUser_Preferences_RightPosixPrefixRejected(t *testing.T) {
 			rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+devUser.ID,
 				map[string]any{"preferences": map[string]any{"timezone": tz}})
 			assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "is not allowed")
 		})
 	}
 }
@@ -567,32 +576,44 @@ func TestUpdateUser_Preferences_NonStringTimezoneRejected(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 }
 
-// TestValidateUserTimezone covers the rejected-name denylist added in review
-// round 1 (R1-1): time.LoadLocation accepts several zoneinfo entries that
-// are not portable IANA zone names and that task 11's Intl-based formatters
-// cannot render, so they must be rejected the same way "Local" already is.
+// TestValidateUserTimezone covers the rejected-name denylist: time.LoadLocation
+// accepts several zoneinfo entries that are not portable IANA zone names and
+// that task 11's Intl-based formatters cannot render, so they must be
+// rejected the same way "Local" already is.
 func TestValidateUserTimezone(t *testing.T) {
 	cases := []struct {
-		name    string
-		tz      string
+		name string
+		tz   string
+		// wantErr is checked whenever wantErrContains is empty.
 		wantErr bool
+		// wantErrContains, when set, asserts the error message contains this
+		// substring instead of just checking that an error occurred. The
+		// right/posix rows need this: without it, a host lacking the right/
+		// and posix/ zoneinfo trees would make time.LoadLocation itself fail
+		// on these names (an unrelated "unknown time zone" error), so the
+		// test would still pass even if the prefix check in
+		// validateIANATimezone were removed.
+		wantErrContains string
 	}{
-		{"empty string is Auto", "", false},
-		{"UTC", "UTC", false},
-		{"IANA area/location zone", "US/Pacific", false},
-		{"IANA Etc fixed-offset zone", "Etc/GMT+5", false},
-		{"Local is rejected", "Local", true},
-		{"localtime is rejected", "localtime", true},
-		{"posixrules is rejected", "posixrules", true},
-		{"Factory is rejected", "Factory", true},
-		{"right/-prefixed name is rejected", "right/Asia/Tokyo", true},
-		{"posix/-prefixed name is rejected", "posix/Asia/Tokyo", true},
-		{"unknown zone is rejected", "Not/AZone", true},
+		{"empty string is Auto", "", false, ""},
+		{"UTC", "UTC", false, ""},
+		{"IANA area/location zone", "US/Pacific", false, ""},
+		{"IANA Etc fixed-offset zone", "Etc/GMT+5", false, ""},
+		{"Local is rejected", "Local", true, ""},
+		{"localtime is rejected", "localtime", true, ""},
+		{"posixrules is rejected", "posixrules", true, ""},
+		{"Factory is rejected", "Factory", true, ""},
+		{"right/-prefixed name is rejected", "right/Asia/Tokyo", true, "is not allowed"},
+		{"posix/-prefixed name is rejected", "posix/Asia/Tokyo", true, "is not allowed"},
+		{"unknown zone is rejected", "Not/AZone", true, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateUserTimezone(tc.tz)
-			if tc.wantErr {
+			if tc.wantErrContains != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErrContains)
+			} else if tc.wantErr {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)

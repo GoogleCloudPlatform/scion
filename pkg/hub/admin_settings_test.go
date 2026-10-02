@@ -726,7 +726,7 @@ func TestHandlePutServerConfig_EnforceBrokerQuotas_PersistedAndAppliedWithoutRes
 	}
 }
 
-// ---- default_timezone, file mode (tz-refactor task 12 review round 1, R1-1/R1-2) ----
+// ---- default_timezone, file mode ----
 //
 // Before this fix, a file-mode default_timezone PUT persisted to
 // settings.yaml and returned 200, but GlobalConfig had no DefaultTimezone
@@ -773,7 +773,7 @@ func TestHandlePutServerConfig_DefaultTimezone_PersistedAndAppliedWithoutRestart
 }
 
 // TestHandlePutServerConfig_DefaultTimezone_ClearedPersistsEmpty is the
-// round-trip half of R1-1: clearing a previously-set file-mode
+// round-trip complement: clearing a previously-set file-mode
 // default_timezone must remove it from settings.yaml and from
 // hubAgentDefaults(), not just leave the old value live. Both PUTs land in
 // the same settings.yaml (HOME is set once, directly — not via
@@ -822,12 +822,11 @@ func TestHandlePutServerConfig_DefaultTimezone_ClearedPersistsEmpty(t *testing.T
 }
 
 // TestHandlePutServerConfig_DefaultTimezone_InvalidRejected is the file-mode
-// half of R1-2: before this fix, handlePutServerConfig had no IANA-name
-// check for default_timezone (unlike the DB-mode handler), so an invalid
-// name — or one of the tzdata names LoadLocation accepts but that do not
-// name a portable zone (R1-3's denylist addendum: Local, localtime,
-// posixrules, Factory) — returned 200 and was written to settings.yaml
-// silently.
+// complement of the DB-mode validation: handlePutServerConfig must apply
+// the same IANA-name check for default_timezone as the DB-mode handler, so
+// an invalid name — or one of the tzdata names LoadLocation accepts but
+// that do not name a portable zone (Local, localtime, posixrules, Factory)
+// — is rejected rather than written to settings.yaml silently.
 func TestHandlePutServerConfig_DefaultTimezone_InvalidRejected(t *testing.T) {
 	for _, tz := range []string{"Not/A/Timezone", "Local", "localtime", "posixrules", "Factory"} {
 		t.Run(tz, func(t *testing.T) {
@@ -853,7 +852,7 @@ func TestHandlePutServerConfig_DefaultTimezone_InvalidRejected(t *testing.T) {
 
 // TestHandlePutServerConfig_DefaultTimezone_ValidPersisted is the file-mode
 // complement of TestPutServerConfigDB_DefaultTimezone_Valid, extended with
-// the aliases R1-4's picker fix cares about (both spellings of
+// the aliases the picker's alias handling cares about (both spellings of
 // Kathmandu/Katmandu are real IANA names, and the server stores whichever
 // string the client sent verbatim, with no canonicalization).
 func TestHandlePutServerConfig_DefaultTimezone_ValidPersisted(t *testing.T) {

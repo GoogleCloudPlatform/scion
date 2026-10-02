@@ -3366,13 +3366,22 @@ func TestPutServerConfigDB_DefaultTimezone_Invalid(t *testing.T) {
 }
 
 // TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected covers
-// tz-refactor task 12 review round 1's R1-3/tz-em addendum: time.LoadLocation
-// accepts "Local", "localtime", "posixrules" and "Factory" (Go's embedded
-// tzdata ships those files), but none of them name a portable IANA zone —
-// "Local" is the host's ambient zone, the other three are tzdata's own
-// implementation files — so the hub default must reject them explicitly,
-// the same denylist the per-user display-timezone preference uses (design
-// §3 A (d)).
+// time.LoadLocation accepting "Local", "localtime", "posixrules" and
+// "Factory" (Go's embedded tzdata ships those files) and, on a host with
+// the right/ and posix/ zoneinfo trees, any "right/..."- or "posix/..."-
+// prefixed name — but none of these name a portable IANA zone: "Local" is
+// the host's ambient zone, "localtime"/"posixrules"/"Factory" are tzdata's
+// own implementation files, and right/posix are whole-tree duplicates under
+// a path prefix that isn't part of any IANA name. So the hub default must
+// reject all of them explicitly, the same denylist the per-user
+// display-timezone preference uses (design §3 A (d)).
+//
+// The assertion below checks for errNonPortableTimezone's own message
+// rather than just the 422 status, so this test fails if the denylist
+// branch in validateIANATimezone is ever removed — including on a host
+// without the right/ and posix/ zoneinfo trees, where time.LoadLocation
+// would otherwise fail on those two names anyway for an unrelated reason
+// ("unknown time zone") and mask the regression.
 func TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected(t *testing.T) {
 	for _, tz := range []string{"Local", "localtime", "posixrules", "Factory", "right/Asia/Tokyo", "posix/Asia/Tokyo"} {
 		t.Run(tz, func(t *testing.T) {
@@ -3388,6 +3397,9 @@ func TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected(t *testing.T
 			}
 			if !strings.Contains(rr.Body.String(), tz) {
 				t.Errorf("error message should mention %q: %s", tz, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), errNonPortableTimezone.Error()) {
+				t.Errorf("error message for %q should contain the denylist message %q, got: %s", tz, errNonPortableTimezone.Error(), rr.Body.String())
 			}
 		})
 	}

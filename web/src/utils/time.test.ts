@@ -59,9 +59,8 @@ describe('isValidTimeZone', () => {
     expect(isValidTimeZone('💥')).toBe(false);
   });
 
-  // tz-refactor task 12 review round 1, R1-3: isValidTimeZone must agree
-  // with the server's validator (Go's time.LoadLocation), which Intl alone
-  // is looser than in these ways.
+  // isValidTimeZone must agree with the server's validator (Go's
+  // time.LoadLocation), which Intl alone is looser than in these ways.
   it('rejects lowercase names Intl matches case-insensitively', () => {
     expect(isValidTimeZone('asia/tokyo')).toBe(false);
     expect(isValidTimeZone('utc')).toBe(false);
@@ -69,7 +68,7 @@ describe('isValidTimeZone', () => {
 
   // "Utc" has valid IANA *shape* (one segment, starts with an uppercase
   // letter) and Intl resolves it case-insensitively to "UTC" without
-  // throwing, so the R3-1 shape rule accepts it, even though Go's
+  // throwing, so the shape rule accepts it, even though Go's
   // time.LoadLocation does not. This is the documented, accepted residual
   // false-accept (see isValidTimeZone's doc comment): nobody intentionally
   // types "Utc", and the server's 422 remains authoritative for it.
@@ -93,12 +92,12 @@ describe('isValidTimeZone', () => {
     expect(isValidTimeZone('Europe/Kiev')).toBe(true);
   });
 
-  // tz-refactor task 12 review round 2, R2-2: round 1's case check only
-  // caught a name resolving to a case variant of *itself*. A lowercase
-  // alias resolves to a *different* canonical string, so it slipped
-  // through — e.g. "asia/kolkata" resolves to "Asia/Calcutta", not
-  // "Asia/kolkata", so it isn't a same-string case variant. Go's
-  // time.LoadLocation rejects every one of these lowercase forms.
+  // A case check that only catches a name resolving to a case variant of
+  // *itself* misses a lowercase alias, which resolves to a *different*
+  // canonical string, so it slips through — e.g. "asia/kolkata" resolves to
+  // "Asia/Calcutta", not "Asia/kolkata", so it isn't a same-string case
+  // variant. Go's time.LoadLocation rejects every one of these lowercase
+  // forms.
   it('rejects lowercase aliases that Go rejects, even though Intl resolves them', () => {
     expect(isValidTimeZone('asia/kolkata')).toBe(false);
     expect(isValidTimeZone('us/pacific')).toBe(false);
@@ -109,26 +108,23 @@ describe('isValidTimeZone', () => {
     expect(isValidTimeZone('Asia/kolkata')).toBe(false);
   });
 
-  // tz-refactor task 12 review round 3, R3-1: round 2's fix (the previous
-  // version of this test) swapped one bug for a worse one. It accepted a
-  // name only if it resolved to itself or was an exact-case member of a
-  // 7-entry hand-picked set, which falsely rejected dozens of real IANA
-  // names Go accepts — including current IANA canonical names, not just
-  // backward-compatibility aliases. The current rule (shape-plus-Intl) has
-  // no hand-picked set to be incomplete, so these are no longer special
-  // cases, just ordinary names that happen not to resolve to themselves.
+  // A rule that accepts a name only if it resolves to itself or is an
+  // exact-case member of a hand-picked set falsely rejects dozens of real
+  // IANA names Go accepts — including current IANA canonical names, not
+  // just backward-compatibility aliases. The shape-plus-Intl rule has no
+  // hand-picked set to be incomplete, so these are no longer special cases,
+  // just ordinary names that happen not to resolve to themselves.
   it('accepts real IANA names that do not resolve to themselves, with no hand-picked list', () => {
     expect(isValidTimeZone('Asia/Kolkata')).toBe(true);
     expect(isValidTimeZone('US/Pacific')).toBe(true);
     expect(isValidTimeZone('GMT')).toBe(true);
     expect(isValidTimeZone('Etc/GMT+5')).toBe(true);
     // EST5EDT resolves to "America/New_York" in Node 24, not to itself —
-    // round 2's response claimed otherwise; that claim was wrong, and this
-    // is exactly the class of name round 2's rule depended on getting
-    // lucky about.
+    // exactly the class of name a resolves-to-itself check depends on
+    // getting lucky about.
     expect(isValidTimeZone('EST5EDT')).toBe(true);
-    // Named in review round 3 as falsely rejected by round 2's rule:
-    // current IANA canonical names (not links/aliases at all) and the
+    // Real IANA names falsely rejected by a resolves-to-itself-or-hand-picked-set
+    // rule: current IANA canonical names (not links/aliases at all) and the
     // very common Etc/UTC.
     expect(isValidTimeZone('Etc/UTC')).toBe(true);
     expect(isValidTimeZone('US/Eastern')).toBe(true);
@@ -157,7 +153,7 @@ const ZONEINFO_DIR = '/usr/share/zoneinfo';
  * that isn't itself part of any IANA name — not because the prefixed form
  * is universally rejected. Go's `time.LoadLocation` resolves against the
  * *host's* zoneinfo directory, so `LoadLocation("right/Africa/Abidjan")`
- * actually succeeds on a host whose tree has it (review round 4, R4-2); the
+ * actually succeeds on a host whose tree has it; the
  * server denylists both prefixes explicitly for exactly that reason
  * (`validateIANATimezone`, pkg/hub/timezone_validate.go). Excluded from
  * this scan because "Africa/Abidjan" without the prefix already covers the
@@ -180,8 +176,7 @@ const TZIF_MAGIC = Buffer.from('TZif');
  * `zonenow.tab`, `iso3166.tab`, `leapseconds`, `leap-seconds.list`,
  * `tzdata.zi`, macOS's `+VERSION`, `SECURITY`, ...) without having to name
  * every one of them — the same "hand-picked list is always incomplete"
- * failure mode R3-1 fixed for `isValidTimeZone` itself (review round 4,
- * R4-1).
+ * failure mode fixed for `isValidTimeZone` itself.
  */
 function isTZifFile(path: string): boolean {
   let fd: number;
@@ -219,17 +214,17 @@ function listSystemZoneNames(dir: string, prefix = ''): string[] {
 }
 
 describe('isValidTimeZone against the system zone database', () => {
-  // tz-refactor task 12 review round 3, R3-1: the regression class here is
-  // "a hand-picked list of exceptions is always incomplete." A test that
-  // only checks a dozen hand-picked names (the describe block above) can't
-  // catch a recurrence of that same mistake. /usr/share/zoneinfo is a
-  // broad, not-hand-picked-by-this-PR source of real zone names — including
-  // backward-compatibility links this container's tzdata package ships —
-  // to check isValidTimeZone against in bulk.
+  // The regression class here is "a hand-picked list of exceptions is
+  // always incomplete." A test that only checks a dozen hand-picked names
+  // (the describe block above) can't catch a recurrence of that same
+  // mistake. /usr/share/zoneinfo is a broad, not-hand-picked-by-this-PR
+  // source of real zone names — including backward-compatibility links
+  // this container's tzdata package ships — to check isValidTimeZone
+  // against in bulk.
   //
-  // skipIf (not a try/catch around a missing directory, review round 4,
-  // R4-1) makes a skip show up as a skip, not a silent pass: a CI image
-  // without tzdata would otherwise quietly lose this guard.
+  // skipIf (not a try/catch around a missing directory) makes a skip show
+  // up as a skip, not a silent pass: a CI image without tzdata would
+  // otherwise quietly lose this guard.
   it.skipIf(!existsSync(ZONEINFO_DIR))(
     'accepts every name in the system zone database (0 false rejects)',
     () => {
@@ -266,7 +261,7 @@ describe('listTimeZones', () => {
   it('every returned name is itself valid per isValidTimeZone', () => {
     // Cross-consistency between the two helpers: every name listTimeZones()
     // returns (400+ of them) must itself pass isValidTimeZone, including
-    // under R1-3's stricter case/offset rules.
+    // under isValidTimeZone's stricter case/offset rules.
     const zones = listTimeZones();
     for (const zone of zones) {
       expect(isValidTimeZone(zone)).toBe(true);

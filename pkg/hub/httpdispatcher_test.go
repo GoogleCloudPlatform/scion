@@ -5977,10 +5977,10 @@ func TestHTTPAgentDispatcher_TZInjection_HubDefault(t *testing.T) {
 }
 
 // TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode is the end-to-end
-// regression test for tz-refactor task 12 review round 1 finding R1-1: a
-// default_timezone saved through a file-mode admin PUT never reached agent
-// create, because BuildLayer1SnapshotFromFile did not populate
-// Layer1Snapshot.DefaultTimezone from GlobalConfig. Unlike
+// regression test guarding against a default_timezone saved through a
+// file-mode admin PUT never reaching agent create, because
+// BuildLayer1SnapshotFromFile did not populate Layer1Snapshot.DefaultTimezone
+// from GlobalConfig. Unlike
 // TestHTTPAgentDispatcher_TZInjection_HubDefault above (which hands the
 // dispatcher an arbitrary closure as the hub-agent-defaults provider), this
 // wires the dispatcher to the real (*Server).hubAgentDefaults method — the
@@ -6070,7 +6070,7 @@ func TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode(t *testing.T) {
 
 	// Re-dispatch: the handler test above already covers hubAgentDefaults()
 	// going back to "" after a clear, but that alone doesn't show dispatch
-	// itself stops injecting TZ (tz-refactor task 12 review round 2, R2-6).
+	// itself stops injecting TZ.
 	agent2 := &store.Agent{
 		ID:              tid("tz-agent-filemode-cleared"),
 		Name:            "tz-agent-filemode-cleared",
