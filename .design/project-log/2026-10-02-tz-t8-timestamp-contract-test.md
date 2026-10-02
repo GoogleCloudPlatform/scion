@@ -55,6 +55,13 @@ Closes ptone/scion#2501. Refs ptone/scion#2457. Design: tz-refactor design §2.2
 - **Policy `validFrom` → access-constraint `appliesWhen` window.** The policy API returns 410, so
   there is no policy write path. The access-constraint window is the remaining user-supplied
   validity window normalised at ingest (tz-refactor task 4).
+- **fireAt: no handler or store edits.** The `+02:00` `fireAt` passes as-is: the create handler
+  re-fetches from the store, and the tz-refactor task 2 ent mutation hook normalises the write.
+  `pkg/hub/handlers_scheduled_events.go` and `pkg/store/entadapter/schedule_store.go` are
+  deliberately untouched (ptone/scion#2476).
+- **Agent message REST read.** The agent message is read back from `GET /api/v1/agents/{id}/messages`.
+  `GET /api/v1/messages` is the caller's own inbox (recipient = the user), so it never lists a
+  user-to-agent message. Putting an agent-to-user message in it would need an agent credential.
 
 ## Notes from building it
 
