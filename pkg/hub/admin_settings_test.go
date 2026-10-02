@@ -944,3 +944,77 @@ func TestApplySettingsUpdates_ClearTopLevelStrings(t *testing.T) {
 		}
 	})
 }
+
+// TestHandlePutServerConfig_ClearTopLevelStrings_RoundTrip is the
+// handler-level complement of TestApplySettingsUpdates_ClearTopLevelStrings
+// (ptone/scion#2535): a file-mode PUT that sends "" for each top-level
+// string setting must remove those keys from the written settings.yaml,
+// while a key the request omits is left as it was.
+func TestHandlePutServerConfig_ClearTopLevelStrings_RoundTrip(t *testing.T) {
+	keys := []string{
+		"active_profile",
+		"default_template",
+		"default_harness_config",
+		"image_registry",
+		"workspace_path",
+		"default_max_agent_role",
+		"default_agent_role",
+		"default_runtime_broker",
+	}
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	scionDir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(scionDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(scionDir, "settings.yaml")
+
+	seed := map[string]interface{}{
+		"schema_version": "1",
+		"default_model":  "keep-model",
+	}
+	for _, k := range keys {
+		seed[k] = "old-" + k
+	}
+	seedData, err := yamlv3.Marshal(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, seedData, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	body := map[string]string{}
+	for _, k := range keys {
+		body[k] = ""
+	}
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{}
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", string(bodyJSON)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("settings.yaml not readable: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse settings.yaml: %v", err)
+	}
+	for _, k := range keys {
+		if v, ok := raw[k]; ok {
+			t.Errorf("expected %s to be absent from settings.yaml after clearing, got %v", k, v)
+		}
+	}
+	if got, _ := raw["default_model"].(string); got != "keep-model" {
+		t.Errorf("default_model was not in the request and should be unchanged, got %v (settings.yaml: %s)", raw["default_model"], data)
+	}
+}

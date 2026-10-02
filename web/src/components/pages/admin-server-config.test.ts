@@ -1032,11 +1032,14 @@ describe('scion-page-admin-server-config', () => {
       );
       const el = element as any;
       for (const [, prop] of clearable) el[prop] = `v-${prop}`;
+      el.harnessConfigSelection = '__other__';
+      el.customHarnessConfig = 'x';
 
       const payload = el.buildFilePayload() as Record<string, unknown>;
       for (const [key, prop] of clearable) {
         expect(payload, key).toHaveProperty(key, `v-${prop}`);
       }
+      expect(payload).toHaveProperty('default_harness_config', 'x');
     });
   });
 

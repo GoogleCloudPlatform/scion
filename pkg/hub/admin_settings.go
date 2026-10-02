@@ -661,27 +661,9 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 			delete(raw, "default_thinking_level")
 		}
 	}
-	if req.DefaultMaxAgentRole != nil {
-		if *req.DefaultMaxAgentRole != "" {
-			raw["default_max_agent_role"] = *req.DefaultMaxAgentRole
-		} else {
-			delete(raw, "default_max_agent_role")
-		}
-	}
-	if req.DefaultAgentRole != nil {
-		if *req.DefaultAgentRole != "" {
-			raw["default_agent_role"] = *req.DefaultAgentRole
-		} else {
-			delete(raw, "default_agent_role")
-		}
-	}
-	if req.DefaultRuntimeBroker != nil {
-		if *req.DefaultRuntimeBroker != "" {
-			raw["default_runtime_broker"] = *req.DefaultRuntimeBroker
-		} else {
-			delete(raw, "default_runtime_broker")
-		}
-	}
+	setOrDeleteString(raw, "default_max_agent_role", req.DefaultMaxAgentRole)
+	setOrDeleteString(raw, "default_agent_role", req.DefaultAgentRole)
+	setOrDeleteString(raw, "default_runtime_broker", req.DefaultRuntimeBroker)
 	if req.DefaultTimezone != nil {
 		if *req.DefaultTimezone != "" {
 			raw["default_timezone"] = *req.DefaultTimezone
