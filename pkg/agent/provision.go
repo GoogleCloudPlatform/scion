@@ -2381,6 +2381,30 @@ func readProvisionedWorktreeRepoRoot(agentDir string) string {
 // broker-owned state file. A no-op when ctxRepoRoot is empty or fails to
 // validate.
 //
+// The validation step resolves both arguments (EvalSymlinks) before
+// comparing them, rather than trusting the caller: by the time run.go's
+// Start calls this, effectiveWorkspace has already been reassigned to
+// ValidateWorkspaceSource's fully-resolved return value, but ctxRepoRoot is
+// still whatever the broker originally constructed it as (never resolved by
+// any caller). Comparing an unresolved candidate against a resolved
+// workspace fails validatedWorktreeRepoRoot's lexical containment check on
+// any host where the project path runs through a symlink, silently
+// discarding a value that is actually correct and leaving a later resume
+// with an empty RepoRoot.
+//
+// The persisted value, however, is the ORIGINAL, unresolved ctxRepoRoot —
+// not the resolved form used only to validate it. A resume/restart recovers
+// its own effectiveWorkspace from the agent's persisted Volumes (see Start's
+// extractWorkspaceFromVolumes), itself stored unresolved from whatever the
+// broker originally passed; persisting the resolved repo root here would
+// reintroduce the identical lexical mismatch one dispatch later, between a
+// resolved persistedRepoRoot and an unresolved recovered workspace, right
+// back at this same function's own validation step on the next resume.
+// Persisting the unresolved form keeps both sides of every future
+// comparison in the same, original spelling; the unconditional EvalSymlinks
+// pass in Start (after repoRoot is established) is what makes the resolved
+// form reach RunConfig, not this persistence gate.
+//
 // This is the single persistence gate shared by every call site that can be
 // the first to see a fresh ctx signal for a given dispatch:
 //   - ProvisionAgent, for a fresh create (via GetAgent, for
@@ -2398,7 +2422,18 @@ func readProvisionedWorktreeRepoRoot(agentDir string) string {
 // A write failure only means a later resume falls back to detectRepoRoot;
 // see writeProvisionedWorktreeRepoRoot.
 func persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, workspace string) {
-	if ctxRepoRoot == "" || validatedWorktreeRepoRoot(ctxRepoRoot, workspace) != ctxRepoRoot {
+	if ctxRepoRoot == "" || workspace == "" {
+		return
+	}
+	resolvedCtxRepoRoot, err := filepath.EvalSymlinks(ctxRepoRoot)
+	if err != nil {
+		return
+	}
+	resolvedWorkspace, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return
+	}
+	if validatedWorktreeRepoRoot(resolvedCtxRepoRoot, resolvedWorkspace) != resolvedCtxRepoRoot {
 		return
 	}
 	if readProvisionedWorktreeRepoRoot(agentDir) == ctxRepoRoot {

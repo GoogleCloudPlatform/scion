@@ -3510,6 +3510,113 @@ func TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkippe
 	}
 }
 
+// TestStartPersistsFreshProvisionedWorktreeRepoRootOnSymlinkedBrokerPath is
+// TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkipped's
+// sibling for a broker project path that runs through a symlinked ancestor.
+// ValidateWorkspaceSource always returns effectiveWorkspace fully resolved,
+// so the persistence gate's ctxRepoRoot argument (passed through unresolved,
+// exactly as the broker constructs it) and effectiveWorkspace (resolved) can
+// name the same real worktree while disagreeing lexically. Before the fix,
+// persistProvisionedWorktreeRepoRootIfValid compared them as given and
+// silently discarded a value that was actually correct, reproducing the
+// original empty-RepoRoot-on-resume bug on any host where the project path
+// runs through a symlink.
+func TestStartPersistsFreshProvisionedWorktreeRepoRootOnSymlinkedBrokerPath(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+
+	// The broker-provisioned base sits behind a symlinked ancestor, exactly
+	// like a broker project path whose parent directory is itself a symlink.
+	realParent := t.TempDir()
+	linkParent := t.TempDir()
+	linkDir := filepath.Join(linkParent, "link")
+	if err := os.Symlink(realParent, linkDir); err != nil {
+		t.Fatal(err)
+	}
+	sharedBase := filepath.Join(linkDir, "shared-base")
+	if err := os.MkdirAll(sharedBase, 0755); err != nil {
+		t.Fatalf("failed to create shared base dir: %v", err)
+	}
+	setupGitRepo(t, sharedBase)
+	worktreesDir := filepath.Join(sharedBase, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatalf("failed to create worktrees dir: %v", err)
+	}
+	userWorkspace := filepath.Join(worktreesDir, "agent-a")
+	if err := util.CreateWorktree(userWorkspace, "agent-a"); err != nil {
+		t.Fatalf("failed to create real worktree: %v", err)
+	}
+
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+	env := map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"}
+
+	// Step 1: create the agent normally as a plain --workspace agent (no ctx
+	// signal) — the agent directory now exists on disk with no repo root
+	// persisted.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: userWorkspace, Env: env,
+	}); err != nil {
+		t.Fatalf("initial Start failed: %v", err)
+	}
+
+	// Step 2: a later dispatch for the SAME agent whose ctx carries a fresh
+	// broker-provisioned-worktree signal — the symlinked, unresolved
+	// sharedBase, exactly as the broker would pass it. Because the agent
+	// directory already exists, GetAgent's "agent dir exists" branch skips
+	// ProvisionAgent entirely, so Start's own persistence call is the only
+	// way this value can reach disk.
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), sharedBase)
+	if _, err := mgr.Start(ctx, api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: userWorkspace, Env: env,
+	}); err != nil {
+		t.Fatalf("second Start failed: %v", err)
+	}
+
+	agentDir := config.GetAgentDir(projectScionDir, "agent-a", false)
+	persisted := readProvisionedWorktreeRepoRoot(agentDir)
+	if persisted == "" {
+		t.Fatal("persisted repo root is empty — the fresh ctx signal was not persisted on a symlinked broker path")
+	}
+	gotRoot, err := filepath.EvalSymlinks(persisted)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(persisted repo root): %v", err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(sharedBase)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(sharedBase): %v", err)
+	}
+	if gotRoot != wantRoot {
+		t.Fatalf("persisted repo root = %q, want %q — the fresh ctx signal was not persisted on a symlinked broker path", gotRoot, wantRoot)
+	}
+
+	// Step 3: a plain resume dispatch (no ctx signal, no Workspace — exactly
+	// what the hub sends on restart) must recover RepoRoot from the
+	// persisted state alone, proving the persisted value is not just
+	// non-empty but actually usable.
+	var capturedConfig runtime.RunConfig
+	mockRT.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
+		capturedConfig = config
+		return "mock-id", nil
+	}
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: "", Resume: true, Env: env,
+	}); err != nil {
+		t.Fatalf("resume Start failed: %v", err)
+	}
+	if capturedConfig.RepoRoot == "" {
+		t.Fatal("resume RunConfig.RepoRoot is empty — the persisted repo root from a symlinked broker path did not survive resume")
+	}
+}
+
 // TestStartDoesNotPersistUnvalidatedCtxRepoRoot covers the persistence path:
 // it must only ever write a repo root that actually validated (repoRoot ==
 // ctxRepoRoot), never a bare ctx value that the validator rejected and
