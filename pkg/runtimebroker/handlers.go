@@ -1150,7 +1150,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			agentResp.HarnessConfig = cfg.HarnessConfig
 			agentResp.Image = cfg.Image
 		}
-		if s.runtime != nil {
+		// Report the runtime this dispatch resolved to (its profile), not
+		// the broker's default runtime: the hub records this value as the
+		// agent's runtime.
+		agentResp.RuntimeType = sc.RuntimeType
+		if agentResp.RuntimeType == "" && s.runtime != nil {
 			agentResp.RuntimeType = s.runtime.Name()
 		}
 
@@ -1981,23 +1985,59 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// agent's worktree lives under.
 	startAgentID := startReq.ResolvedEnv["SCION_AGENT_ID"]
 
+	// If the request names no project, recover the project path from the
+	// agent's existing container, found by the same project-scoped search
+	// across every runtime this broker has that stop and restart use. This
+	// runs before buildStartContext so its runtime resolution reads the
+	// agent's project settings and saved profile. A recovered path is the
+	// project's .scion directory as the container recorded it, not a
+	// project root, so buildStartContext is told where it came from.
+	startProjectPath := startReq.ProjectPath
+	var startProjectPathFromContainer bool
+	if startReq.ProjectPath == "" && startReq.ProjectSlug == "" {
+		m, err := s.lookupAgentMatch(ctx, id, projectID)
+		switch {
+		case m.matched:
+			startProjectPath = m.entry.ProjectPath
+			startProjectPathFromContainer = startProjectPath != ""
+		case errors.Is(err, ErrAgentNotFound):
+			// No container to recover from; resolve as a request that names
+			// no project.
+		case errors.Is(err, errAuxiliaryRuntimeList):
+			// The default runtime listed no match and an auxiliary runtime
+			// could not list; resolve as a request that names no project
+			// rather than failing a start that may not involve that runtime.
+			s.agentLifecycleLog.Warn("Start agent: auxiliary runtime list failed while recovering the project path",
+				"agent_id", id, "error", err)
+		case errors.Is(err, ErrAgentListUnavailable):
+			span.SetStatus(codes.Error, err.Error())
+			AgentLookupUnavailable(w, err, id, "start", "")
+			return
+		default:
+			// More than one container matches: none of them is taken as the
+			// agent's project; resolve as a request that names no project.
+			s.agentLifecycleLog.Warn("Start agent: project path not recovered", "agent_id", id, "error", err)
+		}
+	}
+
 	sc, err := s.buildStartContext(ctx, startContextInputs{
-		Name:               id,
-		AgentID:            startAgentID,
-		ProjectID:          projectID,
-		ProjectPath:        startReq.ProjectPath,
-		ProjectSlug:        startReq.ProjectSlug,
-		Config:             cfg,
-		InlineConfig:       startReq.InlineConfig,
-		HubEndpoint:        startReq.HubEndpoint,
-		ResolvedEnv:        startReq.ResolvedEnv,
-		EnvClassifications: startReq.EnvClassifications,
-		ResolvedSecrets:    startReq.ResolvedSecrets,
-		SharedDirs:         startReq.SharedDirs,
-		AgentToken:         startContextAgentToken,
-		WorkspaceMode:      startReq.WorkspaceMode,
-		HTTPRequest:        r,
-		Operation:          opHTTPStart,
+		Name:                     id,
+		AgentID:                  startAgentID,
+		ProjectID:                projectID,
+		ProjectPath:              startProjectPath,
+		ProjectPathFromContainer: startProjectPathFromContainer,
+		ProjectSlug:              startReq.ProjectSlug,
+		Config:                   cfg,
+		InlineConfig:             startReq.InlineConfig,
+		HubEndpoint:              startReq.HubEndpoint,
+		ResolvedEnv:              startReq.ResolvedEnv,
+		EnvClassifications:       startReq.EnvClassifications,
+		ResolvedSecrets:          startReq.ResolvedSecrets,
+		SharedDirs:               startReq.SharedDirs,
+		AgentToken:               startContextAgentToken,
+		WorkspaceMode:            startReq.WorkspaceMode,
+		HTTPRequest:              r,
+		Operation:                opHTTPStart,
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -2005,24 +2045,6 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		return
 	}
 	opts := sc.Opts
-
-	// If project path wasn't in the request, fall back to looking up from an existing container
-	if startReq.ProjectPath == "" && startReq.ProjectSlug == "" && opts.ProjectPath == "" {
-		agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
-		if err != nil {
-			span.SetStatus(codes.Error, err.Error())
-			RuntimeError(w, "Failed to list agents: "+err.Error())
-			return
-		}
-		for i := range agents {
-			if matchesAgent(agents[i], id, projectID) {
-				if agents[i].ProjectPath != "" {
-					opts.ProjectPath = agents[i].ProjectPath
-				}
-				break
-			}
-		}
-	}
 
 	// Once ProjectPath is resolved, confirm id's agent directory actually
 	// resolves under this project's agents root before applyInlineConfigUpdate,
@@ -2212,9 +2234,16 @@ func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
 // container id — nothing addressable to stop): that case is folded into
 // the same "not found" outcome as a genuine no-match.
 func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) (string, agent.Manager, error) {
-	containerID, mgr, _, err := s.lookupAgentTarget(ctx, id, projectID)
-	if err == nil && containerID != "" {
-		return containerID, mgr, nil
+	m, err := s.lookupAgentMatch(ctx, id, projectID)
+	return s.projectScopedTargetFrom(ctx, id, projectID, m, err)
+}
+
+// projectScopedTargetFrom applies projectScopedTarget's rules to a
+// lookupAgentMatch result the caller already has, so restart can read the
+// agent's project path from the same entry it stops.
+func (s *Server) projectScopedTargetFrom(ctx context.Context, id, projectID string, m agentMatch, err error) (string, agent.Manager, error) {
+	if err == nil && m.containerID != "" {
+		return m.containerID, m.manager, nil
 	}
 	if err != nil && !errors.Is(err, ErrAgentNotFound) {
 		return "", nil, err
@@ -2333,28 +2362,32 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		UserID:               restartReq.UserID,
 	})
 
-	// Look up agent to get its name and project path
+	// Look up the agent with the same project-scoped search across every
+	// runtime this broker has that the stop below uses, and read its name
+	// and project path from the matched entry; the project path is what
+	// lets the runtime resolution below read the agent's project settings
+	// and saved profile. A lookup error leaves the agent unresolved here and
+	// is reported where the stop target is resolved, after the
+	// runtime checks.
 	agentName := id
 	var projectPath string
-	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
-	if err == nil {
-		for i := range agents {
-			if matchesAgent(agents[i], id, projectID) {
-				agentName = agents[i].Name
-				projectPath = agents[i].ProjectPath
-				break
-			}
+	match, matchErr := s.lookupAgentMatch(ctx, id, projectID)
+	if match.matched {
+		if match.entry.Name != "" {
+			agentName = match.entry.Name
 		}
+		projectPath = match.entry.ProjectPath
 	}
 
 	sc, err := s.buildStartContext(ctx, startContextInputs{
-		Name:               agentName,
-		ProjectPath:        projectPath,
-		HubEndpoint:        restartReq.HubEndpoint,
-		ResolvedEnv:        restartReq.ResolvedEnv,
-		EnvClassifications: restartReq.EnvClassifications,
-		HTTPRequest:        r,
-		Operation:          opHTTPRestart,
+		Name:                     agentName,
+		ProjectPath:              projectPath,
+		ProjectPathFromContainer: projectPath != "",
+		HubEndpoint:              restartReq.HubEndpoint,
+		ResolvedEnv:              restartReq.ResolvedEnv,
+		EnvClassifications:       restartReq.EnvClassifications,
+		HTTPRequest:              r,
+		Operation:                opHTTPRestart,
 	})
 	if err != nil {
 		writeStartContextError(w, err)
@@ -2383,7 +2416,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// be exited and the subsequent start will handle cleanup.
 	// The lookup also returns the manager whose runtime reported the
 	// target, so the stop goes to that same runtime (default or auxiliary).
-	stopTarget, stopMgr, err := s.projectScopedTarget(ctx, id, projectID)
+	stopTarget, stopMgr, err := s.projectScopedTargetFrom(ctx, id, projectID, match, matchErr)
 	if err != nil {
 		// A lookup error other than "not found" must abort the restart
 		// without starting a second container — otherwise a runtime hiccup
