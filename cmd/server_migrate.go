@@ -20,7 +20,6 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
-	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
 
@@ -84,7 +83,7 @@ func init() {
 }
 
 func runServerMigrate(cmd *cobra.Command, _ []string) error {
-	util.PinProcessUTC()
+	pinProcessUTC()
 
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()

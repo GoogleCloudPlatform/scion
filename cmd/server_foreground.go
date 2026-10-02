@@ -117,21 +117,22 @@ func chdirHomeIfAtFilesystemRoot() {
 	log.Printf("Working directory was %s; changed to home directory %s", wd, home)
 }
 
-// pinProcessUTCFn and initServerLoggingFn are seams over util.PinProcessUTC
-// and initServerLogging respectively, so tests can observe and control the
-// order runServerStart calls them in without starting a real server.
-var (
-	pinProcessUTCFn     = util.PinProcessUTC
-	initServerLoggingFn = initServerLogging
-)
+// pinProcessUTC is util.PinProcessUTC; a var so the cmd test binary can
+// disable it (see TestMain in main_test.go). Running the real pin inside a
+// test would race goroutines leaked by earlier tests (both read and write
+// time.Local) and would silently switch every later test in the binary to
+// UTC regardless of TZ, masking real timezone bugs (tz-refactor task 1
+// review round 1, R1-3). Placement of every call to this seam is enforced
+// by the AST test in pin_process_utc_test.go, not by this comment.
+var pinProcessUTC = util.PinProcessUTC
 
 func runServerStart(cmd *cobra.Command, args []string) error {
 	// Pin the process to UTC before anything else runs (log timestamps, cron
 	// parsing, ent's Default(time.Now), etc. all read time.Local).
-	pinProcessUTCFn()
+	pinProcessUTC()
 
 	// 1. Initialize logging
-	logCleanups, requestLogger, messageLogger, err := initServerLoggingFn(cmd)
+	logCleanups, requestLogger, messageLogger, err := initServerLogging(cmd)
 	if err != nil {
 		return err
 	}

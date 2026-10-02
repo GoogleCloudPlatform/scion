@@ -26,7 +26,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
-	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
 
@@ -86,7 +85,7 @@ func backfillConfigFromFlags() messaging.BackfillConfig {
 }
 
 func runServerBackfill(cmd *cobra.Command, _ []string) error {
-	util.PinProcessUTC()
+	pinProcessUTC()
 
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
