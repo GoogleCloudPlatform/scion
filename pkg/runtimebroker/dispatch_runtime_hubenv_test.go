@@ -202,3 +202,42 @@ func TestBuildStartContext_WorktreeProvisionFollowsDispatchRuntime(t *testing.T)
 		})
 	}
 }
+
+// TestBuildStartContext_CloudrunSandboxEndpointFollowsDispatchRuntime: on a
+// broker whose default runtime is cloudrun-sandbox, only an agent dispatched
+// to cloudrun-sandbox gets the link-local sandbox hub endpoint. An agent
+// dispatched to a kubernetes profile on the same broker keeps the hub
+// endpoint as resolved.
+func TestBuildStartContext_CloudrunSandboxEndpointFollowsDispatchRuntime(t *testing.T) {
+	clearSCIONEnv(t)
+	t.Setenv("SCION_METADATA_BIND_ADDRESS", "203.0.113.5")
+	tests := []struct {
+		name    string
+		profile string
+		want    string
+	}{
+		{name: "cloudrun-sandbox agent", profile: "", want: "http://203.0.113.5:8080"},
+		{name: "kubernetes agent", profile: dispatchRuntimeOtherProfile, want: "http://localhost:8080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			cfg.HubListenPort = 8080
+			srv, _ := newTestServerForStartContextMultiProfile(t, cfg, "cloudrun-sandbox", dispatchRuntimeOtherProfile, "kubernetes")
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:        "agent-cloudrun-dispatch",
+				HubEndpoint: "http://localhost:8080",
+				Config:      &CreateAgentConfig{Profile: tt.profile},
+				HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
+				Operation:   opCreate,
+			})
+			if err != nil {
+				t.Fatalf("buildStartContext: %v", err)
+			}
+			if got := sc.Opts.Env["SCION_HUB_ENDPOINT"]; got != tt.want {
+				t.Errorf("SCION_HUB_ENDPOINT = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

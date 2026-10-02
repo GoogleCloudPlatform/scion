@@ -429,11 +429,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// 4. Hub endpoint
 	// The hub endpoint (its container-bridge rewrite and the cloudrun-family
 	// overrides) and the colocated extra hosts all depend on where this
-	// agent runs, so they key off the
-	// runtime this dispatch resolved to (dispatchRuntimeType, above), not
-	// the broker's default runtime: a docker-default broker can dispatch an
-	// agent to a kubernetes profile, and that pod must not receive a
-	// docker-bridge hub URL or docker --add-host entries.
+	// agent runs, so they key off the runtime this dispatch resolved to
+	// (dispatchRuntimeType, above), not the broker's default runtime: a
+	// docker-default broker can dispatch an agent to a kubernetes profile,
+	// and that pod must not receive a docker-bridge hub URL or docker
+	// --add-host entries.
 	runtimeName := dispatchRuntimeType
 
 	// Resolve hub connection early — needed for colocated detection and
