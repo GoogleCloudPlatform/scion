@@ -24,7 +24,9 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -177,6 +179,13 @@ func TestProjectMembersGroup_CurrentOwnerKeepsLegitimateAccess(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
 	admin := newSuperAdminUser(t, f.s, "mg-owner-hub-admin")
+	adminAdded := createStaleOwnerUser(t, f.s, tid("mg-owner-admin-added"), "mg-admin-added@test.com")
+	rec = doRequestAsUser(t, f.srv, admin, http.MethodPost, "/api/v1/groups/"+g.ID+"/members",
+		AddGroupMemberRequest{MemberType: "user", MemberID: adminAdded.ID, Role: "member"})
+	assert.Equal(t, http.StatusCreated, rec.Code, "hub admin can still add to the members group: %s", rec.Body.String())
+	_, err = f.s.GetGroupMembership(ctx, g.ID, store.GroupMemberTypeUser, adminAdded.ID)
+	assert.NoError(t, err, "hub admin add must create the membership")
+
 	rec = doRequestAsUser(t, f.srv, admin, http.MethodDelete,
 		"/api/v1/groups/"+g.ID+"/members/user/"+existing.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code, "hub admin can still manage the members group: %s", rec.Body.String())
@@ -276,4 +285,213 @@ func TestBackfillRoleBindings_ClearsProjectMembersGroupOwners(t *testing.T) {
 	require.NoError(t, BackfillRoleBindings(ctx, f.s))
 
 	assert.Empty(t, membersGroupFor(t, f.s, f.project).OwnerID)
+}
+
+// TestProjectMembersGroup_CreatorOwnerUsesProjectMembersEndpoint pins the
+// contract for a creator who still holds the project-owner binding: the
+// members group created by the real creation path carries no OwnerID, so
+// the group API is hub-admin-only (403), and membership is managed through
+// the project members endpoint, which the owner binding authorizes (201).
+func TestProjectMembersGroup_CreatorOwnerUsesProjectMembersEndpoint(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := createStaleOwnerUser(t, s, tid("mg-creator-owner"), "mg-creator-owner@test.com")
+	outsider := createStaleOwnerUser(t, s, tid("mg-creator-outsider"), "mg-creator-outsider@test.com")
+	project := &store.Project{
+		ID: tid("mg-creator-project"), Name: "MG Creator", Slug: "mg-creator-project",
+		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+
+	g := membersGroupFor(t, s, project)
+	require.Empty(t, g.OwnerID, "members group must not copy Project.OwnerID")
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/groups/"+g.ID+"/members",
+		AddGroupMemberRequest{MemberType: "user", MemberID: outsider.ID, Role: "member"})
+	require.Equal(t, http.StatusForbidden, rec.Code,
+		"members group mutation through the group API is hub-admin-only; got: %s", rec.Body.String())
+
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	rec = doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/"+project.ID+"/members",
+		addProjectMemberRequest{
+			RoleDefinitionID: memberRD.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      outsider.ID,
+		})
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"project owner adds members through the project members endpoint; got: %s", rec.Body.String())
+}
+
+// TestUpdateGroup_RejectsOwnerIDOnProjectMembersGroup pins that PATCH cannot
+// put an owner back on a project members group, even as a hub admin, since
+// the owner relationship would re-grant group.* (ptone/scion#2599). Other
+// fields stay patchable, and ordinary groups still accept an owner.
+func TestUpdateGroup_RejectsOwnerIDOnProjectMembersGroup(t *testing.T) {
+	f, g, existing := setupStaleOwnerMembersGroup(t)
+	ctx := context.Background()
+	admin := newSuperAdminUser(t, f.s, "mg-patch-hub-admin")
+
+	patch := func(id string, body map[string]interface{}) *httptest.ResponseRecorder {
+		return doRequestAsUser(t, f.srv, admin, http.MethodPatch, "/api/v1/groups/"+id, body)
+	}
+
+	t.Run("members group (hub key)", func(t *testing.T) {
+		rec := patch(g.ID, map[string]interface{}{"ownerId": existing.ID, "name": "Renamed"})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), ErrCodeValidationError)
+		stored := membersGroupFor(t, f.s, f.project)
+		assert.Empty(t, stored.OwnerID, "rejected PATCH must not set an owner")
+		assert.Equal(t, g.Name, stored.Name, "rejected PATCH must not apply other fields")
+	})
+
+	t.Run("members group (entadapter key)", func(t *testing.T) {
+		legacy := &store.Group{
+			ID: tid("mg-patch-legacy-key"), Name: "MG Patch Legacy", Slug: "mg-patch-legacy-key",
+			GroupType: store.GroupTypeExplicit, ProjectID: f.project.ID,
+			Annotations: map[string]string{legacyProjectMembersGroupAnnotation: "true"},
+		}
+		require.NoError(t, f.s.CreateGroup(ctx, legacy))
+		rec := patch(legacy.ID, map[string]interface{}{"ownerId": existing.ID})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		stored, err := f.s.GetGroup(ctx, legacy.ID)
+		require.NoError(t, err)
+		assert.Empty(t, stored.OwnerID)
+	})
+
+	t.Run("marker added in the same PATCH", func(t *testing.T) {
+		unmarked := &store.Group{
+			ID: tid("mg-patch-unmarked"), Name: "MG Patch Unmarked", Slug: "mg-patch-unmarked",
+			GroupType: store.GroupTypeExplicit, ProjectID: f.project.ID,
+		}
+		require.NoError(t, f.s.CreateGroup(ctx, unmarked))
+		rec := patch(unmarked.ID, map[string]interface{}{
+			"ownerId":     existing.ID,
+			"annotations": map[string]string{systemProjectMembersGroupAnnotation: "true"},
+		})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		stored, err := f.s.GetGroup(ctx, unmarked.ID)
+		require.NoError(t, err)
+		assert.Empty(t, stored.OwnerID)
+	})
+
+	t.Run("members group other fields still patchable", func(t *testing.T) {
+		rec := patch(g.ID, map[string]interface{}{"description": "admin note"})
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, "admin note", membersGroupFor(t, f.s, f.project).Description)
+	})
+
+	t.Run("ordinary group accepts owner", func(t *testing.T) {
+		ordinary := &store.Group{
+			ID: tid("mg-patch-ordinary"), Name: "MG Patch Ordinary", Slug: "mg-patch-ordinary",
+			GroupType: store.GroupTypeExplicit,
+		}
+		require.NoError(t, f.s.CreateGroup(ctx, ordinary))
+		rec := patch(ordinary.ID, map[string]interface{}{"ownerId": existing.ID})
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		stored, err := f.s.GetGroup(ctx, ordinary.ID)
+		require.NoError(t, err)
+		assert.Equal(t, existing.ID, stored.OwnerID)
+	})
+}
+
+// TestBackfillClearProjectMembersGroupOwners_Paginates pins the NextCursor
+// loop: with a small page size, a marked group on a later page is cleared.
+func TestBackfillClearProjectMembersGroupOwners_Paginates(t *testing.T) {
+	f, g, _ := setupStaleOwnerMembersGroup(t)
+	ctx := context.Background()
+	s := f.s
+
+	orig := projectMembersGroupOwnerBackfillPageSize
+	projectMembersGroupOwnerBackfillPageSize = 2
+	t.Cleanup(func() { projectMembersGroupOwnerBackfillPageSize = orig })
+
+	// Filler groups created after the members group, then a second marked
+	// group created last so it sorts onto a later page.
+	for i := 0; i < 5; i++ {
+		id := tid("mg-page-filler-" + string(rune('a'+i)))
+		require.NoError(t, s.CreateGroup(ctx, &store.Group{
+			ID: id, Name: id, Slug: id, GroupType: store.GroupTypeExplicit,
+			OwnerID: f.coOwner.ID, Created: time.Now().Add(time.Duration(i+1) * time.Second),
+		}))
+	}
+	late := &store.Group{
+		ID: tid("mg-page-late-marked"), Name: "MG Late Marked", Slug: "mg-page-late-marked",
+		GroupType: store.GroupTypeExplicit, ProjectID: f.project.ID, OwnerID: f.creator.ID,
+		Annotations: map[string]string{systemProjectMembersGroupAnnotation: "true"},
+		Created:     time.Now().Add(time.Hour),
+	}
+	require.NoError(t, s.CreateGroup(ctx, late))
+	g.OwnerID = f.creator.ID
+	require.NoError(t, s.UpdateGroup(ctx, g))
+
+	// Precondition: the late marked group is not on the first page.
+	first, err := s.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{
+		Limit: projectMembersGroupOwnerBackfillPageSize, SkipTotalCount: true,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, first.NextCursor, "precondition: more than one page")
+	for _, item := range first.Items {
+		require.NotEqual(t, late.ID, item.ID, "precondition: late marked group must not be on page 1")
+	}
+
+	require.NoError(t, backfillClearProjectMembersGroupOwners(ctx, s))
+
+	stored, err := s.GetGroup(ctx, late.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.OwnerID, "marked group on a later page must be cleared")
+	assert.Empty(t, membersGroupFor(t, s, f.project).OwnerID, "fixture members group must be cleared")
+}
+
+// backfillFailingStore makes selected BackfillRoleBindings steps fail.
+type backfillFailingStore struct {
+	store.Store
+	failListUsers  bool
+	failListGroups bool
+}
+
+func (b *backfillFailingStore) ListUsers(ctx context.Context, f store.UserFilter, o store.ListOptions) (*store.ListResult[store.User], error) {
+	if b.failListUsers {
+		return nil, errors.New("injected ListUsers failure")
+	}
+	return b.Store.ListUsers(ctx, f, o)
+}
+
+func (b *backfillFailingStore) ListGroups(ctx context.Context, f store.GroupFilter, o store.ListOptions) (*store.ListResult[store.Group], error) {
+	if b.failListGroups {
+		return nil, errors.New("injected ListGroups failure")
+	}
+	return b.Store.ListGroups(ctx, f, o)
+}
+
+// TestBackfillRoleBindings_ClearRunsWhenEarlierStepFails pins that the
+// security-relevant owner clear runs even when an earlier backfill step
+// fails, and that errors from both are reported (neither hides the other).
+func TestBackfillRoleBindings_ClearRunsWhenEarlierStepFails(t *testing.T) {
+	t.Run("earlier step fails, clear still runs", func(t *testing.T) {
+		f, g, _ := setupStaleOwnerMembersGroup(t)
+		ctx := context.Background()
+		g.OwnerID = f.creator.ID
+		require.NoError(t, f.s.UpdateGroup(ctx, g))
+
+		err := BackfillRoleBindings(ctx, &backfillFailingStore{Store: f.s, failListUsers: true})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "backfill user role bindings")
+		assert.Contains(t, err.Error(), "injected ListUsers failure")
+		assert.NotContains(t, err.Error(), "clear project members group owners")
+
+		assert.Empty(t, membersGroupFor(t, f.s, f.project).OwnerID,
+			"owner clear must run even when an earlier step fails")
+	})
+
+	t.Run("both fail, both errors reported", func(t *testing.T) {
+		f, _, _ := setupStaleOwnerMembersGroup(t)
+		err := BackfillRoleBindings(context.Background(),
+			&backfillFailingStore{Store: f.s, failListUsers: true, failListGroups: true})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "injected ListUsers failure")
+		assert.Contains(t, err.Error(), "injected ListGroups failure")
+	})
 }

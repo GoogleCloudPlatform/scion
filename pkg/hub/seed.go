@@ -842,27 +842,30 @@ func agentRolePermissionIDs(role AgentRole) []string {
 // project ownership. It is idempotent (skips if binding already exists) and
 // called from the startup/migration path.
 func BackfillRoleBindings(ctx context.Context, s store.Store) error {
+	var errs []error
+
 	// Backfill system role bindings from User.Role
 	if err := backfillUserRoleBindings(ctx, s); err != nil {
-		return fmt.Errorf("backfill user role bindings: %w", err)
-	}
-
-	// Backfill project-owner role bindings from Project.CreatedBy.
-	// Pre-existing projects (created before project-scoped RoleBindings were
-	// introduced) have a legacy CreatedBy/OwnerID but no project-owner
-	// RoleBinding. This causes the project members view to show "no members"
-	// and the "my projects" filter to miss RoleBinding-based membership.
-	if err := backfillProjectOwnerRoleBindings(ctx, s); err != nil {
-		return fmt.Errorf("backfill project owner role bindings: %w", err)
+		errs = append(errs, fmt.Errorf("backfill user role bindings: %w", err))
+	} else if err := backfillProjectOwnerRoleBindings(ctx, s); err != nil {
+		// Backfill project-owner role bindings from Project.CreatedBy.
+		// Pre-existing projects (created before project-scoped RoleBindings were
+		// introduced) have a legacy CreatedBy/OwnerID but no project-owner
+		// RoleBinding. This causes the project members view to show "no members"
+		// and the "my projects" filter to miss RoleBinding-based membership.
+		errs = append(errs, fmt.Errorf("backfill project owner role bindings: %w", err))
 	}
 
 	// Clear the legacy Group.OwnerID copied from Project.OwnerID onto
-	// project members groups (ptone/scion#2599).
+	// project members groups (ptone/scion#2599). This is security-relevant
+	// (it removes a stale group.* grant) and independent of the steps above,
+	// so it runs even when they fail, and its error is joined with theirs
+	// rather than hiding them.
 	if err := backfillClearProjectMembersGroupOwners(ctx, s); err != nil {
-		return fmt.Errorf("clear project members group owners: %w", err)
+		errs = append(errs, fmt.Errorf("clear project members group owners: %w", err))
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // legacyProjectMembersGroupAnnotation is the project-members-group marker
@@ -871,10 +874,20 @@ func BackfillRoleBindings(ctx context.Context, s store.Store) error {
 // systemProjectMembersGroupAnnotation, the key createProjectMembersGroup
 // writes; ptone/scion#2556 tracks that mismatch. Until it is resolved, the
 // owner-clearing backfill matches either key.
+//
+// This literal duplicates the entadapter constant
+// systemProjectMembersGroupAnnotation in pkg/store/entadapter/composite.go;
+// fold the two together under ptone/scion#2556.
 const legacyProjectMembersGroupAnnotation = "scion.io/system-project-members-group"
 
+// projectMembersGroupOwnerBackfillPageSize is the ListGroups page size for
+// backfillClearProjectMembersGroupOwners. It is a package variable, not a
+// const, so tests can shrink it to exercise the pagination loop.
+var projectMembersGroupOwnerBackfillPageSize = 200
+
 // hasProjectMembersGroupMarker reports whether g carries either
-// project-members-group marker and belongs to a project.
+// project-members-group marker and belongs to a project. It is shared by the
+// owner-clearing backfill and the group PATCH handler.
 func hasProjectMembersGroupMarker(g *store.Group) bool {
 	if g == nil || g.ProjectID == "" || g.Annotations == nil {
 		return false
@@ -898,11 +911,13 @@ func hasProjectMembersGroupMarker(g *store.Group) bool {
 // is skipped, so a second run changes nothing. Per-group update errors are
 // logged and skipped.
 func backfillClearProjectMembersGroupOwners(ctx context.Context, s store.Store) error {
+	// All groups are scanned rather than filtering by GroupType: the scan is
+	// paginated and cheap, and a type filter could miss legacy group shapes.
 	var cursor string
 	var cleared int
 	for {
 		groups, err := s.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{
-			Limit:          200,
+			Limit:          projectMembersGroupOwnerBackfillPageSize,
 			Cursor:         cursor,
 			SkipTotalCount: true,
 		})

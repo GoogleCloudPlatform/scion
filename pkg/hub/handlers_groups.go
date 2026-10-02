@@ -405,6 +405,23 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 
+	// A project members group carries no owner (ptone/scion#2599): the
+	// owner relationship would grant group.* outside the project's role
+	// bindings. Reject setting one, even by a hub admin. Both the stored
+	// group and the patched annotations are checked so that a PATCH cannot
+	// add the marker and an owner together.
+	if req.OwnerID != "" {
+		patched := *group
+		if req.Annotations != nil {
+			patched.Annotations = req.Annotations
+		}
+		if hasProjectMembersGroupMarker(group) || hasProjectMembersGroupMarker(&patched) {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				"ownerId cannot be set on a project members group", nil)
+			return
+		}
+	}
+
 	if req.Name != "" {
 		group.Name = req.Name
 	}

@@ -1109,40 +1109,6 @@ func TestGCPSA_Verify_MemberDenied(t *testing.T) {
 		"project member should not be able to verify SA; got: %s", rec.Body.String())
 }
 
-// TestGCPSA_ProjectOwnerAddsMembersViaProjectMembers pins the members-group
-// contract after ptone/scion#2599: the project members group carries no
-// OwnerID, so the project owner (here also the creator) cannot mutate it
-// through the group API; membership is managed through the project members
-// endpoints, which the owner's project-owner binding authorizes.
-func TestGCPSA_ProjectOwnerAddsMembersViaProjectMembers(t *testing.T) {
-	srv, s, owner, _, outsider, project := setupGCPAuthzTest(t)
-	ctx := context.Background()
-
-	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
-	require.NoError(t, err)
-	require.Empty(t, membersGroup.OwnerID, "members group must not copy Project.OwnerID")
-
-	rec := doRequestAsUser(t, srv, owner, http.MethodPost,
-		fmt.Sprintf("/api/v1/groups/%s/members", membersGroup.ID), AddGroupMemberRequest{
-			MemberType: "user",
-			MemberID:   outsider.ID,
-			Role:       "member",
-		})
-	require.Equal(t, http.StatusForbidden, rec.Code,
-		"members group mutation through the group API is hub-admin-only; got: %s", rec.Body.String())
-
-	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
-	require.NoError(t, err)
-	rec = doRequestAsUser(t, srv, owner, http.MethodPost,
-		fmt.Sprintf("/api/v1/projects/%s/members", project.ID), addProjectMemberRequest{
-			RoleDefinitionID: memberRD.ID,
-			PrincipalType:    store.RoleBindingPrincipalUser,
-			PrincipalID:      outsider.ID,
-		})
-	require.Equal(t, http.StatusCreated, rec.Code,
-		"project owner should be able to add members through the project members endpoint; got: %s", rec.Body.String())
-}
-
 func TestVerifyGCPServiceAccount_NoTokenGenerator_Returns503(t *testing.T) {
 	srv, s := testServer(t) // no token generator configured
 	projectID := createTestProjectForSA(t, srv, s)
