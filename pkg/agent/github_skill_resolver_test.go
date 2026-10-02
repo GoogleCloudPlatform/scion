@@ -1797,6 +1797,14 @@ func TestGitHubSkillResolver_CrossProjectCredentialIsolation(t *testing.T) {
 	entered := make(chan struct{})
 	var enterOnce sync.Once
 	proceed := make(chan struct{})
+	var proceedOnce sync.Once
+	closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
+	// Registered after newTestGitHubServer's own t.Cleanup(server.Close), so
+	// this runs first (cleanups run in reverse order): releasing any blocked
+	// handler before the server tries to close keeps a regression (project B
+	// incorrectly coalesced, so proceed is the only thing unblocking it) from
+	// turning into a hung Close() instead of a clean test failure.
+	t.Cleanup(closeProceed)
 
 	// Only secret-A (project A's credential) is accepted; secret-B (project
 	// B's) gets a 404, exactly as it would against the real GitHub API for a
@@ -1873,8 +1881,14 @@ func TestGitHubSkillResolver_CrossProjectCredentialIsolation(t *testing.T) {
 		t.Fatal("project B's resolve did not return independently of project A's in-flight fetch — it may have been incorrectly coalesced")
 	}
 
-	close(proceed)
-	wg.Wait()
+	closeProceed()
+	wgDone := make(chan struct{})
+	go func() { wg.Wait(); close(wgDone) }()
+	select {
+	case <-wgDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("project A's resolve did not complete after proceed was closed")
+	}
 
 	if len(resultB.Resolved) != 0 {
 		t.Fatalf("project B must never receive content resolved with project A's credential, got: %+v", resultB.Resolved[0])
@@ -1888,5 +1902,127 @@ func TestGitHubSkillResolver_CrossProjectCredentialIsolation(t *testing.T) {
 	}
 	if got := string(resultA.Resolved[0].Files[0].Content); got != "SECRET" {
 		t.Errorf("expected project A's content %q, got %q", "SECRET", got)
+	}
+}
+
+// TestGitHubSkillResolver_SameProjectDifferentUserCredentialIsolation is the
+// permanent regression test for the within-project user-credential merge
+// defect: two users of the *same* project, each with their own personal
+// default GITHUB_TOKEN — the dispatcher falls back to the creating user's own
+// profile-level GITHUB_TOKEN when the project itself has none (see
+// httpdispatcher.go) — must never share a single-flight result under the
+// "default" credential source. User B must never receive content resolved
+// with user A's token. Project scoping alone (without also scoping by
+// UserID for the default source) is not enough to prevent this: both users
+// share one project, so only the user scope tells them apart.
+func TestGitHubSkillResolver_SameProjectDifferentUserCredentialIsolation(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	proceed := make(chan struct{})
+	var proceedOnce sync.Once
+	closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
+	t.Cleanup(closeProceed)
+
+	// Only user A's personal token is accepted; user B's gets a 404, exactly
+	// as it would against the real GitHub API for a repo B has no access to.
+	authOK := func(r *http.Request) bool { return r.Header.Get("Authorization") == "Bearer pat-user-A" }
+	mux.HandleFunc("/repos/acme/private/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		if !authOK(r) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		enterOnce.Do(func() { close(entered) })
+		<-proceed
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/acme/private/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+		if !authOK(r) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
+		})
+	})
+	mux.HandleFunc("/raw/acme/private/"+testCommitSHA+"/skills/s/SKILL.md", func(w http.ResponseWriter, r *http.Request) {
+		if !authOK(r) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte("SECRET"))
+	})
+
+	// A single shared cache, exactly as the broker wires it.
+	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	mk := func(tok string) *GitHubSkillResolver {
+		r := newTestGitHubResolver(server)
+		r.token = tok // simulates the dispatcher's per-user fallback GITHUB_TOKEN
+		r.provisionCredentials = nil
+		r.resolutionCache = cache
+		return r
+	}
+	resolverA, resolverB := mk("pat-user-A"), mk("pat-user-B")
+	ref := api.SkillReference{URI: "gh://acme/private/s@main"}
+
+	var wg sync.WaitGroup
+	var resultA *ResolveResult
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		resultA, _ = resolverA.Resolve(context.Background(), []api.SkillReference{ref}, ResolveOpts{ProjectID: "project-1", UserID: "user-A"})
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("user A's fetch never started")
+	}
+
+	var resultB *ResolveResult
+	doneB := make(chan struct{})
+	go func() {
+		resultB, _ = resolverB.Resolve(context.Background(), []api.SkillReference{ref}, ResolveOpts{ProjectID: "project-1", UserID: "user-B"})
+		close(doneB)
+	}()
+
+	// With user scoping on the default source, B's flight is independent of
+	// A's: its commits call fails authOK immediately (404), with no need to
+	// wait on proceed at all. If B were instead coalesced into A's flight
+	// (the defect), this would hang until proceed is closed below — the
+	// select gives that failure mode a clean, bounded failure instead of a
+	// test-binary hang.
+	select {
+	case <-doneB:
+	case <-time.After(5 * time.Second):
+		t.Fatal("user B's resolve did not return independently of user A's in-flight fetch — it may have been incorrectly coalesced")
+	}
+
+	closeProceed()
+	wgDone := make(chan struct{})
+	go func() { wg.Wait(); close(wgDone) }()
+	select {
+	case <-wgDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("user A's resolve did not complete after proceed was closed")
+	}
+
+	if len(resultB.Resolved) != 0 {
+		t.Fatalf("user B must never receive content resolved with user A's token, got: %+v", resultB.Resolved[0])
+	}
+	if len(resultB.Errors) != 1 {
+		t.Fatalf("expected user B to get its own resolve error, got %d errors and %d resolved", len(resultB.Errors), len(resultB.Resolved))
+	}
+
+	if len(resultA.Resolved) != 1 {
+		t.Fatalf("expected user A to resolve successfully, got errors: %+v", resultA.Errors)
+	}
+	if got := string(resultA.Resolved[0].Files[0].Content); got != "SECRET" {
+		t.Errorf("expected user A's content %q, got %q", "SECRET", got)
 	}
 }

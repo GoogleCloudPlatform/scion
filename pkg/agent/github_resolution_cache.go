@@ -310,23 +310,6 @@ func (c *GitHubResolutionCache) acquireCredentialSlot(ctx context.Context, crede
 	}
 }
 
-// boundedFlightTimeout returns the timeout to use for a detached flight
-// derived from ctx: the caller's own remaining deadline when it has one and
-// it is shorter than ceiling, otherwise ceiling. A flight must be detached
-// from its leader's cancellation (see coalesceFetch), but discarding the
-// leader's deadline entirely would hand a tight create-deadline caller an
-// unbounded ceiling instead — undoing the fail-fast behavior the caller
-// relies on. A leader with no deadline, or a generous one, still gets a sane
-// upper bound.
-func boundedFlightTimeout(ctx context.Context, ceiling time.Duration) time.Duration {
-	if dl, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(dl); remaining > 0 && remaining < ceiling {
-			return remaining
-		}
-	}
-	return ceiling
-}
-
 // recentRefreshFailure reports whether a background refresh for flightKey
 // failed within the last refreshFailureBackoff.
 func (c *GitHubResolutionCache) recentRefreshFailure(flightKey string) bool {
@@ -360,18 +343,39 @@ func (c *GitHubResolutionCache) clearRefreshFailure(flightKey string) {
 // on its own ctx, so a caller whose own context is done returns ctx.Err()
 // immediately instead of blocking for the whole flight. The flight itself
 // keeps running for whoever is still waiting on it: it is detached from any
-// one caller's cancellation (so the leader's own context ending does not
-// fail the others) but bounded by boundedFlightTimeout, derived from the
-// leader's own remaining deadline where it has one. This mirrors
+// one caller's cancellation and bounded only by the fixed githubFlightTimeout
+// ceiling, not by any one caller's own deadline — every waiter (including the
+// leader) already returns on its own ctx.Done() via the select below, so no
+// caller can wait past its own deadline regardless of this bound. Deriving
+// the bound from the leader's deadline instead would fail every waiter with
+// that leader's own "context deadline exceeded" the moment it expired —
+// including waiters with no deadline, or a later one — the exact starvation
+// this flight exists to prevent. This mirrors
 // cachingGoogleCredentialValidator.validate (google_credential_cache.go) for
-// the detach-but-bound shape, and adds the per-waiter DoChan/select on top so
+// the detach-and-bound shape, and adds the per-waiter DoChan/select on top so
 // an individual caller's own cancellation is still honored promptly.
+// flightJoinHook, when non-nil, is called immediately before every caller —
+// leader and followers alike — calls flight.DoChan for flightKey. Tests use
+// it to know precisely when a second (or later) caller has reached the point
+// of joining an in-flight resolution, without polling or sleeping: the first
+// invocation for a key is the caller that will become the flight leader; any
+// later invocation for the same key, made while that leader's call is still
+// outstanding, is a caller that will join it as a follower.
+var flightJoinHook func(flightKey string)
+
+func injectFlightJoin(flightKey string) {
+	if flightJoinHook != nil {
+		flightJoinHook(flightKey)
+	}
+}
+
 func (c *GitHubResolutionCache) coalesceFetch(
 	ctx context.Context,
 	flightKey, credentialID, cacheKey string,
 	isBranchRef bool,
 	fetch func(context.Context) (ResolvedSkill, error),
 ) (ResolvedSkill, error) {
+	injectFlightJoin(flightKey)
 	resultCh := c.flight.DoChan(flightKey, func() (result interface{}, ferr error) {
 		// DoChan always runs this function in a goroutine it spawns itself
 		// (see golang.org/x/sync/singleflight), never the calling goroutine —
@@ -396,8 +400,7 @@ func (c *GitHubResolutionCache) coalesceFetch(
 			return skill, nil
 		}
 
-		timeout := boundedFlightTimeout(ctx, githubFlightTimeout)
-		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), githubFlightTimeout)
 		defer cancel()
 
 		release, aerr := c.acquireCredentialSlot(flightCtx, credentialID)

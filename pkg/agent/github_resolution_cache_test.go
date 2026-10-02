@@ -428,72 +428,130 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCapIsolatedAcrossPr
 	wg.Wait()
 }
 
-// TestGitHubResolutionCache_ResolveWithFetch_CancelledWaiterReturnsPromptly
+// TestGitHubResolutionCache_ResolveWithFetch_CancelledLeaderDoesNotFailWaiter
 // is the acceptance test for "a cancelled waiter does not cancel the shared
-// flight", with both halves of that claim checked: one of two concurrent
-// callers for the same ref has its own context cancelled while the flight is
-// in progress.
-//   - The cancelled caller (A) must return ctx.Err() promptly — before the
-//     flight itself finishes — rather than blocking for the whole flight.
-//   - The flight must keep running for the other caller (B), which must
-//     still get the successful result once it completes.
-func TestGitHubResolutionCache_ResolveWithFetch_CancelledWaiterReturnsPromptly(t *testing.T) {
+// flight", specifically for the case that matters most: the single-flight
+// *leader* itself is cancelled, not an arbitrary later waiter.
+//
+// It uses flightJoinHook to know, deterministically and without sleeping or
+// polling, that the waiter has actually reached the point of joining the
+// leader's still-in-flight call before the leader is cancelled — otherwise a
+// race (the leader's flight already failing and being removed before the
+// waiter calls DoChan) could let the waiter start a fresh flight of its own
+// and still pass, without the test ever having exercised the "does not fail
+// the flight" property it claims to. fetch also honors its own context,
+// rather than only waiting on proceed: that is what makes the test fail
+// under the mutation that removes WithoutCancel from coalesceFetch (which
+// would tie the flight's context to the leader's, so the leader's
+// cancellation would cancel fetch's context too, before proceed is ever
+// closed, and that error would reach the waiter as well).
+func TestGitHubResolutionCache_ResolveWithFetch_CancelledLeaderDoesNotFailWaiter(t *testing.T) {
 	dir := t.TempDir()
 	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
 
+	const flightKey = "cancel-leader-flight"
+
+	var fetchCount int32
 	entered := make(chan struct{})
 	var enterOnce sync.Once
 	proceed := make(chan struct{})
-	fetch := func(ctx context.Context) (ResolvedSkill, error) {
+	var proceedOnce sync.Once
+	closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
+	// Cleanups run in reverse declaration order, so this runs before
+	// TempDir's removal: it releases fetch (a no-op if the test already
+	// closed proceed itself) so no goroutine is left blocked past the test.
+	t.Cleanup(closeProceed)
+	fetch := func(fctx context.Context) (ResolvedSkill, error) {
+		atomic.AddInt32(&fetchCount, 1)
 		enterOnce.Do(func() { close(entered) })
-		<-proceed
-		return ResolvedSkill{Name: "ok", URI: "gh://o/r/s@main"}, nil
+		select {
+		case <-proceed:
+			return ResolvedSkill{Name: "ok", URI: "gh://o/r/s@main"}, nil
+		case <-fctx.Done():
+			return ResolvedSkill{}, fctx.Err()
+		}
 	}
 
-	ctxA, cancelA := context.WithCancel(context.Background())
-	ctxB := context.Background()
-
-	var resA, resB ResolvedSkill
-	var errA, errB error
-	doneA := make(chan struct{})
-	go func() {
-		resA, errA = cache.ResolveWithFetch(ctxA, "cancel-key", "cancel-flight", "cancel-cred", false, fetch)
-		close(doneA)
-	}()
-	doneB := make(chan struct{})
-	go func() {
-		resB, errB = cache.ResolveWithFetch(ctxB, "cancel-key", "cancel-flight", "cancel-cred", false, fetch)
-		close(doneB)
-	}()
-
-	<-entered
-	cancelA() // cancel one waiter's own context while the flight is still in progress
-
-	<-doneA // must return promptly: the flight is still blocked on proceed below
-	if !errors.Is(errA, context.Canceled) {
-		t.Fatalf("expected context.Canceled for the cancelled waiter, got %v", errA)
+	var joinCount int32
+	waiterJoined := make(chan struct{})
+	flightJoinHook = func(key string) {
+		if key != flightKey {
+			return
+		}
+		if atomic.AddInt32(&joinCount, 1) == 2 {
+			close(waiterJoined)
+		}
 	}
-	if resA.Name != "" {
-		t.Errorf("expected a zero-value result for the cancelled waiter, got %+v", resA)
+	t.Cleanup(func() { flightJoinHook = nil })
+
+	ctxLeader, cancelLeader := context.WithCancel(context.Background())
+	defer cancelLeader()
+
+	var resLeader, resWaiter ResolvedSkill
+	var errLeader, errWaiter error
+	doneLeader := make(chan struct{})
+	go func() {
+		resLeader, errLeader = cache.ResolveWithFetch(ctxLeader, "cancel-leader-key", flightKey, "cancel-leader-cred", false, fetch)
+		close(doneLeader)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("leader's fetch never started")
+	}
+
+	doneWaiter := make(chan struct{})
+	go func() {
+		resWaiter, errWaiter = cache.ResolveWithFetch(context.Background(), "cancel-leader-key", flightKey, "cancel-leader-cred", false, fetch)
+		close(doneWaiter)
+	}()
+
+	select {
+	case <-waiterJoined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter never reached the flight join point")
+	}
+
+	cancelLeader()
+
+	select {
+	case <-doneLeader:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled leader did not return promptly")
+	}
+	if !errors.Is(errLeader, context.Canceled) {
+		t.Fatalf("expected context.Canceled for the cancelled leader, got %v", errLeader)
+	}
+	if resLeader.Name != "" {
+		t.Errorf("expected a zero-value result for the cancelled leader, got %+v", resLeader)
 	}
 
 	select {
-	case <-doneB:
-		t.Fatal("the uncancelled waiter returned before the flight was released — it should still be blocked on proceed")
+	case <-doneWaiter:
+		t.Fatal("the waiter returned before the flight was released — it should still be blocked on proceed")
 	default:
 	}
 
-	close(proceed) // let the still-running flight finish for B
-	<-doneB
+	closeProceed() // let the still-running flight finish for the waiter
 
-	if errB != nil {
-		t.Errorf("unexpected error for the uncancelled waiter: %v", errB)
+	select {
+	case <-doneWaiter:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter did not complete after the flight was released")
 	}
-	if resB.Name != "ok" {
-		t.Errorf("expected resB.Name = %q, got %q", "ok", resB.Name)
+
+	if errWaiter != nil {
+		t.Errorf("unexpected error for the waiter: %v", errWaiter)
+	}
+	if resWaiter.Name != "ok" {
+		t.Errorf("expected resWaiter.Name = %q, got %q", "ok", resWaiter.Name)
+	}
+	if got := atomic.LoadInt32(&fetchCount); got != 1 {
+		t.Fatalf("expected exactly 1 fetch — the waiter must join the leader's flight, not start its own — got %d", got)
 	}
 }
 
@@ -522,7 +580,18 @@ func TestGitHubResolutionCache_ResolveWithFetch_StaleServesImmediately(t *testin
 
 	entered := make(chan struct{})
 	block := make(chan struct{}) // proves ResolveWithFetch did not wait on fetch; released in cleanup
-	t.Cleanup(func() { close(block) })
+	t.Cleanup(func() {
+		close(block)
+		// Wait for the background refresh's flight to actually finish before
+		// returning: cleanups run in reverse declaration order, so without
+		// this, t.TempDir()'s RemoveAll can race the refresh goroutine's
+		// putEntry -> save(), which writes github-resolution-cache.json.tmp
+		// into the directory while it is being removed ("directory not
+		// empty"). Do joins the already-running flight (started by
+		// ResolveWithFetch's own background refresh) rather than starting a
+		// new one.
+		_, _, _ = cache.flight.Do("stale-flight", func() (interface{}, error) { return nil, nil })
+	})
 	fetch := func(ctx context.Context) (ResolvedSkill, error) {
 		close(entered)
 		<-block
