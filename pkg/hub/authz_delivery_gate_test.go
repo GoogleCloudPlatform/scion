@@ -550,7 +550,7 @@ func TestDeliveryGate_Part2KindBoundToCredentialType(t *testing.T) {
 func TestDeliveryGate_BrokerCredentialLayers(t *testing.T) {
 	f := newGoldenFixture(t)
 	secret := Resource{Type: "secret", ID: f.secretID}
-	broker := NewBrokerIdentity(tid("dg-f2b-broker"))
+	broker := NewBrokerIdentity(tid("dg-broker-layers"))
 	user := NewAuthenticatedUser(f.projectOwnerID, "owner@golden.test", "Owner", "member", "web")
 	brokerCredential := CredentialContext{Kind: CredentialKindBroker, ID: broker.ID(), Type: "broker"}
 
