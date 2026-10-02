@@ -3312,3 +3312,133 @@ func TestGitHubResolutionCache_WaiterDeadline_WrapsTypedAndContextError(t *testi
 		t.Errorf("expected exactly context.Canceled, got %#v", err)
 	}
 }
+
+// TestNewGitHubHTTPClient_NonTransportDefault_NoPanic proves that a
+// replaced http.DefaultTransport that is not an *http.Transport no longer
+// panics newGitHubHTTPClient, and that the fallback transport still carries
+// the stall bound and the proxy setting and can serve a request. Not
+// parallel: it swaps a package-level global.
+func TestNewGitHubHTTPClient_NonTransportDefault_NoPanic(t *testing.T) {
+	orig := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = orig })
+	http.DefaultTransport = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("replaced DefaultTransport must not be used")
+	})
+
+	var c *http.Client
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Fatalf("newGitHubHTTPClient panicked: %v", p)
+			}
+		}()
+		c = newGitHubHTTPClient(250 * time.Millisecond)
+	}()
+
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", c.Transport)
+	}
+	if tr.ResponseHeaderTimeout != 250*time.Millisecond {
+		t.Errorf("expected ResponseHeaderTimeout 250ms, got %s", tr.ResponseHeaderTimeout)
+	}
+	if tr.Proxy == nil || tr.DialContext == nil || tr.TLSHandshakeTimeout == 0 {
+		t.Errorf("expected proxy, dialer and TLS handshake timeout to be set, got Proxy=%t DialContext=%t TLSHandshakeTimeout=%s",
+			tr.Proxy != nil, tr.DialContext != nil, tr.TLSHandshakeTimeout)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	resp, err := c.Get(server.URL)
+	if err != nil {
+		t.Fatalf("request with fallback transport failed: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("expected 204, got %d", resp.StatusCode)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestGitHubResolveError_Unwrap proves errors.Is and errors.As reach a
+// githubResolveError's cause, while errors.As for *githubResolveError still
+// finds the typed error first through the fmt.Errorf wrapping fetchOne and
+// the request helpers add.
+func TestGitHubResolveError_Unwrap(t *testing.T) {
+	cause := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	err := fmt.Errorf("failed to resolve ref for gh://o/r/s: %w",
+		fmt.Errorf("GitHub API request failed: %w",
+			&githubResolveError{code: SkillErrCodeUnreachable, msg: cause.Error(), err: cause}))
+
+	var rerr *githubResolveError
+	if !errors.As(err, &rerr) || rerr.code != SkillErrCodeUnreachable {
+		t.Fatalf("expected errors.As to find the typed error with code %s, got %v", SkillErrCodeUnreachable, rerr)
+	}
+	if !errors.Is(err, cause) {
+		t.Error("expected errors.Is to reach the cause")
+	}
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) || opErr != cause {
+		t.Error("expected errors.As to reach the *net.OpError cause")
+	}
+	if (&githubResolveError{code: SkillErrCodeTimeout}).Unwrap() != nil {
+		t.Error("expected Unwrap to return nil without a cause")
+	}
+}
+
+// TestGitHubSkillResolver_CancelledDuringFinalRetry_ReturnsCanceled proves
+// that a caller cancelling while the last retry attempt is in flight gets
+// context.Canceled back, not a typed unreachable (502) error classified
+// from the aborted attempt.
+func TestGitHubSkillResolver_CancelledDuringFinalRetry_ReturnsCanceled(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	var attempts int32
+	finalStarted := make(chan struct{})
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&attempts, 1) <= githubMaxRetries {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		close(finalStarted)
+		<-r.Context().Done()
+	})
+
+	resolver := newTestGitHubResolver(server)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-finalStarted:
+			cancel()
+		case <-time.After(10 * time.Second):
+		}
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/repos/owner/repo/commits/main", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := resolver.doWithRetry(ctx, req, 5*time.Second)
+	if resp != nil {
+		_ = resp.Body.Close()
+		t.Fatalf("expected no response, got status %d", resp.StatusCode)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	var rerr *githubResolveError
+	if errors.As(err, &rerr) {
+		t.Errorf("expected no typed error on cancellation, got code %s", rerr.code)
+	}
+	if got := atomic.LoadInt32(&attempts); got != githubMaxRetries+1 {
+		t.Errorf("expected %d attempts, got %d", githubMaxRetries+1, got)
+	}
+}

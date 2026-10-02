@@ -119,10 +119,36 @@ func durationOr(d, def time.Duration) time.Duration {
 // ResponseHeaderTimeout of stall: a connection that never responds at all
 // fails within stall, independent of the per-attempt ctx timeout, so the
 // longer raw-download timeout (#2546 O2) does not reintroduce slow failure.
+// If something has replaced http.DefaultTransport with a RoundTripper that
+// is not an *http.Transport, it starts from fallbackHTTPTransport instead
+// of panicking.
 func newGitHubHTTPClient(stall time.Duration) *http.Client {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
+	var tr *http.Transport
+	if dt, ok := http.DefaultTransport.(*http.Transport); ok {
+		tr = dt.Clone()
+	} else {
+		tr = fallbackHTTPTransport()
+	}
 	tr.ResponseHeaderTimeout = stall
 	return &http.Client{Timeout: githubAPITimeout, Transport: tr}
+}
+
+// fallbackHTTPTransport mirrors net/http's own DefaultTransport settings
+// (proxy from environment, dial and TLS handshake timeouts, pooling), for
+// when http.DefaultTransport cannot be cloned.
+func fallbackHTTPTransport() *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 }
 
 // stallBound is how long an attempt may go without any response before it
@@ -732,6 +758,7 @@ func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHub
 			return nil, &githubResolveError{
 				code: SkillErrCodeTimeout,
 				msg:  fmt.Sprintf("failed to read %s: %v", filePath, err),
+				err:  err,
 			}
 		}
 		return nil, fmt.Errorf("failed to read file content: %w", err)
@@ -766,14 +793,19 @@ func (r *GitHubSkillResolver) setAuthHeader(req *http.Request, token string) {
 // Resolve can set ResolveError.Code — and provision.go's SkillResolutionError
 // can in turn pick an HTTP status — without string-matching msg. retryAfter
 // carries the raw Retry-After header value when the cause is
-// SkillErrCodeRateLimited and the server sent one; empty otherwise.
+// SkillErrCodeRateLimited and the server sent one; empty otherwise. err is
+// the underlying cause, when there is one, so errors.Is and errors.As can
+// reach it through Unwrap; msg alone is still what Error returns.
 type githubResolveError struct {
 	code       string
 	msg        string
 	retryAfter string
+	err        error
 }
 
 func (e *githubResolveError) Error() string { return e.msg }
+
+func (e *githubResolveError) Unwrap() error { return e.err }
 
 // classifyRetryCause maps the response (and, when resp is nil, the
 // network-level error) that triggered a retry or a fail-fast to a stable
@@ -893,6 +925,12 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 
 	for attempt := 0; attempt <= githubMaxRetries; attempt++ {
 		if attempt > 0 {
+			// A caller that cancelled while the previous attempt was in
+			// flight gets context.Canceled back, as from the backoff select
+			// below, not a typed failure classified from that attempt.
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return nil, ctx.Err()
+			}
 			status := -1
 			retryAfterHeader := ""
 			if lastResp != nil {
@@ -937,6 +975,7 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 						code:       classifyRetryCause(lastResp, lastErr),
 						retryAfter: retryAfterHeader,
 						msg:        budgetExceededMessage(noun, req.URL.Path, status, retryAfterHeader, delay, remaining),
+						err:        lastErr,
 					}
 				}
 			}
@@ -978,8 +1017,13 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 	// `continue`d past a doOnce network-level error, which always sets
 	// lastErr — classify it (DNS/connection/TLS vs. a genuine deadline) so
 	// retries-exhausted network failures are as actionable as any other cause
-	// (#2546 N1).
-	return nil, &githubResolveError{code: classifyNetworkError(lastErr), msg: lastErr.Error()}
+	// (#2546 N1). A caller that cancelled during that last attempt gets
+	// context.Canceled instead, as on the paths above; a deadline still
+	// classifies as timeout via classifyNetworkError.
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return nil, ctx.Err()
+	}
+	return nil, &githubResolveError{code: classifyNetworkError(lastErr), msg: lastErr.Error(), err: lastErr}
 }
 
 // budgetExceededMessage builds the error text for doWithRetry's ctx-budget
