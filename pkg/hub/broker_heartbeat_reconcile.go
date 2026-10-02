@@ -150,13 +150,13 @@ func recordRuntimeTarget(a *store.Agent, reported string) bool {
 	if cfg == nil {
 		cfg = &store.AgentAppliedConfig{}
 	}
-	switch {
-	case reported == cfg.RuntimeTarget:
+	switch reported {
+	case cfg.RuntimeTarget:
 		if cfg.RuntimeTargetCandidate == "" {
 			return false
 		}
 		cfg.RuntimeTargetCandidate = ""
-	case reported == cfg.RuntimeTargetCandidate:
+	case cfg.RuntimeTargetCandidate:
 		cfg.RuntimeTarget = reported
 		cfg.RuntimeTargetCandidate = ""
 	default:
