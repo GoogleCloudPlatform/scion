@@ -511,7 +511,7 @@ describe('Multi-group status text', () => {
     expect(status(el)).toBe('4 matching results');
   });
 
-  it('reports "Loading…" only when every populated group is still loading with no candidates yet', async () => {
+  it('reports "Loading…" when every populated group is still loading with no candidates yet', async () => {
     const el = await mountPalette({
       agents: { status: 'loading', candidates: [] },
       threads: { status: 'loading', candidates: [] },
@@ -519,12 +519,30 @@ describe('Multi-group status text', () => {
     expect(status(el)).toBe('Loading…');
   });
 
-  it('reports a match count, not "Loading…", when every loading group already has stale candidates', async () => {
+  it('also reports "Loading…", not a bare match count, when every loading group already has candidates — a group that is still loading has not settled yet, regardless of how many rows it already published', async () => {
     const el = await mountPalette({
       agents: { status: 'loading', candidates: [agentCandidate('a1', 'Agent One')] },
       threads: { status: 'loading', candidates: [threadCandidate('t1', 'Thread One')] },
     });
-    expect(status(el)).toBe('2 matching results');
+    expect(status(el)).toBe('Loading…');
+  });
+
+  it('announces a loading group as still loading, not a bare zero-match count, when the query only matches a page it has not published yet', async () => {
+    // The scenario a progressively-publishing Agents group newly exposes: a
+    // query can match zero of the rows loaded *so far* while the group is
+    // still loading — this must read as "Agents still loading", not a final
+    // "0 matching results" (which a user searching for a specific agent
+    // would read as "it does not exist").
+    const el = await mountPalette({
+      agents: { status: 'loading', candidates: [agentCandidate('a1', 'Agent One')] },
+      threads: ready([threadCandidate('t1', 'Thread One')]),
+    });
+    input(el).value = 'Thread One';
+    input(el).dispatchEvent(new InputEvent('input'));
+    await el.updateComplete;
+    expect(status(el)).toContain('1 matching result');
+    expect(status(el)).toContain('Agents still loading');
+    expect(status(el)).not.toContain('0 matching');
   });
 
   it('does not call a ready-but-empty group "still loading"', async () => {

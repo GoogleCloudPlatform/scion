@@ -784,6 +784,9 @@ export class ScionChatSwitcher extends LitElement {
           ${state.status === 'loading' && state.candidates.length === 0
             ? html`<div class="palette-loading">Loading…</div>`
             : nothing}
+          ${state.status === 'loading' && state.candidates.length > 0 && ranked.length === 0
+            ? html`<div class="palette-loading">Loading more…</div>`
+            : nothing}
           ${state.status !== 'loading' && state.status !== 'error' && ranked.length === 0
             ? html`<div class="palette-empty">No matches</div>`
             : nothing}
@@ -869,9 +872,13 @@ export class ScionChatSwitcher extends LitElement {
       return `${matchCount} matching ${matchCount === 1 ? noun.singular : noun.plural}`;
     }
 
-    const loadingGroups = presentGroups.filter(
-      (g) => this.groups[g]!.status === 'loading' && this.groups[g]!.candidates.length === 0
-    );
+    // Not gated on `candidates.length === 0`: a group can be `loading` with
+    // partial (progressively-published) candidates already in — e.g.
+    // Agents mid-pagination — and still needs to announce as loading, since
+    // its current match count (for a query that only matches a page not in
+    // yet) can otherwise misreport as a final "0 matching results" that
+    // reads as "this doesn't exist" rather than "still loading".
+    const loadingGroups = presentGroups.filter((g) => this.groups[g]!.status === 'loading');
     if (loadingGroups.length === presentGroups.length) {
       return 'Loading…';
     }
