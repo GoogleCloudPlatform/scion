@@ -15,10 +15,13 @@
 package provision
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -79,7 +82,46 @@ func TestChownProjectTree_EPERM_GroupMismatch_Fails(t *testing.T) {
 
 	err := chownProjectTree(context.Background(), root, "", os.Getuid(), os.Getgid()+1)
 	require.Error(t, err)
+	assert.ErrorIs(t, err, syscall.EPERM)
 	assert.Contains(t, err.Error(), "owner is")
+}
+
+// captureSlog routes the default slog logger into a buffer at Info level
+// for the rest of the test.
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	return &buf
+}
+
+const toleratedSummaryMsg = "chown not permitted on some entries; ownership already matched"
+
+func TestChownProjectTree_EPERM_OwnerMatches_LogsOneSummary(t *testing.T) {
+	root := chownTestTree(t)
+	stubLchown(t, syscall.EPERM)
+	buf := captureSlog(t)
+
+	require.NoError(t, chownProjectTree(context.Background(), root, "", os.Getuid(), os.Getgid()))
+
+	out := buf.String()
+	assert.Equal(t, 1, strings.Count(out, toleratedSummaryMsg), out)
+	// root, a.txt, sub, sub/b.txt, dangling.
+	assert.Contains(t, out, "count=5")
+	assert.Contains(t, out, "root="+root)
+}
+
+func TestChownProjectTree_Success_NoSummary(t *testing.T) {
+	root := chownTestTree(t)
+	orig := lchownFile
+	lchownFile = func(string, int, int) error { return nil }
+	t.Cleanup(func() { lchownFile = orig })
+	buf := captureSlog(t)
+
+	require.NoError(t, chownProjectTree(context.Background(), root, "", os.Getuid(), os.Getgid()))
+	assert.NotContains(t, buf.String(), toleratedSummaryMsg)
 }
 
 func TestChownProjectTree_NonEPERM_OwnerMatches_StillFails(t *testing.T) {
