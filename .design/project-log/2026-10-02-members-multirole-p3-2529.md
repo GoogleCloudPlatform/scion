@@ -30,7 +30,7 @@ PR #127's per-binding POST/DELETE sequence.
   - **Table.** One row per principal. The Roles cell shows the built-in role
     badge (or "No project role"), then a badge for each custom role.
   - **One dialog for Add and Edit**:
-    - a radio group for the single built-in role, plus "No project role";
+    - a radio group for the single built-in role, plus "None";
     - checkboxes for custom roles.
     - Each disabled option shows its inline reason, taken from the tier rules
       and the server's `grantable`/`reason`.
@@ -158,4 +158,52 @@ new commits on top of the branch. History was not rewritten.
 Each new test was checked against the unfixed code, or against a
 targeted mutant where the fix was test-only, and failed there. The editor
 suite now has 60 cases (60/60). `npm run typecheck` and `npm run build`
+pass. eslint reports 0 errors in the editor source.
+
+## Review round 2 fixes
+
+Round 2 raised two Low and three Nit findings. All five were fixed in new
+commits on top of the branch. History was not rewritten.
+
+- **One helper for the dialog lock.** `deriveDialogLock` now computes the
+  Edit dialog's lock and last-owner state. Opening Edit from a row, opening
+  Edit from role IDs, and the authority-changed path all use it. A loaded
+  row follows the row pencil rule. A principal known only by role IDs takes
+  its tier from the built-in role among them.
+- **The actor's own authority changes mid-save.** After a 409
+  `actor_authority_changed`, the editor reloads and then re-derives the
+  dialog:
+  - If the editor is now read-only, the dialog closes and the message is
+    shown as feedback.
+  - In Edit mode, the lock and last-owner state are recomputed. A dialog
+    that is now locked goes back to the principal's current roles and says
+    nothing was saved.
+  - Otherwise, newly chosen custom roles the actor can no longer grant are
+    dropped, and held ones are kept. A built-in choice whose option is now
+    disabled goes back to the current role in Edit mode, or to the Add
+    default in Add mode.
+- **Role IDs that can't be classified.** This applies when Add reaches an
+  existing member by email through the 409 path, and either the role
+  catalog failed to load, or a role ID is unknown and no built-in role is
+  identified. The dialog no longer sorts the IDs into built-in and custom
+  roles, and it no longer infers last-owner status. It is locked for every
+  actor with "Couldn't load the list of roles; close and try again.". The
+  received IDs stay the expected set, and no checkbox is labelled with a
+  raw role ID. The unknown-ID rule still fails closed to the owner tier
+  where IDs can be classified.
+- **Locked info text.** While the dialog is locked, its info text only
+  says "<name> is already a member." (or "This member changed while you
+  were editing."). It no longer asks the user to edit or save.
+- **Lock guards under forced state.** A new test locks the dialog for an
+  actor with custom-role authority. It checks that the checkboxes, Save and
+  Remove member are disabled, and that removing from the dialog sends no
+  request. The `invalid_role_set` reset of a built-in role that left the
+  catalog has no test: built-in role IDs never leave the catalog, so that
+  branch can't be reached today.
+- **This log** now names the radio "None", its label in the dialog.
+
+Each new behaviour test failed against the unfixed code. The forced-state
+test covers guards that already existed, so it was checked against four
+mutants that each remove one guard; it failed on all four. The editor
+suite now has 67 cases (67/67). `npm run typecheck` and `npm run build`
 pass. eslint reports 0 errors in the editor source.
