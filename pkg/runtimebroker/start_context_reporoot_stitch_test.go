@@ -109,8 +109,8 @@ profiles:
 // consumed directly by run.go's Start), this test fails with
 // RunConfig.RepoRoot == "": Start had no way to know opts.Workspace was the
 // broker's own worktree rather than a user --workspace override, so
-// detectRepoRoot's explicit-workspace skip (#642) swallowed the repo root and
-// the real /repo-root/.git mount never fired.
+// detectRepoRoot's explicit-workspace skip swallowed the repo root and the
+// real /repo-root/.git mount never fired.
 func TestTryProvisionWorktree_Start_StitchesRepoRoot(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
