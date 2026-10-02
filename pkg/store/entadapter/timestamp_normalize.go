@@ -53,10 +53,10 @@ const (
 	globDateTime         = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]"
 	globDateTimeT        = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]"
 	globEntCanonical     = globDateTime + " +0000 UTC"
-	globEntCanonicalFrac = globDateTime + ".[0-9]*[0-9] +0000 UTC"
+	globEntCanonicalFrac = globDateTime + ".*[1-9] +0000 UTC"
 	globEntFracNonDigit  = globDateTime + ".*[^0-9]* +0000 UTC"
 	globWebchatCanonical = globDateTimeT + "Z"
-	globWebchatFrac      = globDateTimeT + ".[0-9]*[0-9]Z"
+	globWebchatFrac      = globDateTimeT + ".*[1-9]Z"
 	globWebchatNonDigit  = globDateTimeT + ".*[^0-9]*Z"
 )
 
@@ -76,6 +76,8 @@ func nonCanonicalSQL(col string, family columnFamily) string {
 	if family == familyWebchat {
 		whole, frac, nonDigit = globWebchatCanonical, globWebchatFrac, globWebchatNonDigit
 	}
+	// A fraction is canonical when it is one or more digits ending in a
+	// non-zero digit (String() and RFC3339Nano both trim trailing zeros).
 	// GLOB's "*" matches any text, so the fraction form also requires that
 	// nothing but digits sits between the "." and the zone.
 	return fmt.Sprintf("(%s IS NOT NULL AND %s <> '' AND NOT (%s GLOB '%s' OR (%s GLOB '%s' AND %s NOT GLOB '%s')))",
