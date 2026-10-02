@@ -276,9 +276,9 @@ func TestWorktreeIsLexicallyUnderBase_AcceptsPartiallyRemoved(t *testing.T) {
 	}
 }
 
-// TestWorktreeIsLexicallyUnderBase_RejectsWorktreesRootExactly mirrors the
-// full check's N1 case: base/worktrees itself, with no name segment, is not
-// a valid single element.
+// TestWorktreeIsLexicallyUnderBase_RejectsWorktreesRootExactly covers
+// base/worktrees itself: with no name segment, it is not a valid single
+// path element.
 func TestWorktreeIsLexicallyUnderBase_RejectsWorktreesRootExactly(t *testing.T) {
 	base := t.TempDir()
 	candidate := filepath.Join(base, "worktrees")

@@ -3691,15 +3691,12 @@ profiles:
 // for the storage boundary that keeps the persisted repo root out of
 // container-writable storage: a user --workspace agent on a directory shaped
 // like "<repo>/worktrees/<name>" (not a real git worktree). The first Start
-// correctly yields an empty RepoRoot. Simulating the container, this test
-// then writes agentHome/agent-info.json with the field name AgentInfo used
-// to carry the repo root under previously ("provisionedWorktreeRepoRoot") —
-// agentHome is bind-mounted read-write into the container
-// (pkg/runtime/common.go), so a compromised or prompt-injected agent can
-// write this file for real. A resume must still yield an empty RepoRoot:
-// run.go no longer reads agent-info.json for this value at all (it moved to
-// a broker-owned file under agentDir, which is never bind-mounted), and even
-// if it did, the validator would still reject this non-worktree directory.
+// correctly yields an empty RepoRoot. agent-info.json is writable at
+// runtime, so this test writes it directly (using the field name AgentInfo
+// used to carry the repo root under previously, "provisionedWorktreeRepoRoot")
+// to prove run.go no longer sources RepoRoot from it on resume; the value
+// lives in a broker-owned file under agentDir that is not mounted into the
+// container, and the validator rejects a non-worktree directory regardless.
 func TestStartResumeDoesNotAdoptRepoRootFromAgentInfoFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
