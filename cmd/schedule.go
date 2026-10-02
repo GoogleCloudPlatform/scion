@@ -83,7 +83,9 @@ var scheduleCreateCmd = &cobra.Command{
 var scheduleCreateRecurringCmd = &cobra.Command{
 	Use:   "create-recurring",
 	Short: "Create a recurring schedule",
-	Long:  `Create a recurring schedule with a cron expression. Requires --name, --cron, --agent, and --message.`,
+	Long:  `Create a recurring schedule with a cron expression. Requires --name, --cron, --agent, and --message.
+
+Cron expressions are evaluated in UTC. Write the time in UTC, for example "0 14 * * 1-5" for 14:00 UTC on weekdays.`,
 	RunE:  runScheduleCreateRecurring,
 }
 
@@ -813,7 +815,7 @@ func init() {
 
 	// Create recurring flags
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleName, "name", "", "Schedule name (required)")
-	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleCron, "cron", "", "Cron expression (required, 5-field: minute hour day month weekday, UTC)")
+	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleCron, "cron", "", "Cron expression in UTC (required, 5-field: minute hour day month weekday)")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleType, "type", "message", "Event type")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleMessage, "message", "", "Message body")
