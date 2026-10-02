@@ -210,6 +210,60 @@ back to empty (already covered by the handler test). Added a second
 `DispatchAgentCreate` after the clearing PUT and asserted `TZ` is absent
 from `ResolvedEnv`.
 
+### Round 3 review fixes
+
+R2-1, R2-4, R2-5 and R2-6 were verified fixed as reported. R2-2 and R2-3
+were each fixed in the narrow sense requested, but each introduced a new
+regression — this round fixes both regressions, and a nit.
+
+**R3-1 [High] — R2-2's fix swapped one bug for a worse one: `isValidTimeZone`
+falsely rejected 52 of 484 real system zone names Go accepts.** The
+"resolves to itself, or is an exact-case member of a 7-entry hand-picked
+set" rule assumed a name Go accepts either resolves to itself under `Intl`
+or belongs on a short list. V8/ICU canonicalizes *every* IANA link name to
+CLDR's own pick, and there are far more such links than any hand-picked set
+can cover — including **current IANA canonical names**, not just
+backward-compatibility aliases: `America/Nuuk`, `Asia/Yangon`,
+`Pacific/Kanton`, and the very common `Etc/UTC`, were all falsely rejected.
+An admin typing any of these saw a false "will be rejected" warning before
+a save that actually succeeded, and a *stored* value like `Etc/UTC` showed
+that false warning every time the page loaded.
+
+Fixed by replacing the resolution-identity check with a **shape** check:
+every IANA name's `/`-separated segments start with an uppercase ASCII
+letter (`IANA_NAME_SHAPE`), and `Intl.DateTimeFormat` decides the rest
+(throws or not). `KNOWN_ALIAS_TIMEZONE_NAMES` is gone — there is no longer
+a hand-picked list to be incomplete, by construction. Measured 0 false
+rejects over the same 484 system zone names (previously 52). The one
+residual false accept is an unusual capitalization `Intl` still resolves
+case-insensitively (e.g. `"Utc"`), which `time.LoadLocation` rejects;
+documented and tested as an accepted gap, since the server's 422 remains
+authoritative. Added a test that scans `/usr/share/zoneinfo` (skipped where
+absent) and asserts 0 false rejects, specifically so a hand-picked list
+can't quietly return and reintroduce this class of regression undetected
+by the test suite itself.
+
+**R3-2 [Medium] — R2-3's fix broke the picker's first render with a
+non-empty `empty-label`.** `willUpdate`'s resync compared `value` against
+`valueFor(searchQuery.trim())` and skipped when they already matched. On
+the very first render, `value` defaults to `''` and `searchQuery` also
+starts `''`, so `valueFor('') === ''` is trivially true even when
+`emptyLabel` is set (e.g. `"UTC"`) — the empty-label row never appeared,
+and the admin's Default Timezone field with no configured value rendered
+blank instead of showing `"UTC"`. Fixed by also resyncing unconditionally
+on the very first update (gated on `!this.hasUpdated`, true throughout
+`willUpdate` on that one call) and whenever `emptyLabel` itself changes.
+
+**R3-3 [Nit] — the 422 message repeated the zone name for denylisted
+names.** `validateDefaultTimezone`'s `errNonPortableTimezone` branch
+re-wrapped the sentinel with `"%q is not an IANA time zone name"`,
+producing `invalid default_timezone "Local": "Local" is not an IANA time
+zone name"` — doubled, and adding nothing the sentinel's own text didn't
+already say. Collapsed to a direct delegation to `validateIANATimezone`;
+the message is now `invalid default_timezone "Local": not an IANA time
+zone name`. `validateUserTimezone` keeps its own wrapping, because its
+`"Auto"` wording genuinely differs.
+
 ### Note on ICU canonicalization
 
 Node's ICU build (and browsers using the same CLDR data) returns
@@ -228,17 +282,17 @@ Documented in `time.test.ts` and exercised by the picker's R1-4 tests.
 | `pkg/config/hub_config.go` | Added `GlobalConfig.DefaultTimezone`, filled from raw settings.yaml (R1-1) |
 | `pkg/hub/operational_settings.go` | `BuildLayer1SnapshotFromFile` now sets `DefaultTimezone`; doc comments corrected (R1-1) |
 | `pkg/hub/hub_agent_defaults.go` | Corrected `hubAgentDefaults()`'s stale file-mode doc comment (R1-1) |
-| `pkg/hub/admin_settings.go` | Added `validateDefaultTimezone` + file-mode 422 call site (R1-2); delegates to the shared `validateIANATimezone` (R2-1) |
+| `pkg/hub/admin_settings.go` | Added `validateDefaultTimezone` + file-mode 422 call site (R1-2); delegates to the shared `validateIANATimezone` (R2-1); collapsed to a direct delegation, no redundant wrapping (R3-3) |
 | `pkg/hub/timezone_validate.go` | New: shared `nonPortableTimezoneNames` denylist and `validateIANATimezone`, extracted so this PR and tz-refactor task 10 don't each declare their own copy (R2-1) |
 | `pkg/hub/handlers_users_core.go` | Task 10's `validateUserTimezone` now delegates to the shared `validateIANATimezone` instead of its own copy of the denylist (R2-1) |
 | `pkg/hub/admin_settings_db.go` | DB-mode 422 now calls the shared `validateDefaultTimezone` (R1-2, "On Local") |
 | `pkg/hub/admin_settings_test.go` | New file-mode tests: persisted+applied, clear round-trip, invalid-rejected (incl. denylist), valid-persisted (incl. aliases) |
 | `pkg/hub/admin_settings_db_test.go` | New: `TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected` |
 | `pkg/hub/httpdispatcher_test.go` | New: `TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode`, the dispatcher-level R1-1 proof; re-dispatches after the clear to assert `TZ` is absent (R2-6) |
-| `web/src/utils/time.ts` | Added `browserTimeZone`, `isValidTimeZone`, `listTimeZones`; `isValidTimeZone` tightened (R1-3); replaced with the exact-match-or-known-alias rule (R2-2) |
-| `web/src/utils/time.test.ts` | Unit tests for the three helpers, incl. R1-3's case/offset/alias/denylist cases and R2-2's lowercase-alias/backward-name cases; R1-7 comment fix |
-| `web/src/components/shared/timezone-picker.ts` | New `<scion-timezone-picker>` shared component; R1-4/R1-5/R1-7 fixes; R2-3's `willUpdate` resync fix |
-| `web/src/components/shared/timezone-picker.test.ts` | Unit tests for the picker, incl. R1-4/R1-5/R1-7 cases, R2-2's lowercase-alias case, and R2-3's external-value-after-selection cases |
+| `web/src/utils/time.ts` | Added `browserTimeZone`, `isValidTimeZone`, `listTimeZones`; `isValidTimeZone` tightened (R1-3); replaced with the exact-match-or-known-alias rule (R2-2), then with the `IANA_NAME_SHAPE` rule, dropping the alias set entirely (R3-1) |
+| `web/src/utils/time.test.ts` | Unit tests for the three helpers, incl. R1-3's case/offset cases, R2-2's lowercase-alias cases, R3-1's real-canonical-name cases and the `/usr/share/zoneinfo` scan; R1-7 comment fix |
+| `web/src/components/shared/timezone-picker.ts` | New `<scion-timezone-picker>` shared component; R1-4/R1-5/R1-7 fixes; R2-3's `willUpdate` resync fix, then R3-2's first-render/`emptyLabel`-change fix |
+| `web/src/components/shared/timezone-picker.test.ts` | Unit tests for the picker, incl. R1-4/R1-5/R1-7 cases, R2-2's lowercase-alias case, R2-3's external-value-after-selection cases, R3-1's real-canonical-name case, and R3-2's first-render case |
 | `web/src/components/pages/admin-server-config.ts` | Added the Default Timezone field; fixed `handleSaveError`'s nested-error-shape bug (R1-2 addendum) |
 | `web/src/components/pages/admin-server-config.test.ts` | New tests: load, DB/file-mode save (incl. explicit-`""`-on-clear), env-override read-only, inline validation hint, nested-error-shape 422 rendering |
 | `.design/project-log/2026-10-01-tz-t12-default-timezone-admin-control.md` | This file (R1-6, R2-5) |
@@ -300,6 +354,31 @@ full `make ci`/`ci-full` or full suites — fork CI covers those.
   alongside this task's four `TZInjection_*` tests, since they share the
   same `createTestStore` helper. Pre-existing, tz-refactor task 2's scope,
   not either task's.
+
+## Round 3 test evidence
+
+Still stacked on `origin/scion/tz-t10` at the same `f3bd9a5` SHA (no new
+rebase this round — tz-em asked to hold off until a separate upstream-review
+fixer's new commits land on top of it).
+
+- `npm run typecheck` — clean. `npx prettier --check` on the four changed
+  web files — clean.
+- `npx vitest run` on `time.test.ts`, `timezone-picker.test.ts` and
+  `admin-server-config.test.ts` — 95 passed (round 2's 91, plus R3-1's and
+  R3-2's net-new cases), under both the default TZ and `TZ=Asia/Kathmandu`.
+- `go build -buildvcs=false -p 2 ./pkg/hub/...` — clean. `gofmt -l` on the
+  three changed Go files, `go vet -buildvcs=false ./pkg/hub/...` — clean.
+  `GOGC=40 golangci-lint run --new-from-rev=origin/scion/tz-t10
+  --concurrency=1 ./pkg/hub/...` — 0 issues.
+- `TZ=Asia/Tokyo go test -buildvcs=false -p 2 ./pkg/hub -run
+  'DefaultTimezone|TimeZone|Timezone|TZInjection|LocalRejected'` — all pass,
+  confirming R3-3's message-format change
+  (`invalid default_timezone "Local": not an IANA time zone name`, no
+  longer doubled) didn't break anything that checks the body text.
+- Same selection under `TZ=Asia/Kathmandu` — identical pattern to round 2:
+  every non-`createTestStore` test passes; the `createTestStore`-backed
+  tests fail with the same documented baseline error, pre-existing,
+  tz-refactor task 2's scope.
 
 ## Deferred / out of scope
 
