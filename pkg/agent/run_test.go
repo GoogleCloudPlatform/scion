@@ -3617,6 +3617,74 @@ func TestStartPersistsFreshProvisionedWorktreeRepoRootOnSymlinkedBrokerPath(t *t
 	}
 }
 
+// TestStartRejectsSymlinkedWorktreeLeafPointingAtSiblingWorktree is the
+// permanent regression test for why run.go's post-ValidateWorkspaceSource
+// repo-root re-validation block was removed entirely, rather than kept or
+// patched: that block fed an ALREADY-RESOLVED effectiveWorkspace into
+// validatedWorktreeRepoRoot, which
+// erases exactly the lexical-vs-resolved name mismatch
+// provision.ValidateWorktreeForBase depends on to catch a worktree leaf that
+// is itself a symlink to a sibling worktree. Fed the ORIGINAL (unresolved)
+// pair, as Start's first validation pass and detectRepoRoot's fallback both
+// do, the mismatch is caught and the dispatch falls back to a plain
+// /workspace mount instead of trusting a candidate repo root it must not —
+// mounting that root's .git read-write would give the container the shared
+// base, not just the one sibling worktree it was ever entitled to.
+func TestStartRejectsSymlinkedWorktreeLeafPointingAtSiblingWorktree(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+
+	sharedBase := t.TempDir()
+	setupGitRepo(t, sharedBase)
+	worktreesDir := filepath.Join(sharedBase, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatalf("failed to create worktrees dir: %v", err)
+	}
+
+	// agent-b's worktree is genuine.
+	siblingWorktree := filepath.Join(worktreesDir, "agent-b")
+	if err := util.CreateWorktree(siblingWorktree, "agent-b"); err != nil {
+		t.Fatalf("failed to create sibling worktree: %v", err)
+	}
+
+	// agent-a has no real worktree of its own: the path scion would expect
+	// to find it at is instead a symlink to agent-b's — a leaf that
+	// lexically looks like this agent's own worktree but resolves to a
+	// different agent's.
+	leafPath := filepath.Join(worktreesDir, "agent-a")
+	if err := os.Symlink(siblingWorktree, leafPath); err != nil {
+		t.Fatal(err)
+	}
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+	env := map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"}
+
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), sharedBase)
+	if _, err := mgr.Start(ctx, api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: leafPath, Env: env,
+	}); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	if capturedConfig.RepoRoot != "" {
+		t.Fatalf("RunConfig.RepoRoot = %q, want empty — a worktree leaf symlinked to a sibling worktree must never validate sharedBase as this agent's repo root", capturedConfig.RepoRoot)
+	}
+	if capturedConfig.ContainerWorkspace != "/workspace" {
+		t.Fatalf("RunConfig.ContainerWorkspace = %q, want %q (the plain mount fallback, not the worktree dual-mount branch that would expose sharedBase's .git)", capturedConfig.ContainerWorkspace, "/workspace")
+	}
+}
+
 // TestStartDoesNotPersistUnvalidatedCtxRepoRoot covers the persistence path:
 // it must only ever write a repo root that actually validated (repoRoot ==
 // ctxRepoRoot), never a bare ctx value that the validator rejected and
