@@ -134,13 +134,36 @@ func agentDelegatorEdges(t *testing.T, s store.Store, agentID string) []*store.D
 	return edges
 }
 
-// assertAgentCreateWroteNothing asserts no agent row for slug and no edge
-// delegated by agent parentID beyond the wantEdges already present.
-func assertAgentCreateWroteNothing(t *testing.T, s store.Store, projectID, slug, parentID string, wantEdges int) {
+// createWrites counts the rows an agent create writes after its
+// transaction: agent audit records and the project's notification
+// subscriptions.
+type createWrites struct {
+	audits        int
+	subscriptions int
+}
+
+// countCreateWrites returns the createWrites present in s for projectID.
+func countCreateWrites(t *testing.T, s store.Store, projectID string) createWrites {
+	t.Helper()
+	ctx := context.Background()
+	_, audits, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{TargetType: "agent"})
+	require.NoError(t, err)
+	subs, err := s.GetNotificationSubscriptionsByProject(ctx, projectID)
+	require.NoError(t, err)
+	return createWrites{audits: audits, subscriptions: len(subs)}
+}
+
+// assertAgentCreateWroteNothing asserts no agent row for slug, no edge
+// delegated by agent parentID beyond the wantEdges already present, and no
+// agent audit record or subscription beyond those counted in before.
+func assertAgentCreateWroteNothing(t *testing.T, s store.Store, projectID, slug, parentID string, wantEdges int, before createWrites) {
 	t.Helper()
 	_, err := s.GetAgentBySlug(context.Background(), projectID, slug)
 	assert.ErrorIs(t, err, store.ErrNotFound, "no agent row")
 	assert.Len(t, agentDelegatorEdges(t, s, parentID), wantEdges, "no new delegation edge")
+	after := countCreateWrites(t, s, projectID)
+	assert.Equal(t, before.audits, after.audits, "no agent audit record")
+	assert.Equal(t, before.subscriptions, after.subscriptions, "no subscription")
 }
 
 // A principal parent (session-created) creating a child: the child's edge
@@ -156,6 +179,7 @@ func TestAgentCreateDeliverIDs_PrincipalParent(t *testing.T) {
 	assert.Equal(t, permissions.CeilingVersionV1, cEdge.Version)
 	assert.Equal(t, store.DelegationPrincipalAgent, cEdge.DelegatorType)
 	assert.Equal(t, parent.ID, cEdge.DelegatorID)
+	assertEdgeDelegatorIsSourcePrincipal(t, cEdge)
 	assert.Equal(t, store.SourceCredentialAgent, cEdge.SourceCredentialKind)
 	assert.Equal(t, string(permissions.BoundaryKindProject), cEdge.BoundaryKind)
 	assert.Equal(t, f.proj.ID, cEdge.BoundaryProjectID)
@@ -219,6 +243,7 @@ func TestAgentCreateDeliverIDs_NonDeliverControl(t *testing.T) {
 		fs.getDelegationEdgesForDelegateErr = errors.New("edge store unavailable")
 		fs.getDelegationEdgesForDelegateErrAfterCalls = n
 
+		writesBefore := countCreateWrites(t, fs.Store, f.proj.ID)
 		rec = f.createAsParent(t, token, CreateAgentRequest{Name: "fault-c"})
 		assert.Contains(t, []int{http.StatusInternalServerError, http.StatusServiceUnavailable}, rec.Code, rec.Body.String())
 		require.Greater(t, len(fs.getDelegationEdgesForDelegateResults), n)
@@ -228,7 +253,7 @@ func TestAgentCreateDeliverIDs_NonDeliverControl(t *testing.T) {
 		assert.Error(t, fs.getDelegationEdgesForDelegateResults[n])
 		assert.Equal(t, "parentDeliverEligibility", labels[n])
 		assert.Zero(t, fs.createAgentCalls, "no agent row written")
-		assertAgentCreateWroteNothing(t, fs.Store, f.proj.ID, "fault-c", parent.ID, edgesBefore)
+		assertAgentCreateWroteNothing(t, fs.Store, f.proj.ID, "fault-c", parent.ID, edgesBefore, writesBefore)
 	})
 }
 
@@ -315,6 +340,7 @@ func TestAgentCreateDeliverIDs_MissingParentEdge(t *testing.T) {
 		token := f.agentToken(t, parent.ID)
 		markEdgeBackfillComplete(t, f.store)
 
+		writesBefore := countCreateWrites(t, f.store, f.proj.ID)
 		rec := f.createAsParent(t, token, CreateAgentRequest{Name: "chain-missing-bf-c"})
 		assertCeilingDenial(t, rec)
 		var cause DenyCause
@@ -332,7 +358,7 @@ func TestAgentCreateDeliverIDs_MissingParentEdge(t *testing.T) {
 		srcCause, structural := ceilingDenyCauseForError(err)
 		assert.True(t, structural)
 		assert.Equal(t, DenyCauseCeilingOrphaned, srcCause, "the source ceiling")
-		assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "chain-missing-bf-c", parent.ID, 0)
+		assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "chain-missing-bf-c", parent.ID, 0, writesBefore)
 		assert.False(t, f.client.createCalled, "no broker request")
 	})
 }
@@ -396,10 +422,11 @@ func TestAgentCreateDeliverIDs_MultiHop(t *testing.T) {
 		require.NoError(t, err)
 		mf.srv.authzService.setDevLocalAuthorityEnabled(false)
 
+		writesBefore := countCreateWrites(t, mf.store, mf.projectID)
 		rec := doRequestWithAgentToken(t, mf.srv, http.MethodPost, "/api/v1/projects/"+mf.projectID+"/agents",
 			CreateAgentRequest{Name: "chain-multi-dev-c"}, token)
 		assertCeilingDenial(t, rec)
-		assertAgentCreateWroteNothing(t, mf.store, mf.projectID, "chain-multi-dev-c", parent.ID, 0)
+		assertAgentCreateWroteNothing(t, mf.store, mf.projectID, "chain-multi-dev-c", parent.ID, 0, writesBefore)
 
 		var cause DenyCause
 		allowed, _, err := mf.srv.authzService.walkDelegationChainWithCause(context.Background(),
@@ -622,8 +649,9 @@ func TestLegacyAgentChildWithDefaultSADenied(t *testing.T) {
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentityMode, store.GCPMetadataModeAssign)
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentitySAID, f.sa.ID)
 	token := f.agentToken(t, f.legacy.ID)
+	writesBefore := countCreateWrites(t, f.store, f.proj.ID)
 	assertSAGateDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-dsa-c"}))
-	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-dsa-c", f.legacy.ID, 0)
+	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-dsa-c", f.legacy.ID, 0, writesBefore)
 	f.assertGateUnrecorded(t, token, SurfaceAgentCreate)
 }
 
@@ -632,8 +660,9 @@ func TestLegacyAgentChildWithDefaultSADenied(t *testing.T) {
 func TestLegacyAgentChildWithExplicitSADenied(t *testing.T) {
 	f := newLegacyFixture(t, "legacy-esa")
 	token := f.agentToken(t, f.legacy.ID)
+	writesBefore := countCreateWrites(t, f.store, f.proj.ID)
 	assertSAGateDenied(t, f.createAsParent(t, token, f.assignBody("legacy-esa-c")))
-	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-esa-c", f.legacy.ID, 0)
+	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-esa-c", f.legacy.ID, 0, writesBefore)
 	f.assertGateUnrecorded(t, token, SurfaceAgentCreate)
 }
 
@@ -662,8 +691,9 @@ func TestLegacyParentDescendantInheritsUnrecordedDenial(t *testing.T) {
 	child, _ := f.childOf(t, f.legacy, "legacy-desc-c")
 	token := f.agentToken(t, child.ID)
 
+	writesBefore := countCreateWrites(t, f.store, f.proj.ID)
 	assertSAGateDenied(t, f.createAsParent(t, token, f.assignBody("legacy-desc-esa")))
-	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-desc-esa", child.ID, 0)
+	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-desc-esa", child.ID, 0, writesBefore)
 
 	grand, _ := f.createdAgent(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-desc-gc"}), "legacy-desc-gc")
 	rec := doRequestWithAgentToken(t, f.srv, http.MethodPatch, "/api/v1/agents/"+grand.ID,
@@ -673,8 +703,9 @@ func TestLegacyParentDescendantInheritsUnrecordedDenial(t *testing.T) {
 
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentityMode, store.GCPMetadataModeAssign)
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentitySAID, f.sa.ID)
+	writesBefore = countCreateWrites(t, f.store, f.proj.ID)
 	assertSAGateDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-desc-dsa"}))
-	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-desc-dsa", child.ID, 1)
+	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-desc-dsa", child.ID, 1, writesBefore)
 	f.assertGateUnrecorded(t, token, SurfaceAgentCreate)
 }
 

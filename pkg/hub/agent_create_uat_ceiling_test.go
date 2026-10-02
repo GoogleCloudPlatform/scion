@@ -163,6 +163,8 @@ func TestUATExplicitRoleNoneAllowedNoAuth(t *testing.T) {
 	agent, edge := f.createdAgent(t, rec, "uat-none-ok")
 	assert.Equal(t, string(AgentRoleNone), agent.AppliedConfig.AgentRole)
 	assert.Equal(t, string(AgentRoleNone), edge.Role)
+	assert.Equal(t, f.creator.ID, edge.DelegatorID)
+	assertEdgeDelegatorIsSourcePrincipal(t, edge)
 	assert.True(t, agent.AppliedConfig.NoAuth)
 
 	req := client.lastCreateReq

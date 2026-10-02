@@ -114,4 +114,14 @@ func TestDevAuthCreateRecordsPrincipalCeiling(t *testing.T) {
 	assert.Equal(t, DevUserID, e.SourcePrincipalID)
 	assert.Empty(t, e.SourceCredentialID)
 	assert.Equal(t, agent.AppliedConfig.AgentRole, e.Role, "edge role equals the stored role")
+	assertEdgeDelegatorIsSourcePrincipal(t, e)
+}
+
+// assertEdgeDelegatorIsSourcePrincipal asserts that the edge's delegator is
+// the principal its recorded provenance names as the source.
+func assertEdgeDelegatorIsSourcePrincipal(t *testing.T, e *store.DelegationEdge) {
+	t.Helper()
+	require.NotEmpty(t, e.DelegatorID)
+	assert.Equal(t, e.SourcePrincipalKind, e.DelegatorType, "delegator type is the source principal kind")
+	assert.Equal(t, e.SourcePrincipalID, e.DelegatorID, "delegator ID is the source principal ID")
 }
