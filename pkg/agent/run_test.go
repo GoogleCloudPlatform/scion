@@ -3465,6 +3465,139 @@ profiles:
 	}
 }
 
+// TestStartKubernetesNFSWorktreeDispatch drives a Kubernetes dispatch,
+// worktree-per-agent mode, and the nfs workspace-storage backend together
+// against a real git base and a real, upstream-layout worktree
+// (<base>/worktrees/<agent>) at the path the backend actually resolves to,
+// through the real Start path (not the shared comparison function directly).
+// It pins the three outcomes this shape produces: effectiveWorkspace stays
+// the shared base (never worktree-shaped — see validatedWorktreeRepoRoot's
+// own doc comment), RunConfig.RepoRoot still ends up non-empty via the
+// detectRepoRoot fallback, and nothing is persisted to the broker-owned
+// repo-root file, whether or not a provisioned-worktree ctx signal is
+// present on the dispatch.
+func TestStartKubernetesNFSWorktreeDispatch(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	// run drives one dispatch and returns the outcomes to check. When
+	// withCtxSignal is true, the provisioned-worktree ctx signal is set to
+	// the base path itself once it is known — not a genuine worktree-to-root
+	// pair (the workspace IS the root, not a descendant of it), so this
+	// names a signal that looks plausible but must still fail the
+	// persistence gate's own validation.
+	run := func(t *testing.T, withCtxSignal bool) (capturedConfig runtime.RunConfig, agentDir, base string) {
+		tmpDir := t.TempDir()
+		projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+
+		nfsMountRoot := filepath.Join(tmpDir, "nfs")
+		settingsYAML := fmt.Sprintf(`schema_version: "1"
+active_profile: local
+server:
+  workspace_storage:
+    backend: nfs
+    nfs:
+      mount_root: %s
+      shares:
+        - id: share-1
+          server: 10.0.0.2
+          export: /scion-workspaces
+          pv_name: scion-workspaces-pv
+harness_configs:
+  test-harness:
+    harness: gemini
+    user: scion
+    image: test-image:latest
+profiles:
+  local:
+    runtime: kubernetes
+`, nfsMountRoot)
+		if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+			t.Fatalf("failed to write settings: %v", err)
+		}
+
+		// The base the nfs backend resolves to
+		// (<mount_root>/<share>/projects/<projectID>/workspace, the default
+		// subpath_root) — a real git repo with a real worktree for this
+		// agent already in place, the shape the Kubernetes init container
+		// produces for a worktree-per-agent project before the agent
+		// container starts.
+		base = filepath.Join(nfsMountRoot, "share-1", "projects", "proj-k8s", "workspace")
+		if err := os.MkdirAll(base, 0755); err != nil {
+			t.Fatalf("failed to create base dir: %v", err)
+		}
+		setupGitRepo(t, base)
+		createRealWorktree(t, base, "agent-a")
+
+		mockRT := &runtime.MockRuntime{
+			NameFunc: func() string { return "kubernetes" },
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+				capturedConfig = config
+				return "mock-id", nil
+			},
+		}
+		mgr := NewManager(mockRT)
+
+		ctx := context.Background()
+		if withCtxSignal {
+			ctx = api.ContextWithProvisionedWorktreeRepoRoot(ctx, base)
+		}
+		if _, err := mgr.Start(ctx, api.StartOptions{
+			Name:        "agent-a",
+			ProjectPath: projectScionDir,
+			NoAuth:      true,
+			GitClone:    &api.GitCloneConfig{URL: "https://example.invalid/repo.git"},
+			Env: map[string]string{
+				"SCION_AGENT_ID":       "agent-a",
+				"SCION_PROJECT_ID":     "proj-k8s",
+				"SCION_WORKSPACE_MODE": "worktree-per-agent",
+			},
+		}); err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		agentDir = config.GetAgentDir(projectScionDir, "agent-a", false)
+		return capturedConfig, agentDir, base
+	}
+
+	assertOutcomes := func(t *testing.T, capturedConfig runtime.RunConfig, agentDir, base string) {
+		t.Helper()
+		// Confirm the backend and the worktree selection actually fired —
+		// otherwise this test would pass vacuously.
+		if capturedConfig.WorkspaceBackendName != "nfs" {
+			t.Fatalf("WorkspaceBackendName = %q, want nfs (test setup broken)", capturedConfig.WorkspaceBackendName)
+		}
+		if capturedConfig.Workspace != base {
+			t.Fatalf("Workspace = %q, want %q — the nfs backend's host path is always the shared base, never worktree-shaped", capturedConfig.Workspace, base)
+		}
+		if want := "/repo-root/worktrees/agent-a"; capturedConfig.ContainerWorkspace != want {
+			t.Fatalf("ContainerWorkspace = %q, want %q", capturedConfig.ContainerWorkspace, want)
+		}
+		// The detectRepoRoot fallback resolves effectiveWorkspace (the real
+		// git base) to a non-empty RepoRoot: harmless, since the Kubernetes
+		// runtime builds its mounts from ContainerWorkspace and the NFS*
+		// fields, never from RepoRoot — see the comment on the backend
+		// re-validation in run.go.
+		if capturedConfig.RepoRoot != base {
+			t.Fatalf("RepoRoot = %q, want %q (the detectRepoRoot fallback)", capturedConfig.RepoRoot, base)
+		}
+		if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
+			t.Fatalf("persisted repo root = %q, want \"\" — nothing should be written to the broker-owned repo-root file for a Kubernetes dispatch", got)
+		}
+	}
+
+	t.Run("no ctx signal", func(t *testing.T) {
+		capturedConfig, agentDir, base := run(t, false)
+		assertOutcomes(t, capturedConfig, agentDir, base)
+	})
+
+	t.Run("ctx signal present", func(t *testing.T) {
+		capturedConfig, agentDir, base := run(t, true)
+		assertOutcomes(t, capturedConfig, agentDir, base)
+	})
+}
+
 // TestStartUserWorkspaceOverrideYieldsEmptyRepoRoot is the required
 // counterpart to the broker-provisioned-worktree RepoRoot stitching fix: a
 // user-supplied --workspace (opts.Workspace set with no
