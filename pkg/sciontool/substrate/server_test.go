@@ -451,6 +451,66 @@ func TestWriteBootstrapFile_SetsModeAndOwnerAtomically(t *testing.T) {
 	})
 }
 
+// TestWriteBootstrapFile_OmittedModeDefaultsToOwnerOnly is the regression
+// test for defaultFileMode: a bootstrap file entry that omits Mode (the
+// zero value) must land at 0o600 (owner read/write only), not a more
+// permissive default — a bootstrap file can carry secret content (a CA
+// bundle, an env file with credentials), and a caller that wants it more
+// widely readable must say so explicitly via a non-zero Mode.
+func TestWriteBootstrapFile_OmittedModeDefaultsToOwnerOnly(t *testing.T) {
+	dir := realTempDir(t)
+	withAgentHomeFixture(t, dir)
+	filePath := filepath.Join(dir, "omitted-mode.json")
+
+	srv := NewServer(WithChownOwner(-1, -1))
+	f := BootstrapFile{
+		Path:       filePath,
+		ContentB64: base64.StdEncoding.EncodeToString([]byte("secret")),
+	}
+	if err := srv.writeBootstrapFile(f); err != nil {
+		t.Fatalf("writeBootstrapFile: %v", err)
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600 for an omitted Mode", info.Mode().Perm())
+	}
+}
+
+// TestWriteBootstrapFile_ModeMaskedToPermissionBits is the regression test
+// for masking a caller-supplied Mode to the permission bits only: a Mode
+// carrying the setuid bit (or any bit outside 0o777) must never reach the
+// filesystem — this process runs as root and is about to chown the file to
+// the workload uid, so an unmasked setuid bit would plant a
+// privilege-escalation path that survives bootstrap.
+func TestWriteBootstrapFile_ModeMaskedToPermissionBits(t *testing.T) {
+	dir := realTempDir(t)
+	withAgentHomeFixture(t, dir)
+	filePath := filepath.Join(dir, "setuid-attempt.json")
+
+	srv := NewServer(WithChownOwner(-1, -1))
+	f := BootstrapFile{
+		Path:       filePath,
+		Mode:       0o4755, // setuid + rwxr-xr-x
+		ContentB64: base64.StdEncoding.EncodeToString([]byte("secret")),
+	}
+	if err := srv.writeBootstrapFile(f); err != nil {
+		t.Fatalf("writeBootstrapFile: %v", err)
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode()&os.ModeSetuid != 0 {
+		t.Errorf("mode = %v, setuid bit must be masked out", info.Mode())
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Errorf("mode = %v, want 0755 (the permission bits only) after masking", info.Mode().Perm())
+	}
+}
+
 // TestWriteBootstrapFile_RejectsWriteThroughPreExistingSymlinkDir proves the
 // serve-side symlink safety: an image that ships a directory component as a
 // symlink (e.g. the real-world case this guards, /home/scion/.config ->
@@ -1236,6 +1296,51 @@ func TestBootstrap_PrivilegeDropPreconditionPasses_StartsInit(t *testing.T) {
 	case <-initCh:
 	case <-time.After(2 * time.Second):
 		t.Error("init runner was never invoked despite the precondition passing")
+	}
+}
+
+// TestBootstrap_FailedBootstrapNeverPublishesControlToken is the regression
+// test for publishing the control token only after every step that can
+// still fail a bootstrap request has succeeded: a request that fails the
+// privilege-drop precondition must leave /exec unauthenticatable with the
+// ControlToken it carried, even though the single-use bootstrap slot is
+// still claimed (a second bootstrap attempt still gets 409, not a retry).
+// Without this, the token from a bootstrap that never actually completed —
+// no init runner ever started, the workload home never finished staging —
+// would already work against /exec during the window before the broker
+// acts on the non-2xx response and deletes the actor.
+func TestBootstrap_FailedBootstrapNeverPublishesControlToken(t *testing.T) {
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithPrivilegeDropChecker(func() error {
+			return errors.New("CAP_SETUID absent")
+		}),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
+	)
+
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		StartCmd:     "true",
+		ControlToken: "the-token-from-the-failed-request",
+	})
+	if rec.Code == http.StatusOK {
+		t.Fatalf("status = %d, want a non-2xx failure", rec.Code)
+	}
+
+	execRec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/exec", "the-token-from-the-failed-request", ExecRequest{
+		Argv: []string{"echo", "hi"},
+	})
+	if execRec.Code != http.StatusUnauthorized {
+		t.Fatalf("exec status = %d, want 401: the failed bootstrap's ControlToken must never authenticate /exec (body=%s)", execRec.Code, execRec.Body.String())
+	}
+
+	// The single-use slot is still claimed: a second bootstrap attempt
+	// must not be allowed to retry with a new token either.
+	retryRec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		StartCmd:     "true",
+		ControlToken: "a-different-token",
+	})
+	if retryRec.Code != http.StatusConflict {
+		t.Fatalf("retry status = %d, want 409 (no bootstrap retry after a failure)", retryRec.Code)
 	}
 }
 

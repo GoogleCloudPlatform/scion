@@ -71,7 +71,12 @@ const (
 	ExecEnvelopeAllowanceBytes = 4096
 
 	// defaultFileMode is used when a bootstrap file entry omits mode (0).
-	defaultFileMode = 0o644
+	// 0o600 (owner read/write only), not a more permissive default: a
+	// bootstrap file can carry secret content (a CA bundle, an env file
+	// with credentials), and a caller that wants it more widely readable
+	// must say so explicitly via a non-zero Mode rather than relying on a
+	// default that happens to be permissive.
+	defaultFileMode = 0o600
 
 	// privilegeDropPreconditionFailedMsg is the fixed, secret-free response
 	// body when PrivilegeDropChecker rejects a bootstrap (see its doc
@@ -293,7 +298,6 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.bootstrapped = true
-	s.controlToken = req.ControlToken
 	s.mu.Unlock()
 
 	// Enforced-mode broker-delivered hook content lands under
@@ -413,9 +417,14 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	// Synchronous privilege-drop precondition (see PrivilegeDropChecker's
 	// doc comment): must run after req.Env lands in the process environment
 	// (SCION_HOST_UID/GID come from there) and before the response commits
-	// to 200 or the init runner starts. bootstrapped/controlToken are left
-	// as already claimed above — there is no bootstrap retry, and the
-	// broker is expected to delete this actor on the non-2xx response below.
+	// to 200 or the init runner starts. bootstrapped is left as already
+	// claimed above — there is no bootstrap retry, and the broker is
+	// expected to delete this actor on the non-2xx response below.
+	// s.controlToken is NOT set yet (see below): /exec's own gate requires
+	// both bootstrapped and a non-empty, matching controlToken, so leaving
+	// it unset here means a bootstrap that fails past this point — this
+	// check or any later one — never leaves /exec authenticatable with the
+	// token from a bootstrap that never actually completed.
 	if s.privilegeDropCheck != nil {
 		if err := s.privilegeDropCheck(); err != nil {
 			log.Error("bootstrap: privilege-drop precondition failed: %v", redactErr(err))
@@ -452,6 +461,14 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	} else {
 		log.Error("bootstrap: no InitRunner configured; child process was not started")
 	}
+
+	// Published only now, after every step that can still fail this
+	// request has succeeded: see the comment above the privilege-drop
+	// check for why an earlier publish would let /exec authenticate with
+	// a token from a bootstrap that never actually completed.
+	s.mu.Lock()
+	s.controlToken = req.ControlToken
+	s.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -545,7 +562,14 @@ func (s *Server) writeBootstrapFile(f BootstrapFile) error {
 		return err
 	}
 
-	mode := os.FileMode(f.Mode)
+	// Mask to the permission bits only: f.Mode is caller-supplied (the
+	// bootstrap request body), and passing it through unmasked would let a
+	// caller set setuid/setgid/sticky bits (or any other bits a future
+	// os.FileMode superset might define) on a file this process, running
+	// as root, is about to chown to the workload uid — a setuid-root file
+	// planted this way would survive as a privilege-escalation path long
+	// after bootstrap completes.
+	mode := os.FileMode(f.Mode) & 0o777
 	if mode == 0 {
 		mode = defaultFileMode
 	}
