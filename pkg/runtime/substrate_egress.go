@@ -17,6 +17,7 @@ package runtime
 import (
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"sort"
@@ -230,6 +231,18 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 	// userinfo, path, or query.
 	trustedHubHost := hostFromURL(cfg.TrustedHubEndpoint)
 	if trustedHubHost != "" {
+		if _, err := netip.ParseAddr(trustedHubHost); err == nil {
+			// An IP-literal host, added unvalidated (see the comment above
+			// on why the trusted hub host skips NormalizeEgressAllowEntry),
+			// would otherwise reach CreateActorEgressPolicy as a
+			// HostnameRule pattern and fail only there, with an opaque
+			// control-plane error — Substrate's HostnameRule explicitly
+			// does not support IP addresses, only hostname patterns (see
+			// ValidateEgressAllow's own doc comment). Fail here instead,
+			// as a clear config error naming the offending value, rather
+			// than let that failure surface three layers down.
+			return nil, fmt.Errorf("substrate: trusted hub endpoint %q resolves to IP address %q; configure the hub endpoint with a DNS hostname — substrate's egress policy supports hostname patterns only, not IP addresses", cfg.TrustedHubEndpoint, trustedHubHost)
+		}
 		add(trustedHubHost)
 	}
 	if finalHubHost := hostFromURLEnv(env, "SCION_HUB_ENDPOINT", "SCION_HUB_URL"); finalHubHost != "" && finalHubHost != trustedHubHost {

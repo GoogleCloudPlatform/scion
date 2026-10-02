@@ -415,6 +415,36 @@ func TestSubstrateEgressHostnames_InClusterHubStillAllowed(t *testing.T) {
 	}
 }
 
+// TestSubstrateEgressHostnames_IPLiteralTrustedHubRefused proves an
+// IP-literal trusted hub endpoint fails here, as a clear config error naming
+// the offending value, rather than reaching CreateActorEgressPolicy
+// unvalidated (the trusted hub host otherwise skips
+// substrate.NormalizeEgressAllowEntry entirely — see
+// TestSubstrateEgressHostnames_InClusterHubStillAllowed) and failing only at
+// actor creation with Substrate's own opaque "HostnameRule does not support
+// IP addresses" control-plane error.
+func TestSubstrateEgressHostnames_IPLiteralTrustedHubRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+	}{
+		{"IPv4", "https://10.0.0.5:8443"},
+		{"IPv6", "https://[fd00::1]:8443"},
+		{"bare IPv4 no scheme", "10.0.0.5:8443"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := RunConfig{TrustedHubEndpoint: tc.endpoint}
+			hosts, hostsErr := substrateEgressHostnames(cfg, map[string]string{}, config.V1SubstrateConfig{})
+			if hostsErr == nil {
+				t.Fatalf("substrateEgressHostnames() error = nil, want a config error for IP-literal trusted hub endpoint %q (hosts = %v)", tc.endpoint, hosts)
+			}
+			if !strings.Contains(hostsErr.Error(), "hostname") {
+				t.Errorf("substrateEgressHostnames() error = %q, want it to explain that only hostname patterns are supported", hostsErr.Error())
+			}
+		})
+	}
+}
+
 // TestSubstrateEgressHostnames_HubEndpointOverrideIgnored proves that an
 // agent/template config can still override SCION_HUB_ENDPOINT in the FINAL
 // env (pkg/agent/run.go's own "final priority" override), but that override
