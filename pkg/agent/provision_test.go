@@ -3819,7 +3819,7 @@ func TestGetAgent_RelativeWorkspaceResume(t *testing.T) {
 // .scion dir under tmpDir/project. Returns the project's .scion directory
 // (the projectPath ProvisionAgent expects) and the template directory, so a
 // caller that needs to mutate the template's scion-agent.json (e.g. an
-// injection test) can overwrite filepath.Join(tplDir, "scion-agent.json")
+// override test) can overwrite filepath.Join(tplDir, "scion-agent.json")
 // afterward.
 func provisionAgentRepoRootScaffold(t *testing.T, tmpDir string) (projectScionDir, tplDir string) {
 	t.Helper()
@@ -3955,14 +3955,14 @@ func TestProvisionAgent_TemplateInjectedRepoRootIsInert(t *testing.T) {
 
 	// Plain user --workspace, no broker ctx signal — reachable by any hub
 	// user or template author, so it must stay inert.
-	agentName := "template-injection-agent"
+	agentName := "template-override-agent"
 	_, _, _, err := ProvisionAgent(context.Background(), agentName, "claude", "", "", projectScionDir, "", "", "", userWorkspace)
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
 	agentDir := config.GetAgentDir(projectScionDir, agentName, false)
 	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
-		t.Fatalf("template-injected repo root leaked into persisted state: %q (want empty)", got)
+		t.Fatalf("template-injected repo root persisted into state: %q (want empty)", got)
 	}
 }
 
@@ -3991,13 +3991,13 @@ func TestProvisionAgent_InlineConfigInjectedRepoRootIsInert(t *testing.T) {
 		t.Fatalf("unmarshal inline config: %v", err)
 	}
 
-	agentName := "inline-injection-agent"
+	agentName := "inline-override-agent"
 	_, _, _, err := ProvisionAgent(context.Background(), agentName, "claude", "", "", projectScionDir, "", "", "", userWorkspace, &inline)
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
 	agentDir := config.GetAgentDir(projectScionDir, agentName, false)
 	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
-		t.Fatalf("inline-config-injected repo root leaked into persisted state: %q (want empty)", got)
+		t.Fatalf("inline-config-injected repo root persisted into state: %q (want empty)", got)
 	}
 }

@@ -70,7 +70,7 @@ func sharerPath(base, branch string) string {
 // (util.FindWorktreeByBranch) can register a worktree anywhere git's own
 // worktree list reports one, including a location a user created by hand.
 // Such a path must never be used to mount or remove (see readMarker); it is
-// not, by itself, evidence of tampering.
+// not, by itself, evidence of an unexpected on-disk change.
 func WorktreePathIsScionCreated(base, projectDir, candidate string) bool {
 	return WorktreeIsLexicallyUnderBase(base, candidate) || isProvisionAgentWorkspaceShape(projectDir, candidate)
 }

@@ -1053,7 +1053,7 @@ func runProvisionAgentLayoutFirstLastDelete(t *testing.T, scionDir string) {
 // that branch. Such a WorktreePath matches neither scion-created shape, so it
 // is refcounted (the agent is a real, tracked sharer) but must NEVER be
 // removed by scion teardown, at any point — scion didn't create it and has no
-// business deleting it, independent of any tampering question.
+// business deleting it, independent of any modification question.
 func TestDeleteAgentFiles_ProvisionAgentAttachToUserWorktree_NeverRemoved(t *testing.T) {
 	scionDir, _ := reprovisionSetup(t)
 	projectDir := filepath.Dir(scionDir)

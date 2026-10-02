@@ -829,7 +829,7 @@ func TestReprovision_NeitherGitCloneNorWorkspace_Refused(t *testing.T) {
 // even one naming a genuine worktree base: no repo-root state file should
 // end up on disk. (A ctx signal is never produced on this path in practice
 // today, since tryProvisionWorktree and Reprovision's GitClone precondition
-// are mutually exclusive; this test injects one anyway to prove the gate
+// are mutually exclusive; this test supplies one anyway to prove the gate
 // itself is safe regardless.)
 func TestReprovision_IgnoresProvisionedWorktreeSignalForCloneWorkspace(t *testing.T) {
 	scionDir, _ := reprovisionSetup(t)

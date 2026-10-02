@@ -2133,7 +2133,7 @@ func WorktreePath(hostPath, agentID string) string {
 // to act on against base. It layers two checks:
 //
 //  1. A cheap, explicit rejection of a symlinked .git at candidate, checked
-//     first via Lstat. This is the most common forgery shape, fails fast
+//     first via Lstat. This is the most common mismatch shape, fails fast
 //     and unambiguously, and narrows the window between this check and the
 //     deeper resolved-path work ValidateWorktreeForBase does below.
 //  2. ValidateWorktreeForBase's full lexical-and-resolved relationship

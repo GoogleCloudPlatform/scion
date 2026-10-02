@@ -25,7 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// TestApplyInlineConfigUpdate_RepoRootInjectionIsInert covers the
+// TestApplyInlineConfigUpdate_RepoRootOverrideIsInert covers the
 // "start-request inline path": applyInlineConfigUpdate (handlers.go), which
 // rewrites an existing agent's scion-agent.json from a start request's
 // inline config, must not be a channel for setting or overwriting the
@@ -42,7 +42,7 @@ import (
 // practice: it calls the real handler method with an inline config built by
 // unmarshaling untrusted JSON using both field names, then confirms the
 // existing agent's persisted state file survives unchanged.
-func TestApplyInlineConfigUpdate_RepoRootInjectionIsInert(t *testing.T) {
+func TestApplyInlineConfigUpdate_RepoRootOverrideIsInert(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
@@ -117,7 +117,7 @@ func TestApplyInlineConfigUpdate_RepoRootInjectionIsInert(t *testing.T) {
 		t.Fatalf("unmarshal provisioned-worktree.json: %v", err)
 	}
 	if state.RepoRoot != legitimateRoot {
-		t.Fatalf("persisted repoRoot = %q, want unchanged %q — the inline config injection reached the state file", state.RepoRoot, legitimateRoot)
+		t.Fatalf("persisted repoRoot = %q, want unchanged %q — the config-supplied value reached the state file", state.RepoRoot, legitimateRoot)
 	}
 
 	// Belt and suspenders: raw scion-agent.json bytes must never contain the
