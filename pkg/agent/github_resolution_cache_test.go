@@ -555,6 +555,112 @@ func TestGitHubResolutionCache_ResolveWithFetch_CancelledLeaderDoesNotFailWaiter
 	}
 }
 
+// TestGitHubResolutionCache_ResolveWithFetch_ShortDeadlineLeaderDoesNotFailWaiter
+// is the acceptance test for bounding the flight by the fixed ceiling only:
+// a leader with a short deadline must not fail a waiter that has none (or a
+// later one), once that deadline passes. The flight itself keeps running —
+// fetch here honors its own context (the flight's, not any one caller's) and
+// only returns early if *that* is cancelled, which a correct bound never
+// does from the leader's deadline alone.
+func TestGitHubResolutionCache_ResolveWithFetch_ShortDeadlineLeaderDoesNotFailWaiter(t *testing.T) {
+	cache, err := NewGitHubResolutionCache(t.TempDir(), 5*time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	const flightKey = "short-deadline-flight"
+
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	proceed := make(chan struct{})
+	var proceedOnce sync.Once
+	closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
+	t.Cleanup(closeProceed)
+	fetchCancelled := make(chan struct{}, 1)
+	fetch := func(fctx context.Context) (ResolvedSkill, error) {
+		enterOnce.Do(func() { close(entered) })
+		select {
+		case <-proceed:
+			return ResolvedSkill{Name: "ok"}, nil
+		case <-fctx.Done():
+			// A correct bound (fixed ceiling, not the leader's deadline)
+			// never reaches this case here: the flight's own context has a
+			// multi-minute ceiling, far longer than the leader's deadline
+			// below. Reaching it would mean the flight was wrongly tied to
+			// that deadline.
+			select {
+			case fetchCancelled <- struct{}{}:
+			default:
+			}
+			return ResolvedSkill{}, fctx.Err()
+		}
+	}
+
+	var joinCount int32
+	waiterJoined := make(chan struct{})
+	flightJoinHook = func(key string) {
+		if key != flightKey {
+			return
+		}
+		if atomic.AddInt32(&joinCount, 1) == 2 {
+			close(waiterJoined)
+		}
+	}
+	t.Cleanup(func() { flightJoinHook = nil })
+
+	leaderCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	go func() {
+		_, _ = cache.ResolveWithFetch(leaderCtx, "short-deadline-key", flightKey, "short-deadline-cred", false, fetch)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("leader's fetch never started")
+	}
+
+	var werr error
+	var wres ResolvedSkill
+	done := make(chan struct{})
+	go func() {
+		wres, werr = cache.ResolveWithFetch(context.Background(), "short-deadline-key", flightKey, "short-deadline-cred", false, fetch)
+		close(done)
+	}()
+
+	select {
+	case <-waiterJoined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter never joined")
+	}
+
+	<-leaderCtx.Done() // let the leader's own deadline pass
+
+	// Give a leader-bound flight (the regression this test targets) a moment
+	// to observe its own deadline and cancel fetch, before releasing proceed
+	// — otherwise a short race could let the fetch succeed via proceed before
+	// the wrongly-applied deadline had a chance to fire, masking the defect.
+	select {
+	case <-fetchCancelled:
+	case <-time.After(time.Second):
+	}
+
+	closeProceed()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter hung")
+	}
+
+	if werr != nil {
+		t.Fatalf("waiter with no deadline failed after the leader's deadline passed: %v", werr)
+	}
+	if wres.Name != "ok" {
+		t.Fatalf("expected resWaiter.Name = %q, got %q", "ok", wres.Name)
+	}
+}
+
 // TestGitHubResolutionCache_ResolveWithFetch_StaleServesImmediately is the
 // acceptance test for stale-on-expiry: a branch ref past its TTL but within
 // MaxResolutionStaleAge must be served immediately from the stale entry,

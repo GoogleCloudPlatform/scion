@@ -388,35 +388,35 @@ func (r *GitHubSkillResolver) credentialSource(ghRef *GitHubSkillRef) string {
 	return ""
 }
 
-// flightIdentity returns a stable, project- (and, for the default source,
-// user-) scoped label for the credential actually used to fetch ghRef with
-// token. It keys single-flight coalescing and the per-credential in-flight
-// cap (GitHubResolutionCache.ResolveWithFetch).
+// flightIdentity returns a stable label for the credential actually used to
+// fetch ghRef with token. It keys single-flight coalescing and the
+// per-credential in-flight cap (GitHubResolutionCache.ResolveWithFetch).
 //
-// It must be scoped by projectID: two projects can define the same named
-// credential (e.g. both GH_ACME) with different values and different repo
-// access. Without project scoping, a waiter from one project could be
-// coalesced into — and served the result of — another project's fetch, a
-// cross-project content leak.
+// The identity always includes a hash of token's own value, for every
+// source. That is the one thing that makes two different credential values
+// never merge, regardless of how the value reached this resolver — and there
+// are several such paths for the default (no named override) source alone:
+// an explicit GITHUB_TOKEN set on the agent's own applied config or its
+// template, a project secret used to fill that same env key when it would
+// otherwise be absent, a GitHub App installation token minted fresh for this
+// create, the same mint redirected to a different project's installation via
+// the source-project label, the broker process's own GITHUB_TOKEN, and a
+// provision-credential fallback of the same name — every one of these ends
+// up as r.token by the time tokenForRef's default cascade runs, and none of
+// them is special-cased here: the hash treats them alike. Named sources
+// (?token= and the GH_* convention keys) resolve to a project secret value
+// instead, which should already be the same for every caller in one project,
+// but are hashed too rather than trusting that.
 //
-// For the default source specifically, project scoping alone is not enough:
-// the dispatcher falls back to the *creating user's own personal*
-// GITHUB_TOKEN when the project has none (see httpdispatcher's dispatch-time
-// resolution), so two users of the same project can bring different personal
-// tokens with different repo access under "default". ?token= and GH_*
-// convention credentials, by contrast, are always project-scoped secrets
-// (ProvisionCredentials), never user-scoped, so project scoping alone
-// isolates them correctly.
-//
-// It must NOT be derived from the token's value for the scoped cases: an
-// installation token minted fresh on every create would otherwise give every
-// caller (even within the same project and user) its own key and defeat
-// coalescing — the reason this is a separate label from the token hash in
-// resolutionCacheKey. projectID/userID come from ResolveOpts and are empty
-// only on the CLI path, which uses its own per-process cache anyway; there
-// (and for the default source, whenever either is missing) this falls back
-// to a hash of the token itself, so distinct tokens still cannot collide
-// under one shared label.
+// projectID and userID are layered on top of the hash, not as a substitute
+// for it: they are not required for the no-two-values-merge invariant (the
+// hash alone already gives that), but keeping them means a project or user
+// isolation regression still shows up as a flight merge even in a test setup
+// that happens to reuse one token value across scopes, which is what the
+// project- and user-isolation tests are about. Falls back to a fixed label
+// when a scope is unavailable (empty ProjectID: the CLI path, which uses its
+// own per-process cache anyway; empty UserID: a caller that never carries
+// one) — the hash still makes that fallback a non-issue for correctness.
 //
 // token == "" means the request is unauthenticated: that case is safe to
 // share across every caller regardless of project or user (anonymous public
@@ -425,24 +425,27 @@ func (r *GitHubSkillResolver) flightIdentity(ghRef *GitHubSkillRef, projectID, u
 	if token == "" {
 		return "anon"
 	}
+	tokenScope := tokenHashScope(token)
 
 	if src := r.credentialSource(ghRef); src != "" {
-		scope := projectID
-		if scope == "" {
-			scope = tokenHashScope(token)
-		}
-		return scope + "|" + src
+		return scopeOrDefault(projectID, "no-project") + "|" + src + "|" + tokenScope
 	}
 
-	if projectID == "" || userID == "" {
-		return tokenHashScope(token) + "|default"
-	}
-	return projectID + "|" + userID + "|default"
+	return scopeOrDefault(projectID, "no-project") + "|" + scopeOrDefault(userID, "no-user") + "|default|" + tokenScope
 }
 
-// tokenHashScope derives a flight-identity scope from the token itself, used
-// only when no project (and, for the default source, user) scope is
-// available. Distinct tokens must still not collide under one shared label.
+// scopeOrDefault returns scope, or fallback when scope is empty.
+func scopeOrDefault(scope, fallback string) string {
+	if scope == "" {
+		return fallback
+	}
+	return scope
+}
+
+// tokenHashScope derives a flight-identity scope from the credential's own
+// value. It is always included in flightIdentity's result (for every
+// credential source), which is what makes two different credential values
+// never merge, independent of how the identity is otherwise scoped.
 func tokenHashScope(token string) string {
 	h := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(h[:8])

@@ -2026,3 +2026,153 @@ func TestGitHubSkillResolver_SameProjectDifferentUserCredentialIsolation(t *test
 		t.Errorf("expected user A's content %q, got %q", "SECRET", got)
 	}
 }
+
+// TestGitHubSkillResolver_SameProjectSameUserDifferentTokenIsolation is the
+// permanent regression test for merging two different default-source
+// credentials within the same project *and* the same user — for example two
+// agents, each carrying its own GITHUB_TOKEN set directly on its own applied
+// config or template, with the same project and the same creating user.
+// Project and user scoping alone cannot separate these; only hashing the
+// credential's own value can.
+//
+// Both directions are covered as independent subtests: the agent without
+// repo access must never receive content resolved with the other agent's
+// token, and the agent with access must never be failed merely because a
+// less-privileged agent happened to lead the flight.
+//
+// Both requests' commits calls block until released, regardless of outcome,
+// so a merged (buggy) identity and a correctly-separated one are
+// distinguishable deterministically: flightJoinHook reports how many
+// *distinct* flight keys were touched before release. Under the bug both
+// requests share one key (the hook never reports 2); under the fix each
+// credential gets its own.
+func TestGitHubSkillResolver_SameProjectSameUserDifferentTokenIsolation(t *testing.T) {
+	cases := []struct {
+		name                 string
+		leaderTok, waiterTok string
+		waiterShouldSucceed  bool
+	}{
+		{"leader has access, waiter does not", "tok-agent-A", "tok-agent-B", false},
+		{"leader does not have access, waiter does", "tok-agent-B", "tok-agent-A", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, mux := newTestGitHubServer(t)
+			authOK := func(r *http.Request) bool { return r.Header.Get("Authorization") == "Bearer tok-agent-A" }
+
+			proceed := make(chan struct{})
+			var proceedOnce sync.Once
+			closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
+			t.Cleanup(closeProceed)
+
+			// Every commits request — successful or not — stays in flight
+			// until release, regardless of which credential made it: this is
+			// what lets a merged identity (one shared flight) and a
+			// correctly-separated one (two independent flights) be told
+			// apart deterministically below, rather than relying on which
+			// one happens to answer first.
+			mux.HandleFunc("/repos/acme/private/commits/main", func(w http.ResponseWriter, r *http.Request) {
+				<-proceed
+				if !authOK(r) {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write([]byte(testCommitSHA))
+			})
+			mux.HandleFunc("/repos/acme/private/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+				if !authOK(r) {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_ = json.NewEncoder(w).Encode([]githubContentEntry{
+					{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
+				})
+			})
+			mux.HandleFunc("/raw/acme/private/"+testCommitSHA+"/skills/s/SKILL.md", func(w http.ResponseWriter, r *http.Request) {
+				if !authOK(r) {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write([]byte("SECRET"))
+			})
+
+			cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+			if err != nil {
+				t.Fatalf("NewGitHubResolutionCache: %v", err)
+			}
+			mk := func(tok string) *GitHubSkillResolver {
+				r := newTestGitHubResolver(server)
+				r.token = tok
+				r.provisionCredentials = nil
+				r.resolutionCache = cache
+				return r
+			}
+			leader, waiter := mk(tc.leaderTok), mk(tc.waiterTok)
+			ref := api.SkillReference{URI: "gh://acme/private/s@main"}
+			opts := ResolveOpts{ProjectID: "project-1", UserID: "user-1"}
+
+			var seenMu sync.Mutex
+			seenKeys := make(map[string]bool)
+			bothStarted := make(chan struct{})
+			var startedOnce sync.Once
+			flightJoinHook = func(key string) {
+				seenMu.Lock()
+				seenKeys[key] = true
+				n := len(seenKeys)
+				seenMu.Unlock()
+				if n >= 2 {
+					startedOnce.Do(func() { close(bothStarted) })
+				}
+			}
+			t.Cleanup(func() { flightJoinHook = nil })
+
+			doneLeader := make(chan struct{})
+			go func() {
+				_, _ = leader.Resolve(context.Background(), []api.SkillReference{ref}, opts)
+				close(doneLeader)
+			}()
+
+			var resWaiter *ResolveResult
+			doneWaiter := make(chan struct{})
+			go func() {
+				resWaiter, _ = waiter.Resolve(context.Background(), []api.SkillReference{ref}, opts)
+				close(doneWaiter)
+			}()
+
+			// Two distinct flight keys being touched proves the two
+			// credentials were never coalesced into one flight — the
+			// property this test exists to check. Under the merged-identity
+			// bug, only one key is ever touched, so this would time out
+			// instead of a content assertion failing — still a deterministic,
+			// bounded failure.
+			select {
+			case <-bothStarted:
+			case <-time.After(5 * time.Second):
+				t.Fatal("did not observe two independent flights — the two credentials may have been coalesced into one")
+			}
+
+			closeProceed()
+
+			for _, done := range []chan struct{}{doneLeader, doneWaiter} {
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("a resolve did not complete after the flight was released")
+				}
+			}
+
+			if tc.waiterShouldSucceed {
+				if len(resWaiter.Resolved) != 1 {
+					t.Fatalf("expected the agent with access to resolve successfully, got errors: %+v", resWaiter.Errors)
+				}
+				if got := string(resWaiter.Resolved[0].Files[0].Content); got != "SECRET" {
+					t.Errorf("expected content %q, got %q", "SECRET", got)
+				}
+			} else {
+				if len(resWaiter.Resolved) != 0 {
+					t.Fatalf("the agent without access must never receive content resolved with the other agent's credential, got: %+v", resWaiter.Resolved[0])
+				}
+			}
+		})
+	}
+}

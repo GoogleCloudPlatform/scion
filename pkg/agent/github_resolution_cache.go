@@ -334,6 +334,21 @@ func (c *GitHubResolutionCache) clearRefreshFailure(flightKey string) {
 	delete(c.lastRefreshFailure, flightKey)
 }
 
+// flightJoinHook, when non-nil, is called immediately before every caller —
+// leader and followers alike — calls flight.DoChan for flightKey. Tests use
+// it to know precisely when a second (or later) caller has reached the point
+// of joining an in-flight resolution, without polling or sleeping: the first
+// invocation for a key is the caller that will become the flight leader; any
+// later invocation for the same key, made while that leader's call is still
+// outstanding, is a caller that will join it as a follower.
+var flightJoinHook func(flightKey string)
+
+func injectFlightJoin(flightKey string) {
+	if flightJoinHook != nil {
+		flightJoinHook(flightKey)
+	}
+}
+
 // coalesceFetch runs fetch for cacheKey, using flightKey to coalesce
 // concurrent calls for the same ref into a single upstream fetch, and
 // credentialID to bound how many such fetches may run concurrently for a
@@ -354,21 +369,6 @@ func (c *GitHubResolutionCache) clearRefreshFailure(flightKey string) {
 // cachingGoogleCredentialValidator.validate (google_credential_cache.go) for
 // the detach-and-bound shape, and adds the per-waiter DoChan/select on top so
 // an individual caller's own cancellation is still honored promptly.
-// flightJoinHook, when non-nil, is called immediately before every caller —
-// leader and followers alike — calls flight.DoChan for flightKey. Tests use
-// it to know precisely when a second (or later) caller has reached the point
-// of joining an in-flight resolution, without polling or sleeping: the first
-// invocation for a key is the caller that will become the flight leader; any
-// later invocation for the same key, made while that leader's call is still
-// outstanding, is a caller that will join it as a follower.
-var flightJoinHook func(flightKey string)
-
-func injectFlightJoin(flightKey string) {
-	if flightJoinHook != nil {
-		flightJoinHook(flightKey)
-	}
-}
-
 func (c *GitHubResolutionCache) coalesceFetch(
 	ctx context.Context,
 	flightKey, credentialID, cacheKey string,
