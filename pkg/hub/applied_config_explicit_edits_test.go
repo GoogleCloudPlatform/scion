@@ -1080,3 +1080,164 @@ func TestApplyAgentUpdate_EnvDiffStillRecordsActualAutoExposeToggle(t *testing.T
 	assert.Equal(t, "false", ci.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"],
 		"an actual toggle (not a re-send of the loaded value) must still be recorded into CreateInputs")
 }
+
+// ============================================================================
+// Review round 6 (FINAL) (gs://scion-xproject-exchange/tz-refactor/out/2493/review-6.md)
+// ============================================================================
+
+// TestApplyAgentUpdate_EnvDiffAutoExposeKeyPrefersInlineConfigWhenBothMapsDiffer
+// is R6-1: the page reads the four SCION_AUTO_EXPOSE_* keys per key with
+// InlineConfig.Env taking precedence (R4-2), but R5-1's fallback checked
+// AppliedConfig.Env FIRST for every key, auto-expose included. When BOTH
+// maps hold an auto-expose key with DIFFERENT values -- a template's own env
+// setting it in AppliedConfig.Env (merged by resolveDerivedConfig), and a
+// project/hub default stamping a different value into InlineConfig.Env only
+// -- the page shows and re-sends the InlineConfig value, but R5-1's fix
+// still compared against the AppliedConfig value first and misread the
+// unrelated row edit as an auto-expose change. pageVisibleEnvValue now
+// mirrors the page's own precedence per key, closing this.
+func TestApplyAgentUpdate_EnvDiffAutoExposeKeyPrefersInlineConfigWhenBothMapsDiffer(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Model = "golden-model"
+		// The template's own env set this key in AppliedConfig.Env...
+		a.AppliedConfig.Env = map[string]string{"TEMPLATE_KEY": "x", "SCION_AUTO_EXPOSE_PORTS": "false"}
+		// ...but a project/hub default stamped a DIFFERENT value into
+		// InlineConfig.Env only -- the value the page actually shows.
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{
+			Model: "golden-model",
+			Env:   map[string]string{"SCION_AUTO_EXPOSE_PORTS": "true"},
+		}
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
+			InlineConfig: &api.ScionConfig{Model: "golden-model"},
+		}
+	})
+
+	// The shared fixture: the real buildConfig output for an unrelated row
+	// edit, which re-sends the auto-expose stamp at the page-visible
+	// (InlineConfig) value, "true" -- not the AppliedConfig value, "false".
+	rec := patchAgentConfig(t, srv, agent.ID, configureRowEditBody(t))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	ci := updated.AppliedConfig.CreateInputs
+	require.NotNil(t, ci)
+	require.NotNil(t, ci.InlineConfig)
+	assert.Equal(t, map[string]string{"FOO": "bar"}, ci.InlineConfig.Env,
+		"the re-sent auto-expose value matches what the page showed (InlineConfig.Env), so it must not be recorded -- only the genuinely new key")
+}
+
+// TestApplyAgentUpdate_EnvDiffAutoExposeKeyChangeFromInlineValueIsRecorded is
+// R6-1's guard: when both maps hold the auto-expose key with different
+// values, a request value equal to the OLD AppliedConfig.Env value (but
+// different from what the page showed, InlineConfig.Env) is still a real
+// edit relative to the page -- the user genuinely unticked the control --
+// and must still be recorded.
+func TestApplyAgentUpdate_EnvDiffAutoExposeKeyChangeFromInlineValueIsRecorded(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Model = "golden-model"
+		a.AppliedConfig.Env = map[string]string{"TEMPLATE_KEY": "x", "SCION_AUTO_EXPOSE_PORTS": "false"}
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{
+			Model: "golden-model",
+			Env:   map[string]string{"SCION_AUTO_EXPOSE_PORTS": "true"},
+		}
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
+			InlineConfig: &api.ScionConfig{Model: "golden-model"},
+		}
+	})
+
+	// The user unticks the control: the page showed "true" (InlineConfig),
+	// and now sends "false". That value happens to equal old.Env's value,
+	// but it differs from what the page actually displayed, so it is a real
+	// edit and must be recorded regardless.
+	body := configureUntouchedBody(t)
+	body["env"] = map[string]interface{}{
+		"TEMPLATE_KEY":            "x",
+		"SCION_AUTO_EXPOSE_PORTS": "false",
+	}
+	rec := patchAgentConfig(t, srv, agent.ID, body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	ci := updated.AppliedConfig.CreateInputs
+	require.NotNil(t, ci)
+	require.NotNil(t, ci.InlineConfig)
+	assert.Equal(t, "false", ci.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"],
+		"a real edit away from the page-visible value must be recorded, even though it happens to equal the AppliedConfig value")
+}
+
+// TestApplyAgentUpdate_ModelAliasComparedAfterResolution is R6-2: the
+// enumeration's Model row states the compare runs after alias resolution
+// (cfg.Model is reassigned to the resolved value in applyAgentUpdate before
+// the `old` snapshot and the recordExplicitEdits call), but nothing had
+// pinned that directly -- every existing Model test used a literal model ID
+// on both sides. If resolution were ever moved to run after the diff
+// instead, re-picking a size tier that already resolves to the live model
+// would wrongly be recorded as the raw alias string (e.g. "medium") instead
+// of being recognised as unchanged, and no test would have failed.
+func TestApplyAgentUpdate_ModelAliasComparedAfterResolution(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	hc := &store.HarnessConfig{
+		ID:          tid("hc-model-alias-" + t.Name()),
+		Name:        "hc",
+		Slug:        "model-alias-hc-" + tidSlugSafe(t.Name()),
+		Harness:     "claude",
+		Scope:       store.HarnessConfigScopeGlobal,
+		Status:      store.HarnessConfigStatusActive,
+		ContentHash: "hc-hash-v1",
+		Config: &store.HarnessConfigData{
+			ModelAliases: map[string]string{"medium": "model-m", "large": "model-l"},
+		},
+	}
+	require.NoError(t, s.CreateHarnessConfig(ctx, hc))
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Model = "model-m" // the ALREADY-RESOLVED live model
+		a.AppliedConfig.HarnessConfigID = hc.ID
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+	})
+
+	// Re-picking the tier that already resolves to the live model must be a
+	// no-op: "medium" resolves to "model-m", which equals old.Model.
+	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"model": "medium",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	ci := updated.AppliedConfig.CreateInputs
+	require.NotNil(t, ci)
+	assert.Nil(t, ci.InlineConfig, "an alias that resolves to the already-live model must not be recorded")
+
+	// Picking a DIFFERENT tier must record the RESOLVED model, not the raw
+	// alias string.
+	rec2 := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"model": "large",
+	})
+	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+
+	final, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "model-l", final.AppliedConfig.Model, "the live write must apply the resolved model")
+	ci2 := final.AppliedConfig.CreateInputs
+	require.NotNil(t, ci2)
+	require.NotNil(t, ci2.InlineConfig)
+	assert.Equal(t, "model-l", ci2.InlineConfig.Model,
+		"CreateInputs must record the RESOLVED model id, not the raw alias string")
+}

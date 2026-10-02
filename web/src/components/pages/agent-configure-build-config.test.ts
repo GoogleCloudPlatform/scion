@@ -447,4 +447,33 @@ describe('agent-configure buildConfig — R4-2: auto-expose control reads the pe
     const config = c.buildConfig();
     expect(config).toEqual(goldenRowEditBody);
   });
+
+  it('R6-1: still re-sends the page-visible (InlineConfig) auto-expose value, even when AppliedConfig.Env holds a different value for the same key', async () => {
+    // Both maps hold SCION_AUTO_EXPOSE_PORTS, with DIFFERENT values: a
+    // template's own env sets it in AppliedConfig.Env (merged there by
+    // resolveDerivedConfig), while a project/hub default stamps a different
+    // value into InlineConfig.Env only. The control reads the InlineConfig
+    // value (R4-2's per-key, ic-wins merge), and that is also what buildConfig
+    // must re-send on an unrelated row edit -- the hub's diff (R6-1) depends
+    // on seeing exactly the value the page displayed, not AppliedConfig.Env's.
+    const c = await mountAgentConfigureWithLoadedAgent({
+      model: 'golden-model',
+      env: { TEMPLATE_KEY: 'x', SCION_AUTO_EXPOSE_PORTS: 'false' },
+      inlineConfig: { env: { SCION_AUTO_EXPOSE_PORTS: 'true' } },
+    });
+    expect(c.autoExposePortsEnabled).toBe(true);
+
+    const withEnvEntries = c as unknown as {
+      envEntries: { key: string; value: string }[];
+    };
+    withEnvEntries.envEntries = [
+      { key: 'TEMPLATE_KEY', value: 'x' },
+      { key: 'FOO', value: 'bar' },
+    ];
+
+    const config = c.buildConfig();
+    // Byte-identical to the R5-1 case: the page shows and re-sends "true"
+    // (InlineConfig.Env), never "false" (AppliedConfig.Env).
+    expect(config).toEqual(goldenRowEditBody);
+  });
 });
