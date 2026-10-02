@@ -70,8 +70,8 @@ test('selecting a cross-project thread updates route/title/members without recre
   await expect(page).toHaveURL(new RegExp(`/chat/${SPACE_ALPHA.projectSlug}/${THREAD_ALPHA.id}$`));
 
   await page.keyboard.press('Control+k');
-  await page.locator('scion-chat-switcher #palette-query-input').fill(THREAD_BETA.name);
-  await expect(page.locator('scion-chat-switcher .palette-option')).toHaveCount(1);
+  await page.locator('scion-quick-palette #palette-query-input').fill(THREAD_BETA.name);
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveCount(1);
   await page.keyboard.press('Enter');
 
   await expect(page).toHaveURL(new RegExp(`/chat/${SPACE_BETA.projectSlug}/${THREAD_BETA.id}$`));
@@ -121,11 +121,11 @@ test('Escape makes no navigation: the URL and conversation are unchanged', async
   const before = page.url();
 
   await page.keyboard.press('Control+k');
-  await page.locator('scion-chat-switcher #palette-query-input').fill(THREAD_BETA.name);
-  await expect(page.locator('scion-chat-switcher .palette-option')).toHaveCount(1);
+  await page.locator('scion-quick-palette #palette-query-input').fill(THREAD_BETA.name);
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveCount(1);
   await page.keyboard.press('Escape');
 
-  await expect(page.locator('scion-chat-switcher sl-dialog[label="Quick switcher"]')).toBeHidden();
+  await expect(page.locator('scion-quick-palette sl-dialog[label="Quick switcher"]')).toBeHidden();
   expect(page.url()).toBe(before);
   await expect
     .poll(() =>
@@ -157,8 +157,8 @@ test('back/forward through browser history retains the correct URL for each conv
   const alphaUrl = page.url();
 
   await page.keyboard.press('Control+k');
-  await page.locator('scion-chat-switcher #palette-query-input').fill(THREAD_BETA.name);
-  await expect(page.locator('scion-chat-switcher .palette-option')).toHaveCount(1);
+  await page.locator('scion-quick-palette #palette-query-input').fill(THREAD_BETA.name);
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveCount(1);
   await page.keyboard.press('Enter');
   const betaUrl = page.url();
   expect(betaUrl).not.toBe(alphaUrl);
@@ -186,8 +186,8 @@ test('at a narrow (mobile) viewport, selecting a thread sets the mobile panel to
   });
 
   await page.keyboard.press('Control+k');
-  await page.locator('scion-chat-switcher #palette-query-input').fill(THREAD_BETA.name);
-  await expect(page.locator('scion-chat-switcher .palette-option')).toHaveCount(1);
+  await page.locator('scion-quick-palette #palette-query-input').fill(THREAD_BETA.name);
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveCount(1);
   await page.keyboard.press('Enter');
 
   await expect(page).toHaveURL(new RegExp(`/chat/${SPACE_BETA.projectSlug}/${THREAD_BETA.id}$`));

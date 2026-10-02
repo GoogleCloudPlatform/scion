@@ -77,7 +77,7 @@ func TestListProjectAgentsSorted_CursorCrossProjectRejected(t *testing.T) {
 		OwnerID: f.owner.ID, CreatedBy: f.owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, f.store.CreateProject(ctx, other))
-	f.srv.createProjectMembersGroup(ctx, other)
+	f.srv.seedProjectCreatorMembership(ctx, other)
 	createTestUserWithProjectRole(t, f.store, f.owner.ID, f.owner.Email, other.ID, store.ProjectRoleOwner)
 	// At least one agent in the other project so the request is otherwise valid.
 	otherAgent := &store.Agent{

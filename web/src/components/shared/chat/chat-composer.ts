@@ -326,6 +326,59 @@ export class ScionChatComposer extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
+    /* Stop iOS/Android focus-zoom: the composer's inner native textarea
+       computes at 16px or more on a coarse (touch) pointer, even though
+       the Shoelace font-size custom property (set app-wide in critical
+       CSS) only reaches ::part(base), not the inner textarea itself. */
+    @media (pointer: coarse) {
+      sl-textarea::part(textarea) {
+        font-size: max(16px, var(--chat-fs-lg));
+      }
+    }
+
+    @media (max-width: 768px) {
+      .attach-btn::part(base) {
+        min-height: 44px;
+      }
+
+      /* Icon-only on mobile: a square accent button, freeing the width the
+         text label used for the textarea. The label stays in the DOM
+         (visually hidden, not removed) so the accessible name is still
+         "Send" / "Save Edit" without a separate aria-label. */
+      .send-btn::part(base) {
+        width: 44px;
+        height: 44px;
+        min-height: 44px;
+        padding: 0;
+        justify-content: center;
+      }
+
+      .send-btn::part(prefix) {
+        margin-inline-end: 0;
+      }
+
+      /* The label slot wrapper keeps its own padding even though the
+         slotted content (the clip-rect-hidden span) collapses to 1x1 —
+         without this, the icon sits visibly off-centre in the square
+         button instead of in the middle of it. */
+      .send-btn::part(label) {
+        padding: 0;
+      }
+
+      .send-btn sl-icon {
+        font-size: 20px;
+      }
+
+      .send-btn .send-label {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+      }
+    }
+
     .send-container {
       position: relative;
       flex-shrink: 0;
@@ -803,7 +856,7 @@ export class ScionChatComposer extends LitElement {
                 @contextmenu=${this.handleSendContextMenu}
               >
                 <sl-icon slot="prefix" name=${sendIcon}></sl-icon>
-                ${sendLabel}
+                <span class="send-label">${sendLabel}</span>
               </sl-button>
               ${this.showSendContextMenu && !inEditMode
                 ? html`
@@ -1496,7 +1549,7 @@ export class ScionChatComposer extends LitElement {
       this.runeCount = 0;
       this.resetMentionTracking();
       this.dispatchEvent(new CustomEvent('chat-cancel-edit', { bubbles: true, composed: true }));
-      this.focusTextarea();
+      this.settleFocusAfterSend();
       return;
     }
 
@@ -1534,7 +1587,9 @@ export class ScionChatComposer extends LitElement {
         if (savedReplyTo) {
           this.replyTo = savedReplyTo;
         }
-        this.focusTextarea();
+        // A failed send must not pop the keyboard back up on touch; the
+        // user taps to retry or edit instead.
+        this.settleFocusAfterSend();
       },
     };
     if (this.replyTo) {
@@ -1555,7 +1610,7 @@ export class ScionChatComposer extends LitElement {
     this.resetMentionTracking();
     this.pendingFiles = [];
     this.clearDraft();
-    this.focusTextarea();
+    this.settleFocusAfterSend();
 
     this.dispatchEvent(
       new CustomEvent<ChatSendDetail>('chat-send', {
@@ -1564,6 +1619,27 @@ export class ScionChatComposer extends LitElement {
         composed: true,
       })
     );
+  }
+
+  /**
+   * After a send (successful or failed) or a saved edit, touch devices
+   * blur the composer so the on-screen keyboard retracts instead of
+   * staying up over the thread the user is waiting to read. Desktop keeps
+   * today's re-focus, since Enter still sends there and the user is likely
+   * to keep typing.
+   */
+  private settleFocusAfterSend(): void {
+    if (isPrimaryInputTouch()) {
+      this.blurTextarea();
+    } else {
+      this.focusTextarea();
+    }
+  }
+
+  /** Blur the composer's textarea, retracting the on-screen keyboard. */
+  private blurTextarea(): void {
+    const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+    (slTextarea as HTMLElement | null)?.blur();
   }
 
   /** Focus the textarea after send/cancel. */

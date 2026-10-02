@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
 func TestNew(t *testing.T) {
@@ -875,6 +877,141 @@ func TestTokenRevoke(t *testing.T) {
 	err := client.Tokens().Revoke(context.Background(), "token-123")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestListScopes verifies the plain catalog call (no options) and the
+// project-boundary eligibility call both reach GET /api/v1/auth/scopes with
+// the expected query string, and decode the eligibility fields.
+func TestListScopes(t *testing.T) {
+	t.Run("catalog only", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				t.Errorf("expected GET, got %s", r.Method)
+			}
+			if r.URL.Path != "/api/v1/auth/scopes" {
+				t.Errorf("expected path /api/v1/auth/scopes, got %s", r.URL.Path)
+			}
+			if r.URL.RawQuery != "" {
+				t.Errorf("expected no query string, got %q", r.URL.RawQuery)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ScopesResponse{
+				Scopes: []ScopeInfo{
+					{ID: "agent:read", Resource: "agent", Action: "read", Description: "Read agents", PermissionID: "agent.read"},
+				},
+				Aliases: []ScopeAliasInfo{
+					{ID: "agent:manage", Description: "All agent management operations", ExpandsTo: []string{"agent:read"}},
+				},
+			})
+		}))
+		defer server.Close()
+
+		client, _ := New(server.URL)
+		resp, err := client.Tokens().ListScopes(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(resp.Scopes) != 1 || resp.Scopes[0].ID != "agent:read" {
+			t.Errorf("unexpected scopes: %+v", resp.Scopes)
+		}
+		if resp.Scopes[0].Eligibility != nil {
+			t.Error("catalog-only response must not carry eligibility")
+		}
+	})
+
+	t.Run("project eligibility", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("projectId"); got != "project-123" {
+				t.Errorf("expected projectId=project-123, got %q", got)
+			}
+			if got := r.URL.Query().Get("boundary"); got != "" {
+				t.Errorf("expected no boundary param, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ScopesResponse{
+				Scopes: []ScopeInfo{
+					{
+						ID: "agent:attach", Resource: "agent", Action: "attach", Description: "Attach", PermissionID: "agent.attach",
+						EligibilityKind: "relationship", Relationships: []string{"owner", "ancestor"},
+						Eligibility: &ScopeEligibility{
+							Boundary: TokenBoundary{Kind: "project", ProjectID: "project-123"},
+							Eligible: true,
+						},
+					},
+					{
+						ID: "agent:delete", Resource: "agent", Action: "delete", Description: "Delete", PermissionID: "agent.delete",
+						Eligibility: &ScopeEligibility{
+							Boundary: TokenBoundary{Kind: "project", ProjectID: "project-123"},
+							Eligible: false,
+							Reason:   "flat_role_insufficient",
+						},
+					},
+				},
+			})
+		}))
+		defer server.Close()
+
+		client, _ := New(server.URL)
+		resp, err := client.Tokens().ListScopes(context.Background(), &ListScopesOptions{ProjectID: "project-123"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(resp.Scopes) != 2 {
+			t.Fatalf("expected 2 scopes, got %d", len(resp.Scopes))
+		}
+		attach := resp.Scopes[0]
+		if attach.Eligibility == nil || !attach.Eligibility.Eligible {
+			t.Errorf("expected agent:attach eligible, got %+v", attach.Eligibility)
+		}
+		del := resp.Scopes[1]
+		if del.Eligibility == nil || del.Eligibility.Eligible || del.Eligibility.Reason != "flat_role_insufficient" {
+			t.Errorf("expected agent:delete ineligible with reason flat_role_insufficient, got %+v", del.Eligibility)
+		}
+	})
+}
+
+// TestAsScopeViolation verifies the typed helper extracts the selector and
+// reason from a 403 scope_violation error, and returns ok=false for the
+// detail-free, oracle-resistant project-forbidden error.
+func TestAsScopeViolation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"code":    "scope_violation",
+				"message": `requested scopes exceed issuer authority: selector "agent:delete" denied (flat_role_insufficient)`,
+				"details": map[string]interface{}{
+					"selector": "agent:delete",
+					"reason":   "flat_role_insufficient",
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL)
+	_, err := client.Tokens().Create(context.Background(), &CreateTokenRequest{
+		Name: "t", ProjectID: "p", Scopes: []string{"agent:delete"},
+	})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+
+	selector, reason, ok := AsScopeViolation(err)
+	if !ok {
+		t.Fatal("expected ok=true for a scope_violation error")
+	}
+	if selector != "agent:delete" || reason != "flat_role_insufficient" {
+		t.Errorf("expected selector=agent:delete reason=flat_role_insufficient, got selector=%q reason=%q", selector, reason)
+	}
+
+	// A detail-free forbidden error must not be mistaken for a scope
+	// violation.
+	notScopeViolation := &apiclient.APIError{StatusCode: http.StatusForbidden, Code: "forbidden", Message: "forbidden"}
+	if _, _, ok := AsScopeViolation(notScopeViolation); ok {
+		t.Error("expected ok=false for a plain forbidden error")
 	}
 }
 

@@ -397,6 +397,24 @@ describe('_handlePaletteSelect: thread targets', () => {
   });
 });
 
+describe('_handlePaletteSelect: agent targets', () => {
+  it('ignores an agent target, even one carrying the IDs of a present thread candidate', () => {
+    const el = createPage();
+    const thread = threadTarget();
+    el.v2PaletteGroups = { threads: { status: 'ready', candidates: [threadCandidate(thread)] } };
+    // Chat builds no `agent` candidates. This fixture carries the thread's IDs
+    // only so that, if the agent branch were missing, the target would reach
+    // the thread match and navigate.
+    const target = { ...thread, kind: 'agent', agentId: 'a1', displayName: 'Agent One' };
+    const before = window.location.pathname;
+
+    el._handlePaletteSelect(new CustomEvent('palette-select', { detail: { target } }));
+
+    expect(window.location.pathname).toBe(before);
+    expect(el._paletteClosedBySelection).toBe(false);
+  });
+});
+
 describe('_handlePaletteSelect: People (dm/user) targets', () => {
   // Covers the `'people'` half of the `group` lookup this method shares with
   // Agents (`target.peerKind === 'agent' ? 'agents' : 'people'`): a bug that

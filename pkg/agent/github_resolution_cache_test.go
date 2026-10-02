@@ -21,11 +21,20 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func init() {
+	// The delayed write would otherwise fire on its own after a test has
+	// returned, possibly while t.TempDir() is being removed. Tests that check
+	// what reaches disk call Flush; TestGitHubResolutionCache_DelayedWriteFires
+	// covers the timer itself with its own short delay.
+	resolutionCacheSaveDelay = time.Hour
+}
 
 func TestGitHubResolutionCache_PutAndGet(t *testing.T) {
 	dir := t.TempDir()
@@ -110,6 +119,7 @@ func TestGitHubResolutionCache_PersistAndReload(t *testing.T) {
 		Hash:    "sha256:persist",
 	}
 	cache.putEntry("gh://owner/repo/persist@main", skill, false)
+	cache.Flush()
 
 	// Verify file exists on disk
 	cacheFile := filepath.Join(dir, resolutionCacheFileName)
@@ -132,64 +142,65 @@ func TestGitHubResolutionCache_PersistAndReload(t *testing.T) {
 	}
 }
 
-// TestGitHubResolutionCache_CredentialEntryNotPersistedToDisk verifies that
-// credential-bearing cache keys (those with a "#<tokenhash>" suffix, produced
-// by resolutionCacheKey when a GitHub token is present) are kept in-memory
-// only and never written to disk.
-//
-// This prevents the stale-404 bug from issue #565: ResolvedFile.Content is
-// json:"-" and is stripped on serialisation. A disk-loaded entry would have
-// Content == nil, causing installOneSkill to re-download using the wrong token
-// (the broker's default, not the per-URI named credential) and 404 on private
-// repos. Memory-only entries retain Content for the full TTL window.
-func TestGitHubResolutionCache_CredentialEntryNotPersistedToDisk(t *testing.T) {
+// testCredKey returns a cache key in the format resolutionCacheKey produces
+// for a credential-scoped ref.
+func testCredKey(ref, credential string) string {
+	return ref + "#" + credentialFingerprint(credential)
+}
+
+// TestGitHubResolutionCache_CredentialEntryPersisted verifies that an entry
+// resolved with a credential survives a save and a reload, and that the
+// credential value itself never appears in the file.
+func TestGitHubResolutionCache_CredentialEntryPersisted(t *testing.T) {
 	dir := t.TempDir()
 	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
 
-	// A key with a token-hash suffix (simulating a ?token= private-repo URI).
-	credKey := "gh://owner/repo/my-skill@main#deadbeef12345678"
+	const credential = "ghp_exampleCredentialValue0123456789"
+	credKey := testCredKey("gh://owner/repo/my-skill@main", credential)
 	skill := ResolvedSkill{
 		Name:    "private-skill",
 		URI:     "gh://owner/repo/my-skill@main",
 		Version: "abc123def456",
 		Hash:    "sha256:private",
 		Files: []ResolvedFile{
-			{Path: "SKILL.md", Content: []byte("private content")},
+			{Path: "SKILL.md", URL: "https://raw.githubusercontent.com/owner/repo/abc/SKILL.md", Content: []byte("private content")},
 		},
 	}
-	cache.putEntry(credKey, skill, false)
+	cache.putEntry(credKey, skill, true)
+	cache.Flush()
 
-	// In-memory Get must hit.
-	got, ok := cache.Get(credKey)
-	if !ok {
-		t.Fatal("expected in-memory cache hit for credential entry, got miss")
+	data, err := os.ReadFile(filepath.Join(dir, resolutionCacheFileName))
+	if err != nil {
+		t.Fatalf("cache file not written: %v", err)
 	}
-	if got.Name != "private-skill" {
-		t.Errorf("expected name private-skill, got %s", got.Name)
+	if strings.Contains(string(data), credential) {
+		t.Fatal("cache file contains the raw credential value")
 	}
-
-	// The cache file must not exist (credential entries are never written to disk).
-	cacheFile := filepath.Join(dir, resolutionCacheFileName)
-	if _, err := os.Stat(cacheFile); err == nil {
-		t.Error("credential-bearing entry was persisted to disk; expected memory-only")
+	if strings.Contains(string(data), "private content") {
+		t.Fatal("cache file contains file content; Content must not be persisted")
 	}
 
-	// A new cache instance loading from the same dir must NOT see the credential entry.
 	cache2, err := NewGitHubResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache (reload): %v", err)
 	}
-	if _, ok := cache2.Get(credKey); ok {
-		t.Error("credential entry should not be loadable from disk after restart")
+	got, ok := cache2.Get(credKey)
+	if !ok {
+		t.Fatal("credential-scoped entry did not survive a reload")
+	}
+	if got.Name != "private-skill" || len(got.Files) != 1 {
+		t.Fatalf("unexpected reloaded entry: %+v", got)
+	}
+	if got.Files[0].Content != nil {
+		t.Error("reloaded entry unexpectedly has file content")
 	}
 }
 
-// TestGitHubResolutionCache_MixedPublicAndCredential verifies that a cache
-// containing both public-repo and credential-bearing entries persists only
-// the public-repo entries to disk.
+// TestGitHubResolutionCache_MixedPublicAndCredential verifies that public and
+// credential-scoped entries are both persisted.
 func TestGitHubResolutionCache_MixedPublicAndCredential(t *testing.T) {
 	dir := t.TempDir()
 	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
@@ -198,20 +209,12 @@ func TestGitHubResolutionCache_MixedPublicAndCredential(t *testing.T) {
 	}
 
 	publicKey := "gh://owner/repo/pub-skill@main"
-	credKey := "gh://owner/repo/priv-skill@main#deadbeef12345678"
+	credKey := testCredKey("gh://owner/repo/priv-skill@main", "cred-value")
 
 	cache.putEntry(publicKey, ResolvedSkill{Name: "pub-skill", URI: publicKey}, false)
 	cache.putEntry(credKey, ResolvedSkill{Name: "priv-skill", URI: "gh://owner/repo/priv-skill@main"}, false)
+	cache.Flush()
 
-	// Both accessible in-memory.
-	if _, ok := cache.Get(publicKey); !ok {
-		t.Error("public entry: expected in-memory hit")
-	}
-	if _, ok := cache.Get(credKey); !ok {
-		t.Error("credential entry: expected in-memory hit")
-	}
-
-	// After reload, only public entry survives.
 	cache2, err := NewGitHubResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache (reload): %v", err)
@@ -219,8 +222,8 @@ func TestGitHubResolutionCache_MixedPublicAndCredential(t *testing.T) {
 	if _, ok := cache2.Get(publicKey); !ok {
 		t.Error("public entry: expected disk hit after reload")
 	}
-	if _, ok := cache2.Get(credKey); ok {
-		t.Error("credential entry: must not survive reload (should be memory-only)")
+	if _, ok := cache2.Get(credKey); !ok {
+		t.Error("credential entry: expected disk hit after reload")
 	}
 }
 
@@ -233,6 +236,7 @@ func TestGitHubResolutionCache_ExpiredNotLoaded(t *testing.T) {
 
 	skill := ResolvedSkill{Name: "expired-skill", URI: "gh://o/r/s@main"}
 	cache.putEntry("gh://o/r/s@main", skill, false)
+	cache.Flush()
 
 	time.Sleep(5 * time.Millisecond)
 
@@ -285,7 +289,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_Coalesces(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			results[i], errs[i] = cache.ResolveWithFetch(context.Background(),
-				"coalesce-key", "coalesce-flight", "coalesce-cred", "test-ref", false, fetch)
+				"coalesce-key", "coalesce-flight", "coalesce-cred", "test-ref", false, nil, fetch)
 		}(i)
 	}
 
@@ -337,7 +341,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCap(t *testing.T) {
 			// identity: single-flight cannot coalesce these, so only the
 			// per-credential cap can bound their concurrency.
 			_, _ = cache.ResolveWithFetch(context.Background(),
-				fmt.Sprintf("cap-cache-%d", i), fmt.Sprintf("cap-flight-%d", i), "shared-cred", "test-ref", false, fetch)
+				fmt.Sprintf("cap-cache-%d", i), fmt.Sprintf("cap-flight-%d", i), "shared-cred", "test-ref", false, nil, fetch)
 		}()
 	}
 
@@ -412,7 +416,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCapIsolatedAcrossPr
 				return ResolvedSkill{Name: fmt.Sprintf("a-%d", i)}, nil
 			}
 			_, _ = cache.ResolveWithFetch(context.Background(),
-				fmt.Sprintf("projA-cache-%d", i), fmt.Sprintf("projA-flight-%d", i), "project-A|default", "test-ref", false, fetch)
+				fmt.Sprintf("projA-cache-%d", i), fmt.Sprintf("projA-flight-%d", i), "project-A|default", "test-ref", false, nil, fetch)
 		}()
 	}
 	for i := 0; i < maxInFlightPerCredential; i++ {
@@ -428,7 +432,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCapIsolatedAcrossPr
 			close(enteredB)
 			return ResolvedSkill{Name: "b"}, nil
 		}
-		_, _ = cache.ResolveWithFetch(context.Background(), "projB-cache", "projB-flight", "project-B|default", "test-ref", false, fetch)
+		_, _ = cache.ResolveWithFetch(context.Background(), "projB-cache", "projB-flight", "project-B|default", "test-ref", false, nil, fetch)
 		close(doneB)
 	}()
 
@@ -469,7 +473,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_CredSlotsReturnsToEmpty(t *testi
 			}
 			_, _ = cache.ResolveWithFetch(context.Background(),
 				fmt.Sprintf("credslot-cache-%d", i), fmt.Sprintf("credslot-flight-%d", i),
-				fmt.Sprintf("credslot-cred-%d", i), "test-ref", false, fetch)
+				fmt.Sprintf("credslot-cred-%d", i), "test-ref", false, nil, fetch)
 		}()
 	}
 
@@ -559,7 +563,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_CancelledLeaderDoesNotFailWaiter
 	var errLeader, errWaiter error
 	doneLeader := make(chan struct{})
 	go func() {
-		resLeader, errLeader = cache.ResolveWithFetch(ctxLeader, "cancel-leader-key", flightKey, "cancel-leader-cred", "test-ref", false, fetch)
+		resLeader, errLeader = cache.ResolveWithFetch(ctxLeader, "cancel-leader-key", flightKey, "cancel-leader-cred", "test-ref", false, nil, fetch)
 		close(doneLeader)
 	}()
 
@@ -571,7 +575,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_CancelledLeaderDoesNotFailWaiter
 
 	doneWaiter := make(chan struct{})
 	go func() {
-		resWaiter, errWaiter = cache.ResolveWithFetch(context.Background(), "cancel-leader-key", flightKey, "cancel-leader-cred", "test-ref", false, fetch)
+		resWaiter, errWaiter = cache.ResolveWithFetch(context.Background(), "cancel-leader-key", flightKey, "cancel-leader-cred", "test-ref", false, nil, fetch)
 		close(doneWaiter)
 	}()
 
@@ -676,7 +680,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_ShortDeadlineLeaderDoesNotFailWa
 	leaderCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	go func() {
-		_, _ = cache.ResolveWithFetch(leaderCtx, "short-deadline-key", flightKey, "short-deadline-cred", "test-ref", false, fetch)
+		_, _ = cache.ResolveWithFetch(leaderCtx, "short-deadline-key", flightKey, "short-deadline-cred", "test-ref", false, nil, fetch)
 	}()
 
 	select {
@@ -689,7 +693,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_ShortDeadlineLeaderDoesNotFailWa
 	var wres ResolvedSkill
 	done := make(chan struct{})
 	go func() {
-		wres, werr = cache.ResolveWithFetch(context.Background(), "short-deadline-key", flightKey, "short-deadline-cred", "test-ref", false, fetch)
+		wres, werr = cache.ResolveWithFetch(context.Background(), "short-deadline-key", flightKey, "short-deadline-cred", "test-ref", false, nil, fetch)
 		close(done)
 	}()
 
@@ -777,7 +781,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_StaleServesImmediately(t *testin
 		return ResolvedSkill{Name: "new", URI: key}, nil
 	}
 
-	skill, err := cache.ResolveWithFetch(context.Background(), key, "stale-flight", "stale-cred", "test-ref", true, fetch)
+	skill, err := cache.ResolveWithFetch(context.Background(), key, "stale-flight", "stale-cred", "test-ref", true, nil, fetch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -843,8 +847,8 @@ func TestGitHubResolutionCache_ResolveWithFetch_StaleRefreshesOnce(t *testing.T)
 	flightJoinHook.Store(&hook)
 	t.Cleanup(func() { flightJoinHook.Store(nil) })
 
-	skill1, err1 := cache.ResolveWithFetch(context.Background(), key, flightKey, "refresh-once-cred", "test-ref", true, fetch)
-	skill2, err2 := cache.ResolveWithFetch(context.Background(), key, flightKey, "refresh-once-cred", "test-ref", true, fetch)
+	skill1, err1 := cache.ResolveWithFetch(context.Background(), key, flightKey, "refresh-once-cred", "test-ref", true, nil, fetch)
+	skill2, err2 := cache.ResolveWithFetch(context.Background(), key, flightKey, "refresh-once-cred", "test-ref", true, nil, fetch)
 	if err1 != nil || err2 != nil {
 		t.Fatalf("unexpected errors: %v, %v", err1, err2)
 	}
@@ -907,7 +911,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PastMaxStaleAgeResolvesSynchrono
 		return ResolvedSkill{Name: "fresh", URI: key}, nil
 	}
 
-	skill, err := cache.ResolveWithFetch(context.Background(), key, "too-old-flight", "too-old-cred", "test-ref", true, fetch)
+	skill, err := cache.ResolveWithFetch(context.Background(), key, "too-old-flight", "too-old-cred", "test-ref", true, nil, fetch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -951,7 +955,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_SHARefNeverServedStale(t *testin
 
 	// isBranchRef=false, matching what resolveOne computes for a full commit
 	// SHA ref — this is the one thing that must keep it off the stale path.
-	skill, err := cache.ResolveWithFetch(context.Background(), key, "sha-flight", "sha-cred", "test-ref", false, fetch)
+	skill, err := cache.ResolveWithFetch(context.Background(), key, "sha-flight", "sha-cred", "test-ref", false, nil, fetch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1016,7 +1020,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_RefreshFailureBackoffSkipsRetry(
 		return ResolvedSkill{Name: "new", URI: key}, nil
 	}
 
-	skill, err := cache.ResolveWithFetch(context.Background(), key, flightKey, "backoff-cred", "test-ref", true, fetch)
+	skill, err := cache.ResolveWithFetch(context.Background(), key, flightKey, "backoff-cred", "test-ref", true, nil, fetch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1055,14 +1059,14 @@ func TestGitHubResolutionCache_ResolveWithFetch_FailureNeverCached(t *testing.T)
 		return ResolvedSkill{}, wantErr
 	}
 
-	_, err1 := cache.ResolveWithFetch(context.Background(), key, "failure-flight", "failure-cred", "test-ref", true, fetch)
+	_, err1 := cache.ResolveWithFetch(context.Background(), key, "failure-flight", "failure-cred", "test-ref", true, nil, fetch)
 	if !errors.Is(err1, wantErr) {
 		t.Fatalf("expected the first call to fail with %v, got %v", wantErr, err1)
 	}
 
 	// Nothing from the failed call should have been cached: a second call
 	// must run fetch again, not return a cached (zero-value) success.
-	_, err2 := cache.ResolveWithFetch(context.Background(), key, "failure-flight", "failure-cred", "test-ref", true, fetch)
+	_, err2 := cache.ResolveWithFetch(context.Background(), key, "failure-flight", "failure-cred", "test-ref", true, nil, fetch)
 	if !errors.Is(err2, wantErr) {
 		t.Fatalf("expected the second call to fail again (a prior failure must never be cached), got %v", err2)
 	}

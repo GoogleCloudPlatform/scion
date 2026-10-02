@@ -97,7 +97,7 @@ func (s *Server) handleAgentActionKeysTopLevel(w http.ResponseWriter, r *http.Re
 			s.finishAgentKeysNotFound(w, r, operationID, agentKeysAuditTarget{}, len(keys))
 			return
 		}
-		s.finishAgentKeysInternalError(w, r, operationID, agentKeysAuditTarget{}, len(keys), err)
+		s.finishAgentKeysInternalError(w, r, operationID, agentKeysAuditTarget{}, len(keys), err, agentKeysRouteKeys)
 		return
 	}
 
@@ -142,7 +142,7 @@ func (s *Server) handleAgentActionKeysProjectScoped(w http.ResponseWriter, r *ht
 			s.finishAgentKeysNotFound(w, r, operationID, agentKeysAuditTarget{ProjectID: projectID}, len(keys))
 			return
 		}
-		s.finishAgentKeysInternalError(w, r, operationID, agentKeysAuditTarget{ProjectID: projectID}, len(keys), err)
+		s.finishAgentKeysInternalError(w, r, operationID, agentKeysAuditTarget{ProjectID: projectID}, len(keys), err, agentKeysRouteKeys)
 		return
 	}
 
@@ -275,14 +275,14 @@ func (s *Server) finishAgentKeysNotFound(w http.ResponseWriter, r *http.Request,
 // reports the one generic 500 writeErrorFromErr's default branch would,
 // rather than reproducing that switch's other branches for error classes a
 // read-only lookup cannot produce.
-func (s *Server) finishAgentKeysInternalError(w http.ResponseWriter, r *http.Request, operationID string, audit agentKeysAuditTarget, inputBytes int, err error) {
+func (s *Server) finishAgentKeysInternalError(w http.ResponseWriter, r *http.Request, operationID string, audit agentKeysAuditTarget, inputBytes int, err error, route agentKeysRoute) {
 	const statusCode = http.StatusInternalServerError
 	const code = ErrCodeInternalError
 	const message = "Internal server error"
 
 	slog.Error("agent keys: target resolution failed",
 		"operation_id", operationID, "status", statusCode, "code", code, "error", err)
-	s.logAgentKeysInternalErrorAudit(r, operationID, audit, code, inputBytes)
+	s.logAgentKeysInternalErrorAudit(r, operationID, audit, code, inputBytes, route)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
@@ -625,7 +625,7 @@ func (s *Server) logAgentKeysValidationAudit(r *http.Request, outcome agentkeys.
 // reported under a distinct "error_class" field rather than "decision" --
 // contract §5 defines "decision" as an agentkeys.Outcome value, and this
 // path's code is not one.
-func (s *Server) logAgentKeysInternalErrorAudit(r *http.Request, operationID string, target agentKeysAuditTarget, errorClass string, inputBytes int) {
+func (s *Server) logAgentKeysInternalErrorAudit(r *http.Request, operationID string, target agentKeysAuditTarget, errorClass string, inputBytes int, route agentKeysRoute) {
 	ctx := r.Context()
 	actorType, actorID, sourceProjectID, credential := agentKeysAuditActor(ctx)
 
@@ -639,7 +639,7 @@ func (s *Server) logAgentKeysInternalErrorAudit(r *http.Request, operationID str
 		"target_project_id", target.ProjectID,
 		"credential_kind", string(credential.Kind),
 		"credential_id", credential.ID,
-		"route", "keys",
+		"route", string(route),
 		"input_bytes", inputBytes,
 		"decision", "",
 		"error_class", errorClass,

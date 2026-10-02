@@ -33,6 +33,13 @@ import (
 func setupScheduleTest(t *testing.T) (*Server, store.Store, string) {
 	t.Helper()
 	srv, s := testServer(t)
+	return initScheduleTest(t, srv, s)
+}
+
+// initScheduleTest gives srv a scheduler with the message handler and creates
+// the schedule test project.
+func initScheduleTest(t *testing.T, srv *Server, s store.Store) (*Server, store.Store, string) {
+	t.Helper()
 	ctx := context.Background()
 
 	srv.scheduler = NewScheduler(s, slog.Default())
@@ -148,7 +155,7 @@ func setupScopedDispatchAgentOwner(t *testing.T, srv *Server, s store.Store, pro
 
 	project, err := s.GetProject(ctx, projectID)
 	require.NoError(t, err)
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, userID))
 
 	return ownerUser

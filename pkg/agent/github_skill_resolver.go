@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -27,6 +28,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -55,6 +57,12 @@ type GitHubSkillResolver struct {
 	apiBase              string            // Default: githubAPIBase, override in tests
 	rawBase              string            // Default: githubRawBase, override in tests
 	resolutionCache      *GitHubResolutionCache
+	// cooldown holds requests back per credential identity after a GitHub
+	// rate-limit response (see GitHubCooldown). The constructors set the
+	// process-wide SharedGitHubCooldown; a resolver built without one gets
+	// its own tracker on first use (see cooldownTracker).
+	cooldown     *GitHubCooldown
+	cooldownOnce sync.Once
 }
 
 // NewGitHubSkillResolver creates a resolver for gh:// and GitHub URL skills.
@@ -62,27 +70,49 @@ type GitHubSkillResolver struct {
 // If a resolution cache directory is available, cached resolution results
 // are reused to avoid redundant GitHub API calls.
 func NewGitHubSkillResolver() *GitHubSkillResolver {
-	var cache *GitHubResolutionCache
+	return newGitHubSkillResolver(openDefaultResolutionCache())
+}
+
+// openDefaultResolutionCache opens the resolution cache in its default
+// directory, or returns nil (with a warning) if that is not possible.
+func openDefaultResolutionCache() *GitHubResolutionCache {
 	cacheDir, cacheDirErr := GitHubResolutionCacheDir()
 	if cacheDirErr != nil {
 		// Print to stderr unconditionally: without a cache every request hits the
 		// GitHub API fresh, directly contributing to rate-limit exhaustion.
 		fmt.Fprintf(os.Stderr, "github: WARNING: failed to determine resolution cache dir: %v; proceeding without cache\n", cacheDirErr)
-	} else {
-		var cacheErr error
-		cache, cacheErr = NewGitHubResolutionCache(cacheDir, DefaultResolutionCacheTTL)
-		if cacheErr != nil {
-			// Same rationale: operators need to see cache failures in production logs.
-			fmt.Fprintf(os.Stderr, "github: WARNING: failed to initialize resolution cache at %s: %v (proceeding without cache)\n", cacheDir, cacheErr)
-		}
+		return nil
 	}
+	cache, cacheErr := NewGitHubResolutionCache(cacheDir, DefaultResolutionCacheTTL)
+	if cacheErr != nil {
+		// Same rationale: operators need to see cache failures in production logs.
+		fmt.Fprintf(os.Stderr, "github: WARNING: failed to initialize resolution cache at %s: %v (proceeding without cache)\n", cacheDir, cacheErr)
+		return nil
+	}
+	return cache
+}
+
+func newGitHubSkillResolver(cache *GitHubResolutionCache) *GitHubSkillResolver {
 	return &GitHubSkillResolver{
 		httpClient:      &http.Client{Timeout: githubAPITimeout},
 		token:           os.Getenv("GITHUB_TOKEN"),
 		apiBase:         githubAPIBase,
 		rawBase:         githubRawBase,
 		resolutionCache: cache,
+		cooldown:        SharedGitHubCooldown(),
 	}
+}
+
+// cooldownTracker returns r.cooldown, creating a tracker private to this
+// resolver when none was set, so a resolver built as a struct literal (as
+// tests do) never shares cooldown state with any other.
+func (r *GitHubSkillResolver) cooldownTracker() *GitHubCooldown {
+	r.cooldownOnce.Do(func() {
+		if r.cooldown == nil {
+			r.cooldown = NewGitHubCooldown(nil)
+		}
+	})
+	return r.cooldown
 }
 
 // NewGitHubSkillResolverWithCredentials constructs a resolver with an explicit
@@ -97,9 +127,15 @@ func NewGitHubSkillResolver() *GitHubSkillResolver {
 // provisionCredentials maps secret name → value; may be nil.
 // If cache is non-nil, it is used as the singleton resolution cache (e.g., from
 // the broker server struct) instead of the per-resolver cache created by
-// NewGitHubSkillResolver. Pass nil to get the default per-resolver cache behavior.
+// NewGitHubSkillResolver. Pass nil to open the default cache for this resolver.
 func NewGitHubSkillResolverWithCredentials(defaultToken string, provisionCredentials map[string]string, cache *GitHubResolutionCache) *GitHubSkillResolver {
-	r := NewGitHubSkillResolver()
+	// Use the singleton cache when one is passed in (e.g. from the broker
+	// server struct). Opening the default cache here as well would read, and
+	// possibly rewrite, the cache file on every request for nothing.
+	if cache == nil {
+		cache = openDefaultResolutionCache()
+	}
+	r := newGitHubSkillResolver(cache)
 	if defaultToken != "" {
 		r.token = defaultToken
 	} else if r.token == "" {
@@ -112,11 +148,6 @@ func NewGitHubSkillResolverWithCredentials(defaultToken string, provisionCredent
 		}
 	}
 	r.provisionCredentials = provisionCredentials
-	// If a singleton cache is provided (e.g., from the broker server struct),
-	// use it instead of the per-resolver cache created by NewGitHubSkillResolver.
-	if cache != nil {
-		r.resolutionCache = cache
-	}
 	return r
 }
 
@@ -153,39 +184,113 @@ func deriveGitHubOwnerKey(owner string) string {
 // If ?token= is present but the named secret is missing, an error is returned.
 // Missing convention keys are not errors — the resolver silently falls through.
 func (r *GitHubSkillResolver) tokenForRef(ref *GitHubSkillRef) (string, error) {
+	token, source, err := r.lookupToken(ref)
+	if err != nil {
+		return "", err
+	}
+	switch source {
+	case tokenSourceRepoKey:
+		util.Debugf("github: using credential %s for %s/%s", deriveGitHubTokenKey(ref.Owner, ref.Repo), ref.Owner, ref.Repo)
+	case tokenSourceOwnerKey:
+		util.Debugf("github: using credential %s for %s/%s", deriveGitHubOwnerKey(ref.Owner), ref.Owner, ref.Repo)
+	case tokenSourceDefault:
+		util.Debugf("github: no convention credential for %s/%s, using default", ref.Owner, ref.Repo)
+	case tokenSourceNone:
+		fmt.Fprintf(os.Stderr, "github: WARNING: no credential available for %s/%s, attempting unauthenticated\n", ref.Owner, ref.Repo)
+	}
+	return token, nil
+}
+
+type tokenSource int
+
+const (
+	tokenSourceNone tokenSource = iota
+	tokenSourceSecretParam
+	tokenSourceRepoKey
+	tokenSourceOwnerKey
+	tokenSourceDefault
+)
+
+// lookupToken is the credential lookup behind tokenForRef, without logging,
+// so the install step can repeat it (see CredentialForURI).
+func (r *GitHubSkillResolver) lookupToken(ref *GitHubSkillRef) (string, tokenSource, error) {
 	// Priority 1: Explicit ?token= override.
 	if ref.TokenSecretName != "" {
 		// In Go, reading from a nil map is safe and returns "". Both nil map and
 		// missing/empty key produce the same error: the secret is unavailable.
 		if val := r.provisionCredentials[ref.TokenSecretName]; val != "" {
-			return val, nil
+			return val, tokenSourceSecretParam, nil
 		}
-		return "", fmt.Errorf("secret %q not found in ProvisionCredentials; ensure it is set at project scope", ref.TokenSecretName)
+		return "", tokenSourceNone, fmt.Errorf("secret %q not found in ProvisionCredentials; ensure it is set at project scope", ref.TokenSecretName)
 	}
 
 	// Priority 2: Repo-specific convention key (GH_OWNER__REPO).
-	repoKey := deriveGitHubTokenKey(ref.Owner, ref.Repo)
-	if val := r.provisionCredentials[repoKey]; val != "" {
-		util.Debugf("github: using credential %s for %s/%s", repoKey, ref.Owner, ref.Repo)
-		return val, nil
+	if val := r.provisionCredentials[deriveGitHubTokenKey(ref.Owner, ref.Repo)]; val != "" {
+		return val, tokenSourceRepoKey, nil
 	}
 
 	// Priority 3: Owner-level convention key (GH_OWNER).
-	ownerKey := deriveGitHubOwnerKey(ref.Owner)
-	if val := r.provisionCredentials[ownerKey]; val != "" {
-		util.Debugf("github: using credential %s for %s/%s", ownerKey, ref.Owner, ref.Repo)
-		return val, nil
+	if val := r.provisionCredentials[deriveGitHubOwnerKey(ref.Owner)]; val != "" {
+		return val, tokenSourceOwnerKey, nil
 	}
 
 	// Priority 4: Default GITHUB_TOKEN cascade.
 	if r.token != "" {
-		util.Debugf("github: no convention credential for %s/%s, using default", ref.Owner, ref.Repo)
-		return r.token, nil
+		return r.token, tokenSourceDefault, nil
 	}
 
 	// Priority 5: No credential available — unauthenticated.
-	fmt.Fprintf(os.Stderr, "github: WARNING: no credential available for %s/%s, attempting unauthenticated\n", ref.Owner, ref.Repo)
-	return "", nil
+	return "", tokenSourceNone, nil
+}
+
+// CredentialForURI returns the credential this resolver uses for the gh://
+// skill URI, by the same lookup as resolution (lookupToken), or "" if the
+// URI does not parse, a named secret is unavailable, or no credential
+// applies. The broker installs it as the GitHubCredentialLookup for the
+// request, for skills this resolver served without file content.
+func (r *GitHubSkillResolver) CredentialForURI(uri string) string {
+	ghRef, err := ParseGitHubSkillURI(uri)
+	if err != nil {
+		return ""
+	}
+	token, _, err := r.lookupToken(ghRef)
+	if err != nil {
+		return ""
+	}
+	return token
+}
+
+// WithInstallCredentials returns ctx with what the install step needs to
+// download files of gh:// skills: this resolver's CredentialForURI as the
+// GitHub credential lookup, and defaultToken (when non-empty) as the default
+// GitHub token for skills resolved elsewhere, such as by the Hub. Callers
+// pass the context returned here to provisioning, which also resolves skills
+// with it.
+func (r *GitHubSkillResolver) WithInstallCredentials(ctx context.Context, defaultToken string) context.Context {
+	if defaultToken != "" {
+		ctx = ContextWithGitHubToken(ctx, defaultToken)
+	}
+	return ContextWithGitHubCredentialLookup(ctx, r.CredentialForURI)
+}
+
+// FlushCache writes any resolution cache entries still waiting for their
+// delayed write (see GitHubResolutionCache.Flush). Short-lived processes
+// call it before exiting so persistence does not depend on the delay.
+func (r *GitHubSkillResolver) FlushCache() {
+	if r.resolutionCache != nil {
+		r.resolutionCache.Flush()
+	}
+}
+
+// hasAllFileContent reports whether every file of skill carries its
+// content, i.e. install needs no download for it.
+func hasAllFileContent(skill ResolvedSkill) bool {
+	for _, f := range skill.Files {
+		if f.Content == nil {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *GitHubSkillResolver) ResolverName() string { return "github" }
@@ -222,8 +327,13 @@ func (r *GitHubSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefer
 
 		resolved, err := r.resolveOne(ctx, ghRef, ref, opts.ProjectID, opts.UserID)
 		if err != nil {
+			code := "resolve_failed"
+			var rl *GitHubRateLimitError
+			if errors.As(err, &rl) {
+				code = GitHubRateLimitedCode
+			}
 			result.Errors = append(result.Errors, ResolveError{
-				URI: ref.URI, Code: "resolve_failed", Message: err.Error(),
+				URI: ref.URI, Code: code, Message: err.Error(),
 			})
 			continue
 		}
@@ -257,9 +367,17 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 	}
 
 	cacheKey := resolutionCacheKey(ghRef, token)
+	cooldownID := GitHubCooldownIdentity(token)
 
 	fetch := func(fctx context.Context) (ResolvedSkill, error) {
 		return r.fetchOne(fctx, ghRef, ref, token)
+	}
+	// refreshAllowed gates the background refresh of a stale entry: while
+	// this credential is in a rate-limit cooldown the stale value is served
+	// without starting one.
+	refreshAllowed := func() bool {
+		_, active := r.cooldownTracker().Active(cooldownID)
+		return !active
 	}
 
 	var resolved ResolvedSkill
@@ -287,15 +405,30 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 		}
 		logRef := ghRef.Raw + " (" + sourceKind + ")"
 
-		skill, err := r.resolutionCache.ResolveWithFetch(ctx, cacheKey, flightKey, credID, logRef, isBranchRef, fetch)
+		// A cached entry loaded from disk has no file content, so install
+		// downloads its files using the credential the install context's
+		// lookup returns for this URI (see gitHubDownloadToken). When this
+		// request was resolved with a credential and that lookup cannot
+		// return the same one, such an entry is not used: the ref is
+		// resolved again, with content, so install never downloads a
+		// credential-scoped skill with a different credential or none.
+		var accept func(ResolvedSkill) bool
+		if token != "" && credentialLookupFromContext(ctx)(ghRef.Raw) != token {
+			accept = hasAllFileContent
+			// Keep these callers out of flights started by callers that
+			// accept a content-less entry (see coalesceFetchAccept).
+			flightKey += "|with-content"
+		}
+
+		skill, err := r.resolutionCache.resolveWithFetchAccept(ctx, cacheKey, flightKey, credID, logRef, isBranchRef, refreshAllowed, accept, fetch)
 		if err != nil {
-			return nil, err
+			return nil, withRateLimitRef(err, ghRef.Raw)
 		}
 		resolved = skill
 	} else {
 		skill, err := fetch(ctx)
 		if err != nil {
-			return nil, err
+			return nil, withRateLimitRef(err, ghRef.Raw)
 		}
 		resolved = skill
 	}
@@ -304,7 +437,27 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 	// a cache or in-flight hit may have been produced for a different ref
 	// sharing this URI and credential, with a different As.
 	resolved.As = ref.As
+
+	// A skill loaded from the on-disk cache has no file content, so install
+	// downloads its files. Record this call's URI (it names the secret to
+	// use, never its value) so install looks up the same credential for
+	// those downloads (see gitHubDownloadToken).
+	resolved.githubCredentialRef = ""
+	if !hasAllFileContent(resolved) {
+		resolved.githubCredentialRef = ghRef.Raw
+	}
 	return &resolved, nil
+}
+
+// withRateLimitRef returns err as a *GitHubRateLimitError naming ref when err
+// is one, so the caller sees which ref hit the limit; other errors are
+// returned unchanged.
+func withRateLimitRef(err error, ref string) error {
+	var rl *GitHubRateLimitError
+	if errors.As(err, &rl) {
+		return rl.WithRef(ref)
+	}
+	return err
 }
 
 // fetchOne performs the actual GitHub API work for ghRef — resolving the
@@ -530,7 +683,7 @@ func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHu
 	req.Header.Set("Accept", "application/vnd.github.v3.sha")
 	r.setAuthHeader(req, token)
 
-	resp, err := r.doWithRetry(ctx, req)
+	resp, err := r.doWithRetry(ctx, req, token)
 	if err != nil {
 		return "", fmt.Errorf("GitHub API request failed: %w", err)
 	}
@@ -566,7 +719,7 @@ func (r *GitHubSkillResolver) listContents(ctx context.Context, ghRef *GitHubSki
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	r.setAuthHeader(req, token)
 
-	resp, err := r.doWithRetry(ctx, req)
+	resp, err := r.doWithRetry(ctx, req, token)
 	if err != nil {
 		return nil, fmt.Errorf("GitHub API request failed: %w", err)
 	}
@@ -597,7 +750,7 @@ func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHub
 	}
 	r.setAuthHeader(req, token)
 
-	resp, err := r.doWithRetry(ctx, req)
+	resp, err := r.doWithRetry(ctx, req, token)
 	if err != nil {
 		return nil, fmt.Errorf("download failed: %w", err)
 	}
@@ -637,10 +790,21 @@ func (r *GitHubSkillResolver) setAuthHeader(req *http.Request, token string) {
 }
 
 // doWithRetry executes an HTTP request with retry and exponential backoff
-// for rate-limited (403 with X-RateLimit-Remaining: 0, 429) and transient
-// server errors (5xx). On retryable responses it respects the Retry-After
-// header when present.
-func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request) (*http.Response, error) {
+// for transient failures (5xx responses and transport errors), respecting
+// the Retry-After header when present.
+//
+// Rate limits are not retried: every attempt goes through the shared
+// GitHubCooldown for token's identity, so a rate-limit response (429, or a
+// 403 reporting exhaustion or a secondary limit) starts a cooldown for that
+// credential and returns a *GitHubRateLimitError straight away, and while a
+// cooldown is in effect no request is sent at all. Waiting out the limit
+// here would stall the caller (and, at provision time, the whole batch of
+// refs behind it) for as long as GitHub asks, which can exceed the create
+// deadline.
+func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request, token string) (*http.Response, error) {
+	cooldown := r.cooldownTracker()
+	identity := GitHubCooldownIdentity(token)
+
 	var lastResp *http.Response
 	var lastErr error
 
@@ -658,8 +822,12 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 		}
 
 		cloned := req.Clone(ctx)
-		resp, err := r.httpClient.Do(cloned)
+		resp, err := cooldown.Do(r.httpClient, cloned, identity)
 		if err != nil {
+			var rl *GitHubRateLimitError
+			if errors.As(err, &rl) {
+				return nil, err
+			}
 			lastErr = err
 			lastResp = nil
 			continue

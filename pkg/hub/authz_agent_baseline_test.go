@@ -437,18 +437,32 @@ func TestTemplateResource_ProjectParent(t *testing.T) {
 // This test does not touch enforceUATConstraints; it pins the behaviour the
 // builder fix produces.
 func TestTemplateResource_UATConfinement(t *testing.T) {
-	authz := &AuthzService{}
-	const tokenProject = "project-a"
+	// enforceUATConstraints now also requires live project access for
+	// project targets (ProjectTargetAdmission, ptone/scion#2092), so this
+	// test needs a real store-backed AuthzService and a genuine project
+	// membership for its principal, instead of the previous bare
+	// &AuthzService{}/nil-identity fixture. The assertions below are
+	// unchanged: this test is about the project/scope confinement checks
+	// that run BEFORE the live-access gate, not about project access itself.
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	tokenProject := tid("project-a")
+
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: tokenProject, Name: "Project A", Slug: "project-a"}))
+	userID := tid("uat-confinement-user")
+	createTestUserWithProjectRole(t, s, userID, userID+"@test.com", tokenProject, store.ProjectRoleMember)
+	principal := PrincipalContext{Kind: PrincipalKindUser, ID: userID}
+	base := NewAuthenticatedUser(userID, userID+"@test.com", "User", "member", "api")
 
 	// Scope is present in every case below, so a denial can only come from the
 	// project constraint — never from a missing scope.
-	scoped := NewScopedUserIdentity(nil, tokenProject, []string{"template:read"})
+	scoped := NewScopedUserIdentity(base, tokenProject, []string{"template:read"})
 
 	t.Run("template in another project is denied", func(t *testing.T) {
 		r := templateResource(&store.Template{
 			ID: "tmpl-b", Scope: store.TemplateScopeProject, ScopeID: "project-b",
 		})
-		decision := authz.enforceUATConstraints(scoped, r, ActionRead)
+		decision := authz.enforceUATConstraints(ctx, principal, scoped, r, ActionRead, "template.read")
 		require.NotNil(t, decision, "a project-pinned UAT must be confined against another project's template")
 		assert.False(t, decision.Allowed)
 		assert.Equal(t, "token not scoped for this project", decision.Reason)
@@ -458,7 +472,7 @@ func TestTemplateResource_UATConfinement(t *testing.T) {
 		r := templateResource(&store.Template{
 			ID: "tmpl-a", Scope: store.TemplateScopeProject, ScopeID: tokenProject,
 		})
-		assert.Nil(t, authz.enforceUATConstraints(scoped, r, ActionRead),
+		assert.Nil(t, authz.enforceUATConstraints(ctx, principal, scoped, r, ActionRead, "template.read"),
 			"confinement must not fire on the token's own project")
 	})
 
@@ -468,7 +482,7 @@ func TestTemplateResource_UATConfinement(t *testing.T) {
 	// applied.
 	t.Run("global template is denied as hub-level resource", func(t *testing.T) {
 		r := templateResource(&store.Template{ID: "tmpl-global", Scope: store.TemplateScopeGlobal})
-		decision := authz.enforceUATConstraints(scoped, r, ActionRead)
+		decision := authz.enforceUATConstraints(ctx, principal, scoped, r, ActionRead, "template.read")
 		require.NotNil(t, decision, "project-scoped UAT must be denied access to hub-level global template")
 		assert.False(t, decision.Allowed)
 		assert.Equal(t, "token not scoped for hub-level resources", decision.Reason)

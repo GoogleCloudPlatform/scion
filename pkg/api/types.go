@@ -316,10 +316,17 @@ func ValidateVolumes(volumes []VolumeMount) error {
 }
 
 type KubernetesConfig struct {
-	Context               string            `json:"context,omitempty" yaml:"context,omitempty"`
-	Namespace             string            `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	RuntimeClassName      string            `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty"`
-	ServiceAccountName    string            `json:"serviceAccountName,omitempty" yaml:"serviceAccountName,omitempty"` // For Workload Identity
+	Context            string `json:"context,omitempty" yaml:"context,omitempty"`
+	Namespace          string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	RuntimeClassName   string `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty"`
+	ServiceAccountName string `json:"serviceAccountName,omitempty" yaml:"serviceAccountName,omitempty"` // For Workload Identity
+	// PriorityClassName sets spec.priorityClassName on the agent pod. Must
+	// name a PriorityClass that already exists on the cluster — Scion does
+	// not create one. Validated as a DNS-1123 subdomain. Unset means today's
+	// behaviour (no priorityClassName, so the pod schedules at priority 0
+	// and is an ordinary preemption target). Overrides the runtime-level
+	// default set by runtimes.<name>.priority_class_name, if any.
+	PriorityClassName     string            `json:"priorityClassName,omitempty" yaml:"priorityClassName,omitempty"`
 	Resources             *K8sResources     `json:"resources,omitempty" yaml:"resources,omitempty"`
 	NodeSelector          map[string]string `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty"`
 	Tolerations           []K8sToleration   `json:"tolerations,omitempty" yaml:"tolerations,omitempty"`

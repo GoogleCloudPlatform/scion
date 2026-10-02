@@ -821,11 +821,13 @@ inactive (task 2.2's concern; not implemented here).
 
 **Audit event field list** (content-free; admission and outcome events both use it): timestamp,
 operation ID, authenticated actor kind/ID, source project (when applicable), target agent/project,
-credential ID/kind (if already available), route (`"keys"` or `"raw"` for the transitional
-bridge), input byte length, decision code (an `agentkeys.Outcome` value), dispatch outcome,
-duration. **Never** logged in a keys path, including debug logs and errors: the input itself, any
-preview or hash of it, named-key summaries, terminal contents, bearer values, request JSON, or
-runtime command arguments.
+credential ID/kind (if already available), route (`"keys"` for direct `/keys` requests;
+`"message_raw_bridge"` for requests handled by the temporary raw bridge), input byte
+length, decision code (an `agentkeys.Outcome` value), dispatch outcome, duration.
+The route tag must remain consistent across admission, outcome, and internal-error
+audit records emitted for the same request. **Never** logged in a keys path, including debug logs
+and errors: the input itself, any preview or hash of it, named-key summaries, terminal contents,
+bearer values, request JSON, or runtime command arguments.
 
 This has a real, already-identified source-level leak to close before 2.2/1.1 ship: `pkg/runtime/
 common.go`'s `runSimpleCommand`/`runSimpleCommandWithStdin` (lines ~620-655) log

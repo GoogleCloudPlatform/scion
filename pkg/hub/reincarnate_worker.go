@@ -554,6 +554,16 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// container the start call did manage to create) is gen N+1.
 	// appliedConfig: fresh persists every field the broker echoed back on
 	// reprovision (see above).
+	//
+	// This write sets phase to "starting" before the DispatchAgentStart call
+	// below, so that call's own priorPhase capture sees "starting" rather
+	// than "provisioning" — isConfirmedNonRunningPhase excludes "starting",
+	// so a start failure on this path does not revoke-by-agent even though
+	// the stop step earlier in this same reincarnation already confirmed the
+	// prior container is gone. This is an accepted, deliberate gap, not an
+	// oversight: it fails toward not revoking, the same direction every
+	// other guard in DispatchAgentStart takes, rather than threading this
+	// worker's own confirmation through the dispatcher as a special case.
 	agent, err = s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateStarting,
 		phase:              string(state.PhaseStarting),

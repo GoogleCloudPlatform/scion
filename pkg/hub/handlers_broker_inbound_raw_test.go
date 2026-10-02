@@ -160,7 +160,7 @@ func TestHandleBrokerInbound_RawRejectedWithResolvableSender(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
 	agent := &store.Agent{
@@ -463,4 +463,89 @@ func TestHandleBrokerInboundRouted_RawRejected(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	assert.Equal(t, string(MessageDenialRawBrokerIngressUnsupported), errResp.Error.Details["reason"])
 	assert.Empty(t, env.dispatcher.getCalls())
+}
+
+// TestHandleBrokerInbound_RawCaseVariant_Rejected covers a gap:
+// req.Message.Raw is an ordinary typed bool field
+// (messages.StructuredMessage.Raw, tag "raw"), and encoding/json's field
+// matching is case-insensitive, so "RAW"/"Raw" spellings already populate it
+// — this locks that in with a hand-built body (a struct-marshaled request
+// can only ever produce the lowercase tag).
+func TestHandleBrokerInbound_RawCaseVariant_Rejected(t *testing.T) {
+	for _, key := range []string{"RAW", "Raw"} {
+		t.Run(key, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			project := &store.Project{
+				ID: tid("proj-broker-raw-case-" + key), Slug: "broker-raw-case-" + key,
+				Name: "Broker Raw Case Test", Created: time.Now(), Updated: time.Now(),
+			}
+			require.NoError(t, s.CreateProject(ctx, project))
+
+			agent := &store.Agent{
+				ID: tid("agent-broker-raw-case-" + key), Slug: "broker-raw-case-agent-" + key,
+				Name: "Broker Raw Case Agent", ProjectID: project.ID, Phase: "running",
+				MessageMode: store.MessageModeProject, StateVersion: 1,
+				Created: time.Now(), Updated: time.Now(),
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+
+			dispatcher := &recordingDispatcher{}
+			srv.SetDispatcher(dispatcher)
+
+			topic := "scion.project." + project.ID + ".agent." + agent.Slug + ".messages"
+			body := []byte(`{"topic":"` + topic + `","message":{"version":1,"timestamp":"2026-01-01T00:00:00Z","sender":"user:does-not-exist@example.com","recipient":"agent:` + agent.Slug + `","msg":"hi","type":"instruction","` + key + `":true}}`)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+			rec := httptest.NewRecorder()
+			srv.mux.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
+			var errResp ErrorResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+			assert.Equal(t, string(MessageDenialRawBrokerIngressUnsupported), errResp.Error.Details["reason"])
+			assert.Empty(t, dispatcher.getCalls())
+		})
+	}
+}
+
+// TestHandleBrokerInboundRouted_RawCaseVariant_Rejected is
+// TestHandleBrokerInbound_RawCaseVariant_Rejected for the routed endpoint,
+// with the zero-side-effects spy
+// (recordingDispatcher) asserted too.
+func TestHandleBrokerInboundRouted_RawCaseVariant_Rejected(t *testing.T) {
+	for _, key := range []string{"RAW", "Raw"} {
+		t.Run(key, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			project := &store.Project{
+				ID: tid("proj-routed-raw-case-" + key), Slug: "routed-raw-case-" + key,
+				Name: "Routed Raw Case Test", Created: time.Now(), Updated: time.Now(),
+			}
+			require.NoError(t, s.CreateProject(ctx, project))
+
+			dispatcher := &recordingDispatcher{}
+			srv.SetDispatcher(dispatcher)
+
+			body := []byte(`{"project_id":"` + project.ID + `","message":{"version":1,"sender":"user:nobody@example.com","msg":"hi","type":"instruction","` + key + `":true}}`)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound/routed", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+			rec := httptest.NewRecorder()
+			srv.mux.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
+			var errResp ErrorResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+			assert.Equal(t, string(MessageDenialRawBrokerIngressUnsupported), errResp.Error.Details["reason"])
+			assert.Empty(t, dispatcher.getCalls())
+		})
+	}
 }
