@@ -80,6 +80,7 @@ export const EMPTY_SELECTION_MESSAGE = 'A member needs at least one role.';
 export const TIER_REASON = 'Only project owners can assign admin/owner';
 export const CUSTOM_TIER_CAPTION = 'Only project owners can change custom roles';
 export const OWNER_ONLY_REMOVE_REASON = 'Holds roles only an owner can remove';
+export const ROW_LOCKED_REASON = "Only project owners can change this member's roles.";
 export const LAST_OWNER_REASON = 'Last direct owner. Transfer ownership before changing this role.';
 export const LAST_OWNER_REMOVE_REASON =
   'Last direct owner. Transfer ownership before removing this member.';
@@ -289,6 +290,33 @@ export function isLastDirectOwner(
   return groups.filter(isDirectOwnerRow).length <= 1;
 }
 
+/**
+ * Tier of a principal known only by its current role IDs (e.g. addressed by
+ * email, so no loaded row matches). The built-in role found in the catalog
+ * decides; with none, an ID the catalog does not know might be a built-in
+ * role, so the result fails closed to the owner tier.
+ */
+export function tierFromRoleIds(
+  roleIds: readonly string[],
+  assignable: readonly AssignableProjectRole[]
+): RoleTier {
+  const builtIn = builtInCatalog(assignable).find((r) => roleIds.includes(r.id));
+  if (builtIn) return getRoleTier(builtIn.name);
+  const known = new Set(assignable.map((r) => r.id));
+  return roleIds.some((id) => !known.has(id)) ? 'owner' : 'member';
+}
+
+/** Last-owner status for a principal known only by its tier: a direct user
+ *  owner is the last one when the loaded rows hold at most one direct owner. */
+export function isLastOwnerByTier(
+  principalType: string,
+  tier: RoleTier,
+  groups: readonly ProjectMemberGroup[]
+): boolean {
+  if (principalType !== 'user' || tier !== 'owner') return false;
+  return groups.filter(isDirectOwnerRow).length <= 1;
+}
+
 /** Row Edit: the actor must manage the tier of the row's built-in role.
  *  Custom bindings on the row are carried as Keep when the actor cannot
  *  change them. */
@@ -376,6 +404,9 @@ export class ScionProjectMembersEditor extends LitElement {
   @state() private dlgHeldCustom: ProjectMemberBinding[] = [];
   @state() private dlgExpectedIds: string[] = [];
   @state() private dlgIsLastOwner = false;
+  /** Set when the dialog switched to Edit for a member the actor may not
+   *  edit (same tier rule as the row pencil): every control is read-only. */
+  @state() private dlgLockedReason: string | null = null;
   @state() private dlgSaving = false;
   @state() private dlgError: string | null = null;
   @state() private dlgErrorRoleId: string | null = null;
@@ -740,6 +771,12 @@ export class ScionProjectMembersEditor extends LitElement {
       border-radius: var(--scion-radius, 0.5rem);
     }
 
+    .dialog-info .locked-reason {
+      display: block;
+      margin-top: 0.25rem;
+      font-weight: 600;
+    }
+
     .dialog-actions-inline {
       margin-top: 0.5rem;
     }
@@ -904,7 +941,11 @@ export class ScionProjectMembersEditor extends LitElement {
 
   /** Whether the custom-role checkboxes may change in this dialog. */
   private get customRolesEditable(): boolean {
-    return !!this.capabilities?.canManageCustomRoles && this.dlgPrincipalType !== 'agent';
+    return (
+      !this.dlgLockedReason &&
+      !!this.capabilities?.canManageCustomRoles &&
+      this.dlgPrincipalType !== 'agent'
+    );
   }
 
   private builtInContext(): BuiltInOptionContext {
@@ -945,12 +986,14 @@ export class ScionProjectMembersEditor extends LitElement {
     this.dlgHeldCustom = [];
     this.dlgExpectedIds = [];
     this.dlgIsLastOwner = false;
+    this.dlgLockedReason = null;
     this.resetDialogMessages();
     this.dialogOpen = true;
   }
 
   /** Switches the dialog to Edit mode for a loaded row, pre-filled with the
-   *  principal's current roles. */
+   *  principal's current roles. Read-only when the actor may not edit the
+   *  row (reachable when Add mode lands on an existing member). */
   private openEditDialog(group: ProjectMemberGroup, info: string | null = null): void {
     const builtIn = builtInBinding(group);
     const held = customBindings(group);
@@ -964,13 +1007,16 @@ export class ScionProjectMembersEditor extends LitElement {
     this.dlgCustomIds = held.map((b) => b.roleDefinitionId);
     this.dlgExpectedIds = group.bindings.map((b) => b.roleDefinitionId);
     this.dlgIsLastOwner = isLastDirectOwner(group, this.groups);
+    this.dlgLockedReason = canEditRow(group, this.capabilities) ? null : ROW_LOCKED_REASON;
     this.resetDialogMessages();
     this.dlgInfo = info;
     this.dialogOpen = true;
   }
 
   /** Edit mode for a principal the loaded rows do not contain (e.g. it was
-   *  addressed by email), built from the server's current role IDs. */
+   *  addressed by email), built from the server's current role IDs. The tier
+   *  and last-owner rules match openEditDialog, with the tier inferred from
+   *  the built-in role in roleIds. */
   private openEditFromRoleIds(
     principalType: MemberPrincipalType,
     principalId: string,
@@ -1003,7 +1049,9 @@ export class ScionProjectMembersEditor extends LitElement {
     });
     this.dlgCustomIds = customIds;
     this.dlgExpectedIds = [...roleIds];
-    this.dlgIsLastOwner = false;
+    const tier = tierFromRoleIds(roleIds, this.assignableRoles);
+    this.dlgIsLastOwner = isLastOwnerByTier(principalType, tier, this.groups);
+    this.dlgLockedReason = tierAllowed(tier, this.capabilities) ? null : ROW_LOCKED_REASON;
     this.resetDialogMessages();
     this.dlgInfo = info;
     this.dialogOpen = true;
@@ -1055,7 +1103,7 @@ export class ScionProjectMembersEditor extends LitElement {
     const roleIds = this.selectedRoleIds;
     const principalType = this.dlgPrincipalType;
     const principalId = this.dlgPrincipalId.trim();
-    if (roleIds.length === 0 || !principalId || this.dlgSaving) return;
+    if (roleIds.length === 0 || !principalId || this.dlgSaving || this.dlgLockedReason) return;
 
     const mode = this.dialogMode;
     this.dlgSaving = true;
@@ -1208,7 +1256,7 @@ export class ScionProjectMembersEditor extends LitElement {
 
   /** Edit mode with an empty selection: remove the member entirely. */
   private async handleRemoveFromDialog(): Promise<void> {
-    if (this.dialogMode !== 'edit' || this.dlgSaving) return;
+    if (this.dialogMode !== 'edit' || this.dlgSaving || this.dlgLockedReason) return;
     const label = this.dlgDisplayName || this.dlgPrincipalId;
     if (
       !(await showConfirm(
@@ -1543,6 +1591,9 @@ export class ScionProjectMembersEditor extends LitElement {
     const builtIns = builtInCatalog(this.assignableRoles);
     if (builtIns.length === 0) return nothing;
     const ctx = this.builtInContext();
+    const locked = !!this.dlgLockedReason;
+    const optionState = (role: AssignableProjectRole | null): OptionState =>
+      locked ? { disabled: true, reason: '' } : builtInOptionState(role, ctx);
     const labels: Record<RoleTier, string> = { owner: 'Owner', admin: 'Admin', member: 'Member' };
     const option = (value: string, label: string, state: OptionState, description = '') => html`
       <sl-radio
@@ -1568,17 +1619,12 @@ export class ScionProjectMembersEditor extends LitElement {
           }}
         >
           ${builtIns.map((role) =>
-            option(
-              role.id,
-              labels[getRoleTier(role.name)],
-              builtInOptionState(role, ctx),
-              role.description
-            )
+            option(role.id, labels[getRoleTier(role.name)], optionState(role), role.description)
           )}
           ${option(
             NO_PROJECT_ROLE,
             'None',
-            builtInOptionState(null, ctx),
+            optionState(null),
             'No built-in role; custom roles only'
           )}
         </sl-radio-group>
@@ -1628,13 +1674,14 @@ export class ScionProjectMembersEditor extends LitElement {
     return html`
       <div class="form-group custom-roles">
         <span class="form-label">Custom roles</span>
-        ${!editable ? html`<p class="form-help">${CUSTOM_TIER_CAPTION}</p>` : nothing}
+        ${!editable && !this.dlgLockedReason
+          ? html`<p class="form-help">${CUSTOM_TIER_CAPTION}</p>`
+          : nothing}
         <div class="custom-role-list">
           ${roles.map((role) => {
-            const state = customRoleState(role, {
-              caps: this.capabilities,
-              held: held.has(role.id),
-            });
+            const state: OptionState = this.dlgLockedReason
+              ? { disabled: true, reason: '' }
+              : customRoleState(role, { caps: this.capabilities, held: held.has(role.id) });
             return html`
               <sl-checkbox
                 class=${this.dlgErrorRoleId === role.id ? 'option-error' : ''}
@@ -1676,7 +1723,7 @@ export class ScionProjectMembersEditor extends LitElement {
                   variant="danger"
                   size="small"
                   outline
-                  ?disabled=${this.dlgSaving || !!remove?.disabled}
+                  ?disabled=${this.dlgSaving || !!remove?.disabled || !!this.dlgLockedReason}
                   @click=${() => this.handleRemoveFromDialog()}
                   >Remove member</sl-button
                 >
@@ -1696,7 +1743,8 @@ export class ScionProjectMembersEditor extends LitElement {
     const isAdd = this.dialogMode === 'add';
     const empty = isEmptySelection(this.dlgBuiltIn, this.dlgCustomIds);
     const unchanged = !isAdd && sameRoleSet(this.selectedRoleIds, this.dlgExpectedIds);
-    const saveDisabled = empty || !this.dlgPrincipalId.trim() || unchanged;
+    const saveDisabled =
+      empty || !this.dlgPrincipalId.trim() || unchanged || !!this.dlgLockedReason;
 
     return html`
       <sl-dialog
@@ -1704,7 +1752,14 @@ export class ScionProjectMembersEditor extends LitElement {
         open
         @sl-request-close=${() => this.closeDialog()}
       >
-        ${this.dlgInfo ? html`<div class="dialog-info">${this.dlgInfo}</div>` : nothing}
+        ${this.dlgInfo || this.dlgLockedReason
+          ? html`<div class="dialog-info">
+              ${this.dlgInfo ?? ''}
+              ${this.dlgLockedReason
+                ? html`<span class="locked-reason">${this.dlgLockedReason}</span>`
+                : nothing}
+            </div>`
+          : nothing}
         ${isAdd
           ? html`
               <div class="form-group">

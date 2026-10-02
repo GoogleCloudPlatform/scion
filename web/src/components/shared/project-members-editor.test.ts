@@ -44,6 +44,7 @@ import {
   LAST_OWNER_REASON,
   NO_PROJECT_ROLE,
   OWNER_ONLY_REMOVE_REASON,
+  ROW_LOCKED_REASON,
   TIER_REASON,
   builtInOptionState,
   canEditRow,
@@ -53,7 +54,9 @@ import {
   describeCustomRoleError,
   isCustomProjectRole,
   isEmptySelection,
+  isLastOwnerByTier,
   selectionToRoleIds,
+  tierFromRoleIds,
   type MemberDialogMode,
 } from './project-members-editor.js';
 
@@ -203,6 +206,8 @@ interface EditorInternals {
   dlgError: string | null;
   dlgErrorRoleId: string | null;
   dlgInfo: string | null;
+  dlgIsLastOwner: boolean;
+  dlgLockedReason: string | null;
   actionFeedback: { message: string; variant: string } | null;
   transferDialogOpen: boolean;
   transferNewOwnerId: string;
@@ -994,6 +999,127 @@ describe('409 membership_changed', () => {
     expect(el.dlgCustomIds).toEqual(['r-msg']);
     expect(el.dlgError).toBe(AUTHORITY_CHANGED_MESSAGE);
     expect(`${el.dlgError} ${el.dlgInfo ?? ''}`).not.toContain('already a member');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Automatic switch to Edit respects the row tier and last-owner rules
+// ---------------------------------------------------------------------------
+
+describe('automatic switch to Edit follows the row rules', () => {
+  /** Every radio, checkbox and Save is disabled and the reason is shown. */
+  function expectLocked(el: EditorInternals): void {
+    expect(el.dialogMode).toBe('edit');
+    expect(el.dlgLockedReason).toBe(ROW_LOCKED_REASON);
+    const radios = qa(el, 'sl-radio-group sl-radio');
+    expect(radios.length).toBe(4);
+    for (const r of radios) expect(r.hasAttribute('disabled')).toBe(true);
+    for (const c of qa(el, 'sl-checkbox')) expect(c.hasAttribute('disabled')).toBe(true);
+    expect(q(el, 'sl-button.save-member')?.hasAttribute('disabled')).toBe(true);
+    expect(q(el, '.dialog-info')?.textContent).toContain('already a member');
+    expect(q(el, '.dialog-info .locked-reason')?.textContent).toBe(ROW_LOCKED_REASON);
+  }
+
+  function changed409(current: string[]): Response {
+    return apiError(409, 'membership_changed', 'membership changed', {
+      cause: 'principal_roles_changed',
+      currentRoleDefinitionIds: current,
+    });
+  }
+
+  it('infers the tier from the built-in role in the role IDs, failing closed on unknown IDs', () => {
+    expect(tierFromRoleIds(['r-admin', 'r-msg'], OWNER_CATALOG)).toBe('admin');
+    expect(tierFromRoleIds(['r-owner'], OWNER_CATALOG)).toBe('owner');
+    expect(tierFromRoleIds(['r-msg'], OWNER_CATALOG)).toBe('member');
+    expect(tierFromRoleIds(['r-unknown'], OWNER_CATALOG)).toBe('owner');
+    expect(tierFromRoleIds(['r-member'], [])).toBe('owner');
+    expect(isLastOwnerByTier('user', 'owner', [ALICE, DAVE])).toBe(true);
+    expect(isLastOwnerByTier('user', 'owner', [ALICE, group('user', 'u-zed', [R_OWNER])])).toBe(
+      false
+    );
+    expect(isLastOwnerByTier('user', 'admin', [ALICE])).toBe(false);
+  });
+
+  it('admin in Add mode picking an existing admin gets a read-only dialog with the reason', async () => {
+    const el = await mountEditor(ALL_GROUPS, ADMIN_CAPS, ADMIN_CATALOG);
+    el.openAddDialog();
+    el.onPrincipalChange({ principalType: 'user', principalId: 'u-bob', displayLabel: 'Bob' });
+    await el.updateComplete;
+    expectLocked(el);
+
+    // Even a forced selection change cannot be saved.
+    el.dlgBuiltIn = 'r-member';
+    vi.mocked(apiFetch).mockReset();
+    await el.handleSave();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('admin in Add mode picking an existing member still gets an editable dialog', async () => {
+    const el = await mountEditor(ALL_GROUPS, ADMIN_CAPS, ADMIN_CATALOG);
+    el.openAddDialog();
+    el.onPrincipalChange({ principalType: 'user', principalId: 'u-dave', displayLabel: 'Dave' });
+    await el.updateComplete;
+    expect(el.dlgLockedReason).toBeNull();
+    expect(radio(el, 'r-member').hasAttribute('disabled')).toBe(false);
+    expect(q(el, '.dialog-info .locked-reason')).toBeNull();
+  });
+
+  it('409 principal_roles_changed for an admin typed by email: read-only with the reason', async () => {
+    const el = await mountEditor(ALL_GROUPS, ADMIN_CAPS, ADMIN_CATALOG);
+    el.openAddDialog();
+    el.onPrincipalChange({ principalType: 'user', principalId: 'bob@x.io', displayLabel: '' });
+    el.dlgBuiltIn = 'r-member';
+    routeApi(
+      (url, init) => (init?.method === 'PUT' ? changed409(['r-admin', 'r-msg']) : undefined),
+      listRoute(ALL_GROUPS, ADMIN_CAPS),
+      catalogRoute(ADMIN_CATALOG)
+    );
+    await el.handleSave();
+    await el.updateComplete;
+    expect(el.dlgPrincipalId).toBe('bob@x.io');
+    expectLocked(el);
+  });
+
+  it('409 principal_roles_changed for a member typed by email stays editable for an admin', async () => {
+    const el = makeEditor(ADMIN_CAPS, { catalog: ADMIN_CATALOG });
+    el.openAddDialog();
+    el.onPrincipalChange({ principalType: 'user', principalId: 'dave@x.io', displayLabel: '' });
+    vi.mocked(apiFetch).mockResolvedValueOnce(changed409(['r-member']));
+    await el.handleSave();
+    expect(el.dialogMode).toBe('edit');
+    expect(el.dlgLockedReason).toBeNull();
+  });
+
+  it('owner reaching the last owner by email gets the last-owner lock', async () => {
+    const el = await mountEditor([ALICE, DAVE], OWNER_CAPS);
+    el.openAddDialog();
+    el.onPrincipalChange({ principalType: 'user', principalId: 'alice@x.io', displayLabel: '' });
+    routeApi(
+      (url, init) => (init?.method === 'PUT' ? changed409(['r-owner']) : undefined),
+      listRoute([ALICE, DAVE], OWNER_CAPS),
+      catalogRoute(OWNER_CATALOG)
+    );
+    await el.handleSave();
+    await el.updateComplete;
+    expect(el.dialogMode).toBe('edit');
+    expect(el.dlgLockedReason).toBeNull();
+    expect(el.dlgIsLastOwner).toBe(true);
+    expect(radio(el, 'r-owner').hasAttribute('disabled')).toBe(false);
+    for (const v of ['r-admin', 'r-member', NO_PROJECT_ROLE]) {
+      expect(radio(el, v).hasAttribute('disabled')).toBe(true);
+      expect(radio(el, v).textContent).toContain(LAST_OWNER_REASON);
+    }
+  });
+
+  it('an owner typed by email is not locked when another direct owner exists', async () => {
+    const zed = group('user', 'u-zed', [R_OWNER]);
+    const el = makeEditor(OWNER_CAPS, { groups: [ALICE, zed] });
+    el.openAddDialog();
+    el.onPrincipalChange({ principalType: 'user', principalId: 'alice@x.io', displayLabel: '' });
+    vi.mocked(apiFetch).mockResolvedValueOnce(changed409(['r-owner']));
+    await el.handleSave();
+    expect(el.dialogMode).toBe('edit');
+    expect(el.dlgIsLastOwner).toBe(false);
   });
 });
 
