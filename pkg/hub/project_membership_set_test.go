@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1577,6 +1578,40 @@ func TestSetMemberRoles_TOCTOU_RoleDefinitionDeletedBetweenPhases(t *testing.T) 
 	}
 	assert.Empty(t, mmrBindingsFor(t, realStore, "user", target, f.projectID), "nothing written")
 	assert.Empty(t, mmrAuditRows(t, realStore, f.projectID), "a refused request must write no audit rows")
+}
+
+// nilRoleDefinitionStore is a stub store whose GetRoleDefinition returns
+// (nil, nil), a contract violation a store implementation could commit.
+type nilRoleDefinitionStore struct {
+	store.Store
+}
+
+func (nilRoleDefinitionStore) GetRoleDefinition(context.Context, string) (*store.RoleDefinition, error) {
+	return nil, nil
+}
+
+// TestRefetchRoleDefinitionsTx_NilDefinitionIsNotFound covers the Gemini
+// review on GoogleCloudPlatform/scion#2273: a (nil, nil) read must not
+// append a nil definition (which checkNoRoleBindingPermissionInCreatedCustomRoles
+// would dereference and panic on). It must surface as a
+// *roleDefinitionRefetchError wrapping store.ErrNotFound, which the
+// SetMemberRoles in-tx caller maps to 400 invalid_role_set exactly as for a
+// role deleted between phases.
+func TestRefetchRoleDefinitionsTx_NilDefinitionIsNotFound(t *testing.T) {
+	defs := []*store.RoleDefinition{{ID: "rd-vanished", Name: "custom-vanished", ScopeType: store.RoleScopeProject}}
+
+	var got []*store.RoleDefinition
+	var err error
+	require.NotPanics(t, func() {
+		got, err = refetchRoleDefinitionsTx(context.Background(), nilRoleDefinitionStore{}, defs)
+		_ = checkNoRoleBindingPermissionInCreatedCustomRoles(got)
+	})
+	require.Error(t, err, "a (nil, nil) read must be reported, not returned as a nil definition")
+	assert.Nil(t, got)
+	assert.True(t, errors.Is(err, store.ErrNotFound), "must wrap store.ErrNotFound: %v", err)
+	var rfErr *roleDefinitionRefetchError
+	require.True(t, errors.As(err, &rfErr), "must be a *roleDefinitionRefetchError: %T", err)
+	assert.Equal(t, "rd-vanished", rfErr.roleDefinitionID)
 }
 
 // ---------------------------------------------------------------------------

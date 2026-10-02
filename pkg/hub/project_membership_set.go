@@ -371,13 +371,21 @@ func (e *roleDefinitionRefetchError) Unwrap() error { return e.err }
 // the re-check, instead of silently reusing the Phase P snapshot. The
 // project lock does not cover role definitions; an edit committed after
 // this read is the accepted FYI-2 residual. A failed read is returned as a
-// *roleDefinitionRefetchError naming the failing ID.
+// *roleDefinitionRefetchError naming the failing ID; a (nil, nil) read is
+// reported as a failed read wrapping store.ErrNotFound.
 func refetchRoleDefinitionsTx(ctx context.Context, tx store.Store, defs []*store.RoleDefinition) ([]*store.RoleDefinition, error) {
 	refetched := make([]*store.RoleDefinition, 0, len(defs))
 	for _, d := range defs {
 		rd, err := tx.GetRoleDefinition(ctx, d.ID)
 		if err != nil {
 			return nil, &roleDefinitionRefetchError{roleDefinitionID: d.ID, err: err}
+		}
+		if rd == nil {
+			// A store returning (nil, nil) must not leak a nil definition
+			// into the result (checkNoRoleBindingPermissionInCreatedCustomRoles
+			// would dereference it). Treat it as a deleted role so the
+			// caller maps it to 400 invalid_role_set, as for ErrNotFound.
+			return nil, &roleDefinitionRefetchError{roleDefinitionID: d.ID, err: store.ErrNotFound}
 		}
 		refetched = append(refetched, rd)
 	}
