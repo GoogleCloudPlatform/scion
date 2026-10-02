@@ -86,6 +86,22 @@ func TestChownProjectTree_EPERM_GroupMismatch_Fails(t *testing.T) {
 	assert.Contains(t, err.Error(), "owner is")
 }
 
+// -1 is lchown's "leave unchanged" value, so an EPERM on an entry whose
+// other ID already matches is tolerated, while a mismatch on the ID that was
+// actually requested still fails.
+func TestChownProjectTree_EPERM_UnchangedID_MatchesAny(t *testing.T) {
+	root := chownTestTree(t)
+	stubLchown(t, syscall.EPERM)
+
+	assert.NoError(t, chownProjectTree(context.Background(), root, "", -1, os.Getgid()))
+	assert.NoError(t, chownProjectTree(context.Background(), root, "", os.Getuid(), -1))
+	assert.NoError(t, chownProjectTree(context.Background(), root, "", -1, -1))
+
+	err := chownProjectTree(context.Background(), root, "", -1, os.Getgid()+1)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, syscall.EPERM)
+}
+
 // captureSlog routes the default slog logger into a buffer at Info level
 // for the rest of the test.
 func captureSlog(t *testing.T) *bytes.Buffer {

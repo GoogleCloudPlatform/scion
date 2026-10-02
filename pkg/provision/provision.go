@@ -2529,7 +2529,8 @@ func checkChownEPERM(path string, uid, gid int, lerr error) error {
 	if !ok {
 		return fmt.Errorf("lchown %d:%d %s: %w (owner unknown)", uid, gid, path, lerr)
 	}
-	if int(st.Uid) == uid && int(st.Gid) == gid {
+	// -1 means "leave unchanged" to lchown, so it matches any on-disk ID.
+	if (uid == -1 || int(st.Uid) == uid) && (gid == -1 || int(st.Gid) == gid) {
 		slog.Debug("chown not permitted but ownership already matches, continuing",
 			"path", path, "uid", uid, "gid", gid)
 		return nil
