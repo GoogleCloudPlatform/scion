@@ -182,7 +182,20 @@ test.describe('horizontal drags never navigate browser history', () => {
       () => (window as unknown as { __wide: HTMLElement }).__wide.scrollLeft
     );
     expect(scrolled, 'the code block panned sideways').toBeGreaterThan(100);
-    await assertSamePage(page, 'drag on a code block');
+    await assertSamePage(page, 'leftward drag on a code block');
+
+    // Back the other way, then once more with the block already at its
+    // start: nothing is left to scroll, and that drag must not fall through
+    // to history navigation either.
+    for (let i = 0; i < 2; i++) {
+      await touchSwipe(page, box!.left + 40, y, box!.left + box!.width - 20, y, 8, 400);
+      await page.waitForTimeout(SETTLE_MS);
+    }
+    expect(
+      await page.evaluate(() => (window as unknown as { __wide: HTMLElement }).__wide.scrollLeft),
+      'the code block is back at its start'
+    ).toBe(0);
+    await assertSamePage(page, 'rightward drag on a code block at its start');
   });
 
   test('the panels and their scrollers keep pinch-zoom and vertical panning', async ({ page }) => {

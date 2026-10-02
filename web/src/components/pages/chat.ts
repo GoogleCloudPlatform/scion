@@ -1011,6 +1011,40 @@ export class ScionPageChat extends LitElement {
         display: none;
       }
 
+      /* An agent DM header carries the most actions (terminal, promote,
+         mute, export, search, members) and, at 320px, more than fit beside
+         the back button and the peer name. Rather than run off the screen,
+         taking the members button with it, the actions row shrinks and
+         scrolls sideways. The name gives way first, wrapping down to its
+         longest word, so the row scrolls only once that is not enough.
+         The block padding keeps the buttons' enlarged hit areas (above)
+         inside the scroller's clip, and the negative margin gives that
+         space back. */
+      .v2-thread-header > span {
+        flex-shrink: 1000;
+      }
+
+      .v2-thread-header .header-actions {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
+        padding: 6px 2px;
+        margin-block: -6px;
+      }
+
+      /* Fit the promote dialog to the frame, which the open keyboard
+         shrinks below the layout viewport the dialog is positioned in. */
+      .promote-dialog::part(base) {
+        bottom: auto;
+        height: var(--scion-app-height, 100dvh);
+      }
+
+      .promote-dialog::part(panel) {
+        max-height: calc(100% - 1rem);
+      }
+
       .empty-state .subtitle.desktop-only {
         display: none;
       }
@@ -5102,6 +5136,7 @@ export class ScionPageChat extends LitElement {
       conv.projectSlug || this._projectIdToSlug.get(conv.projectId) || 'this project';
     return html`
       <sl-dialog
+        class="promote-dialog"
         label="Promote DM to Thread"
         ?open=${this.promoteDialogOpen}
         @sl-after-hide=${() => {
