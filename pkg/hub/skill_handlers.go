@@ -1853,6 +1853,19 @@ func injectGHFlightJoin(cacheKey string) {
 	}
 }
 
+// ghStaleServeHook, when non-nil, is called synchronously each time
+// resolveGitHubSkill serves a stale entry, with the cache key and whether a
+// background refresh was started. Tests use it to assert that no refresh was
+// started without waiting for one. Atomic for the same reason as
+// ghFlightJoinHook.
+var ghStaleServeHook atomic.Pointer[func(cacheKey string, refreshStarted bool)]
+
+func injectGHStaleServe(cacheKey string, refreshStarted bool) {
+	if hook := ghStaleServeHook.Load(); hook != nil {
+		(*hook)(cacheKey, refreshStarted)
+	}
+}
+
 // githubCooldown returns the rate-limit cooldown tracker for gh://
 // resolution: s.ghCooldown when set (tests), else the process-wide tracker
 // shared with the broker-side resolver.
@@ -1950,6 +1963,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 				slog.WarnContext(ctx, "github_resolution_cache: stale lookup failed",
 					"uri", rawURI, "error", staleErr)
 			} else if ok {
+				refreshStarted := false
 				if _, cooling := s.githubCooldown().Active(cooldownID); cooling {
 					slog.WarnContext(ctx, "github_resolution_cache: serving stale entry, skipping refresh during a rate-limit cooldown",
 						"uri", rawURI, "commit_sha", safeShortSHA(stale.CommitSHA))
@@ -1959,8 +1973,10 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 				} else {
 					slog.InfoContext(ctx, "github_resolution_cache: serving stale entry, refreshing in background",
 						"uri", rawURI, "commit_sha", safeShortSHA(stale.CommitSHA))
+					refreshStarted = true
 					go s.refreshGitHubSkillInBackground(cacheKey, rawURI, ghRef, token, installID, isBranchRef)
 				}
+				injectGHStaleServe(cacheKey, refreshStarted)
 				return buildResolvedSkillResponse(ghRef, stale), nil
 			}
 		}
