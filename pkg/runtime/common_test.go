@@ -788,6 +788,36 @@ func TestBuildCommonRunArgs(t *testing.T) {
 
 }
 
+// TestBuildCommonRunArgs_HubNativeWorktreeWorkspace covers the hub-native
+// worktree-per-agent shared-base layout end to end through buildCommonRunArgs:
+// RepoRoot is the project's own ~/.scion/projects/<slug> directory (the
+// shared git checkout itself, not a "workspace" subdirectory of it), and
+// Workspace is a direct child of its "worktrees" subdirectory. Both must be
+// accepted by the workspace-source validation this function runs before any
+// mount is built, restoring the shape's pre-existing support.
+func TestBuildCommonRunArgs_HubNativeWorktreeWorkspace(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	repoRoot := filepath.Join(tmpHome, ".scion", "projects", "my-project")
+	workspace := filepath.Join(repoRoot, "worktrees", "agent-1")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := buildCommonRunArgs(RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		RepoRoot:     repoRoot,
+		Workspace:    workspace,
+	})
+	if err != nil {
+		t.Fatalf("expected the hub-native worktree-per-agent workspace to be accepted, got: %v", err)
+	}
+}
+
 func TestRunSimpleCommand(t *testing.T) {
 
 	out, err := runSimpleCommand(context.Background(), "echo", "hello")
