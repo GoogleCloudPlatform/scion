@@ -1017,3 +1017,60 @@ func sortProjectMemberBindings(infos []projectMemberInfo) {
 		return infos[i].ID < infos[j].ID
 	})
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/projects/{id}/members/assignable-roles (ptone/scion#2529)
+// ---------------------------------------------------------------------------
+
+// listAssignableRolesResponse is the GET …/members/assignable-roles body.
+type listAssignableRolesResponse struct {
+	Items []AssignableProjectRole `json:"items"`
+}
+
+// handleProjectAssignableRoles lists the project-scoped roles (never system
+// roles) with whether the calling user could grant each one through PUT
+// …/members/principals/{type}/{id}. Read-only. Gated by project.manage, so
+// a member without manage gets 403; the role catalogue is not exposed
+// through hub role.read here.
+func (s *Server) handleProjectAssignableRoles(w http.ResponseWriter, r *http.Request, projectID string) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	ctx := r.Context()
+
+	if !s.authorize(w, r, Resource{Type: "project", ID: projectID}, ActionManage) {
+		return
+	}
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+	user, ok := identity.(UserIdentity)
+	if !ok {
+		Forbidden(w)
+		return
+	}
+
+	if _, err := s.store.GetProject(ctx, projectID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Project")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if s.membershipService == nil {
+		http.Error(w, "membership service not configured", http.StatusInternalServerError)
+		return
+	}
+	items, err := s.membershipService.AssignableRoles(ctx, user, projectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	writeJSON(w, http.StatusOK, listAssignableRolesResponse{Items: items})
+}
