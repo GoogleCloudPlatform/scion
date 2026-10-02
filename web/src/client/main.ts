@@ -39,6 +39,14 @@ import type { TerminalResources, TerminalSession } from './terminal-sessions.js'
 import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../utils/feature-flags.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
 import { setPreferredTimeZone } from '../utils/time.js';
+import { withTimeout } from './with-timeout.js';
+
+/**
+ * Milliseconds `init()` waits for the SSR-path display-timezone refresh
+ * before proceeding with the first render in Auto and letting
+ * `DisplayZoneController` correct it late (review R3-1).
+ */
+const TZ_LOAD_BUDGET_MS = 1500;
 import {
   type AdminStatus,
   hasAnyPermission,
@@ -269,9 +277,17 @@ async function fetchCurrentUser(): Promise<User | null> {
  * user (`prefetchPageData`, `pkg/hub/web.go`) already supplied `currentUser`
  * without `preferences` — that field is deliberately never cached on the
  * session (`webSessionUser.Preferences`) and so is absent from SSR data,
- * only ever populated by a live `/auth/me` read. Runs after the first
- * render is scheduled; a brief Auto-zone flash until it resolves is
- * preferable to blocking paint on it.
+ * only ever populated by a live `/auth/me` read.
+ *
+ * Callers should bound the wait with `withTimeout` (review R3-1): this
+ * fetch is cosmetic, but blocking first render on it unconditionally means
+ * a stalled `/auth/me` (a busy store, a stuck proxy) blocks the whole shell
+ * until the browser's own fetch timeout, which can be minutes. A timed-out
+ * wait still lets this promise keep running in the background — when it
+ * lands, `setPreferredTimeZone` fires `DISPLAY_TIMEZONE_CHANGED_EVENT`, and
+ * every mounted `DisplayZoneController` subscriber (native chat) re-renders
+ * in the correct zone. So a bounded wait costs nothing a subscriber can't
+ * already fix.
  */
 async function loadPreferredTimeZone(): Promise<void> {
   try {
@@ -801,8 +817,12 @@ async function init(): Promise<void> {
     // nothing to correct it until some unrelated re-render (the
     // DISPLAY_TIMEZONE_CHANGED_EVENT a late-arriving preference dispatches
     // only helps a component that is listening for it, which a component
-    // not yet mounted cannot be).
-    tzReady = loadPreferredTimeZone();
+    // not yet mounted cannot be). Bounded to TZ_LOAD_BUDGET_MS (review
+    // R3-1): a stalled `/auth/me` must not hang first render — past the
+    // budget, render in Auto and let a late result correct itself via
+    // DisplayZoneController once it lands (the fetch itself is not
+    // cancelled, only the wait for it).
+    tzReady = withTimeout(loadPreferredTimeZone(), TZ_LOAD_BUDGET_MS).then(() => undefined);
   }
 
   // Fetch admin status early so the route guard can use the cached result
@@ -857,8 +877,10 @@ async function init(): Promise<void> {
   // Render the initial page based on current URL (strip proxy prefix for route
   // matching). Feature flags must be settled first — renderRoute gates /chat on
   // them, and rendering early would flash a page the server has disabled.
-  // tzReady is awaited alongside it (review R2-1); both fetches started
-  // above and overlap, so this adds no latency beyond the slower of the two.
+  // tzReady is awaited alongside it (review R2-1), bounded to
+  // TZ_LOAD_BUDGET_MS (review R3-1); both fetches started above and
+  // overlap, so this adds no latency beyond the slower of
+  // featureFlagsReady and min(the /auth/me refresh, the budget).
   await Promise.all([featureFlagsReady, tzReady]);
   terminalWorkspaceEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
   ensureRoots();

@@ -142,11 +142,18 @@ export function listTimeZones(): string[] {
 //
 // That event does NOT re-render anything by itself (review R1-4): a
 // formatter call only ever reads the *current* zone at the moment it runs.
-// A long-lived Lit component that renders a time must listen for this event
-// itself and call `requestUpdate()` (or re-run the formatter into reactive
-// state) to reflect a later change — e.g.
-// `window.addEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, () => this.requestUpdate())`
-// in `connectedCallback`, removed in `disconnectedCallback`.
+// A long-lived Lit component that renders a time must subscribe to reflect
+// a later change. Use `DisplayZoneController` (review R3-2; see
+// `utils/display-zone-controller.ts`) rather than hand-rolling an
+// addEventListener/removeEventListener pair in
+// connectedCallback/disconnectedCallback — it is the one, leak-free,
+// reused-by-every-P3-surface implementation of exactly that:
+//
+//   readonly _zone = new DisplayZoneController(this);
+//
+// For any absolute time that needs the zone label alongside it (not just a
+// live re-render), use `formatInstantWithZone` below instead of composing
+// `formatInstant`/`zoneLabel` yourself.
 // ---------------------------------------------------------------------------
 
 /** The user's `preferences.timezone`, or `''` for Auto. */

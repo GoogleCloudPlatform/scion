@@ -24,7 +24,7 @@ import { setPreferredTimeZone, effectiveTimeZone } from './time.js';
 
 @customElement('scion-test-zone-host')
 class TestZoneHost extends LitElement {
-  private readonly zone = new DisplayZoneController(this);
+  readonly zone = new DisplayZoneController(this); // not private (R3-2): see display-zone-controller.ts
   renderCount = 0;
 
   override render() {

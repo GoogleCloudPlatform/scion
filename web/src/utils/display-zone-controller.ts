@@ -28,9 +28,15 @@
  * Usage:
  * ```ts
  * class MyTimeDisplay extends LitElement {
- *   private readonly _zone = new DisplayZoneController(this);
- *   // ... render() calls formatInstant/zoneLabel as usual; no other wiring
- *   // needed — the controller calls requestUpdate() for you.
+ *   // Not `private`: this project's tsconfig enables `noUnusedLocals`,
+ *   // which flags a `private` field that nothing ever reads — and nothing
+ *   // needs to read this one; it exists for its constructor's side effect
+ *   // (registering itself as a controller). A non-private field compiles
+ *   // under the same config (review round 3, R3-2).
+ *   readonly _zone = new DisplayZoneController(this);
+ *   // ... render() calls formatInstant/zoneLabel/formatInstantWithZone as
+ *   // usual; no other wiring needed — the controller calls requestUpdate()
+ *   // for you.
  * }
  * ```
  */
