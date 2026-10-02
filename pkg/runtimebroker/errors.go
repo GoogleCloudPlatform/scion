@@ -412,10 +412,10 @@ func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionErro
 // OriginalErr, the actual underlying failure, over its own curated Message)
 // so the detail reaches the broker's own diagnostics before being redacted
 // out of the response body.
-func writeStartContextError(w http.ResponseWriter, err error, op string) int {
+func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op string) int {
 	sce, ok := err.(*startContextError)
 	if !ok {
-		slog.Warn("buildStartContext failed", "op", op, "error", err)
+		s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", err)
 		RuntimeError(w, runtimeOpError(op, err).Error())
 		return http.StatusInternalServerError
 	}
@@ -424,7 +424,7 @@ func writeStartContextError(w http.ResponseWriter, err error, op string) int {
 			HubUnreachableError(w, sce.OriginalErr.Error())
 			return http.StatusServiceUnavailable
 		}
-		slog.Warn("buildStartContext failed", "op", op, "error", startContextDiagnostic(sce))
+		s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", startContextDiagnostic(sce))
 		TemplateError(w, runtimeOpError(op, err).Error())
 		return http.StatusInternalServerError
 	}
@@ -432,7 +432,7 @@ func writeStartContextError(w http.ResponseWriter, err error, op string) int {
 		writeError(w, sce.Status, ErrCodeValidationError, sce.Message, nil)
 		return sce.Status
 	}
-	slog.Warn("buildStartContext failed", "op", op, "error", startContextDiagnostic(sce))
+	s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", startContextDiagnostic(sce))
 	RuntimeError(w, runtimeOpError(op, err).Error())
 	return http.StatusInternalServerError
 }
@@ -450,4 +450,21 @@ func startContextDiagnostic(sce *startContextError) error {
 		return sce.OriginalErr
 	}
 	return sce
+}
+
+// startContextSpanText is startContextDiagnostic's counterpart for a span
+// status message, callable with buildStartContext's raw, not-yet-type-
+// asserted return value: a caller recording err on an OTEL span via
+// span.SetStatus(codes.Error, err.Error()) would otherwise record a
+// *startContextError's own curated, client-safe Message (that type's
+// Error() method returns Message verbatim) on an internal diagnostics
+// surface that should carry the real failure instead — spans are never
+// shown to the broker's own caller the way the HTTP response body is. When
+// err is not a *startContextError at all, its own Error() text is already
+// the real detail, so it passes through unchanged.
+func startContextSpanText(err error) string {
+	if sce, ok := err.(*startContextError); ok {
+		return startContextDiagnostic(sce).Error()
+	}
+	return err.Error()
 }

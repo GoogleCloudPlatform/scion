@@ -96,12 +96,13 @@ func TestWriteStartContextError_Honors4xxStatus(t *testing.T) {
 		{name: "zero status falls back to 500", status: 0, wantStatus: http.StatusInternalServerError, wantCode: ErrCodeRuntimeError},
 	}
 
+	srv := newTestServer(t)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
 			sce := &startContextError{Status: tt.status, Message: "test message"}
 
-			gotStatus := writeStartContextError(w, sce, "test_op")
+			gotStatus := srv.writeStartContextError(w, sce, "test_op")
 
 			if gotStatus != tt.wantStatus {
 				t.Errorf("writeStartContextError returned %d, want %d", gotStatus, tt.wantStatus)
@@ -230,15 +231,14 @@ func TestWriteStartContextError_RedactsAndLogsEachFallbackBranch(t *testing.T) {
 		},
 	}
 
+	srv := newTestServer(t)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var logBuf bytes.Buffer
-			oldLogger := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-			defer slog.SetDefault(oldLogger)
+			srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 			w := httptest.NewRecorder()
-			gotStatus := writeStartContextError(w, tt.err, "redact_test_op")
+			gotStatus := srv.writeStartContextError(w, tt.err, "redact_test_op")
 
 			if gotStatus != tt.wantStatus {
 				t.Errorf("writeStartContextError returned %d, want %d", gotStatus, tt.wantStatus)
@@ -264,5 +264,35 @@ func TestWriteStartContextError_RedactsAndLogsEachFallbackBranch(t *testing.T) {
 				t.Errorf("server log must contain the sentinel so the failure stays diagnosable, got: %s", logged)
 			}
 		})
+	}
+}
+
+// TestStartContextSpanText_PrefersOriginalErrOverCuratedMessage is the
+// regression test for recording the real failure on an OTEL span, not a
+// *startContextError's own curated, client-safe Message: a
+// *startContextError's Error() method returns Message verbatim (see its own
+// doc comment), so a caller that recorded err.Error() directly on a span
+// would record the SAME curated text a client already receives in the HTTP
+// response, defeating the point of a separate internal diagnostics surface.
+// startContextSpanText must instead surface OriginalErr when the two
+// differ, and must still behave like a plain err.Error() for a generic,
+// non-startContextError error (buildStartContext does return those too).
+func TestStartContextSpanText_PrefersOriginalErrOverCuratedMessage(t *testing.T) {
+	sce := &startContextError{
+		Message:     "Failed to resolve the hub endpoint",
+		OriginalErr: errors.New(startContextSentinel),
+	}
+	if got := startContextSpanText(sce); got != startContextSentinel {
+		t.Errorf("startContextSpanText(sce) = %q, want the OriginalErr text %q, not the curated Message", got, startContextSentinel)
+	}
+
+	noOriginalErr := &startContextError{Message: "image must be pinned by digest"}
+	if got := startContextSpanText(noOriginalErr); got != "image must be pinned by digest" {
+		t.Errorf("startContextSpanText(no OriginalErr) = %q, want the Message itself (nothing more specific to report)", got)
+	}
+
+	plain := errors.New("a generic, non-startContextError failure")
+	if got := startContextSpanText(plain); got != plain.Error() {
+		t.Errorf("startContextSpanText(plain error) = %q, want %q unchanged", got, plain.Error())
 	}
 }

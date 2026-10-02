@@ -808,8 +808,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 						OriginalErr: err,
 					}
 					markAttemptFailed(http.StatusInternalServerError, sce.Message)
-					span.SetStatus(codes.Error, sce.Message)
-					writeStartContextError(w, sce, "create agent")
+					span.SetStatus(codes.Error, startContextSpanText(sce))
+					s.writeStartContextError(w, sce, "create agent")
 					return
 				}
 				hydratedTemplatePath = tplPath
@@ -1048,8 +1048,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		Operation:          opCreate,
 	})
 	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		status := writeStartContextError(w, err, "create agent")
+		span.SetStatus(codes.Error, startContextSpanText(err))
+		status := s.writeStartContextError(w, err, "create agent")
 		markAttemptFailed(status, err.Error())
 		return
 	}
@@ -2146,8 +2146,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		Operation:                opHTTPStart,
 	})
 	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		writeStartContextError(w, err, "start agent")
+		span.SetStatus(codes.Error, startContextSpanText(err))
+		s.writeStartContextError(w, err, "start agent")
 		return
 	}
 	opts := sc.Opts
@@ -2182,7 +2182,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
 	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
-		writeStartContextError(w, sce, "start agent")
+		s.writeStartContextError(w, sce, "start agent")
 		return
 	}
 
@@ -2568,7 +2568,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		Operation:                opHTTPRestart,
 	})
 	if err != nil {
-		writeStartContextError(w, err, "restart agent")
+		s.writeStartContextError(w, err, "restart agent")
 		return
 	}
 	opts := sc.Opts
@@ -2586,7 +2586,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
 	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
-		writeStartContextError(w, sce, "restart agent")
+		s.writeStartContextError(w, sce, "restart agent")
 		return
 	}
 

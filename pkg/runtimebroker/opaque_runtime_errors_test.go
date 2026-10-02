@@ -94,12 +94,13 @@ func TestWriteRuntimeOpError_LogsRawErrorRecordsSpanWritesFixedBody(t *testing.T
 // unchanged, never replaced by runtimeOpError's generic "Failed to <op>"
 // message.
 func TestWriteStartContextError_PassesThroughStatusAndMessageVerbatim(t *testing.T) {
+	srv := newTestServer(t)
 	sce := &startContextError{
 		Status:  http.StatusBadRequest,
 		Message: "image must be pinned by digest",
 	}
 	w := httptest.NewRecorder()
-	writeStartContextError(w, sce, "start agent")
+	srv.writeStartContextError(w, sce, "start agent")
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
@@ -122,6 +123,7 @@ func TestWriteStartContextError_PassesThroughStatusAndMessageVerbatim(t *testing
 // special case — while a non-IsHubError, 4xx *startContextError's Message
 // (buildStartContext's own curated, client-safe text) is written verbatim.
 func TestWriteStartContextError_HidesHubHydrationTextButPassesCuratedMessage(t *testing.T) {
+	srv := newTestServer(t)
 	// A hydration failure's identity-bearing text, deliberately free of any
 	// of templatecache.IsHubConnectivityError's own connectivity-pattern
 	// substrings (e.g. "connection refused", "timeout"): this subtest
@@ -136,7 +138,7 @@ func TestWriteStartContextError_HidesHubHydrationTextButPassesCuratedMessage(t *
 		OriginalErr: errors.New(hydrationIdentityLeak),
 	}
 	w := httptest.NewRecorder()
-	writeStartContextError(w, hubErr, "start agent")
+	srv.writeStartContextError(w, hubErr, "start agent")
 	body := w.Body.String()
 	if strings.Contains(body, "my-actor-7f3") {
 		t.Errorf("IsHubError case: response body leaked the hydration error's identity detail: %s", body)
@@ -150,7 +152,7 @@ func TestWriteStartContextError_HidesHubHydrationTextButPassesCuratedMessage(t *
 		Message: "image must be pinned by digest",
 	}
 	w2 := httptest.NewRecorder()
-	writeStartContextError(w2, curatedErr, "start agent")
+	srv.writeStartContextError(w2, curatedErr, "start agent")
 	if w2.Code != http.StatusBadRequest {
 		t.Errorf("curated case: status = %d, want %d", w2.Code, http.StatusBadRequest)
 	}
@@ -173,10 +175,9 @@ func TestWriteStartContextError_HidesHubHydrationTextButPassesCuratedMessage(t *
 // OriginalErr) would otherwise discard the one place this detail could
 // reach any diagnostic surface.
 func TestWriteStartContextError_LogsOriginalErrNotFixedMessage(t *testing.T) {
+	srv := newTestServer(t)
 	var logBuf bytes.Buffer
-	oldLogger := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, nil)))
-	defer slog.SetDefault(oldLogger)
+	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(&logBuf, nil))
 
 	rawErr := errors.New(identityLeakingRuntimeError)
 	sce := &startContextError{
@@ -185,7 +186,7 @@ func TestWriteStartContextError_LogsOriginalErrNotFixedMessage(t *testing.T) {
 		OriginalErr: rawErr,
 	}
 	w := httptest.NewRecorder()
-	writeStartContextError(w, sce, "start agent")
+	srv.writeStartContextError(w, sce, "start agent")
 
 	logOutput := logBuf.String()
 	if !strings.Contains(logOutput, "my-actor-7f3") {
