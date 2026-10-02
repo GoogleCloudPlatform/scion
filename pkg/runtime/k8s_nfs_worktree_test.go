@@ -206,6 +206,12 @@ func TestNFSWorktreeSubPaths(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "projects/p/workspace/.git", gitSub)
 	assert.Equal(t, "projects/p/workspace/worktrees/agent-1", wtSub)
+	// Kubernetes subPaths use forward slashes on every OS.
+	assert.NotContains(t, gitSub+wtSub, `\`)
+	gitSub, wtSub, err = nfsWorktreeSubPaths("projects/p/workspace/", "agent-1")
+	require.NoError(t, err)
+	assert.Equal(t, "projects/p/workspace/.git", gitSub)
+	assert.Equal(t, "projects/p/workspace/worktrees/agent-1", wtSub)
 	_, _, err = nfsWorktreeSubPaths("", "agent-1")
 	assert.Error(t, err)
 	assert.Equal(t, "/repo-root/worktrees/agent-1", NFSWorktreeContainerPath("agent-1"))

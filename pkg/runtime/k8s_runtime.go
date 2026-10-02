@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -3550,7 +3551,8 @@ func nfsWorktreeSubPaths(workspaceSubPath, name string) (gitSubPath, worktreeSub
 	if workspaceSubPath == "" {
 		return "", "", fmt.Errorf("worktree-per-agent: the NFS workspace subPath is empty")
 	}
-	return filepath.Join(workspaceSubPath, ".git"), filepath.Join(workspaceSubPath, "worktrees", name), nil
+	// A Kubernetes subPath always uses forward slashes, whatever the OS.
+	return path.Join(workspaceSubPath, ".git"), path.Join(workspaceSubPath, "worktrees", name), nil
 }
 
 // nfsInitContainerInjected reports whether buildPod would add the
