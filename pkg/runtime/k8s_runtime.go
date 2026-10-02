@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -1669,7 +1670,6 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	//     pods and nodes without per-start chown (design §9.1).
 	//   - Local backend: host GID (today's behavior) so synced files remain
 	//     writable by the broker user.
-	const containerUID int64 = 1000
 	fsGroupGID := int64(os.Getgid()) // default: host GID (local backend)
 	if config.WorkspaceBackendName == "nfs" {
 		nfsGID := config.NFSGID
@@ -1816,7 +1816,11 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			// Lock winner (or no locker available): provision (mkdir+chown,
 			// plus clone if GitCloneForInit is set) if sentinel is absent,
 			// skip if already provisioned. The command is idempotent.
-			initCommand = nfsProvisionCommand(config.GitCloneForInit)
+			// Ownership follows the pod securityContext above: uid is the
+			// RunAsUser the agent runs as, gid is the NFS fsGroup. The
+			// configured NFS uid is not applied to RunAsUser, so it is not
+			// passed here either.
+			initCommand = nfsProvisionCommand(config.GitCloneForInit, containerUID, fsGroupGID)
 		}
 
 		// F-111: shared dirs served from the workspace PVC by subPath
@@ -3487,18 +3491,30 @@ func nfsInitContainerInjected(config RunConfig) bool {
 	return config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 }
 
-// nfsProvisionCommand builds the Command slice for the lock-winner init
-// container. It invokes `sciontool provision` with numeric/enum flags for
-// depth and mode. URL and branch are passed via env vars (nfsProvisionEnv)
-// to prevent shell injection.
-func nfsProvisionCommand(gc *api.GitCloneConfig) []string {
-	if gc == nil || gc.URL == "" {
-		return []string{"sciontool", "provision"}
-	}
+// containerUID is the uid agent pods run as (pod RunAsUser/RunAsGroup):
+// the image's non-root scion user. The NFS provisioning init container
+// chowns the workspace to this uid so the agent owns what it clones.
+const containerUID int64 = 1000
 
+// nfsProvisionCommand builds the Command slice for the lock-winner init
+// container. It invokes `sciontool provision` with numeric flags for depth
+// and the workspace ownership uid/gid. URL and branch are passed via env vars
+// (nfsProvisionEnv) to prevent shell injection.
+//
+// buildPod passes the identity the agent container runs as: uid is the pod
+// RunAsUser (containerUID) and gid is the pod fsGroup (the resolved
+// workspace_storage.nfs gid). A zero value omits the flag, so sciontool's
+// own default of 1000 applies.
+func nfsProvisionCommand(gc *api.GitCloneConfig, uid, gid int64) []string {
 	cmd := []string{"sciontool", "provision"}
-	if gc.Depth != nil {
+	if gc != nil && gc.URL != "" && gc.Depth != nil {
 		cmd = append(cmd, "--depth", fmt.Sprintf("%d", *gc.Depth))
+	}
+	if uid != 0 {
+		cmd = append(cmd, "--uid", strconv.FormatInt(uid, 10))
+	}
+	if gid != 0 {
+		cmd = append(cmd, "--gid", strconv.FormatInt(gid, 10))
 	}
 	return cmd
 }
