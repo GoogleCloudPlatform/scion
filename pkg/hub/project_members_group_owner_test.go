@@ -27,6 +27,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -416,11 +417,14 @@ func TestUpdateGroup_RejectsOwnerIDOnProjectMembersGroup(t *testing.T) {
 }
 
 // TestUpdateGroup_ProjectMembersGroupMarkerImmutable pins that PATCH cannot
-// remove or change the project-members-group marker keys. Without this, a hub
-// admin could strip the marker in one PATCH and set an owner in the next; the
-// owner would then escape both the PATCH owner guard and the owner-clearing
-// backfill, and createProjectMembersGroup would refuse to adopt the group
-// (ptone/scion#2599).
+// remove, add or change the project-members-group marker keys. Without this, a
+// hub admin could strip the marker in one PATCH and set an owner in the next;
+// the owner would then escape both the PATCH owner guard and the
+// owner-clearing backfill, and createProjectMembersGroup would refuse to adopt
+// the group (ptone/scion#2599).
+//
+// Every mutating subtest uses its own freshly created group, so a regression
+// in one guard cannot cascade into the other subtests.
 func TestUpdateGroup_ProjectMembersGroupMarkerImmutable(t *testing.T) {
 	f, g, existing := setupStaleOwnerMembersGroup(t)
 	ctx := context.Background()
@@ -431,7 +435,30 @@ func TestUpdateGroup_ProjectMembersGroupMarkerImmutable(t *testing.T) {
 	}
 	const markerMsg = "project members group marker annotations cannot be removed or changed"
 
+	// newGroup creates a fresh project-scoped group with the given
+	// annotations (nil for an unmarked group).
+	newGroup := func(t *testing.T, slug string, annotations map[string]string) *store.Group {
+		t.Helper()
+		grp := &store.Group{
+			ID: tid(slug), Name: "Group " + slug, Slug: slug,
+			GroupType: store.GroupTypeExplicit, ProjectID: f.project.ID,
+			Annotations: annotations,
+		}
+		require.NoError(t, f.s.CreateGroup(ctx, grp))
+		return grp
+	}
+	getGroup := func(t *testing.T, id string) *store.Group {
+		t.Helper()
+		stored, err := f.s.GetGroup(ctx, id)
+		require.NoError(t, err)
+		return stored
+	}
+	hubKey := func() map[string]string {
+		return map[string]string{systemProjectMembersGroupAnnotation: "true"}
+	}
+
 	t.Run("two-step bypass: strip marker then set owner", func(t *testing.T) {
+		// The only subtest that uses the real members group.
 		before := membersGroupFor(t, f.s, f.project)
 
 		rec := patch(g.ID, map[string]interface{}{
@@ -451,46 +478,59 @@ func TestUpdateGroup_ProjectMembersGroupMarkerImmutable(t *testing.T) {
 	})
 
 	t.Run("marker value changed", func(t *testing.T) {
-		rec := patch(g.ID, map[string]interface{}{
+		grp := newGroup(t, "mg-marker-value", hubKey())
+		rec := patch(grp.ID, map[string]interface{}{
 			"annotations": map[string]string{systemProjectMembersGroupAnnotation: "false"},
 		})
 		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), markerMsg)
-		assert.Equal(t, "true", membersGroupFor(t, f.s, f.project).Annotations[systemProjectMembersGroupAnnotation])
+		assert.Equal(t, hubKey(), getGroup(t, grp.ID).Annotations)
 	})
 
 	t.Run("entadapter key stripped", func(t *testing.T) {
-		legacy := &store.Group{
-			ID: tid("mg-marker-legacy-key"), Name: "MG Marker Legacy", Slug: "mg-marker-legacy-key",
-			GroupType: store.GroupTypeExplicit, ProjectID: f.project.ID,
-			Annotations: map[string]string{legacyProjectMembersGroupAnnotation: "true"},
-		}
-		require.NoError(t, f.s.CreateGroup(ctx, legacy))
-		rec := patch(legacy.ID, map[string]interface{}{"annotations": map[string]string{}})
+		grp := newGroup(t, "mg-marker-legacy-key", map[string]string{legacyProjectMembersGroupAnnotation: "true"})
+		rec := patch(grp.ID, map[string]interface{}{"annotations": map[string]string{}})
 		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), markerMsg)
-		stored, err := f.s.GetGroup(ctx, legacy.ID)
-		require.NoError(t, err)
-		assert.Equal(t, "true", stored.Annotations[legacyProjectMembersGroupAnnotation])
+		assert.Equal(t, map[string]string{legacyProjectMembersGroupAnnotation: "true"}, getGroup(t, grp.ID).Annotations)
+	})
+
+	t.Run("entadapter key added to a hub-key group", func(t *testing.T) {
+		// Pins the "add" half of changesProjectMembersGroupMarker.
+		grp := newGroup(t, "mg-marker-add-legacy", hubKey())
+		rec := patch(grp.ID, map[string]interface{}{
+			"name": "Added",
+			"annotations": map[string]string{
+				systemProjectMembersGroupAnnotation: "true",
+				legacyProjectMembersGroupAnnotation: "true",
+			},
+		})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), ErrCodeValidationError)
+		assert.Contains(t, rec.Body.String(), markerMsg)
+		stored := getGroup(t, grp.ID)
+		assert.Equal(t, hubKey(), stored.Annotations, "rejected PATCH must leave annotations unchanged")
+		assert.Equal(t, grp.Name, stored.Name, "rejected PATCH must not apply other fields")
 	})
 
 	t.Run("other annotations with marker preserved", func(t *testing.T) {
-		annotations := map[string]string{"note": "kept"}
-		for k, v := range membersGroupFor(t, f.s, f.project).Annotations {
-			annotations[k] = v
-		}
-		rec := patch(g.ID, map[string]interface{}{"annotations": annotations, "name": "Members Renamed"})
+		grp := newGroup(t, "mg-marker-keep", hubKey())
+		annotations := hubKey()
+		annotations["note"] = "kept"
+		rec := patch(grp.ID, map[string]interface{}{"annotations": annotations, "name": "Members Renamed"})
 		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		stored := membersGroupFor(t, f.s, f.project)
-		assert.Equal(t, "kept", stored.Annotations["note"])
-		assert.Equal(t, "true", stored.Annotations[systemProjectMembersGroupAnnotation])
+		stored := getGroup(t, grp.ID)
+		assert.Equal(t, annotations, stored.Annotations)
 		assert.Equal(t, "Members Renamed", stored.Name)
 	})
 
 	t.Run("other fields without annotations", func(t *testing.T) {
-		rec := patch(g.ID, map[string]interface{}{"description": "admin note"})
+		grp := newGroup(t, "mg-marker-desc", hubKey())
+		rec := patch(grp.ID, map[string]interface{}{"description": "admin note"})
 		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		assert.Equal(t, "admin note", membersGroupFor(t, f.s, f.project).Description)
+		stored := getGroup(t, grp.ID)
+		assert.Equal(t, "admin note", stored.Description)
+		assert.Equal(t, hubKey(), stored.Annotations)
 	})
 
 	t.Run("unmarked group annotations freely replaceable", func(t *testing.T) {
@@ -501,6 +541,65 @@ func TestUpdateGroup_ProjectMembersGroupMarkerImmutable(t *testing.T) {
 		require.NoError(t, f.s.CreateGroup(ctx, ordinary))
 		rec := patch(ordinary.ID, map[string]interface{}{"annotations": map[string]string{"c": "d"}})
 		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, map[string]string{"c": "d"}, getGroup(t, ordinary.ID).Annotations)
+	})
+}
+
+// TestUpdateGroup_ProjectMembersGroupMarkerNotAddable pins that the marker
+// keys are system-written only: a PATCH cannot add either key to an unmarked
+// group, while ordinary annotation edits on that group still succeed
+// (ptone/scion#2599, review r3 N3).
+func TestUpdateGroup_ProjectMembersGroupMarkerNotAddable(t *testing.T) {
+	f, _, _ := setupStaleOwnerMembersGroup(t)
+	ctx := context.Background()
+	admin := newSuperAdminUser(t, f.s, "mg-marker-add-hub-admin")
+
+	patch := func(id string, body map[string]interface{}) *httptest.ResponseRecorder {
+		return doRequestAsUser(t, f.srv, admin, http.MethodPatch, "/api/v1/groups/"+id, body)
+	}
+	const addMsg = "project members group marker annotations are system-written and cannot be added"
+
+	// newUnmarked creates a fresh unmarked group that has a ProjectID.
+	newUnmarked := func(t *testing.T, slug string) *store.Group {
+		t.Helper()
+		grp := &store.Group{
+			ID: tid(slug), Name: "Group " + slug, Slug: slug,
+			GroupType: store.GroupTypeExplicit, ProjectID: f.project.ID,
+			Annotations: map[string]string{"a": "b"},
+		}
+		require.NoError(t, f.s.CreateGroup(ctx, grp))
+		return grp
+	}
+
+	for _, key := range []string{systemProjectMembersGroupAnnotation, legacyProjectMembersGroupAnnotation} {
+		t.Run("adding "+key, func(t *testing.T) {
+			grp := newUnmarked(t, "mg-add-"+strings.ReplaceAll(strings.TrimPrefix(key, "scion.io/"), "/", "-"))
+			rec := patch(grp.ID, map[string]interface{}{
+				"name":        "Marked",
+				"annotations": map[string]string{"a": "b", key: "true"},
+			})
+			assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), ErrCodeValidationError)
+			assert.Contains(t, rec.Body.String(), addMsg)
+			stored, err := f.s.GetGroup(ctx, grp.ID)
+			require.NoError(t, err)
+			assert.Equal(t, map[string]string{"a": "b"}, stored.Annotations, "rejected PATCH must not apply annotations")
+			assert.Equal(t, grp.Name, stored.Name, "rejected PATCH must not apply other fields")
+			assert.False(t, hasProjectMembersGroupMarker(stored))
+		})
+	}
+
+	t.Run("ordinary annotation edit still succeeds", func(t *testing.T) {
+		grp := newUnmarked(t, "mg-add-ordinary-edit")
+		rec := patch(grp.ID, map[string]interface{}{
+			"name":        "Edited",
+			"annotations": map[string]string{"c": "d"},
+		})
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		stored, err := f.s.GetGroup(ctx, grp.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"c": "d"}, stored.Annotations)
+		assert.Equal(t, "Edited", stored.Name)
 	})
 }
 

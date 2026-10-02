@@ -427,10 +427,21 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	// marker and a later PATCH could then set an owner that no guard or
 	// backfill would catch. Reject any PATCH that removes or changes either
 	// marker key on a marked group (ptone/scion#2599).
-	if req.Annotations != nil && hasProjectMembersGroupMarker(group) &&
-		changesProjectMembersGroupMarker(group.Annotations, req.Annotations) {
-		ValidationError(w, "project members group marker annotations cannot be removed or changed", nil)
-		return
+	//
+	// The markers are system-written only: createProjectMembersGroup and the
+	// entadapter set them directly through the store, never through this
+	// handler. So a PATCH may not add either marker key to an unmarked group
+	// either; otherwise a mistaken PATCH would become irreversible through
+	// the API once the immutability check above applied to it.
+	if req.Annotations != nil && changesProjectMembersGroupMarker(group.Annotations, req.Annotations) {
+		if hasProjectMembersGroupMarker(group) {
+			ValidationError(w, "project members group marker annotations cannot be removed or changed", nil)
+			return
+		}
+		if setsProjectMembersGroupMarkerKey(group.Annotations, req.Annotations) {
+			ValidationError(w, "project members group marker annotations are system-written and cannot be added", nil)
+			return
+		}
 	}
 
 	if req.Name != "" {

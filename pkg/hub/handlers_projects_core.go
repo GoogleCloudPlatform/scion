@@ -731,6 +731,24 @@ func changesProjectMembersGroupMarker(stored, patched map[string]string) bool {
 	return false
 }
 
+// setsProjectMembersGroupMarkerKey reports whether replacing the stored
+// annotations with patched would add either project-members-group marker key
+// or change its value. Unlike changesProjectMembersGroupMarker it ignores the
+// removal of a key, so a PATCH may still drop a stray non-marking value from
+// an unmarked group.
+func setsProjectMembersGroupMarkerKey(stored, patched map[string]string) bool {
+	for _, key := range []string{systemProjectMembersGroupAnnotation, legacyProjectMembersGroupAnnotation} {
+		pv, pok := patched[key]
+		if !pok {
+			continue
+		}
+		if sv, sok := stored[key]; !sok || sv != pv {
+			return true
+		}
+	}
+	return false
+}
+
 func isSystemProjectAgentsGroup(group *store.Group, projectID string) bool {
 	return group != nil &&
 		group.ProjectID == projectID &&
