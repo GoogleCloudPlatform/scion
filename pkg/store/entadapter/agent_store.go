@@ -1442,15 +1442,16 @@ const containerMissingStatus = "missing"
 
 // MarkAgentContainerMissing implements store.AgentStore. See the interface
 // documentation for the guard conditions.
+//
+// Every guard is part of the UPDATE's WHERE clause (a compare-and-set), not
+// a separate read: the row changes only if it still matches at write time,
+// so a concurrent delete, start, stop, reassignment or heartbeat always wins
+// without relying on a row lock.
 func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*store.Agent, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return nil, err
 	}
-
-	// Prime dialect detection before opening the transaction (see
-	// UpdateAgentStatus).
-	useLock := s.usesRowLocks(ctx)
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -1458,36 +1459,32 @@ func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	q := tx.Agent.Query().Where(agent.IDEQ(uid))
-	if useLock {
-		q = q.ForUpdate()
-	}
-	current, err := q.Only(ctx)
-	if err != nil {
-		return nil, mapError(err)
-	}
-	cur := entAgentToStore(current)
-	switch {
-	case !cur.DeletedAt.IsZero(),
-		cur.RuntimeBrokerID != brokerID,
-		cur.Phase != "running",
-		cur.ReincarnationState != store.ReincarnationStateNone && cur.ReincarnationState != store.ReincarnationStateFailed,
-		!cur.LastSeen.IsZero() && !cur.LastSeen.Before(cutoff):
-		return nil, nil
-	}
-
-	exitReason := "container_missing"
-	if err := tx.Agent.UpdateOneID(uid).
+	n, err := tx.Agent.Update().
+		Where(
+			agent.IDEQ(uid),
+			agent.DeletedAtIsNil(),
+			agent.RuntimeBrokerIDEQ(brokerID),
+			agent.PhaseEQ("running"),
+			agent.Or(
+				agent.ReincarnationStateIsNil(),
+				agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),
+			),
+			agent.Or(agent.LastSeenIsNil(), agent.LastSeenLT(cutoff)),
+		).
 		SetPhase("error").
 		SetActivity("").
 		SetStalledFromActivity("").
 		SetToolName("").
 		SetContainerStatus(containerMissingStatus).
 		ClearExitCode().
-		SetExitReason(exitReason).
+		SetExitReason("container_missing").
 		SetMessage(message).
-		Exec(ctx); err != nil {
+		Save(ctx)
+	if err != nil {
 		return nil, mapError(err)
+	}
+	if n == 0 {
+		return nil, nil
 	}
 	updated, err := tx.Agent.Get(ctx, uid)
 	if err != nil {

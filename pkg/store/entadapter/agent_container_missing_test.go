@@ -18,9 +18,14 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -101,4 +106,56 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 		require.NoError(t, err)
 		assert.Nil(t, got)
 	})
+
+	t.Run("unknown agent", func(t *testing.T) {
+		got, err := s.MarkAgentContainerMissing(ctx, "00000000-0000-0000-0000-00000000dead", "broker-1", cutoff, "gone")
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+}
+
+// TestAgentStore_MarkAgentContainerMissing_GuardsInUpdate pins that the row
+// exclusions are part of the conditional UPDATE itself rather than a read
+// before it, so a row soft-deleted (or otherwise changed) between a read and
+// the write can never be overwritten.
+func TestAgentStore_MarkAgentContainerMissing_GuardsInUpdate(t *testing.T) {
+	ctx := context.Background()
+	base, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "cas")
+	a.RuntimeBrokerID = "broker-1"
+	a.LastSeen = time.Now().Add(-time.Hour)
+	require.NoError(t, base.CreateAgent(ctx, a))
+
+	var (
+		mu    sync.Mutex
+		stmts []string
+	)
+	drv := dialect.DebugWithContext(base.client.Driver(), func(_ context.Context, v ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		stmts = append(stmts, fmt.Sprint(v...))
+	})
+	s := NewAgentStore(ent.NewClient(ent.Driver(drv)))
+
+	got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", time.Now().Add(-5*time.Minute), "gone")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	mu.Lock()
+	defer mu.Unlock()
+	var update string
+	for _, q := range stmts {
+		if strings.Contains(q, "UPDATE") && strings.Contains(q, "agents") {
+			update = q
+			break
+		}
+		assert.NotContains(t, q, "SELECT", "no read may precede the conditional update: %s", q)
+	}
+	require.NotEmpty(t, update, "expected an UPDATE statement, got %v", stmts)
+	for _, cond := range []string{"deleted_at", "runtime_broker_id", "phase", "reincarnation_state", "last_seen"} {
+		where := update[strings.Index(update, "WHERE"):]
+		assert.Contains(t, where, cond, "guard %s must be in the UPDATE predicate", cond)
+	}
+	assert.Regexp(t, `deleted_at[`+"`"+`"]? IS NULL`, update, "soft-delete guard must be deleted_at IS NULL")
 }
