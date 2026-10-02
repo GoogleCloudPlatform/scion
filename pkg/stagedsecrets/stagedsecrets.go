@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
@@ -122,7 +123,30 @@ func writeAs(homeDir string, staged *Staged, uid, gid int) error {
 			return fmt.Errorf("failed to base64-decode secret %s: %w", fs.Name, err)
 		}
 
-		dir := filepath.Dir(fs.Target)
+		// Reject a Target with no real leaf name — a trailing path
+		// separator, or a leaf that is "." or ".." — outright, before
+		// anything below treats filepath.Dir/filepath.Base's result as the
+		// directory/leaf to create and write. filepath.Base silently
+		// strips a trailing separator (Base("a/b/") == "b"), so without
+		// this check ".../secrets/sa.json/" would silently create
+		// "sa.json" as a DIRECTORY and write a file "sa.json" inside it,
+		// instead of failing the way base's os.WriteFile (and this
+		// package's own OpenParentNoFollow, before this function existed)
+		// always did for a malformed Target. filepath.Clean is applied
+		// only AFTER this check — Clean alone would just as silently turn
+		// the trailing slash into a different, also-wrong outcome (a
+		// cleaned path with the leaf as a plain file) rather than refusing
+		// it.
+		if strings.HasSuffix(fs.Target, "/") {
+			return fmt.Errorf("secret %s: target %q ends in a path separator, not a file name", fs.Name, fs.Target)
+		}
+		switch filepath.Base(fs.Target) {
+		case ".", "..":
+			return fmt.Errorf("secret %s: target %q has no usable file name", fs.Name, fs.Target)
+		}
+		target := filepath.Clean(fs.Target)
+
+		dir := filepath.Dir(target)
 		dirFd, underHome, derr := dirfd.EnsureDirNoFollowUnderRoot(homeDir, dir, 0755, uid, gid)
 		if derr != nil {
 			return fmt.Errorf("failed to create directory for secret %s: %w", fs.Name, derr)
@@ -155,7 +179,7 @@ func writeAs(homeDir string, staged *Staged, uid, gid int) error {
 		}
 		// The leaf write is anchored at dirFd — the fd EnsureDirNoFollowUnderRoot
 		// or EnsureDirTrustedAncestorFollow just resolved above — never by
-		// re-resolving fs.Target as a string: either walk may have followed
+		// re-resolving target as a string: either walk may have followed
 		// a trusted symlink (homeDir's own ancestor, or an outside-home
 		// system alias like "/var/run" -> "/run") that a fresh path-based
 		// walk would refuse the second time around. A file-secret target
@@ -164,7 +188,7 @@ func writeAs(homeDir string, staged *Staged, uid, gid int) error {
 		// created file over a bind-mounted regular file's directory entry
 		// fails EBUSY, so this leaf is written in place when it already
 		// exists as a regular file rather than replaced via create+rename.
-		werr := dirfd.WriteAtNoFollowWithChown(dirFd, filepath.Base(fs.Target), fs.Target, data, 0600, fileUID, fileGID, dirfd.TruncateInPlaceOrCreate, syscall.Fchown)
+		werr := dirfd.WriteAtNoFollowWithChown(dirFd, filepath.Base(target), target, data, 0600, fileUID, fileGID, dirfd.TruncateInPlaceOrCreate, syscall.Fchown)
 		_ = syscall.Close(dirFd)
 		if werr != nil {
 			return fmt.Errorf("failed to write secret file %s: %w", fs.Name, werr)

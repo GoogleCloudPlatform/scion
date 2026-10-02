@@ -569,8 +569,8 @@ func TestWriteAs_OutsideHomeGroupWritableAncestorParentFails(t *testing.T) {
 	}
 }
 
-// TestWriteAs_HomeDirReachedViaTrustedSymlinkedAncestor proves the second
-// half of the R1 fix: homeDir itself reached through a trusted symlinked
+// TestWriteAs_HomeDirReachedViaTrustedSymlinkedAncestor proves the
+// home-directory case: homeDir itself reached through a trusted symlinked
 // ancestor — an image where, say, "/home" -> "/var/home" — still works
 // end to end, including the under-home chown path, instead of aborting
 // every staged-secret write the way a strict no-follow open of homeDir's
@@ -608,5 +608,47 @@ func TestWriteAs_HomeDirReachedViaTrustedSymlinkedAncestor(t *testing.T) {
 	}
 	if string(content) != "machine example.com" {
 		t.Errorf("content = %q, want %q", content, "machine example.com")
+	}
+}
+
+// TestWriteAs_RejectsTrailingSlashTarget proves a Target ending in a path
+// separator is rejected outright, with nothing created anywhere near the
+// destination — not silently treated as a directory (which filepath.Base
+// alone would do, since it strips a trailing separator) and not silently
+// normalized into a different, also-surprising destination.
+func TestWriteAs_RejectsTrailingSlashTarget(t *testing.T) {
+	homeDir := t.TempDir()
+	targetDir := t.TempDir()
+	target := filepath.Join(targetDir, "secrets", "sa.json") + "/"
+
+	staged := &Staged{FileSecrets: []FileSecret{
+		{Name: "SA", Target: target, Value: base64.StdEncoding.EncodeToString([]byte("sa-token"))},
+	}}
+	if err := writeAs(homeDir, staged, os.Getuid(), os.Getgid()); err == nil {
+		t.Fatal("writeAs() = nil error, want a refusal for a trailing-slash target")
+	}
+
+	if _, err := os.Stat(filepath.Join(targetDir, "secrets")); !os.IsNotExist(err) {
+		t.Errorf("secrets dir exists after a refused trailing-slash target (stat err=%v); nothing must be created", err)
+	}
+}
+
+// TestWriteAs_RejectsDotDotTarget proves a Target whose leaf is ".." is
+// rejected the same way, rather than being resolved by filepath.Clean into
+// some other, surprising location.
+func TestWriteAs_RejectsDotDotTarget(t *testing.T) {
+	homeDir := t.TempDir()
+	targetDir := t.TempDir()
+	target := filepath.Join(targetDir, "secrets", "..")
+
+	staged := &Staged{FileSecrets: []FileSecret{
+		{Name: "SA", Target: target, Value: base64.StdEncoding.EncodeToString([]byte("sa-token"))},
+	}}
+	if err := writeAs(homeDir, staged, os.Getuid(), os.Getgid()); err == nil {
+		t.Fatal("writeAs() = nil error, want a refusal for a target whose leaf is \"..\"")
+	}
+
+	if _, err := os.Stat(filepath.Join(targetDir, "secrets")); !os.IsNotExist(err) {
+		t.Errorf("secrets dir exists after a refused \"..\" target (stat err=%v); nothing must be created", err)
 	}
 }
