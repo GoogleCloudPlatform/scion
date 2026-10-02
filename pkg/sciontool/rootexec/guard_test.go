@@ -50,10 +50,10 @@ var execSiteAllowlist = map[string]string{
 	// Runs before RunInit populates any workload-owned directory, so no
 	// workload-influenceable PATH entry exists yet: realigning the "scion"
 	// system account's uid/gid.
-	"cmd/sciontool/commands/init.go:2122": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2127": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2255": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2264": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2130": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2135": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2263": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2272": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
 
 	// gitCloneWorkspace's clone-path git calls (including detectDefaultBranch,
 	// which it calls into): configureGitCommand sets a Credential to (uid,
@@ -66,18 +66,18 @@ var execSiteAllowlist = map[string]string{
 	// base. Either way the call is not otherwise reachable by a
 	// workload-influenceable PATH, which is what this guard itself checks
 	// for.
-	"cmd/sciontool/commands/init.go:2496": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2535": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2520": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2591": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2605": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2616": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2635": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2504": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2543": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2528": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2599": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2613": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2624": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2643": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2670": "runs as the workload uid via Credential whenever uid>0",
 	"cmd/sciontool/commands/init.go:2662": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2654": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2666": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2676": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:3023": "runs as the workload uid via Credential whenever uid>0 (git ls-remote for default-branch detection during clone)",
+	"cmd/sciontool/commands/init.go:2674": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2684": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:3031": "runs as the workload uid via Credential whenever uid>0 (git ls-remote for default-branch detection during clone)",
 
 	// The harness-provision subcommand's own subprocess: under
 	// RequirePrivilegeDrop, hooks.buildDroppedProvisionCmd sets Credential
