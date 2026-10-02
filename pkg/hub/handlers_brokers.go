@@ -211,7 +211,10 @@ func (s *Server) authorizedForBrokerOwnerAction(ctx context.Context, user UserId
 		return true, nil
 	}
 
-	if brokerIdent != nil && brokerIdent.BrokerID() == brokerID {
+	// isNilIdentity, not brokerIdent != nil: BrokerIdentity embeds Identity, so
+	// a typed-nil concrete broker identity (see isNilIdentity) is a non-nil
+	// interface value and would otherwise reach brokerIdent.BrokerID() below.
+	if !isNilIdentity(brokerIdent) && brokerIdent.BrokerID() == brokerID {
 		return true, nil
 	}
 

@@ -203,7 +203,11 @@ func (s *Server) authorizeRead(w http.ResponseWriter, r *http.Request, resource 
 //     has no legitimate reason to read a user's private catalog entry, and
 //     an unrecognized scope must fail closed rather than default-allow.
 func (s *Server) brokerMayReadCatalogResource(ctx context.Context, broker BrokerIdentity, scope, scopeID string) bool {
-	if broker == nil {
+	// isNilIdentity, not broker == nil: BrokerIdentity embeds Identity, so a
+	// typed-nil concrete broker identity (see isNilIdentity) is a non-nil
+	// interface value and would otherwise reach broker.BrokerID() below, or
+	// fall through to the global-scope case and be granted access outright.
+	if isNilIdentity(broker) {
 		return false
 	}
 	switch scope {
