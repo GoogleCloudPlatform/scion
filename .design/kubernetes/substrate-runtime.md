@@ -103,6 +103,26 @@ process — see the memoization comment on `substrateRuntimesMu`
 behind the same `ca_file`/`cluster_trust_bundle` value does not take effect
 until the broker process restarts.
 
+**The runtime block is operator-only.** Every key in the table above —
+endpoints, CA/trust-bundle, token audience, `egress_allow`, everything
+under a `type: substrate` entry in `runtimes.<name>` — must be defined in
+the broker's own operator (global, `~/.scion`) settings, never in a
+project's merged settings (an in-repo `.scion/settings.*`, or a hub-managed
+project's own settings file). A project may only *select* an
+operator-defined substrate profile by name (its own `active_profile`, or
+the `profile` a create/start request names); it may never define or
+override the runtime block itself. `pkg/runtime.GetRuntime` enforces this
+(`ValidateOperatorOnlySubstrateProfile`) by comparing the project-merged
+resolution against a `LoadGlobalSettings`-only resolution for the same
+name and refusing construction outright — a clear config error, never a
+silent merge or a silent fallback — on any mismatch. This exists because
+the runtime block crosses the broker's trust boundary into the actor's
+bootstrap payload (hub token, resolved secrets) and egress policy: letting
+project-merged settings control it would let a repo redirect that payload
+to an attacker endpoint or widen egress arbitrarily, the same class of risk
+`resolveHubEndpointForCreate` (`pkg/runtimebroker/hubenv.go`) already
+refuses for the hub endpoint.
+
 ## 3. ActorTemplate mapping
 
 Templates are **generic and content-addressed**, never per-agent: per-agent
@@ -543,11 +563,21 @@ for:
   the network must list that host (or a covering wildcard) in
   `egress_allow` themselves; an uncovered host is dropped and logged, never
   added;
-- the harness model API hosts, hardcoded: `api.anthropic.com`,
-  plus Google auth and Vertex (`oauth2.googleapis.com`, `*.googleapis.com`);
-  `*.googleapis.com` also happens to cover the Cloud Trace telemetry default,
-  but the actual configured telemetry endpoint is always subject to the
-  coverage rule above too — coincidence of the default is not a rule;
+- the harness model API hosts: `api.anthropic.com` and
+  `oauth2.googleapis.com`, hardcoded, plus — only when the agent's resolved
+  env indicates Vertex AI auth (`CLAUDE_CODE_USE_VERTEX`,
+  `ANTHROPIC_VERTEX_PROJECT_ID`, or `CLOUD_ML_REGION`) — the Vertex endpoint
+  for that agent's own configured region (`<region>-aiplatform.googleapis.com`,
+  or the bare `aiplatform.googleapis.com` for an empty or `"global"`
+  region). There is deliberately no `*.googleapis.com` wildcard: that would
+  cover every Google API (GCS, Compute, BigQuery, and hundreds more), not
+  just the ones this runtime actually calls. One consequence: GCP's own
+  default Cloud Trace auto-export (`cloudtrace.googleapis.com`), which the
+  old wildcard happened to also cover, now fails closed like any other
+  uncovered host unless an operator explicitly lists it in `egress_allow`
+  — the actual configured telemetry endpoint (via `SCION_OTEL_ENDPOINT` or
+  the `OTEL_EXPORTER_OTLP_*` vars) is always subject to the tenant-host
+  coverage rule above regardless;
 - `egress_allow` entries from settings (§2), added directly (an
   operator-supplied entry is its own coverage).
 

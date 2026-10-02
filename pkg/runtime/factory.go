@@ -240,6 +240,15 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		// No auto-detect branch: substrate is only ever selected explicitly
 		// by profile (substrate-runtime.md §2), so this case is unreachable via
 		// the "local"/"auto" detection above.
+		//
+		// The runtime definition itself must be operator-only: project-merged
+		// settings (vs) may select an operator-defined substrate profile by
+		// name, but must never define or override its runtime block. See
+		// ValidateOperatorOnlySubstrateProfile's doc comment for why.
+		if verr := ValidateOperatorOnlySubstrateProfile(vs, profileName); verr != nil {
+			util.Debugf("GetRuntime: substrate profile failed operator-only validation: %v", verr)
+			return &ErrorRuntime{Err: verr}
+		}
 		rt, err := NewSubstrateRuntime(rtConfig.Substrate)
 		if err != nil {
 			util.Debugf("GetRuntime: failed to create substrate runtime: %v", err)

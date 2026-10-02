@@ -188,6 +188,19 @@ connection endpoint, or this broker's own configured hub endpoint — never
 from project settings or any other tenant-controllable source; when none of
 those operator sources is available, no hub host is added to egress at all.
 
+**The entire `runtimes.<name>` block above — not just `egress_allow` — is
+operator-only.** A project's merged settings (an in-repo `.scion/settings.*`,
+or a hub-managed project's own settings file) may only *select* an
+operator-defined substrate profile by name; it may never define or override
+`api_endpoint`, `router_endpoint`, `ca_file`/`cluster_trust_bundle`,
+`token_audience`, `egress_allow`, or any other key in this table. The broker
+refuses to construct a substrate runtime outright — a clear config error,
+never a silent merge — if a project's settings define a substrate runtime
+block that doesn't match the operator's own global settings byte for byte.
+This matters because this block is exactly what a hijacked or malicious repo
+would need to control to redirect the bootstrap payload (hub token, resolved
+secrets) to an attacker endpoint, or to widen egress arbitrarily.
+
 ### `egress_trust_bundle`: only needed under sdsmint
 
 Substrate's plain `atenet-egress` only enforces `egress_allow` for TLS

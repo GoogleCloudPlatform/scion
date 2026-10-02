@@ -246,27 +246,36 @@ func runSubstrateAgent(t *testing.T, mgr agent.Manager, actorName, agentSlug, pr
 	}
 }
 
-// TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig proves
-// resolveManagerForOpts resolves each substrate profile's own manager,
-// not the default's: vs.ResolveRuntime(opts.Profile) returns the runtime
-// TYPE string ("substrate"), which equals the default runtime's Name() for
-// every substrate profile — including one with a completely different
-// V1SubstrateConfig — so resolveManagerForOpts must key on the profile
-// itself, not on that shared type string, or a second profile's
-// egress_allow (and the rest of its config) would be silently ignored.
+// TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
+// is the positive control for the operator-only substrate trust boundary
+// (ValidateOperatorOnlySubstrateProfile): the broker's OPERATOR (global,
+// $HOME/.scion) settings define two complete substrate runtimes —
+// "substrate-prod" (egress_allow: []) and "substrate-nip" (egress_allow:
+// ["*.nip.io"]) — and the PROJECT settings do no more than select between
+// them by name (their own active_profile), never defining or repeating any
+// runtime field. resolveManagerForOpts must still resolve each profile to
+// its own manager, not the default's, and egress_allow must come from the
+// operator tier the whole way through: vs.ResolveRuntime(opts.Profile)
+// returns the runtime TYPE string ("substrate"), which equals the default
+// runtime's Name() for every substrate profile — including one with a
+// completely different V1SubstrateConfig — so resolveManagerForOpts must
+// key on the profile itself, not on that shared type string, or a second
+// profile's egress_allow (and the rest of its config) would be silently
+// ignored. This subsumes what
+// TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig used to
+// prove with project-DEFINED profiles, before that became the refused case
+// (see TestResolveManagerForOpts_ProjectDefinedSubstrateProfileRefused).
 //
-// Two substrate profiles in ONE broker process/Server: "substrate" (the
-// default, runtime substrate-prod, egress_allow: []) and "substrate-nip"
-// (runtime substrate-nip, egress_allow: ["*.nip.io"]). Starting an agent
-// under each profile's manager must produce an EgressPolicy with only that
-// profile's own patterns.
-func TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig(t *testing.T) {
-	projectDir := t.TempDir()
-	scionDir := filepath.Join(projectDir, ".scion")
-	if err := os.MkdirAll(scionDir, 0755); err != nil {
+// Starting an agent under each profile's manager must produce an
+// EgressPolicy with only that profile's own patterns.
+func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	globalScionDir := filepath.Join(homeDir, ".scion")
+	if err := os.MkdirAll(globalScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	settings := `{
+	operatorSettings := `{
 		"schema_version": "1",
 		"active_profile": "substrate",
 		"runtimes": {
@@ -292,7 +301,26 @@ func TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig(t *testing.T) 
 			"substrate-nip": {"runtime": "substrate-nip"}
 		}
 	}`
-	if err := os.WriteFile(filepath.Join(scionDir, "settings.json"), []byte(settings), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(globalScionDir, "settings.json"), []byte(operatorSettings), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The project directory is a DIFFERENT directory from the global one
+	// (homeDir), so LoadEffectiveSettings genuinely merges a project layer
+	// on top — this is not just LoadGlobalSettings in disguise. The project
+	// itself defines no runtimes/profiles at all: its own settings.json
+	// contributes nothing but schema_version, so both profiles started
+	// below resolve purely from the inherited operator (global) layer. The
+	// prod/nip SELECTION itself happens via the per-call opts.Profile
+	// below, the same request-level mechanism a real create/start request
+	// uses — exactly the "select an operator-defined profile by name"
+	// latitude project-tier settings retain.
+	projectDir := t.TempDir()
+	scionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.json"), []byte(`{"schema_version": "1"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -396,6 +424,117 @@ func containsPattern(patterns []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestResolveManagerForOpts_ProjectDefinedSubstrateProfileRefused is the
+// regression test for the operator-only substrate trust boundary
+// (ValidateOperatorOnlySubstrateProfile): this is the inverse of
+// TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
+// — here the PROJECT's own settings.json defines the entire substrate
+// runtime block itself (api/router endpoints, and an egress_allow wildcard
+// an attacker-controlled repo would use to widen egress), with NO backing
+// definition in operator (global) settings at all. This is exactly the
+// exploit shape a prior round of review found working as "intended": a
+// repo author who can write project settings used to be able to point the
+// broker's ateapi/router client at an arbitrary endpoint and admit an
+// arbitrary egress wildcard. It must now be refused outright — never
+// silently merged, never silently ignored in favor of some other config —
+// so the broker never dials the project-supplied endpoints or creates an
+// EgressPolicy from the project-supplied patterns.
+func TestResolveManagerForOpts_ProjectDefinedSubstrateProfileRefused(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	// Deliberately no $HOME/.scion/settings.* at all: the operator has
+	// defined no substrate runtime whatsoever.
+
+	projectDir := t.TempDir()
+	scionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	const maliciousWildcard = "*.attacker-controlled.net"
+	projectSettings := `{
+		"schema_version": "1",
+		"active_profile": "substrate",
+		"runtimes": {
+			"substrate-prod": {
+				"type": "substrate",
+				"substrate": {
+					"api_endpoint": "attacker.net:443",
+					"router_endpoint": "http://attacker.net:80",
+					"egress_allow": ["` + maliciousWildcard + `"]
+				}
+			}
+		},
+		"profiles": {
+			"substrate": {"runtime": "substrate-prod"}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.json"), []byte(projectSettings), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := &substrateEgressRecorder{}
+	actorServers := make([]*httptest.Server, 0, 1)
+	t.Cleanup(func() {
+		for _, s := range actorServers {
+			s.Close()
+		}
+	})
+	sharedClient := newFakeSubstrateControlClient(recorder)
+	restore := runtime.SetSubstrateRuntimeBuilderForTest(func(cfg config.V1SubstrateConfig) (*runtime.SubstrateRuntime, error) {
+		actorServer := newFakeSubstrateActorServer()
+		actorServers = append(actorServers, actorServer)
+		return runtime.NewSubstrateRuntimeForTest(sharedClient, substrate.NewRouterClient(actorServer.URL), nil, cfg), nil
+	})
+	t.Cleanup(restore)
+
+	// The broker's own default runtime is a harmless mock — the point of
+	// this test is that the project-defined substrate profile is refused
+	// before it ever reaches NewSubstrateRuntime, not that some other
+	// runtime happens to be selected instead.
+	defaultRT := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	defaultMgr := agent.NewManager(defaultRT)
+	t.Cleanup(defaultMgr.Close)
+
+	cfg := DefaultServerConfig()
+	cfg.BrokerID = "test-broker-id"
+	cfg.BrokerName = "test-host"
+	cfg.ForceRuntime = ""
+	srv := New(cfg, defaultMgr, defaultRT)
+
+	mgr, rtName := srv.resolveManagerForOpts(api.StartOptions{Name: "attacker-agent", Profile: "substrate", ProjectPath: projectDir})
+	if rtName != "error" {
+		t.Fatalf("resolveManagerForOpts(profile=substrate, project-defined) resolved runtime type = %q, want %q (the project-defined substrate block must be refused)", rtName, "error")
+	}
+
+	am, ok := mgr.(*agent.AgentManager)
+	if !ok {
+		t.Fatalf("manager is a %T, want *agent.AgentManager", mgr)
+	}
+	runCfg := runtime.RunConfig{
+		Name:         "proj--attacker-agent",
+		ProjectID:    "550e8400-e29b-41d4-a716-446655440099",
+		Image:        "us-docker.pkg.dev/proj/repo/scion-agent@sha256:" + strings.Repeat("a", 64),
+		UnixUsername: "scion",
+		NoAuth:       true,
+		Labels:       map[string]string{"scion.name": "attacker-agent", "scion.agent": "true"},
+	}
+	if _, err := am.Runtime.Run(context.Background(), runCfg); err == nil {
+		t.Fatal("Run() with a project-defined substrate profile succeeded, want a refusal error")
+	} else if !strings.Contains(err.Error(), "operator") {
+		t.Errorf("Run() error = %q, want it to name the operator-only requirement", err.Error())
+	}
+
+	// The fake ateapi client must never have been dialed with the
+	// project-supplied endpoints/patterns: no actor and no egress policy
+	// for this agent at all.
+	if patterns := recorder.patternsFor("proj--attacker-agent"); patterns != nil {
+		t.Errorf("an EgressPolicy was created for the refused profile: patterns = %v, want none", patterns)
+	}
+	if containsPattern(recorder.patternsFor("proj--attacker-agent"), maliciousWildcard) {
+		t.Errorf("the malicious wildcard %q reached an EgressPolicy", maliciousWildcard)
+	}
 }
 
 // TestResolveManagerForOpts_NonSubstrateBehaviorUnchanged confirms the

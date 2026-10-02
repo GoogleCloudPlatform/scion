@@ -372,9 +372,24 @@ this broker are:
   anywhere the tenant chooses. List the actual git host and telemetry
   collector in `egress_allow` if agents need to reach them (see
   `settings.example.yaml`).
+- **The runtime no longer grants a blanket `*.googleapis.com` allowance.**
+  It adds only `oauth2.googleapis.com`, the Anthropic API host, and — when
+  the agent's own config indicates Vertex AI auth — the Vertex endpoint for
+  that agent's configured region. One consequence: GCP's own default Cloud
+  Trace auto-export (`cloudtrace.googleapis.com`), which the old wildcard
+  happened to cover, now fails closed like any other uncovered host unless
+  an operator explicitly lists it (or covers it with a wildcard) in
+  `egress_allow`. Any other Google API an agent might have reached under
+  the old wildcard — GCS, Compute, BigQuery, and so on — needs the same
+  explicit `egress_allow` entry now.
 - The broker→router hop is plaintext HTTP, and bootstrap credentials cross
-  it; NetworkPolicy and the first-bootstrap-wins nonce mitigate this, not
-  transport encryption — see `README.md` for the fix options.
+  it; NetworkPolicy and the single-use, first-caller-wins bootstrap guard
+  mitigate this, not transport encryption. The guard is NOT a nonce check —
+  the actor does not verify the bootstrap nonce the broker generates; it
+  simply accepts whichever caller claims bootstrap first and refuses every
+  later attempt, and the broker treats a conflict (meaning some other
+  caller claimed first) as a hijack and deletes the actor. See `README.md`
+  for the fix options.
 
 ## TODO (not automated yet)
 
