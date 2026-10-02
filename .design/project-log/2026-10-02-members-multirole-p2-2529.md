@@ -308,11 +308,12 @@ Not run, per the task's resource limits: `make ci` and the full
 
 ## P1 corrections: principal addressing
 
-Three fixes correct how P1's `PUT`/`DELETE
-…/members/principals/{type}/{id}` handle a principal address that does not
-resolve. Each one used to fall through to the store and come back with the
-wrong status. In every case the fix uses `invalid_request`, the code P1
-already uses for an unknown email.
+Four fixes correct how P1's `PUT`/`DELETE
+…/members/principals/{type}/{id}` handle a principal address. The first
+three cover an address that does not resolve: each used to fall through to
+the store and come back with the wrong status, and each fix uses
+`invalid_request`, the code P1 already uses for an unknown email. The fourth
+covers an address that resolves but is not spelled canonically.
 
 | Input | PUT before → after | DELETE before → after | Fix |
 |---|---|---|---|
@@ -320,6 +321,7 @@ already uses for an unknown email.
 | `agent/not-a-uuid` | 500 `internal_error` → 400 `invalid_request` | 404 `not_found` → 400 `invalid_request` | malformed agent ID |
 | `user/<unknown UUID>` | 500 `internal_error` → 400 `invalid_request` | 404 `not_found` (unchanged) | nonexistent principal |
 | `agent/<unknown UUID>` | 500 `internal_error` → 400 `invalid_request` | 404 `not_found` (unchanged) | nonexistent principal |
+| `user/<UPPER-CASE UUID>`, `urn:uuid:…`, `{…}`, undashed (same for `agent/`) | 201, binding stored under the raw string → binding stored under the canonical ID | 404 for a canonical binding, which the raw string never matched → removes the canonical binding | canonical UUID addressing |
 
 - **L-500** (round 2, above) made `validateMemberPrincipalAddress` reject a
   user principal that is neither an email nor a UUID.
@@ -350,6 +352,29 @@ already uses for an unknown email.
     `TestSetMemberRoles_ExistingAgentPrincipalStillAddressable` and
     `TestSetMemberRoles_PrincipalLookupStoreErrorIs500`.
 
+- **Canonical UUID addressing:** `uuid.Parse` accepts upper-case,
+  `urn:uuid:`, braced and undashed spellings, and the handlers used to pass
+  the raw path segment on. The binding was then stored under a non-canonical
+  `principal_id`. It granted nothing, slipped past the one-built-in check
+  (which compares the stored string), and a `DELETE` by the canonical ID
+  left it behind. `canonicalMemberPrincipalID` now returns `uuid.String()`
+  for a user or agent ID, and both handlers continue with that value. Emails
+  and group addresses are unchanged. These spellings are canonicalised, not
+  rejected. Covered by
+  `TestSetMemberRoles_NonCanonicalPrincipalIDIsCanonicalised` (user and
+  agent: PUT by every spelling returns the canonical `principalId` and
+  leaves one binding under the canonical ID; `DELETE` by the upper-case form
+  removes it).
+- **Existence-check placement is pinned.**
+  `TestSetMemberRoles_PrincipalExistenceCheckedAfterAuthorization`: an
+  admin granting `project-owner` to a nonexistent user gets 403
+  `target_role_protected`, and a beyond-ceiling custom role gets 403
+  `role_assignment_forbidden`, the same refusals as for an existing user.
+  So the check reveals that a principal is missing only to an actor who may
+  make the grant. `TestSetMemberRoles_OrphanedPrincipalRemovalOnlyPUT`:
+  deleting an agent record leaves its bindings, and a removal-only PUT
+  prunes them (200) instead of refusing with "agent not found".
+
 Revert proof, run in a throwaway detached worktree:
 - Reverting the agent-ID validation fails its test on PUT (500) and DELETE
   (404) at its own commit. At the final head it fails on DELETE only.
@@ -357,14 +382,24 @@ Revert proof, run in a throwaway detached worktree:
   (PUT 500).
 - A mutation that maps every lookup error to 400 fails
   `TestSetMemberRoles_PrincipalLookupStoreErrorIs500`.
+- Discarding the canonical ID in both handlers fails
+  `TestSetMemberRoles_NonCanonicalPrincipalIDIsCanonicalised`.
+- Moving the existence check before the project-role lookup, ahead of
+  governance and CanDelegate, fails
+  `TestSetMemberRoles_PrincipalExistenceCheckedAfterAuthorization`.
+- Dropping the "plan creates a binding" guard on the existence check fails
+  `TestSetMemberRoles_OrphanedPrincipalRemovalOnlyPUT`.
 
 Residual: a user or agent that was deleted while still holding bindings
-can still be removed with DELETE, and with a PUT that only removes roles.
+can still be removed with DELETE, and with a PUT that only removes roles
+(the latter pinned for an agent by
+`TestSetMemberRoles_OrphanedPrincipalRemovalOnlyPUT`).
 A PUT that adds a binding for it now gets 400 instead of 500.
 
 ### Gates run (principal addressing)
 
-- The mandated `pkg/hub` subset (`Assignable|Grouped|…|Flat`) and
+- The mandated `pkg/hub` subset (`Assignable|Grouped|…|Flat`, plus
+  `Refetch` after the canonical-addressing round) and
   `pkg/hub/authzop`: pass.
 - gofmt and `go vet ./pkg/hub/`: clean. `go build -buildvcs=false ./...`:
   ok.
