@@ -381,3 +381,27 @@ func TestEnsureDirTrustedAncestorFollow_RefusesSymlinkWhoseOwnOwnerIsUntrusted(t
 		t.Errorf("real/secrets exists after a refused untrusted-link-owner symlink (stat err=%v); nothing must be created past the refusal", statErr)
 	}
 }
+
+// TestEnsureDirTrustedAncestorFollow_RootReturnsRootFd proves "/" itself
+// resolves rather than being refused — the parent directory of a file
+// target such as "/token" — and that the returned fd refers to the real
+// root directory: its Fstat device and inode match a fresh Stat of "/".
+func TestEnsureDirTrustedAncestorFollow_RootReturnsRootFd(t *testing.T) {
+	fd, err := EnsureDirTrustedAncestorFollow("/")
+	if err != nil {
+		t.Fatalf("EnsureDirTrustedAncestorFollow(%q) = %v, want nil", "/", err)
+	}
+	defer func() { _ = syscall.Close(fd) }()
+
+	var got unix.Stat_t
+	if err := unix.Fstat(fd, &got); err != nil {
+		t.Fatalf("Fstat(returned fd): %v", err)
+	}
+	var want unix.Stat_t
+	if err := unix.Stat("/", &want); err != nil {
+		t.Fatalf("Stat(/): %v", err)
+	}
+	if got.Dev != want.Dev || got.Ino != want.Ino {
+		t.Fatalf("returned fd has dev/ino %d/%d, want %d/%d (the root directory)", got.Dev, got.Ino, want.Dev, want.Ino)
+	}
+}

@@ -117,20 +117,24 @@ var ErrTooManyTrustedAncestorSymlinks = errors.New("dirfd: too many symlinks res
 // WriteAtNoFollowWithChown), never by re-resolving the original or
 // resolved path as a string again, so nothing between this call returning
 // and the leaf write can redirect the destination a second time. The
-// caller owns the returned fd and must close it.
+// caller owns the returned fd and must close it. A path of "/" itself
+// resolves to an fd for the root directory.
 func EnsureDirTrustedAncestorFollow(path string) (dirFd int, err error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return -1, fmt.Errorf("dirfd: resolve %s: %w", path, err)
 	}
 	abs = filepath.Clean(abs)
-	if abs == string(filepath.Separator) {
-		return -1, fmt.Errorf("dirfd: refusing to resolve the root directory itself")
-	}
 
 	rootFd, operr := syscall.Open(string(filepath.Separator), syscall.O_DIRECTORY|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 	if operr != nil {
 		return -1, fmt.Errorf("dirfd: open /: %w", operr)
+	}
+	if abs == string(filepath.Separator) {
+		// path is "/" itself (e.g. the parent of a file target such as
+		// "/token"): there is no component to walk and "/" cannot be a
+		// symlink, so the root fd just opened is the resolved directory.
+		return rootFd, nil
 	}
 
 	// stack holds one open fd per path component already resolved, from
