@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
@@ -1832,11 +1833,17 @@ func (g *ghSHAMemo) set(key, value string) {
 // the first invocation for a key is the caller that will become the flight
 // leader; any later invocation for the same key, made while that leader's
 // call is still outstanding, is a caller that will join it as a follower.
-var ghFlightJoinHook func(cacheKey string)
+//
+// Held in an atomic.Pointer, not a plain var, for the same reason as the
+// broker's flightJoinHook (github_resolution_cache.go): a background refresh
+// goroutine started by one test can still be running when that test returns
+// and a later test installs its own hook, and reading/writing a plain var
+// across those two goroutines with no synchronization is a data race.
+var ghFlightJoinHook atomic.Pointer[func(string)]
 
 func injectGHFlightJoin(cacheKey string) {
-	if ghFlightJoinHook != nil {
-		ghFlightJoinHook(cacheKey)
+	if hook := ghFlightJoinHook.Load(); hook != nil {
+		(*hook)(cacheKey)
 	}
 }
 
@@ -1962,14 +1969,6 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 			}
 		}()
 
-		// Re-check: a concurrent flight for this exact key may have already
-		// landed while this call waited to become the flight leader.
-		if s.ghResolutionStore != nil {
-			if entry, hit, gerr := s.ghResolutionStore.Get(ctx, cacheKey); gerr == nil && hit {
-				return entry, nil
-			}
-		}
-
 		// Bounded by the fixed ceiling only, not by the leader's own
 		// deadline: every waiter (including the leader) already returns on
 		// its own ctx.Done() via the select below, so no caller can wait
@@ -1980,6 +1979,21 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		// exact starvation this flight exists to prevent.
 		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hubGitHubRefreshTimeout)
 		defer cancel()
+
+		// Re-check: a concurrent flight for this exact key may have already
+		// landed while this call waited to become the flight leader. Uses
+		// flightCtx, not the leader's own ctx: DoChan can run this closure
+		// some time after the call that started the flight, and if that
+		// caller's own ctx had already ended by then, a Get keyed to it would
+		// fail outright and fall through to a redundant fetch — the detached
+		// flightCtx exists precisely so this flight never depends on any one
+		// caller's own context staying alive.
+		if s.ghResolutionStore != nil {
+			if entry, hit, gerr := s.ghResolutionStore.Get(flightCtx, cacheKey); gerr == nil && hit {
+				return entry, nil
+			}
+		}
+
 		return s.fetchAndCacheGitHubSkill(flightCtx, cacheKey, rawURI, ghRef, token, installID, isBranchRef, refSHAMemo)
 	})
 

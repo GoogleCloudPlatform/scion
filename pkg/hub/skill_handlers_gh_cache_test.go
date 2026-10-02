@@ -461,7 +461,7 @@ func TestResolveGitHubSkill_FollowerGetsItsOwnURI(t *testing.T) {
 
 	var joinCount int32
 	allJoined := make(chan struct{})
-	ghFlightJoinHook = func(key string) {
+	hook := func(key string) {
 		if key != cacheKey {
 			return
 		}
@@ -469,7 +469,8 @@ func TestResolveGitHubSkill_FollowerGetsItsOwnURI(t *testing.T) {
 			close(allJoined)
 		}
 	}
-	t.Cleanup(func() { ghFlightJoinHook = nil })
+	ghFlightJoinHook.Store(&hook)
+	t.Cleanup(func() { ghFlightJoinHook.Store(nil) })
 
 	doneLeader := make(chan struct{})
 	go func() {
@@ -587,6 +588,23 @@ func TestResolveGitHubSkill_CancelledRequestStartsNoNewFlights(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// touched records every cacheKey injectGHFlightJoin fires for. That call
+	// happens synchronously in the caller's own goroutine, before DoChan is
+	// even invoked (see resolveGitHubSkill) — so by the time a
+	// resolveGitHubSkill call returns, any flight it started has already been
+	// recorded here, with no timing window to race: unlike asserting on
+	// commitCalls (whose increment happens inside a different goroutine's
+	// HTTP handler, arbitrarily later), this needs no join or wait at all.
+	var touchedMu sync.Mutex
+	touched := make(map[string]bool)
+	hook := func(key string) {
+		touchedMu.Lock()
+		touched[key] = true
+		touchedMu.Unlock()
+	}
+	ghFlightJoinHook.Store(&hook)
+	t.Cleanup(func() { ghFlightJoinHook.Store(nil) })
+
 	doneA := make(chan error, 1)
 	go func() {
 		_, err := srv.resolveGitHubSkill(ctx, "gh://"+owner+"/"+repo+"/a@main", "", memo)
@@ -616,6 +634,21 @@ func TestResolveGitHubSkill_CancelledRequestStartsNoNewFlights(t *testing.T) {
 	_, errB := srv.resolveGitHubSkill(ctx, "gh://"+owner+"/"+repo+"/b@main", "", memo)
 	if !errors.Is(errB, context.Canceled) {
 		t.Fatalf("expected a request for URI b on an already-cancelled context to return context.Canceled without starting a flight, got %v", errB)
+	}
+
+	// errB returning context.Canceled only proves this caller did not wait
+	// for a flight's result — the leader's own ctx is checked by a select
+	// that races the flight's resultCh, after injectGHFlightJoin/DoChan have
+	// already (synchronously, in this same call) launched it. touched is the
+	// actual proof that no flight was started for URI b at all.
+	ghRefB, err := agent.ParseGitHubSkillURI("gh://" + owner + "/" + repo + "/b@main")
+	require.NoError(t, err)
+	cacheKeyB := computeCacheKey(ghRefB.Owner, ghRefB.Repo, ghRefB.SkillPath, ghRefB.Ref, "public")
+	touchedMu.Lock()
+	gotB := touched[cacheKeyB]
+	touchedMu.Unlock()
+	if gotB {
+		t.Fatal("URI b must never start a flight once its request context is already done")
 	}
 
 	closeProceed()
@@ -732,7 +765,7 @@ func TestResolveGitHubSkill_CancelledLeaderDoesNotFailWaiters(t *testing.T) {
 
 	var joinCount int32
 	waiterJoined := make(chan struct{})
-	ghFlightJoinHook = func(key string) {
+	hook := func(key string) {
 		if key != cacheKey {
 			return
 		}
@@ -740,7 +773,8 @@ func TestResolveGitHubSkill_CancelledLeaderDoesNotFailWaiters(t *testing.T) {
 			close(waiterJoined)
 		}
 	}
-	t.Cleanup(func() { ghFlightJoinHook = nil })
+	ghFlightJoinHook.Store(&hook)
+	t.Cleanup(func() { ghFlightJoinHook.Store(nil) })
 
 	ctxLeader, cancelLeader := context.WithCancel(context.Background())
 	defer cancelLeader()
@@ -869,7 +903,7 @@ func TestResolveGitHubSkill_ShortDeadlineLeaderDoesNotFailWaiter(t *testing.T) {
 
 	var joinCount int32
 	waiterJoined := make(chan struct{})
-	ghFlightJoinHook = func(key string) {
+	hook := func(key string) {
 		if key != cacheKey {
 			return
 		}
@@ -877,7 +911,8 @@ func TestResolveGitHubSkill_ShortDeadlineLeaderDoesNotFailWaiter(t *testing.T) {
 			close(waiterJoined)
 		}
 	}
-	t.Cleanup(func() { ghFlightJoinHook = nil })
+	ghFlightJoinHook.Store(&hook)
+	t.Cleanup(func() { ghFlightJoinHook.Store(nil) })
 
 	leaderCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
@@ -1169,12 +1204,13 @@ func TestResolveGitHubSkill_RefreshFailureBackoffSkipsRetry(t *testing.T) {
 
 	flightStarted := make(chan struct{})
 	var startedOnce sync.Once
-	ghFlightJoinHook = func(key string) {
+	hook := func(key string) {
 		if key == cacheKey {
 			startedOnce.Do(func() { close(flightStarted) })
 		}
 	}
-	t.Cleanup(func() { ghFlightJoinHook = nil })
+	ghFlightJoinHook.Store(&hook)
+	t.Cleanup(func() { ghFlightJoinHook.Store(nil) })
 
 	resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
 	require.NoError(t, err)
