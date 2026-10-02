@@ -22,7 +22,10 @@
  * since a filtered intermediate page can legitimately return zero items
  * while still carrying a cursor. A cursor value repeating across pages is
  * treated as a load error rather than looping forever, and a safety bound on
- * page count guards against a server bug that never terminates.
+ * page count guards against a server bug that never terminates. Each page
+ * request, including reading its body, is bounded by a timeout: when it
+ * expires the request is aborted through its signal and the walk rejects,
+ * instead of a request that never settles leaving it pending forever.
  *
  * This mirrors the agents/users pagination contract already implemented by
  * `chat-palette-data.ts`'s `fetchAllPaletteAgents`/`fetchAllPaletteUsers`;
@@ -66,11 +69,20 @@ export interface PaginateAllOptions<T> {
    * mistake a stopped walk's partial result for a complete one.
    */
   shouldContinue?: () => boolean;
+  /**
+   * Time limit, in milliseconds, for each page: the request and the read of
+   * its response body together. A page that has not finished by then is
+   * aborted through the request's signal, and the walk rejects with
+   * {@link PaginationError}. Defaults to 60000 — well above the slowest
+   * list endpoint's measured response time.
+   */
+  pageTimeoutMs?: number;
 }
 
 const DEFAULT_MAX_PAGES = 500;
+const DEFAULT_PAGE_TIMEOUT_MS = 60_000;
 
-/** Raised when a page request fails, a response body is malformed, or pagination does not terminate within the safety bound. */
+/** Raised when a page request fails or times out, a response body is malformed, or pagination does not terminate within the safety bound. */
 export class PaginationError extends Error {
   constructor(message: string) {
     super(message);
@@ -99,9 +111,15 @@ export class PaginationStoppedError<T = unknown> extends Error {
   }
 }
 
+function pageTimeoutError(label: string, timeoutMs: number): PaginationError {
+  return new PaginationError(`${label} page request timed out after ${timeoutMs}ms`);
+}
+
 /**
  * Fetch every page of `options.path`, following `nextCursor` until it is
- * empty. Throws {@link PaginationError} on the first page that fails —
+ * empty. Throws {@link PaginationError} on the first page that fails,
+ * including a page whose request and body read do not finish within
+ * `pageTimeoutMs` (that page's request is aborted through its signal) —
  * callers that need to preserve previously loaded data on a failed walk
  * should keep their own copy until this resolves, rather than publishing
  * partial results. Throws {@link PaginationStoppedError} if `shouldContinue`
@@ -114,6 +132,7 @@ export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[
   const { path, pageSize, parsePage, shouldContinue } = options;
   const maxPages = options.maxPages ?? DEFAULT_MAX_PAGES;
   const label = options.label ?? path;
+  const pageTimeoutMs = options.pageTimeoutMs ?? DEFAULT_PAGE_TIMEOUT_MS;
 
   const all: T[] = [];
   const seenCursors = new Set<string>();
@@ -126,15 +145,32 @@ export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[
     const url = cursor
       ? `${path}${separator}limit=${pageSize}&cursor=${encodeURIComponent(cursor)}`
       : `${path}${separator}limit=${pageSize}`;
-    const res = await apiFetch(url);
-    if (!res.ok) {
-      throw new PaginationError(`${label} request failed: ${res.status}`);
-    }
+    // Each page gets its own abort signal and timer, covering both the
+    // request and the body read: aborting a fetch rejects the pending
+    // request or body read with an AbortError, which is reported here as a
+    // timeout. The timer is cleared once the page has settled either way.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), pageTimeoutMs);
     let raw: unknown;
     try {
-      raw = await res.json();
-    } catch {
-      throw new PaginationError(`${label} response was not valid JSON`);
+      let res: Response;
+      try {
+        res = await apiFetch(url, { signal: controller.signal });
+      } catch (err) {
+        if (controller.signal.aborted) throw pageTimeoutError(label, pageTimeoutMs);
+        throw err;
+      }
+      if (!res.ok) {
+        throw new PaginationError(`${label} request failed: ${res.status}`);
+      }
+      try {
+        raw = await res.json();
+      } catch {
+        if (controller.signal.aborted) throw pageTimeoutError(label, pageTimeoutMs);
+        throw new PaginationError(`${label} response was not valid JSON`);
+      }
+    } finally {
+      clearTimeout(timer);
     }
     // A JSON body can be any of null, an array, or a primitive (string,
     // number, boolean) and still parse successfully — none of those are a

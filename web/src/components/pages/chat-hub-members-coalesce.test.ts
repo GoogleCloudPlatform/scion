@@ -770,6 +770,100 @@ describe('loadHubMembers error handling', () => {
   });
 });
 
+describe('loadHubMembers stalled page', () => {
+  for (const stalled of ['users', 'agents'] as const) {
+    it(`a stalled ${stalled} page times out, clears the in-flight marker, keeps the published lists, and the next poll reloads`, async () => {
+      vi.useFakeTimers();
+      const page = createPage();
+
+      // A successful load publishes the lists the stalled walk must not empty.
+      vi.mocked(apiFetch).mockImplementation(
+        routeByPath(
+          () => usersPage(['u1']),
+          () => agentsPage(['a1'])
+        )
+      );
+      page.loadHubMembers();
+      await flush();
+      expect(requestCounts()).toEqual({ users: 1, agents: 1 });
+      expect(page._hubMembersInFlight).toBe(false);
+
+      // The next poll's walk: the stalled list's second page never settles
+      // until its request is aborted, as a real fetch does; the other list
+      // completes.
+      vi.mocked(apiFetch).mockImplementation((url, init) => {
+        const isUsers = url.startsWith('/api/v1/users');
+        const stalls =
+          (isUsers ? stalled === 'users' : stalled === 'agents') && url.includes('cursor=');
+        if (stalls) {
+          return new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('The operation was aborted.', 'AbortError'));
+            });
+          });
+        }
+        if (isUsers) {
+          return Promise.resolve(
+            stalled === 'users' ? usersPage(['u2'], 'u-cursor') : usersPage(['u2'])
+          );
+        }
+        return Promise.resolve(
+          stalled === 'agents' ? agentsPage(['a2'], 'a-cursor') : agentsPage(['a2'])
+        );
+      });
+      page.loadHubMembers({ refresh: true });
+      await flush();
+      expect(page._hubMembersInFlight).toBe(true);
+      expect(requestCounts()).toEqual(
+        stalled === 'users' ? { users: 3, agents: 2 } : { users: 2, agents: 3 }
+      );
+
+      // A view re-parse while the page is stalled joins the walk.
+      page.loadHubMembers();
+      await flush();
+      expect(requestCounts()).toEqual(
+        stalled === 'users' ? { users: 3, agents: 2 } : { users: 2, agents: 3 }
+      );
+      expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u1']);
+      expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a1']);
+
+      // The default page timeout elapses: the walk settles, the marker
+      // clears, the stalled list keeps its previous contents and the other
+      // list publishes this walk's result.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flush();
+      expect(page._hubMembersInFlight).toBe(false);
+      expect(requestCounts()).toEqual(
+        stalled === 'users' ? { users: 3, agents: 2 } : { users: 2, agents: 3 }
+      );
+      if (stalled === 'users') {
+        expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u1']);
+        expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a2']);
+      } else {
+        expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u2']);
+        expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a1']);
+      }
+
+      // The next fallback poll issues fresh requests and publishes.
+      vi.mocked(apiFetch).mockImplementation(
+        routeByPath(
+          () => usersPage(['u3']),
+          () => agentsPage(['a3'])
+        )
+      );
+      page.loadHubMembers({ refresh: true });
+      await flush();
+      expect(requestCounts()).toEqual(
+        stalled === 'users' ? { users: 4, agents: 3 } : { users: 3, agents: 4 }
+      );
+      expect(page._hubMembersInFlight).toBe(false);
+      expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u3']);
+      expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a3']);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  }
+});
+
 describe('loadHubMembers reconnect handling', () => {
   it('a disconnect-then-reconnect while a walk is in flight starts a fresh walk, and the stale walk publishing later does not overwrite it', async () => {
     window.history.pushState({}, '', '/chat');

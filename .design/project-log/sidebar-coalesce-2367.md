@@ -411,3 +411,47 @@ each from the re-run).
 | --- | --- |
 | `web/src/components/pages/chat.ts` | `_fetchHubMembersOnce` returns its attempt's stopped result; `_runHubMembersLoad` uses it; shared stopped field and the join-path clause removed; doc comments updated. |
 | `web/src/components/pages/chat-hub-members-coalesce.test.ts` | Tests for a superseded walk stopping after open/close and after disconnect/reconnect (fresh walk stays at one request per list and publishes); a completed leg is not published from a stopped attempt; a per-trigger request-count table; comments describe current behaviour. |
+
+## Per-page request timeout in paginateAll (2026-10-02)
+
+### Problem
+
+The hub-members load allows one walk in flight per view: other callers join
+it, and the fallback poll only queues a trailing reload behind it. Neither
+`paginateAll` nor `apiFetch` applied a timeout, so a page request (or its
+body read) that never settled kept the in-flight marker set indefinitely,
+and the members list stopped refreshing until the view changed.
+
+### Change
+
+`paginateAll` gives each page its own `AbortController` and timer, covering
+both the `apiFetch` call (which passes the signal through to `fetch`) and
+the `res.json()` body read. A new optional `pageTimeoutMs` option sets the
+limit, defaulting to 60000 ms (well above the 17-19 s the agents list
+measured on the server). When the timer fires, the request is aborted, the
+resulting rejection is reported as a `PaginationError` naming the list and
+saying it timed out, and the walk rejects. The timer is cleared in a
+`finally` once each page settles, so no timer is left pending. Other
+failures keep their existing errors and messages: a non-OK status, invalid
+JSON and a non-object body are reported as before, and a network error from
+`apiFetch` is still rethrown unchanged. There is no retry, and
+`shouldContinue`, `maxPages` and the repeated-cursor check are unchanged.
+
+`chat.ts` is unchanged. A timed-out leg already rejects like any other
+failed walk, so `_fetchHubMembersOnce` keeps that list as it was and still
+publishes the other list, and `_runHubMembersLoad` clears the in-flight
+marker in its `finally`. The next fallback poll then starts a fresh walk.
+
+The timeout relies on `fetch` rejecting a pending request or body read
+when its signal is aborted, instead of wrapping each page in a
+`Promise.race`. A race wrapper adds microtask hops between a page settling
+and the next `shouldContinue` check. The same-batch open/close tests depend
+on the exact number of hops, so the wrapper would break them.
+
+### Files changed
+
+| File | Change |
+| --- | --- |
+| `web/src/client/paginate-all.ts` | `pageTimeoutMs` option; per-page abort signal and timer around the request and body read; timeout reported as `PaginationError`; header and doc comments updated. |
+| `web/src/client/paginate-all.test.ts` | A stalled request and a stalled body read each reject with `PaginationError` after the timeout and abort the signal; the 60000 ms default; a normal multi-page walk and non-timeout failures leave no pending timer and keep their existing errors. |
+| `web/src/components/pages/chat-hub-members-coalesce.test.ts` | A stalled users or agents page: the walk times out, the in-flight marker clears, the stalled list keeps its previous contents, the other list publishes, and the next poll issues fresh requests (exact counts) and publishes. |

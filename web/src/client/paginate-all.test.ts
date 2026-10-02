@@ -16,7 +16,7 @@
 
 // @vitest-environment happy-dom
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from './api.js';
 import { paginateAll, PaginationError, PaginationStoppedError } from './paginate-all.js';
 
@@ -40,6 +40,10 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 beforeEach(() => {
   vi.mocked(apiFetch).mockReset();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe('paginateAll', () => {
@@ -168,5 +172,143 @@ describe('paginateAll', () => {
       paginateAll({ path: '/api/v1/things', pageSize: 100, parsePage, maxPages: 3 })
     ).rejects.toThrow('page safety bound');
     expect(apiFetch).toHaveBeenCalledTimes(3);
+  });
+});
+
+/**
+ * A promise that, like a fetch request or body read, never settles on its
+ * own and rejects with an AbortError once `signal` is aborted.
+ */
+function settleOnlyOnAbort<T>(signal: AbortSignal | null | undefined): Promise<T> {
+  return new Promise<T>((_, reject) => {
+    signal?.addEventListener('abort', () => {
+      reject(new DOMException('The operation was aborted.', 'AbortError'));
+    });
+  });
+}
+
+describe('paginateAll page timeout', () => {
+  it('rejects with PaginationError after pageTimeoutMs when a page request never settles, aborting its signal', async () => {
+    vi.useFakeTimers();
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'a' }], nextCursor: 'c1' }))
+      .mockImplementationOnce((_url, init) => settleOnlyOnAbort<Response>(init?.signal));
+
+    const settled = paginateAll({
+      path: '/api/v1/things',
+      pageSize: 100,
+      parsePage,
+      label: 'things list',
+      pageTimeoutMs: 5000,
+    }).then(
+      () => 'resolved',
+      (err: unknown) => err
+    );
+
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+    const signal = vi.mocked(apiFetch).mock.calls[1]?.[1]?.signal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal?.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    const err = await settled;
+    expect(err).toBeInstanceOf(PaginationError);
+    expect(err).not.toBeInstanceOf(PaginationStoppedError);
+    expect((err as Error).message).toBe('things list page request timed out after 5000ms');
+    expect(signal?.aborted).toBe(true);
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('rejects with PaginationError after pageTimeoutMs when a page body read never settles', async () => {
+    vi.useFakeTimers();
+    const stalledBody = new Response('{}', { status: 200 });
+    vi.mocked(apiFetch).mockImplementationOnce((_url, init) => {
+      vi.spyOn(stalledBody, 'json').mockReturnValue(settleOnlyOnAbort(init?.signal));
+      return Promise.resolve(stalledBody);
+    });
+
+    const settled = paginateAll({
+      path: '/api/v1/things',
+      pageSize: 100,
+      parsePage,
+      label: 'things list',
+      pageTimeoutMs: 5000,
+    }).then(
+      () => 'resolved',
+      (err: unknown) => err
+    );
+
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(stalledBody.json).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(apiFetch).mock.calls[0]?.[1]?.signal?.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    const err = await settled;
+    expect(err).toBeInstanceOf(PaginationError);
+    expect((err as Error).message).toBe('things list page request timed out after 5000ms');
+    expect(vi.mocked(apiFetch).mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('defaults the page timeout to 60000ms', async () => {
+    vi.useFakeTimers();
+    vi.mocked(apiFetch).mockImplementationOnce((_url, init) =>
+      settleOnlyOnAbort<Response>(init?.signal)
+    );
+
+    const settled = paginateAll({ path: '/api/v1/things', pageSize: 100, parsePage }).then(
+      () => 'resolved',
+      (err: unknown) => err
+    );
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(vi.mocked(apiFetch).mock.calls[0]?.[1]?.signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const err = await settled;
+    expect(err).toBeInstanceOf(PaginationError);
+    expect((err as Error).message).toBe('/api/v1/things page request timed out after 60000ms');
+  });
+
+  it('completes a normal multi-page walk and leaves no pending timer', async () => {
+    vi.useFakeTimers();
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'a' }], nextCursor: 'c1' }))
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'b' }], nextCursor: 'c2' }))
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'c' }] }));
+
+    const items = await paginateAll({
+      path: '/api/v1/things',
+      pageSize: 2,
+      parsePage,
+      pageTimeoutMs: 5000,
+    });
+
+    expect(items).toEqual([{ id: 'a' }, { id: 'b' }, { id: 'c' }]);
+    expect(apiFetch).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps non-timeout failures unchanged and leaves no pending timer', async () => {
+    vi.useFakeTimers();
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response('', { status: 500 }));
+    await expect(
+      paginateAll({ path: '/api/v1/things', pageSize: 100, parsePage, label: 'things list' })
+    ).rejects.toThrow('things list request failed: 500');
+    expect(vi.getTimerCount()).toBe(0);
+
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response('not json', { status: 200 }));
+    await expect(
+      paginateAll({ path: '/api/v1/things', pageSize: 100, parsePage, label: 'things list' })
+    ).rejects.toThrow('things list response was not valid JSON');
+    expect(vi.getTimerCount()).toBe(0);
+
+    const networkError = new TypeError('Failed to fetch');
+    vi.mocked(apiFetch).mockRejectedValueOnce(networkError);
+    await expect(
+      paginateAll({ path: '/api/v1/things', pageSize: 100, parsePage, label: 'things list' })
+    ).rejects.toBe(networkError);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
