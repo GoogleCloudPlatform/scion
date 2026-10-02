@@ -169,8 +169,8 @@ test('an unrelated open sl-dialog prevents the shortcut from activating', async 
     dialog.open = true;
   });
   // The modal guard is a live DOM query run at keydown time (not an
-  // event-tracked set — see chat.ts's _hasOpenModalDescendant), so no wait
-  // is strictly required for the guard itself; this margin just lets the
+  // event-tracked set — see shared/open-modal.ts's hasOpenModalDescendant),
+  // so no wait is strictly required for the guard itself; this margin just lets the
   // dialog's own open-transition and sl-show settle before we probe it.
   await page.waitForTimeout(150);
 

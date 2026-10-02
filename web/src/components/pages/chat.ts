@@ -62,6 +62,7 @@ import type { RecentFile, RecentFilesSnapshot } from '../../client/chat-recent-f
 import { paginateAll, PaginationStoppedError } from '../../client/paginate-all.js';
 import { isProjectChimeEnabled, setProjectChimeEnabled } from '../../utils/audio.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-terminal.js';
+import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal.js';
 import '../shared/chat/chat-thread.js';
 import '../shared/chat/chat-file-preview.js';
 import type { PreviewTarget } from '../shared/chat/chat-file-preview.js';
@@ -3396,52 +3397,7 @@ export class ScionPageChat extends LitElement {
    * actually open and connected right now.
    */
   private _isUnrelatedModalActive(): boolean {
-    return this._hasOpenModalDescendant(document, this._switcherEl ?? null);
-  }
-
-  /**
-   * Recursively walks `root`'s descendants — including into every open
-   * shadow root, not just the light-DOM tree `querySelectorAll` alone would
-   * reach — looking for an open `sl-dialog`, `sl-drawer` or native `dialog`.
-   * `exclude` (our own switcher/palette host) and everything inside its
-   * shadow tree is skipped entirely, since composedPath()-based exclusion
-   * does not work here: our own dialog lives inside `exclude`'s shadow root,
-   * and `Element.contains()` does not cross shadow boundaries.
-   */
-  private _hasOpenModalDescendant(root: ParentNode, exclude: Element | null): boolean {
-    for (const el of Array.from(root.querySelectorAll('*'))) {
-      if (exclude && el === exclude) continue;
-      if (this._isOpenModalElement(el)) return true;
-      if (el.shadowRoot && this._hasOpenModalDescendant(el.shadowRoot, exclude)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /**
-   * Is `el` a currently-open *modal* surface — an `sl-dialog`, a non-
-   * `contained` `sl-drawer` (a `contained` drawer renders inside its own
-   * container rather than as a page-blocking overlay, per Shoelace), or a
-   * native `<dialog open>`? Shared between the live modal query above and
-   * `_handleDocumentModalShow` below, since both need exactly this
-   * definition of "modal" — not every Shoelace element that happens to fire
-   * `sl-show` (toasts/`sl-alert`, `sl-tooltip`, `sl-dropdown`, `sl-details`,
-   * `sl-select` all do, and none of them are modal).
-   */
-  private _isOpenModalElement(el: Element): boolean {
-    const tag = el.tagName;
-    if (tag === 'SL-DIALOG') {
-      return Boolean((el as unknown as { open?: boolean }).open);
-    }
-    if (tag === 'SL-DRAWER') {
-      if (el.hasAttribute('contained')) return false;
-      return Boolean((el as unknown as { open?: boolean }).open);
-    }
-    if (tag === 'DIALOG') {
-      return el.hasAttribute('open');
-    }
-    return false;
+    return hasOpenModalDescendant(document, this._switcherEl ?? null);
   }
 
   /**
@@ -3458,7 +3414,7 @@ export class ScionPageChat extends LitElement {
     const path = e.composedPath();
     if (this._switcherEl && path.includes(this._switcherEl)) return; // our own dialog opening
     const origin = path[0];
-    if (!(origin instanceof Element) || !this._isOpenModalElement(origin)) return;
+    if (!(origin instanceof Element) || !isOpenModalElement(origin)) return;
     this._closePaletteWithoutFocusRestore();
   }
 

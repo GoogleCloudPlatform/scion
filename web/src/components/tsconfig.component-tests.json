@@ -9,6 +9,7 @@
     "shared/palette/quick-palette.test.ts",
     "shared/palette/quick-palette-groups.test.ts",
     "shared/palette/quick-palette-ranking-memo.test.ts",
+    "shared/open-modal.test.ts",
     "pages/chat-palette-shortcut.test.ts"
   ],
   "exclude": []

@@ -54,6 +54,7 @@ module.exports = {
                 'src/components/shared/palette/quick-palette.test.ts',
                 'src/components/shared/palette/quick-palette-groups.test.ts',
                 'src/components/shared/palette/quick-palette-ranking-memo.test.ts',
+                'src/components/shared/open-modal.test.ts',
             ],
             parserOptions: { project: './src/components/tsconfig.component-tests.json' },
         },
