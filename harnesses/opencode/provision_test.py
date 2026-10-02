@@ -46,9 +46,27 @@ def temporary_home(path: str):
             os.environ["HOME"] = old_home
 
 
-def _invoke(home: str, *, env_vars: list[str], explicit_type: str = "", harness_config: dict | None = None) -> dict:
+CONFIG_REL = os.path.join(".config", "opencode", "opencode.json")
+
+
+def _read_config(home: str) -> dict:
+    with open(os.path.join(home, CONFIG_REL), "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _invoke(
+    home: str,
+    *,
+    env_vars: list[str],
+    explicit_type: str = "",
+    harness_config: dict | None = None,
+    mcp_servers: dict | None = None,
+) -> dict:
     bundle = os.path.join(home, ".scion", "harness")
     os.makedirs(os.path.join(bundle, "inputs"), exist_ok=True)
+    if mcp_servers is not None:
+        with open(os.path.join(bundle, "inputs", "mcp-servers.json"), "w", encoding="utf-8") as f:
+            json.dump({"mcp_servers": mcp_servers}, f)
     candidates = {"env_vars": env_vars}
     if explicit_type:
         candidates["explicit_type"] = explicit_type
@@ -106,10 +124,7 @@ class ModelResolutionTest(unittest.TestCase):
             else:
                 os.environ["SCION_MODEL"] = scion_model
             _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"], harness_config=harness_config)
-        config_path = os.path.join(tmp, ".config", "opencode", ".opencode.json")
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
-        return config.get("model")
+        return _read_config(tmp).get("model")
 
     def test_no_model_requested_omits_model_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -136,7 +151,7 @@ class ModelResolutionTest(unittest.TestCase):
 
     def test_size_alias_now_resolves_through_model_aliases(self) -> None:
         """Behavior difference from before G3: a bare size alias used to be
-        written into .opencode.json verbatim (e.g. "medium") because the
+        written into the config verbatim (e.g. "medium") because the
         dead ctx.model_resolution read always fell through to the raw
         SCION_MODEL value with no alias lookup. resolve_model now maps it
         through this harness's own config.yaml model_aliases.
@@ -157,6 +172,80 @@ class ModelResolutionTest(unittest.TestCase):
                 harness_config={"model_aliases": {"medium": "anthropic/claude-sonnet-4-5"}},
             )
             self.assertEqual(model, "anthropic/claude-sonnet-4-5")
+
+
+class ConfigSchemaTest(unittest.TestCase):
+    """ptone/scion#2679: opencode 1.x (sst/opencode) loads only
+    config.json, opencode.json and opencode.jsonc from ~/.config/opencode
+    (packages/opencode/src/config/config.ts in v1.18.34). The provisioner
+    used to write ~/.config/opencode/.opencode.json with the legacy
+    Go-opencode keys (mcpServers, providers, agents), which the installed
+    CLI never reads.
+    """
+
+    VERTEX_ENV = {"GOOGLE_CLOUD_PROJECT": "proj-1", "GOOGLE_CLOUD_REGION": "us-central1"}
+
+    def _invoke_vertex(self, tmp: str, *, scion_model: str | None = None) -> None:
+        with temporary_home(tmp), unittest.mock.patch.dict(os.environ, self.VERTEX_ENV):
+            if scion_model is None:
+                os.environ.pop("SCION_MODEL", None)
+            else:
+                os.environ["SCION_MODEL"] = scion_model
+            _invoke(tmp, env_vars=list(self.VERTEX_ENV), explicit_type="vertex-ai")
+
+    def test_legacy_dotfile_is_not_written(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(
+            os.environ, {"SCION_MODEL": "anthropic/claude-sonnet-4-5"}
+        ):
+            _invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            self.assertTrue(os.path.isfile(os.path.join(tmp, CONFIG_REL)))
+            self.assertFalse(os.path.exists(os.path.join(tmp, ".config", "opencode", ".opencode.json")))
+
+    def test_mcp_servers_merge_under_mcp_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.dirname(os.path.join(tmp, CONFIG_REL)))
+            with open(os.path.join(tmp, CONFIG_REL), "w", encoding="utf-8") as f:
+                json.dump({"$schema": "https://opencode.ai/config.json", "mcp": {"keep": {"enabled": False}}}, f)
+            _invoke(
+                tmp,
+                env_vars=["ANTHROPIC_API_KEY"],
+                mcp_servers={
+                    "local-tool": {"transport": "stdio", "command": "npx", "args": ["tool"], "env": {"A": "1"}},
+                    "remote-tool": {"transport": "sse", "url": "https://example.com/mcp"},
+                },
+            )
+            config = _read_config(tmp)
+        self.assertNotIn("mcpServers", config)
+        self.assertEqual(config["$schema"], "https://opencode.ai/config.json")
+        self.assertEqual(
+            config["mcp"],
+            {
+                "keep": {"enabled": False},
+                "local-tool": {"type": "local", "command": ["npx", "tool"], "environment": {"A": "1"}},
+                "remote-tool": {"type": "remote", "url": "https://example.com/mcp"},
+            },
+        )
+
+    def test_vertex_writes_current_provider_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._invoke_vertex(tmp)
+            config = _read_config(tmp)
+        self.assertEqual(config["model"], "google-vertex/gemini-2.5-pro")
+        self.assertEqual(config["small_model"], "google-vertex/gemini-2.5-flash")
+        self.assertIn("github-copilot", config["disabled_providers"])
+        for legacy in ("providers", "agents", "mcpServers"):
+            self.assertNotIn(legacy, config)
+
+    def test_vertex_explicit_model_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._invoke_vertex(tmp, scion_model="google-vertex/gemini-2.5-flash-lite")
+            config = _read_config(tmp)
+        self.assertEqual(config["model"], "google-vertex/gemini-2.5-flash-lite")
+
+    def test_seeded_home_config_uses_loaded_filename(self) -> None:
+        home_dir = os.path.join(os.path.dirname(__file__), "home", ".config", "opencode")
+        self.assertTrue(os.path.isfile(os.path.join(home_dir, "opencode.json")))
+        self.assertFalse(os.path.exists(os.path.join(home_dir, ".opencode.json")))
 
 
 if __name__ == "__main__":
