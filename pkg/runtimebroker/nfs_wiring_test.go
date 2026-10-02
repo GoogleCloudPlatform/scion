@@ -146,6 +146,7 @@ func TestServer_EnsureNFSMountsReady_WithReconciler(t *testing.T) {
 	nfsCfg := &config.V1NFSConfig{
 		MountRoot:    "/mnt/nfs",
 		MountOptions: "vers=3,hard",
+		AutoMount:    true,
 		Shares: []config.V1NFSShare{
 			{ID: "ws1", Server: "10.0.0.2", Export: "/export-a"},
 			{ID: "ws2", Server: "10.0.0.3", Export: "/export-b"},

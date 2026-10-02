@@ -108,6 +108,7 @@ func testNFSConfig() *config.V1NFSConfig {
 		MountRoot:    "/mnt/nfs",
 		MountOptions: "vers=3,hard,nconnect=4,_netdev",
 		SubPathRoot:  "projects",
+		AutoMount:    true,
 		Shares: []config.V1NFSShare{
 			{ID: "ws1", Server: "10.0.0.2", Export: "/scion-workspaces"},
 		},
@@ -209,6 +210,7 @@ func TestReconcile_MultipleShares(t *testing.T) {
 	cfg := &config.V1NFSConfig{
 		MountRoot:    "/mnt/nfs",
 		MountOptions: "vers=4.1,hard",
+		AutoMount:    true,
 		Shares: []config.V1NFSShare{
 			{ID: "ws1", Server: "10.0.0.2", Export: "/export-a"},
 			{ID: "ws2", Server: "10.0.0.3", Export: "/export-b"},
@@ -372,6 +374,7 @@ func TestReconcile_DefaultMountOptions(t *testing.T) {
 	cfg := &config.V1NFSConfig{
 		MountRoot:    "/mnt/nfs",
 		MountOptions: "", // should use default
+		AutoMount:    true,
 		Shares: []config.V1NFSShare{
 			{ID: "ws1", Server: "10.0.0.2", Export: "/scion-workspaces"},
 		},

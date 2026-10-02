@@ -16,11 +16,14 @@ package runtimebroker
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // ExecMountChecker is the production MountChecker that shells out to
@@ -48,9 +51,21 @@ func NewExecMountChecker(log *slog.Logger) *ExecMountChecker {
 	}
 }
 
-// execRunCommand runs a command and returns its combined output.
+// mountCommandTimeout bounds every mount-related command. mount.nfs retries
+// an unreachable server for about two minutes in the foreground; the bound
+// keeps a dispatch-time check or a reconcile pass from hanging longer.
+const mountCommandTimeout = 90 * time.Second
+
+// execRunCommand runs a command with mountCommandTimeout and returns its
+// combined output.
 func execRunCommand(name string, args ...string) ([]byte, error) {
-	return exec.Command(name, args...).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), mountCommandTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return out, fmt.Errorf("%s timed out after %s: %w", name, mountCommandTimeout, ctx.Err())
+	}
+	return out, err
 }
 
 // IsMountpoint returns true if the given path is currently a mountpoint.
@@ -61,6 +76,11 @@ func (e *ExecMountChecker) IsMountpoint(path string) (bool, error) {
 		// mountpoint returns exit code 1 for non-mountpoints (not an error)
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 			return false, nil
+		}
+		// A timeout usually means a hung (stale) mount at path: report it
+		// rather than treat the path as unmounted and mount over it.
+		if errors.Is(err, context.DeadlineExceeded) {
+			return false, err
 		}
 		// Other errors (path doesn't exist, permission denied)
 		e.log.Debug("mountpoint check failed", "path", path, "error", err, "output", string(out))

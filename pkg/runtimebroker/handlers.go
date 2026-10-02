@@ -929,8 +929,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// N1-7: Ensure NFS shares are mounted before dispatch (no-op when backend=local).
-	if err := s.ensureNFSMountsReady(); err != nil {
+	// N1-7: with nfs.auto_mount, ensure NFS shares are mounted before an
+	// NFS-backed dispatch. No-op without NFS config, with auto_mount off, or
+	// for a project that does not use the nfs workspace backend.
+	nfsProfile := ""
+	if req.Config != nil {
+		nfsProfile = req.Config.Profile
+	}
+	if err := s.checkNFSForDispatch(req.Name, req.ProjectPath, req.ProjectSlug, nfsProfile); err != nil {
 		markAttemptFailed(http.StatusServiceUnavailable, "NFS mount check failed: "+err.Error())
 		span.SetStatus(codes.Error, "NFS workspace storage is not available: "+err.Error())
 		writeError(w, http.StatusServiceUnavailable, "nfs_unavailable",
@@ -4948,15 +4954,82 @@ func isLocalhostEndpoint(endpoint string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
+// checkNFSForDispatch is the NFS pre-flight for an agent create. It returns
+// a non-nil error only when the dispatch must be refused:
+//   - NFS is configured with nfs.auto_mount on (otherwise mounts are managed
+//     externally and the broker never gates on them),
+//   - the project's effective settings select the nfs workspace backend
+//     (projects on any other backend are never affected by NFS state),
+//   - a configured share cannot be mounted, and
+//   - the dispatch targets a local-container runtime, where the workspace
+//     would otherwise silently land on local disk under the mount point.
+//
+// A Kubernetes dispatch is only warned about: there the kubelet can create
+// the workspace subPath itself when the broker does not have the export
+// mounted (see the Kubernetes NFS workspace docs).
+func (s *Server) checkNFSForDispatch(name, projectPath, projectSlug, profile string) error {
+	if s.nfsMountReconciler == nil || !s.nfsMountReconciler.AutoMount() {
+		return nil
+	}
+	projectDir := resolveDispatchProjectDir(projectPath, projectSlug)
+	if !dispatchUsesNFSWorkspace(projectDir) {
+		return nil
+	}
+	err := s.ensureNFSMountsReady()
+	if err == nil {
+		return nil
+	}
+	_, runtimeType := s.resolveManagerForOpts(api.StartOptions{
+		Name:        name,
+		ProjectPath: projectDir,
+		Profile:     profile,
+	})
+	if isKubernetesRuntimeName(runtimeType) {
+		s.agentLifecycleLog.Warn("NFS share not mounted on the broker; continuing Kubernetes dispatch (the kubelet mounts the export in the pod)",
+			"agent", name, "runtime", runtimeType, "error", err)
+		return nil
+	}
+	return err
+}
+
+// resolveDispatchProjectDir mirrors buildStartContext's hub-managed project
+// path resolution (a slug with no path resolves under the global projects
+// directory) followed by config.GetResolvedProjectDir, the directory the
+// agent manager loads effective settings from.
+func resolveDispatchProjectDir(projectPath, projectSlug string) string {
+	if projectPath == "" && projectSlug != "" {
+		if globalDir, err := config.GetGlobalDir(); err == nil {
+			projectPath = filepath.Join(globalDir, "projects", projectSlug)
+		}
+	}
+	projectDir, _ := config.GetResolvedProjectDir(projectPath)
+	return projectDir
+}
+
+// dispatchUsesNFSWorkspace reports whether the effective settings for
+// projectDir select the nfs workspace backend, the same condition the agent
+// manager uses (pkg/agent run.go). If the settings cannot be loaded it
+// returns true: the caller only asks when the broker itself is configured
+// for NFS, so that is the likely backend.
+func dispatchUsesNFSWorkspace(projectDir string) bool {
+	vs, _, err := config.LoadEffectiveSettings(projectDir)
+	if err != nil || vs == nil {
+		return true
+	}
+	return vs.Server != nil && vs.Server.WorkspaceStorage != nil &&
+		vs.Server.WorkspaceStorage.Backend == "nfs"
+}
+
 // ensureNFSMountsReady verifies that all configured NFS shares are mounted
 // before dispatching an agent. This is a pre-flight check (N1-7):
 // the reconciler may have mounted them at startup, but a transient
 // unmount (network blip, manual intervention) should block dispatches.
 // Returns an error if any configured share cannot be mounted — the caller
-// should reject the dispatch to avoid silent fallback to a broken mount.
+// decides whether to reject the dispatch (see checkNFSForDispatch). A no-op
+// unless NFS is configured with auto_mount on.
 func (s *Server) ensureNFSMountsReady() error {
-	if s.nfsMountReconciler == nil {
-		return nil // NFS not configured — local backend, nothing to check.
+	if s.nfsMountReconciler == nil || !s.nfsMountReconciler.AutoMount() {
+		return nil // NFS not configured, or mounts managed externally.
 	}
 
 	nfsCfg := s.config.NFSConfig

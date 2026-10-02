@@ -15,12 +15,14 @@
 package runtimebroker
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -47,19 +49,38 @@ type MountChecker interface {
 	MkdirAll(path string, perm os.FileMode) error
 }
 
-// NFSMountReconciler ensures configured NFS shares are mounted at the expected
-// paths and reports health status. It is safe for concurrent use.
+// NFSMountReconciler checks that configured NFS shares are mounted at the
+// expected paths and reports health status. It is safe for concurrent use.
 //
-// Deploy note: The broker process requires mount privilege (root or
-// CAP_SYS_ADMIN) to mount NFS shares. When running as a non-root user,
-// either grant CAP_SYS_ADMIN via setcap or configure sudoers for mount/umount.
+// It has two modes, selected by cfg.AutoMount:
+//   - AutoMount false (the default): check-only. Each share is checked
+//     read-only (is <MountRoot>/<ID> a mountpoint of the expected
+//     server:export); nothing is created, mounted or unmounted. The mounts
+//     are provided by the operator, or by the kubelet on Kubernetes.
+//   - AutoMount true: a share that is not mounted is mounted, and one
+//     mounted from the wrong source is remounted.
+//
+// Deploy note: auto-mount requires the broker process to run as root: the
+// mount.nfs helper checks uid 0, so CAP_SYS_ADMIN alone is not enough (see
+// NFS_DEPLOY_NOTES.md).
 type NFSMountReconciler struct {
 	cfg     *config.V1NFSConfig
 	checker MountChecker
 	log     *slog.Logger
 
+	// reconcileMu serializes share reconciliation so the background loop
+	// and a dispatch-time EnsureShareMounted never mount the same target
+	// concurrently.
+	reconcileMu sync.Mutex
+
 	mu       sync.RWMutex
 	statuses map[string]ShareMountStatus // keyed by share ID
+}
+
+// AutoMount reports whether the reconciler mounts shares itself (true) or
+// only checks them (false).
+func (r *NFSMountReconciler) AutoMount() bool {
+	return r.cfg != nil && r.cfg.AutoMount
 }
 
 // ShareMountStatus tracks the health of a single NFS share mount.
@@ -84,8 +105,8 @@ func NewNFSMountReconciler(cfg *config.V1NFSConfig, checker MountChecker, log *s
 	}
 }
 
-// Reconcile ensures all configured NFS shares are mounted at the correct
-// paths. It is idempotent: a broker restart calls Reconcile again without
+// Reconcile checks every configured NFS share and, when AutoMount is set,
+// mounts or remounts it as needed. It is idempotent: a broker restart calls Reconcile again without
 // double-mounting or erroring on an already-correct state.
 //
 // For each configured share:
@@ -119,17 +140,27 @@ func (r *NFSMountReconciler) Reconcile() error {
 
 // reconcileShare handles a single share's mount reconciliation.
 func (r *NFSMountReconciler) reconcileShare(share config.V1NFSShare, mountOpts string) {
+	r.reconcileMu.Lock()
+	defer r.reconcileMu.Unlock()
+
 	target := filepath.Join(r.cfg.MountRoot, share.ID)
 	wantServerExport := fmt.Sprintf("%s:%s", share.Server, share.Export)
 
-	r.log.Info("Reconciling NFS share",
+	r.log.Debug("Reconciling NFS share",
 		"shareID", share.ID, "target", target,
-		"server", share.Server, "export", share.Export)
+		"server", share.Server, "export", share.Export,
+		"autoMount", r.cfg.AutoMount)
 
 	mounted, err := r.checker.IsMountpoint(target)
 	if err != nil {
 		r.setStatus(share.ID, target, false,
 			fmt.Sprintf("failed to check mountpoint: %v", err))
+		return
+	}
+
+	if !mounted && !r.cfg.AutoMount {
+		r.setStatus(share.ID, target, false,
+			fmt.Sprintf("not mounted (expected %s; auto_mount is off, so the export must be mounted externally)", wantServerExport))
 		return
 	}
 
@@ -168,6 +199,12 @@ func (r *NFSMountReconciler) reconcileShare(share config.V1NFSShare, mountOpts s
 		return
 	}
 
+	if !r.cfg.AutoMount {
+		r.setStatus(share.ID, target, false,
+			fmt.Sprintf("mounted from %s, expected %s (auto_mount is off, so it is not remounted)", currentServerExport, wantServerExport))
+		return
+	}
+
 	// Wrong server:export — remount.
 	r.log.Warn("NFS share mounted with wrong source, remounting",
 		"shareID", share.ID, "target", target,
@@ -188,19 +225,64 @@ func (r *NFSMountReconciler) reconcileShare(share config.V1NFSShare, mountOpts s
 	r.log.Info("NFS share remounted", "shareID", share.ID, "target", target)
 }
 
-// setStatus records the health status of a share.
+// setStatus records the health status of a share. A change of state is
+// logged; an unchanged status (the periodic re-check finding the same
+// problem again) is not, so a persistently failing share does not flood
+// the log.
 func (r *NFSMountReconciler) setStatus(shareID, target string, healthy bool, message string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.statuses[shareID] = ShareMountStatus{
+	prev, had := r.statuses[shareID]
+	next := ShareMountStatus{
 		ShareID: shareID,
 		Target:  target,
 		Healthy: healthy,
 		Message: message,
 	}
+	r.statuses[shareID] = next
+	r.mu.Unlock()
+
+	if had && prev == next {
+		return
+	}
 	if !healthy {
 		r.log.Error("NFS share unhealthy",
 			"shareID", shareID, "target", target, "reason", message)
+	} else if had && !prev.Healthy {
+		r.log.Info("NFS share healthy again",
+			"shareID", shareID, "target", target, "status", message)
+	}
+}
+
+// DefaultNFSReconcileInterval is how often Run re-checks the shares after
+// the first pass.
+const DefaultNFSReconcileInterval = time.Minute
+
+// Run performs a first reconciliation pass immediately, calls firstPassDone
+// (if non-nil), then re-runs Reconcile every interval until ctx is
+// cancelled. In check-only mode this keeps /healthz current when an operator
+// mounts or unmounts a share; with AutoMount it also restores a dropped
+// mount. Run never returns an error: failures are per-share status.
+func (r *NFSMountReconciler) Run(ctx context.Context, interval time.Duration, firstPassDone func()) {
+	if interval <= 0 {
+		interval = DefaultNFSReconcileInterval
+	}
+	if err := r.Reconcile(); err != nil {
+		r.log.Warn("NFS mount reconciliation returned error", "error", err)
+	}
+	if firstPassDone != nil {
+		firstPassDone()
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := r.Reconcile(); err != nil {
+				r.log.Warn("NFS mount reconciliation returned error", "error", err)
+			}
+		}
 	}
 }
 

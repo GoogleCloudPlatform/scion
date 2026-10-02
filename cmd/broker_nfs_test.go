@@ -1,0 +1,317 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"strings"
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+)
+
+func nfsSettings(autoMount bool, shares ...config.V1NFSShare) *config.VersionedSettings {
+	return &config.VersionedSettings{
+		Server: &config.V1ServerConfig{
+			WorkspaceStorage: &config.V1WorkspaceStorageConfig{
+				Backend: "nfs",
+				NFS: &config.V1NFSConfig{
+					MountRoot: "/mnt/nfs",
+					AutoMount: autoMount,
+					Shares:    shares,
+				},
+			},
+		},
+	}
+}
+
+var share1 = config.V1NFSShare{ID: "ws1", Server: "10.0.0.2", Export: "/scion-workspaces"}
+
+func TestBrokerNFSConfig(t *testing.T) {
+	t.Run("nil settings", func(t *testing.T) {
+		if cfg, warn := brokerNFSConfig(nil); cfg != nil || warn != "" {
+			t.Fatalf("got %v, %q; want nil, empty", cfg, warn)
+		}
+	})
+	t.Run("no workspace storage", func(t *testing.T) {
+		vs := &config.VersionedSettings{Server: &config.V1ServerConfig{}}
+		if cfg, warn := brokerNFSConfig(vs); cfg != nil || warn != "" {
+			t.Fatalf("got %v, %q; want nil, empty", cfg, warn)
+		}
+	})
+	t.Run("local backend ignores nfs block", func(t *testing.T) {
+		vs := nfsSettings(true, share1)
+		vs.Server.WorkspaceStorage.Backend = "local"
+		if cfg, warn := brokerNFSConfig(vs); cfg != nil || warn != "" {
+			t.Fatalf("got %v, %q; want nil, empty", cfg, warn)
+		}
+	})
+	t.Run("nfs without shares warns", func(t *testing.T) {
+		cfg, warn := brokerNFSConfig(nfsSettings(false))
+		if cfg != nil || !strings.Contains(warn, "no NFS shares") {
+			t.Fatalf("got %v, %q; want nil and a no-shares warning", cfg, warn)
+		}
+	})
+	t.Run("nfs with shares", func(t *testing.T) {
+		for _, auto := range []bool{false, true} {
+			vs := nfsSettings(auto, share1)
+			cfg, warn := brokerNFSConfig(vs)
+			if cfg == nil || warn != "" {
+				t.Fatalf("auto=%v: got %v, %q; want config", auto, cfg, warn)
+			}
+			if cfg.AutoMount != auto {
+				t.Errorf("AutoMount = %v, want %v", cfg.AutoMount, auto)
+			}
+			if cfg.MountOptions == "" || cfg.UID == 0 {
+				t.Errorf("defaults not applied: %+v", cfg)
+			}
+			if len(cfg.Shares) != 1 || cfg.Shares[0] != share1 {
+				t.Errorf("Shares = %+v", cfg.Shares)
+			}
+			// The input is not modified.
+			in := vs.Server.WorkspaceStorage.NFS
+			if in.MountOptions != "" || in.UID != 0 {
+				t.Errorf("input settings were modified: %+v", in)
+			}
+			if cfg == in || &cfg.Shares[0] == &in.Shares[0] {
+				t.Error("returned config aliases the input")
+			}
+		}
+	})
+}
+
+func TestBrokerNFSConfig_RejectsInvalidShares(t *testing.T) {
+	cases := map[string]func(vs *config.VersionedSettings){
+		"empty mount_root":    func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.MountRoot = "" },
+		"relative mount_root": func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.MountRoot = "mnt/nfs" },
+		"empty id":            func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].ID = "" },
+		"dotdot id":           func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].ID = ".." },
+		"nested id":           func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].ID = "a/b" },
+		"empty server":        func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].Server = "" },
+		"relative export":     func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].Export = "export" },
+		"duplicate id": func(vs *config.VersionedSettings) {
+			vs.Server.WorkspaceStorage.NFS.Shares = append(vs.Server.WorkspaceStorage.NFS.Shares, share1)
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			vs := nfsSettings(true, share1)
+			mutate(vs)
+			cfg, warn := brokerNFSConfig(vs)
+			if cfg != nil || !strings.HasPrefix(warn, "NFS mount checks disabled:") {
+				t.Fatalf("got %v, %q; want nil and a warning", cfg, warn)
+			}
+		})
+	}
+}
+
+// TestServerForeground_WiresBrokerNFSConfig guards the broker wiring: the
+// runtimebroker.ServerConfig literal in runServerForeground must set
+// NFSConfig from brokerNFSConfig, fed from the global settings.
+func TestServerForeground_WiresBrokerNFSConfig(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "server_foreground.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	var nfsIdent string
+	literals := 0
+	assignedFrom := map[string]string{} // ident -> called function
+	calls := map[string]bool{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.CompositeLit:
+			sel, ok := n.Type.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "ServerConfig" {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "runtimebroker" {
+				return true
+			}
+			literals++
+			for _, elt := range n.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "NFSConfig" {
+					if v, ok := kv.Value.(*ast.Ident); ok {
+						nfsIdent = v.Name
+					}
+				}
+			}
+		case *ast.AssignStmt:
+			if len(n.Rhs) != 1 {
+				return true
+			}
+			call, ok := n.Rhs[0].(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			fn := ""
+			switch f := call.Fun.(type) {
+			case *ast.Ident:
+				fn = f.Name
+			case *ast.SelectorExpr:
+				fn = f.Sel.Name
+			}
+			if len(n.Lhs) > 0 {
+				if id, ok := n.Lhs[0].(*ast.Ident); ok {
+					assignedFrom[id.Name] = fn
+				}
+			}
+		case *ast.CallExpr:
+			if sel, ok := n.Fun.(*ast.SelectorExpr); ok {
+				calls[sel.Sel.Name] = true
+			}
+		}
+		return true
+	})
+
+	if literals != 1 {
+		t.Fatalf("found %d runtimebroker.ServerConfig literals, want 1", literals)
+	}
+	if nfsIdent == "" {
+		t.Fatal("runtimebroker.ServerConfig literal does not set NFSConfig from a variable")
+	}
+	if got := assignedFrom[nfsIdent]; got != "brokerNFSConfig" {
+		t.Fatalf("NFSConfig is set from %q, which is assigned from %q; want brokerNFSConfig", nfsIdent, got)
+	}
+	if !calls["LoadGlobalSettings"] {
+		t.Error("server_foreground.go must load the broker's NFS settings with config.LoadGlobalSettings")
+	}
+}
+
+func TestFindMountSource(t *testing.T) {
+	table := strings.Join([]string{
+		"proc /proc proc rw 0 0",
+		"10.0.0.9:/old /mnt/nfs/ws1 nfs rw 0 0",
+		"10.0.0.2:/scion-workspaces /mnt/nfs/ws1 nfs rw,vers=3 0 0",
+		`10.0.0.3:/with\040space /mnt/nfs/my\040share nfs rw 0 0`,
+		"short",
+	}, "\n")
+	cases := []struct {
+		path, wantSource string
+		wantMounted      bool
+	}{
+		{"/mnt/nfs/ws1", "10.0.0.2:/scion-workspaces", true}, // last entry wins
+		{"/mnt/nfs/ws1/", "10.0.0.2:/scion-workspaces", true},
+		{"/mnt/nfs/my share", "10.0.0.3:/with space", true},
+		{"/mnt/nfs/ws2", "", false},
+	}
+	for _, tc := range cases {
+		src, mounted, err := findMountSource(strings.NewReader(table), tc.path)
+		if err != nil || src != tc.wantSource || mounted != tc.wantMounted {
+			t.Errorf("findMountSource(%q) = %q, %v, %v; want %q, %v", tc.path, src, mounted, err, tc.wantSource, tc.wantMounted)
+		}
+	}
+	if got := unescapeMountField(`a\134b\0`); got != `a\b\0` {
+		t.Errorf("unescapeMountField = %q", got)
+	}
+}
+
+type fakeNFSProbe struct {
+	mounts  map[string]string
+	mntErr  error
+	dialErr map[string]error
+	dialed  []string
+}
+
+func (f *fakeNFSProbe) probe() nfsDoctorProbe {
+	return nfsDoctorProbe{
+		mountSource: func(path string) (string, bool, error) {
+			if f.mntErr != nil {
+				return "", false, f.mntErr
+			}
+			src, ok := f.mounts[path]
+			return src, ok, nil
+		},
+		dial: func(addr string) error {
+			f.dialed = append(f.dialed, addr)
+			return f.dialErr[addr]
+		},
+	}
+}
+
+func TestCheckDoctorNFSMounts(t *testing.T) {
+	good := map[string]string{"/mnt/nfs/ws1": "10.0.0.2:/scion-workspaces"}
+	cases := []struct {
+		name        string
+		vs          *config.VersionedSettings
+		probe       fakeNFSProbe
+		wantStatus  string
+		wantMessage []string
+		wantRemedy  string
+	}{
+		{name: "nil settings", vs: nil, wantStatus: "skip", wantMessage: []string{"not configured", "backend: local"}},
+		{name: "local backend", vs: func() *config.VersionedSettings {
+			vs := nfsSettings(false, share1)
+			vs.Server.WorkspaceStorage.Backend = "local"
+			return vs
+		}(), wantStatus: "skip", wantMessage: []string{"not configured"}},
+		{name: "nfs without shares", vs: nfsSettings(false), wantStatus: "fail", wantMessage: []string{"no NFS shares"}, wantRemedy: "at least one share"},
+		{name: "healthy, auto_mount off", vs: nfsSettings(false, share1), probe: fakeNFSProbe{mounts: good},
+			wantStatus: "pass", wantMessage: []string{"1 share(s) mounted and reachable: ws1", "auto_mount off"}},
+		{name: "healthy, auto_mount on", vs: nfsSettings(true, share1), probe: fakeNFSProbe{mounts: good},
+			wantStatus: "pass", wantMessage: []string{"auto_mount on"}},
+		{name: "not mounted, auto_mount off", vs: nfsSettings(false, share1),
+			wantStatus: "fail", wantMessage: []string{"ws1: not mounted at /mnt/nfs/ws1", "auto_mount off"}, wantRemedy: "Mount each export"},
+		{name: "not mounted, auto_mount on", vs: nfsSettings(true, share1),
+			wantStatus: "fail", wantMessage: []string{"not mounted", "auto_mount on"}, wantRemedy: "broker.nfs-mount"},
+		{name: "wrong source", vs: nfsSettings(false, share1), probe: fakeNFSProbe{mounts: map[string]string{"/mnt/nfs/ws1": "10.9.9.9:/x"}},
+			wantStatus: "fail", wantMessage: []string{"mounted from 10.9.9.9:/x, expected 10.0.0.2:/scion-workspaces"}},
+		{name: "server unreachable", vs: nfsSettings(false, share1),
+			probe:      fakeNFSProbe{mounts: good, dialErr: map[string]error{"10.0.0.2:2049": errors.New("refused")}},
+			wantStatus: "fail", wantMessage: []string{"server 10.0.0.2 unreachable on port 2049"}},
+		{name: "mount table unreadable", vs: nfsSettings(false, share1), probe: fakeNFSProbe{mntErr: errors.New("no /proc")},
+			wantStatus: "fail", wantMessage: []string{"mount state unknown (no /proc)"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := tc.probe
+			res := checkDoctorNFSMounts(tc.vs, p.probe())
+			if res.Name != "nfs-mounts" || res.Status != tc.wantStatus {
+				t.Fatalf("got %s/%s %q; want status %s", res.Name, res.Status, res.Message, tc.wantStatus)
+			}
+			for _, want := range tc.wantMessage {
+				if !strings.Contains(res.Message, want) {
+					t.Errorf("message %q missing %q", res.Message, want)
+				}
+			}
+			if tc.wantRemedy != "" && !strings.Contains(res.Remediation, tc.wantRemedy) {
+				t.Errorf("remediation %q missing %q", res.Remediation, tc.wantRemedy)
+			}
+		})
+	}
+}
+
+func TestCheckDoctorNFSMounts_DialsEachShareServer(t *testing.T) {
+	share2 := config.V1NFSShare{ID: "ws2", Server: "fd00::2", Export: "/b"}
+	p := fakeNFSProbe{mounts: map[string]string{
+		"/mnt/nfs/ws1": "10.0.0.2:/scion-workspaces",
+		"/mnt/nfs/ws2": "fd00::2:/b",
+	}}
+	res := checkDoctorNFSMounts(nfsSettings(false, share1, share2), p.probe())
+	if res.Status != "pass" {
+		t.Fatalf("status = %s %q", res.Status, res.Message)
+	}
+	if strings.Join(p.dialed, ",") != "10.0.0.2:2049,[fd00::2]:2049" {
+		t.Errorf("dialed %v", p.dialed)
+	}
+}
