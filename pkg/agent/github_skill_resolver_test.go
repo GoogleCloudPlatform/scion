@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -3266,5 +3267,48 @@ func TestGitHubSkillResolver_CachedWaiterDeadline_ClassifiedAsTimeout(t *testing
 	}
 	if strings.Contains(got.Message, credentialFingerprint("test-token")) || strings.Contains(got.Message, "test-token") {
 		t.Errorf("message must not carry credential-derived material, got %s", got.Message)
+	}
+}
+
+// TestGitHubResolutionCache_WaiterDeadline_WrapsTypedAndContextError pins the
+// waiter-path error contract of ResolveWithFetch directly (Resolve flattens
+// errors, so it cannot see this): when the caller's own deadline expires on a
+// blocked shared fetch, errors.As finds the typed timeout and errors.Is still
+// matches context.DeadlineExceeded; plain cancellation returns exactly
+// context.Canceled.
+func TestGitHubResolutionCache_WaiterDeadline_WrapsTypedAndContextError(t *testing.T) {
+	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	blockingFetch := func(ctx context.Context) (ResolvedSkill, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return ResolvedSkill{}, errors.New("released")
+	}
+
+	dctx, dcancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer dcancel()
+	_, err = cache.ResolveWithFetch(dctx, "key-deadline", "flight-deadline", "cred", "gh://o/r/s@main (default)", false, blockingFetch)
+	var typed *githubResolveError
+	if !errors.As(err, &typed) || typed.code != SkillErrCodeTimeout {
+		t.Errorf("expected typed error with code %s, got %v", SkillErrCodeTimeout, err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected errors.Is(err, context.DeadlineExceeded), got %v", err)
+	}
+
+	cctx, ccancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		ccancel()
+	}()
+	_, err = cache.ResolveWithFetch(cctx, "key-cancel", "flight-cancel", "cred", "gh://o/r/s@main (default)", false, blockingFetch)
+	if err != context.Canceled { //nolint:errorlint // exact identity is the contract under test
+		t.Errorf("expected exactly context.Canceled, got %#v", err)
 	}
 }
