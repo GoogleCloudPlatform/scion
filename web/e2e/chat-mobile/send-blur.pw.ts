@@ -107,10 +107,10 @@ test('@static touch: after saving an edit, the composer is not the deep active e
   const sentMessage = page.locator('scion-chat-message', { hasText: 'edit me please' }).first();
   await expect(sentMessage).toBeVisible();
 
-  // A tap on a message opens the same context menu a desktop right-click
-  // would, on devices that cannot hover.
+  // A tap on a message opens the same actions a desktop right-click would,
+  // on devices that cannot hover — as an action sheet on a phone.
   await sentMessage.click();
-  await page.locator('.context-menu-item', { hasText: 'Edit' }).first().click();
+  await page.locator('scion-action-sheet[open]').locator('.item', { hasText: 'Edit' }).click();
 
   const textarea = page.locator('sl-textarea').first();
   await expect(async () => {

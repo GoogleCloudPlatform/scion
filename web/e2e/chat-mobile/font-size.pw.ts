@@ -64,7 +64,8 @@ test('@static the rail rename input computes at 16px or more', async ({ page }, 
 
   const generalRow = page.locator('.thread-item', { hasText: 'general' }).first();
   await generalRow.click({ button: 'right' });
-  await page.locator('.context-menu-item', { hasText: 'Rename' }).first().click();
+  // On a phone the row menu opens as an action sheet.
+  await page.locator('scion-action-sheet[open]').locator('.item', { hasText: 'Rename' }).click();
   await page.locator('.rename-input').waitFor({ state: 'visible' });
 
   const box = await computedBoxDeepRetrying(page, '.rename-input', '[part="input"]');
