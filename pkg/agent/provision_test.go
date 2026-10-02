@@ -2382,10 +2382,9 @@ func TestProvisionAgent_RequiredGHSkillWithResolver_Provisions(t *testing.T) {
 // actual ProvisionAgent entry point with a real GitHubSkillResolver, rather
 // than injecting the error directly into a runtimebroker mock as the broker
 // tests do (#2546 O3). The test server returns a 429 with a Retry-After far
-// larger than the backoff cap, and ctx carries a 2-minute deadline so the
-// budget-fit check would allow the capped backoff: only the
-// Retry-After-above-cap fail-fast can end the call at once. A watchdog
-// cancels ctx if it does not, so a regression fails in seconds.
+// larger than the backoff cap, and ctx carries a 2-minute deadline. The
+// rate-limit cooldown ends the call at that first response, without retrying.
+// A watchdog cancels ctx if it does not, so a regression fails in seconds.
 func TestProvisionAgent_RequiredGHSkillRateLimited_YieldsSkillResolutionError(t *testing.T) {
 	tmpDir := t.TempDir()
 

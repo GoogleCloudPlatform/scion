@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -381,8 +382,11 @@ func TestGitHubSkillResolver_StalledServer_FailsWithinBudget(t *testing.T) {
 
 // TestGitHubSkillResolver_RateLimit429_LargeRetryAfter_FailsWithinBudget
 // proves that a 429 carrying a Retry-After larger than the remaining ctx
-// budget fails immediately instead of sleeping through (and past) the
-// create deadline (#2546).
+// budget fails immediately, naming the ref, instead of sleeping through (and
+// past) the create deadline (#2546). The rate-limit cooldown is what ends the
+// call: a rate-limit response is never retried. The doWithRetry fail-fast
+// paths are pinned with 5xx responses by the BudgetFit and RetryAfterAboveCap
+// tests.
 func TestGitHubSkillResolver_RateLimit429_LargeRetryAfter_FailsWithinBudget(t *testing.T) {
 	server, mux := newTestGitHubServer(t)
 
@@ -474,8 +478,8 @@ func TestGitHubSkillResolver_RateLimit403_LargeRetryAfter_FailsWithinBudget(t *t
 // the exact production scenario from #2546: the broker's create ctx carries
 // no deadline at all (context.Background(), not context.WithTimeout), yet a
 // 429 with a Retry-After far larger than githubMaxBackoff still fails fast
-// and names the ref — instead of relying on ctx.Deadline() ever being set
-// (which it never was in production before the fix) to run the budget check.
+// and names the ref. The rate-limit cooldown ends the call at the first
+// response, without retrying.
 func TestGitHubSkillResolver_RateLimit429_LargeRetryAfter_NoDeadlineCtx(t *testing.T) {
 	server, mux := newTestGitHubServer(t)
 
@@ -664,6 +668,29 @@ func TestGitHubSkillResolver_ConnectionRefused_ClassifiedUnreachable(t *testing.
 	}
 	if result.Errors[0].Code != SkillErrCodeUnreachable {
 		t.Errorf("expected code %s, got %s", SkillErrCodeUnreachable, result.Errors[0].Code)
+	}
+
+	// Resolve flattens the error to a code and message, so check the chain
+	// one level down, on a real request path: the typed error must carry
+	// the transport failure as its cause, reachable through Unwrap.
+	ghRef, err := ParseGitHubSkillURI("gh://owner/repo/my-skill@main")
+	if err != nil {
+		t.Fatalf("ParseGitHubSkillURI: %v", err)
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	_, err = resolver.resolveCommitSHA(ctx2, ghRef, "")
+	var rerr *githubResolveError
+	if !errors.As(err, &rerr) || rerr.code != SkillErrCodeUnreachable {
+		t.Fatalf("expected a githubResolveError with code %s, got %T: %v", SkillErrCodeUnreachable, err, err)
+	}
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		t.Errorf("expected the *url.Error cause to be reachable through Unwrap, got %v", err)
+	}
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) || opErr.Op != "dial" {
+		t.Errorf("expected a dial *net.OpError in the chain, got %v", err)
 	}
 }
 
@@ -1049,8 +1076,9 @@ func TestIsRetryableResponse(t *testing.T) {
 		headers    map[string]string
 		want       bool
 	}{
-		{"429 is retryable", 429, nil, true},
-		{"403 with rate limit is retryable", 403, map[string]string{"X-RateLimit-Remaining": "0"}, true},
+		// Rate limits are never retried; GitHubCooldown.Do intercepts them.
+		{"429 is not retryable", 429, nil, false},
+		{"403 with rate limit is not retryable", 403, map[string]string{"X-RateLimit-Remaining": "0"}, false},
 		{"403 without rate limit is not retryable", 403, nil, false},
 		{"500 is retryable", 500, nil, true},
 		{"502 is retryable", 502, nil, true},
@@ -1079,7 +1107,7 @@ func TestIsRetryableResponse(t *testing.T) {
 func TestRetryDelay(t *testing.T) {
 	t.Run("uses Retry-After header", func(t *testing.T) {
 		resp := &http.Response{
-			StatusCode: 429,
+			StatusCode: 503,
 			Header:     make(http.Header),
 		}
 		resp.Header.Set("Retry-After", "3")
@@ -1091,7 +1119,7 @@ func TestRetryDelay(t *testing.T) {
 
 	t.Run("caps Retry-After at max backoff", func(t *testing.T) {
 		resp := &http.Response{
-			StatusCode: 429,
+			StatusCode: 503,
 			Header:     make(http.Header),
 		}
 		resp.Header.Set("Retry-After", "120")
@@ -2316,6 +2344,8 @@ func TestGitHubSkillResolver_RawDownloadTransient_RetriesWithinDefaultBudget(t *
 // so only the cap check can end the call at the first attempt (#2546 RQ3).
 // If that check is removed, the resolver sleeps the capped backoff and the
 // watchdog below cancels it, failing the test in seconds rather than minutes.
+// It uses a 503: a 429 would be ended by the rate-limit cooldown before the
+// cap check runs.
 func TestGitHubSkillResolver_RetryAfterAboveCap_FailsFastWithoutBudgetPressure(t *testing.T) {
 	server, mux := newTestGitHubServer(t)
 
@@ -2323,7 +2353,7 @@ func TestGitHubSkillResolver_RetryAfterAboveCap_FailsFastWithoutBudgetPressure(t
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&attempts, 1)
 		w.Header().Set("Retry-After", "60") // above githubMaxBackoff (30s)
-		w.WriteHeader(http.StatusTooManyRequests)
+		w.WriteHeader(http.StatusServiceUnavailable)
 	})
 	resolver := newTestGitHubResolver(server)
 
@@ -2354,11 +2384,62 @@ func TestGitHubSkillResolver_RetryAfterAboveCap_FailsFastWithoutBudgetPressure(t
 		t.Errorf("expected exactly 1 attempt, got %d", got)
 	}
 	e := result.Errors[0]
-	if e.Code != SkillErrCodeRateLimited {
-		t.Errorf("expected code %s, got %s (%s)", SkillErrCodeRateLimited, e.Code, e.Message)
+	if e.Code != SkillErrCodeUpstreamUnavailable {
+		t.Errorf("expected code %s, got %s (%s)", SkillErrCodeUpstreamUnavailable, e.Code, e.Message)
 	}
 	if e.RetryAfter != "60" {
 		t.Errorf("expected RetryAfter 60, got %q", e.RetryAfter)
+	}
+	if !strings.Contains(e.Message, "past the 30s backoff cap") {
+		t.Errorf("expected the cap fail-fast message, got %q", e.Message)
+	}
+}
+
+// TestGitHubSkillResolver_5xxBackoffPastDeadline_FailsFastWithinBudget pins
+// the budget-fit fail-fast for a response (not a network error): a 503 whose
+// Retry-After is under the backoff cap but past the ctx deadline fails at the
+// first attempt with upstream_unavailable naming the ref. Without the check
+// the resolver would sleep the backoff into the deadline.
+func TestGitHubSkillResolver_5xxBackoffPastDeadline_FailsFastWithinBudget(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	var attempts int32
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.Header().Set("Retry-After", "20") // under githubMaxBackoff, past the deadline
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	resolver := newTestGitHubResolver(server)
+
+	const budget = 3 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	start := time.Now()
+	result, err := resolver.Resolve(ctx, []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(result.Errors))
+	}
+	if elapsed >= time.Second {
+		t.Errorf("expected an immediate fail-fast, took %s", elapsed)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("expected exactly 1 attempt, got %d", got)
+	}
+	e := result.Errors[0]
+	if e.Code != SkillErrCodeUpstreamUnavailable {
+		t.Errorf("expected code %s, got %s (%s)", SkillErrCodeUpstreamUnavailable, e.Code, e.Message)
+	}
+	if !strings.Contains(e.Message, "gh://owner/repo/my-skill@main") ||
+		!strings.Contains(e.Message, "would exceed the") {
+		t.Errorf("expected a budget fail-fast message naming the ref, got %q", e.Message)
 	}
 }
 
@@ -3438,5 +3519,56 @@ func TestGitHubSkillResolver_CancelledDuringFinalRetry_ReturnsCanceled(t *testin
 	}
 	if got := atomic.LoadInt32(&attempts); got != githubMaxRetries+1 {
 		t.Errorf("expected %d attempts, got %d", githubMaxRetries+1, got)
+	}
+}
+
+// TestGitHubSkillResolver_CancelledBeforeRetry_ReturnsCanceled covers the
+// cancel check at the top of doWithRetry's loop. The caller cancels while
+// the first attempt is in flight, and that attempt still returns a 503 with
+// a Retry-After above the backoff cap. Without the check, the
+// Retry-After-above-cap fail-fast would run first and return a typed
+// upstream_unavailable error; with it, the caller gets context.Canceled and
+// no second request is made. The transport cancels ctx and then returns the
+// response, so the attempt itself is not affected by the cancel.
+func TestGitHubSkillResolver_CancelledBeforeRetry_ReturnsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var attempts int32
+	resolver := &GitHubSkillResolver{
+		httpClient: &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			atomic.AddInt32(&attempts, 1)
+			cancel()
+			h := make(http.Header)
+			h.Set("Retry-After", "120") // above githubMaxBackoff
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Header:     h,
+				Body:       http.NoBody,
+				Request:    r,
+			}, nil
+		})},
+		apiBase: "http://github.invalid",
+		rawBase: "http://github.invalid/raw",
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://github.invalid/repos/owner/repo/commits/main", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := resolver.doWithRetry(ctx, req, 5*time.Second, "")
+	if resp != nil {
+		_ = resp.Body.Close()
+		t.Fatalf("expected no response, got status %d", resp.StatusCode)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	var rerr *githubResolveError
+	if errors.As(err, &rerr) {
+		t.Errorf("expected no typed error on cancellation, got code %s", rerr.code)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("expected exactly 1 attempt, got %d", got)
 	}
 }

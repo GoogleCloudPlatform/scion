@@ -957,8 +957,8 @@ func (r *GitHubSkillResolver) setAuthHeader(req *http.Request, token string) {
 // stable cause code (see the SkillErrCode* constants in skill_resolver.go) so
 // Resolve can set ResolveError.Code — and provision.go's SkillResolutionError
 // can in turn pick an HTTP status — without string-matching msg. retryAfter
-// carries the raw Retry-After header value when the cause is
-// SkillErrCodeRateLimited and the server sent one; empty otherwise. err is
+// carries the raw Retry-After header value of the response that ended the
+// call, when the server sent one; empty otherwise. err is
 // the underlying cause, when there is one, so errors.Is and errors.As can
 // reach it through Unwrap; msg alone is still what Error returns.
 type githubResolveError struct {
@@ -975,21 +975,16 @@ func (e *githubResolveError) Unwrap() error { return e.err }
 // classifyRetryCause maps the response (and, when resp is nil, the
 // network-level error) that triggered a retry or a fail-fast to a stable
 // cause code:
-//   - 429, or 403 with rate-limit exhaustion: rate_limited.
-//   - anything else (in practice a 5xx): upstream_unavailable — GitHub
-//     itself is failing, not the caller (#2546 R3).
+//   - a response: upstream_unavailable. isRetryableResponse admits only 5xx,
+//     so GitHub itself is failing, not the caller (#2546 R3). Rate-limit
+//     responses never get here: GitHubCooldown.Do turns them into a
+//     *GitHubRateLimitError, which doWithRetry returns without retrying.
 //   - no response at all: delegated to classifyNetworkError, which tells a
 //     genuine deadline apart from a DNS/connection/TLS failure.
 func classifyRetryCause(resp *http.Response, err error) string {
 	if resp == nil {
 		return classifyNetworkError(err)
 	}
-	if resp.StatusCode == http.StatusTooManyRequests ||
-		(resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0") {
-		return SkillErrCodeRateLimited
-	}
-	// Defensive default: isRetryableResponse only admits the two cases
-	// above, so no other status reaches here today.
 	return SkillErrCodeUpstreamUnavailable
 }
 
@@ -1126,7 +1121,7 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 
 			// The server has said explicitly when to come back; if that is
 			// further out than our backoff cap, retrying now (capped at
-			// githubMaxBackoff) would just run into another rate limit.
+			// githubMaxBackoff) would come back before it asked.
 			if ra, ok := retryAfterDuration(lastResp); ok && ra > githubMaxBackoff {
 				slog.Warn("github: retry-after exceeds backoff cap, failing fast",
 					"method", req.Method, "path", req.URL.Path,
@@ -1135,9 +1130,9 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 					code:       classifyRetryCause(lastResp, nil),
 					retryAfter: retryAfterHeader,
 					msg: fmt.Sprintf(
-						"%s %s asked to retry after %s, past the %s backoff cap: "+
-							"failing fast instead of retrying into another rate limit",
-						noun, req.URL.Path, ra, githubMaxBackoff),
+						"%s %s failed (status %d) and asked to retry after %s, "+
+							"past the %s backoff cap: failing fast instead of retrying early",
+						noun, req.URL.Path, status, ra, githubMaxBackoff),
 				}
 			}
 
@@ -1224,8 +1219,8 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 // deadline is described as the "request" deadline, not the "create" deadline,
 // since the resolver also runs outside of create — on start, restart and
 // reprovision (#2546 N2). noun names the path kind ("GitHub API request to"
-// or "GitHub raw download of"), and a status is reported as a plain failure,
-// not as rate limiting, since 5xx responses take this path too.
+// or "GitHub raw download of"), and a status is reported as a plain failure:
+// only 5xx responses are retried, so only they take this path.
 func budgetExceededMessage(noun, path string, status int, retryAfter string, delay, remaining time.Duration) string {
 	outcome := fmt.Sprintf("failed (status %d)", status)
 	if retryAfter != "" {
@@ -1239,19 +1234,12 @@ func budgetExceededMessage(noun, path string, status int, retryAfter string, del
 		noun, path, outcome, delay, remaining)
 }
 
-// isRetryableResponse returns true for HTTP responses that should be retried:
-// 429 (Too Many Requests), 403 with rate-limit exhaustion, and 5xx server errors.
+// isRetryableResponse returns true for HTTP responses that should be
+// retried: 5xx server errors. Rate-limit responses (429, or a 403 reporting
+// exhaustion or a secondary limit) are never retried; GitHubCooldown.Do
+// turns them into a *GitHubRateLimitError before they get here.
 func isRetryableResponse(resp *http.Response) bool {
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return true
-	}
-	if resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0" {
-		return true
-	}
-	if resp.StatusCode >= 500 {
-		return true
-	}
-	return false
+	return resp.StatusCode >= 500
 }
 
 // retryDelay calculates the backoff duration for a retry attempt.
@@ -1267,20 +1255,6 @@ func retryDelay(resp *http.Response, attempt int) time.Duration {
 				return d
 			}
 		}
-		// For rate limits, check X-RateLimit-Reset (Unix timestamp)
-		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-			if resetStr := resp.Header.Get("X-RateLimit-Reset"); resetStr != "" {
-				if resetUnix, err := strconv.ParseInt(resetStr, 10, 64); err == nil {
-					wait := time.Until(time.Unix(resetUnix, 0))
-					if wait > 0 {
-						if wait > githubMaxBackoff {
-							return githubMaxBackoff
-						}
-						return wait
-					}
-				}
-			}
-		}
 	}
 	backoff := time.Duration(float64(githubBaseBackoff) * math.Pow(githubBackoffFactor, float64(attempt-1)))
 	if backoff > githubMaxBackoff {
@@ -1291,11 +1265,16 @@ func retryDelay(resp *http.Response, attempt int) time.Duration {
 
 // apiError builds the error for a terminal non-OK response: either the last
 // of githubMaxRetries retryable responses, or a non-retryable error status.
-// Rate-limit responses (429, or 403 with X-RateLimit-Remaining: 0) and
-// retries-exhausted 5xx responses are classified via githubResolveError so
+// Retries-exhausted 5xx responses are classified via githubResolveError so
 // callers can map them to the right status without string-matching; every
 // other status (401, 422, ...) keeps the existing uncategorized error, which
 // resolves to the same 5xx path it always has (#2546 R3).
+//
+// The rate_limited branch is a defensive fallback only: GitHubCooldown.Do
+// turns rate-limit responses into a *GitHubRateLimitError before any caller
+// sees them, so it is unreachable today. It is kept so that a rate-limit
+// response that ever got past the cooldown would still be reported as
+// rate_limited (and not retried) rather than as a generic failure.
 func (r *GitHubSkillResolver) apiError(resp *http.Response, action string) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	if resp.StatusCode == http.StatusTooManyRequests ||
