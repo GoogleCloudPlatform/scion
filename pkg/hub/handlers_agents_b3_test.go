@@ -89,7 +89,7 @@ func TestB3_CreateEdgeFailureRollsBack(t *testing.T) {
 // A create through DevAuthMiddleware records a principal edge with dev_local
 // provenance and delegator user:<DevUserID>; the edge role equals the stored
 // role.
-func TestB3_DevCreateRecordsPrincipalDevLocalEdge(t *testing.T) {
+func TestB3_DevAuthCreateRecordsPrincipalCeiling(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	project := setupProjectWithBroker(t, s, "b3-dev-edge", "B3 Dev Edge")
