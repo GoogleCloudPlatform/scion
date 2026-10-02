@@ -100,9 +100,9 @@ func setupDemoPolicyTest(t *testing.T) (*Server, store.Store, *store.User, *stor
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
-	// Create project members group and policy (simulates what project creation handler does).
-	// Phase 1F: createProjectMembersGroup now also creates the role binding.
-	srv.createProjectMembersGroup(ctx, project)
+	// Create the creator's owner binding and the members group (simulates
+	// what the project creation handler does).
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	return srv, s, alice, bob, project
 }

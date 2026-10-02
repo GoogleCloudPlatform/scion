@@ -225,7 +225,11 @@ Examples:
 			return fmt.Errorf("--thread-id requires --channel to be set")
 		}
 
-		// Validate --raw restrictions
+		// Validate --raw restrictions. --raw is a thin alias of the keys
+		// client (sendKeysViaHub/sendKeysLocal, shared with `scion keys`):
+		// anything keys itself does not support must be rejected here,
+		// before any send is attempted, exactly like every other
+		// invalid-combination check in this block.
 		if msgRaw {
 			if msgPlain {
 				return fmt.Errorf("--raw and --plain are mutually exclusive")
@@ -235,6 +239,32 @@ Examples:
 			}
 			if len(msgAttach) > 0 {
 				return fmt.Errorf("--raw cannot be combined with --attach")
+			}
+			if msgNotify {
+				return fmt.Errorf("--raw cannot be combined with --notify")
+			}
+			if msgInterrupt {
+				return fmt.Errorf("--raw cannot be combined with --interrupt; keys has no interrupt step")
+			}
+			// --thread-id checked before --channel: --thread-id requires
+			// --channel to be set at all (checked earlier, unconditionally),
+			// so the only way to reach this block with --thread-id set is
+			// with --channel also set — checking thread-id first lets its
+			// own, more specific message fire instead of being masked by
+			// the channel check.
+			if msgThreadID != "" {
+				return fmt.Errorf("--raw cannot be combined with --thread-id")
+			}
+			if msgChannel != "" {
+				return fmt.Errorf("--raw cannot be combined with --channel")
+			}
+			// Only a same-project @agent reference is an alias for `scion
+			// keys` (routed below, in place of sendMessageViaConversation);
+			// conv:/#thread/@email have no single-agent-keys equivalent and
+			// must not reach the legacy Raw StructuredMessage path that
+			// sendMessageViaConversation would otherwise use for them.
+			if convRef != nil && convRef.Kind != messaging.RefAgent {
+				return fmt.Errorf("--raw cannot be used with %s addressing; target the agent directly instead (e.g. 'scion keys <agent> ...')", convRef.Raw)
 			}
 		}
 
@@ -341,7 +371,7 @@ Examples:
 		// path skips the wrapped envelope, so a cross-project send must
 		// refuse it the same way `scion keys` refuses cross-project targets
 		// outright. This CLI check is UX only; the authoritative refusal is
-		// hub-side (ExecuteAgentDM).
+		// hub-side (ExecuteAgentKeys, via authorizeAgentKeys).
 		if crossProjectTarget != "" && msgRaw {
 			return fmt.Errorf("--raw cannot be used with a cross-project target; message the agent from within its own project")
 		}
@@ -442,6 +472,16 @@ Examples:
 
 		// Conversation-reference messages: resolve and send via Hub
 		if convRef != nil {
+			if msgRaw {
+				// Validated above: only RefAgent (same-project @agent) can
+				// still be msgRaw here. It is a plain alias for `scion
+				// keys` against that same agent slug — never
+				// sendMessageViaConversation, which would otherwise build a
+				// Raw StructuredMessage for it. Slugify like every other
+				// keys entry point so `@Builder` and `Builder` address the
+				// same agent.
+				return sendKeysViaHub(hubCtx, api.Slugify(convRef.Value), message)
+			}
 			return sendMessageViaConversation(hubCtx, convRef, message, msgInterrupt, msgWake, msgAttach)
 		}
 
@@ -456,6 +496,12 @@ Examples:
 		}
 
 		if hubCtx != nil {
+			if msgRaw {
+				// The temporary --raw alias: identical operation to `scion
+				// keys`, through the same dedicated /keys client path —
+				// never /message, never a Raw StructuredMessage.
+				return sendKeysViaHub(hubCtx, agentName, message)
+			}
 			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgNotify, msgWake)
 		}
 
@@ -471,6 +517,13 @@ Examples:
 			return fmt.Errorf("--attach requires Hub mode (use 'scion hub enable' first); in local mode, include the file contents in the message text")
 		}
 
+		// The temporary --raw alias in local mode: the same project-scoped,
+		// ambiguity-safe keys path `scion keys` uses (sendKeysLocal), never
+		// the legacy MessageRaw primitive.
+		if msgRaw {
+			return sendKeysLocal(agentName, message)
+		}
+
 		// Local mode — structured messages are only available in Hub mode,
 		// so local mode continues to use plain text delivery.
 		ctx := context.Background()
@@ -478,12 +531,6 @@ Examples:
 		rt := runtime.GetRuntime(projectPath, profile)
 		mgr := agent.NewManager(rt)
 		defer mgr.Close()
-
-		// Raw mode: send literal bytes via send-keys with no trailing Enter
-		if msgRaw {
-			fmt.Printf("Sending raw keys to agent '%s'...\n", agentName)
-			return mgr.MessageRaw(ctx, agentName, "", message)
-		}
 
 		fmt.Printf("Sending message to agent '%s'...\n", agentName)
 		if err := mgr.Message(ctx, agentName, "", message, msgInterrupt); err != nil {

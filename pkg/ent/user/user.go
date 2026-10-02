@@ -48,6 +48,8 @@ const (
 	EdgePolicyBindings = "policy_bindings"
 	// EdgeExternalIdentities holds the string denoting the external_identities edge name in mutations.
 	EdgeExternalIdentities = "external_identities"
+	// EdgeTerminalWorkspace holds the string denoting the terminal_workspace edge name in mutations.
+	EdgeTerminalWorkspace = "terminal_workspace"
 	// Table holds the table name of the user in the database.
 	Table = "users"
 	// OwnedGroupsTable is the table that holds the owned_groups relation/edge.
@@ -78,6 +80,13 @@ const (
 	ExternalIdentitiesInverseTable = "external_identities"
 	// ExternalIdentitiesColumn is the table column denoting the external_identities relation/edge.
 	ExternalIdentitiesColumn = "user_id"
+	// TerminalWorkspaceTable is the table that holds the terminal_workspace relation/edge.
+	TerminalWorkspaceTable = "user_terminal_workspaces"
+	// TerminalWorkspaceInverseTable is the table name for the UserTerminalWorkspace entity.
+	// It exists in this package in order to avoid circular dependency with the "userterminalworkspace" package.
+	TerminalWorkspaceInverseTable = "user_terminal_workspaces"
+	// TerminalWorkspaceColumn is the table column denoting the terminal_workspace relation/edge.
+	TerminalWorkspaceColumn = "user_id"
 )
 
 // Columns holds all SQL columns for user fields.
@@ -290,6 +299,13 @@ func ByExternalIdentities(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOptio
 		sqlgraph.OrderByNeighborTerms(s, newExternalIdentitiesStep(), append([]sql.OrderTerm{term}, terms...)...)
 	}
 }
+
+// ByTerminalWorkspaceField orders the results by terminal_workspace field.
+func ByTerminalWorkspaceField(field string, opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newTerminalWorkspaceStep(), sql.OrderByField(field, opts...))
+	}
+}
 func newOwnedGroupsStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
@@ -316,5 +332,12 @@ func newExternalIdentitiesStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(ExternalIdentitiesInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2M, false, ExternalIdentitiesTable, ExternalIdentitiesColumn),
+	)
+}
+func newTerminalWorkspaceStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(TerminalWorkspaceInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2O, false, TerminalWorkspaceTable, TerminalWorkspaceColumn),
 	)
 }

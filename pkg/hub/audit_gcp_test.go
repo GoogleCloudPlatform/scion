@@ -59,6 +59,10 @@ func (m *mockAuditLogger) LogAgentSecretReadEvent(_ context.Context, _ *AgentSec
 	return nil
 }
 
+func (m *mockAuditLogger) LogGCSLinkFetchEvent(_ context.Context, _ *GCSLinkFetchEvent) error {
+	return nil
+}
+
 func TestLogGCPTokenGeneration_Success(t *testing.T) {
 	mock := &mockAuditLogger{}
 	ctx := context.Background()

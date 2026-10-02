@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -75,6 +76,16 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		status.ExitReason = "" // silently drop invalid values
 	}
 
+	// Observability only: sciontool init reports elapsed-since-process-start
+	// via Metadata["startup_ms"] on its first running status report. Log the
+	// parsed value only — never the rest of the Metadata map — so start-time
+	// attribution does not depend on persisting a new column.
+	if raw, ok := status.Metadata["startup_ms"]; ok {
+		if ms, parseErr := strconv.ParseInt(raw, 10, 64); parseErr == nil {
+			s.agentLifecycleLog.Info("agent reported startup timing", "agent_id", id, "startup_ms", ms)
+		}
+	}
+
 	// Guard against phase regressions and auto-correct phase from activity.
 	if status.Phase != "" || status.Activity != "" {
 		agent, err := s.store.GetAgent(ctx, id)
@@ -82,6 +93,38 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 			writeErrorFromErr(w, err, "")
 			return
 		}
+
+		// Observability only: start-time attribution from agent.Created to the
+		// first "running"/"working" status report, logged at whichever of two
+		// known sources actually reaches here first. A no-auth/drop-to-shell
+		// agent never runs a harness session, so it never emits SessionStart
+		// and only ever reaches the first case below (see ptone/scion#2519):
+		//
+		//  - "Agent started": sciontool init's own report, right after the
+		//    supervised child process starts (same request that carries
+		//    Metadata["startup_ms"] above). Fires for every agent, including
+		//    no-auth/drop-to-shell ones. This is the dispatch-to-init-ready
+		//    number.
+		//  - "Session started": the harness's SessionStart hook (see
+		//    ReportState's one call site for EventSessionStart in
+		//    pkg/sciontool/hooks/handlers/hub.go). Only fires once a real
+		//    harness session starts, i.e. when credentials are configured.
+		//    This is the dispatch-to-harness-ready number.
+		//
+		// Logging every time a matching report arrives, rather than tracking
+		// a persisted "first report" flag — testers take the earliest line
+		// per agent and source as the number.
+		if status.Phase == string(state.PhaseRunning) && status.Activity == string(state.ActivityWorking) && !agent.Created.IsZero() {
+			switch status.Message {
+			case "Agent started":
+				s.agentLifecycleLog.Info("dispatch ready: Agent started status received",
+					"agent_id", id, "since_create_ms", time.Since(agent.Created).Milliseconds())
+			case "Session started":
+				s.agentLifecycleLog.Info("harness ready: SessionStart status received",
+					"agent_id", id, "since_create_ms", time.Since(agent.Created).Milliseconds())
+			}
+		}
+
 		oldPhase := agent.Phase
 		guardAgentPhaseTransition(agent, &status)
 		// Reconcile the max_agents_per_broker reservation against the phase
@@ -216,6 +259,10 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 		return &errHarnessNoResume{reason: reason}
 	}
 
+	// The container is stopped before phase=suspended is written; see
+	// beginLifecycleOp.
+	defer s.beginLifecycleOp(agent.ID)()
+
 	dispatcher := s.GetDispatcher()
 	if dispatcher != nil && agent.RuntimeBrokerID != "" {
 		s.syncWorkspaceOnStop(ctx, agent)
@@ -283,6 +330,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	if !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}
+
+	// While this lifecycle action runs, the agent's container may be
+	// legitimately absent with the row still in phase running (for example
+	// between the stop and the start of a restart); keep the heartbeat
+	// missing-container reconcile away from it until the final status write.
+	defer s.beginLifecycleOp(agent.ID)()
 
 	var newPhase string
 	var dispatchErr error
@@ -444,9 +497,17 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		zero := 0
 		statusUpdate.ExitCode = &zero
 	}
-	// When starting or restarting, propagate container status from broker response
-	if (action == api.AgentActionStart || action == api.AgentActionRestart) && agent.ContainerStatus != "" {
-		statusUpdate.ContainerStatus = agent.ContainerStatus
+	// When starting or restarting, propagate container status from broker
+	// response, and clear any exit reason/code from the prior generation —
+	// including a disruption reason recorded while the agent was still
+	// running (state.ExitReasonPreempted/ExitReasonEvicted), which the
+	// phase-transition clear in UpdateAgentStatus does not catch when the
+	// agent was already running (not stopped/error) at dispatch time.
+	if action == api.AgentActionStart || action == api.AgentActionRestart {
+		if agent.ContainerStatus != "" {
+			statusUpdate.ContainerStatus = agent.ContainerStatus
+		}
+		statusUpdate.ClearExit = true
 	}
 	if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
 		writeErrorFromErr(w, err, "")

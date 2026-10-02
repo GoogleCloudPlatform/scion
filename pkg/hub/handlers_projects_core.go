@@ -705,10 +705,9 @@ func isSystemProjectAgentsGroup(group *store.Group, projectID string) bool {
 }
 
 // createProjectMembersGroup creates the project's collaboration
-// members group and ensures project membership via RoleBindings. The group
-// exists for collaboration (chat, agent co-ownership) but carries NO
-// authorization meaning — all authorization flows through project-scoped
-// RoleBindings.
+// members group. The group exists for collaboration (chat, agent
+// co-ownership) but carries NO authorization meaning — all authorization
+// flows through project-scoped RoleBindings. It never creates role bindings.
 //
 // PM1 contract: project membership IS the set of project-scoped role bindings.
 // The special project:<slug>:members group no longer has authorization meaning.
@@ -790,17 +789,16 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 			s.projectsLogger().Warn("failed to add creator to project members group",
 				"project_id", project.ID, "user", project.CreatedBy, "error", err.Error())
 		}
-
-		// Ensure a project-owner role binding exists for the creator. In
-		// production, the createProject handler creates this via
-		// createProjectOwnerRoleBinding BEFORE calling us. But this function
-		// is also called from backfill and sync paths where the role binding
-		// may not exist. Best-effort; errors logged.
-		if rbErr := s.createProjectOwnerRoleBinding(ctx, project.ID, project.CreatedBy); rbErr != nil {
-			s.projectsLogger().Debug("project owner role binding already exists or failed",
-				"project_id", project.ID, "user", project.CreatedBy, "error", rbErr.Error())
-		}
 	}
+
+	// This function deliberately does NOT create a project-owner role binding
+	// for project.CreatedBy (ptone/scion#2554). It runs on GET, register,
+	// the idempotent re-create of an existing project and clone, so granting
+	// here would re-make a removed or demoted creator an owner on the next
+	// read. The creator-owner binding is created only on genuine first
+	// creation, by createProjectOwnerRoleBinding in the create, register and
+	// clone handlers; legacy projects with no owner binding at all are
+	// backfilled at startup by backfillProjectOwnerRoleBindings.
 
 	// ── Legacy policy bridge (pre-CO1) ──────────────────────────────────
 	// CO1 cutover: legacy project policies are no longer needed.
@@ -1765,6 +1763,27 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		memberPath := strings.TrimPrefix(subPath, "members")
 		memberPath = strings.TrimPrefix(memberPath, "/")
 		memberPath = strings.TrimSuffix(memberPath, "/")
+		// ptone/scion#2529 P1: …/members/principals/{principalType}/{principalId}
+		// sits above handleProjectMemberByID's binding-ID dispatch — binding
+		// IDs are UUIDs, so there is no collision with the literal
+		// "principals" segment.
+		if strings.HasPrefix(memberPath, "principals/") {
+			principalPath := strings.TrimPrefix(memberPath, "principals/")
+			parts := strings.SplitN(principalPath, "/", 2)
+			// L6 (review r1): principalPath comes from r.URL.Path, which
+			// net/http has already percent-decoded once — a further
+			// url.PathUnescape here double-decoded it (e.g. a principal ID
+			// that is literally "a%40b" was silently corrupted to "a@b").
+			// Reject an ID containing "/" rather than accepting it as part
+			// of a two-segment ID: SplitN(…, 2) otherwise lets
+			// "principals/user/a/b" through as principalID "a/b".
+			if len(parts) == 2 && parts[0] != "" && parts[1] != "" && !strings.Contains(parts[1], "/") {
+				s.handleProjectMemberPrincipal(w, r, projectID, parts[0], parts[1])
+			} else {
+				NotFound(w, "Member principal")
+			}
+			return
+		}
 		if memberPath == "" {
 			s.handleProjectMembers(w, r, projectID)
 		} else {
@@ -1779,11 +1798,9 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for nested /agents path
-	if strings.HasPrefix(subPath, "agents") {
-		agentPath := strings.TrimPrefix(subPath, "agents")
-		agentPath = strings.TrimPrefix(agentPath, "/")
-		s.handleProjectAgents(w, r, projectID, agentPath)
+	// Nested /agents paths: routeGuard resolved the agent sub-route.
+	if subPath == "agents" || strings.HasPrefix(subPath, "agents/") {
+		s.handleProjectAgents(w, r, projectID)
 		return
 	}
 
@@ -2027,8 +2044,17 @@ func (s *Server) handleProjectByIDInternal(w http.ResponseWriter, r *http.Reques
 
 // handleProjectAgents handles agent operations scoped to a project
 // Path: /api/v1/projects/{projectId}/agents[/{agentId}[/{action}]]
-func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, projectID, agentPath string) {
+func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
+
+	route, ok := requireAgentSubRoute(w, r)
+	if !ok {
+		return
+	}
+	if resolveProjectID(route.ProjectID) != projectID {
+		NotFound(w, "Project")
+		return
+	}
 
 	// Verify project exists
 	project, err := s.store.GetProject(ctx, projectID)
@@ -2041,14 +2067,14 @@ func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 
-	// Handle stop-all (POST /api/v1/projects/{projectId}/agents/stop-all)
-	if agentPath == "stop-all" {
+	agentIDRaw := route.AgentID
+	switch route.RouteID {
+	case ProjectAgentRouteStopAll:
+		// POST /api/v1/projects/{projectId}/agents/stop-all
 		s.handleStopAllAgents(w, r, project.ID)
-		return
-	}
 
-	// No agent ID - list or create agents in this project
-	if agentPath == "" {
+	case ProjectAgentRouteCollection:
+		// No agent ID - list or create agents in this project
 		switch r.Method {
 		case http.MethodGet:
 			s.listProjectAgents(w, r, project.ID)
@@ -2057,34 +2083,52 @@ func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, pro
 		default:
 			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 		}
-		return
-	}
 
-	// Parse agent ID and action
-	parts := strings.SplitN(agentPath, "/", 2)
-	agentIDRaw := parts[0]
-	action := ""
-	if len(parts) > 1 {
-		action = parts[1]
-	}
+	case ProjectAgentRouteRoot:
+		// Agent by ID within project
+		switch r.Method {
+		case http.MethodGet:
+			s.getProjectAgent(w, r, project.ID, agentIDRaw)
+		case http.MethodPatch:
+			s.updateProjectAgent(w, r, project.ID, agentIDRaw)
+		case http.MethodDelete:
+			s.deleteProjectAgent(w, r, project.ID, agentIDRaw)
+		default:
+			MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
+		}
 
-	// Handle actions
-	if action != "" {
-		s.handleProjectAgentAction(w, r, project.ID, agentIDRaw, action)
-		return
-	}
-
-	// Handle agent by ID within project
-	switch r.Method {
-	case http.MethodGet:
-		s.getProjectAgent(w, r, project.ID, agentIDRaw)
-	case http.MethodPatch:
-		s.updateProjectAgent(w, r, project.ID, agentIDRaw)
-	case http.MethodDelete:
-		s.deleteProjectAgent(w, r, project.ID, agentIDRaw)
 	default:
-		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
+		action, ok := projectAgentRouteActions[route.RouteID]
+		if !ok {
+			NotFound(w, "Agent route")
+			return
+		}
+		s.handleProjectAgentAction(w, r, project.ID, agentIDRaw, action)
 	}
+}
+
+// projectAgentRouteActions maps project-form agent action routes to the
+// action name handleProjectAgentAction dispatches on.
+var projectAgentRouteActions = map[AgentSubRouteID]string{
+	ProjectAgentRouteLogs:              api.AgentActionLogs,
+	ProjectAgentRouteCloudLogs:         "cloud-logs",
+	ProjectAgentRouteCloudLogsStream:   "cloud-logs/stream",
+	ProjectAgentRouteMessageLogs:       api.AgentActionMessageLogs,
+	ProjectAgentRouteMessageLogsStream: api.AgentActionMessageLogsStream,
+	ProjectAgentRouteActionStatus:      api.AgentActionStatus,
+	ProjectAgentRouteActionStart:       api.AgentActionStart,
+	ProjectAgentRouteActionStop:        api.AgentActionStop,
+	ProjectAgentRouteActionSuspend:     api.AgentActionSuspend,
+	ProjectAgentRouteActionRestart:     api.AgentActionRestart,
+	ProjectAgentRouteActionMessage:     api.AgentActionMessage,
+	ProjectAgentRouteActionExec:        api.AgentActionExec,
+	ProjectAgentRouteActionRestore:     api.AgentActionRestore,
+	ProjectAgentRouteActionEnv:         api.AgentActionEnv,
+	ProjectAgentRouteActionOutbound:    api.AgentActionOutboundMessage,
+	ProjectAgentRouteActionMessageMode: api.AgentActionSetMessageMode,
+	ProjectAgentRouteActionReincarnate: api.AgentActionReincarnate,
+	ProjectAgentRouteActionResetAuth:   api.AgentActionResetAuth,
+	ProjectAgentRouteActionKeys:        api.AgentActionKeys,
 }
 
 // listProjectAgents lists agents within a specific project
@@ -2095,6 +2139,8 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 
 	ctx := r.Context()
 	agentIdent := GetAgentIdentityFromContext(ctx)
+	query := r.URL.Query()
+	sorted := isSortedModeRequest(query)
 
 	if agentIdent != nil {
 		// checkAgentReadScope only checks that the token carries the
@@ -2109,6 +2155,14 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 			NotFound(w, "Project")
 			return
 		}
+		// P1b (ptone/scion#2383, design lists-graph.md 5.3 "P1b build"): the
+		// agent-JWT sorted path ships in P2. Reject before any SQL, so a
+		// sorted request from an agent token can never fall into the user
+		// path's read pass below.
+		if sorted {
+			rejectAgentJWTSortedMode(w)
+			return
+		}
 	} else {
 		// A user identity (or no identity) reached no gate at all here before
 		// this fix: any authenticated hub user, project member or not, got
@@ -2119,8 +2173,6 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 			return
 		}
 	}
-
-	query := r.URL.Query()
 
 	filter := store.AgentFilter{
 		ProjectID:       projectID,
@@ -2149,9 +2201,32 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		}
 	}
 
+	if sorted {
+		params, ok := parseSortedProjectListParams(w, query, limit)
+		if !ok {
+			return
+		}
+		s.listProjectAgentsSorted(w, r, projectID, query, filter, params)
+		return
+	}
+
+	// Legacy mode. identity is resolved generically (user or agent) because
+	// the new project cursor binding below covers both callers (design 4.4:
+	// "This is new in both modes"; the CLI walk test exercises both).
+	identity := GetIdentityFromContext(ctx)
+	cursorBinding := scopedCursorBinding(sortSuffix("project-agents:"+projectID, "", ""), filter, identity)
+	cursor := query.Get("cursor")
+	if cursor != "" {
+		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
+			BadRequest(w, err.Error())
+			return
+		}
+	}
+
 	result, err := s.store.ListAgents(ctx, filter, store.ListOptions{
-		Limit:  limit,
-		Cursor: query.Get("cursor"),
+		Limit:         limit,
+		Cursor:        cursor,
+		CursorBinding: cursorBinding,
 	})
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -2162,7 +2237,6 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	s.enrichAgents(ctx, result.Items)
 
 	// Compute per-item and scope capabilities
-	identity := GetIdentityFromContext(ctx)
 	agents := make([]AgentWithCapabilities, 0, len(result.Items))
 	switch {
 	case agentIdent != nil:
@@ -2177,7 +2251,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
 		for i := range result.Items {
 			item := result.Items[i]
-			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, capabilityAllows(caps[i], ActionAttach))
+			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
 			agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
 		}
 	case identity != nil:
@@ -2196,7 +2270,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 				continue
 			}
 			item := result.Items[i]
-			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, capabilityAllows(caps[i], ActionAttach))
+			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
 			agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
 		}
 	}
@@ -2423,21 +2497,16 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 
 	ctx := r.Context()
 
-	// --- Keys action: routed through authorizeAgentKeys (contract §3.1) ---
-	// The agent-credential cross-project refusal must be decided before any
-	// agent-target lookup on this route (invariant 4, AK-21c): compare the
-	// caller's own project against the already-resolved {project} ID first,
-	// so a foreign agent identity never causes (or requires) a lookup for a
-	// same-slug agent that might exist in the URL's project. Only once that
-	// passes do we resolve the target, using the same canonical
+	// --- Keys action: ExecuteAgentKeys (task 2.2, contract §3.1) ---
+	// This is the sole authoritative operation for the keys action on this
+	// route (see execute_agent_keys.go for the full flow): bounded strict
+	// body decode, one minted operation ID, the agent-credential
+	// cross-project refusal decided before any agent-target lookup
+	// (invariant 4, AK-21c), target resolution via the same canonical
 	// resolveProjectAgent the logs/cloud-logs/message-logs branches above
-	// already use, so a store failure surfaces as a generic 5xx via
-	// writeErrorFromErr rather than being collapsed into a misleading
-	// "agent does not exist" 404. A store.ErrNotFound miss is reported as
-	// keys' own "not_found" (invariant 3), not the shared resolution
-	// block's agent_not_found/{agent_slug,project_id} shape a few lines
-	// below, which is specific to every other (non-keys) action on this
-	// route.
+	// use, authorizeAgentKeys, admission and one typed dispatch. It writes
+	// its own response for every outcome and never falls through to the
+	// generic switch below.
 	//
 	// No separate nil-identity guard: authorizeAgentKeys already fails
 	// closed (keys_denied) on a nil identity, and the shared auth
@@ -2446,30 +2515,7 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	// or, placed after resolution, let an (unreachable) unauthenticated
 	// caller learn whether the agent exists before being refused.
 	if action == api.AgentActionKeys {
-		if denial := s.authorizeAgentKeysCrossProject(r, projectID); denial != nil {
-			writeAgentKeysAuthzDenial(w, *denial)
-			return
-		}
-		agent, err := s.resolveProjectAgent(ctx, projectID, agentID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				NotFound(w, "Agent")
-				return
-			}
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		decision := s.authorizeAgentKeys(r, agent)
-		if !decision.Allowed {
-			writeAgentKeysAuthzDenial(w, decision)
-			return
-		}
-		// Task 2.2 adds the real handler; until then, an authorized call
-		// still 404s here, matching the two switches' shared
-		// `default: NotFound(w, "Action")` below for every other
-		// not-yet-implemented action on this route — not because it was
-		// denied.
-		NotFound(w, "Action")
+		s.handleAgentActionKeysProjectScoped(w, r, projectID, agentID)
 		return
 	}
 
@@ -2518,6 +2564,17 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 				"This action requires user or agent authentication", nil)
 			return
 		}
+		// --- Task 2.3 (ptone/scion#2197): message-raw bridge ---
+		// Classify raw before authorizeAgentMessage runs (contract §6.1's
+		// branch-point invariant), reusing the agent already resolved above
+		// (the same shared resolution block every other action on this route
+		// uses -- the bridge introduces no separate resolution step). A
+		// raw-selected request is handled here entirely; a non-raw request
+		// falls through completely unaffected, body restored byte-for-byte.
+		if s.tryAgentKeysMessageBridge(w, r, agent, agentID, "/api/v1/projects/"+projectID+"/agents/"+agent.ID+"/keys", true) {
+			return
+		}
+
 		isSystemPlane := false
 		allowed, reason, decision := s.authorizeAgentMessage(r.Context(), identity, agent, isSystemPlane)
 		messaging.RecordStep(r.Context(), "message_authorized")

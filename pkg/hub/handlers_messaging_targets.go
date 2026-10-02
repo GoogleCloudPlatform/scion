@@ -52,7 +52,7 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 	}
 
 	identity := GetIdentityFromContext(r.Context())
-	if identity == nil {
+	if isNilIdentity(identity) {
 		Unauthorized(w)
 		return
 	}

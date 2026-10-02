@@ -245,6 +245,42 @@ def _resolve_reasoning_effort(level: int) -> str:
     return "low"
 
 
+# Codex-only fallback effort when SCION_THINKING_LEVEL gives no explicit
+# level (ptone/scion#2479) -- see _resolve_reasoning_effort_env below.
+_DEFAULT_REASONING_EFFORT = "medium"
+
+
+def _resolve_reasoning_effort_env(ctx: scion_harness.ProvisionContext, thinking_raw: str) -> str:
+    """Resolve the (already-stripped) SCION_THINKING_LEVEL value into a
+    reasoning_effort, logging the decision.
+
+    An explicit integer value always wins and uses _resolve_reasoning_effort's
+    mapping. An unset/blank value, or one that isn't a valid integer, falls
+    back to _DEFAULT_REASONING_EFFORT: both cases mean this script has no
+    explicit signal from CLI/web/template/hub, so they're treated the same
+    way rather than letting an invalid value silently reproduce the
+    "low" bug this fallback exists to fix.
+    """
+    if thinking_raw:
+        try:
+            thinking_level = int(thinking_raw)
+        except ValueError:
+            # Every Go path produces this value with strconv.Itoa, so a
+            # non-integer here means something upstream (a hand-set env, a
+            # template, or a harness-config env) is misconfigured -- warn
+            # rather than log at the same level as the normal paths below.
+            ctx.warn(
+                f"thinking_level={thinking_raw!r} is not a valid integer; "
+                f"reasoning_effort={_DEFAULT_REASONING_EFFORT} (default)"
+            )
+            return _DEFAULT_REASONING_EFFORT
+        reasoning_effort = _resolve_reasoning_effort(thinking_level)
+        ctx.info(f"thinking_level={thinking_level} reasoning_effort={reasoning_effort}")
+        return reasoning_effort
+    ctx.info(f"thinking_level=<unset>, reasoning_effort={_DEFAULT_REASONING_EFFORT} (default)")
+    return _DEFAULT_REASONING_EFFORT
+
+
 # The line-oriented TOML string/comment masking, bracket-depth tracking,
 # header detection, top-level key strip/insert, and the tomllib
 # round-trip/preservation backstop all live in scion_harness now (shared
@@ -546,14 +582,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     scion_harness.project_instructions(ctx, instructions_file)
 
     thinking_raw = os.environ.get("SCION_THINKING_LEVEL", "").strip()
-    reasoning_effort: str | None = None
-    if thinking_raw:
-        try:
-            thinking_level = int(thinking_raw)
-            reasoning_effort = _resolve_reasoning_effort(thinking_level)
-            ctx.info(f"thinking_level={thinking_level} reasoning_effort={reasoning_effort}")
-        except ValueError:
-            pass
+    reasoning_effort = _resolve_reasoning_effort_env(ctx, thinking_raw)
 
     telemetry_payload = ctx.telemetry
     telemetry = telemetry_payload.get("telemetry") if isinstance(telemetry_payload, dict) else None

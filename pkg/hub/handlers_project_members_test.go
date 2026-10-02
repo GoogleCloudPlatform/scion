@@ -73,7 +73,7 @@ func setupProjectMembersTest(t *testing.T) (srv *Server, st store.Store, owner *
 	require.NoError(t, st.CreateProject(ctx, project))
 
 	// Create project-owner role binding for "owner" (simulates project creation).
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, owner.ID))
 
 	return srv, st, owner, other, project
@@ -1008,7 +1008,7 @@ func TestC0_CrossProjectDenied(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, st.CreateProject(ctx, otherProject))
-	srv.createProjectMembersGroup(ctx, otherProject)
+	srv.seedProjectCreatorMembership(ctx, otherProject)
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, otherProject.ID, otherOwner.ID))
 
 	// The first project's owner tries to manage members in the other project.

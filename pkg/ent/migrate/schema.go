@@ -58,6 +58,57 @@ var (
 			},
 		},
 	}
+	// AccessConstraintHistoryColumns holds the columns for the "access_constraint_history" table.
+	AccessConstraintHistoryColumns = []*schema.Column{
+		{Name: "event_id", Type: field.TypeString},
+		{Name: "occurred_at", Type: field.TypeTime},
+		{Name: "operation", Type: field.TypeString},
+		{Name: "actor_kind", Type: field.TypeString, Nullable: true},
+		{Name: "actor_id", Type: field.TypeString, Nullable: true},
+		{Name: "correlation_id", Type: field.TypeString, Nullable: true},
+		{Name: "batch_operation_id", Type: field.TypeString, Nullable: true},
+		{Name: "before_revision", Type: field.TypeInt64, Nullable: true},
+		{Name: "after_revision", Type: field.TypeInt64, Nullable: true},
+		{Name: "classification", Type: field.TypeString, Nullable: true},
+		{Name: "preview_id", Type: field.TypeString, Nullable: true},
+		{Name: "draft_hash", Type: field.TypeString, Nullable: true},
+		{Name: "impact_counts_json", Type: field.TypeString, Nullable: true},
+		{Name: "changed_fields_json", Type: field.TypeString, Nullable: true},
+		{Name: "constraint_id", Type: field.TypeUUID},
+	}
+	// AccessConstraintHistoryTable holds the schema information for the "access_constraint_history" table.
+	AccessConstraintHistoryTable = &schema.Table{
+		Name:       "access_constraint_history",
+		Columns:    AccessConstraintHistoryColumns,
+		PrimaryKey: []*schema.Column{AccessConstraintHistoryColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "access_constraint_history_access_constraints_history",
+				Columns:    []*schema.Column{AccessConstraintHistoryColumns[14]},
+				RefColumns: []*schema.Column{AccessConstraintsColumns[0]},
+				OnDelete:   schema.Cascade,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "accessconstrainthistory_constraint_id_occurred_at_event_id",
+				Unique:  false,
+				Columns: []*schema.Column{AccessConstraintHistoryColumns[14], AccessConstraintHistoryColumns[1], AccessConstraintHistoryColumns[0]},
+				Annotation: &entsql.IndexAnnotation{
+					DescColumns: map[string]bool{
+						AccessConstraintHistoryColumns[0].Name: true,
+
+						AccessConstraintHistoryColumns[1].Name: true,
+					},
+				},
+			},
+			{
+				Name:    "accessconstrainthistory_occurred_at",
+				Unique:  false,
+				Columns: []*schema.Column{AccessConstraintHistoryColumns[1]},
+			},
+		},
+	}
 	// AccessPoliciesColumns holds the columns for the "access_policies" table.
 	AccessPoliciesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -2216,7 +2267,8 @@ var (
 		{Name: "name", Type: field.TypeString},
 		{Name: "prefix", Type: field.TypeString},
 		{Name: "key_hash", Type: field.TypeString, Unique: true},
-		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "boundary_kind", Type: field.TypeString, Default: "project"},
 		{Name: "scopes", Type: field.TypeString},
 		{Name: "ceiling_version", Type: field.TypeInt32, Default: 0},
 		{Name: "ceiling_permission_ids", Type: field.TypeString, Nullable: true},
@@ -2242,6 +2294,30 @@ var (
 				Name:    "useraccesstoken_project_id",
 				Unique:  false,
 				Columns: []*schema.Column{UserAccessTokensColumns[5]},
+			},
+		},
+	}
+	// UserTerminalWorkspacesColumns holds the columns for the "user_terminal_workspaces" table.
+	UserTerminalWorkspacesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "agent_ids", Type: field.TypeJSON},
+		{Name: "frontmost_agent_id", Type: field.TypeString, Nullable: true},
+		{Name: "schema_version", Type: field.TypeInt, Default: 1},
+		{Name: "revision", Type: field.TypeInt64, Default: 0},
+		{Name: "update_time", Type: field.TypeTime},
+		{Name: "user_id", Type: field.TypeUUID, Unique: true},
+	}
+	// UserTerminalWorkspacesTable holds the schema information for the "user_terminal_workspaces" table.
+	UserTerminalWorkspacesTable = &schema.Table{
+		Name:       "user_terminal_workspaces",
+		Columns:    UserTerminalWorkspacesColumns,
+		PrimaryKey: []*schema.Column{UserTerminalWorkspacesColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "user_terminal_workspaces_users_terminal_workspace",
+				Columns:    []*schema.Column{UserTerminalWorkspacesColumns[6]},
+				RefColumns: []*schema.Column{UsersColumns[0]},
+				OnDelete:   schema.Cascade,
 			},
 		},
 	}
@@ -2273,6 +2349,7 @@ var (
 	// Tables holds all the tables in the schema.
 	Tables = []*schema.Table{
 		AccessConstraintsTable,
+		AccessConstraintHistoryTable,
 		AccessPoliciesTable,
 		AgentsTable,
 		AgentCredentialsTable,
@@ -2335,11 +2412,16 @@ var (
 		UsageReservationsTable,
 		UsersTable,
 		UserAccessTokensTable,
+		UserTerminalWorkspacesTable,
 		GroupChildGroupsTable,
 	}
 )
 
 func init() {
+	AccessConstraintHistoryTable.ForeignKeys[0].RefTable = AccessConstraintsTable
+	AccessConstraintHistoryTable.Annotation = &entsql.Annotation{
+		Table: "access_constraint_history",
+	}
 	AgentsTable.ForeignKeys[0].RefTable = ProjectsTable
 	AgentSessionMetricsTable.Annotation = &entsql.Annotation{
 		Table: "agent_session_metrics",
@@ -2478,6 +2560,13 @@ func init() {
 	UsageReservationsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	UserAccessTokensTable.Annotation = &entsql.Annotation{
 		Table: "user_access_tokens",
+	}
+	UserAccessTokensTable.Annotation.Checks = map[string]string{
+		"user_access_tokens_boundary_kind_check": "((boundary_kind = 'project' AND project_id IS NOT NULL) OR (boundary_kind = 'hub' AND project_id IS NULL))",
+	}
+	UserTerminalWorkspacesTable.ForeignKeys[0].RefTable = UsersTable
+	UserTerminalWorkspacesTable.Annotation = &entsql.Annotation{
+		Table: "user_terminal_workspaces",
 	}
 	GroupChildGroupsTable.ForeignKeys[0].RefTable = GroupsTable
 	GroupChildGroupsTable.ForeignKeys[1].RefTable = GroupsTable

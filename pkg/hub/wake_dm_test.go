@@ -890,11 +890,17 @@ func TestBrokerQuota_WakeReadinessTimeoutLiveCtxNoTransientRelease(t *testing.T)
 	u := newWakeQuotaFixture(t, "wq-livectx", 1)
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		_ = u.s.UpdateAgentStatus(context.Background(), u.target.ID, store.AgentStatusUpdate{Phase: "resumed"})
+		// "stopping" is rejected by waitForAgentReady's phase check (unlike
+		// the tolerated legacy "resumed" value, ptone/scion#1956) but is
+		// still broker-quota counted (isBrokerQuotaCountedPhase), so this
+		// still exercises the fast-fail path on a live caller context
+		// without changing the slot assertion below.
+		_ = u.s.UpdateAgentStatus(context.Background(), u.target.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStopping)})
 	}()
 	dmErr := wakeWithReadinessBudget(t, u.srv, u.target, 10*time.Second)
 	require.NotNil(t, dmErr)
 	require.Equal(t, http.StatusBadGateway, dmErr.HTTPStatus, dmErr.Message)
+	assert.Contains(t, dmErr.Message, "unexpected phase", "must fail fast via the phase check, not the 10s budget")
 	assert.EqualValues(t, 1, u.count(t), "slot held immediately after live-ctx wake failure")
 
 	disp := &quotaLifecycleDispatcher{}

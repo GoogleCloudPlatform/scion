@@ -7,8 +7,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -48,10 +50,24 @@ to prevent shell injection via crafted values.`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Wired locally to this one subcommand, not at the root command
+		// level: a pod deleted mid-provisioning sends this init container
+		// SIGTERM, and without this, cmd.Context() never observes it
+		// (rootCmd.Execute() does not itself install a signal-to-context
+		// handler). Cancelling the context here makes acquireFileLock's
+		// wait loop return promptly instead of running out its retry budget,
+		// and — since ProvisionShared's lock release is always deferred, and
+		// exec.CommandContext kills the in-flight git process on
+		// cancellation too — makes an in-progress holder's own defer still
+		// fire and release the lock cleanly, instead of leaving it for
+		// provisionLockStaleAfter to reclaim.
+		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+
 		if provisionWaitSentinel {
-			return runWaitForSentinel(cmd.Context())
+			return runWaitForSentinel(ctx)
 		}
-		return runProvision(cmd.Context())
+		return runProvision(ctx)
 	},
 }
 
@@ -144,8 +160,16 @@ func runProvision(ctx context.Context) error {
 		// invisibly — the sentinel would still get written, and every future
 		// pod for this project would see it and skip provisioning forever.
 		// Failing the init container (non-zero exit, pod doesn't start) is
-		// the correct, loud failure mode.
-		RequireChownSuccess: true,
+		// the correct, loud failure mode. The one exception is a workspace
+		// the broker prepared before the pod existed, by creating it or
+		// finding it with setgid and group write (see
+		// provision.ChownBestEffortEnv): agents reach it through its group,
+		// so a chown the export does not allow is logged and the sentinel is
+		// still written.
+		RequireChownSuccess: provisionRequireChownSuccess(os.Getenv),
+	}
+	if !in.RequireChownSuccess {
+		log.Info("Best-effort chown requested (workspace directory prepared by the broker); a failed chown is logged and provisioning continues")
 	}
 
 	log.Info("Provisioning workspace at %s (mode=%s, project=%s, shared_dirs=%d)",
@@ -155,6 +179,14 @@ func runProvision(ctx context.Context) error {
 	}
 	log.Info("Workspace provisioned successfully")
 	return nil
+}
+
+// provisionRequireChownSuccess keeps a chown failure fatal unless the
+// Kubernetes runtime marked the workspace directory as prepared by the
+// broker, created or found with setgid and group write
+// (provision.ChownBestEffortEnv set to exactly "1").
+func provisionRequireChownSuccess(getenv func(string) string) bool {
+	return !provision.ChownBestEffortRequested(getenv)
 }
 
 func runWaitForSentinel(ctx context.Context) error {

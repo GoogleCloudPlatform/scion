@@ -114,7 +114,7 @@ func setupHubScopedAssignTest(t *testing.T) *hubScopedAssignFixture {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, f.project))
-	srv.createProjectMembersGroup(ctx, f.project)
+	srv.seedProjectCreatorMembership(ctx, f.project)
 
 	// Add member to the project members group
 	membersGroup, err := s.GetGroupBySlug(ctx, "project:hsa-project:members")
@@ -194,7 +194,7 @@ func TestHubScopedAssign_ModeOff_Denied(t *testing.T) {
 	// The owner created the SA, so they'd pass Hub policy. But mode=off must
 	// deny at the mode-coupling precondition, before policy runs.
 	sa := hubScopedSACreatedBy(t, f, f.owner.ID, true)
-	f.srv.createProjectMembersGroup(context.Background(), f.proj)
+	f.srv.seedProjectCreatorMembership(context.Background(), f.proj)
 	require.NoError(t, f.srv.createProjectOwnerRoleBinding(context.Background(), f.proj.ID, f.owner.ID))
 
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
@@ -217,7 +217,7 @@ func TestHubScopedAssign_ModeOff_AdminAlsoDenied(t *testing.T) {
 
 	admin := hubAdminUser(t, f)
 	sa := hubScopedSAForAgent(t, f, true)
-	f.srv.createProjectMembersGroup(context.Background(), f.proj)
+	f.srv.seedProjectCreatorMembership(context.Background(), f.proj)
 	require.NoError(t, f.srv.createProjectOwnerRoleBinding(context.Background(), f.proj.ID, f.owner.ID))
 
 	rec := doRequestAsUser(t, f.srv, admin, http.MethodPost,
@@ -253,7 +253,7 @@ func TestHubScopedAssign_ModeOff_ProjectScopedStillAllowed(t *testing.T) {
 		CreatedAt:          time.Now(),
 	}
 	require.NoError(t, f.store.CreateGCPServiceAccount(ctx, sa))
-	f.srv.createProjectMembersGroup(ctx, f.proj)
+	f.srv.seedProjectCreatorMembership(ctx, f.proj)
 	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
 
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost,

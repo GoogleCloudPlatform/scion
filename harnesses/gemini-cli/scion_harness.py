@@ -25,12 +25,14 @@ Stdlib-only so it works in any container image that ships python3.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from typing import Any, Collection
 
@@ -75,14 +77,87 @@ def load_json(path: str) -> Any:
         return json.load(f)
 
 
+_atomic_tmp_name_counter = itertools.count()
+
+
+def _atomic_tmp_name(name: str) -> str:
+    """Returns the temp name atomic_write_json creates before renaming it
+    into place: unique to this call (pid + a monotonic timestamp + a
+    same-process call counter), so a stale leftover from an earlier,
+    interrupted call can never collide with — and so can never block — a
+    later one, and so an adversary who does not already share this process's
+    pid cannot predict it in advance either. The counter is what keeps two
+    calls unique even if the clock reading happens not to advance between
+    them (a real possibility on a coarse-resolution clock, not just a
+    theoretical one) — pid and time alone narrow the guess space but do not
+    themselves guarantee two calls in the same process never produce the
+    same name.
+
+    A separate, named function purely so a test can monkeypatch it to a
+    fixed, predictable name: that is the only way to deterministically plant
+    a symlink or a FIFO at the exact path this call will try to create, to
+    prove O_CREAT|O_EXCL|O_NOFOLLOW still refuses a pre-existing entry there,
+    since the real name is not predictable from outside this process.
+    """
+    return f".{name}.tmp-{os.getpid()}-{time.monotonic_ns()}-{next(_atomic_tmp_name_counter)}"
+
+
 def atomic_write_json(path: str, payload: Any) -> None:
-    """Write JSON atomically: tmp file + os.replace, sorted keys, trailing newline."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
-        f.write("\n")
-    os.replace(tmp, path)
+    """Write JSON atomically: tmp file + os.replace, sorted keys, trailing newline.
+
+    Every filesystem operation after the initial os.makedirs is anchored to an
+    open directory file descriptor for path's parent, opened with
+    O_DIRECTORY|O_NOFOLLOW: if the parent is a symlink (e.g. a workload
+    replaced an expected directory with one pointing elsewhere), that open
+    fails immediately instead of silently writing through it. The temp file
+    is then created relative to that same directory fd with a name unique to
+    this call (pid + a monotonic timestamp + a same-process counter, see
+    _atomic_tmp_name, matching the Go side's ".<leaf>.tmp-<pid>-<ns>"
+    convention) and O_CREAT|O_EXCL|O_NOFOLLOW, so a
+    pre-existing entry at that exact name — a symlink to an arbitrary target,
+    a leftover regular file, or a FIFO — also fails immediately (EEXIST)
+    instead of being followed or, for a FIFO, blocking this call forever
+    waiting for a reader. Because the name is unique per call, a stale temp
+    file left behind by an earlier call that never reached os.replace (e.g.
+    killed mid-write) can never collide with — and so can never permanently
+    block — any later call, unlike a fixed ".tmp" name, which a single
+    leftover would block forever. This makes the guard independent of which
+    uid calls it: it refuses the same way whether this runs as root or as an
+    unprivileged user.
+    """
+    directory = os.path.dirname(path) or "."
+    name = os.path.basename(path)
+    os.makedirs(directory, exist_ok=True)
+
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        tmp_name = _atomic_tmp_name(name)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        fd = os.open(tmp_name, flags, 0o666, dir_fd=dir_fd)
+        try:
+            try:
+                f = os.fdopen(fd, "w", encoding="utf-8")
+            except BaseException:
+                # os.fdopen itself failed before wrapping fd in a file
+                # object, so nothing owns fd yet and nothing will close it
+                # unless this does.
+                os.close(fd)
+                raise
+            with f:
+                json.dump(payload, f, indent=2, sort_keys=True)
+                f.write("\n")
+            # Inside the same try as the write: a failed replace (e.g. a
+            # cross-device rename, or the destination directory vanishing)
+            # must clean up tmp_name exactly like a failed write does.
+            os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except BaseException:
+            try:
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dir_fd)
 
 
 def read_manifest(manifest_path: str | None = None) -> dict[str, Any]:
@@ -679,6 +754,31 @@ _MODEL_ALIAS_SHORTHAND = {"s": "small", "m": "medium", "l": "large", "xl": "extr
 _KNOWN_MODEL_ALIASES = frozenset({"small", "medium", "large", "extra-large"})
 
 
+def normalize_model_alias(value: str, harness_config: dict[str, Any] | None) -> str:
+    """Normalize *value* through *harness_config*'s model_aliases table.
+
+    Factored out of resolve_model() so callers with a raw value that did not
+    come from the SCION_MODEL environment variable (e.g. a harness's own
+    harness_config.model) can be resolved through the exact same alias
+    lookup, rather than reimplementing it or passed through unresolved. See
+    resolve_model() for the precise normalization rules this applies.
+
+    Empty/unset *value* returns "" so callers can apply their own default or
+    pin.
+    """
+    value = value.strip()
+    if not value:
+        return ""
+    normalized = value.lower()
+    normalized = _MODEL_ALIAS_SHORTHAND.get(normalized, normalized)
+    if normalized not in _KNOWN_MODEL_ALIASES:
+        return value  # concrete model name: preserve the caller's spelling
+    aliases = harness_config.get("model_aliases") if isinstance(harness_config, dict) else None
+    if not isinstance(aliases, dict):
+        aliases = {}
+    return aliases.get(normalized, normalized)
+
+
 def resolve_model(ctx: "ProvisionContext") -> str:
     """Resolve the effective model name for this harness's CLI/config.
 
@@ -718,14 +818,7 @@ def resolve_model(ctx: "ProvisionContext") -> str:
     raw = os.environ.get("SCION_MODEL", "").strip()
     if not raw:
         return ""
-    normalized = raw.lower()
-    normalized = _MODEL_ALIAS_SHORTHAND.get(normalized, normalized)
-    if normalized not in _KNOWN_MODEL_ALIASES:
-        return raw  # concrete model name: preserve the caller's spelling
-    aliases = ctx.harness_config.get("model_aliases") if isinstance(ctx.harness_config, dict) else None
-    if not isinstance(aliases, dict):
-        aliases = {}
-    return aliases.get(normalized, normalized)
+    return normalize_model_alias(raw, ctx.harness_config)
 
 
 # ---------------------------------------------------------------------------

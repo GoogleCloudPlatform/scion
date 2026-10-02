@@ -198,7 +198,7 @@ var bridgeHostnames = map[string]struct{}{
 }
 
 func applyContainerBridgeOverride(endpoint, containerHubEndpoint, runtimeName string) string {
-	if containerHubEndpoint == "" || runtimeName == "kubernetes" || !isLocalhostEndpoint(endpoint) {
+	if containerHubEndpoint == "" || isKubernetesRuntimeName(runtimeName) || !isLocalhostEndpoint(endpoint) {
 		return endpoint
 	}
 	bridgeURL, err := url.Parse(containerHubEndpoint)
@@ -237,7 +237,7 @@ func applyContainerBridgeOverride(endpoint, containerHubEndpoint, runtimeName st
 // reach the host's own public domain via hairpin NAT (e.g. on GCE), so we
 // map the domain to host-gateway to route through the Docker bridge.
 func colocatedExtraHosts(hubEndpoint string, isColocated bool, runtimeName string) []string {
-	if !isColocated || runtimeName == "kubernetes" || hubEndpoint == "" || isLocalhostEndpoint(hubEndpoint) {
+	if !isColocated || isKubernetesRuntimeName(runtimeName) || hubEndpoint == "" || isLocalhostEndpoint(hubEndpoint) {
 		return nil
 	}
 	u, err := url.Parse(hubEndpoint)

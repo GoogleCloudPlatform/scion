@@ -55,6 +55,9 @@ type UserResponse struct {
 	DisplayName string `json:"displayName"`
 	Role        string `json:"role"`
 	AvatarURL   string `json:"avatarUrl,omitempty"`
+
+	// Preferences is populated only by handleAuthMe, from a live store read.
+	Preferences *store.UserPreferences `json:"preferences,omitempty"`
 }
 
 // AuthTokenRequest is the request body for /api/v1/auth/token.
@@ -616,6 +619,7 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		Email:       user.Email(),
 		DisplayName: user.DisplayName(),
 		Role:        user.Role(),
+		Preferences: loadUserPreferences(r.Context(), s.store, user.ID()),
 	})
 }
 

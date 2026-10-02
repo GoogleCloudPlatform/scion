@@ -101,14 +101,16 @@ func TestCatalogRoute_AgentAttachIsPTYNotAttach(t *testing.T) {
 		t.Errorf("GET %s: error code = %q, want %q", path, code, ErrCodeNoRuntimeBroker)
 	}
 
-	// The /attach pattern is not one of handleAgentByID's recognized
-	// sub-resources (deliberately NOT read from the catalog -- this proves
-	// the absence of a catalog entry for it), so it falls through to
-	// handleAgentAction, which is POST-only and returns 405 for GET -- the
-	// opposite of /pty's behavior.
+	// The /attach pattern is not a recognized agent sub-route
+	// (deliberately NOT read from the catalog -- this proves the absence of
+	// a catalog entry for it), so route resolution rejects it with 404 and
+	// it never reaches the PTY handler.
 	rec = doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID+"/attach", nil)
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("GET /attach: got %d, want %d (MethodNotAllowed) -- /attach must not be treated as PTY", rec.Code, http.StatusMethodNotAllowed)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET /attach: got %d, want %d (NotFound) -- /attach must not be treated as PTY", rec.Code, http.StatusNotFound)
+	}
+	if !strings.Contains(rec.Body.String(), "Agent route not found") {
+		t.Errorf("GET /attach: body = %s, want the unrecognized agent route error", rec.Body.String())
 	}
 }
 

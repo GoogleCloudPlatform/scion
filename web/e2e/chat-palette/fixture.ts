@@ -11,6 +11,8 @@
  */
 import type { PageData } from '../../src/shared/types.js';
 import '../../src/components/pages/chat.js';
+import '../../src/components/chat/chat-shell.js';
+import type { ScionChatShell } from '../../src/components/chat/chat-shell.js';
 import '../../src/components/terminal/terminal-pane.js';
 import { TerminalSessionRegistry } from '../../src/client/terminal-sessions.js';
 import { chatRecentFiles } from '../../src/client/chat-recent-files.js';
@@ -18,6 +20,13 @@ import type { RecentFile } from '../../src/client/chat-recent-files.js';
 import { attachmentIdentityKey, pathIdentityKey } from '../../src/utils/chat-file-links.js';
 import type { PathLinkTarget } from '../../src/utils/chat-file-links.js';
 import { setAnimation } from '@shoelace-style/shoelace/dist/utilities/animation-registry.js';
+import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.js';
+// This fixture stubs out client/main.ts entirely (see mock-api.ts's
+// stubMainClientModule), which is the only place the real app calls
+// setBasePath('/shoelace') — without it, <sl-icon> cannot resolve its SVGs
+// and every icon (including the palette button's) renders blank, which
+// understates real layout width at narrow viewports.
+setBasePath('/shoelace');
 // This fixture stubs out client/main.ts entirely (see mock-api.ts:
 // stubMainClientModule) to avoid its real app bootstrap, which also means
 // its bulk Shoelace component registration never runs. Mirror that exact
@@ -81,15 +90,6 @@ document.documentElement.setAttribute('data-theme', 'light');
 const params = new URLSearchParams(location.search);
 window.history.replaceState({}, '', params.get('route') || '/chat');
 
-// Server-injected feature flags, exactly as main.ts would set them from the
-// Go template. Defaults on for this fixture; a test that needs the "flag
-// off" (v1) case navigates to fixture.html?v2=0 instead — isV2 is captured
-// once at construction, so it must be set before the page element is
-// created.
-window.__SCION_FEATURES__ = {
-  'web.native_chat_v2': params.get('v2') !== '0',
-};
-
 const TEST_USER_ID = 'self-user';
 // Kept in sync by eye with mock-api.ts's TERMINAL_AGENT_ID — that file is
 // Playwright-only (imports `@playwright/test`'s types) and this one loads in
@@ -109,7 +109,34 @@ const terminalOutlet = document.getElementById('terminal-outlet')!;
 
 const page = document.createElement('scion-page-chat') as HTMLElement & { pageData: PageData };
 page.pageData = pageData;
-chatOutlet.appendChild(page);
+
+/**
+ * `?shell=1` mounts the real `<scion-chat-shell>` (header + slot) with the
+ * page slotted inside, exactly as main.ts does for a real chat route — the
+ * header renders as the page's sibling, not its ancestor, so this is the
+ * only fixture mode that exercises the real, production event path from the
+ * header's palette button through to the page's document-level listener.
+ * The default (bare `scion-page-chat`, no shell) mode every other spec in
+ * this directory uses is unaffected.
+ */
+const useShell = params.get('shell') === '1';
+let chatShell: ScionChatShell | null = null;
+if (useShell) {
+  chatShell = document.createElement('scion-chat-shell') as ScionChatShell;
+  chatShell.user = pageData.user ?? null;
+  chatShell.currentPath = window.location.pathname;
+  chatShell.appendChild(page);
+  chatOutlet.appendChild(chatShell);
+  // Mirrors main.ts's router: the shell's own currentPath only reflects the
+  // route at mount time otherwise, which would leave the header showing the
+  // wrong mode/button after a fixture-driven navigation (e.g.
+  // hideChatShowTerminal's pushState).
+  window.addEventListener('popstate', () => {
+    if (chatShell) chatShell.currentPath = window.location.pathname;
+  });
+} else {
+  chatOutlet.appendChild(page);
+}
 
 const terminalRegistry = new TerminalSessionRegistry({
   hubUrl: location.origin,

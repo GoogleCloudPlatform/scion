@@ -112,6 +112,7 @@ runtimes:
 | `namespace` | string | (Kubernetes) The target namespace. |
 | `sync` | string | File sync strategy (e.g., `tar`). |
 | `gke` | bool | (Kubernetes) Enable GKE-specific features (e.g., Workload Identity, Autopilot scheduling). Default: `false`. |
+| `priority_class_name` | string | (Kubernetes) Default `priorityClassName` applied to agent pods using this runtime entry. Must name a `PriorityClass` that already exists on the cluster — Scion does not create one. A template/agent `kubernetes.priorityClassName` overrides this. Unset means no priority class (pods schedule at priority 0). |
 | `env` | map | Environment variables to set for the runtime. |
 
 :::note

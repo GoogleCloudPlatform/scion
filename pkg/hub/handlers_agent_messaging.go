@@ -1703,15 +1703,22 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 	// Phase 0.2 (ptone/scion#2192): reject cross-project agent-sender raw
 	// here, before conversation resolution starts further down
-	// (storeMsg/conversation build begins later in this function).
-	// agent_dm_operation.go step 4b applies the same check again inside
-	// ExecuteAgentDM as a second check, so a rejected cross-project raw
-	// send is refused here — before any conversation is created — and
-	// again there.
+	// (storeMsg/conversation build begins later in this function). As of
+	// task 2.3 (ptone/scion#2197), this branch and its managed-runtime
+	// sibling above are vestigial for production traffic on the single-
+	// agent route: the message-raw bridge (agent_keys_message_bridge.go)
+	// classifies and fully handles every raw request in the routers,
+	// before authorizeAgentMessage runs, which is strictly before
+	// handleAgentMessage -- where this function lives -- is ever reached.
+	// The former second check inside ExecuteAgentDM (agent_dm_operation.go
+	// step 4b) was removed for the same reason; it cannot drift from this
+	// one because there is no longer a second copy. Left in place as a
+	// harmless, unreachable-in-practice defense until Phase 4 removes raw
+	// delivery entirely (contract §8).
 	//
 	// Compares the stored sender record (not the token claim) with the same
-	// crossProjectRawUnsupported predicate as ExecuteAgentDM step 4b, so
-	// this early check is never weaker than that backstop.
+	// crossProjectRawUnsupported predicate agent_dm_operation.go used to
+	// call before its own copy was removed.
 	if structuredMsg != nil && structuredMsg.Raw {
 		if senderAgent := GetAgentIdentityFromContext(ctx); senderAgent != nil {
 			senderAgentRecord, senderErr := s.store.GetAgent(ctx, senderAgent.ID())
@@ -2590,6 +2597,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				}
 				if errors.Is(err, ErrBrokerTimeout) {
 					GatewayTimeout(w, "Broker unreachable after 30s deadline")
+				} else if isBrokerAgentNotFound(err) {
+					// The broker answered that the agent has no running
+					// container: a state conflict, not a broker failure.
+					writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+						"Agent has no running container; the message was not delivered", nil)
 				} else if req.Wake {
 					RuntimeError(w, "Agent resumed successfully but message delivery failed: "+err.Error())
 				} else {

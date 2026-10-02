@@ -128,6 +128,8 @@ When `SCION_THINKING_LEVEL` is set (a value from 0–100, provided via `--thinki
 
 Values outside the 0–100 range are clamped to the nearest boundary.
 
+When `SCION_THINKING_LEVEL` is unset, blank, or not a valid integer, the provisioner writes `model_reasoning_effort = "medium"` rather than leaving the key unwritten. This keeps Codex's own per-model catalog default (which can be `low` for some models) from silently taking over when no one has expressed an explicit preference.
+
 ### Known Limitations
 - **Auth File Copy**: The `auth.json` file is only copied when the agent is **created**.
 - **Model selection**: Specific model selection must currently be handled via the `config.toml` or environment variables within the agent.
@@ -231,7 +233,7 @@ the Antigravity bundle's `capture_auth.py` (which can also extract the token fro
 - **MCP**: `~/.gemini/config/mcp_config.json`.
 - **Hooks**: Antigravity ships a hook dialect (`dialect.yaml`) mapping `agy` events to Scion lifecycle events. Hooks fire **project-locally** (wired via `/workspace/.agents/hooks.json`).
 - **Runtime**: requires gnome-keyring and D-Bus in the container (provided by the base image); a generated wrapper script bootstraps the keyring and injects the token before launching `agy`.
-- **Default model**: `Gemini 3.8 Flash (Medium)` (override via `AGY_MODEL`).
+- **Model selection**: the model is resolved in this order: the agent's model (`--model` / `SCION_MODEL`), then `harness_config.model`, then the operator-set `AGY_MODEL` env var, then the default `Gemini 3.8 Flash (Medium)`. Tier aliases (`small`, `medium`, `large`, `extra-large`) are resolved through the harness's `model_aliases` table. The resolved model is written into `settings.json` on every provision, including into an existing `settings.json`, so changing the model takes effect on the next start.
 
 ### Known Limitations
 - **System Prompt**: approximated via `GEMINI.md` (no native override).

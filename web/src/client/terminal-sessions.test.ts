@@ -236,6 +236,46 @@ describe('terminal sessions', () => {
   });
 });
 
+describe('idle sessions', () => {
+  it('deferConnect gives idle and does not call the initializer', () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize, { deferConnect: true });
+    expect(session.state.connection).toBe('idle');
+    expect(f.initialize).not.toHaveBeenCalled();
+    expect(f.fetcher).not.toHaveBeenCalled();
+    // Reopening the same agent (e.g. a later restore attempt) returns the
+    // same idle session rather than rebinding.
+    expect(f.registry.open(agentId, f.initialize, { deferConnect: true })).toBe(session);
+    expect(f.registry.open(agentId, f.initialize)).toBe(session);
+    session.close();
+  });
+
+  it('setFrontmost(true) on idle connects once', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize, { deferConnect: true });
+    session.setFrontmost(true);
+    expect(session.state.connection).toBe('loading');
+    await vi.waitFor(() => expect(f.initialize).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(f.fetcher).toHaveBeenCalled());
+    // A further setFrontmost(true) call (no false in between) does not
+    // trigger a second connect.
+    session.setFrontmost(false);
+    session.setFrontmost(true);
+    expect(f.initialize).toHaveBeenCalledTimes(1);
+    session.close();
+  });
+
+  it('close() from idle closes without ever opening a socket', () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize, { deferConnect: true });
+    session.close();
+    expect(session.state.connection).toBe('closed');
+    expect(FakeSocket.instances).toHaveLength(0);
+    expect(f.initialize).not.toHaveBeenCalled();
+    expect(f.registry.list()).toHaveLength(0);
+  });
+});
+
 describe('terminal lifecycle boundaries', () => {
   it('preserves the first adapter and retains its screen on denied reconnect', async () => {
     const f = fixture();

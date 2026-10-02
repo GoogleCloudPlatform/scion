@@ -467,4 +467,80 @@ describe('W3 seed epoch', () => {
 
     expect(sm.getAgent('a1')?.exposedPorts).toEqual([port]);
   });
+
+  describe('a TTL-expired buffered delta is not replayed by a later seed', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('matches live state once the buffer entry it was recorded from has expired', () => {
+      // Exactly the sequence the design calls out: a status delta for an
+      // unknown ID, recorded into both the 30s buffer and this still-open
+      // epoch; more than 30s with nothing else touching the ID, so live
+      // state drops it (see the buffer-expiry tests in
+      // state-coalescing.test.ts); then "created"; then the seed. Before
+      // the fix, the epoch kept its own copy past the buffer's expiry and
+      // replayed it here — a field ('labels') that only the expired delta
+      // ever set would resurface at seed time even though live state never
+      // showed it after "created".
+      const sm = new StateManager();
+      sm.setScope({ type: 'dashboard' });
+
+      const token = sm.beginSeedEpoch();
+      emit(sm, 'agent.a1.status', { phase: 'error', labels: { env: 'stale' } });
+
+      vi.advanceTimersByTime(30_000); // the buffered entry (and now the epoch's copy) expires
+
+      emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+      // Live state already dropped the expired delta (per the buffer-expiry
+      // tests in state-coalescing.test.ts).
+      expect(sm.getAgent('a1')?.phase).toBe('running');
+      expect(sm.getAgent('a1')?.labels).toBeUndefined();
+
+      sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'running' } as Agent], { token });
+
+      // The seeded state must agree with live state: no resurrected 'error'
+      // phase, no resurrected 'labels' field from the expired delta.
+      expect(sm.getAgent('a1')?.phase).toBe('running');
+      expect(sm.getAgent('a1')?.labels).toBeUndefined();
+    });
+
+    it('an untokened seed that makes an id known cancels its stale pending-buffer timer, so later known-state epoch deltas are not wiped out from under it', () => {
+      // A second way the buffer/epoch can disagree: an id becomes known not
+      // through "created", but through a plain (untokened) seedAgents call
+      // — every page-level seed today (agents.ts, project-detail.ts,
+      // home.ts, chat.ts, agent-detail.ts, agent-graph.ts). Before this
+      // fix, that path left the original buffered-phase timer running; if
+      // it later fired, it deleted the whole epoch entry for the id,
+      // including known-state deltas recorded into it *after* the id
+      // became known — deltas live state had already applied.
+      const sm = new StateManager();
+      sm.setScope({ type: 'dashboard' });
+
+      const token = sm.beginSeedEpoch();
+      emit(sm, 'agent.a1.status', { phase: 'starting' }); // a1 unknown; buffered, a 30s timer starts.
+
+      vi.advanceTimersByTime(5_000);
+      // An untokened seed (a different, already-in-flight fetch) makes a1
+      // known. No "created" event is involved.
+      sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'running' } as Agent]);
+
+      vi.advanceTimersByTime(5_000); // 10s since the first delta.
+      emit(sm, 'agent.a1.status', { phase: 'stopped' }); // known-state path now; recorded into the open epoch.
+      expect(sm.getAgent('a1')?.phase).toBe('stopped'); // live state.
+
+      vi.advanceTimersByTime(20_000); // 30s since the very first delta: the original timer, if still live, fires now.
+
+      // The drain's own REST snapshot for this epoch, stale relative to live.
+      sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'running' } as Agent], { token });
+
+      // Must match live state ('stopped'), not regress to the stale REST
+      // snapshot's 'running'.
+      expect(sm.getAgent('a1')?.phase).toBe('stopped');
+    });
+  });
 });

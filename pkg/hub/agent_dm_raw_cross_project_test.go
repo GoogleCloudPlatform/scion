@@ -36,6 +36,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -86,30 +87,49 @@ func sendInboundAgentMessageRaw(t *testing.T, srv *Server, senderAgent, targetAg
 	return rr
 }
 
-func TestExecuteAgentDM_CrossProjectRaw_Denied(t *testing.T) {
-	srv, s, _, _, agentA, agentB, _, dispatcher, _ := foreignAttachSetup(t)
+// TestExecuteAgentDM_CrossProjectRaw_RefusedByDispatchBackstop replaces the
+// former TestExecuteAgentDM_CrossProjectRaw_Denied: task 2.3
+// (ptone/scion#2197) removed ExecuteAgentDM's own step 4b
+// (crossProjectRawUnsupported / MessageDenialCrossProjectRawUnsupported)
+// because raw agent-to-agent DMs -- cross-project or not -- are now
+// intercepted upstream of ExecuteAgentDM entirely, by the message-raw
+// bridge in the routers (agent_keys_message_bridge.go), before
+// authorizeAgentMessage ever runs. That bridge reports this exact
+// cross-project case as agentkeys.OutcomeCrossProjectKeysUnsupported (see
+// the bridge's own tests, AK-21d) -- not as anything ExecuteAgentDM itself
+// decides.
+//
+// Calling ExecuteAgentDM directly with Raw==true, as this test does, can
+// only happen by bypassing the bridge (a production caller never can): it
+// is exactly the "classification-parity defect scenario" contract §6.1(a)/
+// AK-55 describes. This test proves the remaining guarantee for that
+// scenario: the dispatch-layer backstop (httpdispatcher.go's
+// ErrRawDispatchRefused) refuses to deliver unconditionally, and the
+// already-persisted row (persistence happens before dispatch, and this
+// layer cannot undo that) is marked failed through the ordinary failure
+// path -- never a broker call, regardless of project.
+func TestExecuteAgentDM_CrossProjectRaw_RefusedByDispatchBackstop(t *testing.T) {
+	srv, s, _, _, agentA, agentB, _, _, _ := foreignAttachSetup(t)
 	ctx := context.Background()
-	buf := captureSlog(t)
+
+	mockClient := &mockRuntimeBrokerClient{}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, mockClient, false, slog.Default()))
 
 	input := deliveryDMInput(agentA, agentB, "RAWPROBE-CROSS")
 	input.Raw = true
 	input.ProjectID = agentB.ProjectID
 
-	_, dmErr := srv.ExecuteAgentDM(ctx, input)
-	require.NotNil(t, dmErr, "cross-project raw DM must be rejected")
-	assert.Equal(t, ErrCodeUnsupportedCapability, dmErr.Code)
-	assert.Equal(t, http.StatusUnprocessableEntity, dmErr.HTTPStatus)
-	assert.Equal(t, string(MessageDenialCrossProjectRawUnsupported), dmErr.Details["reason"])
+	result, dmErr := srv.ExecuteAgentDM(ctx, input)
+	require.NotNil(t, dmErr, "raw DM dispatch must be refused at the backstop")
+	assert.Nil(t, result)
+	assert.Equal(t, http.StatusBadGateway, dmErr.HTTPStatus)
 
-	assert.Empty(t, dispatcher.getCalls(), "nothing must be dispatched when cross-project raw is refused")
+	assert.False(t, mockClient.messageCalled, "the dispatch-layer backstop must prevent any broker call")
 
 	msgs, err := s.ListMessages(ctx, store.MessageFilter{SenderID: agentA.ID}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
-	assert.Empty(t, msgs.Items, "cross-project raw refusal must produce zero message rows for this send")
-
-	output := buf.String()
-	assert.Contains(t, output, "dm admission denied")
-	assert.Contains(t, output, "decision_code="+string(MessageDenialCrossProjectRawUnsupported))
+	require.Len(t, msgs.Items, 1, "ExecuteAgentDM persists before dispatch -- the backstop cannot undo that (contract §6.1(a))")
+	assert.Equal(t, store.MessageDispatchFailed, msgs.Items[0].DispatchState)
 }
 
 func TestExecuteAgentDM_CrossProjectPlain_StillAllowed(t *testing.T) {
@@ -132,22 +152,38 @@ func TestExecuteAgentDM_CrossProjectPlain_StillAllowed(t *testing.T) {
 	assert.True(t, calls[0].StructuredMessage.Plain)
 }
 
-func TestExecuteAgentDM_SameProjectRaw_StillWorks(t *testing.T) {
-	srv, _, _, sender, target, _, dispatcher := deliverySetup(t)
+// TestExecuteAgentDM_SameProjectRaw_RefusedByDispatchBackstop replaces the
+// former TestExecuteAgentDM_SameProjectRaw_StillWorks. Before task 2.3,
+// ExecuteAgentDM delivered a same-project raw DM (only the cross-project
+// case, step 4b, was refused). From 2.3 onward, raw never reaches
+// ExecuteAgentDM at all in production -- the message-raw bridge
+// (agent_keys_message_bridge.go) intercepts it upstream, same- or
+// cross-project alike, and delegates to ExecuteAgentKeys instead. Calling
+// ExecuteAgentDM directly with Raw==true, as this test does, now hits the
+// unconditional dispatch-layer backstop (httpdispatcher.go's
+// ErrRawDispatchRefused, contract §6.1(a)/AK-55) regardless of project,
+// proving ExecuteAgentDM itself no longer special-cases Raw at all.
+func TestExecuteAgentDM_SameProjectRaw_RefusedByDispatchBackstop(t *testing.T) {
+	srv, s, _, sender, target, _, _ := deliverySetup(t)
 	ctx := context.Background()
+
+	mockClient := &mockRuntimeBrokerClient{}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, mockClient, false, slog.Default()))
 
 	input := deliveryDMInput(sender, target, "RAWPROBE-SAME-PROJECT")
 	input.Raw = true
 
 	result, dmErr := srv.ExecuteAgentDM(ctx, input)
-	require.Nil(t, dmErr, "same-project raw DM must not be rejected")
-	require.Equal(t, AgentDMAccepted, result.Outcome)
+	require.NotNil(t, dmErr, "raw DM dispatch must be refused at the backstop even same-project")
+	assert.Nil(t, result)
+	assert.Equal(t, http.StatusBadGateway, dmErr.HTTPStatus)
 
-	calls := dispatcher.getCalls()
-	require.Len(t, calls, 1, "exactly one dispatch must occur")
-	require.NotNil(t, calls[0].StructuredMessage)
-	assert.True(t, calls[0].StructuredMessage.Raw,
-		"same-project raw delivery must be unaffected by the cross-project refusal")
+	assert.False(t, mockClient.messageCalled, "the dispatch-layer backstop must prevent any broker call")
+
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{SenderID: sender.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, msgs.Items, 1, "ExecuteAgentDM persists before dispatch -- the backstop cannot undo that (contract §6.1(a))")
+	assert.Equal(t, store.MessageDispatchFailed, msgs.Items[0].DispatchState)
 }
 
 // TestAgentSenderDM_CrossProjectRaw_InboundPath_Denied is an end-to-end

@@ -1102,7 +1102,7 @@ func TestC1_AuthorizeScheduledMessageAuthoring_UATDenied(t *testing.T) {
 		ID: tid("uat-proj"), Name: "UAT Project", Slug: "uat-proj",
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	user := &store.User{
 		ID: tid("uat-user"), Email: "uat@test.com", DisplayName: "UAT User",
@@ -1151,7 +1151,7 @@ func TestC1_AuthorizeScheduledMessageAuthoring_ConflictingTarget(t *testing.T) {
 		ID: tid("conflict-proj"), Name: "Conflict Project", Slug: "conflict-proj",
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	user := &store.User{
 		ID: tid("conflict-user"), Email: "conflict@test.com", DisplayName: "Conflict User",

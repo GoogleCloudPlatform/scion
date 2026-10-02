@@ -17,6 +17,7 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstrainthistory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
@@ -79,6 +80,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 )
 
 // Client is the client that holds all ent builders.
@@ -88,6 +90,8 @@ type Client struct {
 	Schema *migrate.Schema
 	// AccessConstraint is the client for interacting with the AccessConstraint builders.
 	AccessConstraint *AccessConstraintClient
+	// AccessConstraintHistory is the client for interacting with the AccessConstraintHistory builders.
+	AccessConstraintHistory *AccessConstraintHistoryClient
 	// AccessPolicy is the client for interacting with the AccessPolicy builders.
 	AccessPolicy *AccessPolicyClient
 	// Agent is the client for interacting with the Agent builders.
@@ -212,6 +216,8 @@ type Client struct {
 	User *UserClient
 	// UserAccessToken is the client for interacting with the UserAccessToken builders.
 	UserAccessToken *UserAccessTokenClient
+	// UserTerminalWorkspace is the client for interacting with the UserTerminalWorkspace builders.
+	UserTerminalWorkspace *UserTerminalWorkspaceClient
 }
 
 // NewClient creates a new client configured with the given options.
@@ -224,6 +230,7 @@ func NewClient(opts ...Option) *Client {
 func (c *Client) init() {
 	c.Schema = migrate.NewSchema(c.driver)
 	c.AccessConstraint = NewAccessConstraintClient(c.config)
+	c.AccessConstraintHistory = NewAccessConstraintHistoryClient(c.config)
 	c.AccessPolicy = NewAccessPolicyClient(c.config)
 	c.Agent = NewAgentClient(c.config)
 	c.AgentCredential = NewAgentCredentialClient(c.config)
@@ -286,6 +293,7 @@ func (c *Client) init() {
 	c.UsageReservation = NewUsageReservationClient(c.config)
 	c.User = NewUserClient(c.config)
 	c.UserAccessToken = NewUserAccessTokenClient(c.config)
+	c.UserTerminalWorkspace = NewUserTerminalWorkspaceClient(c.config)
 }
 
 type (
@@ -379,6 +387,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		ctx:                      ctx,
 		config:                   cfg,
 		AccessConstraint:         NewAccessConstraintClient(cfg),
+		AccessConstraintHistory:  NewAccessConstraintHistoryClient(cfg),
 		AccessPolicy:             NewAccessPolicyClient(cfg),
 		Agent:                    NewAgentClient(cfg),
 		AgentCredential:          NewAgentCredentialClient(cfg),
@@ -441,6 +450,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		UsageReservation:         NewUsageReservationClient(cfg),
 		User:                     NewUserClient(cfg),
 		UserAccessToken:          NewUserAccessTokenClient(cfg),
+		UserTerminalWorkspace:    NewUserTerminalWorkspaceClient(cfg),
 	}, nil
 }
 
@@ -461,6 +471,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		ctx:                      ctx,
 		config:                   cfg,
 		AccessConstraint:         NewAccessConstraintClient(cfg),
+		AccessConstraintHistory:  NewAccessConstraintHistoryClient(cfg),
 		AccessPolicy:             NewAccessPolicyClient(cfg),
 		Agent:                    NewAgentClient(cfg),
 		AgentCredential:          NewAgentCredentialClient(cfg),
@@ -523,6 +534,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		UsageReservation:         NewUsageReservationClient(cfg),
 		User:                     NewUserClient(cfg),
 		UserAccessToken:          NewUserAccessTokenClient(cfg),
+		UserTerminalWorkspace:    NewUserTerminalWorkspaceClient(cfg),
 	}, nil
 }
 
@@ -552,11 +564,11 @@ func (c *Client) Close() error {
 // In order to add hooks to a specific client, call: `client.Node.Use(...)`.
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
-		c.AccessConstraint, c.AccessPolicy, c.Agent, c.AgentCredential,
-		c.AgentIdentityKey, c.AgentReincarnation, c.AgentSessionMetrics,
-		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
-		c.BrokerSecret, c.BrokerSetting, c.ChatLinkCode, c.Conversation,
-		c.ConversationParticipant, c.DecisionAudit, c.DelegationEdge,
+		c.AccessConstraint, c.AccessConstraintHistory, c.AccessPolicy, c.Agent,
+		c.AgentCredential, c.AgentIdentityKey, c.AgentReincarnation,
+		c.AgentSessionMetrics, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
+		c.BrokerJoinToken, c.BrokerSecret, c.BrokerSetting, c.ChatLinkCode,
+		c.Conversation, c.ConversationParticipant, c.DecisionAudit, c.DelegationEdge,
 		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
 		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
 		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
@@ -568,6 +580,7 @@ func (c *Client) Use(hooks ...Hook) {
 		c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
 		c.SkillInjection, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate,
 		c.Template, c.UsageReservation, c.User, c.UserAccessToken,
+		c.UserTerminalWorkspace,
 	} {
 		n.Use(hooks...)
 	}
@@ -577,11 +590,11 @@ func (c *Client) Use(hooks ...Hook) {
 // In order to add interceptors to a specific client, call: `client.Node.Intercept(...)`.
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
-		c.AccessConstraint, c.AccessPolicy, c.Agent, c.AgentCredential,
-		c.AgentIdentityKey, c.AgentReincarnation, c.AgentSessionMetrics,
-		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
-		c.BrokerSecret, c.BrokerSetting, c.ChatLinkCode, c.Conversation,
-		c.ConversationParticipant, c.DecisionAudit, c.DelegationEdge,
+		c.AccessConstraint, c.AccessConstraintHistory, c.AccessPolicy, c.Agent,
+		c.AgentCredential, c.AgentIdentityKey, c.AgentReincarnation,
+		c.AgentSessionMetrics, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
+		c.BrokerJoinToken, c.BrokerSecret, c.BrokerSetting, c.ChatLinkCode,
+		c.Conversation, c.ConversationParticipant, c.DecisionAudit, c.DelegationEdge,
 		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
 		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
 		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
@@ -593,6 +606,7 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
 		c.SkillInjection, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate,
 		c.Template, c.UsageReservation, c.User, c.UserAccessToken,
+		c.UserTerminalWorkspace,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -603,6 +617,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 	switch m := m.(type) {
 	case *AccessConstraintMutation:
 		return c.AccessConstraint.mutate(ctx, m)
+	case *AccessConstraintHistoryMutation:
+		return c.AccessConstraintHistory.mutate(ctx, m)
 	case *AccessPolicyMutation:
 		return c.AccessPolicy.mutate(ctx, m)
 	case *AgentMutation:
@@ -727,6 +743,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.User.mutate(ctx, m)
 	case *UserAccessTokenMutation:
 		return c.UserAccessToken.mutate(ctx, m)
+	case *UserTerminalWorkspaceMutation:
+		return c.UserTerminalWorkspace.mutate(ctx, m)
 	default:
 		return nil, fmt.Errorf("ent: unknown mutation type %T", m)
 	}
@@ -840,6 +858,22 @@ func (c *AccessConstraintClient) GetX(ctx context.Context, id uuid.UUID) *Access
 	return obj
 }
 
+// QueryHistory queries the history edge of a AccessConstraint.
+func (c *AccessConstraintClient) QueryHistory(_m *AccessConstraint) *AccessConstraintHistoryQuery {
+	query := (&AccessConstraintHistoryClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(accessconstraint.Table, accessconstraint.FieldID, id),
+			sqlgraph.To(accessconstrainthistory.Table, accessconstrainthistory.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, accessconstraint.HistoryTable, accessconstraint.HistoryColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
 // Hooks returns the client hooks.
 func (c *AccessConstraintClient) Hooks() []Hook {
 	return c.hooks.AccessConstraint
@@ -862,6 +896,155 @@ func (c *AccessConstraintClient) mutate(ctx context.Context, m *AccessConstraint
 		return (&AccessConstraintDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown AccessConstraint mutation op: %q", m.Op())
+	}
+}
+
+// AccessConstraintHistoryClient is a client for the AccessConstraintHistory schema.
+type AccessConstraintHistoryClient struct {
+	config
+}
+
+// NewAccessConstraintHistoryClient returns a client for the AccessConstraintHistory from the given config.
+func NewAccessConstraintHistoryClient(c config) *AccessConstraintHistoryClient {
+	return &AccessConstraintHistoryClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `accessconstrainthistory.Hooks(f(g(h())))`.
+func (c *AccessConstraintHistoryClient) Use(hooks ...Hook) {
+	c.hooks.AccessConstraintHistory = append(c.hooks.AccessConstraintHistory, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `accessconstrainthistory.Intercept(f(g(h())))`.
+func (c *AccessConstraintHistoryClient) Intercept(interceptors ...Interceptor) {
+	c.inters.AccessConstraintHistory = append(c.inters.AccessConstraintHistory, interceptors...)
+}
+
+// Create returns a builder for creating a AccessConstraintHistory entity.
+func (c *AccessConstraintHistoryClient) Create() *AccessConstraintHistoryCreate {
+	mutation := newAccessConstraintHistoryMutation(c.config, OpCreate)
+	return &AccessConstraintHistoryCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of AccessConstraintHistory entities.
+func (c *AccessConstraintHistoryClient) CreateBulk(builders ...*AccessConstraintHistoryCreate) *AccessConstraintHistoryCreateBulk {
+	return &AccessConstraintHistoryCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *AccessConstraintHistoryClient) MapCreateBulk(slice any, setFunc func(*AccessConstraintHistoryCreate, int)) *AccessConstraintHistoryCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &AccessConstraintHistoryCreateBulk{err: fmt.Errorf("calling to AccessConstraintHistoryClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*AccessConstraintHistoryCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &AccessConstraintHistoryCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for AccessConstraintHistory.
+func (c *AccessConstraintHistoryClient) Update() *AccessConstraintHistoryUpdate {
+	mutation := newAccessConstraintHistoryMutation(c.config, OpUpdate)
+	return &AccessConstraintHistoryUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *AccessConstraintHistoryClient) UpdateOne(_m *AccessConstraintHistory) *AccessConstraintHistoryUpdateOne {
+	mutation := newAccessConstraintHistoryMutation(c.config, OpUpdateOne, withAccessConstraintHistory(_m))
+	return &AccessConstraintHistoryUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *AccessConstraintHistoryClient) UpdateOneID(id string) *AccessConstraintHistoryUpdateOne {
+	mutation := newAccessConstraintHistoryMutation(c.config, OpUpdateOne, withAccessConstraintHistoryID(id))
+	return &AccessConstraintHistoryUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for AccessConstraintHistory.
+func (c *AccessConstraintHistoryClient) Delete() *AccessConstraintHistoryDelete {
+	mutation := newAccessConstraintHistoryMutation(c.config, OpDelete)
+	return &AccessConstraintHistoryDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *AccessConstraintHistoryClient) DeleteOne(_m *AccessConstraintHistory) *AccessConstraintHistoryDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *AccessConstraintHistoryClient) DeleteOneID(id string) *AccessConstraintHistoryDeleteOne {
+	builder := c.Delete().Where(accessconstrainthistory.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &AccessConstraintHistoryDeleteOne{builder}
+}
+
+// Query returns a query builder for AccessConstraintHistory.
+func (c *AccessConstraintHistoryClient) Query() *AccessConstraintHistoryQuery {
+	return &AccessConstraintHistoryQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeAccessConstraintHistory},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a AccessConstraintHistory entity by its id.
+func (c *AccessConstraintHistoryClient) Get(ctx context.Context, id string) (*AccessConstraintHistory, error) {
+	return c.Query().Where(accessconstrainthistory.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *AccessConstraintHistoryClient) GetX(ctx context.Context, id string) *AccessConstraintHistory {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryConstraint queries the constraint edge of a AccessConstraintHistory.
+func (c *AccessConstraintHistoryClient) QueryConstraint(_m *AccessConstraintHistory) *AccessConstraintQuery {
+	query := (&AccessConstraintClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(accessconstrainthistory.Table, accessconstrainthistory.FieldID, id),
+			sqlgraph.To(accessconstraint.Table, accessconstraint.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, accessconstrainthistory.ConstraintTable, accessconstrainthistory.ConstraintColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *AccessConstraintHistoryClient) Hooks() []Hook {
+	return c.hooks.AccessConstraintHistory
+}
+
+// Interceptors returns the client interceptors.
+func (c *AccessConstraintHistoryClient) Interceptors() []Interceptor {
+	return c.inters.AccessConstraintHistory
+}
+
+func (c *AccessConstraintHistoryClient) mutate(ctx context.Context, m *AccessConstraintHistoryMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&AccessConstraintHistoryCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&AccessConstraintHistoryUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&AccessConstraintHistoryUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&AccessConstraintHistoryDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown AccessConstraintHistory mutation op: %q", m.Op())
 	}
 }
 
@@ -9401,6 +9584,22 @@ func (c *UserClient) QueryExternalIdentities(_m *User) *ExternalIdentityQuery {
 	return query
 }
 
+// QueryTerminalWorkspace queries the terminal_workspace edge of a User.
+func (c *UserClient) QueryTerminalWorkspace(_m *User) *UserTerminalWorkspaceQuery {
+	query := (&UserTerminalWorkspaceClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(user.Table, user.FieldID, id),
+			sqlgraph.To(userterminalworkspace.Table, userterminalworkspace.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, user.TerminalWorkspaceTable, user.TerminalWorkspaceColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
 // Hooks returns the client hooks.
 func (c *UserClient) Hooks() []Hook {
 	return c.hooks.User
@@ -9559,40 +9758,190 @@ func (c *UserAccessTokenClient) mutate(ctx context.Context, m *UserAccessTokenMu
 	}
 }
 
+// UserTerminalWorkspaceClient is a client for the UserTerminalWorkspace schema.
+type UserTerminalWorkspaceClient struct {
+	config
+}
+
+// NewUserTerminalWorkspaceClient returns a client for the UserTerminalWorkspace from the given config.
+func NewUserTerminalWorkspaceClient(c config) *UserTerminalWorkspaceClient {
+	return &UserTerminalWorkspaceClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `userterminalworkspace.Hooks(f(g(h())))`.
+func (c *UserTerminalWorkspaceClient) Use(hooks ...Hook) {
+	c.hooks.UserTerminalWorkspace = append(c.hooks.UserTerminalWorkspace, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `userterminalworkspace.Intercept(f(g(h())))`.
+func (c *UserTerminalWorkspaceClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UserTerminalWorkspace = append(c.inters.UserTerminalWorkspace, interceptors...)
+}
+
+// Create returns a builder for creating a UserTerminalWorkspace entity.
+func (c *UserTerminalWorkspaceClient) Create() *UserTerminalWorkspaceCreate {
+	mutation := newUserTerminalWorkspaceMutation(c.config, OpCreate)
+	return &UserTerminalWorkspaceCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UserTerminalWorkspace entities.
+func (c *UserTerminalWorkspaceClient) CreateBulk(builders ...*UserTerminalWorkspaceCreate) *UserTerminalWorkspaceCreateBulk {
+	return &UserTerminalWorkspaceCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UserTerminalWorkspaceClient) MapCreateBulk(slice any, setFunc func(*UserTerminalWorkspaceCreate, int)) *UserTerminalWorkspaceCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UserTerminalWorkspaceCreateBulk{err: fmt.Errorf("calling to UserTerminalWorkspaceClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UserTerminalWorkspaceCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UserTerminalWorkspaceCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UserTerminalWorkspace.
+func (c *UserTerminalWorkspaceClient) Update() *UserTerminalWorkspaceUpdate {
+	mutation := newUserTerminalWorkspaceMutation(c.config, OpUpdate)
+	return &UserTerminalWorkspaceUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UserTerminalWorkspaceClient) UpdateOne(_m *UserTerminalWorkspace) *UserTerminalWorkspaceUpdateOne {
+	mutation := newUserTerminalWorkspaceMutation(c.config, OpUpdateOne, withUserTerminalWorkspace(_m))
+	return &UserTerminalWorkspaceUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UserTerminalWorkspaceClient) UpdateOneID(id uuid.UUID) *UserTerminalWorkspaceUpdateOne {
+	mutation := newUserTerminalWorkspaceMutation(c.config, OpUpdateOne, withUserTerminalWorkspaceID(id))
+	return &UserTerminalWorkspaceUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UserTerminalWorkspace.
+func (c *UserTerminalWorkspaceClient) Delete() *UserTerminalWorkspaceDelete {
+	mutation := newUserTerminalWorkspaceMutation(c.config, OpDelete)
+	return &UserTerminalWorkspaceDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UserTerminalWorkspaceClient) DeleteOne(_m *UserTerminalWorkspace) *UserTerminalWorkspaceDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UserTerminalWorkspaceClient) DeleteOneID(id uuid.UUID) *UserTerminalWorkspaceDeleteOne {
+	builder := c.Delete().Where(userterminalworkspace.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UserTerminalWorkspaceDeleteOne{builder}
+}
+
+// Query returns a query builder for UserTerminalWorkspace.
+func (c *UserTerminalWorkspaceClient) Query() *UserTerminalWorkspaceQuery {
+	return &UserTerminalWorkspaceQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUserTerminalWorkspace},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UserTerminalWorkspace entity by its id.
+func (c *UserTerminalWorkspaceClient) Get(ctx context.Context, id uuid.UUID) (*UserTerminalWorkspace, error) {
+	return c.Query().Where(userterminalworkspace.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UserTerminalWorkspaceClient) GetX(ctx context.Context, id uuid.UUID) *UserTerminalWorkspace {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryUser queries the user edge of a UserTerminalWorkspace.
+func (c *UserTerminalWorkspaceClient) QueryUser(_m *UserTerminalWorkspace) *UserQuery {
+	query := (&UserClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(userterminalworkspace.Table, userterminalworkspace.FieldID, id),
+			sqlgraph.To(user.Table, user.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, true, userterminalworkspace.UserTable, userterminalworkspace.UserColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *UserTerminalWorkspaceClient) Hooks() []Hook {
+	return c.hooks.UserTerminalWorkspace
+}
+
+// Interceptors returns the client interceptors.
+func (c *UserTerminalWorkspaceClient) Interceptors() []Interceptor {
+	return c.inters.UserTerminalWorkspace
+}
+
+func (c *UserTerminalWorkspaceClient) mutate(ctx context.Context, m *UserTerminalWorkspaceMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UserTerminalWorkspaceCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UserTerminalWorkspaceUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UserTerminalWorkspaceUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UserTerminalWorkspaceDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UserTerminalWorkspace mutation op: %q", m.Op())
+	}
+}
+
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
-		AccessConstraint, AccessPolicy, Agent, AgentCredential, AgentIdentityKey,
-		AgentReincarnation, AgentSessionMetrics, AllowListEntry, ApiKey,
-		BrokerDispatch, BrokerJoinToken, BrokerSecret, BrokerSetting, ChatLinkCode,
-		Conversation, ConversationParticipant, DecisionAudit, DelegationEdge,
-		EntitlementBinding, EnvVar, ExternalIdentity, GCPServiceAccount,
-		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
-		HarnessConfig, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
-		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
-		MaintenanceOperation, MaintenanceOperationRun, Message, MessageAddressee,
-		MutationAudit, NonceCache, Notification, NotificationSubscription,
-		PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
-		ProjectSyncState, RoleBinding, RoleDefinition, RuntimeBroker, Schedule,
-		ScheduledEvent, Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
-		SubscriptionTemplate, Template, UsageReservation, User,
-		UserAccessToken []ent.Hook
+		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
+		AgentIdentityKey, AgentReincarnation, AgentSessionMetrics, AllowListEntry,
+		ApiKey, BrokerDispatch, BrokerJoinToken, BrokerSecret, BrokerSetting,
+		ChatLinkCode, Conversation, ConversationParticipant, DecisionAudit,
+		DelegationEdge, EntitlementBinding, EnvVar, ExternalIdentity,
+		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
+		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
+		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
+		MaintenanceOperationRun, Message, MessageAddressee, MutationAudit, NonceCache,
+		Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RoleBinding,
+		RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
+		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
+		UsageReservation, User, UserAccessToken, UserTerminalWorkspace []ent.Hook
 	}
 	inters struct {
-		AccessConstraint, AccessPolicy, Agent, AgentCredential, AgentIdentityKey,
-		AgentReincarnation, AgentSessionMetrics, AllowListEntry, ApiKey,
-		BrokerDispatch, BrokerJoinToken, BrokerSecret, BrokerSetting, ChatLinkCode,
-		Conversation, ConversationParticipant, DecisionAudit, DelegationEdge,
-		EntitlementBinding, EnvVar, ExternalIdentity, GCPServiceAccount,
-		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
-		HarnessConfig, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
-		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
-		MaintenanceOperation, MaintenanceOperationRun, Message, MessageAddressee,
-		MutationAudit, NonceCache, Notification, NotificationSubscription,
-		PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
-		ProjectSyncState, RoleBinding, RoleDefinition, RuntimeBroker, Schedule,
-		ScheduledEvent, Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
-		SubscriptionTemplate, Template, UsageReservation, User,
-		UserAccessToken []ent.Interceptor
+		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
+		AgentIdentityKey, AgentReincarnation, AgentSessionMetrics, AllowListEntry,
+		ApiKey, BrokerDispatch, BrokerJoinToken, BrokerSecret, BrokerSetting,
+		ChatLinkCode, Conversation, ConversationParticipant, DecisionAudit,
+		DelegationEdge, EntitlementBinding, EnvVar, ExternalIdentity,
+		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
+		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
+		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
+		MaintenanceOperationRun, Message, MessageAddressee, MutationAudit, NonceCache,
+		Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RoleBinding,
+		RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
+		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
+		UsageReservation, User, UserAccessToken,
+		UserTerminalWorkspace []ent.Interceptor
 	}
 )

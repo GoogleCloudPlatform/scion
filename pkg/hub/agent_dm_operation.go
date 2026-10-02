@@ -342,34 +342,17 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}
 	}
 
-	// 4b. Foreign raw keystroke-injection rejection.
-	//
-	// Raw skips the wrapped envelope and is delivered as literal
-	// keystrokes with no automatic Enter — the same isolation boundary
-	// concern that #1687 raised for attachments. Refuse it cross-project
-	// the same way, rather than downgrading the message or extending
-	// cross-project capabilities.
-	//
-	// This check is intentionally isolated (its own step, its own denial
-	// code) pending confirmation of the final cross-project policy for
-	// keystroke injection; it does not touch Plain, which is unaffected by
-	// this decision.
-	//
-	// Uses the shared crossProjectRawUnsupported predicate (raw_guard.go),
-	// the same one handlers_agent_messaging.go's earlier HTTP-layer check
-	// calls, so the two checks share one definition and cannot drift apart.
-	if input.Raw && crossProjectRawUnsupported(input.SenderAgent.ProjectID, input.TargetAgent.ProjectID) {
-		LogDMAdmission(DMAuditEntryForDenial(input, string(MessageDenialCrossProjectRawUnsupported),
-			"cross-project raw keystroke delivery not supported"))
-		return nil, &AgentDMError{
-			Code:       ErrCodeUnsupportedCapability,
-			Message:    "cross-project raw message delivery is not supported",
-			HTTPStatus: http.StatusUnprocessableEntity,
-			Details: map[string]interface{}{
-				"reason": string(MessageDenialCrossProjectRawUnsupported),
-			},
-		}
-	}
+	// 4b. (Removed by task 2.3, ptone/scion#2197.) The cross-project raw
+	// keystroke-injection rejection that used to live here is superseded by
+	// the message-raw bridge (agent_keys_message_bridge.go), which
+	// intercepts every raw request upstream of this function, before
+	// authorizeAgentMessage ever runs, and reports this same case as the
+	// unified agentkeys.OutcomeCrossProjectKeysUnsupported (AK-21d, contract
+	// §8). The dispatch-layer backstop (httpdispatcher.go's
+	// ErrRawDispatchRefused) remains the fail-closed guarantee for a
+	// Raw==true call that somehow still reaches this function directly
+	// (AK-55) -- see TestExecuteAgentDM_CrossProjectRaw_RefusedByDispatchBackstop
+	// and TestExecuteAgentDM_SameProjectRaw_RefusedByDispatchBackstop.
 
 	// 4c. Managed-backend raw rejection (ptone/scion#2192).
 	//
@@ -665,6 +648,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		if markErr := s.markFailed(ctx, msgID, dispatchErr.Error()); markErr != nil {
 			s.messageLog.Error("agent DM: failed to mark message failed",
 				"message_id", msgID, "error", markErr)
+		}
+		if isBrokerAgentNotFound(dispatchErr) {
+			return nil, agentNotRunningDispatchError(msgID)
 		}
 		return nil, dispatchFailedError(msgID)
 	}

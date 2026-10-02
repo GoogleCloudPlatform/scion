@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -194,6 +195,7 @@ func TestBuildPod_NFSBackend_InitContainer_Present(t *testing.T) {
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
 		NFSSubPath:           "projects/proj-123/workspace",
+		ProjectID:            "proj-123",
 		GitCloneForInit: &api.GitCloneConfig{
 			URL:    "https://github.com/example/repo.git",
 			Branch: "main",
@@ -252,7 +254,7 @@ func TestBuildPod_NFSBackend_InitContainer_Present(t *testing.T) {
 	}
 
 	// Verify env vars are set on the container (URL/branch via env, not args)
-	var hasURL, hasBranch bool
+	var hasURL, hasBranch, hasProjectID bool
 	for _, env := range ic.Env {
 		if env.Name == "SCION_CLONE_URL" && env.Value == "https://github.com/example/repo.git" {
 			hasURL = true
@@ -260,12 +262,18 @@ func TestBuildPod_NFSBackend_InitContainer_Present(t *testing.T) {
 		if env.Name == "SCION_CLONE_BRANCH" && env.Value == "main" {
 			hasBranch = true
 		}
+		if env.Name == "SCION_PROJECT_ID" && env.Value == "proj-123" {
+			hasProjectID = true
+		}
 	}
 	if !hasURL {
 		t.Error("init container missing SCION_CLONE_URL env var")
 	}
 	if !hasBranch {
 		t.Error("init container missing SCION_CLONE_BRANCH env var")
+	}
+	if !hasProjectID {
+		t.Error("init container missing SCION_PROJECT_ID env var (logs would show project=unknown)")
 	}
 }
 
@@ -284,6 +292,7 @@ func TestBuildPod_NFSBackend_InitContainer_Present_NonGit(t *testing.T) {
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
 		NFSSubPath:           "projects/proj-123/workspace",
+		ProjectID:            "proj-123",
 		// GitCloneForInit is nil — non-git, shared-plain project.
 	}
 
@@ -298,13 +307,18 @@ func TestBuildPod_NFSBackend_InitContainer_Present_NonGit(t *testing.T) {
 	}
 
 	ic := pod.Spec.InitContainers[0]
-	assert.Equal(t, []string{"sciontool", "provision"}, ic.Command,
-		"non-git init container should run plain provision, no clone flags")
+	assert.Equal(t, []string{"sciontool", "provision", "--uid", "1000", "--gid", "1000"}, ic.Command,
+		"non-git init container should run plain provision with ownership flags only, no clone flags")
+	var hasProjectID bool
 	for _, env := range ic.Env {
 		if env.Name == "SCION_CLONE_URL" || env.Name == "SCION_CLONE_BRANCH" {
 			t.Errorf("non-git init container should not have clone env var %s", env.Name)
 		}
+		if env.Name == "SCION_PROJECT_ID" && env.Value == "proj-123" {
+			hasProjectID = true
+		}
 	}
+	assert.True(t, hasProjectID, "non-git init container missing SCION_PROJECT_ID env var")
 }
 
 // TestBuildPod_NFSBackend_InitContainer_SecurityContext_Winner verifies the
@@ -416,7 +430,7 @@ func TestNFSProvisionCommand_ShallowClone(t *testing.T) {
 		Depth:  intPtr(1),
 	}
 
-	cmd := nfsProvisionCommand(gc)
+	cmd := nfsProvisionCommand(gc, 0, 0)
 
 	assert.Equal(t, "sciontool", cmd[0])
 	assert.Equal(t, "provision", cmd[1])
@@ -458,8 +472,70 @@ func TestNFSInitContainerInjected(t *testing.T) {
 }
 
 func TestNFSProvisionCommand_NilConfig(t *testing.T) {
-	cmd := nfsProvisionCommand(nil)
+	cmd := nfsProvisionCommand(nil, 0, 0)
 	assert.Equal(t, []string{"sciontool", "provision"}, cmd)
+}
+
+// TestNFSProvisionCommand_UIDGID verifies the helper passes the given
+// uid/gid to `sciontool provision` independently, with and without a git
+// clone config, and that zero values leave the flags off so sciontool's 1000
+// default applies. Which uid/gid buildPod passes is covered by
+// TestBuildPod_NFSInitOwnershipMatchesSecurityContext.
+func TestNFSProvisionCommand_UIDGID(t *testing.T) {
+	gc := &api.GitCloneConfig{
+		URL:   "https://github.com/example/repo.git",
+		Depth: intPtr(1),
+	}
+
+	tests := []struct {
+		name string
+		gc   *api.GitCloneConfig
+		uid  int64
+		gid  int64
+		want []string
+	}{
+		{
+			name: "git clone with uid and gid",
+			gc:   gc,
+			uid:  997,
+			gid:  1003,
+			want: []string{"sciontool", "provision", "--depth", "1", "--uid", "997", "--gid", "1003"},
+		},
+		{
+			name: "no git config with uid and gid",
+			gc:   nil,
+			uid:  997,
+			gid:  1003,
+			want: []string{"sciontool", "provision", "--uid", "997", "--gid", "1003"},
+		},
+		{
+			name: "only gid set",
+			gc:   nil,
+			gid:  1003,
+			want: []string{"sciontool", "provision", "--gid", "1003"},
+		},
+		{
+			name: "only uid set",
+			gc:   nil,
+			uid:  1000,
+			want: []string{"sciontool", "provision", "--uid", "1000"},
+		},
+		{
+			name: "unset with git clone",
+			gc:   gc,
+			want: []string{"sciontool", "provision", "--depth", "1"},
+		},
+		{
+			name: "unset without git config",
+			gc:   nil,
+			want: []string{"sciontool", "provision"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, nfsProvisionCommand(tt.gc, tt.uid, tt.gid))
+		})
+	}
 }
 
 func TestNFSProvisionCommand_DefaultDepth(t *testing.T) {
@@ -468,7 +544,7 @@ func TestNFSProvisionCommand_DefaultDepth(t *testing.T) {
 		// Depth nil → no --depth flag; CLI defaults to shallow (depth 1)
 	}
 
-	cmd := nfsProvisionCommand(gc)
+	cmd := nfsProvisionCommand(gc, 0, 0)
 
 	assert.Equal(t, []string{"sciontool", "provision"}, cmd)
 }
@@ -479,7 +555,7 @@ func TestNFSProvisionCommand_FullClone(t *testing.T) {
 		Depth: intPtr(0),
 	}
 
-	cmd := nfsProvisionCommand(gc)
+	cmd := nfsProvisionCommand(gc, 0, 0)
 
 	assert.Equal(t, []string{"sciontool", "provision", "--depth", "0"}, cmd)
 }
@@ -519,7 +595,7 @@ func TestNFSProvisionCommand_InjectionSafety(t *testing.T) {
 		Branch: "feat/test; rm -rf /",
 	}
 
-	cmd := nfsProvisionCommand(gc)
+	cmd := nfsProvisionCommand(gc, 0, 0)
 
 	// Branch and URL must NOT appear in command args
 	for _, arg := range cmd {
@@ -1840,4 +1916,76 @@ func findVolumeMount(container *corev1.Container, name string) *corev1.VolumeMou
 		}
 	}
 	return nil
+}
+
+// effectiveProvisionID returns the value `sciontool provision` uses for an
+// ownership flag: the flag's argument if present, otherwise sciontool's
+// default of 1000 (cmd/sciontool/commands/provision.go).
+func effectiveProvisionID(t *testing.T, cmd []string, flag string) int64 {
+	t.Helper()
+	for i, arg := range cmd {
+		if arg == flag {
+			if i+1 >= len(cmd) {
+				t.Fatalf("%s has no value in %v", flag, cmd)
+			}
+			v, err := strconv.ParseInt(cmd[i+1], 10, 64)
+			if err != nil {
+				t.Fatalf("%s value %q: %v", flag, cmd[i+1], err)
+			}
+			return v
+		}
+	}
+	return 1000
+}
+
+// TestBuildPod_NFSInitOwnershipMatchesSecurityContext checks that the
+// lock-winner init container chowns the workspace to the identity the agent
+// container actually runs as: --uid follows the pod RunAsUser and --gid
+// follows the pod fsGroup. A configured NFS uid is not applied to the pod
+// RunAsUser, so it must not reach the init container either; otherwise the
+// cloned tree ends up owned by a uid the agent is not (ptone/scion#2566).
+func TestBuildPod_NFSInitOwnershipMatchesSecurityContext(t *testing.T) {
+	tests := []struct {
+		name    string
+		uid     int
+		gid     int
+		wantUID int64
+		wantGID int64
+	}{
+		{name: "configured uid and gid", uid: 997, gid: 1003, wantUID: 1000, wantGID: 1003},
+		{name: "gid only", gid: 1003, wantUID: 1000, wantGID: 1003},
+		{name: "uid only", uid: 997, wantUID: 1000, wantGID: 1000},
+		{name: "unset", wantUID: 1000, wantGID: 1000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newNFSTestK8sRuntime()
+			config := nfsBaseConfig("test-nfs-init-owner")
+			config.NFSUID = tt.uid
+			config.NFSGID = tt.gid
+
+			pod, err := r.buildPod("default", config)
+			if err != nil {
+				t.Fatalf("buildPod failed: %v", err)
+			}
+			if len(pod.Spec.InitContainers) != 1 {
+				t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
+			}
+			sc := pod.Spec.SecurityContext
+			if sc == nil || sc.RunAsUser == nil || sc.FSGroup == nil {
+				t.Fatal("pod security context, RunAsUser or FSGroup is nil")
+			}
+
+			cmd := pod.Spec.InitContainers[0].Command
+			assert.True(t, hasFlag(cmd, "--uid"), "init command should pass --uid explicitly: %v", cmd)
+			assert.True(t, hasFlag(cmd, "--gid"), "init command should pass --gid explicitly: %v", cmd)
+			gotUID := effectiveProvisionID(t, cmd, "--uid")
+			gotGID := effectiveProvisionID(t, cmd, "--gid")
+
+			assert.Equal(t, tt.wantUID, *sc.RunAsUser, "pod RunAsUser")
+			assert.Equal(t, tt.wantGID, *sc.FSGroup, "pod FSGroup")
+			assert.Equal(t, *sc.RunAsUser, gotUID, "init --uid must equal pod RunAsUser (cmd %v)", cmd)
+			assert.Equal(t, *sc.FSGroup, gotGID, "init --gid must equal pod FSGroup (cmd %v)", cmd)
+		})
+	}
 }

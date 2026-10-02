@@ -831,14 +831,14 @@ func TestBroadcast_B5F1a_SenderOverrideStoresAuthIdentity(t *testing.T) {
 
 	// Give the attacker minimum project membership so the ActionAttach authz
 	// check added by #1347 passes and broadcastDirect actually runs.
-	// Setting CreatedBy makes createProjectMembersGroup add the
+	// Setting CreatedBy makes seedProjectCreatorMembership add the
 	// attacker as the group owner, which grants sufficient project access.
 	ensureHubMembership(ctx, s, attacker.ID)
 	project.CreatedBy = attacker.ID
 	if err := s.UpdateProject(ctx, project); err != nil {
 		t.Fatalf("UpdateProject (set CreatedBy): %v", err)
 	}
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	agent := &store.Agent{
 		ID: api.NewUUID(), Name: "a1", Slug: "a1",
@@ -2843,7 +2843,7 @@ func TestBroadcast_SenderUsesEmailNotDisplayName(t *testing.T) {
 	ensureHubMembership(ctx, s, user.ID)
 	project.CreatedBy = user.ID
 	require.NoError(t, s.UpdateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	agent := &store.Agent{
 		ID:        api.NewUUID(),

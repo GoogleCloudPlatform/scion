@@ -817,6 +817,7 @@ type createAgentDispatcher struct {
 	// ptone/scion#1986) can read it back after the HTTP response, which for
 	// a failure path never echoes the ID.
 	capturedAgent *store.Agent
+	logsErr       error
 }
 
 func (d *createAgentDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) error {
@@ -892,7 +893,7 @@ func (d *failingCreateDispatcher) DispatchAgentDelete(_ context.Context, _ *stor
 	return nil
 }
 func (d *createAgentDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
-	return "", nil
+	return "", d.logsErr
 }
 func (d *createAgentDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
 	return d.execOutput, d.execExitCode, nil
@@ -4251,11 +4252,14 @@ func TestCreateAgent_GCPIdentityNoField(t *testing.T) {
 
 	var resp CreateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	// When no GCP identity is specified, default to "block" to prevent
-	// leaking the underlying compute identity.
-	require.NotNil(t, resp.Agent.AppliedConfig.GCPIdentity, "GCPIdentity should default to block when not specified")
-	assert.Equal(t, store.GCPMetadataModeBlock, resp.Agent.AppliedConfig.GCPIdentity.MetadataMode)
-	assert.Empty(t, resp.Agent.AppliedConfig.GCPIdentity.ServiceAccountID)
+	// When no GCP identity is specified anywhere (no request field, no
+	// project default, no hub default), AppliedConfig.GCPIdentity is left
+	// unset (nil) rather than an explicit "block" record, so the broker can
+	// apply its own runtime-aware default: "block" on every runtime except
+	// Kubernetes (unchanged, still keeping the underlying compute identity
+	// unavailable by default), "passthrough" on Kubernetes, since Kubernetes
+	// does not support "block" (ptone/scion#2328 phase 1).
+	assert.Nil(t, resp.Agent.AppliedConfig.GCPIdentity, "GCPIdentity should stay unset when not specified anywhere, letting the broker apply its runtime-aware default")
 }
 
 func TestCreateAgent_GCPIdentityInvalidMode(t *testing.T) {
@@ -4416,7 +4420,7 @@ func TestCreateAgent_GCPPassthrough_BrokerOwnerAllowed(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Create a broker owned by the same user, with host SA registered (P8).
 	broker := &store.RuntimeBroker{
@@ -4494,7 +4498,7 @@ func TestCreateAgent_GCPPassthrough_NonOwnerDenied(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Create a broker owned by a DIFFERENT user
 	broker := &store.RuntimeBroker{
@@ -4568,7 +4572,7 @@ func TestCreateAgent_GCPPassthrough_AdminAllowed(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Broker owned by someone else, with host SA registered (P8).
 	broker := &store.RuntimeBroker{

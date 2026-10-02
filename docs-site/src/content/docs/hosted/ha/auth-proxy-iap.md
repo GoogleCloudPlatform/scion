@@ -220,6 +220,8 @@ When transport auth is configured, the Hub injects these environment variables i
 | `SCION_TRANSPORT_AUDIENCE` | Audience the transport token was minted for (IAP client ID or hub URL). |
 | `SCION_TRANSPORT_TOKEN_EXPIRY` | Token expiry in RFC 3339 format. |
 
+On the Kubernetes runtime, `SCION_TRANSPORT_TOKEN` comes from the agent's per-agent Secret through `secretKeyRef`, not from a plain value in the Pod spec. See [Hub Transport Credential](/scion/hosted/ha/kubernetes/#hub-transport-credential). Other runtimes set it as a regular environment variable.
+
 ### Refresh response: `tokens[]` array
 
 The agent token refresh endpoint (`POST /api/v1/agents/{id}/token/refresh`) returns a generalized `tokens[]` array alongside the legacy single-token fields for backward compatibility:
@@ -311,6 +313,10 @@ The Hub uses a dedicated service account solely for transport-layer auth. The Hu
 |-----------|------|--------|
 | Hub's runtime SA | `roles/iam.serviceAccountTokenCreator` | Transport SA (`platform_auth_sa`) |
 | Transport SA | IAP-secured web user **or** Cloud Run invoker | The Hub's backend service |
+
+### Seeing requests IAP rejects
+
+When IAP enforces access directly on a Cloud Run service (for example, the IAP proxy in front of a single-node Hub), a request IAP rejects never reaches the container. It does not appear in the Cloud Run service's logs or the Hub's logs. To see IAP's own authorization decisions, enable **Data Access** audit logs (**Data Read**) for the `iap.googleapis.com` service, then filter Cloud Logging on `protoPayload.serviceName="iap.googleapis.com"` and `protoPayload.authorizationInfo.granted=false`. A mismatched `auth.proxy.iap.audience` is different: IAP passes the request through and the Hub rejects it, so it does show up in the Hub's logs. For step-by-step Console and `auditConfigs` instructions, see [Requests IAP rejects never reach Cloud Run or the Hub logs](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/single-node-vm.md#requests-iap-rejects-never-reach-cloud-run-or-the-hub-logs) in the repository.
 
 ## Security notes
 

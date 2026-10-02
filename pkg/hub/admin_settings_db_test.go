@@ -1993,6 +1993,81 @@ func TestPutServerConfigDB_ServerEnv_422(t *testing.T) {
 	}
 }
 
+func TestExtractKoanfKeys_AsyncAgentLaunchSettings_AreLayer0(t *testing.T) {
+	// The three async-launch settings are documented as Layer 0 (restart
+	// required, not writable via the admin API) in server-config.md's
+	// Layer-0 table. They must be extracted so ClassifyKeys sees them.
+	asyncLaunch := true
+	keepalive := 20
+	req := &ServerConfigUpdateRequest{
+		Server: &config.V1ServerConfig{
+			Hub: &config.V1ServerHubConfig{
+				AsyncAgentLaunch:       &asyncLaunch,
+				LaunchTimeout:          "10m",
+				LaunchKeepaliveSeconds: &keepalive,
+			},
+		},
+	}
+
+	keys := extractKoanfKeysFromRequest(req)
+	keySet := make(map[string]bool)
+	for _, k := range keys {
+		keySet[k] = true
+	}
+	for _, want := range []string{
+		"server.hub.async_agent_launch",
+		"server.hub.launch_timeout",
+		"server.hub.launch_keepalive_seconds",
+	} {
+		if !keySet[want] {
+			t.Errorf("%s not extracted", want)
+		}
+	}
+}
+
+func TestPutServerConfigDB_AsyncAgentLaunchSettings_422(t *testing.T) {
+	// A PUT carrying any of the three async-launch settings must be rejected
+	// with 422 layer0_rejected, matching server-config.md's Layer-0 table,
+	// rather than silently dropping them.
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "async_agent_launch",
+			body: `{"server": {"hub": {"async_agent_launch": true}}}`,
+		},
+		{
+			name: "launch_timeout",
+			body: `{"server": {"hub": {"launch_timeout": "10m"}}}`,
+		},
+		{
+			name: "launch_keepalive_seconds",
+			body: `{"server": {"hub": {"launch_keepalive_seconds": 20}}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _, ops := newTestDBServer(t)
+
+			req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", tt.body)
+			rr := httptest.NewRecorder()
+			srv.handlePutServerConfigDB(rr, req, ops)
+
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422 for %s, got %d: %s", tt.name, rr.Code, rr.Body.String())
+			}
+			var resp map[string]interface{}
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to unmarshal response: %v", err)
+			}
+			if resp["error"] != "layer0_rejected" {
+				t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
+			}
+		})
+	}
+}
+
 // ---- N6: Presence-aware field clearing tests ----
 
 func TestPutServerConfigDB_ExplicitEmptyAdminEmails_ClearsField(t *testing.T) {
@@ -3287,6 +3362,46 @@ func TestPutServerConfigDB_DefaultTimezone_Invalid(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "Not/A/Timezone") {
 		t.Errorf("error message should mention the invalid timezone: %s", rr.Body.String())
+	}
+}
+
+// TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected covers
+// time.LoadLocation accepting "Local", "localtime", "posixrules" and
+// "Factory" (Go's embedded tzdata ships those files) and, on a host with
+// the right/ and posix/ zoneinfo trees, any "right/..."- or "posix/..."-
+// prefixed name — but none of these name a portable IANA zone: "Local" is
+// the host's ambient zone, "localtime"/"posixrules"/"Factory" are tzdata's
+// own implementation files, and right/posix are whole-tree duplicates under
+// a path prefix that isn't part of any IANA name. So the hub default must
+// reject all of them explicitly, the same denylist the per-user
+// display-timezone preference uses (design §3 A (d)).
+//
+// The assertion below checks for errNonPortableTimezone's own message
+// rather than just the 422 status, so this test fails if the denylist
+// branch in validateIANATimezone is ever removed — including on a host
+// without the right/ and posix/ zoneinfo trees, where time.LoadLocation
+// would otherwise fail on those two names anyway for an unrelated reason
+// ("unknown time zone") and mask the regression.
+func TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected(t *testing.T) {
+	for _, tz := range []string{"Local", "localtime", "posixrules", "Factory", "right/Asia/Tokyo", "posix/Asia/Tokyo"} {
+		t.Run(tz, func(t *testing.T) {
+			srv, _, ops := newTestDBServer(t)
+
+			body := `{"default_timezone": "` + tz + `"}`
+			req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+			rr := httptest.NewRecorder()
+			srv.handlePutServerConfigDB(rr, req, ops)
+
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422 for default_timezone %q, got %d: %s", tz, rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), tz) {
+				t.Errorf("error message should mention %q: %s", tz, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), errNonPortableTimezone.Error()) {
+				t.Errorf("error message for %q should contain the denylist message %q, got: %s", tz, errNonPortableTimezone.Error(), rr.Body.String())
+			}
+		})
 	}
 }
 

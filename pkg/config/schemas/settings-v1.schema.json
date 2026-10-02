@@ -311,6 +311,12 @@
           "type": "boolean",
           "default": false,
           "description": "Enable GKE-specific features (e.g., Workload Identity)."
+        },
+        "priority_class_name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "description": "Kubernetes-runtime-only default PriorityClass name (DNS-1123 subdomain) applied to agent pods using this runtime entry, or the empty string for unset. The PriorityClass must already exist on the cluster; Scion does not create one. An explicit template/agent-config kubernetes.priorityClassName overrides this."
         }
       },
       "additionalProperties": false
@@ -864,6 +870,30 @@
           "type": "string",
           "description": "Duration before marking agents as stalled (e.g. '5m', '10m', '30m').",
           "x-env-var": "SCION_SERVER_HUB_STALLED_THRESHOLD",
+          "x-since": "1"
+        },
+        "async_agent_launch": {
+          "type": "boolean",
+          "description": "Reserved: no create path reads this yet, so setting it has no effect until the async dispatch path lands. Once live: the non-blocking agent create kill switch, off by default; a launch is non-blocking only when this is on AND the client request also opts in (acceptAsyncLaunch). Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_ASYNCAGENTLAUNCH",
+          "x-since": "1"
+        },
+        "launch_timeout": {
+          "type": "string",
+          "description": "Reserved: not yet read by any create path. Once live: the whole-launch budget for an opted-in launch, from acceptance to a terminal Hub state (e.g. '5m'). Below 30s is rejected and the default is used, since the broker's fixed 20s abort margin would leave no time for a launch to run. Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_LAUNCHTIMEOUT",
+          "x-since": "1"
+        },
+        "launch_keepalive_seconds": {
+          "type": "integer",
+          "description": "Broker keepalive interval, in seconds. Today it sets only the reaper's staleness window (8x this value); it will also be sent to the broker once the async dispatch path lands. Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_LAUNCHKEEPALIVESECONDS",
+          "x-since": "1"
+        },
+        "missing_agent_grace": {
+          "type": "string",
+          "description": "How long a running agent must be absent from its runtime broker's complete heartbeat inventory before the Hub marks it phase 'error' with exit reason 'container_missing' (an existing preempted or evicted exit reason is kept) (e.g. '3m'; default '3m', minimum '1m').",
+          "x-env-var": "SCION_SERVER_HUB_MISSINGAGENTGRACE",
           "x-since": "1"
         }
       }

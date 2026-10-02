@@ -18,6 +18,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/google/uuid"
 )
 
@@ -245,6 +246,25 @@ func (_c *UserCreate) AddExternalIdentities(v ...*ExternalIdentity) *UserCreate 
 		ids[i] = v[i].ID
 	}
 	return _c.AddExternalIdentityIDs(ids...)
+}
+
+// SetTerminalWorkspaceID sets the "terminal_workspace" edge to the UserTerminalWorkspace entity by ID.
+func (_c *UserCreate) SetTerminalWorkspaceID(id uuid.UUID) *UserCreate {
+	_c.mutation.SetTerminalWorkspaceID(id)
+	return _c
+}
+
+// SetNillableTerminalWorkspaceID sets the "terminal_workspace" edge to the UserTerminalWorkspace entity by ID if the given value is not nil.
+func (_c *UserCreate) SetNillableTerminalWorkspaceID(id *uuid.UUID) *UserCreate {
+	if id != nil {
+		_c = _c.SetTerminalWorkspaceID(*id)
+	}
+	return _c
+}
+
+// SetTerminalWorkspace sets the "terminal_workspace" edge to the UserTerminalWorkspace entity.
+func (_c *UserCreate) SetTerminalWorkspace(v *UserTerminalWorkspace) *UserCreate {
+	return _c.SetTerminalWorkspaceID(v.ID)
 }
 
 // Mutation returns the UserMutation object of the builder.
@@ -480,6 +500,22 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(externalidentity.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
+	}
+	if nodes := _c.mutation.TerminalWorkspaceIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TerminalWorkspaceTable,
+			Columns: []string{user.TerminalWorkspaceColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(userterminalworkspace.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {

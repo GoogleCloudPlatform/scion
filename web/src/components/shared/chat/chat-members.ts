@@ -36,6 +36,7 @@ import { apiFetch } from '../../../client/api.js';
 import { navigateTo } from '../../../client/main.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../../client/open-terminal.js';
 import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../../../utils/feature-flags.js';
+import { touchMenuItemStyles } from '../touch-styles.js';
 import './chat-avatar.js';
 import '../status-badge.js';
 
@@ -235,6 +236,8 @@ export class ScionChatMembers extends LitElement {
   private _outsideClickHandler: ((e: Event) => void) | null = null;
 
   static override styles = css`
+    ${touchMenuItemStyles}
+
     :host {
       display: flex;
       flex-direction: column;
@@ -247,6 +250,7 @@ export class ScionChatMembers extends LitElement {
       flex: 1;
       min-height: 0;
       overflow-y: auto;
+      overscroll-behavior: contain;
     }
 
     .section-label {
@@ -525,6 +529,13 @@ export class ScionChatMembers extends LitElement {
 
     .context-menu-item sl-icon {
       font-size: var(--chat-fs-lg, 1rem);
+    }
+
+    @media (max-width: 768px) {
+      .sort-btn::part(base) {
+        width: 44px;
+        height: 44px;
+      }
     }
   `;
 

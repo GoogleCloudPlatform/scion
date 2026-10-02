@@ -41,6 +41,7 @@ import {
   type HighlightRange,
   type RankedCandidate,
 } from '../../../utils/chat-palette-match.js';
+import { TouchPrimaryController } from '../../../utils/input-modality.js';
 
 /** Rows shown per group before "show more". */
 const PALETTE_GROUP_VISIBLE_LIMIT = 10;
@@ -94,8 +95,25 @@ export class ScionChatSwitcher extends LitElement {
   @query('#palette-query-input')
   private paletteInputEl?: HTMLInputElement;
 
+  /** Whether the device's primary pointer is touch — drives the keyboard-affordance omissions in {@link renderPalette} below. */
+  private touchPrimary = new TouchPrimaryController(this);
+
   static override styles = [
     css`
+      :host {
+        /* Combined height of the dialog's own chrome around the results
+           list at narrow widths: the input row, its border, the dialog's
+           own top/bottom margins, and -- where shown -- the keyboard-help
+           legend below the results. Measured empirically against this
+           exact layout: ~111px (6.9375rem) with the legend hidden (touch),
+           ~137px (8.5625rem) with it shown (a narrow but non-touch window,
+           since the legend is gated on touch, not on width). Rounded up
+           from the larger of the two with a small safety margin, as a named
+           property rather than a bare number in the max-height rule below,
+           so a future chrome change has one place to update. */
+        --palette-chrome-height: 9rem;
+      }
+
       .palette-dialog::part(panel) {
         width: min(560px, 92vw);
       }
@@ -122,6 +140,16 @@ export class ScionChatSwitcher extends LitElement {
         padding: 0.25rem 0;
       }
 
+      /* Stop iOS/Android focus-zoom: this is a native <input>, so it is not
+         covered by the app-wide --sl-input-font-size-* rule, and a coarse
+         pointer isn't limited to narrow viewports (an iPad is coarse-pointer
+         at any width). */
+      @media (pointer: coarse) {
+        #palette-query-input {
+          font-size: max(16px, var(--chat-fs-xl));
+        }
+      }
+
       .palette-results {
         max-height: 50vh;
         overflow-y: auto;
@@ -136,8 +164,65 @@ export class ScionChatSwitcher extends LitElement {
       }
 
       @media (max-width: 768px) {
+        .palette-dialog::part(panel) {
+          /* Near-full-width and top-anchored (see ::part(base) below): a
+             centred panel puts the lower results under the iOS on-screen
+             keyboard, which anchoring at the top avoids. Shoelace's own
+             dialog part sets max-width to calc(100% - var(--sl-spacing-2x-large))
+             (2.25rem, i.e. 36px, by default) on this same part, which
+             otherwise clamps width below well before 100vw - 1rem at narrow
+             widths (354px, not 374px, at a 390px viewport) -- this rule
+             needs its own max-width to actually win that clamp, not just a
+             width.
+             Specificity is not what decides this either way: per CSS
+             Cascade 4's "Context" rule, a ::part() declaration from this
+             outer tree always wins over the shadow tree's own styles for a
+             given property, regardless of either rule's specificity or
+             source order -- which is exactly why plain width above already
+             took effect on its own. max-width only needed its own explicit
+             declaration here because the clamp comes from that same
+             property, not because of any specificity contest. */
+          width: calc(100vw - 1rem);
+          max-width: calc(100vw - 1rem);
+          margin-top: max(env(safe-area-inset-top), 0.5rem);
+        }
+
+        .palette-dialog::part(base) {
+          align-items: flex-start;
+        }
+
         .palette-results {
           grid-template-columns: 1fr;
+          /* Neither vh nor dvh shrinks for the iOS keyboard, so a fixed 50vh
+             here would leave the bottom rows hidden under it --
+             --palette-vvh (set from window.visualViewport's own height while
+             open, see _onVisualViewportResize) does shrink.
+             --palette-chrome-height (defined on :host above) is the
+             dialog's own header, input row and margins. Falls back to
+             100dvh when visualViewport isn't available at all, so this
+             never regresses to an unbounded scroller. */
+          max-height: calc(var(--palette-vvh, 100dvh) - var(--palette-chrome-height));
+          overscroll-behavior: contain;
+        }
+      }
+
+      /* Tap targets: at least 44x44 for every interactive row/button, per
+         Apple/WCAG touch-target guidance — not needed on desktop, where
+         pointer precision makes the smaller default sizing fine. */
+      @media (hover: none) and (pointer: coarse) {
+        .palette-option {
+          /* .palette-option's own padding (0.5rem top+bottom = 16px) is
+             added on top of min-height under the default content-box
+             sizing, inflating every row to 60px instead of the intended
+             44px minimum — border-box folds the padding back into that
+             44px instead of adding to it. */
+          box-sizing: border-box;
+          min-height: 44px;
+          justify-content: center;
+        }
+
+        .palette-group-cell sl-button::part(base) {
+          min-height: 44px;
         }
       }
 
@@ -168,10 +253,14 @@ export class ScionChatSwitcher extends LitElement {
        * Pointer affordance only — hover must never change which row Enter
        * would commit. A CSS-only :hover state (rather than a @mouseenter
        * handler updating activeId) guarantees that: hovering repaints
-       * nothing but appearance.
+       * nothing but appearance. Scoped to hover-capable devices: on touch,
+       * :hover sticks after a tap until the next tap lands elsewhere, which
+       * would otherwise leave a stale highlighted row.
        */
-      .palette-option:hover:not(.active) {
-        background: var(--scion-bg-subtle, #f8fafc);
+      @media (hover: hover) {
+        .palette-option:hover:not(.active) {
+          background: var(--scion-bg-subtle, #f8fafc);
+        }
       }
 
       .palette-option mark {
@@ -343,6 +432,13 @@ export class ScionChatSwitcher extends LitElement {
       this.committed = false;
       this.expandedGroups = new Set();
     }
+    if (changed.has('open')) {
+      if (this.open) {
+        this._startVisualViewportTracking();
+      } else {
+        this._stopVisualViewportTracking();
+      }
+    }
     if (changedKeys.has('queryText')) {
       // A query edit resets manual navigation and any show-more expansion —
       // the new match set starts back at each group's first 10 rows.
@@ -352,6 +448,51 @@ export class ScionChatSwitcher extends LitElement {
       const ranked = this.rankedPaletteCandidates;
       this.reconcileActiveId(ranked, changedKeys.has('queryText'));
     }
+  }
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    // A reconnect while `open` is already `true` (its value unchanged
+    // across the disconnect/reconnect) never flips `willUpdate`'s own
+    // `changed.has('open')` check, so that path alone would never restart
+    // tracking here even though `disconnectedCallback` always tears it
+    // down. Not reachable today (the switcher is never moved/reparented
+    // while open), but a future change that does so should not silently
+    // lose vvh tracking.
+    if (this.open) this._startVisualViewportTracking();
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this._stopVisualViewportTracking();
+  }
+
+  /**
+   * Neither `vh` nor `dvh` shrinks when the iOS on-screen keyboard opens, so
+   * a `50vh`-based results scroller would keep the lower rows hidden under
+   * it. `window.visualViewport` does shrink, so its height is mirrored onto
+   * `--palette-vvh` on this host while open, which the narrow-viewport
+   * results sizing (see styles) consumes instead of a fixed viewport unit.
+   * Desktop never sets this custom property, so its own `50vh` rule is
+   * unaffected.
+   */
+  private readonly _onVisualViewportResize = (): void => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    this.style.setProperty('--palette-vvh', `${vv.height}px`);
+  };
+
+  private _startVisualViewportTracking(): void {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    vv.addEventListener('resize', this._onVisualViewportResize);
+    this._onVisualViewportResize();
+  }
+
+  private _stopVisualViewportTracking(): void {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    vv.removeEventListener('resize', this._onVisualViewportResize);
   }
 
   private handlePaletteQueryInput(e: InputEvent): void {
@@ -653,6 +794,9 @@ export class ScionChatSwitcher extends LitElement {
           ${state.status === 'loading' && state.candidates.length === 0
             ? html`<div class="palette-loading">Loading…</div>`
             : nothing}
+          ${state.status === 'loading' && state.candidates.length > 0 && ranked.length === 0
+            ? html`<div class="palette-loading">Loading more…</div>`
+            : nothing}
           ${state.status !== 'loading' && state.status !== 'error' && ranked.length === 0
             ? html`<div class="palette-empty">No matches</div>`
             : nothing}
@@ -738,9 +882,13 @@ export class ScionChatSwitcher extends LitElement {
       return `${matchCount} matching ${matchCount === 1 ? noun.singular : noun.plural}`;
     }
 
-    const loadingGroups = presentGroups.filter(
-      (g) => this.groups[g]!.status === 'loading' && this.groups[g]!.candidates.length === 0
-    );
+    // Not gated on `candidates.length === 0`: a group can be `loading` with
+    // partial (progressively-published) candidates already in — e.g.
+    // Agents mid-pagination — and still needs to announce as loading, since
+    // its current match count (for a query that only matches a page not in
+    // yet) can otherwise misreport as a final "0 matching results" that
+    // reads as "this doesn't exist" rather than "still loading".
+    const loadingGroups = presentGroups.filter((g) => this.groups[g]!.status === 'loading');
     if (loadingGroups.length === presentGroups.length) {
       return 'Loading…';
     }
@@ -776,7 +924,7 @@ export class ScionChatSwitcher extends LitElement {
             aria-expanded="true"
             aria-controls="palette-result-list"
             aria-activedescendant=${activeDomId ?? nothing}
-            aria-describedby="palette-keyboard-help"
+            aria-describedby=${this.touchPrimary.isTouch ? nothing : 'palette-keyboard-help'}
             placeholder="Search agents, threads, people, documents…"
             .value=${this.queryText}
             autocomplete="off"
@@ -807,12 +955,16 @@ export class ScionChatSwitcher extends LitElement {
               </div>`
             : nothing}
         </div>
-        <div id="palette-keyboard-help" class="palette-help">
-          <span><kbd>Tab</kbd> next group</span>
-          <span><kbd>↑↓</kbd> navigate</span>
-          <span><kbd>↵</kbd> open</span>
-          <span><kbd>esc</kbd> close</span>
-        </div>
+        ${this.touchPrimary.isTouch
+          ? nothing
+          : html`
+              <div id="palette-keyboard-help" class="palette-help">
+                <span><kbd>Tab</kbd> next group</span>
+                <span><kbd>↑↓</kbd> navigate</span>
+                <span><kbd>↵</kbd> open</span>
+                <span><kbd>esc</kbd> close</span>
+              </div>
+            `}
         <div class="palette-status" role="status" aria-live="polite">
           ${this.paletteStatusText()}
         </div>
