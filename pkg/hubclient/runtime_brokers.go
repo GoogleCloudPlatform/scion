@@ -114,6 +114,23 @@ type BrokerHeartbeat struct {
 	// snapshot alone (the pre-A2 state) is never refreshed for an
 	// already-registered broker until it re-registers with --force.
 	Capabilities *BrokerCapabilities `json:"capabilities,omitempty"`
+	// Inventory describes how complete the agent list in Projects is. The
+	// Hub only treats an agent missing from Projects as having no container
+	// when Inventory is present and Complete is true. An older broker omits
+	// the field, and the Hub then never draws that conclusion.
+	Inventory *BrokerInventory `json:"inventory,omitempty"`
+}
+
+// BrokerInventory reports whether a heartbeat's agent list is the broker's
+// full runtime inventory.
+type BrokerInventory struct {
+	// Complete is true only when every runtime the broker manages (the
+	// default runtime and every auxiliary runtime) was listed successfully,
+	// so an agent absent from the heartbeat has no container on this broker.
+	Complete bool `json:"complete"`
+	// Runtimes names the runtimes that were listed (runtime.Runtime.Name()
+	// values such as "docker" or "kubernetes").
+	Runtimes []string `json:"runtimes,omitempty"`
 }
 
 // ProjectHeartbeat is per-project status in a heartbeat.

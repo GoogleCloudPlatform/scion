@@ -139,13 +139,18 @@ type ExitReason string
 const (
 	ExitReasonCrashed        ExitReason = "crashed"
 	ExitReasonLimitsExceeded ExitReason = "limits_exceeded"
+	// ExitReasonContainerMissing is set by the Hub when the agent's runtime
+	// broker keeps reporting a complete runtime inventory that no longer
+	// contains the agent's container (for example a Kubernetes pod removed
+	// by a node drain), so the agent cannot still be running.
+	ExitReasonContainerMissing ExitReason = "container_missing"
 )
 
 // IsValid reports whether r is a recognised ExitReason value.
 // Empty string is valid (no reason given).
 func (r ExitReason) IsValid() bool {
 	switch r {
-	case "", ExitReasonCrashed, ExitReasonLimitsExceeded:
+	case "", ExitReasonCrashed, ExitReasonLimitsExceeded, ExitReasonContainerMissing:
 		return true
 	}
 	return false

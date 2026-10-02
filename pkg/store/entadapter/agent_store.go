@@ -1436,6 +1436,69 @@ func (s *AgentStore) MarkStaleAgentsOffline(ctx context.Context, threshold time.
 	return updated, nil
 }
 
+// containerMissingStatus is the container_status recorded by
+// MarkAgentContainerMissing.
+const containerMissingStatus = "missing"
+
+// MarkAgentContainerMissing implements store.AgentStore. See the interface
+// documentation for the guard conditions.
+func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*store.Agent, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return nil, err
+	}
+
+	// Prime dialect detection before opening the transaction (see
+	// UpdateAgentStatus).
+	useLock := s.usesRowLocks(ctx)
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Agent.Query().Where(agent.IDEQ(uid))
+	if useLock {
+		q = q.ForUpdate()
+	}
+	current, err := q.Only(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	cur := entAgentToStore(current)
+	switch {
+	case !cur.DeletedAt.IsZero(),
+		cur.RuntimeBrokerID != brokerID,
+		cur.Phase != "running",
+		cur.ReincarnationState != store.ReincarnationStateNone && cur.ReincarnationState != store.ReincarnationStateFailed,
+		!cur.LastSeen.IsZero() && !cur.LastSeen.Before(cutoff):
+		return nil, nil
+	}
+
+	exitReason := "container_missing"
+	if err := tx.Agent.UpdateOneID(uid).
+		SetPhase("error").
+		SetActivity("").
+		SetStalledFromActivity("").
+		SetToolName("").
+		SetContainerStatus(containerMissingStatus).
+		ClearExitCode().
+		SetExitReason(exitReason).
+		SetMessage(message).
+		Exec(ctx); err != nil {
+		return nil, mapError(err)
+	}
+	updated, err := tx.Agent.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return entAgentToStore(updated), nil
+}
+
 // stalledExcluded lists the activities that disqualify a running agent from
 // being marked "stalled" (terminal, already-stalled, or intentionally waiting).
 var stalledExcluded = []string{"completed", "limits_exceeded", "blocked", "stalled", "offline", "waiting_for_input"}

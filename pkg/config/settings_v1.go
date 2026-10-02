@@ -619,6 +619,10 @@ type V1ServerHubConfig struct {
 	AutoSuspendStalled *bool `json:"auto_suspend_stalled,omitempty" yaml:"auto_suspend_stalled,omitempty" koanf:"auto_suspend_stalled"`
 	// StalledThreshold is how long before an agent is marked stalled (e.g., "5m", "10m").
 	StalledThreshold string `json:"stalled_threshold,omitempty" yaml:"stalled_threshold,omitempty" koanf:"stalled_threshold"`
+	// MissingAgentGrace is how long a running agent must be absent from its
+	// runtime broker's complete heartbeat inventory before the Hub marks it
+	// as having no container (e.g., "3m"; minimum "1m").
+	MissingAgentGrace string `json:"missing_agent_grace,omitempty" yaml:"missing_agent_grace,omitempty" koanf:"missing_agent_grace"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
 	// AsyncAgentLaunch is the non-blocking agent create kill switch.
@@ -1549,6 +1553,7 @@ var knownCompoundFields = []string{
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
 	"soft_delete_retention",
+	"missing_agent_grace",
 	"stalled_threshold",
 	"authorized_domains",
 	"platform_auth_sa",
@@ -1855,6 +1860,11 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if v1.Hub.LaunchKeepaliveSeconds != nil {
 			gc.Hub.LaunchKeepaliveSeconds = *v1.Hub.LaunchKeepaliveSeconds
+		}
+		if v1.Hub.MissingAgentGrace != "" {
+			if d, err := time.ParseDuration(v1.Hub.MissingAgentGrace); err == nil {
+				gc.Hub.MissingAgentGrace = d
+			}
 		}
 		if v1.Hub.DisableLegacyStorageFallback != nil {
 			gc.Hub.DisableLegacyStorageFallback = *v1.Hub.DisableLegacyStorageFallback
@@ -2177,6 +2187,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.StalledThreshold > 0 {
 		v1Hub.StalledThreshold = gc.Hub.StalledThreshold.String()
+	}
+	if gc.Hub.MissingAgentGrace > 0 {
+		v1Hub.MissingAgentGrace = gc.Hub.MissingAgentGrace.String()
 	}
 	if gc.Hub.SoftDeleteRetainFiles {
 		retainFiles := true

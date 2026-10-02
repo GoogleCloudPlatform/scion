@@ -236,15 +236,29 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 	// Gather per-project agent counts. gatherProjectAgents snapshots the
 	// current manager under its own lock and handles nil, so no separate
 	// nil check is needed here.
-	if projectAgents := s.gatherProjectAgents(ctx); len(projectAgents) > 0 {
+	projectAgents, inventory := s.gatherProjectAgents(ctx)
+	if len(projectAgents) > 0 {
 		heartbeat.Projects = projectAgents
 	}
+	heartbeat.Inventory = inventory
 
 	return heartbeat
 }
 
-// gatherProjectAgents collects agent information grouped by project.
-func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) []hubclient.ProjectHeartbeat {
+// runtimeNamer is implemented by agent managers that can name the runtime
+// they list (agent.AgentManager does). The heartbeat inventory reports these
+// names so the Hub only draws conclusions about agents on listed runtimes.
+type runtimeNamer interface {
+	RuntimeName() string
+}
+
+// gatherProjectAgents collects agent information grouped by project, and
+// reports whether that information is the broker's complete runtime
+// inventory. The inventory is complete only when the default runtime and
+// every auxiliary runtime were listed without error and each can be named;
+// any listing failure makes it incomplete so the Hub never mistakes a failed
+// listing for missing containers.
+func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) ([]hubclient.ProjectHeartbeat, *hubclient.BrokerInventory) {
 	// Snapshot the current manager under the lock so that a concurrent
 	// SwapManager call (triggered by Server.SwapRuntime) is picked up
 	// on the next heartbeat tick rather than racing with this one.
@@ -253,7 +267,29 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) []hubclient.
 	s.mu.Unlock()
 
 	if mgr == nil {
-		return nil
+		return nil, &hubclient.BrokerInventory{Complete: false}
+	}
+
+	inventory := &hubclient.BrokerInventory{Complete: true}
+	// A project filter (multi-hub mode) drops projects whose ownership is
+	// inferred from local settings, so the reported list is not a reliable
+	// complete inventory for any one hub.
+	if s.projectFilter != nil {
+		inventory.Complete = false
+	}
+	addRuntime := func(m agent.Manager) {
+		n, ok := m.(runtimeNamer)
+		if !ok || n.RuntimeName() == "" {
+			inventory.Complete = false
+			return
+		}
+		name := n.RuntimeName()
+		for _, existing := range inventory.Runtimes {
+			if existing == name {
+				return
+			}
+		}
+		inventory.Runtimes = append(inventory.Runtimes, name)
 	}
 
 	// List all agents managed by this broker (default runtime).
@@ -263,6 +299,9 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) []hubclient.
 	if err != nil {
 		s.log.Warn("Default runtime agent listing failed for heartbeat, trying auxiliary runtimes", "error", err)
 		agents = nil
+		inventory.Complete = false
+	} else {
+		addRuntime(mgr)
 	}
 
 	// Also include agents from auxiliary runtimes (e.g. Kubernetes).
@@ -281,8 +320,11 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) []hubclient.
 		for _, auxMgr := range s.auxiliaryManagers() {
 			auxAgents, auxErr := auxMgr.List(ctx, nil)
 			if auxErr != nil {
+				s.log.Warn("Auxiliary runtime agent listing failed for heartbeat; inventory marked incomplete", "error", auxErr)
+				inventory.Complete = false
 				continue
 			}
+			addRuntime(auxMgr)
 			for _, ag := range auxAgents {
 				k := heartbeatAgentKey(ag)
 				if !seen[k] {
@@ -337,7 +379,10 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) []hubclient.
 		})
 	}
 
-	return projects
+	if !inventory.Complete {
+		inventory.Runtimes = nil
+	}
+	return projects, inventory
 }
 
 // ForceHeartbeat sends an immediate heartbeat, bypassing the interval.

@@ -334,6 +334,17 @@ type AgentStore interface {
 	// Returns the updated agent records for event publishing.
 	MarkStalledAgents(ctx context.Context, activityThreshold, heartbeatRecency time.Time) ([]Agent, error)
 
+	// MarkAgentContainerMissing moves a running agent whose container its
+	// runtime broker no longer reports to phase=error with exit reason
+	// container_missing. It re-checks, under a row lock in one transaction,
+	// that the agent still exists (not soft-deleted), is still assigned to
+	// brokerID, is still in phase running, has no reincarnation in flight, and
+	// has not been seen (last_seen) at or after cutoff. When any check fails
+	// it changes nothing and returns (nil, nil), so a concurrent start,
+	// restart, stop or heartbeat always wins. On success it returns the
+	// updated record for event publishing.
+	MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*Agent, error)
+
 	// FindOrphanedAgents returns agents whose RuntimeBrokerID references a broker
 	// that is offline or does not exist, and who are not in terminal states
 	// (stopped, error). Agents assigned to the given currentBrokerID are excluded.

@@ -1,0 +1,378 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// Missing-container reconcile (GoogleCloudPlatform/scion#2077).
+//
+// A runtime broker's heartbeat lists the agents its runtimes report, that is,
+// the containers (or Kubernetes pods) that exist. When a container disappears
+// outside of a Scion lifecycle action (a node drain, repair or eviction
+// removing a pod, or a container removed by hand), the agent would otherwise
+// stay in phase running forever. After every heartbeat that carries a
+// complete inventory, the Hub looks for agents assigned to the broker that
+// are in phase running but absent from the report, and once an agent has been
+// continuously absent for the grace period it is moved to phase error with
+// exit reason container_missing.
+//
+// The mechanism is runtime-neutral: it applies to Docker, Podman, Apple
+// container and Kubernetes brokers alike, because it only compares the
+// heartbeat's inventory with the Hub's agent rows.
+//
+// Safety rules (each one keeps a live agent from being caught):
+//   - Only heartbeats with inventory.complete=true count. A broker sets it only
+//     when every runtime listed without error; an older broker never sends it.
+//   - The broker must be online and its previous heartbeat must be recent; a
+//     broker returning from an offline or stale period restarts every clock.
+//   - Only phase running is considered. created/provisioning/cloning/starting
+//     are dispatch phases in which the container may legitimately not exist
+//     yet; suspended/stopping/stopped/error are not running.
+//   - The agent's runtime must be one the broker listed.
+//   - Agents with a reincarnation, a queued lifecycle dispatch, or a lifecycle
+//     dispatch in flight on this Hub are skipped.
+//   - The agent must be absent from complete inventories for the whole grace
+//     period, as observed by this Hub process, AND its last_seen (bumped by
+//     every heartbeat that reports it and by the agent's own status reports)
+//     must be older than the grace period. last_seen, not the row's updated
+//     timestamp, is used because unrelated writes bump updated.
+//   - The final write is a conditional store update that re-checks phase,
+//     broker, reincarnation state and last_seen under a row lock.
+
+// DefaultMissingAgentGrace is the default time an agent must be continuously
+// absent from its broker's complete heartbeat inventory before the Hub marks
+// it as having no container. At the default 30s broker heartbeat interval this
+// is six consecutive heartbeats.
+const DefaultMissingAgentGrace = 3 * time.Minute
+
+// MinMissingAgentGrace is the lowest accepted grace period. Lower configured
+// values are replaced by the default.
+const MinMissingAgentGrace = time.Minute
+
+// missingAgentMessage is the status message recorded on a reconciled agent.
+const missingAgentMessage = "The runtime broker no longer reports a container for this agent; it was removed outside of Scion (for example by a node drain or eviction)."
+
+// brokerInventory mirrors hubclient.BrokerInventory on the Hub side.
+type brokerInventory struct {
+	Complete bool     `json:"complete"`
+	Runtimes []string `json:"runtimes,omitempty"`
+}
+
+// missingAgentTracker records, per broker, when this Hub process first saw
+// each running agent absent from a complete heartbeat inventory. It is
+// in-memory and per replica on purpose: losing it (restart) or not sharing it
+// (several replicas) only delays a reconcile, never speeds one up, because
+// the store's last_seen check still applies.
+type missingAgentTracker struct {
+	mu     sync.Mutex
+	since  map[string]map[string]time.Time // brokerID -> agentID -> first seen missing
+	nowFor func() time.Time                // test hook; nil means time.Now
+}
+
+func (t *missingAgentTracker) now() time.Time {
+	if t.nowFor != nil {
+		return t.nowFor()
+	}
+	return time.Now()
+}
+
+// reset forgets every clock for brokerID.
+func (t *missingAgentTracker) reset(brokerID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.since, brokerID)
+}
+
+// observe replaces brokerID's clocks with the given currently-missing agent
+// IDs, keeping the first-seen time of agents that were already missing, and
+// returns the first-seen time for each.
+func (t *missingAgentTracker) observe(brokerID string, missing []string, now time.Time) map[string]time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.since == nil {
+		t.since = make(map[string]map[string]time.Time)
+	}
+	prev := t.since[brokerID]
+	next := make(map[string]time.Time, len(missing))
+	for _, id := range missing {
+		if first, ok := prev[id]; ok {
+			next[id] = first
+		} else {
+			next[id] = now
+		}
+	}
+	if len(next) == 0 {
+		delete(t.since, brokerID)
+	} else {
+		t.since[brokerID] = next
+	}
+	out := make(map[string]time.Time, len(next))
+	for k, v := range next {
+		out[k] = v
+	}
+	return out
+}
+
+// forget drops one agent's clock (after it was reconciled).
+func (t *missingAgentTracker) forget(brokerID, agentID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if m := t.since[brokerID]; m != nil {
+		delete(m, agentID)
+		if len(m) == 0 {
+			delete(t.since, brokerID)
+		}
+	}
+}
+
+// lifecycleOpTracker counts lifecycle dispatches (start, stop, restart,
+// suspend, resume) in flight on this Hub process per agent. During such an
+// operation the container can be legitimately absent while the agent row
+// still says running (for example between the stop and the start of a
+// restart), so the missing-container reconcile skips the agent.
+type lifecycleOpTracker struct {
+	mu       sync.Mutex
+	inFlight map[string]int
+}
+
+// begin marks agentID as having a lifecycle operation in flight and returns
+// the function that ends it. Safe to call with an empty ID (no-op).
+func (t *lifecycleOpTracker) begin(agentID string) func() {
+	if agentID == "" {
+		return func() {}
+	}
+	t.mu.Lock()
+	if t.inFlight == nil {
+		t.inFlight = make(map[string]int)
+	}
+	t.inFlight[agentID]++
+	t.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			if t.inFlight[agentID] <= 1 {
+				delete(t.inFlight, agentID)
+			} else {
+				t.inFlight[agentID]--
+			}
+		})
+	}
+}
+
+func (t *lifecycleOpTracker) active(agentID string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.inFlight[agentID] > 0
+}
+
+// beginLifecycleOp marks a lifecycle dispatch for agentID as in flight; call
+// the returned function when the dispatch and its status write are done.
+func (s *Server) beginLifecycleOp(agentID string) func() {
+	return s.lifecycleOps.begin(agentID)
+}
+
+// missingAgentGrace returns the configured grace period, applying the
+// default and the floor.
+func (s *Server) missingAgentGrace() time.Duration {
+	g := s.config.MissingAgentGrace
+	if g < MinMissingAgentGrace {
+		return DefaultMissingAgentGrace
+	}
+	return g
+}
+
+// heartbeatReport is what reconcileMissingAgents needs from one processed
+// heartbeat.
+type heartbeatReport struct {
+	// present holds the IDs of Hub agents matched by (project, slug).
+	present map[string]bool
+	// unresolvedSlugs holds the slugs of reported entries that could not be
+	// matched to an agent of this broker (unknown project ID, legacy project
+	// key, or another broker's agent). An agent of this broker with one of
+	// these slugs is treated as present, which errs on the side of leaving
+	// it alone.
+	unresolvedSlugs map[string]bool
+}
+
+func newHeartbeatReport() *heartbeatReport {
+	return &heartbeatReport{present: map[string]bool{}, unresolvedSlugs: map[string]bool{}}
+}
+
+// inventoryAllowsReconcile reports whether this heartbeat may be used to
+// conclude that unreported agents have no container. prev is the broker row
+// as it was before this heartbeat was stored (nil when it could not be read).
+func inventoryAllowsReconcile(prev *store.RuntimeBroker, hb *brokerHeartbeatRequest, now time.Time, grace time.Duration) bool {
+	if hb.Inventory == nil || !hb.Inventory.Complete {
+		return false
+	}
+	if hb.Status != store.BrokerStatusOnline {
+		return false
+	}
+	if prev == nil || prev.Status != store.BrokerStatusOnline || prev.LastHeartbeat.IsZero() {
+		return false
+	}
+	// A broker whose previous heartbeat is older than the grace period was
+	// stale or offline; start counting again from this heartbeat.
+	return now.Sub(prev.LastHeartbeat) < grace
+}
+
+// runtimeListed reports whether an agent's runtime is covered by the
+// inventory. An agent with no recorded runtime is only covered when the
+// broker listed exactly one runtime, so it cannot belong to an unlisted one.
+func runtimeListed(agentRuntime string, inv *brokerInventory) bool {
+	if agentRuntime == "" {
+		return len(inv.Runtimes) == 1
+	}
+	for _, r := range inv.Runtimes {
+		if r == agentRuntime {
+			return true
+		}
+	}
+	return false
+}
+
+// listRunningBrokerAgents returns every non-deleted agent assigned to
+// brokerID in phase running, following pagination.
+func (s *Server) listRunningBrokerAgents(ctx context.Context, brokerID string) ([]store.Agent, error) {
+	var out []store.Agent
+	opts := store.ListOptions{SkipTotalCount: true}
+	for {
+		res, err := s.store.ListAgents(ctx, store.AgentFilter{
+			RuntimeBrokerID: brokerID,
+			Phase:           string(state.PhaseRunning),
+		}, opts)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, res.Items...)
+		if res.NextCursor == "" {
+			return out, nil
+		}
+		opts.Cursor = res.NextCursor
+	}
+}
+
+// pendingLifecycleAgents returns the IDs of agents with a queued lifecycle
+// dispatch for brokerID. Such an agent's container may be about to be
+// created, stopped or replaced, so it is not reconciled.
+func (s *Server) pendingLifecycleAgents(ctx context.Context, brokerID string) (map[string]bool, error) {
+	rows, err := s.store.ListPendingDispatch(ctx, brokerID)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(rows))
+	for _, d := range rows {
+		if d.AgentID == "" {
+			continue
+		}
+		switch d.Op {
+		case "create", "start", "stop", "restart", "delete":
+			out[d.AgentID] = true
+		}
+	}
+	return out, nil
+}
+
+// reconcileMissingAgents runs after a heartbeat's reported agents have been
+// processed. See the file comment for the rules.
+func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, prev *store.RuntimeBroker, hb *brokerHeartbeatRequest, report *heartbeatReport) {
+	grace := s.missingAgentGrace()
+	now := s.missingAgents.now()
+
+	if !inventoryAllowsReconcile(prev, hb, now, grace) {
+		s.missingAgents.reset(brokerID)
+		return
+	}
+
+	agents, err := s.listRunningBrokerAgents(ctx, brokerID)
+	if err != nil {
+		s.agentLifecycleLog.Warn("heartbeat reconcile: failed to list broker agents",
+			"broker_id", brokerID, "error", err)
+		return
+	}
+
+	var missing []store.Agent
+	for i := range agents {
+		a := &agents[i]
+		if report.present[a.ID] || report.unresolvedSlugs[a.Slug] {
+			continue
+		}
+		if reincarnationInFlight(a) || s.lifecycleOps.active(a.ID) {
+			continue
+		}
+		if !runtimeListed(a.Runtime, hb.Inventory) {
+			continue
+		}
+		missing = append(missing, *a)
+	}
+	if len(missing) == 0 {
+		s.missingAgents.reset(brokerID)
+		return
+	}
+
+	pending, err := s.pendingLifecycleAgents(ctx, brokerID)
+	if err != nil {
+		s.agentLifecycleLog.Warn("heartbeat reconcile: failed to list pending dispatches",
+			"broker_id", brokerID, "error", err)
+		return
+	}
+	ids := make([]string, 0, len(missing))
+	kept := missing[:0]
+	for _, a := range missing {
+		if pending[a.ID] {
+			continue
+		}
+		ids = append(ids, a.ID)
+		kept = append(kept, a)
+	}
+	missing = kept
+
+	firstSeen := s.missingAgents.observe(brokerID, ids, now)
+	cutoff := now.Add(-grace)
+	for _, a := range missing {
+		if first, ok := firstSeen[a.ID]; !ok || first.After(cutoff) {
+			continue
+		}
+		if !a.LastSeen.IsZero() && !a.LastSeen.Before(cutoff) {
+			continue
+		}
+		updated, err := s.store.MarkAgentContainerMissing(ctx, a.ID, brokerID, cutoff, missingAgentMessage)
+		if err != nil {
+			s.agentLifecycleLog.Warn("heartbeat reconcile: failed to mark agent container missing",
+				"broker_id", brokerID, "agent_id", a.ID, "error", err)
+			continue
+		}
+		if updated == nil {
+			// A concurrent write (start, heartbeat, stop) changed the row.
+			continue
+		}
+		s.missingAgents.forget(brokerID, a.ID)
+		s.agentLifecycleLog.Warn("heartbeat reconcile: agent container missing, marked error",
+			"broker_id", brokerID, "agent_id", a.ID, "agent", a.Slug, "project_id", a.ProjectID,
+			"previous_activity", a.Activity, "missing_since", firstSeen[a.ID], "last_seen", a.LastSeen,
+			"exit_reason", string(state.ExitReasonContainerMissing))
+		s.reconcileBrokerQuotaOnPhaseChange(ctx, &a, string(state.PhaseRunning), updated.Phase)
+		s.events.PublishAgentStatus(ctx, updated)
+	}
+}

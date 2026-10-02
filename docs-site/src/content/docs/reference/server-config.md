@@ -66,6 +66,7 @@ Controls the central Hub API server.
 | `async_agent_launch` | bool | `false` | **Reserved.** No create path reads this yet, so setting it has no effect until the async dispatch path lands. Once live: the non-blocking agent create kill switch — a launch is non-blocking only when this is on **and** the client request also opts in (`acceptAsyncLaunch`); clients that never opt in stay synchronous permanently. Restart required to change. |
 | `launch_timeout` | duration | `"5m"` | **Reserved.** Not yet read by any create path. Once live: the whole-launch budget for an opted-in launch, from acceptance to a terminal Hub state. Values below `30s` are rejected (the broker's fixed 20s abort margin would leave no time for a launch to run) and the default is used instead. Restart required to change. |
 | `launch_keepalive_seconds` | int | `15` | Broker keepalive interval, in seconds. Today it sets only the reaper's staleness window (when a launch is presumed lost, 8x this value); it will also be sent to the broker once the async dispatch path lands. Restart required to change. |
+| `missing_agent_grace` | duration | `"3m"` | How long a `running` agent may be absent from its Runtime Broker's heartbeat before the Hub marks it `error` with exit reason `container_missing`. Applies only when the broker is online, reported a complete runtime inventory, and sent a recent previous heartbeat; agents with a lifecycle operation in progress are skipped. Values below `"1m"` fall back to the default. Env: `SCION_SERVER_HUB_MISSINGAGENTGRACE`. |
 | `cors` | object | | CORS configuration (see below). |
 
 #### CORS (`server.hub.cors`)
@@ -656,6 +657,7 @@ Settings required before the database connection exists, or that are restart-bou
 | CORS | `hub.cors.*`, `broker.cors` |
 | Messaging/plugins | `message_broker.*`, `plugins.*` |
 | Async agent create | `hub.async_agent_launch`, `hub.launch_timeout`, `hub.launch_keepalive_seconds` |
+| Heartbeat reconcile | `hub.missing_agent_grace` |
 
 ### Layer 1 — Operational (Postgres `hub_settings` table)
 

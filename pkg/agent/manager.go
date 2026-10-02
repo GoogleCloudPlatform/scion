@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -426,6 +427,17 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 		return m.deliverImmediate(ctx, agentID, projectID, message, interrupt)
 	}
 
+	// Before buffering, make sure the target has a running container. A
+	// buffered message is reported as accepted at once and only fails later,
+	// asynchronously, so without this check a message to an agent whose
+	// container is gone (for example a Kubernetes pod removed by a node
+	// drain) would look delivered to the sender. Only a definite answer from
+	// the runtime fails the send; a lookup error falls back to the buffered
+	// path so a transient runtime or API error never blocks delivery.
+	if err := m.checkDeliveryTarget(ctx, agentID, projectID); err != nil {
+		return err
+	}
+
 	// Non-interrupt messages go through the debounce buffer. This ensures
 	// that a rapid burst of messages (e.g. from multiple senders or broadcast
 	// fan-out) is coalesced into a single delivery, avoiding contention on
@@ -435,6 +447,63 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 	// rather than leave it "dispatched" (#1820).
 	m.msgBuffer.SendWithFailureHandler(agentID, projectID, message, DeliveryFailureHandlerFromContext(ctx))
 	return nil
+}
+
+// errNoRunningContainer formats the error returned when a message target
+// has no running container. It contains "not found" so the runtime broker
+// maps it to 404, matching deliverImmediate's own lookup failure.
+func errNoRunningContainer(agentID string) error {
+	return fmt.Errorf("agent '%s' not found or not running", agentID)
+}
+
+// checkDeliveryTarget performs one scoped runtime lookup (the same name and
+// project label filter deliverImmediate uses, so on Kubernetes a single
+// label-selected pod list, on Docker a single filtered container list) and
+// returns errNoRunningContainer only when the runtime answers definitively
+// that the agent has no container, or that its container is stopped or
+// errored. A lookup error, or a container whose state the runtime does not
+// report, returns nil so the caller keeps the normal buffered path.
+//
+// It queries the runtime directly rather than m.List: the runtime's Phase is
+// derived from the container state, while m.List merges the agent's
+// self-reported agent-info.json phase on top of it.
+func (m *AgentManager) checkDeliveryTarget(ctx context.Context, agentID, projectID string) error {
+	if m.Runtime == nil {
+		return nil
+	}
+	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
+	if projectID != "" {
+		filter["scion.project_id"] = projectID
+	}
+	agents, err := m.Runtime.List(ctx, filter)
+	if err != nil {
+		slog.Warn("message target lookup failed; using buffered delivery",
+			"agent", agentID, "project_id", projectID, "error", err)
+		return nil
+	}
+	for _, a := range agents {
+		if !matchesAgentID(a, agentID) {
+			continue
+		}
+		switch state.Phase(a.Phase) {
+		case state.PhaseStopped, state.PhaseError:
+			// Keep looking: another matching container may be running.
+		default:
+			return nil
+		}
+	}
+	// No matching container, or every matching container is stopped/errored.
+	return errNoRunningContainer(agentID)
+}
+
+// RuntimeName returns the name of the runtime this manager lists, or "" when
+// it has none. The broker heartbeat uses it to report which runtimes its
+// agent inventory covers.
+func (m *AgentManager) RuntimeName() string {
+	if m.Runtime == nil {
+		return ""
+	}
+	return m.Runtime.Name()
 }
 
 // MessageRaw sends literal bytes to an agent's tmux session via send-keys
@@ -460,7 +529,7 @@ func (m *AgentManager) MessageRaw(ctx context.Context, agentID, projectID string
 	}
 
 	if agent == nil {
-		return fmt.Errorf("agent '%s' not found or not running", agentID)
+		return errNoRunningContainer(agentID)
 	}
 
 	// Serialize against a concurrent SendKeys call (or a concurrent
@@ -1167,7 +1236,7 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	}
 
 	if agent == nil {
-		return fmt.Errorf("agent '%s' not found or not running", agentID)
+		return errNoRunningContainer(agentID)
 	}
 
 	// Serialize against a concurrent SendKeys call (or another concurrent

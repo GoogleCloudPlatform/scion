@@ -640,6 +640,10 @@ type brokerHeartbeatRequest struct {
 	// which case the store's capabilities are
 	// left exactly as CompleteBrokerJoin last set them.
 	Capabilities *store.BrokerCapabilities `json:"capabilities,omitempty"`
+	// Inventory reports whether Projects is the broker's complete runtime
+	// inventory (see hubclient.BrokerInventory). Omitted by an older broker,
+	// in which case the missing-container reconcile never runs for it.
+	Inventory *brokerInventory `json:"inventory,omitempty"`
 }
 
 // brokerProjectHeartbeat is per-project status in a heartbeat.
@@ -698,6 +702,17 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
+	// Snapshot the broker row before this heartbeat is stored: the
+	// missing-container reconcile needs to know whether the broker was
+	// already online and fresh, or is returning from a stale/offline period.
+	// Only read when the heartbeat could drive a reconcile.
+	var prevBroker *store.RuntimeBroker
+	if heartbeat.Inventory != nil && heartbeat.Inventory.Complete {
+		if b, err := s.store.GetRuntimeBroker(ctx, id); err == nil {
+			prevBroker = b
+		}
+	}
+
 	// Update the broker's heartbeat status
 	if err := s.store.UpdateRuntimeBrokerHeartbeat(ctx, id, heartbeat.Status); err != nil {
 		writeErrorFromErr(w, err, "")
@@ -747,6 +762,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	}
 
 	// Process agent status updates from each project
+	report := newHeartbeatReport()
 	for _, project := range heartbeat.Projects {
 		for _, agentHB := range project.Agents {
 			// Look up the agent by name (slug) within the project
@@ -754,18 +770,21 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			if err != nil {
 				// Agent not found in this project - skip silently
 				// This can happen if the agent exists locally but isn't registered on the Hub
+				report.unresolvedSlugs[agentHB.Slug] = true
 				continue
 			}
 
 			// Defense in depth: skip agents not assigned to the targeted broker.
 			// Caller authorization is handled above at the handler level.
 			if agent.RuntimeBrokerID != id {
+				report.unresolvedSlugs[agentHB.Slug] = true
 				slog.Warn("Broker attempted to update agent owned by different broker",
 					"brokerID", id,
 					"agentBrokerID", agent.RuntimeBrokerID,
 					"agent_id", agent.ID)
 				continue
 			}
+			report.present[agent.ID] = true
 
 			// Build status update with agent status and container status.
 			// When the broker sends structured Phase/Activity fields, use
@@ -1046,6 +1065,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			}
 		}
 	}
+
+	// Reconcile running agents of this broker that the heartbeat no longer
+	// reports (their container is gone). Gated on a complete inventory and a
+	// fresh broker; see broker_heartbeat_reconcile.go.
+	s.reconcileMissingAgents(ctx, id, prevBroker, &heartbeat, report)
 
 	w.WriteHeader(http.StatusOK)
 }
