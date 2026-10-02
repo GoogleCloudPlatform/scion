@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -1962,6 +1963,70 @@ func TestSubstrateList_Pagination(t *testing.T) {
 	}
 	if len(pageTokensSeen) != 2 || pageTokensSeen[0] != "" || pageTokensSeen[1] != "page-2" {
 		t.Errorf("ListActors called with page tokens %v, want [\"\", \"page-2\"]", pageTokensSeen)
+	}
+}
+
+// TestSubstrateList_RepeatedPageTokenIsAnError proves List detects a
+// server that returns the same next_page_token twice in a row (a sign of a
+// broken or malicious server, since a real paging cursor always advances)
+// and fails explicitly rather than looping on it forever.
+func TestSubstrateList_RepeatedPageTokenIsAnError(t *testing.T) {
+	rec := &callRecorder{}
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	calls := 0
+	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+		calls++
+		return &ateapipb.ListActorsResponse{NextPageToken: "stuck"}, nil
+	}
+
+	agents, err := rt.List(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "repeated page token") {
+		t.Fatalf("List() err = %v, want a repeated-page-token error", err)
+	}
+	if agents != nil {
+		t.Errorf("List() agents = %v, want nil alongside the error", agents)
+	}
+	if calls != 2 {
+		t.Errorf("ListActors calls = %d, want 2 (stop at the first repeated token)", calls)
+	}
+}
+
+// TestSubstrateList_EndlessPagingHitsPageCap proves a server that returns a
+// fresh next_page_token on every call — never repeating, never going empty
+// — is cut off by maxActorListPages with an explicit error, rather than
+// spinning until ctx expires.
+func TestSubstrateList_EndlessPagingHitsPageCap(t *testing.T) {
+	rec := &callRecorder{}
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	// maxActorListPages is a package var (not a const) precisely so this
+	// test can lower it, rather than paging through the real production
+	// cap's worth of fake responses.
+	origCap := maxActorListPages
+	maxActorListPages = 5
+	t.Cleanup(func() { maxActorListPages = origCap })
+
+	calls := 0
+	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+		calls++
+		if calls > maxActorListPages+1 {
+			return nil, fmt.Errorf("List exceeded the page cap (call %d)", calls)
+		}
+		return &ateapipb.ListActorsResponse{NextPageToken: fmt.Sprintf("p%d", calls)}, nil
+	}
+
+	agents, err := rt.List(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "exceeded") {
+		t.Fatalf("List() err = %v, want a page-cap error", err)
+	}
+	if agents != nil {
+		t.Errorf("List() agents = %v, want nil alongside the error", agents)
+	}
+	if calls != maxActorListPages {
+		t.Errorf("ListActors calls = %d, want exactly %d", calls, maxActorListPages)
 	}
 }
 

@@ -678,13 +678,20 @@ const substrateAtespacePrefix = "scion-"
 func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 	var actors []*ateapipb.Actor
 	pageToken := ""
-	for {
+	for page := 0; ; page++ {
+		if page >= maxActorListPages {
+			return nil, fmt.Errorf("substrate: list actors: exceeded %d pages", maxActorListPages)
+		}
 		resp, err := r.client.ListActors(ctx, &ateapipb.ListActorsRequest{PageToken: pageToken})
 		if err != nil {
 			return nil, fmt.Errorf("substrate: list actors: %w", err)
 		}
 		actors = append(actors, resp.GetActors()...)
-		pageToken = resp.GetNextPageToken()
+		next := resp.GetNextPageToken()
+		if next != "" && next == pageToken {
+			return nil, fmt.Errorf("substrate: list actors: server returned a repeated page token")
+		}
+		pageToken = next
 		if pageToken == "" {
 			break
 		}
@@ -944,6 +951,17 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 // unbounded. A package-level var, not a const, so a test can lower it to
 // exercise the cap without paging through this many fake responses.
 var maxRecordlessActorListPages = 100
+
+// maxActorListPages bounds List's own ListActors paging loop, the same way
+// maxRecordlessActorListPages bounds RecordlessActors' — a misbehaving
+// server that never returns an empty next_page_token would otherwise spin
+// until ctx expires. Larger than maxRecordlessActorListPages because List's
+// query is unscoped (cluster-wide across every project sharing this
+// Substrate install, not one project's own atespace): a legitimately large
+// cluster needs more headroom here than RecordlessActors' one-atespace
+// query does. A package-level var, not a const, for the same test-lowering
+// reason as maxRecordlessActorListPages.
+var maxActorListPages = 1000
 
 // isProjectNameLabelKey reports whether key is the project-name label key.
 func isProjectNameLabelKey(key string) bool {
