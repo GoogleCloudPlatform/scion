@@ -278,6 +278,23 @@ func TestCanDelegate_ParityForOtherIdentityTypes(t *testing.T) {
 		assert.Nil(t, agentGrant.AgentScopes)
 	})
 
+	// An agent-typed actor on an allow path that checks scopes: the JWT
+	// agent holds the full role's scopes and requests a sub-agent with the
+	// full role, so every requested scope is compared and found. The
+	// literal was recorded on the code before the hub_delivery deny arm was
+	// added to CanDelegate, like canDelegateParityExpected.
+	t.Run("agentIdentityWrapper/agent_delegation_full_role", func(t *testing.T) {
+		grant := GrantDescriptor{
+			Type:      GrantTypeAgentDelegation,
+			AgentRole: string(AgentRoleFull),
+			ProjectID: f.projectID,
+		}
+		require.NotEmpty(t, ScopesForRole(AgentRoleFull), "the row must compare a non-empty scope set")
+		got := authz.CanDelegate(ctx, identities["agentIdentityWrapper"], grant)
+		assert.True(t, got.Allowed, "Allowed")
+		assert.Equal(t, "agent holds all delegated scopes", got.Reason, "Reason")
+	})
+
 	for _, name := range sortedIdentityNames(identities) {
 		identity := identities[name]
 		for _, gt := range allGrantTypes {
