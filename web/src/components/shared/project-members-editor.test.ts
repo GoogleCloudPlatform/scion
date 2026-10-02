@@ -1065,6 +1065,58 @@ describe('409 membership_changed', () => {
     expect(q(el, 'sl-button.save-member')?.hasAttribute('disabled')).toBe(true);
   });
 
+  it('actor_authority_changed with the catalog reload failing resets an Add-mode built-in choice', async () => {
+    const el = await mountEditor([ALICE], OWNER_CAPS);
+    el.openAddDialog();
+    el.onPrincipalChange({ principalType: 'user', principalId: 'u-new', displayLabel: 'New' });
+    expect(el.dlgBuiltIn).toBe('r-admin');
+    routeApi(
+      (url, init) => (init?.method === 'PUT' ? changed('actor_authority_changed', []) : undefined),
+      listRoute([ALICE], ADMIN_CAPS),
+      (url) =>
+        url.endsWith('/members/assignable-roles')
+          ? apiError(500, 'internal', 'catalog unavailable')
+          : undefined
+    );
+    await el.handleSave();
+    await el.updateComplete;
+
+    expect(el.capabilities).toEqual(ADMIN_CAPS);
+    expect(el.dialogOpen).toBe(true);
+    expect(el.dialogMode).toBe('add');
+    // Admin is no longer listed, so it can't stay selected without a radio.
+    expect(el.dlgBuiltIn).toBe(NO_PROJECT_ROLE);
+    expect(q(el, 'sl-radio[value="r-admin"]')).toBeNull();
+    expect(q(el, 'sl-button.save-member')?.hasAttribute('disabled')).toBe(true);
+    expect(writes()).toHaveLength(1);
+  });
+
+  it('actor_authority_changed with the catalog reload failing keeps a row-based Edit dialog unlocked', async () => {
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS);
+    el.openEditDialog(ERIN);
+    el.dlgBuiltIn = 'r-admin';
+    routeApi(
+      (url, init) => (init?.method === 'PUT' ? changed('actor_authority_changed', []) : undefined),
+      listRoute(ALL_GROUPS, ADMIN_CAPS),
+      (url) =>
+        url.endsWith('/members/assignable-roles')
+          ? apiError(500, 'internal', 'catalog unavailable')
+          : undefined
+    );
+    await el.handleSave();
+    await el.updateComplete;
+
+    expect(el.capabilities).toEqual(ADMIN_CAPS);
+    expect(el.dialogOpen).toBe(true);
+    // The loaded row decides the lock, not the now-unclassifiable role IDs.
+    expect(el.dlgLockedReason).toBeNull();
+    expect(q(el, '.dialog-info .locked-reason')).toBeNull();
+    expect(el.dlgBuiltIn).toBe('r-member');
+    expect(el.dlgCustomIds).toEqual(['r-msg']);
+    expect(el.dlgError).toBe(AUTHORITY_CHANGED_MESSAGE);
+    expect(radio(el, NO_PROJECT_ROLE).hasAttribute('disabled')).toBe(false);
+  });
+
   it('actor_authority_changed that leaves the editor read-only closes the dialog', async () => {
     const el = makeEditor(OWNER_CAPS);
     el.openEditDialog(DAVE);
