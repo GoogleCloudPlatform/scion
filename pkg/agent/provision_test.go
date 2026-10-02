@@ -26,6 +26,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -2380,10 +2381,11 @@ func TestProvisionAgent_RequiredGHSkillWithResolver_Provisions(t *testing.T) {
 // exercises provision.go's SkillResolutionError construction through the
 // actual ProvisionAgent entry point with a real GitHubSkillResolver, rather
 // than injecting the error directly into a runtimebroker mock as the broker
-// tests do — closing the O3 gap noted in review (#2546 O3). The test server
-// returns a 429 with a Retry-After far larger than the backoff cap, so the
-// resolver fails fast (O3) regardless of ctx having no explicit deadline,
-// keeping the test itself fast.
+// tests do (#2546 O3). The test server returns a 429 with a Retry-After far
+// larger than the backoff cap, and ctx carries a 2-minute deadline so the
+// budget-fit check would allow the capped backoff: only the
+// Retry-After-above-cap fail-fast can end the call at once. A watchdog
+// cancels ctx if it does not, so a regression fails in seconds.
 func TestProvisionAgent_RequiredGHSkillRateLimited_YieldsSkillResolutionError(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -2421,7 +2423,11 @@ func TestProvisionAgent_RequiredGHSkillRateLimited_YieldsSkillResolutionError(t 
 	})
 	resolver := newTestGitHubResolver(server)
 
-	ctx := ContextWithSkillResolver(context.Background(), resolver)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	watchdog := time.AfterFunc(3*time.Second, cancel)
+	defer watchdog.Stop()
+	ctx = ContextWithSkillResolver(ctx, resolver)
 	_, _, _, err := ProvisionAgent(ctx, "gh-ratelimit-agent", "gh-skill-ratelimit-tpl", "", "", projectScionDir, "", "", "", "")
 	if err == nil {
 		t.Fatal("expected provisioning to fail when the required gh:// skill is rate limited")

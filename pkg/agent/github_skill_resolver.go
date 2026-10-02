@@ -98,6 +98,31 @@ type GitHubSkillResolver struct {
 	apiBase              string            // Default: githubAPIBase, override in tests
 	rawBase              string            // Default: githubRawBase, override in tests
 	resolutionCache      *GitHubResolutionCache
+
+	// Zero values fall back to githubResolveBudget, githubRequestTimeout and
+	// githubDownloadRequestTimeout; tests shrink them to run quickly.
+	resolveBudget   time.Duration
+	requestTimeout  time.Duration
+	downloadTimeout time.Duration
+}
+
+// durationOr returns d, or def when d is unset.
+func durationOr(d, def time.Duration) time.Duration {
+	if d > 0 {
+		return d
+	}
+	return def
+}
+
+// newGitHubHTTPClient clones http.DefaultTransport, so proxy settings
+// (ProxyFromEnvironment), dial/TLS timeouts and pooling survive, and adds a
+// ResponseHeaderTimeout of stall: a connection that never responds at all
+// fails within stall, independent of the per-attempt ctx timeout, so the
+// longer raw-download timeout (#2546 O2) does not reintroduce slow failure.
+func newGitHubHTTPClient(stall time.Duration) *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = stall
+	return &http.Client{Timeout: githubAPITimeout, Transport: tr}
 }
 
 // NewGitHubSkillResolver creates a resolver for gh:// and GitHub URL skills.
@@ -120,11 +145,7 @@ func NewGitHubSkillResolver() *GitHubSkillResolver {
 		}
 	}
 	return &GitHubSkillResolver{
-		// ResponseHeaderTimeout catches a connection that never responds at
-		// all (the stall case) well before githubDownloadRequestTimeout, so
-		// widening that ctx timeout for raw downloads (#2546 O2) does not
-		// reintroduce the slow-failure regression it was meant to fix.
-		httpClient:      &http.Client{Timeout: githubAPITimeout, Transport: &http.Transport{ResponseHeaderTimeout: githubRequestTimeout}},
+		httpClient:      newGitHubHTTPClient(githubRequestTimeout),
 		token:           os.Getenv("GITHUB_TOKEN"),
 		apiBase:         githubAPIBase,
 		rawBase:         githubRawBase,
@@ -243,7 +264,7 @@ func (r *GitHubSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefer
 	// deadline — actually runs in production (#2546 R1).
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, githubResolveBudget)
+		ctx, cancel = context.WithTimeout(ctx, durationOr(r.resolveBudget, githubResolveBudget))
 		defer cancel()
 	}
 
@@ -446,7 +467,7 @@ func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHu
 	req.Header.Set("Accept", "application/vnd.github.v3.sha")
 	r.setAuthHeader(req, token)
 
-	resp, err := r.doWithRetry(ctx, req, githubRequestTimeout)
+	resp, err := r.doWithRetry(ctx, req, durationOr(r.requestTimeout, githubRequestTimeout))
 	if err != nil {
 		return "", fmt.Errorf("GitHub API request failed: %w", err)
 	}
@@ -485,7 +506,7 @@ func (r *GitHubSkillResolver) listContents(ctx context.Context, ghRef *GitHubSki
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	r.setAuthHeader(req, token)
 
-	resp, err := r.doWithRetry(ctx, req, githubRequestTimeout)
+	resp, err := r.doWithRetry(ctx, req, durationOr(r.requestTimeout, githubRequestTimeout))
 	if err != nil {
 		return nil, fmt.Errorf("GitHub API request failed: %w", err)
 	}
@@ -519,7 +540,7 @@ func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHub
 	}
 	r.setAuthHeader(req, token)
 
-	resp, err := r.doWithRetry(ctx, req, githubDownloadRequestTimeout)
+	resp, err := r.doWithRetry(ctx, req, durationOr(r.downloadTimeout, githubDownloadRequestTimeout))
 	if err != nil {
 		return nil, fmt.Errorf("download failed: %w", err)
 	}
@@ -582,8 +603,8 @@ func (e *githubResolveError) Error() string { return e.msg }
 // network-level error) that triggered a retry or a fail-fast to a stable
 // cause code:
 //   - 429, or 403 with rate-limit exhaustion: rate_limited.
-//   - any other 5xx: upstream_unavailable — GitHub itself is failing, not the
-//     caller (#2546 R3).
+//   - anything else (in practice a 5xx): upstream_unavailable — GitHub
+//     itself is failing, not the caller (#2546 R3).
 //   - no response at all: delegated to classifyNetworkError, which tells a
 //     genuine deadline apart from a DNS/connection/TLS failure.
 func classifyRetryCause(resp *http.Response, err error) string {
@@ -594,10 +615,9 @@ func classifyRetryCause(resp *http.Response, err error) string {
 		(resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0") {
 		return SkillErrCodeRateLimited
 	}
-	if resp.StatusCode >= http.StatusInternalServerError {
-		return SkillErrCodeUpstreamUnavailable
-	}
-	return SkillErrCodeTimeout
+	// Defensive default: isRetryableResponse only admits the two cases
+	// above, so no other status reaches here today.
+	return SkillErrCodeUpstreamUnavailable
 }
 
 // classifyNetworkError distinguishes "no response arrived in time" — the
@@ -690,6 +710,10 @@ func (r *GitHubSkillResolver) doOnce(ctx context.Context, req *http.Request, att
 func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request, attemptTimeout time.Duration) (*http.Response, error) {
 	var lastResp *http.Response
 	var lastErr error
+	noun := "GitHub API request to"
+	if r.rawBase != "" && strings.HasPrefix(req.URL.String(), r.rawBase) {
+		noun = "GitHub raw download of"
+	}
 
 	for attempt := 0; attempt <= githubMaxRetries; attempt++ {
 		if attempt > 0 {
@@ -711,19 +735,24 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 					code:       classifyRetryCause(lastResp, nil),
 					retryAfter: retryAfterHeader,
 					msg: fmt.Sprintf(
-						"GitHub API request to %s asked to retry after %s, past the %s backoff cap: "+
+						"%s %s asked to retry after %s, past the %s backoff cap: "+
 							"failing fast instead of retrying into another rate limit",
-						req.URL.Path, ra, githubMaxBackoff),
+						noun, req.URL.Path, ra, githubMaxBackoff),
 				}
 			}
 
 			delay := retryDelay(lastResp, attempt)
 
-			// Fail fast when the backoff (plus the time a further attempt
-			// would need) would run past ctx's deadline, rather than sleeping
-			// most or all of it away only to have the next request canceled.
+			// Fail fast when the backoff, plus the stall bound a further
+			// attempt needs to show it is alive, would run past ctx's
+			// deadline, rather than sleeping most or all of it away only to
+			// have the next request canceled. Reserving the stall bound, not
+			// the full attempt timeout, keeps raw downloads retryable: their
+			// attempt timeout equals the default budget, and a transfer still
+			// in progress is bounded by ctx itself (#2546 RQ1).
 			if dl, ok := ctx.Deadline(); ok {
-				if remaining := time.Until(dl); delay+attemptTimeout >= remaining {
+				stall := durationOr(r.requestTimeout, githubRequestTimeout)
+				if remaining := time.Until(dl); delay+stall >= remaining {
 					slog.Warn("github: skill resolution out of budget before backoff, failing fast",
 						"method", req.Method, "path", req.URL.Path,
 						"status", status, "retry_after", retryAfterHeader,
@@ -731,7 +760,7 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 					return nil, &githubResolveError{
 						code:       classifyRetryCause(lastResp, lastErr),
 						retryAfter: retryAfterHeader,
-						msg:        budgetExceededMessage(req.URL.Path, status, retryAfterHeader, delay, remaining),
+						msg:        budgetExceededMessage(noun, req.URL.Path, status, retryAfterHeader, delay, remaining),
 					}
 				}
 			}
@@ -784,16 +813,20 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 // rather than the misleading "status -1, retry-after " (#2546 N3). The
 // deadline is described as the "request" deadline, not the "create" deadline,
 // since the resolver also runs outside of create — on start, restart and
-// reprovision (#2546 N2).
-func budgetExceededMessage(path string, status int, retryAfter string, delay, remaining time.Duration) string {
-	outcome := fmt.Sprintf("status %d, retry-after %s", status, retryAfter)
+// reprovision (#2546 N2). noun names the path kind ("GitHub API request to"
+// or "GitHub raw download of"), and a status is reported as a plain failure,
+// not as rate limiting, since 5xx responses take this path too.
+func budgetExceededMessage(noun, path string, status int, retryAfter string, delay, remaining time.Duration) string {
+	outcome := fmt.Sprintf("failed (status %d)", status)
+	if retryAfter != "" {
+		outcome = fmt.Sprintf("failed (status %d, retry-after %s)", status, retryAfter)
+	}
 	if status == -1 {
-		outcome = "no response"
+		outcome = "got no response"
 	}
 	return fmt.Sprintf(
-		"GitHub API request to %s rate limited or unresponsive (%s): "+
-			"next backoff %s would exceed the %s left before the request deadline",
-		path, outcome, delay, remaining)
+		"%s %s %s: next backoff %s would exceed the %s left before the request deadline",
+		noun, path, outcome, delay, remaining)
 }
 
 // isRetryableResponse returns true for HTTP responses that should be retried:
