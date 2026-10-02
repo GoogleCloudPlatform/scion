@@ -220,6 +220,8 @@ When transport auth is configured, the Hub injects these environment variables i
 | `SCION_TRANSPORT_AUDIENCE` | Audience the transport token was minted for (IAP client ID or hub URL). |
 | `SCION_TRANSPORT_TOKEN_EXPIRY` | Token expiry in RFC 3339 format. |
 
+`SCION_TRANSPORT_TOKEN` only bootstraps the agent. At startup, `sciontool init` writes it to `~/.scion/transport-token` (mode `0600`, owned by the agent user) and removes it from the environment that the harness and its child processes inherit. Children get `SCION_TRANSPORT_TOKEN_FILE`, which points at that file. Each token refresh rewrites the file, and every in-agent hub client (hooks, `sciontool` subcommands, the in-agent `scion` CLI) re-reads it when it changes. So these clients keep working after the initial token expires, which takes about an hour.
+
 On the Kubernetes runtime, `SCION_TRANSPORT_TOKEN` comes from the agent's per-agent Secret through `secretKeyRef`, not from a plain value in the Pod spec. See [Hub Transport Credential](/scion/hosted/ha/kubernetes/#hub-transport-credential). Other runtimes set it as a regular environment variable.
 
 ### Refresh response: `tokens[]` array
@@ -254,9 +256,11 @@ The `transport` entry is only present when `auth.transport` is configured on the
 
 The agent (`pkg/sciontool/hub`) selects an OIDC token source automatically:
 
-1. **`SCION_TRANSPORT_TOKEN` env var set** → **Injected mode**: uses the hub-provided token from dispatch, refreshed via `tokens[]` on subsequent refresh calls.
+1. **Hub-provided token available** (the `~/.scion/transport-token` file, or the `SCION_TRANSPORT_TOKEN` bootstrap value) → **Injected mode**: uses the hub-provided token from dispatch, refreshed via `tokens[]` on subsequent refresh calls and shared with other processes through the file. Whichever of the file and the env value expires later is used.
 2. **Running on GCP (metadata server available)** → **Metadata mode**: fetches OIDC from the GCE metadata server using the ambient SA identity (the PR #307 pattern). Audience is set via `SCION_HUB_OIDC_AUDIENCE` or defaults to the hub URL.
 3. **Neither** → No OIDC transport (agent uses plain HTTP).
+
+The header follows `SCION_TRANSPORT_MODE` in every in-agent client: `iap` sends `Proxy-Authorization`, `cloudrun_invoker` sends `X-Serverless-Authorization`, and anything else sends `Authorization`.
 
 Injected mode (option 1) is the recommended path for IAP deployments — it decouples agent transport auth from the agent's own GCP identity.
 

@@ -15,8 +15,8 @@
 package hub
 
 import (
+	"net/http"
 	"os"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
@@ -35,33 +35,39 @@ const (
 
 // configureOIDCTransport sets up the OIDC transport layer on the client.
 // Token source selection:
-//  1. If SCION_TRANSPORT_TOKEN env var is set → injected mode (hub-provided token).
+//  1. If a hub-provided transport token is available (the refreshed
+//     transport token file under the scion user's ~/.scion, or the
+//     SCION_TRANSPORT_TOKEN bootstrap value) → file-backed mode. The file is
+//     re-read when it changes, and whichever of file and env value expires
+//     last is used, so short-lived clients see the value the long-lived
+//     client in sciontool init last refreshed.
 //  2. Else if running on GCP → metadata server mode (ambient SA identity).
 //  3. Else → no OIDC transport (agent uses plain HTTP).
+//
+// The header carrying the token follows SCION_TRANSPORT_MODE (see
+// transportauth.ModeFromEnv), the same as hubclient: "iap" uses
+// Proxy-Authorization, "cloudrun_invoker" X-Serverless-Authorization, and
+// anything else Authorization.
 //
 // Unlike the generic transportauth.FromEnv(), this method defaults the
 // metadata-mode audience to the hub URL when no explicit audience env var
 // is set, preserving the PR #307 behaviour for agents.
 func (c *Client) configureOIDCTransport() {
-	if tok := os.Getenv(transportauth.EnvTransportToken); tok != "" {
-		source := transportauth.NewInjectedSource()
-		source.WarnLog = log.Debug
-		expiry, err := transportauth.ParseTokenExpiry(tok)
-		if err != nil {
-			expiry = time.Now().Add(transportauth.DefaultTTL)
-		}
-		source.SetToken(tok, expiry)
-		c.oidcSource = source
-		c.client.Transport = transportauth.Wrap(c.client.Transport, source, transportauth.HeaderAuthorization)
-		log.Debug("Configured OIDC transport: injected mode (hub-provided token)")
+	mode := transportauth.ModeFromEnv()
+	if src := newTransportFileSource(); src != nil {
+		src.WarnLog = log.Debug
+		c.oidcSource = src
+		c.oidcMode = mode
+		c.client.Transport = transportauth.Wrap(c.client.Transport, src, mode)
+		log.Debug("Configured OIDC transport: injected mode (hub-provided token, file-backed)")
 		return
 	}
 
 	if !transportauth.IsOnGCEFunc() {
 		return
 	}
-	if mode := os.Getenv(transportauth.EnvMetadataMode); transportauth.IsMetadataRedirected(mode) {
-		log.Debug("Skipping OIDC metadata mode: scion metadata server active (mode=%s), GCE metadata IP is redirected", mode)
+	if mdMode := os.Getenv(transportauth.EnvMetadataMode); transportauth.IsMetadataRedirected(mdMode) {
+		log.Debug("Skipping OIDC metadata mode: scion metadata server active (mode=%s), GCE metadata IP is redirected", mdMode)
 		return
 	}
 
@@ -72,6 +78,56 @@ func (c *Client) configureOIDCTransport() {
 
 	source := transportauth.NewMetadataSource(audience)
 	c.oidcSource = source
-	c.client.Transport = transportauth.Wrap(c.client.Transport, source, transportauth.HeaderAuthorization)
+	c.oidcMode = mode
+	c.client.Transport = transportauth.Wrap(c.client.Transport, source, mode)
 	log.Debug("Configured OIDC transport: metadata mode (audience=%s)", audience)
+}
+
+// newTransportFileSource returns a file-backed transport source when this
+// agent was given a hub-provided transport token: the bootstrap env value
+// is set, or the transport token file exists. Returns nil otherwise.
+func newTransportFileSource() *transportauth.FileSource {
+	envTok := os.Getenv(transportauth.EnvTransportToken)
+	path := TransportTokenFilePath()
+	if envTok == "" {
+		if _, err := os.Lstat(path); err != nil {
+			return nil
+		}
+	}
+	src := transportauth.NewFileSource(path, readTransportTokenFile)
+	src.SetBootstrap(envTok)
+	return src
+}
+
+// TransportSourceStatus reports the state of the client's file-backed
+// transport source for diagnostics. ok is false when the client is not
+// using a hub-provided transport token. Never includes token values.
+func (c *Client) TransportSourceStatus() (transportauth.FileSourceStatus, bool) {
+	if c == nil {
+		return transportauth.FileSourceStatus{}, false
+	}
+	fs, ok := c.oidcSource.(*transportauth.FileSource)
+	if !ok {
+		return transportauth.FileSourceStatus{}, false
+	}
+	return fs.Status(), true
+}
+
+// ApplyTransportHeaders sets the transport credential header on h, for
+// connections that do not go through the client's http.Transport (such as
+// WebSocket dials). It is a no-op when no transport source is configured.
+func (c *Client) ApplyTransportHeaders(h http.Header) error {
+	if c == nil || c.oidcSource == nil {
+		return nil
+	}
+	return transportauth.ApplyHeaders(h, c.oidcSource, c.oidcMode)
+}
+
+// SetTransportAuth installs src as the client's transport credential
+// source, sent in the header selected by mode. NewClient configures this
+// automatically; it is for clients built with NewClientWithConfig.
+func (c *Client) SetTransportAuth(src transportauth.TokenSource, mode transportauth.HeaderMode) {
+	c.oidcSource = src
+	c.oidcMode = mode
+	c.client.Transport = transportauth.Wrap(c.client.Transport, src, mode)
 }

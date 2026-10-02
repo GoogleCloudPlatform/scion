@@ -37,6 +37,7 @@ import (
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
@@ -165,6 +166,7 @@ type Client struct {
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
 	oidcSource     transportauth.TokenSource // transport-layer OIDC token source (nil = disabled)
+	oidcMode       transportauth.HeaderMode  // header carrying the transport token
 	// tokenChownUID and tokenChownGID are the ownership StartTokenRefresh
 	// applies (via WriteTokenFile) to the token file after every refresh.
 	// Guarded by tokenMu alongside token itself. Set once, before the
@@ -780,22 +782,32 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	// Process the generalized tokens[] array if present.
 	// Apply each entry to the appropriate subsystem by layer/type.
 	if len(result.Tokens) > 0 {
-		c.applyRefreshTokens(result.Tokens)
+		c.applyRefreshTokens(result.Tokens, chownUID, chownGID)
 	}
 
 	return result.Token, expiresAt, nil
 }
 
 // applyRefreshTokens processes the tokens[] array from a refresh response,
-// applying each entry to the appropriate subsystem.
-func (c *Client) applyRefreshTokens(tokens []RefreshTokenEntry) {
+// applying each entry to the appropriate subsystem. A refreshed transport
+// token is also persisted to the transport token file (owned by uid:gid
+// when uid > 0) so that every other hub client in the container — hooks,
+// sciontool subcommands, the scion CLI — uses it instead of the original
+// injected value, which expires after about an hour.
+func (c *Client) applyRefreshTokens(tokens []RefreshTokenEntry, uid, gid int) {
 	for _, entry := range tokens {
 		switch {
 		case entry.Layer == "transport" && entry.Type == "google_oidc":
+			if entry.Value == "" {
+				continue
+			}
+			entryExpiry := time.Now().Add(time.Duration(entry.ExpiresIn) * time.Second)
 			// Update the OIDC transport's token source
 			if c.oidcSource != nil {
-				entryExpiry := time.Now().Add(time.Duration(entry.ExpiresIn) * time.Second)
 				c.oidcSource.SetToken(entry.Value, entryExpiry)
+			}
+			if err := WriteTransportTokenFile(entry.Value, uid, gid); err != nil {
+				log.Error("Failed to persist refreshed transport token: %v", err)
 			}
 			// app/scion_access is already handled via the legacy token field above
 		}
@@ -811,9 +823,11 @@ func (c *Client) adjustRefreshForTransportTokens(proposed time.Time) time.Time {
 		return proposed
 	}
 
-	// MetadataSource self-refreshes; only InjectedSource needs refresh
-	// driven from here.
-	if _, ok := c.oidcSource.(*transportauth.InjectedSource); !ok {
+	// MetadataSource self-refreshes; only hub-provided (injected or
+	// file-backed) sources need refresh driven from here.
+	switch c.oidcSource.(type) {
+	case *transportauth.InjectedSource, *transportauth.FileSource:
+	default:
 		return proposed
 	}
 
@@ -1531,6 +1545,62 @@ func WriteTokenFile(token string, uid, gid int) error {
 		return fmt.Errorf("failed to write token file: %w", err)
 	}
 	return nil
+}
+
+// TransportTokenFilePath returns the path of the transport token file, a
+// sibling of the agent credential file. Like TokenFilePath it resolves to
+// the scion user's home so that root (sciontool init) and the scion user
+// (child processes) agree on the same path.
+func TransportTokenFilePath() string {
+	return filepath.Join(tokenHomeResolver(), ".scion", transportauth.TransportTokenFileName)
+}
+
+// WriteTransportTokenFile persists the hub-provided transport token to the
+// transport token file, mode 0600, through the same fchown-then-rename
+// path WriteTokenFile uses. uid <= 0 skips the chown.
+func WriteTransportTokenFile(token string, uid, gid int) error {
+	if testing.Testing() && !tokenHomeOverridden {
+		panic("scion/hub: WriteTransportTokenFile called during a test without SetTokenHome(); " +
+			"call SetTokenHome(t.TempDir()) so tests never overwrite the real ~/.scion/transport-token")
+	}
+
+	path := TransportTokenFilePath()
+	d, err := dirfd.EnsureDirNoFollow(filepath.Dir(path), 0700)
+	if err != nil {
+		return fmt.Errorf("failed to create transport token file directory: %w", err)
+	}
+	_ = d.Close()
+
+	if err := WriteFileNoFollowChown(path, []byte(token), tokenFileMode, uid, gid); err != nil {
+		return fmt.Errorf("failed to write transport token file: %w", err)
+	}
+	return nil
+}
+
+// SeedTransportTokenFile writes the injected bootstrap transport token to
+// the transport token file unless the file already holds a token that
+// expires later (for example after an in-place container restart, where
+// the bootstrap value is older than the last refresh). Returns the path.
+func SeedTransportTokenFile(token string, uid, gid int) (string, error) {
+	path := TransportTokenFilePath()
+	if existing, err := readTransportTokenFile(path); err == nil {
+		existing = strings.TrimSpace(existing)
+		if existing != "" {
+			fileExp, ferr := transportauth.ParseTokenExpiry(existing)
+			envExp, eerr := transportauth.ParseTokenExpiry(token)
+			if ferr == nil && eerr == nil && fileExp.After(envExp) {
+				return path, nil
+			}
+		}
+	}
+	return path, WriteTransportTokenFile(token, uid, gid)
+}
+
+// readTransportTokenFile reads the transport token file through the same
+// symlink-safe, single-link-regular-file guard ReadTokenFile uses, since
+// sciontool init (root) reads it from a directory the workload owns.
+func readTransportTokenFile(path string) (string, error) {
+	return readTokenFileGuarded(path)
 }
 
 // ChownTokenFile fixes the ownership of an already-written token file to

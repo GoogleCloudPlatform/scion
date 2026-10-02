@@ -46,6 +46,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	otellog "go.opentelemetry.io/otel/log"
@@ -426,6 +427,14 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// the harness. This must happen before telemetry pipeline initialization
 	// because the GCP credentials file (pointed to by SCION_OTEL_GCP_CREDENTIALS)
 	// must exist on disk when the telemetry pipeline starts.
+	// Move the bootstrap transport credential out of the environment and
+	// into the transport token file before anything else can inherit it.
+	// Child processes read the file (via SCION_TRANSPORT_TOKEN_FILE), which
+	// the refresh loop keeps current; the env value is only valid for about
+	// an hour. When staged secrets are also present, the single re-exec
+	// below restarts init with the cleaned environment for both.
+	transportCleared := stageTransportToken(targetUID, targetGID)
+
 	if encoded := os.Getenv(stagedsecrets.EnvVar); encoded != "" {
 		staged, err := stagedsecrets.Decode(encoded)
 		if err != nil {
@@ -466,6 +475,13 @@ func RunInit(args []string, opts InitRunOptions) int {
 			log.Error("Re-exec to clear /proc environ failed: %v (secret remains in /proc)", err)
 			// Fall through — child-process inheritance is still blocked by
 			// os.Unsetenv, so this degrades to the pre-fix behavior.
+		}
+	} else if transportCleared {
+		// Restart init with the cleaned environment, as above. On the
+		// second pass the env var is absent and the file already exists,
+		// so this branch is not taken again.
+		if err := reExecWithCleanEnv(); err != nil {
+			log.Error("Re-exec with cleaned environment failed: %v", err)
 		}
 	}
 
@@ -1628,8 +1644,34 @@ func extractChildCommand(args []string) []string {
 // syscall itself — standard behavior on Linux >= 2.6, under any runtime that
 // runs a real Linux kernel beneath its own hypervisor/sandbox layer.
 func reExecWithCleanEnv() error {
-	log.Info("Re-execing to clear staged secrets from /proc/%d/environ", os.Getpid())
+	log.Info("Re-execing init (pid %d) with cleaned environment", os.Getpid())
 	return syscall.Exec(rootexec.SelfExe(), os.Args, os.Environ())
+}
+
+// stageTransportToken persists the bootstrap transport credential
+// (SCION_TRANSPORT_TOKEN) to the transport token file, owned by uid:gid,
+// then removes it from this process's environment and points children at
+// the file via SCION_TRANSPORT_TOKEN_FILE. Child processes therefore no
+// longer inherit the bootstrap-only value; they read the file, which the
+// refresh loop keeps current.
+//
+// Returns true when the env var was removed. If the file cannot be
+// written the env var is left in place so hub access keeps working until
+// it expires.
+func stageTransportToken(uid, gid int) bool {
+	tok := os.Getenv(transportauth.EnvTransportToken)
+	if tok == "" {
+		return false
+	}
+	path, err := hub.SeedTransportTokenFile(tok, uid, gid)
+	if err != nil {
+		log.Error("Failed to write transport token file; leaving bootstrap value in the environment: %v", err)
+		return false
+	}
+	_ = os.Setenv(transportauth.EnvTransportTokenFile, path)
+	_ = os.Unsetenv(transportauth.EnvTransportToken)
+	log.Info("Transport credential moved to %s", path)
+	return true
 }
 
 // setupHostUser modifies the scion user's UID/GID to match the host user.
