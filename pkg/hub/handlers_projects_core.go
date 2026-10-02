@@ -1765,6 +1765,27 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		memberPath := strings.TrimPrefix(subPath, "members")
 		memberPath = strings.TrimPrefix(memberPath, "/")
 		memberPath = strings.TrimSuffix(memberPath, "/")
+		// ptone/scion#2529 P1: …/members/principals/{principalType}/{principalId}
+		// sits above handleProjectMemberByID's binding-ID dispatch — binding
+		// IDs are UUIDs, so there is no collision with the literal
+		// "principals" segment.
+		if strings.HasPrefix(memberPath, "principals/") {
+			principalPath := strings.TrimPrefix(memberPath, "principals/")
+			parts := strings.SplitN(principalPath, "/", 2)
+			// L6 (review r1): principalPath comes from r.URL.Path, which
+			// net/http has already percent-decoded once — a further
+			// url.PathUnescape here double-decoded it (e.g. a principal ID
+			// that is literally "a%40b" was silently corrupted to "a@b").
+			// Reject an ID containing "/" rather than accepting it as part
+			// of a two-segment ID: SplitN(…, 2) otherwise lets
+			// "principals/user/a/b" through as principalID "a/b".
+			if len(parts) == 2 && parts[0] != "" && parts[1] != "" && !strings.Contains(parts[1], "/") {
+				s.handleProjectMemberPrincipal(w, r, projectID, parts[0], parts[1])
+			} else {
+				NotFound(w, "Member principal")
+			}
+			return
+		}
 		if memberPath == "" {
 			s.handleProjectMembers(w, r, projectID)
 		} else {

@@ -15,10 +15,12 @@
 package hub
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,6 +39,27 @@ type projectMemberInfo struct {
 	Source               string `json:"source"` // "direct" for direct bindings
 	PrincipalDisplayName string `json:"principalDisplayName,omitempty"`
 	CreatedByDisplayName string `json:"createdByDisplayName,omitempty"`
+	// RoleKind is "builtin" or "custom". Additive field (ptone/scion#2529 P1);
+	// every existing consumer of projectMemberInfo ignores unknown JSON
+	// fields. No `omitempty` (review r1 L5): the field must appear on every
+	// endpoint that returns a binding, and every construction site sets it
+	// via projectRoleKind, so it is never the empty string in practice.
+	RoleKind string `json:"roleKind"`
+}
+
+// projectMemberGroup is one principal's project membership: its built-in
+// role (if any) plus every custom role it holds, as returned by
+// PUT/DELETE …/members/principals/{type}/{id} (ptone/scion#2529 P1).
+type projectMemberGroup struct {
+	PrincipalType        string              `json:"principalType"`
+	PrincipalID          string              `json:"principalId"`
+	PrincipalDisplayName string              `json:"principalDisplayName,omitempty"`
+	BuiltInRoleName      string              `json:"builtInRoleName"`
+	Bindings             []projectMemberInfo `json:"bindings"`
+	// Changed deliberately has no `omitempty`: the idempotent PUT response
+	// must show `"changed":false` explicitly, not omit the field, so clients
+	// can distinguish it from a response that never set it.
+	Changed bool `json:"changed"`
 }
 
 // listProjectMembersResponse wraps the paginated result for project members.
@@ -172,6 +195,7 @@ func (s *Server) listProjectMembers(w http.ResponseWriter, r *http.Request, proj
 			RoleBinding: *b,
 			RoleName:    roleName,
 			Source:      "direct",
+			RoleKind:    projectRoleKind(roleName),
 		}
 		info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
 		info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
@@ -243,44 +267,24 @@ func (s *Server) addProjectMember(w http.ResponseWriter, r *http.Request, projec
 		return
 	}
 
-	// Resolve email to UUID for user principals.
-	if req.PrincipalType == store.RoleBindingPrincipalUser && strings.Contains(req.PrincipalID, "@") {
-		resolvedUser, err := s.store.GetUserByEmail(ctx, req.PrincipalID)
+	// Resolve a user email or group slug to its canonical ID (extracted as
+	// resolveMemberPrincipal so the PUT/DELETE principal endpoints share
+	// this resolution logic with POST).
+	if req.PrincipalType == store.RoleBindingPrincipalUser || req.PrincipalType == store.RoleBindingPrincipalGroup {
+		resolvedID, err := s.resolveMemberPrincipal(ctx, req.PrincipalType, req.PrincipalID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				BadRequest(w, "user not found with email: "+req.PrincipalID)
+				if req.PrincipalType == store.RoleBindingPrincipalUser {
+					BadRequest(w, "user not found with email: "+req.PrincipalID)
+				} else {
+					BadRequest(w, "group not found: "+req.PrincipalID)
+				}
 				return
 			}
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if resolvedUser == nil {
-			BadRequest(w, "user not found with email: "+req.PrincipalID)
-			return
-		}
-		req.PrincipalID = resolvedUser.ID
-	}
-
-	// Verify group exists for group principals (slug fallback).
-	if req.PrincipalType == store.RoleBindingPrincipalGroup {
-		g, err := s.store.GetGroup(ctx, req.PrincipalID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				g, err = s.store.GetGroupBySlug(ctx, req.PrincipalID)
-				if err != nil {
-					if errors.Is(err, store.ErrNotFound) {
-						BadRequest(w, "group not found: "+req.PrincipalID)
-					} else {
-						writeErrorFromErr(w, err, "")
-					}
-					return
-				}
-			} else {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-		}
-		req.PrincipalID = g.ID
+		req.PrincipalID = resolvedID
 	}
 
 	// Validate lifecycle fields.
@@ -330,6 +334,7 @@ func (s *Server) addProjectMember(w http.ResponseWriter, r *http.Request, projec
 		RoleBinding: *result.Binding,
 		RoleName:    roleName,
 		Source:      "direct",
+		RoleKind:    projectRoleKind(roleName),
 	}
 	info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, result.Binding.PrincipalType, result.Binding.PrincipalID)
 	info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, result.Binding.CreatedBy)
@@ -407,6 +412,7 @@ func (s *Server) updateProjectMemberRole(w http.ResponseWriter, r *http.Request,
 		RoleBinding: *result.Binding,
 		RoleName:    roleName,
 		Source:      "direct",
+		RoleKind:    projectRoleKind(roleName),
 	}
 	info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, result.Binding.PrincipalType, result.Binding.PrincipalID)
 	info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, result.Binding.CreatedBy)
@@ -552,3 +558,286 @@ func (s *Server) handleTransferOwnership(w http.ResponseWriter, r *http.Request,
 // ErrCodePrincipalIneligible indicates the principal type cannot hold the
 // requested role.
 const ErrCodePrincipalIneligible = "principal_ineligible"
+
+// ---------------------------------------------------------------------------
+// resolveMemberPrincipal — shared user-email / group-slug resolution
+// (ptone/scion#2529 P1). Extracted from addProjectMember so
+// POST /members and PUT/DELETE …/members/principals/{type}/{id} resolve
+// principals the same way. Returns store.ErrNotFound when a user email or
+// group slug does not resolve; callers format their own error message so
+// existing response text (and existing tests) is unchanged.
+// ---------------------------------------------------------------------------
+
+func (s *Server) resolveMemberPrincipal(ctx context.Context, principalType, principalID string) (string, error) {
+	switch principalType {
+	case store.RoleBindingPrincipalUser:
+		if !strings.Contains(principalID, "@") {
+			return principalID, nil
+		}
+		u, err := s.store.GetUserByEmail(ctx, principalID)
+		if err != nil {
+			return "", err
+		}
+		if u == nil {
+			return "", store.ErrNotFound
+		}
+		return u.ID, nil
+	case store.RoleBindingPrincipalGroup:
+		g, err := s.store.GetGroup(ctx, principalID)
+		if err == nil {
+			return g.ID, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return "", err
+		}
+		g, err = s.store.GetGroupBySlug(ctx, principalID)
+		if err != nil {
+			return "", err
+		}
+		return g.ID, nil
+	default:
+		return principalID, nil
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PUT/DELETE /api/v1/projects/{id}/members/principals/{principalType}/{principalId}
+// — atomic "set this principal's whole project role set" (ptone/scion#2529
+// P1).
+// ---------------------------------------------------------------------------
+
+// setMemberRolesRequestBody is the payload for
+// PUT …/members/principals/{type}/{id}.
+type setMemberRolesRequestBody struct {
+	RoleDefinitionIDs         []string   `json:"roleDefinitionIds"`
+	ExpectedRoleDefinitionIDs *[]string  `json:"expectedRoleDefinitionIds,omitempty"`
+	NotBefore                 *time.Time `json:"notBefore,omitempty"`
+	ExpiresAt                 *time.Time `json:"expiresAt,omitempty"`
+}
+
+// handleProjectMemberPrincipal dispatches PUT and DELETE for
+// …/members/principals/{principalType}/{principalId}.
+func (s *Server) handleProjectMemberPrincipal(w http.ResponseWriter, r *http.Request, projectID, principalType, principalID string) {
+	switch r.Method {
+	case http.MethodPut:
+		s.putProjectMemberPrincipal(w, r, projectID, principalType, principalID)
+	case http.MethodDelete:
+		s.deleteProjectMemberPrincipal(w, r, projectID, principalType, principalID)
+	default:
+		MethodNotAllowed(w, http.MethodPut, http.MethodDelete)
+	}
+}
+
+// validatePrincipalType checks principalType against the three types the
+// members API supports, writing a 400 invalid_request and returning false
+// if it is anything else.
+func validatePrincipalType(w http.ResponseWriter, principalType string) bool {
+	switch principalType {
+	case store.RoleBindingPrincipalUser, store.RoleBindingPrincipalAgent, store.RoleBindingPrincipalGroup:
+		return true
+	default:
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "principalType must be \"user\", \"agent\", or \"group\"", nil)
+		return false
+	}
+}
+
+func (s *Server) putProjectMemberPrincipal(w http.ResponseWriter, r *http.Request, projectID, principalType, principalID string) {
+	ctx := r.Context()
+
+	// L3 (review r1): the credential-kind gate runs before resource
+	// authorization, mirroring checkMembershipCredential's own position as
+	// the FIRST check in SetMemberRoles — "you need an interactive user
+	// session to mutate membership at all" is independent of, and prior to,
+	// what permissions that credential happens to map to. Without this, an
+	// agent token (which no permission in the registry maps project.manage
+	// to, so it can never pass the authorize() call below anyway) would
+	// still surface as a generic resource-authorization denial rather than
+	// the credential_insufficient code the PUT/DELETE acceptance criteria
+	// (ptone/scion#2529 acceptance 7) ask for uniformly across UAT and agent
+	// credentials.
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+	user, ok := identity.(UserIdentity)
+	if !ok {
+		writeError(w, http.StatusForbidden, ErrCodeMembershipCredentialInsufficient, "membership mutations require an authenticated user identity", nil)
+		return
+	}
+
+	if !s.authorize(w, r, Resource{Type: "project", ID: projectID}, ActionManage) {
+		return
+	}
+
+	if !validatePrincipalType(w, principalType) {
+		return
+	}
+
+	var body setMemberRolesRequestBody
+	if err := readJSON(r, &body); err != nil {
+		BadRequest(w, "invalid request body: "+err.Error())
+		return
+	}
+
+	// Validate lifecycle fields (same rules as POST /members).
+	if body.ExpiresAt != nil && !body.ExpiresAt.After(time.Now()) {
+		BadRequest(w, "expiresAt must be in the future")
+		return
+	}
+	if body.NotBefore != nil && body.ExpiresAt != nil && !body.ExpiresAt.After(*body.NotBefore) {
+		BadRequest(w, "expiresAt must be after notBefore")
+		return
+	}
+
+	resolvedPrincipalID, err := s.resolveMemberPrincipal(ctx, principalType, principalID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			if principalType == store.RoleBindingPrincipalUser {
+				BadRequest(w, "user not found with email: "+principalID)
+			} else {
+				BadRequest(w, "group not found: "+principalID)
+			}
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if s.membershipService == nil {
+		http.Error(w, "membership service not configured", http.StatusInternalServerError)
+		return
+	}
+
+	result, decision := s.membershipService.SetMemberRoles(ctx, SetMemberRolesRequest{
+		ProjectID:       projectID,
+		PrincipalType:   principalType,
+		PrincipalID:     resolvedPrincipalID,
+		Actor:           user,
+		DesiredRoleIDs:  body.RoleDefinitionIDs,
+		ExpectedRoleIDs: body.ExpectedRoleDefinitionIDs,
+		NotBefore:       body.NotBefore,
+		ExpiresAt:       body.ExpiresAt,
+	})
+	if decision != nil && !decision.Allowed {
+		slog.Info("project member set-roles denied",
+			"project_id", projectID, "actor", user.Email(), "principal", principalType+":"+resolvedPrincipalID,
+			"denial_code", decision.DenialCode, "reason", decision.Reason)
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, decision.Details)
+		return
+	}
+
+	group := s.buildProjectMemberGroup(ctx, principalType, resolvedPrincipalID, result.After)
+	group.Changed = result.Changed
+
+	status := http.StatusOK
+	if result.Created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, group)
+}
+
+func (s *Server) deleteProjectMemberPrincipal(w http.ResponseWriter, r *http.Request, projectID, principalType, principalID string) {
+	ctx := r.Context()
+
+	// L3 (review r1): see putProjectMemberPrincipal — credential-kind gate
+	// before resource authorization.
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+	user, ok := identity.(UserIdentity)
+	if !ok {
+		writeError(w, http.StatusForbidden, ErrCodeMembershipCredentialInsufficient, "membership mutations require an authenticated user identity", nil)
+		return
+	}
+
+	if !s.authorize(w, r, Resource{Type: "project", ID: projectID}, ActionManage) {
+		return
+	}
+
+	if !validatePrincipalType(w, principalType) {
+		return
+	}
+
+	resolvedPrincipalID, err := s.resolveMemberPrincipal(ctx, principalType, principalID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Member")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if s.membershipService == nil {
+		http.Error(w, "membership service not configured", http.StatusInternalServerError)
+		return
+	}
+
+	_, decision := s.membershipService.SetMemberRoles(ctx, SetMemberRolesRequest{
+		ProjectID:     projectID,
+		PrincipalType: principalType,
+		PrincipalID:   resolvedPrincipalID,
+		Actor:         user,
+		RemoveAll:     true,
+	})
+	if decision != nil && !decision.Allowed {
+		slog.Info("project member remove-all denied",
+			"project_id", projectID, "actor", user.Email(), "principal", principalType+":"+resolvedPrincipalID,
+			"denial_code", decision.DenialCode, "reason", decision.Reason)
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, decision.Details)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// buildProjectMemberGroup assembles the projectMemberGroup response for the
+// PUT/DELETE principal endpoints from the principal's post-state bindings.
+// Bindings are ordered built-in first, then custom roles alphabetically by
+// name.
+func (s *Server) buildProjectMemberGroup(ctx context.Context, principalType, principalID string, bindings []*store.RoleBinding) *projectMemberGroup {
+	group := &projectMemberGroup{
+		PrincipalType: principalType,
+		PrincipalID:   principalID,
+	}
+	group.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, principalType, principalID)
+
+	infos := make([]projectMemberInfo, 0, len(bindings))
+	for _, b := range bindings {
+		if b == nil {
+			continue
+		}
+		roleName, roleKind := "", roleKindCustom
+		if rd, err := s.store.GetRoleDefinition(ctx, b.RoleDefinitionID); err == nil && rd != nil {
+			roleName = rd.Name
+			roleKind = projectRoleKind(rd.Name)
+			if roleKind == roleKindBuiltIn {
+				group.BuiltInRoleName = rd.Name
+			}
+		}
+		info := projectMemberInfo{
+			RoleBinding: *b,
+			RoleName:    roleName,
+			Source:      "direct",
+			RoleKind:    roleKind,
+		}
+		info.PrincipalDisplayName = group.PrincipalDisplayName
+		info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
+		infos = append(infos, info)
+	}
+
+	sort.Slice(infos, func(i, j int) bool {
+		iBuiltIn := infos[i].RoleKind == roleKindBuiltIn
+		jBuiltIn := infos[j].RoleKind == roleKindBuiltIn
+		if iBuiltIn != jBuiltIn {
+			return iBuiltIn
+		}
+		return infos[i].RoleName < infos[j].RoleName
+	})
+
+	group.Bindings = infos
+	return group
+}
