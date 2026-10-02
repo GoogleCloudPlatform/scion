@@ -289,7 +289,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_Coalesces(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			results[i], errs[i] = cache.ResolveWithFetch(context.Background(),
-				"coalesce-key", "coalesce-flight", "coalesce-cred", "test-ref", false, fetch)
+				"coalesce-key", "coalesce-flight", "coalesce-cred", "test-ref", false, nil, fetch)
 		}(i)
 	}
 
@@ -341,7 +341,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCap(t *testing.T) {
 			// identity: single-flight cannot coalesce these, so only the
 			// per-credential cap can bound their concurrency.
 			_, _ = cache.ResolveWithFetch(context.Background(),
-				fmt.Sprintf("cap-cache-%d", i), fmt.Sprintf("cap-flight-%d", i), "shared-cred", "test-ref", false, fetch)
+				fmt.Sprintf("cap-cache-%d", i), fmt.Sprintf("cap-flight-%d", i), "shared-cred", "test-ref", false, nil, fetch)
 		}()
 	}
 
@@ -416,7 +416,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCapIsolatedAcrossPr
 				return ResolvedSkill{Name: fmt.Sprintf("a-%d", i)}, nil
 			}
 			_, _ = cache.ResolveWithFetch(context.Background(),
-				fmt.Sprintf("projA-cache-%d", i), fmt.Sprintf("projA-flight-%d", i), "project-A|default", "test-ref", false, fetch)
+				fmt.Sprintf("projA-cache-%d", i), fmt.Sprintf("projA-flight-%d", i), "project-A|default", "test-ref", false, nil, fetch)
 		}()
 	}
 	for i := 0; i < maxInFlightPerCredential; i++ {
@@ -432,7 +432,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCapIsolatedAcrossPr
 			close(enteredB)
 			return ResolvedSkill{Name: "b"}, nil
 		}
-		_, _ = cache.ResolveWithFetch(context.Background(), "projB-cache", "projB-flight", "project-B|default", "test-ref", false, fetch)
+		_, _ = cache.ResolveWithFetch(context.Background(), "projB-cache", "projB-flight", "project-B|default", "test-ref", false, nil, fetch)
 		close(doneB)
 	}()
 
@@ -473,7 +473,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_CredSlotsReturnsToEmpty(t *testi
 			}
 			_, _ = cache.ResolveWithFetch(context.Background(),
 				fmt.Sprintf("credslot-cache-%d", i), fmt.Sprintf("credslot-flight-%d", i),
-				fmt.Sprintf("credslot-cred-%d", i), "test-ref", false, fetch)
+				fmt.Sprintf("credslot-cred-%d", i), "test-ref", false, nil, fetch)
 		}()
 	}
 
@@ -563,7 +563,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_CancelledLeaderDoesNotFailWaiter
 	var errLeader, errWaiter error
 	doneLeader := make(chan struct{})
 	go func() {
-		resLeader, errLeader = cache.ResolveWithFetch(ctxLeader, "cancel-leader-key", flightKey, "cancel-leader-cred", "test-ref", false, fetch)
+		resLeader, errLeader = cache.ResolveWithFetch(ctxLeader, "cancel-leader-key", flightKey, "cancel-leader-cred", "test-ref", false, nil, fetch)
 		close(doneLeader)
 	}()
 
@@ -575,7 +575,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_CancelledLeaderDoesNotFailWaiter
 
 	doneWaiter := make(chan struct{})
 	go func() {
-		resWaiter, errWaiter = cache.ResolveWithFetch(context.Background(), "cancel-leader-key", flightKey, "cancel-leader-cred", "test-ref", false, fetch)
+		resWaiter, errWaiter = cache.ResolveWithFetch(context.Background(), "cancel-leader-key", flightKey, "cancel-leader-cred", "test-ref", false, nil, fetch)
 		close(doneWaiter)
 	}()
 
@@ -680,7 +680,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_ShortDeadlineLeaderDoesNotFailWa
 	leaderCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	go func() {
-		_, _ = cache.ResolveWithFetch(leaderCtx, "short-deadline-key", flightKey, "short-deadline-cred", "test-ref", false, fetch)
+		_, _ = cache.ResolveWithFetch(leaderCtx, "short-deadline-key", flightKey, "short-deadline-cred", "test-ref", false, nil, fetch)
 	}()
 
 	select {
@@ -693,7 +693,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_ShortDeadlineLeaderDoesNotFailWa
 	var wres ResolvedSkill
 	done := make(chan struct{})
 	go func() {
-		wres, werr = cache.ResolveWithFetch(context.Background(), "short-deadline-key", flightKey, "short-deadline-cred", "test-ref", false, fetch)
+		wres, werr = cache.ResolveWithFetch(context.Background(), "short-deadline-key", flightKey, "short-deadline-cred", "test-ref", false, nil, fetch)
 		close(done)
 	}()
 
@@ -781,7 +781,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_StaleServesImmediately(t *testin
 		return ResolvedSkill{Name: "new", URI: key}, nil
 	}
 
-	skill, err := cache.ResolveWithFetch(context.Background(), key, "stale-flight", "stale-cred", "test-ref", true, fetch)
+	skill, err := cache.ResolveWithFetch(context.Background(), key, "stale-flight", "stale-cred", "test-ref", true, nil, fetch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -847,8 +847,8 @@ func TestGitHubResolutionCache_ResolveWithFetch_StaleRefreshesOnce(t *testing.T)
 	flightJoinHook.Store(&hook)
 	t.Cleanup(func() { flightJoinHook.Store(nil) })
 
-	skill1, err1 := cache.ResolveWithFetch(context.Background(), key, flightKey, "refresh-once-cred", "test-ref", true, fetch)
-	skill2, err2 := cache.ResolveWithFetch(context.Background(), key, flightKey, "refresh-once-cred", "test-ref", true, fetch)
+	skill1, err1 := cache.ResolveWithFetch(context.Background(), key, flightKey, "refresh-once-cred", "test-ref", true, nil, fetch)
+	skill2, err2 := cache.ResolveWithFetch(context.Background(), key, flightKey, "refresh-once-cred", "test-ref", true, nil, fetch)
 	if err1 != nil || err2 != nil {
 		t.Fatalf("unexpected errors: %v, %v", err1, err2)
 	}
@@ -911,7 +911,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PastMaxStaleAgeResolvesSynchrono
 		return ResolvedSkill{Name: "fresh", URI: key}, nil
 	}
 
-	skill, err := cache.ResolveWithFetch(context.Background(), key, "too-old-flight", "too-old-cred", "test-ref", true, fetch)
+	skill, err := cache.ResolveWithFetch(context.Background(), key, "too-old-flight", "too-old-cred", "test-ref", true, nil, fetch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -955,7 +955,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_SHARefNeverServedStale(t *testin
 
 	// isBranchRef=false, matching what resolveOne computes for a full commit
 	// SHA ref — this is the one thing that must keep it off the stale path.
-	skill, err := cache.ResolveWithFetch(context.Background(), key, "sha-flight", "sha-cred", "test-ref", false, fetch)
+	skill, err := cache.ResolveWithFetch(context.Background(), key, "sha-flight", "sha-cred", "test-ref", false, nil, fetch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1020,7 +1020,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_RefreshFailureBackoffSkipsRetry(
 		return ResolvedSkill{Name: "new", URI: key}, nil
 	}
 
-	skill, err := cache.ResolveWithFetch(context.Background(), key, flightKey, "backoff-cred", "test-ref", true, fetch)
+	skill, err := cache.ResolveWithFetch(context.Background(), key, flightKey, "backoff-cred", "test-ref", true, nil, fetch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1059,14 +1059,14 @@ func TestGitHubResolutionCache_ResolveWithFetch_FailureNeverCached(t *testing.T)
 		return ResolvedSkill{}, wantErr
 	}
 
-	_, err1 := cache.ResolveWithFetch(context.Background(), key, "failure-flight", "failure-cred", "test-ref", true, fetch)
+	_, err1 := cache.ResolveWithFetch(context.Background(), key, "failure-flight", "failure-cred", "test-ref", true, nil, fetch)
 	if !errors.Is(err1, wantErr) {
 		t.Fatalf("expected the first call to fail with %v, got %v", wantErr, err1)
 	}
 
 	// Nothing from the failed call should have been cached: a second call
 	// must run fetch again, not return a cached (zero-value) success.
-	_, err2 := cache.ResolveWithFetch(context.Background(), key, "failure-flight", "failure-cred", "test-ref", true, fetch)
+	_, err2 := cache.ResolveWithFetch(context.Background(), key, "failure-flight", "failure-cred", "test-ref", true, nil, fetch)
 	if !errors.Is(err2, wantErr) {
 		t.Fatalf("expected the second call to fail again (a prior failure must never be cached), got %v", err2)
 	}

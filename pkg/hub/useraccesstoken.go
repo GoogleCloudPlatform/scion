@@ -65,6 +65,31 @@ var (
 	ErrUATCredentialDenied = errors.New("access tokens cannot manage other access tokens")
 )
 
+// UATScopeViolationError names the selector and machine-readable reason when
+// CanMintSelector (pkg/hub/authz_boundary.go) denies a requested selector at
+// mint time. Unwrap returns ErrUATScopeViolation so existing
+// errors.Is(err, ErrUATScopeViolation) callers (handlers_auth.go's error
+// mapping, TestRS4_DenialCodeStability) keep working unchanged.
+// handlers_auth.go's scope_violation response already writes err.Error() as
+// its message, so the 403 body now includes the selector and reason text
+// (e.g. `requested scopes exceed issuer authority: selector "agent:delete"
+// denied (flat_role_insufficient)`), where it previously carried only the
+// sentinel text. This is reached only once project admission has already
+// succeeded, never on the uniform ErrUATProjectForbidden path (see
+// CreateToken below), so it does not weaken oracle resistance.
+type UATScopeViolationError struct {
+	Selector string
+	Reason   MintDenialReason
+}
+
+func (e *UATScopeViolationError) Error() string {
+	return fmt.Sprintf("%v: selector %q denied (%s)", ErrUATScopeViolation, e.Selector, e.Reason)
+}
+
+func (e *UATScopeViolationError) Unwrap() error {
+	return ErrUATScopeViolation
+}
+
 // UATRejection reports that a presented UAT failed ValidateToken, and
 // classifies why. Reason is one of "invalid", "revoked", "expired", or
 // "user_suspended" — see auth.go's UAT branch, which logs exactly one of
@@ -254,51 +279,72 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 		return "", nil, ErrUATExpiryTooLong
 	}
 
-	// --- Issuer ceiling at mint (target-project only) with oracle resistance ---
-	// Resolve only project-scoped permissions for the target project. System/hub
-	// authority must not enlarge the token.
+	// --- Mint eligibility via CanMintSelector (ptone/scion#2092, #2117) ---
+	// CanMintSelector composes project admission (current membership OR, per
+	// selector, exact-permission system authority on the exact requested
+	// permission) with per-selector mint eligibility (the existing flat
+	// project-role subset check, unchanged, or declared relationship
+	// candidacy for resource-relative selectors such as
+	// agent:attach/agent:port_access, which are mintable before any target
+	// exists) in one batched call, with admission checked once for the
+	// whole request. This replaces only the flat eligibility subset loop;
+	// selector resolution (expandScopes above) and the persisted ceiling
+	// (below) are a separate concern (ptone/scion#2118 owns normalizing
+	// those, including at load time).
 	//
-	// getProjectScopedPermissions filters to ScopeType==project && ScopeID==projectID
-	// while retaining group-expanded principals (transitive membership), activation
-	// window filtering (future/expired bindings excluded), and AccessConstraint
-	// reduction. If the result is empty, the user has no project-level authority —
-	// this covers both non-membership and nonexistent projects with the same error
-	// (oracle resistance, G10).
-	//
-	// Note: authorization runs outside WithTx. The TOCTOU window is acceptable
-	// because (1) use-time enforcement narrows every request to the intersection
-	// of token scopes and the user's current permissions, and (2) token minting
-	// only reads authority state, it does not mutate it. See O1 documentation in
-	// rs4_credential_test.go.
-	actorPerms, err := s.authz.getProjectScopedPermissions(ctx, store.RoleBindingPrincipalUser, params.UserID, params.ProjectID)
+	// Note: authorization runs outside WithTx. The TOCTOU window is
+	// acceptable because (1) use-time enforcement narrows every request to
+	// the intersection of token scopes and the user's current permissions,
+	// and (2) token minting only reads authority state, it does not mutate
+	// it. See O1 documentation in rs4_credential_test.go.
+	identity := GetIdentityFromContext(ctx)
+	// enforceSessionCredential above already rejects a missing identity;
+	// this keeps the mint path fail-closed on its own rather than relying
+	// on that ordering.
+	if isNilIdentity(identity) {
+		return "", nil, ErrUATProjectForbidden
+	}
+	principal := principalContextForIdentity(identity)
+	boundary := TokenBoundary{Kind: BoundaryKindProject, ProjectID: params.ProjectID}
+	eligibility, err := s.authz.CanMintSelector(ctx, principal, boundary, expanded)
 	if err != nil {
-		s.logger.Warn("RS4: failed to resolve project-scoped permissions",
+		s.logger.Warn("RS4: CanMintSelector failed",
 			"user_id", params.UserID, "project_id", params.ProjectID, "error", err)
 		return "", nil, ErrUATProjectForbidden
 	}
-	if len(actorPerms) == 0 {
-		return "", nil, ErrUATProjectForbidden
+	for _, result := range eligibility {
+		if result.OK {
+			continue
+		}
+		// Oracle resistance: MintDenialProjectAccessRequired means
+		// CanMintSelector's ONE admission check for the whole batch failed
+		// (no membership and no exact-permission system authority) -- every
+		// selector gets this same reason uniformly in that case. Preserve
+		// the existing contract that a non-member and a nonexistent project
+		// both get the bare ErrUATProjectForbidden, with no selector
+		// detail, so neither is distinguishable from the other or from
+		// "authority exists but not for this selector." Only a per-selector
+		// eligibility denial (admission passed, this specific selector
+		// didn't) surfaces the typed UATScopeViolationError.
+		if result.Reason == MintDenialProjectAccessRequired {
+			return "", nil, ErrUATProjectForbidden
+		}
+		return "", nil, &UATScopeViolationError{Selector: result.Selector, Reason: result.Reason}
 	}
 
-	// Resolve the requested scopes to a CeilingVersionV1 ceiling and verify
-	// the issuer holds every resulting permission in the target project;
-	// that same ceiling is persisted below and is what runtime authorization
-	// and delegation enforce. Fail closed if any valid scope does not
-	// resolve.
+	// --- Persisted ceiling (ptone/scion#2118) ---
+	// Resolve the requested scopes to a CeilingVersionV1 ceiling; this is
+	// what is persisted below and is what runtime authorization and
+	// delegation enforce going forward, pinned to the version's rules. Fail
+	// closed if any valid scope does not resolve to a selector mapping —
+	// CanMintSelector's per-selector eligibility above already proved the
+	// issuer's authority, so this is a resolvability check, not an
+	// authority check.
 	ceiling, ceilingOK := permissions.BuildCeilingFromSelectors(expanded)
 	if !ceilingOK {
 		s.logger.Error("RS4: scope-to-permission mapping gap — some valid scope has no resolvable selector",
 			"expanded_count", len(expanded))
 		return "", nil, ErrUATScopeViolation
-	}
-	actorPermSet := make(map[string]bool, len(actorPerms))
-	for _, p := range actorPerms {
-		actorPermSet[p] = true
-	}
-	for _, permID := range ceiling.PermissionIDs {
-		if !actorPermSet[permID] {
-			return "", nil, ErrUATScopeViolation
-		}
 	}
 
 	// --- Atomic mint: token insert + audit in one transaction ---

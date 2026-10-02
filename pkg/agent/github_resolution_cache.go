@@ -631,6 +631,20 @@ func injectFlightJoin(flightKey string) {
 	}
 }
 
+// staleServeHook, when non-nil, is called synchronously each time
+// ResolveWithFetch serves a stale entry, with the flight key and whether a
+// background refresh was started for it. Tests use it to assert that no
+// refresh was started (for example during a rate-limit cooldown) without
+// waiting for one that might never come. Atomic for the same reason as
+// flightJoinHook.
+var staleServeHook atomic.Pointer[func(flightKey string, refreshStarted bool)]
+
+func injectStaleServe(flightKey string, refreshStarted bool) {
+	if hook := staleServeHook.Load(); hook != nil {
+		(*hook)(flightKey, refreshStarted)
+	}
+}
+
 // coalesceFetch runs fetch for cacheKey, using flightKey to coalesce
 // concurrent calls for the same ref into a single upstream fetch, and
 // credentialID to bound how many such fetches may run concurrently for a
@@ -746,7 +760,10 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 //     and a refresh is started in the background, coalesced with any other
 //     refresh already in flight for flightKey — unless a refresh for this key
 //     failed within the last refreshFailureBackoff, in which case the stale
-//     value is served without starting another one.
+//     value is served without starting another one. The same applies when
+//     refreshAllowed is non-nil and returns false (the credential is in a
+//     GitHub rate-limit cooldown, see GitHubCooldown): the stale value is
+//     served and no refresh is started.
 //   - Otherwise, fetch runs synchronously, coalesced via flightKey and capped
 //     per credentialID (see coalesceFetch).
 //
@@ -772,9 +789,10 @@ func (c *GitHubResolutionCache) ResolveWithFetch(
 	ctx context.Context,
 	cacheKey, flightKey, credentialID, logRef string,
 	isBranchRef bool,
+	refreshAllowed func() bool,
 	fetch func(context.Context) (ResolvedSkill, error),
 ) (ResolvedSkill, error) {
-	return c.resolveWithFetchAccept(ctx, cacheKey, flightKey, credentialID, logRef, isBranchRef, nil, fetch)
+	return c.resolveWithFetchAccept(ctx, cacheKey, flightKey, credentialID, logRef, isBranchRef, refreshAllowed, nil, fetch)
 }
 
 // resolveWithFetchAccept is ResolveWithFetch, except that a cached value
@@ -786,6 +804,7 @@ func (c *GitHubResolutionCache) resolveWithFetchAccept(
 	ctx context.Context,
 	cacheKey, flightKey, credentialID, logRef string,
 	isBranchRef bool,
+	refreshAllowed func() bool,
 	accept func(ResolvedSkill) bool,
 	fetch func(context.Context) (ResolvedSkill, error),
 ) (ResolvedSkill, error) {
@@ -797,9 +816,13 @@ func (c *GitHubResolutionCache) resolveWithFetchAccept(
 
 	if isBranchRef {
 		if skill, ok := c.getStale(cacheKey); ok && acceptable(skill) {
-			if c.recentRefreshFailure(flightKey) {
+			refreshStarted := false
+			if refreshAllowed != nil && !refreshAllowed() {
+				fmt.Fprintf(os.Stderr, "github: WARNING: serving stale entry for %s; skipping refresh during a rate-limit cooldown\n", logRef)
+			} else if c.recentRefreshFailure(flightKey) {
 				fmt.Fprintf(os.Stderr, "github: WARNING: serving stale entry for %s; skipping refresh after a recent failure\n", logRef)
 			} else {
+				refreshStarted = true
 				// A panic in fetch is recovered inside coalesceFetch's DoChan
 				// closure (see its comment), so this goroutine itself cannot
 				// panic from that; no recover needed at this level.
@@ -812,6 +835,7 @@ func (c *GitHubResolutionCache) resolveWithFetchAccept(
 					}
 				}()
 			}
+			injectStaleServe(flightKey, refreshStarted)
 			return skill, nil
 		}
 	}

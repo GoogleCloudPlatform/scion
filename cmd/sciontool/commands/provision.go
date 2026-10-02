@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -110,7 +111,28 @@ func runProvision(ctx context.Context) error {
 		}
 	}
 
-	mode := store.ResolveWorkspaceSharingMode(provisionMode)
+	// The Kubernetes runtime passes the workspace mode and the agent's
+	// worktree as env vars (an older sciontool ignores them and provisions
+	// the shared checkout only). SCION_WORKSPACE_MODE takes precedence over
+	// --mode.
+	modeLabel := provisionMode
+	if envMode := os.Getenv("SCION_WORKSPACE_MODE"); envMode != "" {
+		modeLabel = envMode
+	}
+	mode := store.ResolveWorkspaceSharingMode(modeLabel)
+	// The agent's worktree directory is named after the agent's slug.
+	agentSlug := os.Getenv("SCION_AGENT_SLUG")
+	worktree := mode == store.SharingModeWorktreePerAgent
+	if worktree {
+		if slug, err := api.ValidateAgentName(agentSlug); err != nil || slug != agentSlug {
+			return fmt.Errorf("provision: worktree-per-agent mode needs SCION_AGENT_SLUG set to the agent's slug (got %q)", agentSlug)
+		}
+	}
+	if worktree {
+		// Files the worktree step creates as root keep group write, like
+		// the directories the broker prepares.
+		defer setProvisionUmask()()
+	}
 
 	// F-111 (design §9): the k8s runtime mounts each NFS-backed shared dir
 	// into this init container at its own path (mirroring the main
@@ -168,17 +190,64 @@ func runProvision(ctx context.Context) error {
 		// still written.
 		RequireChownSuccess: provisionRequireChownSuccess(os.Getenv),
 	}
+	if worktree {
+		setWorktreeInput(&in, agentSlug, os.Getenv("SCION_AGENT_BRANCH"), provisionTimeout)
+		for key, value := range worktreeSafeDirectoryEnv(os.Getenv, provisionWorkspace, agentSlug) {
+			if err := os.Setenv(key, value); err != nil {
+				return fmt.Errorf("provision: set %s: %w", key, err)
+			}
+		}
+	}
 	if !in.RequireChownSuccess {
 		log.Info("Best-effort chown requested (workspace directory prepared by the broker); a failed chown is logged and provisioning continues")
 	}
 
 	log.Info("Provisioning workspace at %s (mode=%s, project=%s, shared_dirs=%d)",
 		provisionWorkspace, mode, projectID, len(sharedDirs))
+	if worktree {
+		log.Info("Adding the worktree for agent %s at %s", agentSlug, provision.WorktreePath(provisionWorkspace, agentSlug))
+	}
 	if err := provision.ProvisionShared(in); err != nil {
 		return fmt.Errorf("provision failed: %w", err)
 	}
 	log.Info("Workspace provisioned successfully")
 	return nil
+}
+
+// setWorktreeInput fills in the worktree-per-agent part of in. The branch
+// is used as the broker passes it, as for worktrees on the local runtimes,
+// and ProvisionShared checks that it is a valid branch name. In this mode
+// every pod of the project takes the provisioning file lock, so the lock
+// wait is at least the --timeout value, the same time a pod waiting for
+// the sentinel would wait.
+func setWorktreeInput(in *provision.ProvisionInput, agentSlug, branch string, timeoutSeconds int) {
+	in.AgentID = agentSlug
+	in.AgentName = branch
+	in.MountedWorktree = true
+	in.LockWait = time.Duration(timeoutSeconds) * time.Second
+}
+
+// worktreeSafeDirectoryEnv returns the environment entries that list the
+// shared checkout and the agent's worktree, and only those two paths, as
+// git safe.directory entries for the git commands this process runs.
+// The init container runs as root while both directories belong to the
+// agents' user, and git does not work in a repository owned by another
+// user unless it is listed. The entries are appended to any GIT_CONFIG_*
+// entries already in the environment.
+func worktreeSafeDirectoryEnv(getenv func(string) string, workspace, agentSlug string) map[string]string {
+	base := 0
+	if raw := getenv("GIT_CONFIG_COUNT"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			base = n
+		}
+	}
+	paths := []string{workspace, provision.WorktreePath(workspace, agentSlug)}
+	env := map[string]string{"GIT_CONFIG_COUNT": strconv.Itoa(base + len(paths))}
+	for i, p := range paths {
+		env[fmt.Sprintf("GIT_CONFIG_KEY_%d", base+i)] = "safe.directory"
+		env[fmt.Sprintf("GIT_CONFIG_VALUE_%d", base+i)] = p
+	}
+	return env
 }
 
 // provisionRequireChownSuccess keeps a chown failure fatal unless the

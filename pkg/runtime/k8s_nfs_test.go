@@ -1120,9 +1120,10 @@ func TestRun_NFSLockLost_CreatesWaitPod(t *testing.T) {
 	config := nfsBaseConfig("scion-test-lock-lost")
 	config.Locker = &alwaysLoseLocker{}
 
-	// Run() will create the pod but waitForPodReady will time out with the
-	// fake clientset. Use a short-lived context so we don't block for 10m.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Run() creates the pod, then fails readiness at its first poll (see
+	// failPodReadiness), which keeps the pod for inspection.
+	failPodReadiness(r.Client.Clientset.(*k8sfake.Clientset))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	r.Run(ctx, config) //nolint:errcheck
 
@@ -1156,8 +1157,10 @@ func TestRun_NFSLockWon_CreatesClonePod(t *testing.T) {
 	config := nfsBaseConfig("scion-test-lock-won")
 	config.Locker = locker
 
-	// Short-lived context to avoid blocking on waitForPodReady.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Run() creates the pod, then fails readiness at its first poll (see
+	// failPodReadiness), which keeps the pod for inspection.
+	failPodReadiness(r.Client.Clientset.(*k8sfake.Clientset))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	r.Run(ctx, config) //nolint:errcheck
 

@@ -30,6 +30,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -98,6 +99,12 @@ type GitHubSkillResolver struct {
 	apiBase              string            // Default: githubAPIBase, override in tests
 	rawBase              string            // Default: githubRawBase, override in tests
 	resolutionCache      *GitHubResolutionCache
+	// cooldown holds requests back per credential identity after a GitHub
+	// rate-limit response (see GitHubCooldown). The constructors set the
+	// process-wide SharedGitHubCooldown; a resolver built without one gets
+	// its own tracker on first use (see cooldownTracker).
+	cooldown     *GitHubCooldown
+	cooldownOnce sync.Once
 
 	// Zero values fall back to githubResolveBudget, githubRequestTimeout and
 	// githubDownloadRequestTimeout; tests shrink them to run quickly.
@@ -200,7 +207,20 @@ func newGitHubSkillResolver(cache *GitHubResolutionCache) *GitHubSkillResolver {
 		apiBase:         githubAPIBase,
 		rawBase:         githubRawBase,
 		resolutionCache: cache,
+		cooldown:        SharedGitHubCooldown(),
 	}
+}
+
+// cooldownTracker returns r.cooldown, creating a tracker private to this
+// resolver when none was set, so a resolver built as a struct literal (as
+// tests do) never shares cooldown state with any other.
+func (r *GitHubSkillResolver) cooldownTracker() *GitHubCooldown {
+	r.cooldownOnce.Do(func() {
+		if r.cooldown == nil {
+			r.cooldown = NewGitHubCooldown(nil)
+		}
+	})
+	return r.cooldown
 }
 
 // NewGitHubSkillResolverWithCredentials constructs a resolver with an explicit
@@ -424,14 +444,21 @@ func (r *GitHubSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefer
 
 		resolved, err := r.resolveOne(ctx, ghRef, ref, opts.ProjectID, opts.UserID)
 		if err != nil {
-			// Classify the failure into a stable cause code when possible
-			// (set by doWithRetry/listContents/resolveCommitSHA below), so
-			// the create path can map a required-skill failure to the right
-			// status instead of a generic 500/502 (#2546).
 			code := "resolve_failed"
 			var retryAfter string
+			var rl *GitHubRateLimitError
 			var rerr *githubResolveError
-			if errors.As(err, &rerr) {
+			switch {
+			case errors.As(err, &rl):
+				// Checked first: a rate-limit error may also be wrapped in a
+				// githubResolveError, and its RetryAt is the cooldown's own end.
+				code = GitHubRateLimitedCode
+				retryAfter = r.cooldownRetryAfter(rl)
+			case errors.As(err, &rerr):
+				// Classify the failure into a stable cause code when possible
+				// (set by doWithRetry/listContents/resolveCommitSHA below), so
+				// the create path can map a required-skill failure to the
+				// right status instead of a generic 500/502.
 				code = rerr.code
 				retryAfter = rerr.retryAfter
 			}
@@ -470,9 +497,17 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 	}
 
 	cacheKey := resolutionCacheKey(ghRef, token)
+	cooldownID := GitHubCooldownIdentity(token)
 
 	fetch := func(fctx context.Context) (ResolvedSkill, error) {
 		return r.fetchOne(fctx, ghRef, ref, token)
+	}
+	// refreshAllowed gates the background refresh of a stale entry: while
+	// this credential is in a rate-limit cooldown the stale value is served
+	// without starting one.
+	refreshAllowed := func() bool {
+		_, active := r.cooldownTracker().Active(cooldownID)
+		return !active
 	}
 
 	var resolved ResolvedSkill
@@ -515,15 +550,15 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 			flightKey += "|with-content"
 		}
 
-		skill, err := r.resolutionCache.resolveWithFetchAccept(ctx, cacheKey, flightKey, credID, logRef, isBranchRef, accept, fetch)
+		skill, err := r.resolutionCache.resolveWithFetchAccept(ctx, cacheKey, flightKey, credID, logRef, isBranchRef, refreshAllowed, accept, fetch)
 		if err != nil {
-			return nil, err
+			return nil, withRateLimitRef(err, ghRef.Raw)
 		}
 		resolved = skill
 	} else {
 		skill, err := fetch(ctx)
 		if err != nil {
-			return nil, err
+			return nil, withRateLimitRef(err, ghRef.Raw)
 		}
 		resolved = skill
 	}
@@ -542,6 +577,28 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 		resolved.githubCredentialRef = ghRef.Raw
 	}
 	return &resolved, nil
+}
+
+// withRateLimitRef returns err as a *GitHubRateLimitError naming ref when err
+// is one, so the caller sees which ref hit the limit; other errors are
+// returned unchanged.
+func withRateLimitRef(err error, ref string) error {
+	var rl *GitHubRateLimitError
+	if errors.As(err, &rl) {
+		return rl.WithRef(ref)
+	}
+	return err
+}
+
+// cooldownRetryAfter renders the time left until rl.RetryAt, by the
+// cooldown tracker's clock, as a whole number of seconds (rounded up, at
+// least 1), the form ResolveError.RetryAfter carries.
+func (r *GitHubSkillResolver) cooldownRetryAfter(rl *GitHubRateLimitError) string {
+	secs := int64(math.Ceil(rl.RetryAt.Sub(r.cooldownTracker().now()).Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	return strconv.FormatInt(secs, 10)
 }
 
 // fetchOne performs the actual GitHub API work for ghRef — resolving the
@@ -767,7 +824,7 @@ func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHu
 	req.Header.Set("Accept", "application/vnd.github.v3.sha")
 	r.setAuthHeader(req, token)
 
-	resp, err := r.doWithRetry(ctx, req, durationOr(r.requestTimeout, githubRequestTimeout))
+	resp, err := r.doWithRetry(ctx, req, durationOr(r.requestTimeout, githubRequestTimeout), token)
 	if err != nil {
 		return "", fmt.Errorf("GitHub API request failed: %w", err)
 	}
@@ -806,7 +863,7 @@ func (r *GitHubSkillResolver) listContents(ctx context.Context, ghRef *GitHubSki
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	r.setAuthHeader(req, token)
 
-	resp, err := r.doWithRetry(ctx, req, durationOr(r.requestTimeout, githubRequestTimeout))
+	resp, err := r.doWithRetry(ctx, req, durationOr(r.requestTimeout, githubRequestTimeout), token)
 	if err != nil {
 		return nil, fmt.Errorf("GitHub API request failed: %w", err)
 	}
@@ -840,7 +897,7 @@ func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHub
 	}
 	r.setAuthHeader(req, token)
 
-	resp, err := r.doWithRetry(ctx, req, durationOr(r.downloadTimeout, githubDownloadRequestTimeout))
+	resp, err := r.doWithRetry(ctx, req, durationOr(r.downloadTimeout, githubDownloadRequestTimeout), token)
 	if err != nil {
 		return nil, fmt.Errorf("download failed: %w", err)
 	}
@@ -997,10 +1054,15 @@ func (b *cancelOnCloseBody) Close() error {
 // applied via the request context rather than relying solely on
 // r.httpClient's own Timeout, so it composes with (and is independent of) the
 // caller's ctx deadline: whichever is shorter wins.
-func (r *GitHubSkillResolver) doOnce(ctx context.Context, req *http.Request, attemptTimeout time.Duration) (*http.Response, error) {
+//
+// The attempt goes through the cooldown tracker for identity: during a
+// cooldown nothing is sent and a *GitHubRateLimitError is returned, and a
+// rate-limit response starts a cooldown and is returned as one (see
+// GitHubCooldown.Do).
+func (r *GitHubSkillResolver) doOnce(ctx context.Context, req *http.Request, attemptTimeout time.Duration, identity string) (*http.Response, error) {
 	attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 	cloned := req.Clone(attemptCtx)
-	resp, err := r.httpClient.Do(cloned)
+	resp, err := r.cooldownTracker().Do(r.httpClient, cloned, identity)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -1010,9 +1072,17 @@ func (r *GitHubSkillResolver) doOnce(ctx context.Context, req *http.Request, att
 }
 
 // doWithRetry executes an HTTP request with retry and exponential backoff
-// for rate-limited (403 with X-RateLimit-Remaining: 0, 429) and transient
-// server errors (5xx). On retryable responses it respects the Retry-After
-// header when present.
+// for transient failures (5xx responses and transport errors). On
+// retryable responses it respects the Retry-After header when present.
+//
+// Rate limits are not retried: every attempt goes through the shared
+// GitHubCooldown for token's identity (see doOnce), so a rate-limit response
+// (429, or a 403 reporting exhaustion or a secondary limit) starts a cooldown
+// for that credential and returns a *GitHubRateLimitError straight away, and
+// while a cooldown is in effect no request is sent at all. Waiting out the
+// limit here would stall the caller (and, at provision time, the whole batch
+// of refs behind it) for as long as GitHub asks, which can exceed the create
+// deadline.
 //
 // Each attempt is bounded by attemptTimeout (see doOnce), so a single stalled
 // request cannot by itself consume the whole create-deadline budget. Before
@@ -1020,10 +1090,11 @@ func (r *GitHubSkillResolver) doOnce(ctx context.Context, req *http.Request, att
 // fits inside ctx's remaining deadline; if it doesn't, it fails immediately
 // with a classified, ref-naming error instead of sleeping into a context
 // cancellation that would otherwise surface only as an opaque "context
-// canceled" (#2546). Separately, when the server's own Retry-After exceeds
+// canceled". Separately, when the server's own Retry-After exceeds
 // githubMaxBackoff, doWithRetry fails fast rather than sleeping the capped
-// backoff and retrying straight into another rate limit (#2546 O3).
-func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request, attemptTimeout time.Duration) (*http.Response, error) {
+// backoff and retrying.
+func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request, attemptTimeout time.Duration, token string) (*http.Response, error) {
+	identity := GitHubCooldownIdentity(token)
 	var lastResp *http.Response
 	var lastErr error
 	noun, kind := "GitHub API request to", "api"
@@ -1038,6 +1109,13 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 			// below, not a typed failure classified from that attempt.
 			if errors.Is(ctx.Err(), context.Canceled) {
 				return nil, ctx.Err()
+			}
+			// A cooldown started for this identity since the previous attempt
+			// (by another ref or caller sharing the credential) means the
+			// next attempt would not be sent; fail now rather than sleep the
+			// backoff first.
+			if retryAt, cooling := r.cooldownTracker().Active(identity); cooling {
+				return nil, &GitHubRateLimitError{RetryAt: retryAt, Unauthenticated: GitHubCooldownIdentityIsAnonymous(identity)}
 			}
 			status := -1
 			retryAfterHeader := ""
@@ -1100,8 +1178,12 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 			}
 		}
 
-		resp, err := r.doOnce(ctx, req, attemptTimeout)
+		resp, err := r.doOnce(ctx, req, attemptTimeout, identity)
 		if err != nil {
+			var rl *GitHubRateLimitError
+			if errors.As(err, &rl) {
+				return nil, err
+			}
 			lastErr = err
 			lastResp = nil
 			continue

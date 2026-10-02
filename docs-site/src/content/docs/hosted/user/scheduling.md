@@ -50,7 +50,7 @@ scion schedule create \
 Recurring schedules fire repeatedly on a **5-field cron expression** (Minute, Hour, Day of Month, Month, Day of Week). 
 
 :::caution[Cron is UTC]
-Schedules evaluate using **UTC (Coordinated Universal Time)**. There is no local timezone configuration — convert from your local timezone to UTC before writing the cron expression.
+Schedules are evaluated in **UTC (Coordinated Universal Time) only**. A cron expression cannot carry a timezone, and there is no timezone setting — convert from your local timezone to UTC before writing the expression. A fixed UTC time shifts by an hour against local time across daylight-saving changes.
 :::
 
 ### Creating a Recurring Schedule via CLI
