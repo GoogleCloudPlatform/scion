@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -409,4 +410,94 @@ func TestAssignableRoles_CustomManagerWithNoProjectRole(t *testing.T) {
 	assert.Equal(t, ErrCodeRoleAssignmentForbidden, rb.DenialCode)
 	assert.Contains(t, rb.Reason, "role_binding.", "the structural refusal precedes the no-project-role refusal")
 	assert.Equal(t, f.roleBindingCustom.ID, rb.Details["roleDefinitionId"])
+}
+
+// TestAssignableRoles_AgentTokenGetsCredentialInsufficient: a non-user
+// identity is refused with the members PUT's credential_insufficient code.
+func TestAssignableRoles_AgentTokenGetsCredentialInsufficient(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+	agentID := tid(t.Name() + "-agent")
+	require.NoError(t, f.store.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: agentID, Name: "asg-agent", ProjectID: f.projectID,
+		Phase: "running", CreatedBy: f.owner.ID, OwnerID: f.owner.ID, Ancestry: []string{f.owner.ID},
+	}))
+	agentToken, err := f.srv.GenerateAgentToken(agentID, f.projectID, []string{f.owner.ID}, AgentRoleFull, nil)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, assignableRolesPath(f.projectID), nil)
+	req.Header.Set("Authorization", "Bearer "+agentToken)
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	var errBody ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errBody))
+	assert.Equal(t, ErrCodeMembershipCredentialInsufficient, errBody.Error.Code)
+}
+
+// TestAssignableRoles_RoutingKeepsMemberAddressing: the literal
+// members/assignable-roles segment does not shadow principal or binding-ID
+// addressing.
+func TestAssignableRoles_RoutingKeepsMemberAddressing(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+	membersPath := "/api/v1/projects/" + f.projectID + "/members"
+
+	// A principal literally named "assignable-roles" (a group with that
+	// slug) is still addressed through members/principals/{type}/{id}.
+	const literal = "assignable-roles"
+	groupID := tid(t.Name() + "-group")
+	require.NoError(t, f.store.CreateGroup(ctx, &store.Group{ID: groupID, Name: "literal", Slug: literal}))
+	rec := putMemberRoles(t, f.srv, f.owner, f.projectID, "group", literal, []string{f.memberRD.ID}, &[]string{})
+	require.Equal(t, http.StatusCreated, rec.Code, "principal handler: %s", rec.Body.String())
+	bindings := mmrBindingsFor(t, f.store, "group", groupID, f.projectID)
+	require.Len(t, bindings, 1)
+	assert.Equal(t, f.memberRD.ID, bindings[0].RoleDefinitionID)
+
+	// members/principals/user/assignable-roles reaches the principal
+	// handler too: PUT is answered by it (no such user; never the
+	// assignable-roles handler's GET-only 405), and GET gets the principal
+	// handler's PUT/DELETE-only 405.
+	rec = putMemberRoles(t, f.srv, f.owner, f.projectID, "user", literal, []string{f.memberRD.ID}, &[]string{})
+	assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code, rec.Body.String())
+	assert.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
+	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodGet, mmrPrincipalPath(f.projectID, "user", literal), nil)
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	assert.Equal(t, "PUT, DELETE", rec.Header().Get("Allow"), "principal handler")
+
+	// ID addressing still works alongside the new route.
+	byID := grpUser(t, f.store, t.Name()+"-byid", "By ID")
+	rec = putMemberRoles(t, f.srv, f.owner, f.projectID, "user", byID.ID, []string{f.memberRD.ID}, &[]string{})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Len(t, mmrBindingsFor(t, f.store, "user", byID.ID, f.projectID), 1)
+
+	// Email addressing still works alongside the new route.
+	byEmail := grpUser(t, f.store, t.Name()+"-byemail", "By Email")
+	rec = putMemberRoles(t, f.srv, f.owner, f.projectID, "user", byEmail.Email, []string{f.memberRD.ID}, &[]string{})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Len(t, mmrBindingsFor(t, f.store, "user", byEmail.ID, f.projectID), 1)
+
+	// PATCH/DELETE members/assignable-roles are pinned to 405 (GET only) and
+	// write nothing; they no longer reach the binding-ID handler.
+	before, err := f.store.ListRoleBindingsForScope(ctx, store.RoleScopeProject, f.projectID)
+	require.NoError(t, err)
+	for _, method := range []string{http.MethodPatch, http.MethodDelete} {
+		rec = doRequestAsUser(t, f.srv, f.owner, method, membersPath+"/assignable-roles", map[string]string{"role": store.ProjectRoleMember})
+		assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "%s: %s", method, rec.Body.String())
+		assert.Equal(t, http.MethodGet, rec.Header().Get("Allow"), method)
+	}
+	after, err := f.store.ListRoleBindingsForScope(ctx, store.RoleScopeProject, f.projectID)
+	require.NoError(t, err)
+	assert.Len(t, after, len(before))
+
+	// A deeper path still falls to the binding-ID handler.
+	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodGet, membersPath+"/assignable-roles/x", nil)
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	assert.Equal(t, "PATCH, DELETE", rec.Header().Get("Allow"), "binding-ID handler")
+
+	// A real binding ID is still addressable.
+	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, membersPath+"/"+bindings[0].ID, nil)
+	assert.Less(t, rec.Code, 300, "binding-ID DELETE: %s", rec.Body.String())
+	assert.Empty(t, mmrBindingsFor(t, f.store, "group", groupID, f.projectID))
 }

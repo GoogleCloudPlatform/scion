@@ -1016,10 +1016,9 @@ func (s *Server) handleProjectAssignableRoles(w http.ResponseWriter, r *http.Req
 	}
 	ctx := r.Context()
 
-	if !s.authorize(w, r, Resource{Type: "project", ID: projectID}, ActionManage) {
-		return
-	}
-
+	// A non-user identity (an agent token) is refused before resource
+	// authorization with the code and message the members PUT gives it, so
+	// this view reports what the PUT would do for that caller.
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
@@ -1027,7 +1026,11 @@ func (s *Server) handleProjectAssignableRoles(w http.ResponseWriter, r *http.Req
 	}
 	user, ok := identity.(UserIdentity)
 	if !ok {
-		Forbidden(w)
+		writeError(w, http.StatusForbidden, ErrCodeMembershipCredentialInsufficient, "membership mutations require an authenticated user identity", nil)
+		return
+	}
+
+	if !s.authorize(w, r, Resource{Type: "project", ID: projectID}, ActionManage) {
 		return
 	}
 
