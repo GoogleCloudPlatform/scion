@@ -22,6 +22,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -31,6 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
@@ -231,4 +234,83 @@ func TestResolveGitHubSkill_MissDuringCooldownFailsFast(t *testing.T) {
 	assert.Equal(t, int64(2), gh.calls.Load())
 	_, active := srv.ghCooldown.Active(agent.GitHubCooldownIdentityForInstallation("public"))
 	assert.False(t, active, "the cooldown must be over after T")
+}
+
+// TestResolveGitHubSkill_InstallationCooldownIsAuthenticated: for a project
+// with a GitHub App installation, a miss during the installation's cooldown
+// fails fast and is reported as authenticated, also when the minted
+// credential value is empty: whether a request is unauthenticated follows
+// the cooldown identity, not the credential value.
+func TestResolveGitHubSkill_InstallationCooldownIsAuthenticated(t *testing.T) {
+	for _, minted := range []string{"", "ghs_test_value"} {
+		t.Run("minted="+minted, func(t *testing.T) {
+			const instID = int64(424242)
+			srv, s, _, _, project := setupSkillAuthzTest(t)
+			srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+			clock := &ghCooldownClock{t: time.Now()}
+			srv.ghCooldown = agent.NewGitHubCooldown(clock.Now)
+
+			var repoCalls atomic.Int64
+			mux := http.NewServeMux()
+			mux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
+				if !strings.HasSuffix(r.URL.Path, "/access_tokens") {
+					http.NotFound(w, r)
+					return
+				}
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"token":      minted,
+					"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+				})
+			})
+			mux.HandleFunc("/repos/", func(w http.ResponseWriter, _ *http.Request) {
+				repoCalls.Add(1)
+				http.NotFound(w, nil)
+			})
+			gh := httptest.NewServer(mux)
+			t.Cleanup(gh.Close)
+			srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+			srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+			srv.config.GitHubAppConfig.AppID = 1
+			srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
+
+			ctx := context.Background()
+			require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+				InstallationID: instID,
+				AccountLogin:   "acme",
+				AccountType:    "Organization",
+				AppID:          1,
+				Status:         store.GitHubInstallationStatusActive,
+			}))
+			id := instID
+			project.GitHubInstallationID = &id
+			require.NoError(t, s.UpdateProject(ctx, project))
+
+			// Start the installation's cooldown with a 429 for one ref.
+			limitedMux := http.NewServeMux()
+			limitedMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Retry-After", "30")
+				w.WriteHeader(http.StatusTooManyRequests)
+			})
+			limited := httptest.NewServer(limitedMux)
+			t.Cleanup(limited.Close)
+			req, err := http.NewRequest(http.MethodGet, limited.URL, nil)
+			require.NoError(t, err)
+			identity := agent.GitHubCooldownIdentityForInstallation(strconv.FormatInt(instID, 10))
+			_, err = srv.ghCooldown.Do(limited.Client(), req, identity)
+			var rl *agent.GitHubRateLimitError
+			require.True(t, errors.As(err, &rl), "want a rate-limit error, got %v", err)
+
+			const uri = "gh://acme/skills/s@main"
+			_, err = srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
+			require.True(t, errors.As(err, &rl), "want a rate-limit error, got %v", err)
+			assert.False(t, rl.Sent)
+			assert.False(t, rl.Unauthenticated, "an installation-backed request is authenticated")
+			assert.NotContains(t, err.Error(), "GITHUB_TOKEN")
+			assert.Equal(t, int64(0), repoCalls.Load(), "no request during the cooldown")
+
+			_, anonActive := srv.ghCooldown.Active(agent.GitHubCooldownIdentityForInstallation("public"))
+			assert.False(t, anonActive, "the installation's cooldown must not apply to unauthenticated requests")
+		})
+	}
 }

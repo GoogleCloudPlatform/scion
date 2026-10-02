@@ -1985,7 +1985,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 	// A miss during a rate-limit cooldown fails now, without starting a
 	// flight: no request could be sent for this identity anyway.
 	if retryAt, cooling := s.githubCooldown().Active(cooldownID); cooling {
-		return nil, &agent.GitHubRateLimitError{Ref: rawURI, RetryAt: retryAt, Unauthenticated: token == ""}
+		return nil, &agent.GitHubRateLimitError{Ref: rawURI, RetryAt: retryAt, Unauthenticated: agent.GitHubCooldownIdentityIsAnonymous(cooldownID)}
 	}
 
 	// 5. Cache miss, with no usable stale entry: coalesce concurrent misses

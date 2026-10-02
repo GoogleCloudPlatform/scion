@@ -300,3 +300,70 @@ func TestGitHubCooldownIdentity_NoCredentialMaterial(t *testing.T) {
 		t.Error("different installations must have different identities")
 	}
 }
+
+// nilBodyTransport answers every request with resp and no body, as a custom
+// RoundTripper might.
+type nilBodyTransport struct {
+	status  int
+	headers map[string]string
+}
+
+func (n nilBodyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	h := http.Header{}
+	for k, v := range n.headers {
+		h.Set(k, v)
+	}
+	return &http.Response{StatusCode: n.status, Header: h, Request: req}, nil
+}
+
+// TestGitHubCooldown_NilResponseBody: a RoundTripper response without a body is handled
+// without a panic: a rate-limit response still starts the cooldown, and a
+// plain 403 is returned to the caller.
+func TestGitHubCooldown_NilResponseBody(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		headers map[string]string
+		limited bool
+	}{
+		{"429", http.StatusTooManyRequests, nil, true},
+		{"403 remaining 0", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "0"}, true},
+		{"plain 403", http.StatusForbidden, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newFakeClock()
+			c := NewGitHubCooldown(clock.Now)
+			client := &http.Client{Transport: nilBodyTransport{status: tc.status, headers: tc.headers}}
+			req, err := http.NewRequest(http.MethodGet, "http://example.invalid/x", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := c.Do(client, req, "id")
+			_, active := c.Active("id")
+			if tc.limited {
+				_ = requireRateLimit(t, err)
+				if !active {
+					t.Error("expected a cooldown")
+				}
+				return
+			}
+			if err != nil || resp == nil || resp.StatusCode != tc.status {
+				t.Fatalf("expected the %d response, got resp=%v err=%v", tc.status, resp, err)
+			}
+			if active {
+				t.Error("a plain 403 must not start a cooldown")
+			}
+		})
+	}
+}
+
+// TestIsGitHubRateLimitResponse_NilBody: the 403 body check accepts a
+// response with no body (http.Client fills one in, but this check does not
+// rely on that).
+func TestIsGitHubRateLimitResponse_NilBody(t *testing.T) {
+	limited, err := isGitHubRateLimitResponse(&http.Response{StatusCode: http.StatusForbidden, Header: http.Header{}})
+	if err != nil || limited {
+		t.Fatalf("a plain 403 with no body: got limited=%v err=%v", limited, err)
+	}
+}

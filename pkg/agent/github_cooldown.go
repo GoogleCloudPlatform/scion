@@ -146,6 +146,14 @@ func GitHubCooldownIdentityForInstallation(installID string) string {
 	return "installation:" + installID
 }
 
+// GitHubCooldownIdentityIsAnonymous reports whether identity is the one used
+// for unauthenticated requests. Use it, not an empty credential, to decide
+// whether a request was unauthenticated: an installation-backed request is
+// authenticated by its installation even if no credential value is at hand.
+func GitHubCooldownIdentityIsAnonymous(identity string) bool {
+	return identity == githubAnonIdentity
+}
+
 // Active reports whether identity is in a cooldown, and when it ends.
 func (c *GitHubCooldown) Active(identity string) (time.Time, bool) {
 	c.mu.Lock()
@@ -193,7 +201,7 @@ func (c *GitHubCooldown) clearIfElapsed(identity string) {
 // unchanged and do not affect the cooldown.
 func (c *GitHubCooldown) Do(client *http.Client, req *http.Request, identity string) (*http.Response, error) {
 	if t, ok := c.Active(identity); ok {
-		return nil, &GitHubRateLimitError{RetryAt: t, Unauthenticated: identity == githubAnonIdentity}
+		return nil, &GitHubRateLimitError{RetryAt: t, Unauthenticated: GitHubCooldownIdentityIsAnonymous(identity)}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -201,14 +209,18 @@ func (c *GitHubCooldown) Do(client *http.Client, req *http.Request, identity str
 	}
 	limited, err := isGitHubRateLimitResponse(resp)
 	if err != nil {
-		_ = resp.Body.Close()
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
 		return nil, err
 	}
 	if limited {
 		t := c.record(identity, c.now().Add(githubCooldownFor(resp, c.now())))
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
-		_ = resp.Body.Close()
-		return nil, &GitHubRateLimitError{RetryAt: t, Sent: true, Unauthenticated: identity == githubAnonIdentity}
+		if resp.Body != nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+			_ = resp.Body.Close()
+		}
+		return nil, &GitHubRateLimitError{RetryAt: t, Sent: true, Unauthenticated: GitHubCooldownIdentityIsAnonymous(identity)}
 	}
 	c.clearIfElapsed(identity)
 	return resp, nil
@@ -226,6 +238,9 @@ func isGitHubRateLimitResponse(resp *http.Response) (bool, error) {
 	case http.StatusForbidden:
 		if resp.Header.Get("X-RateLimit-Remaining") == "0" {
 			return true, nil
+		}
+		if resp.Body == nil {
+			return false, nil
 		}
 		head, err := io.ReadAll(io.LimitReader(resp.Body, githubSecondaryLimitPeek))
 		if err != nil {
