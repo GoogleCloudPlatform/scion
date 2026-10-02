@@ -3627,6 +3627,25 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		}
 	}
 
+	// Hub-only keys (TZ) are never required: an empty value means "unset",
+	// never "ask". Only the hub supplies them for a hub-dispatched agent, so
+	// asking for one would let a laptop or parent agent fill it in.
+	for k := range required {
+		if agent.IsHubOnlyEnvKey(k) {
+			delete(required, k)
+		}
+	}
+	for k := range secretInfo {
+		if agent.IsHubOnlyEnvKey(k) {
+			delete(secretInfo, k)
+		}
+	}
+	for k := range alternatives {
+		if agent.IsHubOnlyEnvKey(k) {
+			delete(alternatives, k)
+		}
+	}
+
 	keys := make([]string, 0, len(required))
 	for k := range required {
 		keys = append(keys, k)
