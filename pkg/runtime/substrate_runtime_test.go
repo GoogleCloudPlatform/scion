@@ -662,7 +662,7 @@ func TestSubstrateAtespaceName_Deterministic(t *testing.T) {
 		t.Errorf("substrateAtespaceName(%q) = %q, length %d exceeds the 63-char k8s-short-name limit", projectID, got1, len(got1))
 	}
 	for _, r := range got1 {
-		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
 			t.Errorf("substrateAtespaceName(%q) = %q contains invalid k8s-short-name character %q", projectID, got1, r)
 		}
 	}
