@@ -1159,30 +1159,45 @@ func TestRunPreStart_EnforcedModeSkipsRefusedWorkloadEntryButRunsSiblings(t *tes
 // proves the exception: a refused entry under EnforcedHooksDir itself (the
 // root-owned, broker-delivered directory, never workload-writable) still
 // hard-fails the event instead of being silently skipped — an anomaly there
-// is worth aborting over, not routine workload nuisance.
+// is worth aborting over, not routine workload nuisance. The directory is
+// matched after cleaning both paths, so naming it with a trailing slash —
+// in HooksDirs or in EnforcedHooksDir — still hard-fails.
 func TestRunPreStart_EnforcedModeHardFailsRefusedEntryUnderEnforcedHooksDir(t *testing.T) {
-	dir := t.TempDir()
-	orig := EnforcedHooksDir
-	EnforcedHooksDir = dir
-	t.Cleanup(func() { EnforcedHooksDir = orig })
+	tests := []struct {
+		name              string
+		hooksDirSuffix    string
+		enforcedDirSuffix string
+	}{
+		{name: "identical paths"},
+		{name: "hooks dir with trailing slash", hooksDirSuffix: "/"},
+		{name: "enforced hooks dir with trailing slash", enforcedDirSuffix: "/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			orig := EnforcedHooksDir
+			EnforcedHooksDir = dir + tt.enforcedDirSuffix
+			t.Cleanup(func() { EnforcedHooksDir = orig })
 
-	if err := os.MkdirAll(filepath.Join(dir, "pre-start.d"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	bad := filepath.Join(dir, "pre-start.d", "05-bad-symlink")
-	if err := os.Symlink("/nonexistent", bad); err != nil {
-		t.Fatal(err)
-	}
+			if err := os.MkdirAll(filepath.Join(dir, "pre-start.d"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			bad := filepath.Join(dir, "pre-start.d", "05-bad-symlink")
+			if err := os.Symlink("/nonexistent", bad); err != nil {
+				t.Fatal(err)
+			}
 
-	m := &LifecycleManager{
-		EnforcePrivilegeDrop: true,
-		HooksDirs:            []string{dir},
-		Handlers:             map[string][]Handler{},
-		WorkloadUID:          os.Getuid(),
-		WorkloadGID:          os.Getgid(),
-	}
-	if err := m.RunPreStart(); err == nil {
-		t.Fatal("expected RunPreStart to hard-fail on a refused entry under the (test's stand-in for the) enforced hooks dir")
+			m := &LifecycleManager{
+				EnforcePrivilegeDrop: true,
+				HooksDirs:            []string{dir + tt.hooksDirSuffix},
+				Handlers:             map[string][]Handler{},
+				WorkloadUID:          os.Getuid(),
+				WorkloadGID:          os.Getgid(),
+			}
+			if err := m.RunPreStart(); err == nil {
+				t.Fatal("expected RunPreStart to hard-fail on a refused entry under the (test's stand-in for the) enforced hooks dir")
+			}
+		})
 	}
 }
 

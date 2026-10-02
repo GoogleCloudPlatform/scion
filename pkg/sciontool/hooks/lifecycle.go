@@ -267,9 +267,11 @@ func (m *LifecycleManager) runScriptHooks(eventName string) error {
 // hook for the same event. It should not: a workload can otherwise trivially
 // disable its own remaining post-start/pre-stop/session-end hooks (or any
 // hub-scoped hook sharing the same directory) by planting one broken entry
-// ahead of them.
+// ahead of them. hooksDir and EnforcedHooksDir are compared after
+// filepath.Clean on both sides, so a spelling difference such as a trailing
+// slash cannot turn the EnforcedHooksDir hard-fail into a skip.
 func (m *LifecycleManager) skipRefusedEntry(hooksDir, scriptPath string, err error) bool {
-	if !m.EnforcePrivilegeDrop || hooksDir == EnforcedHooksDir {
+	if !m.EnforcePrivilegeDrop || filepath.Clean(hooksDir) == filepath.Clean(EnforcedHooksDir) {
 		return false
 	}
 	if !errors.Is(err, ErrScriptRefused) {

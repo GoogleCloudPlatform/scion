@@ -99,7 +99,7 @@ var execSiteAllowlist = map[string]string{
 	// path is an absolute path built by the caller, not a bare name — PATH
 	// is never consulted for it, so there is nothing for this guard to
 	// resolve through rootexec.
-	"pkg/sciontool/hooks/lifecycle.go:303": "non-enforced branch (EnforcePrivilegeDrop unset); path is an absolute path, not a bare name",
+	"pkg/sciontool/hooks/lifecycle.go:305": "non-enforced branch (EnforcePrivilegeDrop unset); path is an absolute path, not a bare name",
 
 	// supervisor.Run: args[0] is the operator/harness-selected entrypoint.
 	// Run() sets a Credential before Start() whenever UID/GID are supplied,
