@@ -55,6 +55,7 @@ module.exports = {
                 'src/components/shared/palette/quick-palette-groups.test.ts',
                 'src/components/shared/palette/quick-palette-ranking-memo.test.ts',
                 'src/components/shared/palette/quick-palette-host.test.ts',
+                'src/components/shared/palette/graph-palette-controller.test.ts',
                 'src/components/shared/open-modal.test.ts',
                 'src/components/shared/agent-tree-view.test.ts',
                 'src/components/shared/deep-active-element.test.ts',

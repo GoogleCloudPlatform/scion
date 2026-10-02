@@ -309,6 +309,18 @@ export class QuickPaletteHost {
     return this.paletteMount;
   }
 
+  /**
+   * Publishes `candidates` as the Agents group, ready, superseding any load
+   * in flight: for a surface whose candidates change while the palette is
+   * open. The next open loads afresh as usual.
+   */
+  setCandidates(candidates: PaletteCandidate[]): void {
+    this.abort?.abort();
+    this.abort = null;
+    ++this.generation;
+    this.setAgents({ status: 'ready', candidates });
+  }
+
   /** Whether the mounted palette's dialog is running its close animation. */
   private isHiding(): boolean {
     const palette = this.hidingPalette;

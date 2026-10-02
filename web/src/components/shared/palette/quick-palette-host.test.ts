@@ -687,6 +687,72 @@ describe('QuickPaletteHost: element leaving the document', () => {
   });
 });
 
+describe('QuickPaletteHost: setCandidates', () => {
+  it('publishes ready candidates over a load still in flight', async () => {
+    const pending = deferred<PaletteCandidate[]>();
+    const h = createHost({ load: () => pending.promise });
+    h.open();
+    const palette = await waitForPalette();
+
+    h.setCandidates([candidate('b1', 'Bravo')]);
+    expect(palette.groups.agents).toEqual({
+      status: 'ready',
+      candidates: [candidate('b1', 'Bravo')],
+    });
+
+    pending.resolve([candidate('a1', 'Alpha')]);
+    await nextTask();
+    expect(palette.groups.agents?.candidates).toEqual([candidate('b1', 'Bravo')]);
+  });
+
+  it('aborts the load in flight', async () => {
+    const contexts: QuickPaletteLoadContext[] = [];
+    const h = createHost({
+      load: (ctx) => {
+        contexts.push(ctx);
+        return new Promise(() => {});
+      },
+    });
+    h.open();
+    await waitForPalette();
+
+    h.setCandidates([candidate('b1', 'Bravo')]);
+
+    expect(contexts[0].controller.signal.aborted).toBe(true);
+  });
+
+  it('supersedes the load in flight, so its progress no longer publishes', async () => {
+    const contexts: QuickPaletteLoadContext[] = [];
+    const h = createHost({
+      load: (ctx) => {
+        contexts.push(ctx);
+        return new Promise(() => {});
+      },
+    });
+    h.open();
+    const palette = await waitForPalette();
+
+    h.setCandidates([candidate('b1', 'Bravo')]);
+    contexts[0].onProgress([candidate('a1', 'Alpha')]);
+
+    expect(contexts[0].isCurrent()).toBe(false);
+    expect(palette.groups.agents).toEqual({
+      status: 'ready',
+      candidates: [candidate('b1', 'Bravo')],
+    });
+  });
+
+  it('a later selection is checked against the published candidates', async () => {
+    const onSelect = vi.fn();
+    const h = createHost({ onSelect });
+    const palette = await openReady(h);
+
+    h.setCandidates([candidate('b1')]);
+    select(palette, agentTarget('a1'));
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+});
+
 describe('QuickPaletteHost: selection', () => {
   it('a present agent closes the palette, reaches onSelect, then settles without refocusing the invoker', async () => {
     const invoker = document.createElement('button');
