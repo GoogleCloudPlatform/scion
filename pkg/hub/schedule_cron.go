@@ -91,8 +91,9 @@ var zonePrefixPassBatchSize = 200
 // the pass has not already handled (for example because a pause reported
 // success without taking effect) stops the loop with an error. Each
 // iteration therefore handles at least one new row or ends the pass, so it
-// terminates after at most one iteration per candidate row. Errors are logged, not returned; the evaluator backstop in
-// executeSchedule covers any row this pass misses.
+// terminates after at most one iteration per candidate row. Errors are
+// logged, not returned; the evaluator backstop in executeSchedule covers any
+// row this pass misses.
 func (s *Server) pauseZonePrefixedSchedules(ctx context.Context) {
 	log := slog.With("subsystem", "scheduler")
 	// seen holds every ID this pass has handled (paused, failed or not a
