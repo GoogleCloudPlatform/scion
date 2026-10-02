@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -2452,7 +2453,8 @@ func chownTarget(hostPath string) string {
 // aborting the whole walk on the first one, the same as the recursive
 // chown binary this replaces: every reachable path still gets a real
 // attempt, and the first failure (if any) is what gets returned, not
-// necessarily the only one. A ctx cancellation is the one thing that stops
+// necessarily the only one. An EPERM on an entry already owned by uid:gid
+// is not a failure (see checkChownEPERM). A ctx cancellation is the one thing that stops
 // the walk outright, matching the previous exec.CommandContext-based
 // implementation being killed on cancellation.
 //
@@ -2486,8 +2488,8 @@ func chownProjectTree(ctx context.Context, projectRoot, lockDir string, uid, gid
 			return nil
 		}
 		if lerr := lchownFile(path, uid, gid); lerr != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("lchown %d:%d %s: %w", uid, gid, path, lerr)
+			if cerr := checkChownEPERM(path, uid, gid, lerr); cerr != nil && firstErr == nil {
+				firstErr = cerr
 			}
 		}
 		return nil
@@ -2496,6 +2498,34 @@ func chownProjectTree(ctx context.Context, projectRoot, lockDir string, uid, gid
 		return walkErr
 	}
 	return firstErr
+}
+
+// checkChownEPERM decides whether a failed lchown of path is fatal. It
+// returns nil only when lerr is EPERM and path (Lstat'd, so a symlink is
+// never followed, matching lchownFile) is already owned by uid:gid. That is
+// the normal outcome on an NFS export with all_squash or root_squash, where
+// root cannot chown but the server already maps every file to the desired
+// identity. Any other error, or EPERM with a different owner, is returned
+// as an error naming the path, the desired owner and the actual owner.
+func checkChownEPERM(path string, uid, gid int, lerr error) error {
+	if !errors.Is(lerr, syscall.EPERM) {
+		return fmt.Errorf("lchown %d:%d %s: %w", uid, gid, path, lerr)
+	}
+	info, serr := os.Lstat(path)
+	if serr != nil {
+		return fmt.Errorf("lchown %d:%d %s: %w (stat for owner check failed: %v)", uid, gid, path, lerr, serr)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("lchown %d:%d %s: %w (owner unknown)", uid, gid, path, lerr)
+	}
+	if int(st.Uid) == uid && int(st.Gid) == gid {
+		slog.Debug("chown not permitted but ownership already matches, continuing",
+			"path", path, "uid", uid, "gid", gid)
+		return nil
+	}
+	return fmt.Errorf("lchown %d:%d %s: %w (owner is %d:%d, want %d:%d)",
+		uid, gid, path, lerr, st.Uid, st.Gid, uid, gid)
 }
 
 // isLockArtifactPath reports whether path's base name is the file lock's own
