@@ -299,7 +299,8 @@ export function isLastDirectOwner(
  * Tier of a principal known only by its current role IDs (e.g. addressed by
  * email, so no loaded row matches). The built-in role found in the catalog
  * decides; with none, an ID the catalog does not know might be a built-in
- * role, so the result fails closed to the owner tier.
+ * role, so the result fails closed to the owner tier. Callers check
+ * `roleIdsUnclassifiable` first; the owner fallback is a backstop.
  */
 export function tierFromRoleIds(
   roleIds: readonly string[],

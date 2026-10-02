@@ -189,8 +189,8 @@ commits on top of the branch. History was not rewritten.
   roles, and it no longer infers last-owner status. It is locked for every
   actor with "Couldn't load the list of roles; close and try again.". The
   received IDs stay the expected set, and no checkbox is labelled with a
-  raw role ID. The unknown-ID rule still fails closed to the owner tier
-  where IDs can be classified.
+  raw role ID. IDs that previously fell back to the owner tier now lock
+  the dialog instead.
 - **Locked info text.** While the dialog is locked, its info text only
   says "<name> is already a member." (or "This member changed while you
   were editing."). It no longer asks the user to edit or save.
