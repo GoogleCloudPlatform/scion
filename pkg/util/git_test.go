@@ -15,6 +15,7 @@
 package util
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1326,4 +1327,51 @@ func TestAuthenticatedCloneURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fakeGitBinary writes a shell script that reports the given `git --version`
+// output and returns its path, for pointing SCION_GIT_BINARY at a specific
+// version without depending on whatever git happens to be installed on the
+// host running the test.
+func fakeGitBinary(t *testing.T, version string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "git")
+	script := fmt.Sprintf("#!/bin/sh\necho 'git version %s'\n", version)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write fake git binary: %v", err)
+	}
+	return path
+}
+
+// TestCheckGitVersion_Gate is the required regression guard for the
+// worktree-per-agent git-version bump (2.47 -> 2.48): `git worktree add
+// --relative-paths` did not exist until 2.48, so a 2.47.x host must be
+// rejected by CheckGitVersion rather than silently falling back to
+// clone-per-agent later. 2.48.0 must still be accepted.
+func TestCheckGitVersion_Gate(t *testing.T) {
+	t.Run("2.47.x is rejected", func(t *testing.T) {
+		t.Setenv("SCION_GIT_BINARY", fakeGitBinary(t, "2.47.2"))
+		err := CheckGitVersion()
+		if err == nil {
+			t.Fatal("CheckGitVersion() = nil, want an error for git 2.47.2")
+		}
+		if !strings.Contains(err.Error(), "2.48.0") {
+			t.Errorf("error %q should name the 2.48.0 requirement", err.Error())
+		}
+	})
+
+	t.Run("2.48.0 is accepted", func(t *testing.T) {
+		t.Setenv("SCION_GIT_BINARY", fakeGitBinary(t, "2.48.0"))
+		if err := CheckGitVersion(); err != nil {
+			t.Errorf("CheckGitVersion() = %v, want nil for git 2.48.0", err)
+		}
+	})
+
+	t.Run("2.49.0 (above minimum) is accepted", func(t *testing.T) {
+		t.Setenv("SCION_GIT_BINARY", fakeGitBinary(t, "2.49.0"))
+		if err := CheckGitVersion(); err != nil {
+			t.Errorf("CheckGitVersion() = %v, want nil for git 2.49.0", err)
+		}
+	})
 }

@@ -66,7 +66,7 @@ scion start my-agent "fix web bugs" --workspace packages/web
 When working inside a Git repository without an explicit `--workspace`, Scion automatically manages **Git Worktrees**. This ensures that each agent has its own isolated checkout of the code, allowing them to work on different branches simultaneously without interfering with your main working directory.
 
 ### Prerequisites
-- Git **2.47.0** or newer is required (for relative path support).
+- Git **2.48.0** or newer is required (for relative path support).
 
 ### Branch Resolution
 Scion determines which branch to check out in the worktree:

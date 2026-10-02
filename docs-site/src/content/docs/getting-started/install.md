@@ -93,7 +93,7 @@ Scion requires a container runtime to manage agents. You can use Docker, Podman,
 ### 3. Git
 Scion uses `git worktree` to manage agent workspaces.
 - Ensure `git` is installed and available in your PATH.
-- Because Scion uses a new feature for relative path worktrees, ensure that `git --version` >= 2.47.0.
+- Because Scion uses a new feature for relative path worktrees, ensure that `git --version` >= 2.48.0.
 
 For Ubuntu you can install the latest version with
 
@@ -103,7 +103,7 @@ add-apt-repository ppa:git-core/ppa
 apt update; apt install git
 ```
 
-On Debian, Debian 13 (trixie) ships a new enough `git` (2.47.3) via `apt`. On older Debian releases you may need to build from source; see the [git site](https://git-scm.com/install/source).
+On Debian, check `git --version` against the `apt` package first — if it's older than 2.48, use the [git-core PPA equivalent for your distro](https://git-scm.com/download/linux) or build from source; see the [git site](https://git-scm.com/install/source).
 
 ---
 
