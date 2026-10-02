@@ -336,14 +336,36 @@ func TestResolveAgentTZ_StoreErrorsWithNilLog(t *testing.T) {
 		})
 	}
 
-	t.Run("a failed scope is skipped and a later scope still wins", func(t *testing.T) {
-		d, s := tzTestDispatcher(t, "Asia/Tokyo")
-		tzTestEnvVar(t, s, store.EnvVar{Value: "Europe/Berlin", Scope: store.ScopeUser, ScopeID: envScopeTestScopeID(t, store.ScopeUser)})
-		tzTestEnvVar(t, s, store.EnvVar{Value: "America/Denver", Scope: store.ScopeProject, ScopeID: envScopeTestScopeID(t, store.ScopeProject)})
-		d.store = &tzErrStore{Store: s, failScopes: map[string]bool{store.ScopeUser: true}}
-		d.log = nil
-		if got, want := d.resolveAgentTZ(context.Background(), newAgent(), false), (agentTZ{TZ: "America/Denver", Source: TZSourceProject}); got != want {
-			t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, want)
-		}
-	})
+	// Scopes are walked broker, hub, project, user, and a later scope
+	// overrides an earlier one. Failing a scope that is not the last one walked
+	// shows the walk continues past the error rather than stopping there.
+	for _, tc := range []struct {
+		name    string
+		project string
+		user    string
+		fail    string
+		want    agentTZ
+	}{
+		{
+			name:    "a failed project read is skipped and the user scope still wins",
+			project: "Europe/Berlin", user: "America/Denver", fail: store.ScopeProject,
+			want: agentTZ{TZ: "America/Denver", Source: TZSourceUser},
+		},
+		{
+			name:    "a failed higher-precedence scope falls back to a lower one",
+			project: "America/Denver", user: "Europe/Berlin", fail: store.ScopeUser,
+			want: agentTZ{TZ: "America/Denver", Source: TZSourceProject},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, s := tzTestDispatcher(t, "Asia/Tokyo")
+			tzTestEnvVar(t, s, store.EnvVar{Value: tc.project, Scope: store.ScopeProject, ScopeID: envScopeTestScopeID(t, store.ScopeProject)})
+			tzTestEnvVar(t, s, store.EnvVar{Value: tc.user, Scope: store.ScopeUser, ScopeID: envScopeTestScopeID(t, store.ScopeUser)})
+			d.store = &tzErrStore{Store: s, failScopes: map[string]bool{tc.fail: true}}
+			d.log = nil
+			if got := d.resolveAgentTZ(context.Background(), newAgent(), false); got != tc.want {
+				t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
 }
