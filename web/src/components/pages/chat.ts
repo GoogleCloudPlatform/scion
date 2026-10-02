@@ -416,6 +416,18 @@ export class ScionPageChat extends LitElement {
    * already-`ready` People state.
    */
   private _peopleLoadSeq = 0;
+  /**
+   * The `AbortController` backing whichever `/api/v1/auth/me` fetch
+   * {@link _resolveSelfUserId} currently has in flight, so a close
+   * ({@link _closePaletteAndCancelLoad}) or a newer People load (which
+   * aborts the previous controller before installing its own, same as
+   * {@link ChatPaletteDataController}'s own per-group abort fields) stops the
+   * request immediately instead of leaving it running for up to
+   * {@link AGENTS_IDLE_TIMEOUT_MS}. Purely a resource-usage fix: `_peopleLoadSeq`
+   * already guarantees a stale resolution can never publish, with or without
+   * this abort.
+   */
+  private _selfUserAbortController: AbortController | null = null;
   /** Debounce timer coalescing SSE-driven dirty-group refreshes while the palette is open. */
   private _paletteRefreshDebounce: ReturnType<typeof setTimeout> | null = null;
   /** The deep-active element (and, for a textarea or text input, its selection) captured just before the palette opened. */
@@ -3275,6 +3287,12 @@ export class ScionPageChat extends LitElement {
     // closes — the data controller's own cancel() above doesn't reach
     // `_resolveSelfUserId`'s `/auth/me` fetch.
     this._peopleLoadSeq++;
+    // Stop that fetch immediately rather than leaving it running for up to
+    // AGENTS_IDLE_TIMEOUT_MS — `_peopleLoadSeq` above already guarantees its
+    // (eventual) result can't publish, so this is a resource-usage fix, not
+    // a correctness one.
+    this._selfUserAbortController?.abort();
+    this._selfUserAbortController = null;
     this._stopPaletteVisibilityWatchdog();
     this._stopPaletteDebouncedRefresh();
     this.v2PaletteOpen = false;
@@ -3384,11 +3402,19 @@ export class ScionPageChat extends LitElement {
    * load token forever — its `finally` can't run until this `await` settles
    * one way or another. A timeout here settles it with the same
    * `''`-means-unresolved outcome as any other failure.
+   *
+   * Aborts any previous call's still-pending fetch first — same
+   * abort-the-predecessor pattern as {@link ChatPaletteDataController}'s own
+   * per-group loaders — so a close or a newer People load stops the old
+   * request immediately via {@link _selfUserAbortController} rather than
+   * leaving it running for up to {@link AGENTS_IDLE_TIMEOUT_MS}.
    */
   private async _resolveSelfUserId(): Promise<string> {
     const known = this.pageData?.user?.id;
     if (known) return known;
+    this._selfUserAbortController?.abort();
     const timeoutController = new AbortController();
+    this._selfUserAbortController = timeoutController;
     const timeoutId = setTimeout(() => timeoutController.abort(), AGENTS_IDLE_TIMEOUT_MS);
     try {
       const authRes = await apiFetch('/api/v1/auth/me', { signal: timeoutController.signal });
@@ -3421,6 +3447,13 @@ export class ScionPageChat extends LitElement {
       // caller treats '' as failure.
     } finally {
       clearTimeout(timeoutId);
+      // Only clear the field if it's still this call's own controller — a
+      // newer call's abort-the-predecessor step above may already have
+      // replaced it with its own, and this (now-superseded) call's finally
+      // must not null out a newer call's live controller out from under it.
+      if (this._selfUserAbortController === timeoutController) {
+        this._selfUserAbortController = null;
+      }
     }
     return '';
   }

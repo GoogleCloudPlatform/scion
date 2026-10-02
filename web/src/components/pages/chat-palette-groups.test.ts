@@ -1203,6 +1203,73 @@ describe('_loadPalettePeople', () => {
       expect(aborted).toBe(true);
       expect(await resolved).toBe('');
     });
+
+    it('aborts a pending /auth/me immediately on close, instead of leaving it running for the idle timeout', async () => {
+      const el = createPage();
+      el.pageData = {};
+      el.v2PaletteOpen = true;
+      let aborted = false;
+      const fetchCalls: string[] = [];
+      vi.mocked(apiFetch).mockImplementation((url: string, options?: { signal?: AbortSignal }) => {
+        fetchCalls.push(url);
+        if (url === '/api/v1/auth/me') {
+          return new Promise<Response>((_resolve, reject) => {
+            options?.signal?.addEventListener('abort', () => {
+              aborted = true;
+              reject(new DOMException('aborted', 'AbortError'));
+            });
+          });
+        }
+        return Promise.resolve(jsonResponse({ users: [], dms: [] }));
+      });
+
+      const load = el._loadPalettePeople();
+      await vi.waitFor(() => expect(fetchCalls).toContain('/api/v1/auth/me'));
+      expect(aborted).toBe(false);
+
+      el._closePaletteAndCancelLoad();
+
+      expect(aborted).toBe(true);
+      await load;
+    });
+
+    it('aborts a pending /auth/me immediately when a newer People load starts, instead of leaving it running for the idle timeout', async () => {
+      const el = createPage();
+      el.pageData = {};
+      el.v2PaletteOpen = true;
+      let firstAborted = false;
+      let authMeCalls = 0;
+      vi.mocked(apiFetch).mockImplementation((url: string, options?: { signal?: AbortSignal }) => {
+        if (url === '/api/v1/auth/me') {
+          authMeCalls++;
+          if (authMeCalls === 1) {
+            return new Promise<Response>((_resolve, reject) => {
+              options?.signal?.addEventListener('abort', () => {
+                firstAborted = true;
+                reject(new DOMException('aborted', 'AbortError'));
+              });
+            });
+          }
+          return Promise.resolve(jsonResponse({ id: 'resolved-self' }));
+        }
+        return Promise.resolve(
+          jsonResponse({ users: [{ id: 'u1', displayName: 'Alice' }], dms: [] })
+        );
+      });
+
+      const load1 = el._loadPalettePeople();
+      await vi.waitFor(() => expect(authMeCalls).toBe(1));
+      expect(firstAborted).toBe(false);
+
+      const load2 = el._loadPalettePeople();
+      // The abort fires synchronously, inside the new call's own
+      // synchronous prologue (before its first await) — no await needed
+      // between starting load2 and observing load1's controller abort.
+      expect(firstAborted).toBe(true);
+
+      await Promise.all([load1, load2]);
+      expect(el.v2PaletteGroups.people.status).toBe('ready');
+    });
   });
 
   describe('unknown identity — connected element: no route side effects from resolving it', () => {
