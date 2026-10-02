@@ -272,7 +272,8 @@ func resolveProjectHookPath(agentHome string, requirePrivilegeDrop bool) string 
 
 // harnessSupervisorConfig builds the supervisor.Config for the harness
 // child process from RunInit's inputs. It is a pure function of its
-// arguments — it reads no globals and has no side effects.
+// arguments — it reads no globals and has no side effects — so it can be
+// pinned by a table-driven unit test without invoking RunInit itself.
 func harnessSupervisorConfig(opts InitRunOptions, gracePeriod time.Duration, targetUID, targetGID int, rootless bool, envOverlay map[string]string, nativeTelemetryPolicy string, secretOverrides map[string]string) supervisor.Config {
 	return supervisor.Config{
 		GracePeriod:           gracePeriod,
@@ -3005,19 +3006,19 @@ func isClaude(childArgs []string) bool {
 // refusing that would break it, with no privilege boundary at stake to
 // justify the change.
 //
-// When true this runs as root: os.MkdirAll silently succeeds (via
-// os.Stat, which follows symlinks) if debugDir already exists as anything,
-// including a symlink, and the os.Chmod that follows it then chmods
-// whatever that symlink points at — so a scion-uid process (a sidecar
-// service, or a process a pre-start hook spawned) that plants
-// ~/.claude/debug as a symlink to an arbitrary root-owned directory before
-// this runs gets that directory chmod'd to 0555 (world-readable) by root.
-// dirfd.EnsureDirNoFollow refuses a symlinked leaf outright instead of
-// creating/resolving through it, and the chmod that follows is fchmod on
-// the fd EnsureDirNoFollow already resolved, never a path-based os.Chmod
-// that could be redirected by anything changed afterward. A refusal is
-// logged (path only) and this simply skips the chmod rather than failing
-// init closed — a planted symlink must not be able to stop the workload
+// When true this runs as root: os.MkdirAll silently succeeds (via os.Stat,
+// which follows symlinks) if debugDir already exists as anything, including
+// a symlink, and the os.Chmod that follows it then chmods whatever that
+// symlink points at — so a scion-uid process (a sidecar service, or a
+// process a pre-start hook spawned) that plants ~/.claude/debug as a
+// symlink to an arbitrary root-owned directory before this runs gets that
+// directory chmod'd to 0555 (world-readable) by root. dirfd.EnsureDirNoFollow
+// refuses a symlinked leaf outright instead of creating/resolving through
+// it, and the chmod that follows is fchmod on the fd EnsureDirNoFollow
+// already resolved, never a path-based os.Chmod that could be redirected by
+// anything changed afterward. A refusal is logged (path only) and this
+// simply skips the chmod rather than failing init closed — a planted
+// symlink must not be able to stop the workload
 // from starting.
 func blockClaudeDebugSymlink(debugDir string, requirePrivilegeDrop bool) {
 	if !requirePrivilegeDrop {
