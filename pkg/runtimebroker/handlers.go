@@ -1150,7 +1150,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			agentResp.HarnessConfig = cfg.HarnessConfig
 			agentResp.Image = cfg.Image
 		}
-		if s.runtime != nil {
+		// Report the runtime this dispatch resolved to (its profile), not
+		// the broker's default runtime: the hub records this value as the
+		// agent's runtime.
+		agentResp.RuntimeType = sc.RuntimeType
+		if agentResp.RuntimeType == "" && s.runtime != nil {
 			agentResp.RuntimeType = s.runtime.Name()
 		}
 
@@ -1967,11 +1971,28 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// agent's worktree lives under.
 	startAgentID := startReq.ResolvedEnv["SCION_AGENT_ID"]
 
+	// If the request names no project, recover the project path from the
+	// agent's existing container on any runtime this broker has. This runs
+	// before buildStartContext so its runtime resolution reads the agent's
+	// project settings and saved profile.
+	startProjectPath := startReq.ProjectPath
+	if startReq.ProjectPath == "" && startReq.ProjectSlug == "" {
+		found, err := s.findAgentOnRuntimes(ctx, id, projectID)
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			RuntimeError(w, "Failed to list agents: "+err.Error())
+			return
+		}
+		if found != nil {
+			startProjectPath = found.ProjectPath
+		}
+	}
+
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:               id,
 		AgentID:            startAgentID,
 		ProjectID:          projectID,
-		ProjectPath:        startReq.ProjectPath,
+		ProjectPath:        startProjectPath,
 		ProjectSlug:        startReq.ProjectSlug,
 		Config:             cfg,
 		InlineConfig:       startReq.InlineConfig,
@@ -1991,24 +2012,6 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		return
 	}
 	opts := sc.Opts
-
-	// If project path wasn't in the request, fall back to looking up from an existing container
-	if startReq.ProjectPath == "" && startReq.ProjectSlug == "" && opts.ProjectPath == "" {
-		agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
-		if err != nil {
-			span.SetStatus(codes.Error, err.Error())
-			RuntimeError(w, "Failed to list agents: "+err.Error())
-			return
-		}
-		for i := range agents {
-			if matchesAgent(agents[i], id, projectID) {
-				if agents[i].ProjectPath != "" {
-					opts.ProjectPath = agents[i].ProjectPath
-				}
-				break
-			}
-		}
-	}
 
 	// Once ProjectPath is resolved, confirm id's agent directory actually
 	// resolves under this project's agents root before applyInlineConfigUpdate,
@@ -2319,18 +2322,17 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		UserID:               restartReq.UserID,
 	})
 
-	// Look up agent to get its name and project path
+	// Look up the agent on every runtime this broker has, to get its name
+	// and project path; the project path is what lets the runtime
+	// resolution below read the agent's project settings and saved profile.
+	// A listing error leaves the agent unresolved here, as before; the
+	// stop-target lookup below reports it.
 	agentName := id
 	var projectPath string
-	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
-	if err == nil {
-		for i := range agents {
-			if matchesAgent(agents[i], id, projectID) {
-				agentName = agents[i].Name
-				projectPath = agents[i].ProjectPath
-				break
-			}
-		}
+	found, _ := s.findAgentOnRuntimes(ctx, id, projectID)
+	if found != nil {
+		agentName = found.Name
+		projectPath = found.ProjectPath
 	}
 
 	sc, err := s.buildStartContext(ctx, startContextInputs{
@@ -4057,6 +4059,49 @@ func (s *Server) allManagers() []agent.Manager {
 	}
 	s.auxiliaryRuntimesMu.RUnlock()
 	return managers
+}
+
+// findAgentOnRuntimes looks id up (by name, container ID or slug, scoped to
+// projectID as matchesAgent does) on the default runtime first and then on
+// every auxiliary runtime in sorted identity order, and returns the first
+// matching entry. It returns nil when no runtime lists the agent.
+//
+// err reports a failure to list the default runtime and is returned only
+// when no runtime matched. An auxiliary runtime that fails to list is
+// skipped, so it does not turn into an error for an agent that runs on the
+// default runtime.
+func (s *Server) findAgentOnRuntimes(ctx context.Context, id, projectID string) (*api.AgentInfo, error) {
+	filter := map[string]string{"scion.agent": "true"}
+	match := func(agents []api.AgentInfo) *api.AgentInfo {
+		for i := range agents {
+			if matchesAgent(agents[i], id, projectID) {
+				return &agents[i]
+			}
+		}
+		return nil
+	}
+
+	agents, defaultErr := s.manager.List(ctx, filter)
+	if defaultErr == nil {
+		if found := match(agents); found != nil {
+			return found, nil
+		}
+	}
+	for _, aux := range s.sortedAuxiliaryRuntimes() {
+		if aux.Manager == nil || aux.Manager == s.manager {
+			continue
+		}
+		auxAgents, err := aux.Manager.List(ctx, filter)
+		if err != nil {
+			s.agentLifecycleLog.Debug("Agent lookup: auxiliary runtime list failed",
+				"agent_id", id, "runtime", aux.identity, "error", err)
+			continue
+		}
+		if found := match(auxAgents); found != nil {
+			return found, nil
+		}
+	}
+	return nil, defaultErr
 }
 
 // resolveRuntimeForAgent returns the runtime for direct operations such as

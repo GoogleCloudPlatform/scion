@@ -47,6 +47,11 @@ type startContext struct {
 	TemplateSlug string
 	Manager      agent.Manager
 
+	// RuntimeType is the runtime type this dispatch resolved to through
+	// resolveManagerForOpts (dispatchRuntimeType), which can differ from the
+	// broker's default runtime. The create path reports it to the hub.
+	RuntimeType string
+
 	// EnvClassifications is the merged provenance map: what the hub sent,
 	// plus the broker-written keys classified in buildStartContext. Nil means
 	// the hub sent none — see api.EnvKind's three-state contract. No consumer
@@ -866,6 +871,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Opts:               opts,
 		TemplateSlug:       templateSlug,
 		Manager:            mgr,
+		RuntimeType:        dispatchRuntimeType,
 		EnvClassifications: envCls,
 	}, nil
 }
