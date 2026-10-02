@@ -50,6 +50,21 @@ const goldenUntouchedBody: Record<string, unknown> = JSON.parse(
   readFileSync(GOLDEN_UNTOUCHED_BODY_PATH, 'utf-8')
 );
 
+// Shared golden fixture (ptone/scion#2493 R5-1): the body buildConfig emits
+// when the user edits (adds) one custom env row on an agent whose
+// AppliedConfig.Env has an unrelated template key and whose
+// InlineConfig.Env-only auto-expose stamp must be re-sent verbatim
+// alongside it. Also loaded by the matching Go test
+// (TestApplyAgentUpdate_EnvDiffIgnoresUnchangedInlineOnlyStamp), so the two
+// cannot drift apart.
+const GOLDEN_ROW_EDIT_BODY_PATH = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../../../pkg/hub/testdata/configure-row-edit-body.json'
+);
+const goldenRowEditBody: Record<string, unknown> = JSON.parse(
+  readFileSync(GOLDEN_ROW_EDIT_BODY_PATH, 'utf-8')
+);
+
 interface ScionConfigPayload {
   image?: string;
   model?: string;
@@ -402,5 +417,34 @@ describe('agent-configure buildConfig — R4-2: auto-expose control reads the pe
     // exactly -- reading the correct live value must not, by itself, cause
     // it to be echoed.
     expect(config).toEqual(goldenUntouchedBody);
+  });
+
+  it('R5-1: re-sends the InlineConfig.Env-only auto-expose stamp verbatim when the user edits an unrelated custom row', async () => {
+    // Same live shape as the display test above -- a template key in
+    // AppliedConfig.Env, and the auto-expose stamp living only in
+    // InlineConfig.Env (exactly as resolveDerivedConfig's project/hub
+    // default leaves it) -- but this time the user actually edits a custom
+    // row. The hub's recordExplicitEdits (R5-1) depends on the stamp being
+    // re-sent at its unchanged value so it is not misread as an edit; this
+    // pins the web side of that contract: buildConfig must not drop or
+    // alter the stamp just because some other row changed.
+    const c = await mountAgentConfigureWithLoadedAgent({
+      model: 'golden-model',
+      env: { TEMPLATE_KEY: 'x' },
+      inlineConfig: { env: { SCION_AUTO_EXPOSE_PORTS: 'true' } },
+    });
+    expect(c.autoExposePortsEnabled).toBe(true);
+
+    const withEnvEntries = c as unknown as {
+      envEntries: { key: string; value: string }[];
+    };
+    // The template row is still there (untouched), plus a genuinely new one.
+    withEnvEntries.envEntries = [
+      { key: 'TEMPLATE_KEY', value: 'x' },
+      { key: 'FOO', value: 'bar' },
+    ];
+
+    const config = c.buildConfig();
+    expect(config).toEqual(goldenRowEditBody);
   });
 });

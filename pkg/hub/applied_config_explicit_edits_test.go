@@ -407,6 +407,100 @@ func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 		"a PATCHed harness_config must never reach CreateInputs.InlineConfig.HarnessConfig either")
 }
 
+// TestApplyAgentUpdate_TaskNeverReachesCreateInputs fills a gap in the
+// CreateInputs entry-path enumeration (round 6, tz-lead requirement, see the
+// PR body): Task is excluded from CreateInputs by design
+// (AgentCreateInputs' doc comment, pkg/store/models.go -- reincarnate's
+// hub-built preamble plus handoff always replaces it), but until now nothing
+// PATCHed a changed task and asserted it never shows up in CI.
+func TestApplyAgentUpdate_TaskNeverReachesCreateInputs(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Task = "original task"
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+	})
+
+	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"task": "a brand new task",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "a brand new task", updated.AppliedConfig.Task, "the live write must still apply the new task")
+	ci := updated.AppliedConfig.CreateInputs
+	require.NotNil(t, ci)
+	assert.Nil(t, ci.InlineConfig, "a PATCHed task must never reach CreateInputs at all -- AgentCreateInputs has no Task field to record it in")
+}
+
+// TestApplyAgentUpdate_HarnessAuthChangeIsRecorded fills a gap in the
+// CreateInputs entry-path enumeration (round 6, tz-lead requirement, see the
+// PR body): TestApplyAgentUpdate_EchoPatchLeavesCreateInputsByteIdentical
+// covers an unchanged auth_selectedType echo, but until now nothing proved a
+// genuine HarnessAuth CHANGE is recorded into CreateInputs (special-cased in
+// recordExplicitEdits against old.HarnessAuth, "" meaning unchanged).
+func TestApplyAgentUpdate_HarnessAuthChangeIsRecorded(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.HarnessAuth = "api-key"
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+	})
+
+	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"auth_selectedType": "vertex-ai",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "vertex-ai", updated.AppliedConfig.HarnessAuth)
+	ci := updated.AppliedConfig.CreateInputs
+	require.NotNil(t, ci)
+	assert.Equal(t, "vertex-ai", ci.HarnessAuth, "a genuine HarnessAuth change must be recorded into CreateInputs.HarnessAuth")
+	require.NotNil(t, ci.InlineConfig)
+	assert.Equal(t, "vertex-ai", ci.InlineConfig.AuthSelectedType, "...and mirrored into CreateInputs.InlineConfig.AuthSelectedType")
+}
+
+// TestApplyAgentUpdate_ImageChangeIsRecorded fills a gap in the CreateInputs
+// entry-path enumeration (round 6, tz-lead requirement, see the PR body):
+// TestApplyAgentUpdate_ImageCompareCanonicalizesBothSides and
+// TestApplyAgentUpdate_EchoPatchLeavesCreateInputsByteIdentical both cover an
+// unchanged image echo, but until now nothing proved a genuine Image CHANGE
+// is recorded (special-cased in recordExplicitEdits against old.Image,
+// canonicalized via RewriteImageRegistry, "" meaning unchanged).
+func TestApplyAgentUpdate_ImageChangeIsRecorded(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Image = "old-image:v1"
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+	})
+
+	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"image": "new-image:v2",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "new-image:v2", updated.AppliedConfig.Image)
+	ci := updated.AppliedConfig.CreateInputs
+	require.NotNil(t, ci)
+	require.NotNil(t, ci.InlineConfig)
+	assert.Equal(t, "new-image:v2", ci.InlineConfig.Image, "a genuine Image change must be recorded into CreateInputs.InlineConfig.Image")
+}
+
 // ============================================================================
 // Review round 1 (gs://scion-xproject-exchange/tz-refactor/out/2493/review-1.md)
 // ============================================================================
@@ -422,7 +516,27 @@ func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 // actually produces anymore (ptone/scion#2493 R2-2).
 func configureUntouchedBody(t *testing.T) map[string]interface{} {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join("testdata", "configure-untouched-body.json"))
+	return loadTestdataJSONBody(t, "configure-untouched-body.json")
+}
+
+// configureRowEditBody loads the golden fixture shared with
+// agent-configure-build-config.test.ts's "R5-1" vitest case: the exact body
+// the real, fixed buildConfig emits when the user edits (adds) one custom
+// env row (FOO) on an agent whose AppliedConfig.Env has an unrelated
+// template key (TEMPLATE_KEY) and whose InlineConfig.Env-only auto-expose
+// stamp (SCION_AUTO_EXPOSE_PORTS) must be re-sent verbatim alongside it
+// (R2-1's "re-send the loaded auto-expose keys" rule, R4-2's per-key read).
+// Loading the SAME file in both places means a future buildConfig change
+// that stops matching it breaks the vitest case directly (ptone/scion#2493
+// R5-1 / round 6 completeness requirement).
+func configureRowEditBody(t *testing.T) map[string]interface{} {
+	t.Helper()
+	return loadTestdataJSONBody(t, "configure-row-edit-body.json")
+}
+
+func loadTestdataJSONBody(t *testing.T, name string) map[string]interface{} {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", name))
 	require.NoError(t, err)
 	var body map[string]interface{}
 	require.NoError(t, json.Unmarshal(data, &body))
@@ -859,4 +973,110 @@ func TestApplyAgentUpdate_PresenceDetectionIsCaseInsensitive(t *testing.T) {
 	require.NotNil(t, ci.InlineConfig)
 	assert.Equal(t, "be helpful", ci.InlineConfig.SystemPrompt,
 		"a non-canonical-case JSON key must still count as present, matching encoding/json's own case-insensitive field match")
+}
+
+// ============================================================================
+// Review round 5 (gs://scion-xproject-exchange/tz-refactor/out/2493/review-5.md)
+// ============================================================================
+
+// TestApplyAgentUpdate_EnvDiffIgnoresUnchangedInlineOnlyStamp is R5-1's exact
+// repro: resolveDerivedConfig (handlers_agent_create_helpers.go) stamps the
+// project/hub SCION_AUTO_EXPOSE_PORTS default into InlineConfig.Env ONLY,
+// never into AppliedConfig.Env, when the create request had no explicit env.
+// agent-configure.ts's R4-2 per-key merge correctly displays that stamp
+// (reads InlineConfig.Env for it), and R2-1's "re-send the loaded auto-expose
+// keys" rule means ANY unrelated env-row edit re-sends it verbatim. Before
+// this fix, diffExplicitEnvKeys compared only against old.Env (which lacks
+// the key), so the echoed stamp was misread as an "added" key and frozen
+// into CreateInputs -- even though the user never touched auto-expose and
+// its live value never changed.
+func TestApplyAgentUpdate_EnvDiffIgnoresUnchangedInlineOnlyStamp(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Model = "golden-model"
+		// AppliedConfig.Env has a template-derived key but NOT the
+		// auto-expose stamp -- it lives only in InlineConfig.Env, exactly as
+		// resolveDerivedConfig's project/hub auto-expose default leaves it
+		// when the create request had no explicit env of its own.
+		a.AppliedConfig.Env = map[string]string{"TEMPLATE_KEY": "x"}
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{
+			Model: "golden-model",
+			Env:   map[string]string{"SCION_AUTO_EXPOSE_PORTS": "true"},
+		}
+		// CI already exists (e.g. from an earlier edit) but has never
+		// recorded any env at all.
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
+			InlineConfig: &api.ScionConfig{Model: "golden-model"},
+		}
+	})
+
+	// The page-shaped body: shared with agent-configure-build-config.test.ts's
+	// matching R5-1 vitest case, so the two cannot drift apart. It contains
+	// the golden untouched fields, plus env with the template key
+	// (unchanged), a genuinely new custom key (FOO), and the auto-expose
+	// stamp re-sent verbatim per R2-1/R4-2 -- exactly what a real row edit
+	// on this agent would send.
+	rec := patchAgentConfig(t, srv, agent.ID, configureRowEditBody(t))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	ci := updated.AppliedConfig.CreateInputs
+	require.NotNil(t, ci)
+	require.NotNil(t, ci.InlineConfig)
+	assert.Equal(t, map[string]string{"FOO": "bar"}, ci.InlineConfig.Env,
+		"only the genuinely new key must be recorded; the unchanged auto-expose stamp and the unchanged template key must not be")
+	// The live value is untouched either way (it was already true, re-sent
+	// as true), and must certainly not be lost as a side effect of this fix.
+	require.NotNil(t, updated.AppliedConfig.InlineConfig)
+	assert.Equal(t, "true", updated.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"])
+}
+
+// TestApplyAgentUpdate_EnvDiffStillRecordsActualAutoExposeToggle is R5-1's
+// guard, requested by the review: the fix above must not make a GENUINE
+// auto-expose toggle invisible to CreateInputs. When the user actually
+// changes the value (not just re-sending the loaded one), it must still be
+// recorded -- the fallback to old.InlineConfig.Env only suppresses an
+// EQUAL echo, never a real change.
+func TestApplyAgentUpdate_EnvDiffStillRecordsActualAutoExposeToggle(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Model = "golden-model"
+		a.AppliedConfig.Env = map[string]string{"TEMPLATE_KEY": "x"}
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{
+			Model: "golden-model",
+			Env:   map[string]string{"SCION_AUTO_EXPOSE_PORTS": "true"},
+		}
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
+			InlineConfig: &api.ScionConfig{Model: "golden-model"},
+		}
+	})
+
+	// The user toggles auto-expose OFF this time, so the request's value
+	// (false) differs from both old.Env (absent) and old.InlineConfig.Env
+	// (true) -- a real edit, which must be recorded regardless of the R5-1
+	// fallback.
+	body := configureUntouchedBody(t)
+	body["env"] = map[string]interface{}{
+		"TEMPLATE_KEY":            "x",
+		"SCION_AUTO_EXPOSE_PORTS": "false",
+	}
+	rec := patchAgentConfig(t, srv, agent.ID, body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	ci := updated.AppliedConfig.CreateInputs
+	require.NotNil(t, ci)
+	require.NotNil(t, ci.InlineConfig)
+	assert.Equal(t, "false", ci.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"],
+		"an actual toggle (not a re-send of the loaded value) must still be recorded into CreateInputs")
 }
