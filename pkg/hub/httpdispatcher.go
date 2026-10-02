@@ -2715,6 +2715,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		attribute.String("scion.broker.id", agent.RuntimeBrokerID),
 	)
 
+	// Start guard (design t1-async-create-v11.md §3.6): no broker call
+	// while a create launch is in flight, or after one did not complete.
+	if err := d.launchGuardError(ctx, agent, "DispatchAgentStart"); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -2934,6 +2941,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 // It generates a fresh auth token so the restarted container has valid
 // Hub credentials, preventing auth loss across container restarts.
 func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *store.Agent) error {
+	// Start guard (design t1-async-create-v11.md §3.6).
+	if err := d.launchGuardError(ctx, agent, "DispatchAgentRestart"); err != nil {
+		return err
+	}
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}

@@ -374,6 +374,26 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// Start guard entry checks (design t1-async-create-v11.md §3.6). Restart
+	// is checked here, before its stop leg, so a launching agent is not
+	// stopped; the dispatcher guard is the backstop for the start leg.
+	if action == api.AgentActionStart || action == api.AgentActionRestart {
+		if refusal := launchStartRefusal(agent, time.Now()); refusal != nil {
+			if !refusal.InFlight {
+				refusal.write(w)
+				return
+			}
+			var warnings []string
+			if action == api.AgentActionRestart {
+				warnings = []string{launchRestartNotPerformedWarning}
+			} else if r.ContentLength > 0 {
+				warnings = []string{launchInFlightInputsWarning}
+			}
+			s.writeLaunchingAgent(ctx, w, agent, warnings)
+			return
+		}
+	}
+
 	if !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}
@@ -539,6 +559,20 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 
 	// If dispatch failed, return error
 	if dispatchErr != nil {
+		// A launch that began after the entry check is caught by the
+		// dispatcher guard; answer as the entry check does.
+		if refusal := s.launchRefusalFromError(ctx, agent.ID, dispatchErr); refusal != nil {
+			if !refusal.InFlight {
+				refusal.write(w)
+				return
+			}
+			var warnings []string
+			if action == api.AgentActionRestart {
+				warnings = []string{launchRestartNotPerformedWarning}
+			}
+			s.writeLaunchingAgent(ctx, w, agent, warnings)
+			return
+		}
 		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
 			return
 		}

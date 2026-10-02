@@ -1061,6 +1061,19 @@ func (s *Server) handleExistingAgent(
 		cleanupMode = "strict"
 	}
 
+	// Start guard entry checks (design t1-async-create-v11.md §3.6), before
+	// Phase 1 and Phase 2: an incomplete create is refused, and an agent
+	// whose create is in flight is returned as it is, without applying the
+	// request.
+	if refusal := launchStartRefusal(existingAgent, time.Now()); refusal != nil {
+		if !refusal.InFlight {
+			refusal.write(w)
+			return existingAgentErrored
+		}
+		s.writeExistingAgentLaunching(ctx, w, existingAgent, project, req)
+		return existingAgentStarted
+	}
+
 	// Suspended agents are restarted in-place (not deleted), preserving harness state.
 	if !req.ProvisionOnly && existingAgent.Phase == string(state.PhaseSuspended) {
 		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
@@ -1096,6 +1109,9 @@ func (s *Server) handleExistingAgent(
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
 			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
+				return res
+			}
 			switch {
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
@@ -1179,6 +1195,9 @@ func (s *Server) handleExistingAgent(
 			}
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
 				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+				if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
+					return res
+				}
 				switch {
 				case writeEmptyPerAgentCapabilityError(w, err):
 					// 412 already written (design #2703 D3).
@@ -1291,6 +1310,9 @@ func (s *Server) handleExistingAgent(
 		// response (status, container info) onto existingAgent in-place.
 		// A created/provisioning agent has no prior session to resume.
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
+			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
+				return res
+			}
 			switch {
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
