@@ -207,3 +207,27 @@ test covers guards that already existed, so it was checked against four
 mutants that each remove one guard; it failed on all four. The editor
 suite now has 67 cases (67/67). `npm run typecheck` and `npm run build`
 pass. eslint reports 0 errors in the editor source.
+
+## Review round 3 fixes
+
+- **Owner-tier fallback wording.** The round 2 entry above no longer says
+  the unknown-ID rule fails closed to the owner tier: such IDs now lock the
+  dialog instead. The `tierFromRoleIds` doc comment now says callers check
+  `roleIdsUnclassifiable` first and the owner fallback is only a backstop.
+  The fallback itself stays.
+- **Authority change with a failed catalog reload.** Two mounted tests
+  cover the re-derive after `actor_authority_changed` when the
+  assignable-roles reload returns 500. In Add mode, an owner's Admin choice
+  is reset to None once the actor is an admin, because Admin is no longer
+  listed and has no radio; Save is disabled. In a row-based Edit dialog
+  (Erin), the loaded row still decides the lock, so the dialog stays
+  unlocked with the held custom role kept, rather than locking because the
+  role IDs can no longer be classified. No production code changed.
+
+Each new test was checked against a mutant of the re-derive. Keeping a
+built-in that the refreshed catalog no longer lists fails both tests;
+locking on role IDs instead of the loaded row fails the Edit test. The
+editor suite now has 69 cases (69/69). `npm run typecheck` and
+`npm run build` pass. eslint reports 0 errors in the editor source (the
+test file hits the existing `parserOptions.project` parse error shared by
+every `*.test.ts` file).
