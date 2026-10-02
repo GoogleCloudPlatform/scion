@@ -304,3 +304,72 @@ func TestProjectOwnerID_BackfillWarnsOnOwnerOnlyLegacyProject(t *testing.T) {
 		"exactly one warning for the owner-only project: %s", buf.String())
 	assert.Contains(t, buf.String(), "no project-owner binding")
 }
+
+// TestProjectOwnerID_BackfillNoWarningWhenNotOwnerOnly pins the negative
+// cases of the owner-only warning: a project whose OwnerID already holds a
+// project-owner binding, and a project with neither OwnerID nor CreatedBy,
+// produce no warning. The owner-only project alongside them still warns once.
+func TestProjectOwnerID_BackfillNoWarningWhenNotOwnerOnly(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	bound := createStaleOwnerUser(t, s, tid("bound-owner-user"), "bound-owner@test.com")
+	boundProject := &store.Project{
+		ID:      tid("bound-owner-project"),
+		Name:    "Bound Owner",
+		Slug:    "bound-owner-project",
+		OwnerID: bound.ID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, boundProject))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      bound.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          boundProject.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	unowned := &store.Project{
+		ID:      tid("unowned-legacy-project"),
+		Name:    "Unowned Legacy",
+		Slug:    "unowned-legacy-project",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, unowned))
+
+	ownerOnlyUser := createStaleOwnerUser(t, s, tid("owner-only-neg-user"), "owner-only-neg@test.com")
+	ownerOnly := &store.Project{
+		ID:      tid("owner-only-neg-project"),
+		Name:    "Owner Only Neg",
+		Slug:    "owner-only-neg-project",
+		OwnerID: ownerOnlyUser.ID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, ownerOnly))
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	require.NoError(t, backfillProjectOwnerRoleBindings(ctx, s))
+
+	logs := buf.String()
+	assert.NotContains(t, logs, "project_id="+boundProject.ID,
+		"no warning when OwnerID already holds a project-owner binding: %s", logs)
+	assert.NotContains(t, logs, "project_id="+unowned.ID,
+		"no warning when neither OwnerID nor CreatedBy is set: %s", logs)
+	assert.Equal(t, 1, strings.Count(logs, "project_id="+ownerOnly.ID),
+		"exactly one warning for the owner-only project: %s", logs)
+	assert.Equal(t, 1, strings.Count(logs, "no project-owner binding"),
+		"exactly one owner-only warning overall: %s", logs)
+}

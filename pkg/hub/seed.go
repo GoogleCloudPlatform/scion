@@ -1068,6 +1068,8 @@ func warnOwnerOnlyLegacyProject(ctx context.Context, s store.Store, p *store.Pro
 	}
 	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, p.ID)
 	if err != nil {
+		slog.Warn("failed to check project owner bindings for owner-only legacy project; skipping",
+			"project_id", p.ID, "error", err)
 		return
 	}
 	for _, b := range bindings {
