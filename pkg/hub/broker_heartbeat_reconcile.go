@@ -51,10 +51,13 @@ import (
 //     Kubernetes namespace the broker may not read) never leads to a
 //     conclusion about its agents, while other targets are still reconciled.
 //   - An agent with no recorded target, or whose target is absent from the
-//     heartbeat, is never concluded. The recorded target is cleared whenever
-//     a create or start response is applied, so an agent started anew is
-//     only considered after a heartbeat has listed it again. An older broker
-//     sends no targets, and a filtered (multi-hub) heartbeat claims none.
+//     heartbeat, is never concluded. The recorded target (and any candidate)
+//     is cleared, with a state_version bump, whenever a create, start or
+//     restart is accepted, so an agent started anew is only considered after
+//     two consecutive heartbeats have listed it on the same target again, and
+//     a writer holding a read from before the clear cannot write the old
+//     target back. An older broker sends no targets, and a filtered
+//     (multi-hub) heartbeat claims none.
 //   - The broker must be online and its previous heartbeat must be recent; a
 //     broker returning from an offline or stale period restarts every clock.
 //   - Only phase running is considered. created/provisioning/cloning/starting
@@ -67,8 +70,8 @@ import (
 //     every heartbeat that reports it and by the agent's own status reports)
 //     must be older than the grace period. last_seen, not the row's updated
 //     timestamp, is used because unrelated writes bump updated.
-//   - The final write is a conditional store update that re-checks phase,
-//     broker, reincarnation state and last_seen under a row lock.
+//   - The final write is a single conditional UPDATE whose WHERE clause
+//     re-checks deleted_at, broker, phase, reincarnation state and last_seen.
 
 // DefaultMissingAgentGrace is the default time an agent must be continuously
 // absent from its broker's complete heartbeat inventory before the Hub marks
@@ -127,6 +130,40 @@ func agentRuntimeTarget(a *store.Agent) string {
 		return ""
 	}
 	return a.AppliedConfig.RuntimeTarget
+}
+
+// recordRuntimeTarget applies one heartbeat's runtime target report to the
+// agent's applied config and reports whether anything changed.
+//
+// A reported target that differs from the recorded one is first stored as a
+// candidate; it replaces the recorded target only when the next heartbeat
+// reports the same target. A heartbeat the broker built before a start or
+// restart was accepted, but that the Hub processes after the clear, can
+// therefore only set a candidate, which the next heartbeat (built after the
+// start) replaces or confirms. A report that matches the recorded target
+// drops any candidate. An empty report changes nothing.
+func recordRuntimeTarget(a *store.Agent, reported string) bool {
+	if reported == "" {
+		return false
+	}
+	cfg := a.AppliedConfig
+	if cfg == nil {
+		cfg = &store.AgentAppliedConfig{}
+	}
+	switch {
+	case reported == cfg.RuntimeTarget:
+		if cfg.RuntimeTargetCandidate == "" {
+			return false
+		}
+		cfg.RuntimeTargetCandidate = ""
+	case reported == cfg.RuntimeTargetCandidate:
+		cfg.RuntimeTarget = reported
+		cfg.RuntimeTargetCandidate = ""
+	default:
+		cfg.RuntimeTargetCandidate = reported
+	}
+	a.AppliedConfig = cfg
+	return true
 }
 
 // missingAgentTracker records, per broker, when this Hub process first saw

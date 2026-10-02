@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -102,6 +103,67 @@ func TestDispatch_StartAndRestartForgetRuntimeTarget(t *testing.T) {
 			assert.Empty(t, a.AppliedConfig.RuntimeTarget, "in-memory target cleared")
 		})
 	}
+}
+
+// nilStartResponseClient accepts a start with no parseable response body,
+// as the control-channel client does for a successful non-JSON reply.
+type nilStartResponseClient struct{ *mockRuntimeBrokerClient }
+
+func (c nilStartResponseClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool, extras StartExtras) (*RemoteAgentResponse, error) {
+	if _, err := c.mockRuntimeBrokerClient.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume, extras); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// A start the broker accepts without a parseable response still forgets the
+// recorded target.
+func TestDispatch_StartWithoutResponseForgetsRuntimeTarget(t *testing.T) {
+	s, client, _, a := runtimeTargetDispatchFixture(t)
+	d := NewHTTPAgentDispatcherWithClient(s, nilStartResponseClient{client}, false, slog.Default())
+	require.NoError(t, d.DispatchAgentStart(context.Background(), a, "", false))
+	require.True(t, client.startCalled)
+	assert.Empty(t, storedRuntimeTarget(t, s, a.ID).RuntimeTarget)
+	assert.Empty(t, a.AppliedConfig.RuntimeTarget)
+}
+
+// The clear bumps state_version. The dispatched agent, current before the
+// clear, adopts the new version so the caller's own later write succeeds,
+// while another holder of a pre-clear read gets a conflict instead of
+// writing the old target back.
+func TestDispatch_ClearAdoptsVersionAndFencesStaleWriters(t *testing.T) {
+	ctx := context.Background()
+	s, _, d, a := runtimeTargetDispatchFixture(t)
+	stale, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.Equal(t, k8sTargetB, stale.AppliedConfig.RuntimeTarget)
+
+	require.NoError(t, d.DispatchAgentStart(ctx, a, "", false))
+	stored, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, stale.StateVersion+1, stored.StateVersion, "the clear bumped state_version")
+	assert.Equal(t, stored.StateVersion, a.StateVersion, "the dispatched agent adopted it")
+
+	require.ErrorIs(t, s.UpdateAgent(ctx, stale), store.ErrVersionConflict, "a pre-clear read cannot write back")
+	assert.Empty(t, storedRuntimeTarget(t, s, a.ID).RuntimeTarget)
+	require.NoError(t, s.UpdateAgent(ctx, a), "the caller's own write still succeeds")
+	assert.Empty(t, storedRuntimeTarget(t, s, a.ID).RuntimeTarget)
+}
+
+// An in-memory agent that was already behind the store before the clear does
+// not adopt the clear's version, so its own conflict is not masked.
+func TestDispatch_ClearDoesNotMaskAnEarlierConflict(t *testing.T) {
+	ctx := context.Background()
+	s, _, d, a := runtimeTargetDispatchFixture(t)
+	cur, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	cur.Message = "concurrent write"
+	require.NoError(t, s.UpdateAgent(ctx, cur))
+	behind := a.StateVersion
+
+	require.NoError(t, d.DispatchAgentRestart(ctx, a))
+	assert.Equal(t, behind, a.StateVersion, "version not adopted")
+	require.ErrorIs(t, s.UpdateAgent(ctx, a), store.ErrVersionConflict)
 }
 
 func TestDispatch_FailedStartKeepsRuntimeTarget(t *testing.T) {

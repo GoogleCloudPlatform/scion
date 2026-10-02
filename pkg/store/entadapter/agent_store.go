@@ -1512,33 +1512,47 @@ const clearRuntimeTargetAttempts = 5
 // Each attempt reads and conditionally writes inside one transaction, with
 // the row locked (SELECT ... FOR UPDATE) where the dialect supports it, so a
 // concurrent writer cannot slip in between. The write is additionally
-// conditional on the stored applied config being unchanged; if it still
-// misses, the row is re-read and the clear retried, up to
-// clearRuntimeTargetAttempts times, after which an error is returned.
-func (s *AgentStore) ClearAgentRuntimeTarget(ctx context.Context, id string) error {
+// conditional on the stored applied config and state_version being
+// unchanged; if it still misses, the row is re-read and the clear retried, up
+// to clearRuntimeTargetAttempts times, after which an error is returned.
+func (s *AgentStore) ClearAgentRuntimeTarget(ctx context.Context, id string) (bool, int64, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
-		return err
+		return false, 0, err
 	}
 	// Prime dialect detection before opening a transaction (see
 	// UpdateAgentStatus).
 	useLock := s.usesRowLocks(ctx)
 	for i := 0; i < clearRuntimeTargetAttempts; i++ {
-		done, err := s.clearRuntimeTargetOnce(ctx, uid, id, useLock)
-		if err != nil || done {
-			return err
+		res, err := s.clearRuntimeTargetOnce(ctx, uid, id, useLock)
+		if err != nil {
+			return false, 0, err
+		}
+		if res.done {
+			return res.cleared, res.newVersion, nil
 		}
 	}
-	return fmt.Errorf("clear runtime target for agent %s: applied config changed concurrently %d times", id, clearRuntimeTargetAttempts)
+	return false, 0, fmt.Errorf("clear runtime target for agent %s: agent changed concurrently %d times", id, clearRuntimeTargetAttempts)
 }
 
-// clearRuntimeTargetOnce is one ClearAgentRuntimeTarget attempt. It reports
-// done=false only when the conditional write matched no row because the
-// applied config changed after it was read.
-func (s *AgentStore) clearRuntimeTargetOnce(ctx context.Context, uid uuid.UUID, id string, useLock bool) (bool, error) {
+// runtimeTargetKeys are the applied-config JSON keys ClearAgentRuntimeTarget
+// removes.
+var runtimeTargetKeys = []string{"runtimeTarget", "runtimeTargetCandidate"}
+
+// clearRuntimeTargetResult is the outcome of one ClearAgentRuntimeTarget
+// attempt. done is false only when the conditional write matched no row
+// because the agent changed after it was read.
+type clearRuntimeTargetResult struct {
+	done       bool
+	cleared    bool
+	newVersion int64
+}
+
+// clearRuntimeTargetOnce is one ClearAgentRuntimeTarget attempt.
+func (s *AgentStore) clearRuntimeTargetOnce(ctx context.Context, uid uuid.UUID, id string, useLock bool) (clearRuntimeTargetResult, error) {
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
-		return false, err
+		return clearRuntimeTargetResult{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -1546,45 +1560,61 @@ func (s *AgentStore) clearRuntimeTargetOnce(ctx context.Context, uid uuid.UUID, 
 	if useLock {
 		q = q.ForUpdate()
 	}
-	row, err := q.Select(agent.FieldAppliedConfig).Only(ctx)
+	row, err := q.Select(agent.FieldAppliedConfig, agent.FieldStateVersion).Only(ctx)
 	if err != nil {
 		if ent.IsNotFound(err) {
-			return true, nil
+			return clearRuntimeTargetResult{done: true}, nil
 		}
-		return false, mapError(err)
+		return clearRuntimeTargetResult{}, mapError(err)
 	}
 	if row.AppliedConfig == "" {
-		return true, nil
+		return clearRuntimeTargetResult{done: true}, nil
 	}
 	// Edit the raw JSON object rather than round-tripping it through
 	// store.AgentAppliedConfig, so every other stored key is kept exactly
 	// as written.
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
-		return false, fmt.Errorf("clear runtime target for agent %s: %w", id, err)
+		return clearRuntimeTargetResult{}, fmt.Errorf("clear runtime target for agent %s: %w", id, err)
 	}
-	if _, ok := raw["runtimeTarget"]; !ok {
-		return true, nil
+	found := false
+	for _, k := range runtimeTargetKeys {
+		if _, ok := raw[k]; ok {
+			delete(raw, k)
+			found = true
+		}
 	}
-	delete(raw, "runtimeTarget")
+	if !found {
+		return clearRuntimeTargetResult{done: true}, nil
+	}
 	cleared, err := json.Marshal(raw)
 	if err != nil {
-		return false, err
+		return clearRuntimeTargetResult{}, err
 	}
 	if clearRuntimeTargetHook != nil {
 		clearRuntimeTargetHook(ctx, tx, uid)
 	}
+	newVersion := row.StateVersion + 1
 	n, err := tx.Agent.Update().
-		Where(agent.IDEQ(uid), agent.DeletedAtIsNil(), agent.AppliedConfigEQ(row.AppliedConfig)).
+		Where(
+			agent.IDEQ(uid),
+			agent.DeletedAtIsNil(),
+			agent.AppliedConfigEQ(row.AppliedConfig),
+			agent.StateVersionEQ(row.StateVersion),
+		).
 		SetAppliedConfig(string(cleared)).
+		SetStateVersion(newVersion).
 		Save(ctx)
 	if err != nil {
-		return false, mapError(err)
+		return clearRuntimeTargetResult{}, mapError(err)
 	}
 	if n == 0 {
-		return false, nil
+		return clearRuntimeTargetResult{}, nil
 	}
-	return true, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return clearRuntimeTargetResult{}, err
+	}
+	return clearRuntimeTargetResult{done: true, cleared: true, newVersion: newVersion}, nil
 }
 
 // stalledExcluded lists the activities that disqualify a running agent from

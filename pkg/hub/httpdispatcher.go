@@ -1163,23 +1163,34 @@ func (d *HTTPAgentDispatcher) applyBrokerResponse(ctx context.Context, agent *st
 	}
 }
 
-// forgetRuntimeTarget drops the agent's recorded runtime target, in memory
-// and in the store, after a create or start was accepted by the broker. The
-// broker may have placed the agent on a different runtime target than the
-// one last recorded, so the missing-container reconcile must not consider
-// the agent until a heartbeat lists it again and records its target. The
-// store write is targeted (it does not depend on the caller persisting the
-// agent), because the lifecycle start path only writes status fields.
+// forgetRuntimeTarget drops the agent's recorded runtime target (and any
+// candidate), in memory and in the store, after a create, start or restart
+// was accepted by the broker. The broker may have placed the agent on a
+// different runtime target than the one last recorded, so the
+// missing-container reconcile must not consider the agent until heartbeats
+// list it again and record its target. The store write is targeted (it does
+// not depend on the caller persisting the agent), because the lifecycle start
+// path only writes status fields. The clear bumps state_version; when the
+// in-memory agent was current before the clear it adopts the new version, so
+// the caller's own later UpdateAgent still succeeds, while any other holder
+// of a pre-clear read gets a version conflict instead of writing the old
+// target back.
 func (d *HTTPAgentDispatcher) forgetRuntimeTarget(ctx context.Context, agent *store.Agent) {
 	if agent.AppliedConfig != nil {
 		agent.AppliedConfig.RuntimeTarget = ""
+		agent.AppliedConfig.RuntimeTargetCandidate = ""
 	}
 	if d.store == nil || agent.ID == "" {
 		return
 	}
-	if err := d.store.ClearAgentRuntimeTarget(ctx, agent.ID); err != nil {
+	cleared, newVersion, err := d.store.ClearAgentRuntimeTarget(ctx, agent.ID)
+	if err != nil {
 		d.log.Warn("Failed to clear the recorded runtime target after dispatch",
 			"agent_id", agent.ID, "error", err)
+		return
+	}
+	if cleared && agent.StateVersion == newVersion-1 {
+		agent.StateVersion = newVersion
 	}
 }
 
@@ -2557,6 +2568,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 	if resp != nil {
 		d.applyBrokerResponse(ctx, agent, resp)
+	} else {
+		// The broker accepted the start without a parseable body; the
+		// recorded target is stale all the same.
+		d.forgetRuntimeTarget(ctx, agent)
 	}
 	return nil
 }

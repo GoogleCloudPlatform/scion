@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -165,60 +166,93 @@ func TestAgentStore_ClearAgentRuntimeTarget(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 
-	t.Run("clears only the target", func(t *testing.T) {
+	t.Run("clears the target and candidate and bumps state_version", func(t *testing.T) {
 		a := makeAgent(projectID, "with-target")
 		a.AppliedConfig = &store.AgentAppliedConfig{
-			Image:         "example/image:1",
-			Profile:       "remote",
-			Env:           map[string]string{"A": "1"},
-			RuntimeTarget: "kubernetes|context=c|namespace=n",
+			Image:                  "example/image:1",
+			Profile:                "remote",
+			Env:                    map[string]string{"A": "1"},
+			RuntimeTarget:          "kubernetes|context=c|namespace=n",
+			RuntimeTargetCandidate: "kubernetes|context=c|namespace=m",
 		}
 		require.NoError(t, s.CreateAgent(ctx, a))
 		before, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 
-		require.NoError(t, s.ClearAgentRuntimeTarget(ctx, a.ID))
+		cleared, newVersion, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+		require.NoError(t, err)
+		assert.True(t, cleared)
+		assert.Equal(t, before.StateVersion+1, newVersion)
+
 		got, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		require.NotNil(t, got.AppliedConfig)
 		assert.Empty(t, got.AppliedConfig.RuntimeTarget)
+		assert.Empty(t, got.AppliedConfig.RuntimeTargetCandidate)
 		assert.Equal(t, "example/image:1", got.AppliedConfig.Image)
 		assert.Equal(t, "remote", got.AppliedConfig.Profile)
 		assert.Equal(t, map[string]string{"A": "1"}, got.AppliedConfig.Env)
-		assert.Equal(t, before.StateVersion, got.StateVersion, "state_version is not bumped")
+		assert.Equal(t, newVersion, got.StateVersion)
 
-		// A stale full update by a holder of the pre-clear version still
-		// succeeds (the clear does not cause version conflicts).
-		before.AppliedConfig.RuntimeTarget = ""
-		require.NoError(t, s.UpdateAgent(ctx, before))
+		// A full update by a holder of the pre-clear read must not write the
+		// old target back: it gets a version conflict.
+		err = s.UpdateAgent(ctx, before)
+		require.ErrorIs(t, err, store.ErrVersionConflict)
+		got, err = s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Empty(t, got.AppliedConfig.RuntimeTarget, "the stale write did not restore the target")
+
+		// A holder of the post-clear version still writes normally.
+		require.NoError(t, s.UpdateAgent(ctx, got))
+	})
+
+	t.Run("candidate only is cleared", func(t *testing.T) {
+		a := makeAgent(projectID, "candidate-only")
+		a.AppliedConfig = &store.AgentAppliedConfig{RuntimeTargetCandidate: "docker"}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+		require.NoError(t, err)
+		assert.True(t, cleared)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Empty(t, got.AppliedConfig.RuntimeTargetCandidate)
 	})
 
 	t.Run("no target is a no-op", func(t *testing.T) {
 		a := makeAgent(projectID, "no-target")
 		a.AppliedConfig = &store.AgentAppliedConfig{Image: "example/image:1"}
 		require.NoError(t, s.CreateAgent(ctx, a))
-		require.NoError(t, s.ClearAgentRuntimeTarget(ctx, a.ID))
+		before, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+		require.NoError(t, err)
+		assert.False(t, cleared)
 		got, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		assert.Equal(t, "example/image:1", got.AppliedConfig.Image)
+		assert.Equal(t, before.StateVersion, got.StateVersion, "a no-op does not bump state_version")
 	})
 
 	t.Run("no applied config is a no-op", func(t *testing.T) {
 		a := makeAgent(projectID, "no-config")
 		a.AppliedConfig = nil
 		require.NoError(t, s.CreateAgent(ctx, a))
-		require.NoError(t, s.ClearAgentRuntimeTarget(ctx, a.ID))
+		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+		require.NoError(t, err)
+		assert.False(t, cleared)
 	})
 
 	t.Run("unknown agent is a no-op", func(t *testing.T) {
-		require.NoError(t, s.ClearAgentRuntimeTarget(ctx, "00000000-0000-0000-0000-00000000abcd"))
+		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, "00000000-0000-0000-0000-00000000abcd")
+		require.NoError(t, err)
+		assert.False(t, cleared)
 	})
 }
 
 // TestAgentStore_ClearAgentRuntimeTarget_WriteMiss covers the conditional
-// write missing because applied_config changed between the read and the
-// write: the clear re-reads and retries, and gives up with an error after a
-// bounded number of attempts.
+// write missing because the agent changed between the read and the write:
+// the clear re-reads and retries, and gives up with an error after a bounded
+// number of attempts.
 func TestAgentStore_ClearAgentRuntimeTarget_WriteMiss(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
@@ -240,39 +274,119 @@ func TestAgentStore_ClearAgentRuntimeTarget_WriteMiss(t *testing.T) {
 		_, err := tx.Agent.UpdateOneID(id).SetAppliedConfig(cfg).Save(ctx)
 		require.NoError(t, err)
 	}
-
-	t.Run("one miss then retry clears the target", func(t *testing.T) {
-		a := create(t, "miss-once")
-		calls := 0
-		clearRuntimeTargetHook = func(ctx context.Context, tx *ent.Tx, id uuid.UUID) {
-			if calls == 0 {
-				changeConfig(ctx, tx, id, calls)
-			}
-			calls++
-		}
-		t.Cleanup(func() { clearRuntimeTargetHook = nil })
-
-		require.NoError(t, s.ClearAgentRuntimeTarget(ctx, a.ID))
-		assert.Equal(t, 2, calls, "the clear re-read and retried once")
-		got, err := s.GetAgent(ctx, a.ID)
+	// bumpVersion changes only state_version, as a concurrent status write
+	// with the same applied config would.
+	bumpVersion := func(ctx context.Context, tx *ent.Tx, id uuid.UUID, _ int) {
+		_, err := tx.Agent.UpdateOneID(id).AddStateVersion(1).Save(ctx)
 		require.NoError(t, err)
-		require.NotNil(t, got.AppliedConfig)
-		assert.Empty(t, got.AppliedConfig.RuntimeTarget)
-		assert.Equal(t, "example/image:1", got.AppliedConfig.Image)
-	})
+	}
 
-	t.Run("persistent miss returns an error", func(t *testing.T) {
-		a := create(t, "miss-always")
-		calls := 0
-		clearRuntimeTargetHook = func(ctx context.Context, tx *ent.Tx, id uuid.UUID) {
-			changeConfig(ctx, tx, id, calls)
-			calls++
-		}
-		t.Cleanup(func() { clearRuntimeTargetHook = nil })
+	for name, change := range map[string]func(context.Context, *ent.Tx, uuid.UUID, int){
+		"applied config changed": changeConfig,
+		"state_version changed":  bumpVersion,
+	} {
+		t.Run(name+": one miss then retry clears the target", func(t *testing.T) {
+			a := create(t, "miss-once-"+strings.ReplaceAll(name, " ", "-"))
+			calls := 0
+			clearRuntimeTargetHook = func(ctx context.Context, tx *ent.Tx, id uuid.UUID) {
+				if calls == 0 {
+					change(ctx, tx, id, calls)
+				}
+				calls++
+			}
+			t.Cleanup(func() { clearRuntimeTargetHook = nil })
 
-		err := s.ClearAgentRuntimeTarget(ctx, a.ID)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "changed concurrently")
-		assert.Equal(t, clearRuntimeTargetAttempts, calls, "retries are bounded")
-	})
+			cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+			require.NoError(t, err)
+			assert.True(t, cleared)
+			assert.Equal(t, 2, calls, "the clear re-read and retried once")
+			got, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			require.NotNil(t, got.AppliedConfig)
+			assert.Empty(t, got.AppliedConfig.RuntimeTarget)
+			assert.Equal(t, "example/image:1", got.AppliedConfig.Image)
+		})
+
+		t.Run(name+": persistent miss returns an error", func(t *testing.T) {
+			a := create(t, "miss-always-"+strings.ReplaceAll(name, " ", "-"))
+			calls := 0
+			clearRuntimeTargetHook = func(ctx context.Context, tx *ent.Tx, id uuid.UUID) {
+				change(ctx, tx, id, calls)
+				calls++
+			}
+			t.Cleanup(func() { clearRuntimeTargetHook = nil })
+
+			cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+			require.Error(t, err)
+			assert.False(t, cleared)
+			assert.Contains(t, err.Error(), "changed concurrently")
+			assert.Equal(t, clearRuntimeTargetAttempts, calls, "retries are bounded")
+		})
+	}
+}
+
+// captureDriver is a dialect.Driver that records every statement and fails
+// it, so a test can see the SQL a store method builds for a dialect it cannot
+// execute.
+type captureDriver struct {
+	dialectName string
+	mu          sync.Mutex
+	stmts       []string
+}
+
+var errCaptured = errors.New("statement captured, not executed")
+
+func (d *captureDriver) record(query string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.stmts = append(d.stmts, query)
+	return errCaptured
+}
+
+func (d *captureDriver) Exec(_ context.Context, query string, _, _ any) error {
+	return d.record(query)
+}
+
+func (d *captureDriver) Query(_ context.Context, query string, _, _ any) error {
+	return d.record(query)
+}
+
+func (d *captureDriver) Tx(context.Context) (dialect.Tx, error) { return dialect.NopTx(d), nil }
+func (d *captureDriver) Close() error                           { return nil }
+func (d *captureDriver) Dialect() string                        { return d.dialectName }
+
+// TestAgentStore_ClearAgentRuntimeTarget_RowLock pins that the read inside
+// the clear's transaction locks the row (SELECT ... FOR UPDATE) on Postgres
+// and does not on SQLite, which has no row locks.
+func TestAgentStore_ClearAgentRuntimeTarget_RowLock(t *testing.T) {
+	const id = "00000000-0000-0000-0000-00000000abcd"
+	for _, tc := range []struct {
+		dialect string
+		lock    bool
+	}{
+		{dialect.Postgres, true},
+		{dialect.SQLite, false},
+	} {
+		t.Run(tc.dialect, func(t *testing.T) {
+			drv := &captureDriver{dialectName: tc.dialect}
+			s := NewAgentStore(ent.NewClient(ent.Driver(drv)))
+			_, _, err := s.ClearAgentRuntimeTarget(context.Background(), id)
+			require.Error(t, err, "the capture driver fails every statement")
+
+			drv.mu.Lock()
+			defer drv.mu.Unlock()
+			var read string
+			for _, q := range drv.stmts {
+				if strings.Contains(q, "SELECT") && strings.Contains(q, "applied_config") {
+					read = q
+				}
+			}
+			require.NotEmpty(t, read, "expected the clear's read, got %v", drv.stmts)
+			if tc.lock {
+				assert.Contains(t, read, "FOR UPDATE")
+			} else {
+				assert.NotContains(t, read, "FOR UPDATE")
+			}
+		})
+	}
 }

@@ -212,9 +212,10 @@ type AgentAppliedConfig struct {
 	ThinkingLevel *int              `json:"thinkingLevel,omitempty"`
 	Profile       string            `json:"profile,omitempty"` // Settings profile for the runtime broker
 	// RuntimeTarget is the broker runtime target (runtime name, plus cluster
-	// context and namespace for Kubernetes) whose listing last reported the
-	// agent. Recorded from heartbeats and cleared when a create or start
-	// response is applied; the missing-container reconcile only considers an
+	// context and namespace for Kubernetes) whose listing reported the agent.
+	// Recorded from heartbeats once two consecutive reports name the same
+	// target (see RuntimeTargetCandidate) and cleared when a create, start or
+	// restart is accepted; the missing-container reconcile only considers an
 	// agent whose recorded target a heartbeat lists as complete.
 	RuntimeTarget string              `json:"runtimeTarget,omitempty"`
 	Task          string              `json:"task,omitempty"`      // Initial task/prompt for the agent
@@ -226,6 +227,13 @@ type AgentAppliedConfig struct {
 	// Template info for Runtime Broker hydration
 	TemplateID   string `json:"templateId,omitempty"`   // Hub template ID for fetching
 	TemplateHash string `json:"templateHash,omitempty"` // Content hash for cache validation
+
+	// RuntimeTargetCandidate is a target reported by one heartbeat that
+	// differs from RuntimeTarget. It becomes RuntimeTarget only when the next
+	// heartbeat reports the same target, so a single heartbeat built before a
+	// start was accepted cannot record the agent's previous target. Cleared
+	// together with RuntimeTarget.
+	RuntimeTargetCandidate string `json:"runtimeTargetCandidate,omitempty"`
 
 	// Harness-config info for Runtime Broker hydration. When set, the broker
 	// fetches the harness-config from the Hub's storage backend instead of

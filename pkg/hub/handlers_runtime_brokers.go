@@ -1040,13 +1040,13 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			}
 			// Record the runtime target whose listing reported the agent;
 			// the missing-container reconcile only considers an agent whose
-			// recorded target a heartbeat lists as complete. Written only
-			// when it changes, so a steady heartbeat adds no store write.
-			if agentHB.RuntimeTarget != "" && agentRuntimeTarget(agent) != agentHB.RuntimeTarget {
-				if agent.AppliedConfig == nil {
-					agent.AppliedConfig = &store.AgentAppliedConfig{}
-				}
-				agent.AppliedConfig.RuntimeTarget = agentHB.RuntimeTarget
+			// recorded target a heartbeat lists as complete. A target is
+			// recorded only after two consecutive heartbeats report it (see
+			// nextRuntimeTarget). Written only when something changes, so a
+			// steady heartbeat adds no store write. The write is the
+			// versioned UpdateAgent on this fresh read, so a clear that lands
+			// in between makes it fail rather than restore an old target.
+			if recordRuntimeTarget(agent, agentHB.RuntimeTarget) {
 				needsUpdate = true
 			}
 			if needsUpdate {

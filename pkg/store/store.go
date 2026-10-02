@@ -346,15 +346,20 @@ type AgentStore interface {
 	// updated record for event publishing.
 	MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*Agent, error)
 
-	// ClearAgentRuntimeTarget removes the runtime target recorded in an
-	// agent's applied config (AgentAppliedConfig.RuntimeTarget) and changes
-	// nothing else; it does not bump state_version. The write is conditional
-	// on the stored applied config being unchanged since it was read (and the
-	// row is locked for the read where supported); when a concurrent write
-	// wins, the config is re-read and the clear retried a bounded number of
-	// times, after which an error is returned. It is a no-op when no target
-	// is recorded or the agent does not exist.
-	ClearAgentRuntimeTarget(ctx context.Context, id string) error
+	// ClearAgentRuntimeTarget removes the runtime target and any runtime
+	// target candidate recorded in an agent's applied config
+	// (AgentAppliedConfig.RuntimeTarget, RuntimeTargetCandidate) and changes
+	// no other applied-config key. When it removes something it bumps
+	// state_version by exactly one, so a writer holding a read from before
+	// the clear gets ErrVersionConflict from UpdateAgent instead of writing
+	// the old target back; it returns cleared=true and the new state_version.
+	// The write is conditional on the stored applied config and state_version
+	// being unchanged since they were read (and the row is locked for the
+	// read where supported); when a concurrent write wins, the row is re-read
+	// and the clear retried a bounded number of times, after which an error
+	// is returned. It is a no-op (cleared=false) when neither key is recorded
+	// or the agent does not exist.
+	ClearAgentRuntimeTarget(ctx context.Context, id string) (cleared bool, newVersion int64, err error)
 
 	// FindOrphanedAgents returns agents whose RuntimeBrokerID references a broker
 	// that is offline or does not exist, and who are not in terminal states

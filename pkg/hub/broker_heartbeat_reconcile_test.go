@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -466,16 +467,16 @@ func TestReconcileMissing_TargetReportedTwice(t *testing.T) {
 	assert.Equal(t, map[string]bool{"docker": true}, hb.completeTargets())
 }
 
-// TestHeartbeat_RecordsRuntimeTargetOnlyOnChange: the hub records the target
-// that listed an agent, writes the agent row only when that target changes,
-// and leaves it alone on steady heartbeats.
-func TestHeartbeat_RecordsRuntimeTargetOnlyOnChange(t *testing.T) {
+// TestHeartbeat_RecordsRuntimeTargetOnChange: a target is recorded after two
+// consecutive heartbeats report it, steady heartbeats write nothing, and a
+// change of target again needs two reports.
+func TestHeartbeat_RecordsRuntimeTargetOnChange(t *testing.T) {
 	f := newReconcileFixture(t)
 	a := f.addAgent("listed", "running", "working", withRuntimeTarget(""))
 	report := func(target string) {
 		f.send(brokerHeartbeatRequest{
 			Status:    store.BrokerStatusOnline,
-			Inventory: completeInventory(k8sTargetB),
+			Inventory: completeInventory(k8sTargetA, k8sTargetB),
 			Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
 				{Slug: a.Slug, Phase: "running", Activity: "working", RuntimeTarget: target},
 			}}},
@@ -486,24 +487,160 @@ func TestHeartbeat_RecordsRuntimeTargetOnlyOnChange(t *testing.T) {
 	report(k8sTargetB)
 	got := f.get(a.ID)
 	require.NotNil(t, got.AppliedConfig)
-	assert.Equal(t, k8sTargetB, got.AppliedConfig.RuntimeTarget, "target backfilled")
-	v1 := got.StateVersion
-	assert.Equal(t, v0+1, v1, "one row write for the backfill")
+	assert.Empty(t, got.AppliedConfig.RuntimeTarget, "one report only sets a candidate")
+	assert.Equal(t, k8sTargetB, got.AppliedConfig.RuntimeTargetCandidate)
+	assert.Equal(t, v0+1, got.StateVersion)
+
+	report(k8sTargetB)
+	got = f.get(a.ID)
+	assert.Equal(t, k8sTargetB, got.AppliedConfig.RuntimeTarget, "the second matching report records it")
+	assert.Empty(t, got.AppliedConfig.RuntimeTargetCandidate)
+	v2 := got.StateVersion
+	assert.Equal(t, v0+2, v2)
 
 	for i := 0; i < 3; i++ {
 		report(k8sTargetB)
 	}
-	assert.Equal(t, v1, f.get(a.ID).StateVersion, "no row write while the target is unchanged")
+	assert.Equal(t, v2, f.get(a.ID).StateVersion, "no row write while the target is unchanged")
 
 	report(k8sTargetA)
 	got = f.get(a.ID)
-	assert.Equal(t, k8sTargetA, got.AppliedConfig.RuntimeTarget, "target updated on change")
-	assert.Equal(t, v1+1, got.StateVersion)
+	assert.Equal(t, k8sTargetB, got.AppliedConfig.RuntimeTarget, "a single different report does not replace the record")
+	assert.Equal(t, k8sTargetA, got.AppliedConfig.RuntimeTargetCandidate)
+
+	report(k8sTargetB)
+	got = f.get(a.ID)
+	assert.Equal(t, k8sTargetB, got.AppliedConfig.RuntimeTarget)
+	assert.Empty(t, got.AppliedConfig.RuntimeTargetCandidate, "a report matching the record drops the candidate")
+
+	report(k8sTargetA)
+	report(k8sTargetA)
+	got = f.get(a.ID)
+	assert.Equal(t, k8sTargetA, got.AppliedConfig.RuntimeTarget, "two matching reports replace the record")
+	v := got.StateVersion
 
 	report("")
 	got = f.get(a.ID)
 	assert.Equal(t, k8sTargetA, got.AppliedConfig.RuntimeTarget, "a report without a target leaves the record alone")
-	assert.Equal(t, v1+1, got.StateVersion)
+	assert.Equal(t, v, got.StateVersion)
+}
+
+// TestHeartbeat_StaleReportAfterClearNotRecorded: an agent on target B is
+// restarted onto target A (the clear runs when the restart is accepted). A
+// heartbeat built before the restart, processed after the clear, still
+// reports target B. It must not record B, so the agent is not reconciled
+// against B's complete listing while its new target A cannot be listed.
+func TestHeartbeat_StaleReportAfterClearNotRecorded(t *testing.T) {
+	ctx := context.Background()
+	f := newReconcileFixture(t)
+	a := f.addAgent("moved", "running", "working", withRuntimeTarget(k8sTargetB))
+
+	cleared, _, err := f.s.ClearAgentRuntimeTarget(ctx, a.ID)
+	require.NoError(t, err)
+	require.True(t, cleared)
+
+	// The stale heartbeat: lists the agent on B.
+	f.send(brokerHeartbeatRequest{
+		Status:    store.BrokerStatusOnline,
+		Inventory: completeInventory(k8sTargetB),
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+			{Slug: a.Slug, Phase: "running", Activity: "working", RuntimeTarget: k8sTargetB},
+		}}},
+	})
+	assert.Empty(t, f.get(a.ID).AppliedConfig.RuntimeTarget, "a single post-clear report records nothing")
+
+	// Later heartbeats: B is listed complete without the agent, and A (where
+	// the agent now runs) cannot be listed.
+	inv := &brokerInventory{Targets: []brokerInventoryTarget{
+		{ID: k8sTargetB, Complete: true},
+		{ID: k8sTargetA, Complete: false},
+	}}
+	f.heartbeat(inv)
+	assert.False(t, f.hasClock(a.ID), "no recorded target, so no clock")
+	f.heartbeat(inv)
+	f.assertUntouched(a.ID, "running")
+	got := f.get(a.ID)
+	assert.Empty(t, got.AppliedConfig.RuntimeTarget)
+	assert.Equal(t, k8sTargetB, got.AppliedConfig.RuntimeTargetCandidate, "the stale report is at most a candidate")
+}
+
+func TestRecordRuntimeTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		cfg                     *store.AgentAppliedConfig
+		reported                string
+		changed                 bool
+		wantTarget, wantPending string
+	}{
+		{"empty report", &store.AgentAppliedConfig{RuntimeTarget: "a"}, "", false, "a", ""},
+		{"no config, first report", nil, "a", true, "", "a"},
+		{"no record, first report", &store.AgentAppliedConfig{}, "a", true, "", "a"},
+		{"second matching report", &store.AgentAppliedConfig{RuntimeTargetCandidate: "a"}, "a", true, "a", ""},
+		{"steady", &store.AgentAppliedConfig{RuntimeTarget: "a"}, "a", false, "a", ""},
+		{"different report", &store.AgentAppliedConfig{RuntimeTarget: "a"}, "b", true, "a", "b"},
+		{"candidate replaced", &store.AgentAppliedConfig{RuntimeTarget: "a", RuntimeTargetCandidate: "b"}, "c", true, "a", "c"},
+		{"record confirmed drops candidate", &store.AgentAppliedConfig{RuntimeTarget: "a", RuntimeTargetCandidate: "b"}, "a", true, "a", ""},
+		{"candidate confirmed", &store.AgentAppliedConfig{RuntimeTarget: "a", RuntimeTargetCandidate: "b"}, "b", true, "b", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &store.Agent{AppliedConfig: tc.cfg}
+			assert.Equal(t, tc.changed, recordRuntimeTarget(a, tc.reported))
+			var target, pending string
+			if a.AppliedConfig != nil {
+				target, pending = a.AppliedConfig.RuntimeTarget, a.AppliedConfig.RuntimeTargetCandidate
+			}
+			assert.Equal(t, tc.wantTarget, target)
+			assert.Equal(t, tc.wantPending, pending)
+		})
+	}
+}
+
+// markCountingStore counts MarkAgentContainerMissing calls, so a test can
+// tell a hub-side skip from the store guard rejecting the write.
+type markCountingStore struct {
+	store.Store
+	marks atomic.Int32
+}
+
+func (s *markCountingStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*store.Agent, error) {
+	s.marks.Add(1)
+	return s.Store.MarkAgentContainerMissing(ctx, id, brokerID, cutoff, message)
+}
+
+// TestReconcileMissing_HubGuardsSkipStoreWrite pins the hub-side last_seen
+// and reincarnation checks: they skip the agent before the store write is
+// attempted (the store's conditional UPDATE re-checks both as well).
+func TestReconcileMissing_HubGuardsSkipStoreWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		create    func(a *store.Agent) // applied when the agent is created
+		before    func(a *store.Agent) // applied (via UpdateAgent) after the clock expired
+		wantMarks int32
+	}{
+		{"expired agent is written", nil, nil, 1},
+		{"recent last_seen", func(a *store.Agent) { a.LastSeen = time.Now() }, nil, 0},
+		{"reincarnation in flight", nil, func(a *store.Agent) { a.ReincarnationState = store.ReincarnationStateStarting }, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReconcileFixture(t)
+			counting := &markCountingStore{Store: f.srv.store}
+			f.srv.store = counting
+			var mutate []func(*store.Agent)
+			if tc.create != nil {
+				mutate = append(mutate, tc.create)
+			}
+			a := f.addAgent("omitted", "running", "working", mutate...)
+			f.heartbeat(completeInventory())
+			f.expireClock(a.ID)
+			if tc.before != nil {
+				cur := f.get(a.ID)
+				tc.before(cur)
+				require.NoError(t, f.s.UpdateAgent(context.Background(), cur))
+			}
+			f.heartbeat(completeInventory())
+			assert.Equal(t, tc.wantMarks, counting.marks.Load())
+		})
+	}
 }
 
 // TestReconcileMissing_OtherBrokerUntouched: an agent of another broker is
@@ -572,6 +709,10 @@ func TestMissingAgentGraceFloor(t *testing.T) {
 	assert.Equal(t, DefaultMissingAgentGrace, s.missingAgentGrace())
 	s.config.MissingAgentGrace = 10 * time.Second
 	assert.Equal(t, DefaultMissingAgentGrace, s.missingAgentGrace())
+	s.config.MissingAgentGrace = MinMissingAgentGrace - time.Second
+	assert.Equal(t, DefaultMissingAgentGrace, s.missingAgentGrace(), "59s falls back")
+	s.config.MissingAgentGrace = MinMissingAgentGrace
+	assert.Equal(t, MinMissingAgentGrace, s.missingAgentGrace(), "exactly 1m is kept")
 	s.config.MissingAgentGrace = 5 * time.Minute
 	assert.Equal(t, 5*time.Minute, s.missingAgentGrace())
 }
