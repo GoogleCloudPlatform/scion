@@ -2025,6 +2025,16 @@ func mergeDispatchedAgent(dst, src *store.Agent) {
 	if src.RuntimeState != "" {
 		dst.RuntimeState = src.RuntimeState
 	}
+	// A resume that hit a version conflict re-reads the row as dst and
+	// retries with src (the in-memory agent the dispatch already ran
+	// against, including the caller's clear of a stale exit reason/code
+	// from the prior generation). Carry that clear through for a running
+	// resume, the same as the other running-phase fields above — otherwise
+	// the retry's full-row write would keep dst's stale values instead.
+	if src.Phase == string(state.PhaseRunning) {
+		dst.ExitReason = src.ExitReason
+		dst.ExitCode = src.ExitCode
+	}
 }
 
 func isTerminalAgentPhase(phase string) bool {

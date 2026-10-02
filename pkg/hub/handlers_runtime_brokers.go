@@ -927,6 +927,17 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						// lost; leave phase and message for the eventual
 						// terminal report to set, same as the
 						// agentInTerminalPhase backfill above.
+						//
+						// Known gap: a heartbeat gathered from the old pod
+						// while it was still terminating can land after a
+						// restart or create-resume has already cleared the
+						// reason for the new generation (ClearExit; see
+						// store.AgentStatusUpdate), writing the stale reason
+						// back onto it. This branch has no way to tell the
+						// old pod's identity from the new one. The window is
+						// narrow for Kubernetes: Start force-deletes a stale
+						// pod with no grace period before creating the
+						// replacement.
 						hbExitReason := state.ExitReason(agentHB.ExitReason)
 						isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
 						if isDisruption && agent.ExitReason == "" {

@@ -618,11 +618,14 @@ type AgentStatusUpdate struct {
 	// ClearExit, when true, clears ExitCode and ExitReason on this update —
 	// independent of any phase-transition-gated clear, since a lifecycle
 	// start/restart dispatch is a fresh generation of the agent regardless
-	// of its current phase (a running agent with a disruption reason
-	// recorded ahead of its pod actually stopping, see state.ExitReasonPreempted/
-	// ExitReasonEvicted, is the case this exists for: that reason describes
-	// the old pod, not the one the start/restart is bringing up).
-	ClearExit bool `json:"clearExit,omitempty"`
+	// of its current phase: an exit reason recorded against the agent's
+	// prior generation (for example state.ExitReasonPreempted/ExitReasonEvicted,
+	// which can be set on a still-running agent ahead of its pod actually
+	// stopping) describes the old pod, not the one the start/restart is
+	// bringing up. Internal to the lifecycle dispatch path — json:"-" so a
+	// status report from an external caller (an agent, or a user with
+	// update access) cannot set it through the wire API.
+	ClearExit bool `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.

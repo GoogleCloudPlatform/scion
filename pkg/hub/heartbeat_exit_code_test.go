@@ -383,14 +383,13 @@ func TestHeartbeatExitCode_CommittedDisruptionWhileRunning(t *testing.T) {
 	})
 }
 
-// TestHeartbeatExitCode_RestartClearsRunningPhaseReason covers the gap a
-// running-phase disruption reason opened: before this reason could be
-// recorded on a still-running agent, ExitReason was only ever cleared on a
-// stopped/error-to-running transition. A restart dispatched while the agent
-// is already running (for example because the pod that triggered the
-// disruption disappeared without sciontool ever reporting a stop) would
-// keep that stale reason into the new generation unless start/restart
-// clears it explicitly.
+// TestHeartbeatExitCode_RestartClearsRunningPhaseReason pins that a
+// disruption reason recorded on a still-running agent (for example because
+// the pod that triggered it disappeared without sciontool ever reporting a
+// stop) does not survive a restart or start dispatched while the agent was
+// already running: ExitReason/ExitCode describe the prior generation, not
+// the one the restart/start is bringing up, so they must be cleared
+// regardless of the current phase.
 func TestHeartbeatExitCode_RestartClearsRunningPhaseReason(t *testing.T) {
 	t.Run("restart", func(t *testing.T) {
 		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
@@ -776,18 +775,76 @@ func TestHeartbeatExitCode_JSONWireFormat(t *testing.T) {
 // broker's own phase tracking has nothing more specific to report. The
 // reason must still be recorded.
 func TestHeartbeatExitCode_LegacyPhaseRunningRecordsDisruption(t *testing.T) {
-	srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+	t.Run("records the reason", func(t *testing.T) {
+		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
 
-	code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
-		Slug: agentSlug,
-		// No structured Phase — only ContainerStatus, like a non-terminal
-		// List() result.
-		ContainerStatus: "Running",
-		ExitReason:      "preempted",
+		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+			Slug: agentSlug,
+			// No structured Phase — only ContainerStatus, like a non-terminal
+			// List() result.
+			ContainerStatus: "Running",
+			ExitReason:      "preempted",
+		})
+		assert.Equal(t, http.StatusOK, code)
+
+		got := getAgentState(t, s, agentSlug, projectID)
+		assert.Equal(t, "running", got.Phase, "ContainerStatus must still derive the running phase")
+		assert.Equal(t, "preempted", got.ExitReason, "the reason must not be dropped just because Phase was empty")
 	})
-	assert.Equal(t, http.StatusOK, code)
+
+	t.Run("an already-stored reason is not overwritten", func(t *testing.T) {
+		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+		agent := getAgentState(t, s, agentSlug, projectID)
+		agent.ExitReason = "evicted"
+		require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+			Slug:            agentSlug,
+			ContainerStatus: "Running",
+			ExitReason:      "preempted",
+		})
+		assert.Equal(t, http.StatusOK, code)
+
+		got := getAgentState(t, s, agentSlug, projectID)
+		assert.Equal(t, "evicted", got.ExitReason, "a stored reason must win over a later legacy-path heartbeat's reason")
+	})
+
+	t.Run("a non-disruption reason is not recorded", func(t *testing.T) {
+		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+			Slug:            agentSlug,
+			ContainerStatus: "Running",
+			ExitReason:      "crashed",
+		})
+		assert.Equal(t, http.StatusOK, code)
+
+		got := getAgentState(t, s, agentSlug, projectID)
+		assert.Equal(t, "", got.ExitReason, "only preempted/evicted are recorded by the legacy-path branch")
+	})
+}
+
+// TestStatusEndpoint_ClearExitNotSettableViaJSON pins ClearExit as internal
+// to the lifecycle start/restart dispatch path: the status endpoint decodes
+// its request body straight into store.AgentStatusUpdate, so a clearExit
+// field reachable from JSON would let any status reporter erase a stored
+// exit reason and code without going through start/restart at all.
+func TestStatusEndpoint_ClearExitNotSettableViaJSON(t *testing.T) {
+	srv, s, _, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+	agent := getAgentState(t, s, agentSlug, projectID)
+	agent.ExitReason = "preempted"
+	ec := 137
+	agent.ExitCode = &ec
+	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/status",
+		map[string]interface{}{"clearExit": true})
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	got := getAgentState(t, s, agentSlug, projectID)
-	assert.Equal(t, "running", got.Phase, "ContainerStatus must still derive the running phase")
-	assert.Equal(t, "preempted", got.ExitReason, "the reason must not be dropped just because Phase was empty")
+	assert.Equal(t, "preempted", got.ExitReason, "clearExit must not be settable through the status endpoint's JSON body")
+	require.NotNil(t, got.ExitCode)
+	assert.Equal(t, 137, *got.ExitCode)
 }

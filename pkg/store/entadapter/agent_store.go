@@ -1300,11 +1300,11 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 
 	// ClearExit covers the case the phase-transition clear above does not:
 	// a lifecycle start/restart dispatched while the CURRENT phase is
-	// already running (or anything else). A disruption reason can now be
+	// already running (or anything else). A disruption reason can be
 	// recorded on a still-running agent ahead of its pod actually stopping
-	// (state.ExitReasonPreempted/ExitReasonEvicted); without this, that
-	// reason describes the old pod and would otherwise survive into the
-	// new generation a start/restart brings up.
+	// (state.ExitReasonPreempted/ExitReasonEvicted), and that reason
+	// describes the old pod, not the new generation a start/restart brings
+	// up, so it must be cleared regardless of the current phase.
 	if su.ClearExit {
 		upd.ClearExitCode()
 		upd.SetExitReason("")
