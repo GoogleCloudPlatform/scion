@@ -361,6 +361,18 @@ type AgentStore interface {
 	// or the agent does not exist.
 	ClearAgentRuntimeTarget(ctx context.Context, id string) (cleared bool, newVersion int64, err error)
 
+	// SetAgentRuntimeTarget sets the runtime target and runtime target
+	// candidate in an agent's applied config (AgentAppliedConfig.RuntimeTarget,
+	// RuntimeTargetCandidate; an empty value removes the key) and changes
+	// nothing else: no other applied-config key, no other column, and not
+	// state_version. The write is conditional on state_version still being
+	// expectedVersion (the version the caller read), so a report based on a
+	// read from before ClearAgentRuntimeTarget, which bumps state_version,
+	// is rejected. It returns written=false, with no error, when the version
+	// no longer matches, the applied config changed concurrently, or the
+	// agent does not exist.
+	SetAgentRuntimeTarget(ctx context.Context, id string, expectedVersion int64, target, candidate string) (written bool, err error)
+
 	// FindOrphanedAgents returns agents whose RuntimeBrokerID references a broker
 	// that is offline or does not exist, and who are not in terminal states
 	// (stopped, error). Agents assigned to the given currentBrokerID are excluded.

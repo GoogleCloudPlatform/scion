@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -132,38 +133,68 @@ func agentRuntimeTarget(a *store.Agent) string {
 	return a.AppliedConfig.RuntimeTarget
 }
 
-// recordRuntimeTarget applies one heartbeat's runtime target report to the
-// agent's applied config and reports whether anything changed.
+// nextRuntimeTarget applies one heartbeat's runtime target report to the
+// recorded target and candidate in cfg (which may be nil) and returns the new
+// pair and whether it differs.
 //
-// A reported target that differs from the recorded one is first stored as a
+// A reported target that differs from the recorded one is first kept as a
 // candidate; it replaces the recorded target only when the next heartbeat
 // reports the same target. A heartbeat the broker built before a start or
 // restart was accepted, but that the Hub processes after the clear, can
 // therefore only set a candidate, which the next heartbeat (built after the
 // start) replaces or confirms. A report that matches the recorded target
 // drops any candidate. An empty report changes nothing.
-func recordRuntimeTarget(a *store.Agent, reported string) bool {
-	if reported == "" {
-		return false
+func nextRuntimeTarget(cfg *store.AgentAppliedConfig, reported string) (target, candidate string, changed bool) {
+	if cfg != nil {
+		target, candidate = cfg.RuntimeTarget, cfg.RuntimeTargetCandidate
 	}
-	cfg := a.AppliedConfig
-	if cfg == nil {
-		cfg = &store.AgentAppliedConfig{}
+	if reported == "" {
+		return target, candidate, false
 	}
 	switch reported {
-	case cfg.RuntimeTarget:
-		if cfg.RuntimeTargetCandidate == "" {
-			return false
+	case target:
+		if candidate == "" {
+			return target, candidate, false
 		}
-		cfg.RuntimeTargetCandidate = ""
-	case cfg.RuntimeTargetCandidate:
-		cfg.RuntimeTarget = reported
-		cfg.RuntimeTargetCandidate = ""
+		return target, "", true
+	case candidate:
+		return reported, "", true
 	default:
-		cfg.RuntimeTargetCandidate = reported
+		return target, reported, true
 	}
-	a.AppliedConfig = cfg
-	return true
+}
+
+// recordHeartbeatRuntimeTarget records the runtime target whose listing
+// reported the agent; the missing-container reconcile only considers an agent
+// whose recorded target a heartbeat lists as complete. A target is recorded
+// only after two consecutive heartbeats report it (see nextRuntimeTarget).
+//
+// The write is the targeted SetAgentRuntimeTarget, not a full-row update: it
+// changes only the two target keys, so it can never undo a concurrent status
+// write (for example a start setting phase running), and it is conditional on
+// the state_version this heartbeat read, so a report read before a clear
+// (which bumps state_version) is dropped. Nothing is written when the pair is
+// unchanged, so a steady heartbeat adds no store write.
+func (s *Server) recordHeartbeatRuntimeTarget(ctx context.Context, a *store.Agent, reported string) {
+	target, candidate, changed := nextRuntimeTarget(a.AppliedConfig, reported)
+	if !changed {
+		return
+	}
+	written, err := s.store.SetAgentRuntimeTarget(ctx, a.ID, a.StateVersion, target, candidate)
+	if err != nil {
+		slog.Warn("Failed to record the agent runtime target from heartbeat",
+			"agent_id", a.ID, "runtimeTarget", reported, "error", err)
+		return
+	}
+	if !written {
+		slog.Debug("Agent changed since the heartbeat read it; runtime target report dropped",
+			"agent_id", a.ID, "runtimeTarget", reported)
+		return
+	}
+	if a.AppliedConfig == nil {
+		a.AppliedConfig = &store.AgentAppliedConfig{}
+	}
+	a.AppliedConfig.RuntimeTarget, a.AppliedConfig.RuntimeTargetCandidate = target, candidate
 }
 
 // missingAgentTracker records, per broker, when this Hub process first saw

@@ -247,6 +247,139 @@ func TestAgentStore_ClearAgentRuntimeTarget(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, cleared)
 	})
+
+	t.Run("soft-deleted agent is a no-op", func(t *testing.T) {
+		a := makeAgent(projectID, "soft-deleted")
+		a.AppliedConfig = &store.AgentAppliedConfig{RuntimeTarget: "docker"}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		uid := uuid.MustParse(a.ID)
+		_, err := s.client.Agent.UpdateOneID(uid).SetDeletedAt(time.Now()).Save(ctx)
+		require.NoError(t, err)
+		before, err := s.client.Agent.Get(ctx, uid)
+		require.NoError(t, err)
+
+		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+		require.NoError(t, err)
+		assert.False(t, cleared)
+		after, err := s.client.Agent.Get(ctx, uid)
+		require.NoError(t, err)
+		assert.Equal(t, before.AppliedConfig, after.AppliedConfig, "applied_config unchanged")
+		assert.Equal(t, before.StateVersion, after.StateVersion)
+	})
+}
+
+func TestAgentStore_SetAgentRuntimeTarget(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	create := func(t *testing.T, name string, cfg *store.AgentAppliedConfig) *store.Agent {
+		t.Helper()
+		a := makeAgent(projectID, name)
+		a.AppliedConfig = cfg
+		require.NoError(t, s.CreateAgent(ctx, a))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		return got
+	}
+
+	t.Run("writes only the target keys and keeps state_version", func(t *testing.T) {
+		a := create(t, "set-target", &store.AgentAppliedConfig{
+			Image:         "example/image:1",
+			Profile:       "remote",
+			Env:           map[string]string{"A": "1"},
+			RuntimeTarget: "docker",
+		})
+		// A status write that does not bump state_version lands after the
+		// caller's read; the target write must keep it.
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running", Activity: "working"}))
+
+		written, err := s.SetAgentRuntimeTarget(ctx, a.ID, a.StateVersion, "docker", "kubernetes|context=c|namespace=n")
+		require.NoError(t, err)
+		assert.True(t, written)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "running", got.Phase)
+		assert.Equal(t, "working", got.Activity)
+		assert.Equal(t, a.StateVersion, got.StateVersion, "the target write does not bump state_version")
+		require.NotNil(t, got.AppliedConfig)
+		assert.Equal(t, "docker", got.AppliedConfig.RuntimeTarget)
+		assert.Equal(t, "kubernetes|context=c|namespace=n", got.AppliedConfig.RuntimeTargetCandidate)
+		assert.Equal(t, "example/image:1", got.AppliedConfig.Image)
+		assert.Equal(t, "remote", got.AppliedConfig.Profile)
+		assert.Equal(t, map[string]string{"A": "1"}, got.AppliedConfig.Env)
+
+		// Empty values remove the keys.
+		written, err = s.SetAgentRuntimeTarget(ctx, a.ID, a.StateVersion, "kubernetes|context=c|namespace=n", "")
+		require.NoError(t, err)
+		assert.True(t, written)
+		got, err = s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "kubernetes|context=c|namespace=n", got.AppliedConfig.RuntimeTarget)
+		assert.Empty(t, got.AppliedConfig.RuntimeTargetCandidate)
+		raw, err := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
+		require.NoError(t, err)
+		assert.NotContains(t, raw.AppliedConfig, "runtimeTargetCandidate")
+	})
+
+	t.Run("version mismatch writes nothing", func(t *testing.T) {
+		a := create(t, "set-stale", &store.AgentAppliedConfig{RuntimeTarget: "docker"})
+		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+		require.NoError(t, err)
+		require.True(t, cleared)
+
+		written, err := s.SetAgentRuntimeTarget(ctx, a.ID, a.StateVersion, "docker", "")
+		require.NoError(t, err)
+		assert.False(t, written)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Empty(t, got.AppliedConfig.RuntimeTarget, "a write based on a read before the clear is dropped")
+	})
+
+	t.Run("no applied config", func(t *testing.T) {
+		a := create(t, "set-no-config", nil)
+		written, err := s.SetAgentRuntimeTarget(ctx, a.ID, a.StateVersion, "", "docker")
+		require.NoError(t, err)
+		assert.True(t, written)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.AppliedConfig)
+		assert.Equal(t, "docker", got.AppliedConfig.RuntimeTargetCandidate)
+	})
+
+	t.Run("NULL applied config", func(t *testing.T) {
+		a := create(t, "set-null-config", nil)
+		_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).ClearAppliedConfig().Save(ctx)
+		require.NoError(t, err)
+		written, err := s.SetAgentRuntimeTarget(ctx, a.ID, a.StateVersion, "", "docker")
+		require.NoError(t, err)
+		assert.True(t, written)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.AppliedConfig)
+		assert.Equal(t, "docker", got.AppliedConfig.RuntimeTargetCandidate)
+	})
+
+	t.Run("unknown agent", func(t *testing.T) {
+		written, err := s.SetAgentRuntimeTarget(ctx, "00000000-0000-0000-0000-00000000abcd", 1, "docker", "")
+		require.NoError(t, err)
+		assert.False(t, written)
+	})
+
+	t.Run("soft-deleted agent", func(t *testing.T) {
+		a := create(t, "set-soft-deleted", &store.AgentAppliedConfig{RuntimeTarget: "docker"})
+		uid := uuid.MustParse(a.ID)
+		_, err := s.client.Agent.UpdateOneID(uid).SetDeletedAt(time.Now()).Save(ctx)
+		require.NoError(t, err)
+		before, err := s.client.Agent.Get(ctx, uid)
+		require.NoError(t, err)
+
+		written, err := s.SetAgentRuntimeTarget(ctx, a.ID, before.StateVersion, "", "kubernetes|context=c|namespace=n")
+		require.NoError(t, err)
+		assert.False(t, written)
+		after, err := s.client.Agent.Get(ctx, uid)
+		require.NoError(t, err)
+		assert.Equal(t, before.AppliedConfig, after.AppliedConfig)
+	})
 }
 
 // TestAgentStore_ClearAgentRuntimeTarget_WriteMiss covers the conditional
@@ -320,7 +453,7 @@ func TestAgentStore_ClearAgentRuntimeTarget_WriteMiss(t *testing.T) {
 			require.Error(t, err)
 			assert.False(t, cleared)
 			assert.Contains(t, err.Error(), "changed concurrently")
-			assert.Equal(t, clearRuntimeTargetAttempts, calls, "retries are bounded")
+			assert.Equal(t, 5, calls, "retries are bounded")
 		})
 	}
 }
@@ -355,11 +488,22 @@ func (d *captureDriver) Tx(context.Context) (dialect.Tx, error) { return dialect
 func (d *captureDriver) Close() error                           { return nil }
 func (d *captureDriver) Dialect() string                        { return d.dialectName }
 
-// TestAgentStore_ClearAgentRuntimeTarget_RowLock pins that the read inside
-// the clear's transaction locks the row (SELECT ... FOR UPDATE) on Postgres
-// and does not on SQLite, which has no row locks.
-func TestAgentStore_ClearAgentRuntimeTarget_RowLock(t *testing.T) {
+// TestAgentStore_RuntimeTarget_RowLock pins that the read inside the
+// transaction of the target clear and the target write locks the row
+// (SELECT ... FOR UPDATE) on Postgres and does not on SQLite, which has no
+// row locks.
+func TestAgentStore_RuntimeTarget_RowLock(t *testing.T) {
 	const id = "00000000-0000-0000-0000-00000000abcd"
+	calls := map[string]func(s *AgentStore) error{
+		"clear": func(s *AgentStore) error {
+			_, _, err := s.ClearAgentRuntimeTarget(context.Background(), id)
+			return err
+		},
+		"set": func(s *AgentStore) error {
+			_, err := s.SetAgentRuntimeTarget(context.Background(), id, 1, "docker", "")
+			return err
+		},
+	}
 	for _, tc := range []struct {
 		dialect string
 		lock    bool
@@ -367,26 +511,27 @@ func TestAgentStore_ClearAgentRuntimeTarget_RowLock(t *testing.T) {
 		{dialect.Postgres, true},
 		{dialect.SQLite, false},
 	} {
-		t.Run(tc.dialect, func(t *testing.T) {
-			drv := &captureDriver{dialectName: tc.dialect}
-			s := NewAgentStore(ent.NewClient(ent.Driver(drv)))
-			_, _, err := s.ClearAgentRuntimeTarget(context.Background(), id)
-			require.Error(t, err, "the capture driver fails every statement")
+		for name, call := range calls {
+			t.Run(name+"/"+tc.dialect, func(t *testing.T) {
+				drv := &captureDriver{dialectName: tc.dialect}
+				s := NewAgentStore(ent.NewClient(ent.Driver(drv)))
+				require.Error(t, call(s), "the capture driver fails every statement")
 
-			drv.mu.Lock()
-			defer drv.mu.Unlock()
-			var read string
-			for _, q := range drv.stmts {
-				if strings.Contains(q, "SELECT") && strings.Contains(q, "applied_config") {
-					read = q
+				drv.mu.Lock()
+				defer drv.mu.Unlock()
+				var read string
+				for _, q := range drv.stmts {
+					if strings.Contains(q, "SELECT") && strings.Contains(q, "applied_config") {
+						read = q
+					}
 				}
-			}
-			require.NotEmpty(t, read, "expected the clear's read, got %v", drv.stmts)
-			if tc.lock {
-				assert.Contains(t, read, "FOR UPDATE")
-			} else {
-				assert.NotContains(t, read, "FOR UPDATE")
-			}
-		})
+				require.NotEmpty(t, read, "expected the read, got %v", drv.stmts)
+				if tc.lock {
+					assert.Contains(t, read, "FOR UPDATE")
+				} else {
+					assert.NotContains(t, read, "FOR UPDATE")
+				}
+			})
+		}
 	}
 }

@@ -1617,6 +1617,93 @@ func (s *AgentStore) clearRuntimeTargetOnce(ctx context.Context, uid uuid.UUID, 
 	return clearRuntimeTargetResult{done: true, cleared: true, newVersion: newVersion}, nil
 }
 
+// appliedConfigUnchanged matches a row whose applied_config is still the
+// value read; an empty read also matches a NULL column.
+func appliedConfigUnchanged(read string) predicate.Agent {
+	if read == "" {
+		return agent.Or(agent.AppliedConfigIsNil(), agent.AppliedConfigEQ(""))
+	}
+	return agent.AppliedConfigEQ(read)
+}
+
+// SetAgentRuntimeTarget implements store.AgentStore. See the interface for
+// the contract.
+//
+// The read and the conditional write run in one transaction, with the row
+// locked where the dialect supports it. The write is conditional on
+// state_version and the stored applied config being unchanged, and edits
+// only the two target keys in the raw JSON, so concurrent status writes
+// (which do not touch applied_config) are never undone.
+func (s *AgentStore) SetAgentRuntimeTarget(ctx context.Context, id string, expectedVersion int64, target, candidate string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	// Prime dialect detection before opening a transaction (see
+	// UpdateAgentStatus).
+	useLock := s.usesRowLocks(ctx)
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil())
+	if useLock {
+		q = q.ForUpdate()
+	}
+	row, err := q.Select(agent.FieldAppliedConfig, agent.FieldStateVersion).Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return false, nil
+		}
+		return false, mapError(err)
+	}
+	if row.StateVersion != expectedVersion {
+		return false, nil
+	}
+	raw := map[string]json.RawMessage{}
+	if row.AppliedConfig != "" {
+		if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
+			return false, fmt.Errorf("set runtime target for agent %s: %w", id, err)
+		}
+	}
+	for key, value := range map[string]string{"runtimeTarget": target, "runtimeTargetCandidate": candidate} {
+		if value == "" {
+			delete(raw, key)
+			continue
+		}
+		enc, err := json.Marshal(value)
+		if err != nil {
+			return false, err
+		}
+		raw[key] = enc
+	}
+	updated, err := json.Marshal(raw)
+	if err != nil {
+		return false, err
+	}
+	n, err := tx.Agent.Update().
+		Where(
+			agent.IDEQ(uid),
+			agent.DeletedAtIsNil(),
+			agent.StateVersionEQ(expectedVersion),
+			appliedConfigUnchanged(row.AppliedConfig),
+		).
+		SetAppliedConfig(string(updated)).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // stalledExcluded lists the activities that disqualify a running agent from
 // being marked "stalled" (terminal, already-stalled, or intentionally waiting).
 var stalledExcluded = []string{"completed", "limits_exceeded", "blocked", "stalled", "offline", "waiting_for_input"}

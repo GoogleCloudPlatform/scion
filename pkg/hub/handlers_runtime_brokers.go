@@ -1038,24 +1038,14 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					needsUpdate = true
 				}
 			}
-			// Record the runtime target whose listing reported the agent;
-			// the missing-container reconcile only considers an agent whose
-			// recorded target a heartbeat lists as complete. A target is
-			// recorded only after two consecutive heartbeats report it (see
-			// nextRuntimeTarget). Written only when something changes, so a
-			// steady heartbeat adds no store write. The write is the
-			// versioned UpdateAgent on this fresh read, so a clear that lands
-			// in between makes it fail rather than restore an old target.
-			if recordRuntimeTarget(agent, agentHB.RuntimeTarget) {
-				needsUpdate = true
-			}
 			if needsUpdate {
 				if err := s.store.UpdateAgent(ctx, agent); err != nil {
 					slog.Warn("Failed to backfill agent config from heartbeat",
 						"agent_id", agent.ID, "harnessAuth", agentHB.HarnessAuth, "profile", agentHB.Profile,
-						"runtimeTarget", agentHB.RuntimeTarget, "error", err)
+						"error", err)
 				}
 			}
+			s.recordHeartbeatRuntimeTarget(ctx, agent, agentHB.RuntimeTarget)
 
 			// Reconcile the max_agents_per_broker reservation against the
 			// phase this heartbeat will actually persist — e.g. release on an

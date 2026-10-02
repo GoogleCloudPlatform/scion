@@ -472,6 +472,8 @@ func TestReconcileMissing_TargetReportedTwice(t *testing.T) {
 // change of target again needs two reports.
 func TestHeartbeat_RecordsRuntimeTargetOnChange(t *testing.T) {
 	f := newReconcileFixture(t)
+	counting := &markCountingStore{Store: f.srv.store}
+	f.srv.store = counting
 	a := f.addAgent("listed", "running", "working", withRuntimeTarget(""))
 	report := func(target string) {
 		f.send(brokerHeartbeatRequest{
@@ -489,19 +491,20 @@ func TestHeartbeat_RecordsRuntimeTargetOnChange(t *testing.T) {
 	require.NotNil(t, got.AppliedConfig)
 	assert.Empty(t, got.AppliedConfig.RuntimeTarget, "one report only sets a candidate")
 	assert.Equal(t, k8sTargetB, got.AppliedConfig.RuntimeTargetCandidate)
-	assert.Equal(t, v0+1, got.StateVersion)
+	assert.Equal(t, v0, got.StateVersion, "the target write does not bump state_version")
+	assert.Equal(t, int32(1), counting.targetWrites.Load())
 
 	report(k8sTargetB)
 	got = f.get(a.ID)
 	assert.Equal(t, k8sTargetB, got.AppliedConfig.RuntimeTarget, "the second matching report records it")
 	assert.Empty(t, got.AppliedConfig.RuntimeTargetCandidate)
-	v2 := got.StateVersion
-	assert.Equal(t, v0+2, v2)
+	assert.Equal(t, v0, got.StateVersion)
+	assert.Equal(t, int32(2), counting.targetWrites.Load())
 
 	for i := 0; i < 3; i++ {
 		report(k8sTargetB)
 	}
-	assert.Equal(t, v2, f.get(a.ID).StateVersion, "no row write while the target is unchanged")
+	assert.Equal(t, int32(2), counting.targetWrites.Load(), "no store write while the target is unchanged")
 
 	report(k8sTargetA)
 	got = f.get(a.ID)
@@ -517,12 +520,13 @@ func TestHeartbeat_RecordsRuntimeTargetOnChange(t *testing.T) {
 	report(k8sTargetA)
 	got = f.get(a.ID)
 	assert.Equal(t, k8sTargetA, got.AppliedConfig.RuntimeTarget, "two matching reports replace the record")
-	v := got.StateVersion
+	writes := counting.targetWrites.Load()
 
 	report("")
 	got = f.get(a.ID)
 	assert.Equal(t, k8sTargetA, got.AppliedConfig.RuntimeTarget, "a report without a target leaves the record alone")
-	assert.Equal(t, v, got.StateVersion)
+	assert.Equal(t, writes, counting.targetWrites.Load())
+	assert.Equal(t, v0, got.StateVersion)
 }
 
 // TestHeartbeat_StaleReportAfterClearNotRecorded: an agent on target B is
@@ -564,7 +568,52 @@ func TestHeartbeat_StaleReportAfterClearNotRecorded(t *testing.T) {
 	assert.Equal(t, k8sTargetB, got.AppliedConfig.RuntimeTargetCandidate, "the stale report is at most a candidate")
 }
 
-func TestRecordRuntimeTarget(t *testing.T) {
+// TestHeartbeat_TargetWriteKeepsConcurrentStatus: a start clears the target,
+// a heartbeat reads the agent, the start writes phase running (a status write
+// that does not bump state_version), and only then does the heartbeat write
+// the target it computed. The target write must change only the target keys,
+// so the phase stays running. A clear that lands after the heartbeat's read
+// makes the write a no-op instead.
+func TestHeartbeat_TargetWriteKeepsConcurrentStatus(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name          string
+		clearAfter    bool // clear after the heartbeat's read instead of before
+		wantCandidate string
+	}{
+		{"clear before the read", false, k8sTargetA},
+		{"clear after the read", true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReconcileFixture(t)
+			a := f.addAgent("starting", "suspended", "", withRuntimeTarget(k8sTargetB))
+			clearTarget := func() {
+				cleared, _, err := f.s.ClearAgentRuntimeTarget(ctx, a.ID)
+				require.NoError(t, err)
+				require.True(t, cleared)
+			}
+			if !tc.clearAfter {
+				clearTarget()
+			}
+			read := f.get(a.ID) // the heartbeat's read
+			if tc.clearAfter {
+				clearTarget()
+			}
+			require.NoError(t, f.s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running", Activity: "working"}))
+
+			f.srv.recordHeartbeatRuntimeTarget(ctx, read, k8sTargetA)
+
+			got := f.get(a.ID)
+			assert.Equal(t, "running", got.Phase, "the target write must not restore the phase the heartbeat read")
+			assert.Equal(t, "working", got.Activity)
+			require.NotNil(t, got.AppliedConfig)
+			assert.Empty(t, got.AppliedConfig.RuntimeTarget)
+			assert.Equal(t, tc.wantCandidate, got.AppliedConfig.RuntimeTargetCandidate)
+		})
+	}
+}
+
+func TestNextRuntimeTarget(t *testing.T) {
 	for _, tc := range []struct {
 		name                    string
 		cfg                     *store.AgentAppliedConfig
@@ -583,23 +632,26 @@ func TestRecordRuntimeTarget(t *testing.T) {
 		{"candidate confirmed", &store.AgentAppliedConfig{RuntimeTarget: "a", RuntimeTargetCandidate: "b"}, "b", true, "b", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a := &store.Agent{AppliedConfig: tc.cfg}
-			assert.Equal(t, tc.changed, recordRuntimeTarget(a, tc.reported))
-			var target, pending string
-			if a.AppliedConfig != nil {
-				target, pending = a.AppliedConfig.RuntimeTarget, a.AppliedConfig.RuntimeTargetCandidate
-			}
+			target, pending, changed := nextRuntimeTarget(tc.cfg, tc.reported)
+			assert.Equal(t, tc.changed, changed)
 			assert.Equal(t, tc.wantTarget, target)
 			assert.Equal(t, tc.wantPending, pending)
 		})
 	}
 }
 
-// markCountingStore counts MarkAgentContainerMissing calls, so a test can
-// tell a hub-side skip from the store guard rejecting the write.
+// markCountingStore counts MarkAgentContainerMissing and
+// SetAgentRuntimeTarget calls, so a test can tell a hub-side skip from the
+// store rejecting the write.
 type markCountingStore struct {
 	store.Store
-	marks atomic.Int32
+	marks        atomic.Int32
+	targetWrites atomic.Int32
+}
+
+func (s *markCountingStore) SetAgentRuntimeTarget(ctx context.Context, id string, expectedVersion int64, target, candidate string) (bool, error) {
+	s.targetWrites.Add(1)
+	return s.Store.SetAgentRuntimeTarget(ctx, id, expectedVersion, target, candidate)
 }
 
 func (s *markCountingStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*store.Agent, error) {
