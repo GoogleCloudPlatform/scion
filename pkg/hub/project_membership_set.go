@@ -1261,5 +1261,5 @@ func (svc *ProjectMembershipService) principalExistsDecision(ctx context.Context
 			HTTPStatus: 400,
 		}
 	}
-	return &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: err.Error(), HTTPStatus: 500}
+	return &MembershipDecision{Allowed: false, DenialCode: ErrCodeInternalError, Reason: err.Error(), HTTPStatus: 500}
 }
