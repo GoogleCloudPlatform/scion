@@ -19,6 +19,7 @@ package entadapter
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,37 +144,234 @@ func TestListDueSchedules_NonUTCLocal(t *testing.T) {
 	}
 }
 
-// TestPurgeOldScheduledEvents_NonUTCLocal exercises the purge cutoff
-// predicate under the numeric-abbreviation Asia/Kathmandu zone, mirroring
-// TestListDueSchedules_NonUTCLocal for PurgeOldScheduledEvents's CreatedLT
-// bind.
-func TestPurgeOldScheduledEvents_NonUTCLocal(t *testing.T) {
-	loc, err := time.LoadLocation("Asia/Kathmandu")
-	require.NoError(t, err)
-	withLocal(t, loc)
+// nonUTCZones are the time.Local settings the timezone tests run under:
+// Asia/Kathmandu has no letter abbreviation (its Zone() name is the
+// numeric "+0545", which the SQLite driver cannot parse back), and
+// Asia/Tokyo has a named abbreviation ("JST") that reads back fine but
+// must still be stored as UTC text so TEXT comparisons stay correct.
+var nonUTCZones = []string{"Asia/Kathmandu", "Asia/Tokyo"}
 
-	s := newTestScheduleStore(t)
+// forEachNonUTCZone runs fn in a subtest per nonUTCZones entry, with
+// time.Local replaced for the subtest's duration.
+func forEachNonUTCZone(t *testing.T, fn func(t *testing.T)) {
+	t.Helper()
+	for _, zone := range nonUTCZones {
+		t.Run(zone, func(t *testing.T) {
+			loc, err := time.LoadLocation(zone)
+			require.NoError(t, err)
+			withLocal(t, loc)
+			fn(t)
+		})
+	}
+}
+
+// assertUTCColumn asserts that a time column holds UTC-normalised text.
+func assertUTCColumn(t *testing.T, s *ScheduleStore, table, column, id string) {
+	t.Helper()
+	typ, val := rawTimeColumn(t, s, table, column, id)
+	assert.Equal(t, "text", typ, "%s.%s storage type", table, column)
+	assert.True(t, strings.HasSuffix(val, " +0000 UTC'"),
+		"%s.%s must be stored as UTC text, got %s", table, column, val)
+}
+
+// TestScheduleStoreWritesUTC_NonUTCLocal runs every schedule store
+// mutator that writes a time column under a non-UTC time.Local, with
+// local-zone inputs, then checks each written column's raw storage and
+// that the row still reads back.
+func TestScheduleStoreWritesUTC_NonUTCLocal(t *testing.T) {
 	ctx := context.Background()
-	projectID := uuid.NewString()
 
-	old := newTestScheduledEvent(projectID)
-	old.CreatedAt = time.Now().Add(-48 * time.Hour)
-	require.NoError(t, s.CreateScheduledEvent(ctx, old))
-	require.NoError(t, s.UpdateScheduledEventStatus(ctx, old.ID, store.ScheduledEventFired, nil, ""))
+	// createSchedule stores a schedule with UTC inputs, so only the
+	// mutator under test can write a non-UTC value.
+	createSchedule := func(t *testing.T, s *ScheduleStore) *store.Schedule {
+		t.Helper()
+		sc := newTestSchedule(uuid.NewString(), "tz")
+		require.NoError(t, s.CreateSchedule(ctx, sc))
+		return sc
+	}
+	createEvent := func(t *testing.T, s *ScheduleStore) *store.ScheduledEvent {
+		t.Helper()
+		ev := newTestScheduledEvent(uuid.NewString())
+		require.NoError(t, s.CreateScheduledEvent(ctx, ev))
+		return ev
+	}
 
-	recent := newTestScheduledEvent(projectID)
-	require.NoError(t, s.CreateScheduledEvent(ctx, recent))
-	require.NoError(t, s.UpdateScheduledEventStatus(ctx, recent.ID, store.ScheduledEventFired, nil, ""))
+	scheduleCases := []struct {
+		name    string
+		columns []string
+		mutate  func(t *testing.T, s *ScheduleStore) string
+	}{
+		{
+			name:    "CreateSchedule local times",
+			columns: []string{"next_run_at", "last_run_at", "created", "updated"},
+			mutate: func(t *testing.T, s *ScheduleStore) string {
+				now := time.Now()
+				next, last := now.Add(time.Hour), now.Add(-time.Hour)
+				sc := newTestSchedule(uuid.NewString(), "tz")
+				sc.NextRunAt, sc.LastRunAt = &next, &last
+				sc.CreatedAt, sc.UpdatedAt = now, now
+				require.NoError(t, s.CreateSchedule(ctx, sc))
+				return sc.ID
+			},
+		},
+		{
+			name:    "CreateSchedule default created/updated",
+			columns: []string{"created", "updated"},
+			mutate: func(t *testing.T, s *ScheduleStore) string {
+				return createSchedule(t, s).ID
+			},
+		},
+		{
+			name:    "UpdateSchedule next_run_at",
+			columns: []string{"next_run_at", "updated"},
+			mutate: func(t *testing.T, s *ScheduleStore) string {
+				sc := createSchedule(t, s)
+				next := time.Now().Add(2 * time.Hour)
+				sc.NextRunAt = &next
+				require.NoError(t, s.UpdateSchedule(ctx, sc,
+					store.ScheduleFieldMask{NextRunAt: true}, 0, false, nil))
+				return sc.ID
+			},
+		},
+		{
+			name:    "UpdateSchedule name only",
+			columns: []string{"updated"},
+			mutate: func(t *testing.T, s *ScheduleStore) string {
+				sc := createSchedule(t, s)
+				sc.Name = "renamed"
+				require.NoError(t, s.UpdateSchedule(ctx, sc,
+					store.ScheduleFieldMask{Name: true}, 0, false, nil))
+				return sc.ID
+			},
+		},
+		{
+			name:    "UpdateScheduleStatus",
+			columns: []string{"updated"},
+			mutate: func(t *testing.T, s *ScheduleStore) string {
+				sc := createSchedule(t, s)
+				require.NoError(t, s.UpdateScheduleStatus(ctx, sc.ID, store.ScheduleStatusPaused))
+				return sc.ID
+			},
+		},
+		{
+			name:    "UpdateScheduleAfterRun",
+			columns: []string{"last_run_at", "next_run_at", "updated"},
+			mutate: func(t *testing.T, s *ScheduleStore) string {
+				sc := createSchedule(t, s)
+				now := time.Now()
+				require.NoError(t, s.UpdateScheduleAfterRun(ctx, sc.ID, now, now.Add(time.Hour), ""))
+				return sc.ID
+			},
+		},
+	}
+	for _, tc := range scheduleCases {
+		t.Run(tc.name, func(t *testing.T) {
+			forEachNonUTCZone(t, func(t *testing.T) {
+				s := newTestScheduleStore(t)
+				id := tc.mutate(t, s)
+				for _, col := range tc.columns {
+					assertUTCColumn(t, s, "schedules", col, id)
+				}
+				_, err := s.GetSchedule(ctx, id)
+				require.NoError(t, err)
+			})
+		})
+	}
 
-	cutoff := time.Now().Add(-24 * time.Hour)
-	n, err := s.PurgeOldScheduledEvents(ctx, cutoff)
-	require.NoError(t, err)
-	assert.Equal(t, 1, n)
+	eventCases := []struct {
+		name    string
+		columns []string
+		mutate  func(t *testing.T, s *ScheduleStore) string
+	}{
+		{
+			name:    "CreateScheduledEvent local times",
+			columns: []string{"fire_at", "fired_at", "created"},
+			mutate: func(t *testing.T, s *ScheduleStore) string {
+				now := time.Now()
+				fired := now.Add(-time.Minute)
+				ev := newTestScheduledEvent(uuid.NewString())
+				ev.FireAt, ev.FiredAt, ev.CreatedAt = now.Add(time.Hour), &fired, now
+				require.NoError(t, s.CreateScheduledEvent(ctx, ev))
+				return ev.ID
+			},
+		},
+		{
+			name:    "CreateScheduledEvent default created",
+			columns: []string{"created"},
+			mutate: func(t *testing.T, s *ScheduleStore) string {
+				return createEvent(t, s).ID
+			},
+		},
+		{
+			name:    "UpdateScheduledEventStatus fired_at",
+			columns: []string{"fired_at"},
+			mutate: func(t *testing.T, s *ScheduleStore) string {
+				ev := createEvent(t, s)
+				fired := time.Now()
+				require.NoError(t, s.UpdateScheduledEventStatus(ctx, ev.ID, store.ScheduledEventFired, &fired, ""))
+				return ev.ID
+			},
+		},
+		{
+			name:    "ClaimScheduledEvent fired_at",
+			columns: []string{"fired_at"},
+			mutate: func(t *testing.T, s *ScheduleStore) string {
+				ev := createEvent(t, s)
+				ok, err := s.ClaimScheduledEvent(ctx, ev.ID, store.ScheduledEventFired)
+				require.NoError(t, err)
+				require.True(t, ok)
+				return ev.ID
+			},
+		},
+	}
+	for _, tc := range eventCases {
+		t.Run(tc.name, func(t *testing.T) {
+			forEachNonUTCZone(t, func(t *testing.T) {
+				s := newTestScheduleStore(t)
+				id := tc.mutate(t, s)
+				for _, col := range tc.columns {
+					assertUTCColumn(t, s, "scheduled_events", col, id)
+				}
+				_, err := s.GetScheduledEvent(ctx, id)
+				require.NoError(t, err)
+			})
+		})
+	}
+}
 
-	_, err = s.GetScheduledEvent(ctx, old.ID)
-	assert.ErrorIs(t, err, store.ErrNotFound)
-	_, err = s.GetScheduledEvent(ctx, recent.ID)
-	require.NoError(t, err)
+// TestPurgeOldScheduledEvents_NonUTCLocal checks the purge cutoff bind
+// under non-UTC time.Local settings. The "inside" row sits 23h old
+// against a 24h cutoff, within the zone offset of the cutoff, so it is
+// deleted if the cutoff is compared as local-zone text.
+func TestPurgeOldScheduledEvents_NonUTCLocal(t *testing.T) {
+	forEachNonUTCZone(t, func(t *testing.T) {
+		s := newTestScheduleStore(t)
+		ctx := context.Background()
+		projectID := uuid.NewString()
+		now := time.Now()
+
+		newFired := func(age time.Duration) *store.ScheduledEvent {
+			ev := newTestScheduledEvent(projectID)
+			ev.CreatedAt = now.Add(-age)
+			require.NoError(t, s.CreateScheduledEvent(ctx, ev))
+			require.NoError(t, s.UpdateScheduledEventStatus(ctx, ev.ID, store.ScheduledEventFired, nil, ""))
+			return ev
+		}
+		old := newFired(48 * time.Hour)
+		inside := newFired(23 * time.Hour)
+		recent := newFired(0)
+
+		n, err := s.PurgeOldScheduledEvents(ctx, now.Add(-24*time.Hour))
+		require.NoError(t, err)
+		assert.Equal(t, 1, n)
+
+		_, err = s.GetScheduledEvent(ctx, old.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		_, err = s.GetScheduledEvent(ctx, inside.ID)
+		require.NoError(t, err, "row newer than the cutoff must survive")
+		_, err = s.GetScheduledEvent(ctx, recent.ID)
+		require.NoError(t, err)
+	})
 }
 
 // TestCreateScheduledEvent_FireInUnderNonUTCLocalRoundTrips mirrors the

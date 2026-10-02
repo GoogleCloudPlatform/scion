@@ -223,15 +223,7 @@ func TestScheduledEvent_CreateWithOffsetFireAt(t *testing.T) {
 	assert.WithinDuration(t, futureTime, fetched.FireAt, 2*time.Second)
 }
 
-// The fireIn-under-a-numeric-abbreviation-time.Local case
-// (TestCreateScheduledEvent_FireInUnderNonUTCLocalRoundTrips) lives in
-// pkg/store/entadapter instead of here: mutating the process-global
-// time.Local while this package's full hub server is up races background
-// goroutines started by server setup (observed via `go test -race`:
-// GCP/TLS client init calls time.Parse, which reads time.Local
-// concurrently). The entadapter package test exercises the same
-// time.Now().Add(duration) computation the handler performs, without that
-// concurrent background activity.
+// fireIn under a non-UTC time.Local is tested in pkg/store/entadapter.
 
 func TestScheduledEvent_CreateWithPlainFlag(t *testing.T) {
 	srv, _, projectID := setupScheduledEventTest(t)
