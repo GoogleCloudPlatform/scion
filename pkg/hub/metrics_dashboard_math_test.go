@@ -188,6 +188,32 @@ func TestQueryDailyTimeSeriesBucketsByEndDay(t *testing.T) {
 	assert.Equal(t, int64(6), byDay["2026-03-11"], "second day's increment is 10-4=6, not the raw value 10")
 }
 
+// TestQueryDailyTimeSeriesBucketsByUTCDay pins that day buckets are UTC
+// days whatever the hub process zone, which is what the dashboard's "(UTC)"
+// labels promise. 23:30Z on 10 March is 08:30 on 11 March in Tokyo; it must
+// still land in the 2026-03-10 bucket.
+func TestQueryDailyTimeSeriesBucketsByUTCDay(t *testing.T) {
+	origLocal := time.Local
+	time.Local = time.FixedZone("JST", 9*60*60)
+	defer func() { time.Local = origLocal }()
+
+	client := newFakeMetricsClient()
+	svc := newContractTestService(client)
+	end := time.Date(2026, 3, 10, 23, 30, 0, 0, time.UTC)
+	epoch := end.Add(-time.Hour)
+	filter := `metric.type = "` + metricPrefix + telemetrycontract.MetricAPICalls + `"`
+	client.seriesByFilter[filter] = []*monitoringpb.TimeSeries{{
+		Metric: &googlemetricpb.Metric{Type: metricPrefix + telemetrycontract.MetricAPICalls},
+		Points: []*monitoringpb.Point{intPoint(epoch, end, 5)},
+	}}
+
+	points, err := svc.queryDailyTimeSeries(context.Background(), telemetrycontract.MetricAPICalls, epoch.Add(-time.Hour), end.Add(time.Hour), nil)
+	require.NoError(t, err)
+	require.Len(t, points, 1)
+	assert.Equal(t, "2026-03-10", points[0].Timestamp)
+	assert.Equal(t, int64(5), points[0].Value)
+}
+
 // TestQuerySumTreatsNotFoundAsZero pins the "NotFound-as-zero" rule at the
 // querySum level directly (the contract test exercises it through
 // QuerySummary).

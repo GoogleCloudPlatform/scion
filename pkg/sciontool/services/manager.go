@@ -595,7 +595,7 @@ func (svc *managedService) writeLifecycle(format string, args ...interface{}) {
 	if svc.lifecycleFile == nil {
 		return
 	}
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	timestamp := log.Timestamp(time.Now())
 	msg := fmt.Sprintf(format, args...)
 	_, _ = fmt.Fprintf(svc.lifecycleFile, "[%s] %s\n", timestamp, msg)
 }
