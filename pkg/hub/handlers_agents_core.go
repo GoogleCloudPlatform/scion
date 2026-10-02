@@ -903,6 +903,13 @@ const (
 	createCleanupRuntimeTimeout = 30 * time.Second
 )
 
+// Values for cleanupFailedCreate's revokeCredentials argument, so call sites
+// read as intent rather than a bare bool.
+const (
+	cleanupRevokeCredentials = true
+	cleanupSkipRevoke        = false
+)
+
 // detachedCleanupContext returns a context that keeps ctx's values but not
 // its cancellation or deadline, bounded instead by timeout. It is for cleanup
 // that must run to completion even when the request that triggered it has
@@ -923,7 +930,13 @@ func detachedCleanupContext(ctx context.Context, timeout time.Duration) (context
 //  4. releases its quota reservations.
 //
 // Every step runs on a context detached from ctx with its own short budget,
-// so a canceled request cannot skip any of them. Failures are logged and
+// so a canceled request cannot skip any of them. The cleanup runs
+// synchronously, before the caller writes its error response, so it may delay
+// that response by up to ~45s in the worst case (5s revoke + 30s runtime
+// delete + 5s row delete + 5s release). That can exceed a client's own
+// timeout (the CLI's is 30s), in which case the client sees a timeout rather
+// than the create error — a deliberate trade for not leaking the agent's
+// row, runtime resources and reservations. Failures are logged and
 // otherwise ignored: the caller has already decided the create failed and is
 // about to report that error, which a cleanup failure must not replace.
 //
@@ -1909,7 +1922,8 @@ func (s *Server) createAgentInProject(
 			task = agent.AppliedConfig.Task
 		}
 		if err := s.managedAgentCreate(ctx, agent, task); err != nil {
-			s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, false, func(cctx context.Context) error {
+			// managedAgentCreate mints no agent credential: nothing to revoke.
+			s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, func(cctx context.Context) error {
 				return s.managedAgentDelete(cctx, agent)
 			})
 			RuntimeError(w, "Failed to create managed agent: "+err.Error())
@@ -1959,7 +1973,7 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts. No revoke here:
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
-					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, false, dispatchDeleteFailedCreate(dispatcher, agent))
+					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, dispatchDeleteFailedCreate(dispatcher, agent))
 					dispatchCreateErrorResponse(w, err)
 					return
 				} else if envReqs != nil {
@@ -1997,7 +2011,7 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts. No revoke here:
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
-					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, false, dispatchDeleteFailedCreate(dispatcher, agent))
+					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, dispatchDeleteFailedCreate(dispatcher, agent))
 					dispatchCreateErrorResponse(w, err)
 					return
 				} else if envReqs != nil && len(envReqs.Needs) > 0 {
@@ -2008,10 +2022,10 @@ func (s *Server) createAgentInProject(
 					// DispatchAgentCreateWithGather returned this as a value, not
 					// an error, so its own revoke-on-failure defer did not fire —
 					// the cleanup revokes the credential it minted instead
-					// (revokeCredentials=true), before the row is deleted
+					// (cleanupRevokeCredentials), before the row is deleted
 					// (ptone/scion#1956: a create that fails after the mint must
 					// not leave the credential valid for its full TTL).
-					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, true, dispatchDeleteFailedCreate(dispatcher, agent))
+					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupRevokeCredentials, dispatchDeleteFailedCreate(dispatcher, agent))
 					MissingEnvVars(w, envReqs.Needs, s.buildEnvGatherResponse(ctx, agent, envReqs))
 					return
 				} else {
