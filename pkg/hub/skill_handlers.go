@@ -2010,6 +2010,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 // value resolveGitHubSkill resolved for this request, passed through so the
 // refreshed entry's TokenScope is preserved rather than overwritten with "".
 func (s *Server) refreshGitHubSkillInBackground(cacheKey, rawURI string, ghRef *agent.GitHubSkillRef, token, installID string, isBranchRef bool) {
+	injectGHFlightJoin(cacheKey)
 	ctx, cancel := context.WithTimeout(context.Background(), hubGitHubRefreshTimeout)
 	defer cancel()
 

@@ -835,19 +835,22 @@ func TestResolveGitHubSkill_ShortDeadlineLeaderDoesNotFailWaiter(t *testing.T) {
 	proceed := make(chan struct{})
 	var proceedOnce sync.Once
 	closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
-	handlerCancelled := make(chan struct{}, 1)
-
+	// reqCtx captures the request context the handler actually runs under —
+	// the flight's own, shared by leader and waiter alike — the first (and
+	// only; the flight coalesces both) time the handler runs, so it can be
+	// inspected deterministically below instead of racing a timer against
+	// whether a wrongly-applied leader deadline fires.
+	var reqCtx context.Context
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, r *http.Request) {
-		enterOnce.Do(func() { close(entered) })
+		enterOnce.Do(func() {
+			reqCtx = r.Context()
+			close(entered)
+		})
 		select {
 		case <-proceed:
 			_, _ = w.Write([]byte(commitSHA))
 		case <-r.Context().Done():
-			select {
-			case handlerCancelled <- struct{}{}:
-			default:
-			}
 		}
 	})
 	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
@@ -901,13 +904,16 @@ func TestResolveGitHubSkill_ShortDeadlineLeaderDoesNotFailWaiter(t *testing.T) {
 
 	<-leaderCtx.Done() // let the leader's own deadline pass
 
-	// Give a leader-bound flight (the regression this test targets) a moment
-	// to observe its own deadline and cancel the request, before releasing
-	// proceed — otherwise a short race could let the handler succeed via
-	// proceed before the wrongly-applied deadline had a chance to fire.
-	select {
-	case <-handlerCancelled:
-	case <-time.After(time.Second):
+	// Deterministic check, no fixed wait: the request context the handler is
+	// actually running under must still be alive the moment the leader's own
+	// deadline has passed — a flight wrongly tied to that deadline would have
+	// already cancelled it by now (net/http propagates request-context
+	// cancellation to the server's r.Context() by closing the underlying
+	// connection, not through any Deadline() visible server-side, so this
+	// checks liveness directly rather than comparing deadlines as the
+	// broker-side version of this test does).
+	if err := reqCtx.Err(); err != nil {
+		t.Fatalf("request context ended when the leader's own deadline passed: %v", err)
 	}
 
 	closeProceed()
@@ -1048,6 +1054,141 @@ func TestResolveGitHubSkill_PastMaxStaleAgeResolvesSynchronously(t *testing.T) {
 	assert.Equal(t, safeShortSHA(freshSHA), resp.ResolvedVersion,
 		"an entry past MaxResolutionStaleAge must not be served stale")
 	assert.Equal(t, int64(2), calls.Load(), "must resolve synchronously via exactly one commit + one contents call")
+}
+
+// TestResolveGitHubSkill_SHARefNeverServedStale is the acceptance test for
+// excluding commit-SHA refs from stale-serve on the hub: a SHA ref is
+// immutable once resolved, so an expired row must always trigger a
+// synchronous re-resolution, never the stale-serve path that branch refs
+// use — even when the row is well within agent.MaxResolutionStaleAge.
+func TestResolveGitHubSkill_SHARefNeverServedStale(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "sha-repo"
+		skillPath = "skills/widget"
+		sha       = "5555555555555555555555555555555555555555"
+		uri       = "gh://" + owner + "/" + repo + "/widget@" + sha
+	)
+
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+
+	var contentsCalls atomic.Int64
+	mux := http.NewServeMux()
+	// No commits handler is registered: a full-SHA ref is already resolved
+	// and must never trigger a commits/{ref} call (see isFullCommitSHA).
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+		contentsCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	ghRef, err := agent.ParseGitHubSkillURI(uri)
+	require.NoError(t, err)
+	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+
+	ctx := context.Background()
+	require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
+		CommitSHA:   sha,
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "old", Size: 1}},
+		BundleHash:  "sha256:old",
+		TokenScope:  "public",
+		// Expired, but well within MaxResolutionStaleAge — if this were a
+		// branch ref, it would be served stale. A SHA ref must not be.
+		ExpiresAt:   time.Now().Add(-time.Minute),
+		OriginalURI: uri,
+	}))
+
+	resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, safeShortSHA(sha), resp.ResolvedVersion)
+	assert.NotEqual(t, "sha256:old", resp.ContentHash,
+		"must not serve the stale cached entry — the content hash should reflect a fresh resolution")
+	assert.Equal(t, int64(1), contentsCalls.Load(),
+		"an expired SHA-ref entry must trigger exactly one synchronous re-resolution, never a stale-serve")
+}
+
+// TestResolveGitHubSkill_RefreshFailureBackoffSkipsRetry is the acceptance
+// test for the refresh-failure backoff on the hub: once a background refresh
+// has failed recently for a cache key, a later stale hit for that key must
+// not start another one — it must keep serving the stale value, with zero
+// additional GitHub calls, until the backoff window passes. The failure is
+// primed directly via recordGHRefreshFailure, exactly as
+// refreshGitHubSkillInBackground would have left it after a real failure.
+//
+// The backoff decision is made synchronously inside resolveGitHubSkill,
+// before it returns, but a wrongly launched refresh runs in its own
+// goroutine; ghFlightJoinHook fires as refreshGitHubSkillInBackground's first
+// statement, before any GitHub call, so the bound below only has to cover
+// that goroutine getting scheduled, not completing any work.
+func TestResolveGitHubSkill_RefreshFailureBackoffSkipsRetry(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "backoff-repo"
+		skillPath = "skills/widget"
+		uri       = "gh://" + owner + "/" + repo + "/widget@main"
+		staleSHA  = "6666666666666666666666666666666666666666"
+	)
+
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+
+	var calls atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	ghRef, err := agent.ParseGitHubSkillURI(uri)
+	require.NoError(t, err)
+	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+
+	ctx := context.Background()
+	require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
+		CommitSHA:   staleSHA,
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1}},
+		BundleHash:  "sha256:stale",
+		TokenScope:  "public",
+		ExpiresAt:   time.Now().Add(-time.Minute),
+		OriginalURI: uri,
+	}))
+
+	srv.recordGHRefreshFailure(cacheKey)
+
+	flightStarted := make(chan struct{})
+	var startedOnce sync.Once
+	ghFlightJoinHook = func(key string) {
+		if key == cacheKey {
+			startedOnce.Do(func() { close(flightStarted) })
+		}
+	}
+	t.Cleanup(func() { ghFlightJoinHook = nil })
+
+	resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, safeShortSHA(staleSHA), resp.ResolvedVersion,
+		"must keep serving the stale value while backed off")
+
+	select {
+	case <-flightStarted:
+		t.Fatal("a background refresh was started while within the refresh-failure backoff window")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	assert.Equal(t, int64(0), calls.Load(),
+		"must not retry a refresh while within the refresh-failure backoff window")
 }
 
 // generateTestGitHubAppKey generates a throwaway RSA private key in PEM
