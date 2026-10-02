@@ -354,7 +354,7 @@ func TestTryProvisionWorktree_ProvisionThenStart_RepoRootSurvives(t *testing.T) 
 
 	srv := &Server{}
 	provisionOpts := &api.StartOptions{}
-	provisioned, repoRoot := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	provisioned, repoRoot, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name:          "agent-a",
 		AgentID:       "agent-a",
 		ProjectID:     "p1",
@@ -363,8 +363,8 @@ func TestTryProvisionWorktree_ProvisionThenStart_RepoRootSurvives(t *testing.T) 
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: gc},
 	}, provisionOpts, map[string]string{})
-	if !provisioned || repoRoot == "" || provisionOpts.Workspace == "" {
-		t.Fatalf("tryProvisionWorktree setup failed: provisioned=%v repoRoot=%q workspace=%q", provisioned, repoRoot, provisionOpts.Workspace)
+	if err != nil || !provisioned || repoRoot == "" || provisionOpts.Workspace == "" {
+		t.Fatalf("tryProvisionWorktree setup failed: err=%v provisioned=%v repoRoot=%q workspace=%q", err, provisioned, repoRoot, provisionOpts.Workspace)
 	}
 
 	projectScionDir := setupRepoRootProjectScaffold(t, t.TempDir())

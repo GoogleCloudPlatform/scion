@@ -16,6 +16,7 @@ package provision
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -3714,9 +3715,17 @@ func TestWorktreePath(t *testing.T) {
 	}
 }
 
-// --- IsRealWorktreeDir ---
+// --- IsValidJoinWorktree (consolidated onto ValidateWorktreeForBase, with the
+// Lstat .git symlink front-guard) ---
+//
+// These cases were originally written directly against main's own
+// IsRealWorktreeDir/isDirectChildOfWorktreesDir helpers before the stack's
+// ValidateWorktreeForBase (admin-directory back-link proof included) was
+// consolidated in as the one implementation both JOIN sites and the
+// mount-time gate share. Ported one-for-one onto IsValidJoinWorktree so no
+// case either side's helper covered is lost in the consolidation.
 
-func TestIsRealWorktreeDir(t *testing.T) {
+func TestIsValidJoinWorktree(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
@@ -3737,8 +3746,8 @@ func TestIsRealWorktreeDir(t *testing.T) {
 	realWorktree := WorktreePath(base, "agent-1")
 
 	t.Run("a real worktree", func(t *testing.T) {
-		if !IsRealWorktreeDir(realWorktree, base) {
-			t.Error("expected the freshly created worktree to be recognized as real")
+		if err := IsValidJoinWorktree(base, realWorktree); err != nil {
+			t.Errorf("expected the freshly created worktree to be recognized as real: %v", err)
 		}
 	})
 
@@ -3747,7 +3756,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a plain file to be rejected")
 		}
 	})
@@ -3758,7 +3767,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.Symlink(target, p); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a symlink to be rejected even when it points at a directory")
 		}
 	})
@@ -3773,7 +3782,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.Symlink(realWorktree, p); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a symlink to another agent's real worktree to be rejected")
 		}
 	})
@@ -3783,7 +3792,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.MkdirAll(p, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a directory with no .git to be rejected")
 		}
 	})
@@ -3793,7 +3802,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(p, ".git"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a directory whose .git is a directory (a full clone, not a worktree) to be rejected")
 		}
 	})
@@ -3810,7 +3819,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(p, ".git"), []byte("gitdir: "+outsideAdminDir+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a .git file pointing outside this base's admin directory to be rejected")
 		}
 	})
@@ -3824,7 +3833,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(p, ".git"), []byte("gitdir: "+adminDir+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a .git file naming the admin directory itself (rel \".\") to be rejected")
 		}
 	})
@@ -3841,7 +3850,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(p, ".git"), []byte("gitdir: "+nested+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a .git file naming a path nested more than one element under the admin directory to be rejected")
 		}
 	})
@@ -3855,7 +3864,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(p, ".git"), []byte("gitdir: "+dotGit+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a .git file naming the base's own .git directory (rel \"..\") to be rejected")
 		}
 	})
@@ -3970,12 +3979,24 @@ func TestProvision_EnsureWorktree_OwnPathNotRealWorktree_Refused(t *testing.T) {
 	assert.Empty(t, sharers, "expected no sharer marker written on refusal")
 }
 
-// TestProvision_EnsureWorktree_RegistryNamesNonWorktree_Refused proves
-// ProvisionShared refuses to join a sharer-registry entry that does not name
-// a real, direct-child worktree of this checkout — directly at the provision
-// package level. The original sharer's own registration must survive
-// unchanged, and no new agent must be added to it.
-func TestProvision_EnsureWorktree_RegistryNamesNonWorktree_Refused(t *testing.T) {
+// TestProvision_EnsureWorktree_RegistryNamesNonWorktree_DiscardedAndRecreated
+// proves the registry read boundary's discard-and-recreate path for a
+// trickery-free bad marker: a subdirectory of another agent's real worktree
+// is physically in-tree but not the canonical direct-child
+// "worktrees/<name>" shape, and contains neither a ".." component nor a
+// symlink hop on the way from base to it, so it carries no sign of a
+// deliberate path-escape attempt (see worktreePathEscapeAttempt). The
+// registry read boundary (readMarker) discards the whole marker rather than
+// refusing outright, ListSharers reports worktreePath="", and ProvisionShared
+// falls through to create agent-c its own fresh, canonical worktree.
+//
+// This was originally a hard-refusal test (renamed from
+// TestProvision_EnsureWorktree_RegistryNamesNonWorktree_Refused): a plain,
+// trickery-free wrong-depth path is reclassified as benign/stale now that
+// the read boundary distinguishes it from an escape attempt, but the
+// named path itself must never be touched either way — that invariant is
+// asserted explicitly below.
+func TestProvision_EnsureWorktree_RegistryNamesNonWorktree_DiscardedAndRecreated(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
@@ -3985,7 +4006,7 @@ func TestProvision_EnsureWorktree_RegistryNamesNonWorktree_Refused(t *testing.T)
 
 	require.NoError(t, ProvisionShared(ProvisionInput{
 		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
-		ProjectID: "proj-registry-refused",
+		ProjectID: "proj-registry-discarded",
 		AgentID:   "agent-a",
 		AgentName: "agent-a",
 		Mode:      store.SharingModeWorktreePerAgent,
@@ -4002,23 +4023,41 @@ func TestProvision_EnsureWorktree_RegistryNamesNonWorktree_Refused(t *testing.T)
 	adminEntry := filepath.Join(hostPath, ".git", "worktrees", "fake-entry")
 	require.NoError(t, os.WriteFile(filepath.Join(nested, ".git"), []byte("gitdir: "+adminEntry+"\n"), 0o644))
 	require.NoError(t, RegisterSharer(hostPath, "other-branch", nested, "agent-a"))
+	nestedGitBefore, err := os.ReadFile(filepath.Join(nested, ".git"))
+	require.NoError(t, err)
+	nestedEntriesBefore, err := os.ReadDir(nested)
+	require.NoError(t, err)
 
-	err := ProvisionShared(ProvisionInput{
+	err = ProvisionShared(ProvisionInput{
 		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
-		ProjectID: "proj-registry-refused",
+		ProjectID: "proj-registry-discarded",
 		AgentID:   "agent-c",
 		AgentName: "other-branch",
 		Mode:      store.SharingModeWorktreePerAgent,
 		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
-	require.Error(t, err, "expected ProvisionShared to refuse joining a registry entry naming a non-direct-child path")
+	require.NoError(t, err, "expected ProvisionShared to recover by creating a fresh worktree, not refuse")
 
-	// agent-c must never have been added as a sharer.
+	// The stale nested path must never have been touched -- no mount, no
+	// write, no delete -- discard means "drop the reference," never "act on
+	// what the bad marker pointed to."
+	require.DirExists(t, nested, "the stale nested path must still exist, untouched")
+	nestedGitAfter, err := os.ReadFile(filepath.Join(nested, ".git"))
+	require.NoError(t, err)
+	assert.Equal(t, nestedGitBefore, nestedGitAfter, "the stale nested path's gitfile must survive byte-identical")
+	nestedEntriesAfter, err := os.ReadDir(nested)
+	require.NoError(t, err)
+	assert.Equal(t, len(nestedEntriesBefore), len(nestedEntriesAfter), "the stale nested path's contents must survive untouched")
+
+	// agent-c must have gotten its own fresh, canonical worktree, and the
+	// registry must now point at it instead of the stale nested path.
+	wtC := WorktreePath(hostPath, "agent-c")
+	require.DirExists(t, wtC, "expected a fresh canonical worktree for agent-c")
 	sharers, wtPath, listErr := ListSharers(hostPath, "other-branch")
 	require.NoError(t, listErr)
-	assert.Equal(t, nested, wtPath, "the original (bogus) registration must survive unchanged")
-	assert.Equal(t, []string{"agent-a"}, sharers, "expected no new agent added to the registry on refusal")
+	assert.Equal(t, wtC, wtPath, "registry must record the fresh worktree, not the stale nested path")
+	assert.Equal(t, []string{"agent-c"}, sharers)
 }
 
 // TestProvision_EnsureWorktree_RegistryNamesDirectChildNonWorktree_Refused
@@ -4139,10 +4178,21 @@ func TestProvision_EnsureWorktree_RegistryNamesNonCanonicalPath_Refused(t *testi
 			})
 			require.Error(t, err, "expected ProvisionShared to refuse joining a non-canonical registry marker")
 
-			sharers, wtPath, listErr := ListSharers(hostPath, branch)
-			require.NoError(t, listErr)
-			assert.Equal(t, marker, wtPath, "the original (bogus) registration must survive unchanged")
-			assert.Equal(t, []string{"agent-a"}, sharers, "expected no new agent added to the registry on refusal")
+			// The marker now consistently refuses to read (worktreePathEscapeAttempt
+			// keeps surfacing it as an error, not just on the first read), so
+			// the original registration's survival is checked directly against
+			// the on-disk JSON rather than through ListSharers.
+			raw, readErr := os.ReadFile(sharerPath(hostPath, branch))
+			require.NoError(t, readErr, "the original (bogus) marker file must still exist, untouched")
+			var m sharerMarker
+			require.NoError(t, json.Unmarshal(raw, &m))
+			assert.Equal(t, marker, m.WorktreePath, "the original (bogus) registration must survive unchanged")
+			assert.Equal(t, []string{"agent-a"}, m.Sharers, "expected no new agent added to the registry on refusal")
+
+			// And the registry read boundary itself keeps refusing it
+			// consistently, rather than silently recovering on a later read.
+			_, _, listErr := ListSharers(hostPath, branch)
+			require.Error(t, listErr, "expected ListSharers to keep refusing a non-canonical marker, not silently discard it")
 		})
 	}
 }
@@ -4259,6 +4309,76 @@ func TestProvision_EnsureWorktree_FirstCollisionFallbackRefusesNonDirectChild(t 
 	if wtPath == nested {
 		t.Errorf("expected no marker naming the nested path %s, but the registry has one (sharers=%v)", nested, sharers)
 	}
+}
+
+// TestProvision_WorktreePerAgent_OutOfTreeMarker_CreatesFreshWorktree covers
+// Phase 1 acceptance: a sharer marker whose recorded WorktreePath is not
+// in-tree under base must not redirect a JOINing agent's workspace. The read
+// boundary (readMarker) discards the whole marker, ListSharers returns
+// worktreePath="", and ProvisionShared falls through to create a fresh
+// worktree for the joining agent instead of reusing the out-of-tree path.
+//
+// The out-of-tree marker is planted for a branch that has no real git worktree
+// backing it — the registry entry is the only place the (fake) association
+// lives, matching the actual exposure: a peer with RW access to the shared
+// .git can write a marker for a branch it never actually checked out.
+func TestProvision_WorktreePerAgent_OutOfTreeMarker_CreatesFreshWorktree(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	// Establish the shared base checkout via an unrelated agent/branch.
+	err := ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-outoftree-1",
+		AgentID:   "agent-setup",
+		AgentName: "setup-branch",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	})
+	require.NoError(t, err)
+
+	branch := "shared-branch"
+
+	// A peer plants an out-of-tree marker directly (simulating a write
+	// through the RW .git bind mount) for a branch that has no real git
+	// worktree, pointing WorktreePath at a host directory outside the base
+	// worktree tree.
+	outside := t.TempDir()
+	require.NoError(t, RegisterSharer(hostPath, branch, outside, "agent-c"))
+
+	// Sanity: the marker with an out-of-tree path is unreadable through the
+	// registry API — the whole marker (including its sharer entry) is discarded.
+	sharers, wtPath, err := ListSharers(hostPath, branch)
+	require.NoError(t, err)
+	assert.Empty(t, wtPath, "marker with an out-of-tree worktreePath must not surface it")
+	assert.Empty(t, sharers, "marker with an out-of-tree worktreePath must be discarded wholesale, not just its path")
+
+	// The victim agent provisions on the same branch. It must NOT be
+	// redirected to the out-of-tree external directory; it must get a fresh
+	// in-tree worktree.
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-outoftree-1",
+		AgentID:   "agent-victim",
+		AgentName: branch,
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	})
+	require.NoError(t, err)
+
+	wtVictim := WorktreePath(hostPath, "agent-victim")
+	require.DirExists(t, wtVictim, "provisioning must create a fresh in-tree worktree when the marker's path is out-of-tree")
+
+	_, wtPath, err = ListSharers(hostPath, branch)
+	require.NoError(t, err)
+	assert.Equal(t, wtVictim, wtPath, "registry must record the fresh in-tree worktree, not the out-of-tree path")
+	assert.NotEqual(t, outside, wtPath)
 }
 
 func TestProvision_WorktreePerAgent_UniqueBranches_SoleSharers(t *testing.T) {

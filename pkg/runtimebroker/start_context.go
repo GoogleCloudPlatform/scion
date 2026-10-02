@@ -1149,9 +1149,11 @@ func shouldCleanupPartialWorktree(projectRoot, worktreePath string, preExisted b
 // the exact string, not a resolved form of it — must already be the
 // canonical "worktrees/<name>" path, and must also be, once symlinks are
 // resolved, a direct child of base's own "worktrees" directory, and a real
-// git worktree of base (provision.IsRealWorktreeDir). The "worktrees"
-// directory itself is checked to confirm it is not a symlink; that check
-// does not by itself say anything about workspacePath's own location.
+// git worktree of base (provision.IsValidJoinWorktree, which also proves the
+// admin-directory back-link rather than just a gitdir pointer shape). The
+// "worktrees" directory itself is checked to confirm it is not a symlink;
+// that check does not by itself say anything about workspacePath's own
+// location.
 func validateMountedWorktree(workspacePath, base string) error {
 	worktreesDir := filepath.Join(base, "worktrees")
 	wtInfo, err := os.Lstat(worktreesDir)
@@ -1174,8 +1176,8 @@ func validateMountedWorktree(workspacePath, base string) error {
 		return fmt.Errorf("resolving %s: %w", worktreesDir, err)
 	}
 
-	if !provision.IsRealWorktreeDir(workspacePath, base) {
-		return fmt.Errorf("%s is not a git worktree of this checkout", workspacePath)
+	if err := provision.IsValidJoinWorktree(base, workspacePath); err != nil {
+		return fmt.Errorf("%s is not a git worktree of this checkout: %w", workspacePath, err)
 	}
 
 	resolvedWorkspace, err := filepath.EvalSymlinks(workspacePath)
@@ -1310,7 +1312,20 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		}
 	}
 	if !preExisted {
-		if _, regPath, err := provision.ListSharers(result.ProjectRoot, branch); err == nil && regPath != "" {
+		_, regPath, listErr := provision.ListSharers(result.ProjectRoot, branch)
+		if listErr != nil {
+			// The registry read boundary refused this branch's marker outright
+			// (an escape/symlink smell, not merely a stale or foreign value —
+			// see provision.readMarker) rather than silently discarding it.
+			// That is a deliberate signal, not an ordinary "nothing registered
+			// yet" absence: surface it as a hard failure here too, the same as
+			// ProvisionShared itself will if this call fell through instead.
+			// Treating it as "preExisted stays false" would let the fallback
+			// path below silently paper over a condition the registry layer
+			// chose to refuse.
+			return false, "", fmt.Errorf("worktree-per-agent: %w", listErr)
+		}
+		if regPath != "" {
 			if _, statErr := os.Lstat(regPath); statErr == nil {
 				preExisted = true
 			}
