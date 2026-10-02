@@ -1408,6 +1408,18 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 			}
 		}
 
+		// Step 3: Point project.OwnerID at the new owner, so the old owner no
+		// longer gets access through the resource-owner relationship rule
+		// (ptone/scion#2554). Read via tx, not the outer store.
+		project, getErr := tx.GetProject(ctx, req.ProjectID)
+		if getErr != nil {
+			return fmt.Errorf("load project: %w", getErr)
+		}
+		project.OwnerID = req.NewOwnerID
+		if upErr := tx.UpdateProject(ctx, project); upErr != nil {
+			return fmt.Errorf("update project owner: %w", upErr)
+		}
+
 		// Post-state invariant: verify at least one active direct owner exists.
 		// This query runs inside the transaction so it sees the committed state.
 		ownerCount, countErr := svc.countActiveDirectOwnersFromStore(ctx, tx, req.ProjectID)

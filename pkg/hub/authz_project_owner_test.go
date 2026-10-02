@@ -230,7 +230,7 @@ func TestAuthz_ProjectOwnerBypass_CreatorOwnerStillWorks(t *testing.T) {
 	decision := srv.authzService.CheckAccess(ctx, user, projectResource(project), ActionUpdate)
 	assert.True(t, decision.Allowed, "project creator (direct OwnerID) should still be allowed; reason=%q", decision.Reason)
 	// CO1: The AK1 kernel evaluates role bindings first; alice has a
-	// project-owner role binding (created by createProjectMembersGroup)
+	// project-owner role binding (created by seedProjectCreatorMembership)
 	// which includes project.update, so the role binding fires before the
 	// resource-owner relationship check.
 	assert.Equal(t, "role binding grant", decision.Reason)

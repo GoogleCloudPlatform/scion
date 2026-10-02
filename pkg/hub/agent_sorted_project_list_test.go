@@ -69,7 +69,7 @@ func sortedListSetup(t *testing.T) *sortedListFixture {
 		OwnerID: f.owner.ID, CreatedBy: f.owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, f.project))
-	srv.createProjectMembersGroup(ctx, f.project)
+	srv.seedProjectCreatorMembership(ctx, f.project)
 	createTestUserWithProjectRole(t, s, f.owner.ID, f.owner.Email, f.project.ID, store.ProjectRoleOwner)
 	msgAuthzAddProjectMember(t, s, f.member.ID, f.project.ID, f.project.Slug, store.GroupMemberRoleMember)
 

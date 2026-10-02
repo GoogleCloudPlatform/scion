@@ -1646,7 +1646,7 @@ func TestProjectRegister_ExistingProject_DeniesNonMemberWithoutBroker(t *testing
 		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	membersSlug := "project:" + project.Slug + ":members"
 	group, err := s.GetGroupBySlug(ctx, membersSlug)
@@ -1697,7 +1697,7 @@ func TestProjectRegister_ExistingProject_DeniesNonMemberWithBroker(t *testing.T)
 		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	broker := &store.RuntimeBroker{
 		ID: tid("register-authz-broker-1"), Name: "Register Authz Broker", Slug: "register-authz-broker-1",
@@ -1760,7 +1760,7 @@ func TestProjectRegister_ExistingProject_OwnerCanLinkBroker(t *testing.T) {
 		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	broker := &store.RuntimeBroker{
 		ID: tid("register-authz-broker-2"), Name: "Owner Link Broker", Slug: "owner-link-broker-2",
@@ -1842,7 +1842,7 @@ func TestProjectRegister_GitRemoteMatch_DeniedFallsThroughToNewCallerOwnedProjec
 		GitRemote: util.NormalizeGitRemote(remote), OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, existing))
-	srv.createProjectMembersGroup(ctx, existing)
+	srv.seedProjectCreatorMembership(ctx, existing)
 
 	membersSlug := "project:" + existing.Slug + ":members"
 	group, err := s.GetGroupBySlug(ctx, membersSlug)
@@ -1911,7 +1911,7 @@ func TestProjectRegister_SlugMatch_DeniesNonMemberWithoutBroker(t *testing.T) {
 		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	other := seedHubMemberNoProjects(t, s, "register-authz-slug-other") // grants hub-scope project.create only
 
@@ -1947,7 +1947,7 @@ func TestProjectRegister_ExistingProject_DeprecatedBrokerFlow_DeniesNonMember(t 
 		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	brokerName := "register-authz-embedded-broker"
 	other := seedHubMemberNoProjects(t, s, "register-authz-embedded-other") // grants hub-scope project.create only
@@ -1999,7 +1999,7 @@ func TestProjectCreate_ExistingID_DeniesNonMemberWithoutBinding(t *testing.T) {
 		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	membersSlug := "project:" + project.Slug + ":members"
 	group, err := s.GetGroupBySlug(ctx, membersSlug)

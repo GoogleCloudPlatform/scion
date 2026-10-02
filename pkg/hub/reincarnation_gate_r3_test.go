@@ -87,7 +87,7 @@ func TestSendAgentRouted_R1_MigratingSecondaryPersistFailureIsErrorNotDeferred(t
 	owner := NewAuthenticatedUser(userID, "r1@test.com", "Owner", "member", "cli")
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: "r1@test.com", DisplayName: "Owner"}))
 	ensureHubMembership(ctx, s, userID)
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, userID))
 	dispatcher := &brokerMockDispatcher{}
 	srv.SetDispatcher(dispatcher)

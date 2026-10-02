@@ -175,7 +175,7 @@ func TestU5a_BroadcastDirect_StripsReservedMetadata(t *testing.T) {
 	ensureHubMembership(ctx, s, user.ID)
 	project.CreatedBy = user.ID
 	require.NoError(t, s.UpdateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	agent := &store.Agent{ID: tid("u5a-bcast-agent"), Name: "agent", Slug: "agent", ProjectID: project.ID, Phase: "running"}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -218,7 +218,7 @@ func TestU5a_HandleBrokerInbound_StripsReservedMetadata(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	project := &store.Project{ID: tid("u5a-inbound-project"), Name: "u5a-inbound", Slug: "u5a-inbound"}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	target := &store.Agent{
 		ID: tid("u5a-inbound-target"), Name: "target", Slug: "target",
 		ProjectID: project.ID, Phase: "running", RuntimeBrokerID: broker.ID,
