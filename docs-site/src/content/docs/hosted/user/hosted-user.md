@@ -58,9 +58,9 @@ hub:
 
 ### Workspace Mode Change for Git Projects
 
-Once a git project is linked to a Hub, **all agents started via the Hub use HTTPS clone-based provisioning** rather than local Git worktrees — even if the broker machine already has the repository on disk.
+Once a git project is linked to a Hub, agents started via the Hub use **HTTPS clone-based provisioning** by default rather than local Git worktrees — even if the broker machine already has the repository on disk — unless the project is configured for worktree-per-agent mode (requires git 2.48+ on the broker).
 
-This means:
+For clone-based provisioning, this means:
 - A `GITHUB_TOKEN` with at least **Contents: Read** access is required. Set it as a secret or ensure it is in your local environment:
   ```bash
   scion hub secret set --project my-project GITHUB_TOKEN=ghp_xxxxxxxxxxxx

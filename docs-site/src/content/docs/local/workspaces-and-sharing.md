@@ -31,7 +31,7 @@ Every agent operates on the same repository history but has an independent worki
 
 - **Isolation:** per-agent working tree; shared history.
 - **Requires git:** yes.
-- **Availability:** supported in **local mode** today; not yet available on Hub-managed projects.
+- **Availability:** supported in **local mode** and on **Hub-managed projects** (requires git 2.48 or later on the broker).
 - **Best for:** local git projects where multiple agents work in parallel on the same repository.
 
 ### Clone-per-agent
@@ -56,10 +56,10 @@ When a Hub manages a git-based project, agents are provisioned with an independe
 A useful rule of thumb:
 
 - **No git, collaborate on shared files** → **Shared-plain**.
-- **Local git repo, parallel agents, one shared history** → **Worktree-per-agent**.
-- **Hub-managed git project, or agents that need fully independent checkouts** → **Clone-per-agent**.
+- **Parallel agents, one shared history** → **Worktree-per-agent** (local mode, or a Hub-managed project configured for it — requires git 2.48+ on the broker).
+- **Hub-managed git project (default), or agents that need fully independent checkouts** → **Clone-per-agent**.
 
-Note that the same git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, because Worktree-per-agent is not yet supported for Hub-managed projects.
+Note that the same git project used locally with worktrees uses clone-based provisioning by default once it is managed by a Hub, unless the project is explicitly configured for worktree-per-agent mode.
 
 ## Runtime environment variables
 
