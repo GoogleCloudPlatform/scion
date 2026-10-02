@@ -35,12 +35,15 @@
  * the terminal workspace becoming visible while a shell is still mounted.
  */
 
+/** The class on `<html>` that switches the document into frame mode. */
+export const APP_FRAME_CLASS = 'scion-app-frame';
+
 let refCount = 0;
 
 /** Mark one more shell as needing frame mode. */
 export function enterAppFrame(): void {
   refCount++;
-  document.documentElement.classList.add('scion-app-frame');
+  document.documentElement.classList.add(APP_FRAME_CLASS);
 }
 
 /**
@@ -50,7 +53,7 @@ export function enterAppFrame(): void {
 export function exitAppFrame(): void {
   refCount = Math.max(0, refCount - 1);
   if (refCount === 0) {
-    document.documentElement.classList.remove('scion-app-frame');
+    document.documentElement.classList.remove(APP_FRAME_CLASS);
   }
 }
 
