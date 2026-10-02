@@ -61,7 +61,7 @@ func seedExecutionAgent(t *testing.T, s store.Store, agentID, projectID string, 
 		if i+1 < len(chain) {
 			delegate = chain[i+1]
 		}
-		createDCEdge(t, s, delegatorType, chain[i], store.DelegationPrincipalAgent, delegate,
+		seedRecordedDelegationEdge(t, s, delegatorType, chain[i], store.DelegationPrincipalAgent, delegate,
 			store.RoleScopeProject, projectID, string(AgentRoleFull))
 	}
 }

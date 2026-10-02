@@ -156,11 +156,10 @@ func uatCeilingFromSelectors(t *testing.T, selectors ...string) store.EffectCeil
 	return boundedCeiling(sortedUniqueIDs(ids)...)
 }
 
-// The pure role cap: the minimal selector set fits baseline (self
-// operations are free); a readonly default stays readonly; an explicit role
-// over the ceiling denies; explicit none is allowed; a defaulted role that
-// fits nothing above none denies.
-func TestB3_UATChildRoleCappedWithinCeiling(t *testing.T) {
+// readonlyRoleUATSelectors returns the UAT selectors that cover the
+// readonly role's scopes: the seven read selectors of the worked example.
+func readonlyRoleUATSelectors(t *testing.T) []string {
+	t.Helper()
 	readSelectors := []string{}
 	for _, scope := range ScopesForRole(AgentRoleReadOnly) {
 		for _, permID := range agentScopeCoverage([]AgentTokenScope{scope}) {
@@ -172,6 +171,15 @@ func TestB3_UATChildRoleCappedWithinCeiling(t *testing.T) {
 	}
 	readSelectors = sortedUniqueIDs(readSelectors)
 	require.Len(t, readSelectors, 7, "the worked example uses seven read selectors")
+	return readSelectors
+}
+
+// The pure role cap: the minimal selector set fits baseline (self
+// operations are free); a readonly default stays readonly; an explicit role
+// over the ceiling denies; explicit none is allowed; a defaulted role that
+// fits nothing above none denies.
+func TestB3_UATChildRoleCappedWithinCeiling(t *testing.T) {
+	readSelectors := readonlyRoleUATSelectors(t)
 	createP, _ := registryPermission("agent.create")
 	minimal := uatCeilingFromSelectors(t, append([]string{createP.UATScope}, readSelectors...)...)
 	createAndProjectRead := uatCeilingFromSelectors(t, createP.UATScope, readSelectors[0])

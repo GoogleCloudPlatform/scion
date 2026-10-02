@@ -126,9 +126,40 @@ func TestAgentCreate_Characterization(t *testing.T) {
 		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})
 	t.Run("UAT with agent:create", func(t *testing.T) {
+		// The UAT's scopes fit no agent role above none, so a defaulted
+		// role is denied at the delegation ceiling and nothing is written.
 		uat := NewScopedUserIdentity(authUser(creator), f.proj.ID, []string{"agent:create"})
 		rec := requestAsIdentity(t, f.srv, uat, http.MethodPost, path, CreateAgentRequest{Name: "char-uat"})
-		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		apiErr := decodeTargetAPIError(t, rec)
+		assert.Equal(t, reasonNoUsableRole, apiErr.Message)
+		assert.Equal(t, string(DeniedByDelegationCeiling), apiErr.Details["denied_by"])
+		_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "char-uat")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+	t.Run("UAT with agent:create, explicit role none", func(t *testing.T) {
+		uat := NewScopedUserIdentity(authUser(creator), f.proj.ID, []string{"agent:create"})
+		rec := requestAsIdentity(t, f.srv, uat, http.MethodPost, path,
+			CreateAgentRequest{Name: "char-uat-none", AgentRole: string(AgentRoleNone)})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		agent, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "char-uat-none")
+		require.NoError(t, err)
+		require.NotNil(t, agent.AppliedConfig)
+		assert.Equal(t, string(AgentRoleNone), agent.AppliedConfig.AgentRole)
+		assert.True(t, agent.AppliedConfig.NoAuth, "role none maps to NoAuth")
+	})
+	t.Run("UAT with agent:create and the readonly selectors", func(t *testing.T) {
+		// The worked-example selector set fits baseline; a defaulted role is
+		// capped there.
+		createP, _ := registryPermission("agent.create")
+		selectors := append([]string{createP.UATScope}, readonlyRoleUATSelectors(t)...)
+		uat := NewScopedUserIdentity(authUser(creator), f.proj.ID, selectors)
+		rec := requestAsIdentity(t, f.srv, uat, http.MethodPost, path, CreateAgentRequest{Name: "char-uat-baseline"})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		agent, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "char-uat-baseline")
+		require.NoError(t, err)
+		require.NotNil(t, agent.AppliedConfig)
+		assert.Equal(t, string(AgentRoleBaseline), agent.AppliedConfig.AgentRole)
 	})
 	t.Run("agent with live user delegator", func(t *testing.T) {
 		rec := createAsAgent(t, f, f.caller.ID, CreateAgentRequest{Name: "char-agent"})
@@ -363,7 +394,7 @@ func TestAgentCreate_ServiceAccountParentAuthority(t *testing.T) {
 		scaCreateDelegatorWithoutAssign(t, f.store, delegator, "projsa-delegator@pc.test", f.projectID)
 		parent := tid("pc-projsa-parent")
 		createDCAgent(t, f.store, parent, f.projectID, delegator, AgentRoleFull)
-		createDCEdge(t, f.store, store.DelegationPrincipalUser, delegator, store.DelegationPrincipalAgent, parent,
+		seedRecordedDelegationEdge(t, f.store, store.DelegationPrincipalUser, delegator, store.DelegationPrincipalAgent, parent,
 			store.RoleScopeProject, f.projectID, string(AgentRoleFull))
 		sa := gcpServiceAccountResource(&store.GCPServiceAccount{
 			ID: tid("pc-projsa-sa"), CreatedBy: delegator,

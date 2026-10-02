@@ -59,7 +59,7 @@ func (f parentCeilingFixture) chain(t *testing.T, ids ...string) {
 	prev, prevType := f.userID, store.DelegationPrincipalUser
 	for _, id := range ids {
 		createDCAgent(t, f.store, id, f.projectID, prev, AgentRoleFull)
-		createDCEdge(t, f.store, prevType, prev, store.DelegationPrincipalAgent, id,
+		seedRecordedDelegationEdge(t, f.store, prevType, prev, store.DelegationPrincipalAgent, id,
 			store.RoleScopeProject, f.projectID, string(AgentRoleFull))
 		prev, prevType = id, store.DelegationPrincipalAgent
 	}
