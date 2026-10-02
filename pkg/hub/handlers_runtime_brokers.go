@@ -668,7 +668,7 @@ type brokerAgentHeartbeat struct {
 	HarnessAuth     string `json:"harnessAuth,omitempty"` // Resolved auth method from container labels
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
 	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
-	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed" or "limits_exceeded"
+	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed", "limits_exceeded", "preempted", or "evicted" (see state.ExitReason)
 }
 
 func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, id string) {
@@ -853,6 +853,38 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						statusUpdate.Activity = agentHB.Activity
 						statusUpdate.Message = agentHB.Message
 					}
+					// A Kubernetes pod disruption (preempted/evicted) is a
+					// graceful deletion: the pod gets SIGTERM, so sciontool
+					// reports a plain clean stop directly to the Hub before
+					// the broker's next heartbeat has a chance to observe
+					// the pod's disruption signal. By the time that
+					// heartbeat arrives the agent is already in a terminal
+					// phase, so without this the more specific reason is
+					// silently dropped and the agent is stuck reading as a
+					// plain stop — the exact symptom in #2528. Back it in
+					// only when nothing more specific is stored yet, and
+					// leave the phase itself untouched.
+					hbExitReason := state.ExitReason(agentHB.ExitReason)
+					isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
+					if isDisruption && agent.ExitReason == "" {
+						statusUpdate.ExitReason = agentHB.ExitReason
+						statusUpdate.ExitCode = agentHB.ExitCode
+						if isGenericStopMessage(agent.Message) {
+							// The heartbeat's own ExitCode may be nil (for example
+							// a disruption observed after the agent container
+							// never started), while the agent already has one on
+							// record from an earlier update — the store update
+							// above leaves that stored value untouched when
+							// statusUpdate.ExitCode is nil, so fall back to it
+							// here too, or the message would undersell what is
+							// actually going to be stored.
+							exitCode := agentHB.ExitCode
+							if exitCode == nil {
+								exitCode = agent.ExitCode
+							}
+							statusUpdate.Message = exitStatusMessage(hbExitReason, exitCode)
+						}
+					}
 				} else {
 					// Structured path: broker sent Phase/Activity directly.
 					// Guard against phase regressions: stale heartbeat data
@@ -878,7 +910,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 								slog.Debug("dropping invalid ExitReason from heartbeat", "exitReason", agentHB.ExitReason, "agent", agentHB.Slug)
 							}
 							if statusUpdate.Message == "" {
-								statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", *agentHB.ExitCode)
+								statusUpdate.Message = exitStatusMessage(state.ExitReason(statusUpdate.ExitReason), agentHB.ExitCode)
 							}
 						} else if hbPhase == state.PhaseStopped && agentHB.ExitCode == nil {
 							// Legacy fallback: parse from ContainerStatus string (old broker).
@@ -888,9 +920,21 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 								agentHB.Phase = string(state.PhaseError)
 								c := code
 								statusUpdate.ExitCode = &c
-								if statusUpdate.Message == "" {
-									statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", code)
-								}
+							}
+							// A structured ExitReason (for example a Kubernetes
+							// disruption, which may carry no meaningful exit code
+							// when the agent container never started) must still
+							// be persisted even when no legacy exit code parses
+							// above — a valid reason alone, with no non-zero
+							// code, is not something the ContainerStatus-parsing
+							// branch above accounts for.
+							if isValidExitReason(agentHB.ExitReason) {
+								statusUpdate.ExitReason = agentHB.ExitReason
+							} else if agentHB.ExitReason != "" {
+								slog.Debug("dropping invalid ExitReason from heartbeat", "exitReason", agentHB.ExitReason, "agent", agentHB.Slug)
+							}
+							if statusUpdate.Message == "" {
+								statusUpdate.Message = exitStatusMessage(state.ExitReason(statusUpdate.ExitReason), statusUpdate.ExitCode)
 							}
 						} else {
 							// PhaseStopped with ExitCode == 0 (clean exit) or
@@ -901,6 +945,38 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 							} else if agentHB.ExitReason != "" {
 								slog.Debug("dropping invalid ExitReason from heartbeat", "exitReason", agentHB.ExitReason, "agent", agentHB.Slug)
 							}
+							if statusUpdate.Message == "" {
+								statusUpdate.Message = exitStatusMessage(state.ExitReason(statusUpdate.ExitReason), agentHB.ExitCode)
+							}
+						}
+					} else {
+						// The pod is still running (not yet Stopped/Error) but
+						// the broker already observed a committed Kubernetes
+						// disruption (List() reports preempted/evicted ahead of
+						// the pod actually terminating — a deletionTimestamp
+						// plus a live DisruptionTarget condition, since
+						// scheduler preemption and the eviction API usually
+						// delete the pod object outright once it does
+						// terminate, often before any heartbeat sees a
+						// terminal phase). Record the reason now so it is not
+						// lost; leave phase and message for the eventual
+						// terminal report to set, same as the
+						// agentInTerminalPhase backfill above.
+						//
+						// Known gap: a heartbeat gathered from the old pod
+						// while it was still terminating can land after a
+						// restart or create-resume has already cleared the
+						// reason for the new generation (ClearExit; see
+						// store.AgentStatusUpdate), writing the stale reason
+						// back onto it. This branch has no way to tell the
+						// old pod's identity from the new one. The window is
+						// narrow for Kubernetes: Start force-deletes a stale
+						// pod with no grace period before creating the
+						// replacement.
+						hbExitReason := state.ExitReason(agentHB.ExitReason)
+						isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
+						if isDisruption && agent.ExitReason == "" {
+							statusUpdate.ExitReason = agentHB.ExitReason
 						}
 					}
 
@@ -964,6 +1040,20 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 							statusUpdate.Phase = string(state.PhaseProvisioning)
 						}
 					}
+				}
+				// A non-terminal pod's structured Phase is "" by design (see
+				// List()'s committed-disruption branch in k8s_runtime.go,
+				// which reports a preempted/evicted reason while a pod is
+				// still Running), so that heartbeat lands in this legacy
+				// branch too whenever the broker's own phase tracking has
+				// nothing more specific to report. Record the reason the
+				// same way as the structured non-terminal branch above: only
+				// when nothing more specific is stored yet, without
+				// touching the phase or message derived from ContainerStatus.
+				hbExitReason := state.ExitReason(agentHB.ExitReason)
+				isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
+				if isDisruption && agent.ExitReason == "" {
+					statusUpdate.ExitReason = agentHB.ExitReason
 				}
 			}
 
@@ -1239,4 +1329,48 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 // isValidExitReason reports whether reason is a valid ExitReason value.
 func isValidExitReason(reason string) bool {
 	return state.ExitReason(reason).IsValid()
+}
+
+// isGenericStopMessage reports whether msg is one of the stored agent.Message
+// values that carry no information beyond "the agent reported a plain stop":
+// empty (nothing recorded yet), or one of the fixed strings sciontool/the
+// hook handlers send for an ordinary graceful shutdown. A disruption reason
+// learned later from a heartbeat is strictly more informative than any of
+// these and may replace them; any other stored message is assumed to already
+// carry meaningful, possibly user-relevant text and is left alone.
+func isGenericStopMessage(msg string) bool {
+	switch msg {
+	case "", "Agent stopped", "Session ended":
+		return true
+	default:
+		return false
+	}
+}
+
+// exitStatusMessage returns the default human-readable status Message for a
+// terminal agent, derived from the resolved ExitReason and the structured
+// ExitCode reported by the broker. Kubernetes pod disruptions get their own
+// wording so a preempted or evicted agent is not reported as a generic
+// crash; every other reason (including the empty one) keeps the existing
+// "Agent crashed with exit code N" wording, and produces no message at all
+// when there is no non-zero exit code to report.
+func exitStatusMessage(reason state.ExitReason, exitCode *int) string {
+	hasNonZeroExit := exitCode != nil && *exitCode != 0
+	switch reason {
+	case state.ExitReasonPreempted:
+		if hasNonZeroExit {
+			return fmt.Sprintf("Agent pod was preempted, exit code %d", *exitCode)
+		}
+		return "Agent pod was preempted"
+	case state.ExitReasonEvicted:
+		if hasNonZeroExit {
+			return fmt.Sprintf("Agent pod was evicted, exit code %d", *exitCode)
+		}
+		return "Agent pod was evicted"
+	default:
+		if hasNonZeroExit {
+			return fmt.Sprintf("Agent crashed with exit code %d", *exitCode)
+		}
+		return ""
+	}
 }
