@@ -2800,7 +2800,46 @@ func TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit(t *testing.T) {
 	}
 }
 
-var startProcreapReaperOnce sync.Once
+// reaperTestChildEnv marks the re-executed test binary in which
+// TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD
+// actually starts the reaper (see runInReaperChild).
+const reaperTestChildEnv = "SCION_TEST_REAPER_CHILD"
+
+// runInReaperChild re-executes the current test binary to run only the
+// named test, with reaperTestChildEnv set, and fails t if that child
+// fails. It returns true in the child, where the caller should run its
+// real body.
+//
+// procreap.StartReaper has no stop function: once started, its SIGCHLD
+// handler reaps every unmanaged zombie child for the rest of the process.
+// Started in this test binary, it would outlive the test that started it
+// and race every later raw exec.Cmd.Wait in the package — test helpers
+// like gitConfigGet, and production paths that are not reaper-aware —
+// turning them into ECHILD-shaped order-dependent failures. Running the
+// test in a child process confines the reaper to that child.
+func runInReaperChild(t *testing.T) bool {
+	t.Helper()
+	if os.Getenv(reaperTestChildEnv) == "1" {
+		return true
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	cmd := exec.CommandContext(t.Context(), exe,
+		"-test.run=^"+t.Name()+"$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), reaperTestChildEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("reaper child test failed: %v\n%s", err, out)
+	}
+	// Guard against a vacuous pass: the child must have actually run
+	// (and passed) this test, not matched nothing.
+	if !strings.Contains(string(out), "--- PASS: "+t.Name()) {
+		t.Fatalf("reaper child did not report a pass for %s:\n%s", t.Name(), out)
+	}
+	return false
+}
 
 // TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD is the
 // regression test for the property that configureSharedWorkspaceGit's
@@ -2825,8 +2864,14 @@ var startProcreapReaperOnce sync.Once
 // TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD
 // ./cmd/sciontool/commands/`; with procreap.CombinedOutputManaged in place
 // it passes reliably.
+//
+// The reaper is started in a re-executed child of the test binary (see
+// runInReaperChild) so it never outlives this test.
 func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testing.T) {
-	startProcreapReaperOnce.Do(procreap.StartReaper)
+	if !runInReaperChild(t) {
+		return
+	}
+	procreap.StartReaper()
 
 	// log.Init() runs first because the logger's lazy initialization is not concurrency-safe.
 	log.Init()
