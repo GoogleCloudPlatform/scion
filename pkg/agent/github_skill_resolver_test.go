@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2411,5 +2412,813 @@ func TestGitHubSkillResolver_RawDownloadBodyTimeout_ClassifiedAsTimeout(t *testi
 	}
 	if !strings.Contains(result.Errors[0].Message, "failed to read skills/my-skill/SKILL.md") {
 		t.Errorf("expected error to name the file path in the read failure, got %s", result.Errors[0].Message)
+	}
+}
+
+func TestGitHubSkillResolver_PreferFallback(t *testing.T) {
+	cases := []struct {
+		name    string
+		uri     string
+		creds   map[string]string
+		prefers bool
+	}{
+		{"explicit ?token= param", "gh://owner/repo/skill?token=MY_TOKEN", nil, true},
+		{"repo convention credential present", "gh://owner/repo/skill", map[string]string{"GH_OWNER__REPO": "x"}, true},
+		{"owner convention credential present", "gh://owner/repo/skill", map[string]string{"GH_OWNER": "x"}, true},
+		{"no credential override, default token", "gh://owner/repo/skill", nil, false},
+		{"unrelated credential present routes through the primary", "gh://owner/repo/skill", map[string]string{"GH_OTHER": "x"}, false},
+		{"empty-value credential routes through the primary", "gh://owner/repo/skill", map[string]string{"GH_OWNER": ""}, false},
+		{"invalid URI routes through the primary", "not-a-gh-uri", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &GitHubSkillResolver{provisionCredentials: tc.creds}
+			got := r.PreferFallback(api.SkillReference{URI: tc.uri})
+			if got != tc.prefers {
+				t.Errorf("PreferFallback(%q) = %v, want %v", tc.uri, got, tc.prefers)
+			}
+		})
+	}
+}
+
+// failIfCalledResolver fails the test immediately if Resolve is ever called —
+// used to prove a hub-unservable ref never reaches the primary resolver.
+type failIfCalledResolver struct {
+	t *testing.T
+}
+
+func (f *failIfCalledResolver) ResolverName() string { return "hub" }
+func (f *failIfCalledResolver) Resolve(_ context.Context, refs []api.SkillReference, _ ResolveOpts) (*ResolveResult, error) {
+	f.t.Fatalf("primary (hub) resolver must not be called for a hub-unservable ref; got refs: %+v", refs)
+	return nil, nil
+}
+
+// TestGitHubSkillResolver_RouteFilter_CredentialedRefRoutesDirectlyToFallback
+// is the end-to-end acceptance test for R: a ref that needs a credential the
+// Hub cannot hold (here, a GH_OWNER convention credential) must be routed
+// directly to the local GitHub resolver through RoutingSkillResolver, making
+// zero calls to the primary (hub) resolver.
+func TestGitHubSkillResolver_RouteFilter_CredentialedRefRoutesDirectlyToFallback(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("hello"))
+	})
+
+	gh := &GitHubSkillResolver{
+		httpClient: server.Client(),
+		apiBase:    server.URL,
+		rawBase:    server.URL + "/raw",
+		provisionCredentials: map[string]string{
+			"GH_OWNER": "owner-level-secret",
+		},
+	}
+
+	router := NewRoutingSkillResolver(&failIfCalledResolver{t: t})
+	router.RegisterFallback("gh", gh)
+
+	result, err := router.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %+v", result.Errors)
+	}
+	if len(result.Resolved) != 1 {
+		t.Fatalf("expected 1 resolved skill, got %d", len(result.Resolved))
+	}
+}
+
+// TestGitHubSkillResolver_CrossProjectCredentialIsolation is the permanent
+// regression test for the cross-project flight-merge defect: two projects
+// that both define a same-named convention credential (GH_ACME), with
+// different values and different repo access, must never share a
+// single-flight result. Project B must never receive content fetched with
+// project A's credential.
+//
+// Before cache-key (flight identity) scoping was fixed to include
+// ResolveOpts.ProjectID, both projects' resolvers computed the identical,
+// unscoped flight identity "default" for this ref, so project B's resolve
+// joined project A's in-flight fetch and was served project A's result
+// (including file Content) — regardless of B's own credential having no
+// access to the repo.
+func TestGitHubSkillResolver_CrossProjectCredentialIsolation(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	proceed := make(chan struct{})
+	var proceedOnce sync.Once
+	closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
+	// Registered after newTestGitHubServer's own t.Cleanup(server.Close), so
+	// this runs first (cleanups run in reverse order): releasing any blocked
+	// handler before the server tries to close keeps a regression (project B
+	// incorrectly coalesced, so proceed is the only thing unblocking it) from
+	// turning into a hung Close() instead of a clean test failure.
+	t.Cleanup(closeProceed)
+
+	// Only secret-A (project A's credential) is accepted; secret-B (project
+	// B's) gets a 404, exactly as it would against the real GitHub API for a
+	// repo it has no access to.
+	authOK := func(r *http.Request) bool { return r.Header.Get("Authorization") == "Bearer secret-A" }
+	mux.HandleFunc("/repos/acme/private/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		if !authOK(r) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		enterOnce.Do(func() { close(entered) })
+		<-proceed
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/acme/private/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+		if !authOK(r) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
+		})
+	})
+	mux.HandleFunc("/raw/acme/private/"+testCommitSHA+"/skills/s/SKILL.md", func(w http.ResponseWriter, r *http.Request) {
+		if !authOK(r) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte("SECRET"))
+	})
+
+	// A single shared cache, exactly as the broker wires it (one
+	// GitHubResolutionCache singleton serving every project).
+	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	mk := func(tok string) *GitHubSkillResolver {
+		r := newTestGitHubResolver(server)
+		r.token = ""
+		r.provisionCredentials = map[string]string{"GH_ACME": tok}
+		r.resolutionCache = cache
+		return r
+	}
+	resolverA, resolverB := mk("secret-A"), mk("secret-B")
+	ref := api.SkillReference{URI: "gh://acme/private/s@main"}
+
+	var wg sync.WaitGroup
+	var resultA *ResolveResult
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		resultA, _ = resolverA.Resolve(context.Background(), []api.SkillReference{ref}, ResolveOpts{ProjectID: "project-A"})
+	}()
+
+	<-entered // project A's fetch has started and is blocked on proceed
+
+	var resultB *ResolveResult
+	doneB := make(chan struct{})
+	go func() {
+		resultB, _ = resolverB.Resolve(context.Background(), []api.SkillReference{ref}, ResolveOpts{ProjectID: "project-B"})
+		close(doneB)
+	}()
+
+	// With project scoping, B's flight is independent of A's: its commits
+	// call fails authOK immediately (404), with no need to wait on proceed at
+	// all. If B were instead coalesced into A's flight (the defect), this
+	// would hang until proceed is closed below — the select gives that
+	// failure mode a clean, bounded failure instead of a test-binary hang.
+	select {
+	case <-doneB:
+	case <-time.After(5 * time.Second):
+		t.Fatal("project B's resolve did not return independently of project A's in-flight fetch — it may have been incorrectly coalesced")
+	}
+
+	closeProceed()
+	wgDone := make(chan struct{})
+	go func() { wg.Wait(); close(wgDone) }()
+	select {
+	case <-wgDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("project A's resolve did not complete after proceed was closed")
+	}
+
+	if len(resultB.Resolved) != 0 {
+		t.Fatalf("project B must never receive content resolved with project A's credential, got: %+v", resultB.Resolved[0])
+	}
+	if len(resultB.Errors) != 1 {
+		t.Fatalf("expected project B to get its own resolve error, got %d errors and %d resolved", len(resultB.Errors), len(resultB.Resolved))
+	}
+
+	if len(resultA.Resolved) != 1 {
+		t.Fatalf("expected project A to resolve successfully, got errors: %+v", resultA.Errors)
+	}
+	if got := string(resultA.Resolved[0].Files[0].Content); got != "SECRET" {
+		t.Errorf("expected project A's content %q, got %q", "SECRET", got)
+	}
+}
+
+// TestGitHubSkillResolver_SameProjectDifferentUserCredentialIsolation is the
+// permanent regression test for the within-project user-credential merge
+// defect: two users of the *same* project, each with their own personal
+// default GITHUB_TOKEN — the dispatcher falls back to the creating user's own
+// profile-level GITHUB_TOKEN when the project itself has none (see
+// httpdispatcher.go) — must never share a single-flight result under the
+// "default" credential source. User B must never receive content resolved
+// with user A's token. Project scoping alone (without also scoping by
+// UserID for the default source) is not enough to prevent this: both users
+// share one project, so only the user scope tells them apart.
+func TestGitHubSkillResolver_SameProjectDifferentUserCredentialIsolation(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	proceed := make(chan struct{})
+	var proceedOnce sync.Once
+	closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
+	t.Cleanup(closeProceed)
+
+	// Only user A's personal token is accepted; user B's gets a 404, exactly
+	// as it would against the real GitHub API for a repo B has no access to.
+	authOK := func(r *http.Request) bool { return r.Header.Get("Authorization") == "Bearer pat-user-A" }
+	mux.HandleFunc("/repos/acme/private/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		if !authOK(r) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		enterOnce.Do(func() { close(entered) })
+		<-proceed
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/acme/private/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+		if !authOK(r) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
+		})
+	})
+	mux.HandleFunc("/raw/acme/private/"+testCommitSHA+"/skills/s/SKILL.md", func(w http.ResponseWriter, r *http.Request) {
+		if !authOK(r) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte("SECRET"))
+	})
+
+	// A single shared cache, exactly as the broker wires it.
+	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	mk := func(tok string) *GitHubSkillResolver {
+		r := newTestGitHubResolver(server)
+		r.token = tok // simulates the dispatcher's per-user fallback GITHUB_TOKEN
+		r.provisionCredentials = nil
+		r.resolutionCache = cache
+		return r
+	}
+	resolverA, resolverB := mk("pat-user-A"), mk("pat-user-B")
+	ref := api.SkillReference{URI: "gh://acme/private/s@main"}
+
+	var wg sync.WaitGroup
+	var resultA *ResolveResult
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		resultA, _ = resolverA.Resolve(context.Background(), []api.SkillReference{ref}, ResolveOpts{ProjectID: "project-1", UserID: "user-A"})
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("user A's fetch never started")
+	}
+
+	var resultB *ResolveResult
+	doneB := make(chan struct{})
+	go func() {
+		resultB, _ = resolverB.Resolve(context.Background(), []api.SkillReference{ref}, ResolveOpts{ProjectID: "project-1", UserID: "user-B"})
+		close(doneB)
+	}()
+
+	// With user scoping on the default source, B's flight is independent of
+	// A's: its commits call fails authOK immediately (404), with no need to
+	// wait on proceed at all. If B were instead coalesced into A's flight
+	// (the defect), this would hang until proceed is closed below — the
+	// select gives that failure mode a clean, bounded failure instead of a
+	// test-binary hang.
+	select {
+	case <-doneB:
+	case <-time.After(5 * time.Second):
+		t.Fatal("user B's resolve did not return independently of user A's in-flight fetch — it may have been incorrectly coalesced")
+	}
+
+	closeProceed()
+	wgDone := make(chan struct{})
+	go func() { wg.Wait(); close(wgDone) }()
+	select {
+	case <-wgDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("user A's resolve did not complete after proceed was closed")
+	}
+
+	if len(resultB.Resolved) != 0 {
+		t.Fatalf("user B must never receive content resolved with user A's token, got: %+v", resultB.Resolved[0])
+	}
+	if len(resultB.Errors) != 1 {
+		t.Fatalf("expected user B to get its own resolve error, got %d errors and %d resolved", len(resultB.Errors), len(resultB.Resolved))
+	}
+
+	if len(resultA.Resolved) != 1 {
+		t.Fatalf("expected user A to resolve successfully, got errors: %+v", resultA.Errors)
+	}
+	if got := string(resultA.Resolved[0].Files[0].Content); got != "SECRET" {
+		t.Errorf("expected user A's content %q, got %q", "SECRET", got)
+	}
+}
+
+// TestGitHubSkillResolver_SameProjectSameUserDifferentTokenIsolation is the
+// permanent regression test for merging two different credentials within the
+// same project *and* the same user — for example two agents, each carrying
+// its own GITHUB_TOKEN set directly on its own applied config or template,
+// with the same project and the same creating user. Project and user scoping
+// alone cannot separate these; only hashing the credential's own value can.
+// A third subtest covers the same thing under a *named* source (a GH_*
+// convention key), where both callers resolve the same key name to a
+// different value — scoping by project, user and source name alone would
+// still merge these, since none of those three differs between them.
+//
+// Both directions are covered as independent subtests for the default
+// source: the agent without repo access must never receive content resolved
+// with the other agent's token, and the agent with access must never be
+// failed merely because a less-privileged agent happened to lead the flight.
+//
+// Both requests' commits calls block until released, regardless of outcome,
+// so a merged (buggy) identity and a correctly-separated one are
+// distinguishable deterministically: flightJoinHook reports how many
+// *distinct* flight keys were touched before release. Under the bug both
+// requests share one key (the hook never reports 2); under the fix each
+// credential gets its own.
+func TestGitHubSkillResolver_SameProjectSameUserDifferentTokenIsolation(t *testing.T) {
+	cases := []struct {
+		name                 string
+		leaderTok, waiterTok string
+		waiterShouldSucceed  bool
+		// namedSource, when true, routes both callers through the same named
+		// convention-key source (credentialSource returns one non-empty
+		// value for both) rather than the default GITHUB_TOKEN cascade —
+		// pinning that the credential-value fingerprint also separates two
+		// different values presented under one named key, not only the
+		// default source (see flightIdentity's named-source branch).
+		namedSource bool
+	}{
+		{"leader has access, waiter does not", "tok-agent-A", "tok-agent-B", false, false},
+		{"leader does not have access, waiter does", "tok-agent-B", "tok-agent-A", true, false},
+		{"named source, same key name, different values, leader has access", "tok-agent-A", "tok-agent-B", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, mux := newTestGitHubServer(t)
+			authOK := func(r *http.Request) bool { return r.Header.Get("Authorization") == "Bearer tok-agent-A" }
+
+			proceed := make(chan struct{})
+			var proceedOnce sync.Once
+			closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
+			t.Cleanup(closeProceed)
+
+			// Every commits request — successful or not — stays in flight
+			// until release, regardless of which credential made it: this is
+			// what lets a merged identity (one shared flight) and a
+			// correctly-separated one (two independent flights) be told
+			// apart deterministically below, rather than relying on which
+			// one happens to answer first.
+			mux.HandleFunc("/repos/acme/private/commits/main", func(w http.ResponseWriter, r *http.Request) {
+				<-proceed
+				if !authOK(r) {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write([]byte(testCommitSHA))
+			})
+			mux.HandleFunc("/repos/acme/private/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+				if !authOK(r) {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_ = json.NewEncoder(w).Encode([]githubContentEntry{
+					{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
+				})
+			})
+			mux.HandleFunc("/raw/acme/private/"+testCommitSHA+"/skills/s/SKILL.md", func(w http.ResponseWriter, r *http.Request) {
+				if !authOK(r) {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write([]byte("SECRET"))
+			})
+
+			cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+			if err != nil {
+				t.Fatalf("NewGitHubResolutionCache: %v", err)
+			}
+			mk := func(tok string) *GitHubSkillResolver {
+				r := newTestGitHubResolver(server)
+				r.resolutionCache = cache
+				if tc.namedSource {
+					// No default fallback: only the named convention key
+					// supplies a credential, under the same key name for
+					// both callers but a different value each.
+					r.token = ""
+					r.provisionCredentials = map[string]string{deriveGitHubTokenKey("acme", "private"): tok}
+				} else {
+					r.token = tok
+					r.provisionCredentials = nil
+				}
+				return r
+			}
+			leader, waiter := mk(tc.leaderTok), mk(tc.waiterTok)
+			ref := api.SkillReference{URI: "gh://acme/private/s@main"}
+			opts := ResolveOpts{ProjectID: "project-1", UserID: "user-1"}
+
+			var seenMu sync.Mutex
+			seenKeys := make(map[string]bool)
+			bothStarted := make(chan struct{})
+			var startedOnce sync.Once
+			hook := func(key string) {
+				seenMu.Lock()
+				seenKeys[key] = true
+				n := len(seenKeys)
+				seenMu.Unlock()
+				if n >= 2 {
+					startedOnce.Do(func() { close(bothStarted) })
+				}
+			}
+			flightJoinHook.Store(&hook)
+			t.Cleanup(func() { flightJoinHook.Store(nil) })
+
+			doneLeader := make(chan struct{})
+			go func() {
+				_, _ = leader.Resolve(context.Background(), []api.SkillReference{ref}, opts)
+				close(doneLeader)
+			}()
+
+			var resWaiter *ResolveResult
+			doneWaiter := make(chan struct{})
+			go func() {
+				resWaiter, _ = waiter.Resolve(context.Background(), []api.SkillReference{ref}, opts)
+				close(doneWaiter)
+			}()
+
+			// Two distinct flight keys being touched proves the two
+			// credentials were never coalesced into one flight — the
+			// property this test exists to check. Under the merged-identity
+			// bug, only one key is ever touched, so this would time out
+			// instead of a content assertion failing — still a deterministic,
+			// bounded failure.
+			select {
+			case <-bothStarted:
+			case <-time.After(5 * time.Second):
+				t.Fatal("did not observe two independent flights — the two credentials may have been coalesced into one")
+			}
+
+			closeProceed()
+
+			for _, done := range []chan struct{}{doneLeader, doneWaiter} {
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("a resolve did not complete after the flight was released")
+				}
+			}
+
+			if tc.waiterShouldSucceed {
+				if len(resWaiter.Resolved) != 1 {
+					t.Fatalf("expected the agent with access to resolve successfully, got errors: %+v", resWaiter.Errors)
+				}
+				if got := string(resWaiter.Resolved[0].Files[0].Content); got != "SECRET" {
+					t.Errorf("expected content %q, got %q", "SECRET", got)
+				}
+			} else {
+				if len(resWaiter.Resolved) != 0 {
+					t.Fatalf("the agent without access must never receive content resolved with the other agent's credential, got: %+v", resWaiter.Resolved[0])
+				}
+			}
+		})
+	}
+}
+
+// TestGitHubSkillResolver_ScopeLayeringIsolation pins the project and user
+// scope layered on top of the credential-value hash in flightIdentity: even
+// when two callers present the exact same credential value, a different
+// project, a different user within one project under the default source, or
+// a different project under a named source must each still get independent
+// flights. The value hash alone cannot tell these cases apart — the
+// credential is identical in every subtest here — so only the project/user
+// layering can; dropping it (see flightIdentity) would silently merge these
+// cases back into one flight.
+func TestGitHubSkillResolver_ScopeLayeringIsolation(t *testing.T) {
+	const sharedToken = "tok-shared"
+	cases := []struct {
+		name                   string
+		leaderOpts, waiterOpts ResolveOpts
+		namedSource            bool
+	}{
+		{
+			name:       "same token, different project, default source",
+			leaderOpts: ResolveOpts{ProjectID: "project-1", UserID: "user-1"},
+			waiterOpts: ResolveOpts{ProjectID: "project-2", UserID: "user-1"},
+		},
+		{
+			name:       "same token, same project, different user, default source",
+			leaderOpts: ResolveOpts{ProjectID: "project-1", UserID: "user-1"},
+			waiterOpts: ResolveOpts{ProjectID: "project-1", UserID: "user-2"},
+		},
+		{
+			name:        "same token, different project, named source",
+			leaderOpts:  ResolveOpts{ProjectID: "project-1", UserID: "user-1"},
+			waiterOpts:  ResolveOpts{ProjectID: "project-2", UserID: "user-1"},
+			namedSource: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, mux := newTestGitHubServer(t)
+			authOK := func(r *http.Request) bool { return r.Header.Get("Authorization") == "Bearer "+sharedToken }
+
+			proceed := make(chan struct{})
+			var proceedOnce sync.Once
+			closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
+			t.Cleanup(closeProceed)
+
+			mux.HandleFunc("/repos/acme/shared/commits/main", func(w http.ResponseWriter, r *http.Request) {
+				<-proceed
+				if !authOK(r) {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write([]byte(testCommitSHA))
+			})
+			mux.HandleFunc("/repos/acme/shared/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+				if !authOK(r) {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_ = json.NewEncoder(w).Encode([]githubContentEntry{
+					{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
+				})
+			})
+			mux.HandleFunc("/raw/acme/shared/"+testCommitSHA+"/skills/s/SKILL.md", func(w http.ResponseWriter, r *http.Request) {
+				if !authOK(r) {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write([]byte("CONTENT"))
+			})
+
+			cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+			if err != nil {
+				t.Fatalf("NewGitHubResolutionCache: %v", err)
+			}
+			mk := func() *GitHubSkillResolver {
+				r := newTestGitHubResolver(server)
+				r.token = sharedToken
+				r.resolutionCache = cache
+				if tc.namedSource {
+					r.provisionCredentials = map[string]string{deriveGitHubTokenKey("acme", "shared"): sharedToken}
+				} else {
+					r.provisionCredentials = nil
+				}
+				return r
+			}
+			leader, waiter := mk(), mk()
+			ref := api.SkillReference{URI: "gh://acme/shared/s@main"}
+
+			var seenMu sync.Mutex
+			seenKeys := make(map[string]bool)
+			bothStarted := make(chan struct{})
+			var startedOnce sync.Once
+			hook := func(key string) {
+				seenMu.Lock()
+				seenKeys[key] = true
+				n := len(seenKeys)
+				seenMu.Unlock()
+				if n >= 2 {
+					startedOnce.Do(func() { close(bothStarted) })
+				}
+			}
+			flightJoinHook.Store(&hook)
+			t.Cleanup(func() { flightJoinHook.Store(nil) })
+
+			doneLeader := make(chan struct{})
+			var resLeader *ResolveResult
+			go func() {
+				resLeader, _ = leader.Resolve(context.Background(), []api.SkillReference{ref}, tc.leaderOpts)
+				close(doneLeader)
+			}()
+
+			doneWaiter := make(chan struct{})
+			var resWaiter *ResolveResult
+			go func() {
+				resWaiter, _ = waiter.Resolve(context.Background(), []api.SkillReference{ref}, tc.waiterOpts)
+				close(doneWaiter)
+			}()
+
+			// Two distinct flight keys being touched proves the project/user
+			// scope told these two otherwise-identical credentials apart —
+			// under a dropped-scope regression, both calls would land on the
+			// same key and this would time out instead.
+			select {
+			case <-bothStarted:
+			case <-time.After(5 * time.Second):
+				t.Fatal("did not observe two independent flights — project/user scope may have been dropped, merging two different scopes under one identity")
+			}
+
+			closeProceed()
+
+			for _, done := range []chan struct{}{doneLeader, doneWaiter} {
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("a resolve did not complete after the flight was released")
+				}
+			}
+
+			for name, res := range map[string]*ResolveResult{"leader": resLeader, "waiter": resWaiter} {
+				if len(res.Resolved) != 1 {
+					t.Fatalf("%s: expected one resolved skill, got errors: %+v", name, res.Errors)
+				}
+				if got := string(res.Resolved[0].Files[0].Content); got != "CONTENT" {
+					t.Errorf("%s: expected content %q, got %q", name, "CONTENT", got)
+				}
+			}
+		})
+	}
+}
+
+// TestGitHubSkillResolver_FullSHARefNeverServedStale is the resolver-level
+// acceptance test for resolveOne's own branch-vs-SHA classification
+// (isBranchRef := !isFullCommitSHA(effectiveRef)): a commit-SHA ref must
+// never be served stale, which only holds if resolveOne actually computes
+// isBranchRef correctly for it, not merely if the cache layer honors
+// whatever isBranchRef it is given (see
+// TestGitHubResolutionCache_ResolveWithFetch_SHARefNeverServedStale, which
+// calls the cache directly and so cannot catch a wrong classification at
+// this call site).
+//
+// The cache is constructed with a negative TTL so every entry it writes is
+// already expired the instant it is written — standing in for "time has
+// passed" without a sleep. A second resolve of the same SHA ref must then
+// re-fetch rather than serve the first resolve's now-expired entry stale.
+func TestGitHubSkillResolver_FullSHARefNeverServedStale(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	var contentsCalls int32
+	var content atomic.Value
+	content.Store("v1")
+	mux.HandleFunc("/repos/acme/private/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&contentsCalls, 1)
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
+		})
+	})
+	mux.HandleFunc("/raw/acme/private/"+testCommitSHA+"/skills/s/SKILL.md", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(content.Load().(string)))
+	})
+
+	cache, err := NewGitHubResolutionCache(t.TempDir(), -time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+	r := newTestGitHubResolver(server)
+	r.resolutionCache = cache
+	ref := api.SkillReference{URI: "gh://acme/private/s@" + testCommitSHA}
+
+	res1, err := r.Resolve(context.Background(), []api.SkillReference{ref}, ResolveOpts{})
+	if err != nil || len(res1.Resolved) != 1 {
+		t.Fatalf("first resolve: unexpected result, err=%v res=%+v", err, res1)
+	}
+	if got := string(res1.Resolved[0].Files[0].Content); got != "v1" {
+		t.Fatalf("first resolve: expected content %q, got %q", "v1", got)
+	}
+
+	content.Store("v2")
+	res2, err := r.Resolve(context.Background(), []api.SkillReference{ref}, ResolveOpts{})
+	if err != nil || len(res2.Resolved) != 1 {
+		t.Fatalf("second resolve: unexpected result, err=%v res=%+v", err, res2)
+	}
+	if got := string(res2.Resolved[0].Files[0].Content); got != "v2" {
+		t.Fatalf("a commit-SHA ref must never be served stale — expected the freshly re-resolved content %q, got %q (classified as a branch ref?)", "v2", got)
+	}
+	if got := atomic.LoadInt32(&contentsCalls); got != 2 {
+		t.Fatalf("expected one GitHub call per resolve of an already-expired SHA-ref entry, got %d calls", got)
+	}
+}
+
+// TestGitHubSkillResolver_CoalescedCallersKeepOwnAlias is the acceptance test
+// for the per-caller As assignment in resolveOne (resolved.As = ref.As): two
+// callers sharing one URI, token, project and user — and so one cache entry
+// and one flight — must each get back their own As, not whichever caller led
+// the flight. The leader's As is baked into the ResolvedSkill the fetch
+// itself returns (see fetchOne), so resolveOne must overwrite it per caller
+// after the shared fetch completes.
+func TestGitHubSkillResolver_CoalescedCallersKeepOwnAlias(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	proceed := make(chan struct{})
+	var proceedOnce sync.Once
+	closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
+	t.Cleanup(closeProceed)
+
+	mux.HandleFunc("/repos/acme/shared/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		<-proceed
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/acme/shared/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
+		})
+	})
+	mux.HandleFunc("/raw/acme/shared/"+testCommitSHA+"/skills/s/SKILL.md", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("CONTENT"))
+	})
+
+	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+	r := newTestGitHubResolver(server)
+	r.resolutionCache = cache
+
+	refA := api.SkillReference{URI: "gh://acme/shared/s@main", As: "alias-a"}
+	refB := api.SkillReference{URI: "gh://acme/shared/s@main", As: "alias-b"}
+
+	var joinCount int32
+	bothJoined := make(chan struct{})
+	var joinedOnce sync.Once
+	hook := func(key string) {
+		if atomic.AddInt32(&joinCount, 1) == 2 {
+			joinedOnce.Do(func() { close(bothJoined) })
+		}
+	}
+	flightJoinHook.Store(&hook)
+	t.Cleanup(func() { flightJoinHook.Store(nil) })
+
+	var resA, resB *ResolveResult
+	doneA := make(chan struct{})
+	doneB := make(chan struct{})
+	go func() {
+		resA, _ = r.Resolve(context.Background(), []api.SkillReference{refA}, ResolveOpts{})
+		close(doneA)
+	}()
+	go func() {
+		resB, _ = r.Resolve(context.Background(), []api.SkillReference{refB}, ResolveOpts{})
+		close(doneB)
+	}()
+
+	select {
+	case <-bothJoined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("did not observe both callers joining one flight")
+	}
+
+	closeProceed()
+
+	for _, done := range []chan struct{}{doneA, doneB} {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a resolve did not complete after the flight was released")
+		}
+	}
+
+	if len(resA.Resolved) != 1 || resA.Resolved[0].As != "alias-a" {
+		t.Fatalf("caller A: expected As %q, got result %+v (errors: %+v)", "alias-a", resA.Resolved, resA.Errors)
+	}
+	if len(resB.Resolved) != 1 || resB.Resolved[0].As != "alias-b" {
+		t.Fatalf("caller B: expected As %q, got result %+v (errors: %+v)", "alias-b", resB.Resolved, resB.Errors)
+	}
+}
+
+// TestCredentialFingerprint_FullWidth pins the full-width requirement on
+// credentialFingerprint directly: the decided design calls for the full
+// SHA-256 digest (or at least 128 bits) from one shared helper, not a
+// truncated prefix, so that "two different credential values never merge"
+// holds exactly rather than merely with high probability.
+func TestCredentialFingerprint_FullWidth(t *testing.T) {
+	got := credentialFingerprint("x")
+	const wantLen = 64 // hex-encoded SHA-256: 32 bytes * 2 hex chars/byte
+	if len(got) != wantLen {
+		t.Fatalf("expected a %d-character full hex-encoded SHA-256 digest, got %d characters: %q", wantLen, len(got), got)
 	}
 }

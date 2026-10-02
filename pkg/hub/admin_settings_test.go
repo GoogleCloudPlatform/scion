@@ -725,3 +725,159 @@ func TestHandlePutServerConfig_EnforceBrokerQuotas_PersistedAndAppliedWithoutRes
 		t.Error("expected brokerQuotasEnforced()=false immediately after PUT, without a restart")
 	}
 }
+
+// ---- default_timezone, file mode ----
+//
+// Before this fix, a file-mode default_timezone PUT persisted to
+// settings.yaml and returned 200, but GlobalConfig had no DefaultTimezone
+// field and BuildLayer1SnapshotFromFile never set
+// Layer1Snapshot.DefaultTimezone, so hubAgentDefaults().DefaultTimezone (what
+// agent create actually reads) stayed "" forever — the control did nothing.
+// See TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode in
+// httpdispatcher_test.go for the dispatch-level proof that the fix reaches
+// DispatchAgentCreate's ResolvedEnv["TZ"].
+
+// TestHandlePutServerConfig_DefaultTimezone_PersistedAndAppliedWithoutRestart
+// mirrors TestHandlePutServerConfig_EnforceBrokerQuotas_PersistedAndAppliedWithoutRestart
+// for default_timezone: a file-mode admin PUT writes settings.yaml and
+// applies the new value live, with no restart.
+func TestHandlePutServerConfig_DefaultTimezone_PersistedAndAppliedWithoutRestart(t *testing.T) {
+	srv := &Server{}
+	if got := srv.hubAgentDefaults().DefaultTimezone; got != "" {
+		t.Fatalf("expected hubAgentDefaults().DefaultTimezone=\"\" before any PUT, got %q", got)
+	}
+
+	rr, settingsPath := fileModePutServerConfig(t, srv,
+		`{"server":{"hub":{"port":9810}},"default_timezone":"Asia/Tokyo"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("settings.yaml not written: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse settings.yaml: %v", err)
+	}
+	if got, _ := raw["default_timezone"].(string); got != "Asia/Tokyo" {
+		t.Errorf("persisted default_timezone = %q, want Asia/Tokyo (settings.yaml: %s)", raw["default_timezone"], data)
+	}
+
+	// No restart: the in-memory config must already reflect the new value,
+	// through the same accessor agent create reads (hubAgentDefaultsProvider).
+	if got := srv.hubAgentDefaults().DefaultTimezone; got != "Asia/Tokyo" {
+		t.Errorf("hubAgentDefaults().DefaultTimezone = %q immediately after PUT, want Asia/Tokyo (no restart)", got)
+	}
+}
+
+// TestHandlePutServerConfig_DefaultTimezone_ClearedPersistsEmpty is the
+// round-trip complement: clearing a previously-set file-mode
+// default_timezone must remove it from settings.yaml and from
+// hubAgentDefaults(), not just leave the old value live. Both PUTs land in
+// the same settings.yaml (HOME is set once, directly — not via
+// fileModePutServerConfig, which repoints HOME at a fresh temp dir on every
+// call).
+func TestHandlePutServerConfig_DefaultTimezone_ClearedPersistsEmpty(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(tmpHome, ".scion", "settings.yaml")
+
+	srv := &Server{}
+	put := func(body string) *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
+		return rr
+	}
+
+	if rr := put(`{"server":{"hub":{"port":9810}},"default_timezone":"Asia/Tokyo"}`); rr.Code != http.StatusOK {
+		t.Fatalf("set: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := srv.hubAgentDefaults().DefaultTimezone; got != "Asia/Tokyo" {
+		t.Fatalf("precondition: hubAgentDefaults().DefaultTimezone = %q, want Asia/Tokyo", got)
+	}
+
+	if rr := put(`{"server":{"hub":{"port":9810}},"default_timezone":""}`); rr.Code != http.StatusOK {
+		t.Fatalf("clear: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("settings.yaml not written: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse settings.yaml: %v", err)
+	}
+	if v, ok := raw["default_timezone"]; ok {
+		t.Errorf("expected default_timezone to be deleted from settings.yaml after clearing, got %v", v)
+	}
+	if got := srv.hubAgentDefaults().DefaultTimezone; got != "" {
+		t.Errorf("hubAgentDefaults().DefaultTimezone = %q after clearing, want \"\" (no restart)", got)
+	}
+}
+
+// TestHandlePutServerConfig_DefaultTimezone_InvalidRejected is the file-mode
+// complement of the DB-mode validation: handlePutServerConfig must apply
+// the same IANA-name check for default_timezone as the DB-mode handler, so
+// an invalid name — or one of the tzdata names LoadLocation accepts but
+// that do not name a portable zone (Local, localtime, posixrules, Factory)
+// — is rejected rather than written to settings.yaml silently.
+func TestHandlePutServerConfig_DefaultTimezone_InvalidRejected(t *testing.T) {
+	for _, tz := range []string{"Not/A/Timezone", "Local", "localtime", "posixrules", "Factory"} {
+		t.Run(tz, func(t *testing.T) {
+			srv := &Server{}
+			rr, settingsPath := fileModePutServerConfig(t, srv,
+				`{"server":{"hub":{"port":9810}},"default_timezone":"`+tz+`"}`)
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), "default_timezone") || !strings.Contains(rr.Body.String(), tz) {
+				t.Errorf("422 body should name default_timezone and the invalid value %q, got: %s", tz, rr.Body.String())
+			}
+			if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+				data, _ := os.ReadFile(settingsPath)
+				t.Errorf("nothing should be persisted for an invalid value, got settings.yaml: %s", data)
+			}
+			if got := srv.hubAgentDefaults().DefaultTimezone; got != "" {
+				t.Errorf("hubAgentDefaults().DefaultTimezone = %q after a rejected PUT, want \"\"", got)
+			}
+		})
+	}
+}
+
+// TestHandlePutServerConfig_DefaultTimezone_ValidPersisted is the file-mode
+// complement of TestPutServerConfigDB_DefaultTimezone_Valid, extended with
+// the aliases the picker's alias handling cares about (both spellings of
+// Kathmandu/Katmandu are real IANA names, and the server stores whichever
+// string the client sent verbatim, with no canonicalization).
+func TestHandlePutServerConfig_DefaultTimezone_ValidPersisted(t *testing.T) {
+	for _, tz := range []string{"Europe/Berlin", "Asia/Kathmandu", "Asia/Katmandu", "UTC"} {
+		t.Run(tz, func(t *testing.T) {
+			srv := &Server{}
+			rr, settingsPath := fileModePutServerConfig(t, srv,
+				`{"server":{"hub":{"port":9810}},"default_timezone":"`+tz+`"}`)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+			}
+			data, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatalf("settings.yaml not written: %v", err)
+			}
+			var raw map[string]interface{}
+			if err := yamlv3.Unmarshal(data, &raw); err != nil {
+				t.Fatalf("parse settings.yaml: %v", err)
+			}
+			if got, _ := raw["default_timezone"].(string); got != tz {
+				t.Errorf("persisted default_timezone = %q, want %q (settings.yaml: %s)", raw["default_timezone"], tz, data)
+			}
+			if got := srv.hubAgentDefaults().DefaultTimezone; got != tz {
+				t.Errorf("hubAgentDefaults().DefaultTimezone = %q, want %q (no restart)", got, tz)
+			}
+		})
+	}
+}

@@ -2375,9 +2375,44 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
-  private startCreateThread(projectId: string): void {
-    this.creatingThread = projectId;
-    this.newThreadName = '';
+  /**
+   * Open the new-thread name entry for a space. `groupId` is the group the
+   * thread is filed into once created; every request sets it, so a target
+   * left by an earlier group-menu request cannot carry over.
+   */
+  private startCreateThread(projectId: string, groupId: string | null = null): void {
+    this._createThreadGroupId = groupId;
+    // The name-entry row renders inside the space's thread list, so a
+    // collapsed space must open for the row to be visible.
+    this.expandSpace(projectId);
+    // Asking again for the space whose row is already open keeps the typed
+    // name; only a fresh entry starts empty.
+    if (this.creatingThread !== projectId) {
+      this.creatingThread = projectId;
+      this.newThreadName = '';
+    }
+    // Focus on every request, not only when the row first opens, so a repeat
+    // New thread brings focus back from the menu that issued it.
+    void this.updateComplete.then(() => this.focusCreateThreadInput());
+  }
+
+  /**
+   * Focus the new-thread name input. Native focus also scrolls the input
+   * into view, so no separate scroll is needed.
+   */
+  private async focusCreateThreadInput(): Promise<void> {
+    const input = this.shadowRoot?.querySelector<
+      HTMLElement & { updateComplete?: Promise<unknown> }
+    >('.create-thread sl-input');
+    if (!input) return;
+    await input.updateComplete;
+    input.focus();
+  }
+
+  /** Close the new-thread name entry without creating a thread. */
+  private cancelCreateThread(): void {
+    this.creatingThread = '';
+    this._createThreadGroupId = null;
   }
 
   /** IDs of topics created by this client — suppresses SSE-triggered reloads. */
@@ -2796,12 +2831,12 @@ export class ScionChatSpaceRail extends LitElement {
           !isCollapsed
             ? html`
                 <div class="thread-list">
-                  ${this.renderThreadList(threads, space.projectId)}
                   ${
                     this.creatingThread === space.projectId
                       ? this.renderCreateThread(space.projectId)
                       : nothing
                   }
+                  ${this.renderThreadList(threads, space.projectId)}
                 </div>
               `
             : nothing
@@ -3029,11 +3064,11 @@ export class ScionChatSpaceRail extends LitElement {
               void this.submitCreateThread(projectId);
             }
             if (e.key === 'Escape') {
-              this.creatingThread = '';
+              this.cancelCreateThread();
             }
           }}
           @sl-blur=${() => {
-            if (!this.newThreadName.trim()) this.creatingThread = '';
+            if (!this.newThreadName.trim()) this.cancelCreateThread();
           }}
           style="flex: 1"
         ></sl-input>
@@ -3275,8 +3310,7 @@ export class ScionChatSpaceRail extends LitElement {
           class="context-menu-item"
           @click=${() => {
             this.groupContextMenuTarget = null;
-            this._createThreadGroupId = group.id;
-            this.startCreateThread(projectId);
+            this.startCreateThread(projectId, group.id);
           }}
         >
           <sl-icon name="plus-lg"></sl-icon>

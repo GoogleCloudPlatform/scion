@@ -715,6 +715,10 @@ type BrokerCapabilities struct {
 	// unset (design /scion-volumes/scratchpad/projects/agent-migrate/design.md
 	// §5 "Broker/hub version skew").
 	Reprovision bool `json:"reprovision"`
+	// AsyncLaunch indicates the broker understands the non-blocking agent
+	// create path and the launch-report protocol (design t1-async-create-v11.md
+	// §3.2, §7 P1b-1).
+	AsyncLaunch bool `json:"asyncLaunch"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.

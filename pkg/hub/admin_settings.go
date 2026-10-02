@@ -381,6 +381,26 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// validateDefaultTimezone checks an agent_defaults.default_timezone
+// candidate against the rule design.md §3 A (d) also uses for the per-user
+// display-timezone preference: it must be a real IANA time zone name, and
+// nonPortableTimezoneNames is rejected even though time.LoadLocation accepts
+// those names. An empty string means UTC and is always valid.
+//
+// Delegates to validateIANATimezone (timezone_validate.go), shared with the
+// per-user display-timezone preference validator (handlers_users_core.go's
+// validateUserTimezone), so the two can't drift. Unlike validateUserTimezone,
+// this one adds no wrapping of its own: errNonPortableTimezone's own text
+// ("not an IANA time zone name") already says everything "default_timezone"
+// needs — there is no "Auto" concept to mention here, which is the only
+// reason validateUserTimezone's wording has to differ from the sentinel's.
+func validateDefaultTimezone(tz string) error {
+	if tz == "" {
+		return nil
+	}
+	return validateIANATimezone(tz)
+}
+
 // handlePutServerConfig updates the global settings.yaml.
 func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	var req ServerConfigUpdateRequest
@@ -452,6 +472,19 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			DefaultGCPIdentityMode:             mode,
 			DefaultGCPIdentityServiceAccountID: saID,
 		}) {
+			return
+		}
+	}
+
+	// Validate the hub default timezone (IANA name check) before writing.
+	// Same rule, same 422, as the DB-mode handler (admin_settings_db.go) —
+	// without this, an invalid name is written to settings.yaml silently and
+	// never rejected in file mode.
+	if req.DefaultTimezone != nil {
+		tz := *req.DefaultTimezone
+		if err := validateDefaultTimezone(tz); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+				fmt.Sprintf("invalid default_timezone %q: %v", tz, err), nil)
 			return
 		}
 	}

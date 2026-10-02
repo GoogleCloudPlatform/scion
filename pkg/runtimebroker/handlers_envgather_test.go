@@ -2319,7 +2319,7 @@ profiles:
 // resolveRuntimeNameForOpts, which never builds a real runtime client (see
 // that function's doc comment, handlers.go) — unlike resolveManagerForOpts,
 // a settings profile that resolves to "kubernetes" here does not attempt a
-// real cluster connection, so no runtimeResolver mock is needed.
+// real cluster connection, so no resolveAuxiliaryRuntime mock is needed.
 func TestExtractRequiredEnvKeys_KubernetesImplicitPassthroughSkipsADC(t *testing.T) {
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,

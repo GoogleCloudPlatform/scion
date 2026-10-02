@@ -1830,14 +1830,20 @@ func suppliedCredentialCompatible(ctx context.Context, principal PrincipalContex
 // ctx provenance the middleware sets, not the supplied kind by itself.
 func brokerOnBehalfOfAuthorizes(ctx context.Context, principal PrincipalContext, supplied CredentialContext) bool {
 	broker := GetBrokerIdentityFromContext(ctx)
-	if broker == nil || broker.Type() != "broker" || supplied.Type != "broker" {
+	// isNilIdentity, not broker == nil: BrokerIdentity embeds Identity, so a
+	// typed-nil concrete broker identity (see isNilIdentity) is a non-nil
+	// interface value and would otherwise reach broker.Type() below.
+	if isNilIdentity(broker) || broker.Type() != "broker" || supplied.Type != "broker" {
 		return false
 	}
 	obo, ok := BrokerOnBehalfOfFromContext(ctx)
 	if !ok || obo.BrokerID == "" {
 		return false
 	}
-	if obo.BrokerID != broker.ID() || obo.Broker == nil || obo.Broker.ID() != broker.ID() {
+	// isNilIdentity, not obo.Broker == nil, for the same reason: obo.Broker is
+	// a BrokerIdentity and a typed-nil value here would otherwise reach
+	// obo.Broker.ID() below.
+	if obo.BrokerID != broker.ID() || isNilIdentity(obo.Broker) || obo.Broker.ID() != broker.ID() {
 		return false
 	}
 	effective := GetIdentityFromContext(ctx)

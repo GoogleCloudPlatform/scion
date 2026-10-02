@@ -230,6 +230,7 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 			Sync:        true,
 			Attach:      scionrt.HasAttachSupport(defaultRuntime),
 			Reprovision: true,
+			AsyncLaunch: true,
 		},
 	}
 

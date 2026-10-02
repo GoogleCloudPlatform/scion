@@ -95,7 +95,7 @@ func writeRemapSettings(t *testing.T, runtimeType string) string {
 // the create path: a passthrough grant flagged as RequireLocalRuntime, where
 // this dispatch's project-effective settings resolve the profile to a
 // runtime that is neither a local-container runtime nor Kubernetes, must
-// downgrade to block. srv.runtimeResolver is overridden (the same pattern
+// downgrade to block. srv.resolveAuxiliaryRuntime is overridden (the same pattern
 // newTestServerForSavedProfileRemap uses) to a fictitious runtime name
 // ("other") rather than "kubernetes": block is not offered on Kubernetes
 // (ptone/scion#2328), so Kubernetes is excluded from this downgrade (see
@@ -105,7 +105,7 @@ func writeRemapSettings(t *testing.T, runtimeType string) string {
 func TestBuildStartContext_HubDefaultPassthroughDowngradedOnRuntimeRemap(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
 	projectPath := writeRemapSettings(t, "other")
-	srv.runtimeResolver = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return "other" }}
 	}
 
@@ -146,14 +146,14 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedOnRuntimeRemap(t *test
 // anyway, so keeping the grant's passthrough unchanged produces the
 // identical outcome a downgrade-to-unset would. This is reconciled with
 // upstream's RequireLocalRuntime downgrade mechanism (main #2186).
-// srv.runtimeResolver is overridden so settings resolving to "kubernetes"
+// srv.resolveAuxiliaryRuntime is overridden so settings resolving to "kubernetes"
 // returns a mock runtime rather than attempting a real cluster client (see
 // TestExtractRequiredEnvKeys_KubernetesImplicitPassthroughSkipsADC for the
 // same need in a different test file).
 func TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesRemap(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
 	projectPath := writeRemapSettings(t, "kubernetes")
-	srv.runtimeResolver = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
 	}
 
@@ -297,7 +297,7 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag(t *testing
 // second (after it, in the handler itself) sees the agent's saved profile
 // and does not. Production always constructs a fresh agent.Manager around a
 // freshly resolved runtime for that second resolution; this fixture
-// overrides srv.runtimeResolver so that resolution returns this test's own
+// overrides srv.resolveAuxiliaryRuntime so that resolution returns this test's own
 // mock runtime (remapRuntime, returned to the caller) instead of attempting
 // a real cluster client, without changing what resolveManagerForOpts does
 // for any real dispatch or how its result is wired up afterward. The
@@ -388,7 +388,7 @@ func newTestServerForSavedProfileRemap(t *testing.T, agentName, remapRuntimeName
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 	remapRuntime := &runtime.MockRuntime{NameFunc: func() string { return remapRuntimeName }}
-	srv.runtimeResolver = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return remapRuntime
 	}
 	return srv, mgr, remapRuntime
@@ -660,7 +660,7 @@ func newTestServerForLateCheckOrdering(t *testing.T, agentName, urlID, remapRunt
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 	remapRuntime := &runtime.MockRuntime{NameFunc: func() string { return remapRuntimeName }}
-	srv.runtimeResolver = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return remapRuntime
 	}
 	return srv, mgr, remapRuntime

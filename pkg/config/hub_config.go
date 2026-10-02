@@ -789,6 +789,13 @@ type GlobalConfig struct {
 	// in file/SQLite mode.
 	DefaultHarnessConfig string `json:"-" yaml:"-" koanf:"-"`
 
+	// DefaultTimezone is the hub-level IANA timezone fallback for agent
+	// containers with no pinned timezone and no TZ environment variable.
+	// Populated from the top-level default_timezone key in settings.yaml in
+	// file/SQLite mode, so a file-mode admin save reaches
+	// hubAgentDefaults() (and therefore agent create) without a restart.
+	DefaultTimezone string `json:"-" yaml:"-" koanf:"-"`
+
 	// DefaultGCPIdentityMode and DefaultGCPIdentityServiceAccountID are the
 	// hub-level default GCP identity for new agents. Populated from the
 	// top-level keys of the same name in settings.yaml in file/SQLite mode,
@@ -1923,6 +1930,13 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
 	if dhc, ok := raw["default_harness_config"]; ok && dhc != nil {
 		if s, ok := dhc.(string); ok {
 			gc.DefaultHarnessConfig = s
+		}
+	}
+
+	// Top-level default_timezone — read from raw YAML.
+	if dtz, ok := raw["default_timezone"]; ok && dtz != nil {
+		if s, ok := dtz.(string); ok {
+			gc.DefaultTimezone = s
 		}
 	}
 

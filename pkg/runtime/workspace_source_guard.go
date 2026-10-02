@@ -365,8 +365,18 @@ func isScionHomeAllowedSubtree(resolvedSource, scionHomeDir string) bool {
 //     (pkg/agent/provision.go's agentWorkspace, filepath.Join(agentDir,
 //     "workspace"), where agentDir is this project's own
 //     .scion/agents/<agent-id>).
+//   - "<slug>/worktrees/<name>", or anything under it: the hub-native
+//     worktree-per-agent shared-base layout, where the project's own
+//     directory is the shared git checkout and each agent's worktree is a
+//     direct child of its "worktrees" subdirectory. Modeled on the agents
+//     rule above (a variable name segment, not a fixed leaf like
+//     "workspace"): the implementation CutPrefixes the fixed "worktrees/"
+//     literal, then requires the remaining first path segment to be
+//     non-empty, so a bare "worktrees" (no match, no trailing separator) or
+//     an empty name ("worktrees/" alone) are both rejected rather than
+//     admitting the "worktrees" directory itself.
 //
-// The last two rules exist for callers that resolve a source narrower than
+// The last three rules exist for callers that resolve a source narrower than
 // the bare "<slug>" directory — resolveProjectRoot's parent-of-.scion
 // fallback, for example, which lands exactly on "<slug>/.scion" not
 // "<slug>" — and so cannot rely on the first rule to admit an agent's own
@@ -384,6 +394,15 @@ func isAllowedProjectSubtree(rel string) bool {
 	if after, ok := strings.CutPrefix(remainder, agentsPrefix); ok {
 		agentParts := strings.SplitN(after, string(filepath.Separator), 2)
 		if len(agentParts) == 2 && (agentParts[1] == "workspace" || strings.HasPrefix(agentParts[1], "workspace"+string(filepath.Separator))) {
+			return true
+		}
+	}
+	// "<slug>/worktrees/<name>" or "<slug>/worktrees/<name>/..." — see this
+	// function's doc comment.
+	worktreesPrefix := "worktrees" + string(filepath.Separator)
+	if after, ok := strings.CutPrefix(remainder, worktreesPrefix); ok {
+		nameParts := strings.SplitN(after, string(filepath.Separator), 2)
+		if nameParts[0] != "" {
 			return true
 		}
 	}
