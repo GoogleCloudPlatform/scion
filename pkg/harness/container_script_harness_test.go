@@ -1487,3 +1487,61 @@ func TestContainerScriptHarness_ResolveAuth_SelectedTypeFiltersFiles(t *testing.
 		}
 	})
 }
+
+// TestContainerScriptHarness_NoAuthSentinelNeverForwarded: the no-auth
+// sentinel "none" must never reach the provisioner as
+// SCION_HARNESS_SELECTED_AUTH or explicit_type (ptone/scion#2561).
+func TestContainerScriptHarness_NoAuthSentinelNeverForwarded(t *testing.T) {
+	readExplicitType := func(t *testing.T, agentHome string) interface{} {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal(data, &payload); err != nil {
+			t.Fatalf("invalid JSON: %v", err)
+		}
+		return payload["explicit_type"]
+	}
+
+	t.Run("ResolveAuth", func(t *testing.T) {
+		h, _ := newTestContainerScriptHarness(t)
+		resolved, err := h.ResolveAuth(api.AuthConfig{SelectedType: "none"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; ok {
+			t.Errorf("SCION_HARNESS_SELECTED_AUTH = %q, want unset", got)
+		}
+	})
+
+	t.Run("ApplyAuthSettingsResolvedNoneFallsBackToEntry", func(t *testing.T) {
+		h, _ := newTestContainerScriptHarness(t)
+		h.entry.AuthSelectedType = "vertex-ai"
+		agentHome := t.TempDir()
+		resolved := &api.ResolvedAuth{
+			Method:  "container-script",
+			EnvVars: map[string]string{"SCION_HARNESS_SELECTED_AUTH": "none"},
+		}
+		if err := h.ApplyAuthSettings(agentHome, resolved); err != nil {
+			t.Fatal(err)
+		}
+		if got := readExplicitType(t, agentHome); got != "vertex-ai" {
+			t.Errorf("explicit_type = %v, want vertex-ai", got)
+		}
+	})
+
+	t.Run("ApplyAuthSettingsEntryNone", func(t *testing.T) {
+		h, _ := newTestContainerScriptHarness(t)
+		h.entry.AuthSelectedType = "none"
+		agentHome := t.TempDir()
+		resolved := &api.ResolvedAuth{Method: "container-script", EnvVars: map[string]string{}}
+		if err := h.ApplyAuthSettings(agentHome, resolved); err != nil {
+			t.Fatal(err)
+		}
+		if got := readExplicitType(t, agentHome); got != "" {
+			t.Errorf("explicit_type = %v, want empty", got)
+		}
+	})
+}

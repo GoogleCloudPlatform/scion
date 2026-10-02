@@ -7796,3 +7796,143 @@ func TestSortedEnvVarKeysEmpty(t *testing.T) {
 		t.Errorf("sortedEnvVarKeys(nil) = %v, want empty", got)
 	}
 }
+
+// TestStartNoneAuthTypeTreatedAsNoAuth covers agents created in no-auth
+// mode (ptone/scion#2561). Create persists auth_selectedType "none" to
+// scion-agent.json; a later start, restart, resume or wake reaches Start
+// without NoAuth set. "none" must select the no-auth path rather than be
+// forwarded to the container-side provisioner as an auth type.
+func TestStartNoneAuthTypeTreatedAsNoAuth(t *testing.T) {
+	cases := []struct {
+		name          string
+		persistedAuth string
+		harnessAuth   string
+		env           map[string]string
+		wantNoAuth    bool
+		wantSelected  string
+	}{
+		{
+			name:          "PersistedNone",
+			persistedAuth: "none",
+			wantNoAuth:    true,
+		},
+		{
+			name:        "ExplicitNone",
+			harnessAuth: "none",
+			wantNoAuth:  true,
+		},
+		{
+			name:          "ExplicitTypeOverridesPersistedNone",
+			persistedAuth: "none",
+			harnessAuth:   "api-key",
+			env:           map[string]string{"GEMINI_API_KEY": "test-key"},
+			wantSelected:  "api-key",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Chdir(tmpDir)
+			t.Setenv("HOME", tmpDir)
+
+			globalScionDir := filepath.Join(tmpDir, ".scion")
+			hcDir := filepath.Join(globalScionDir, "harness-configs", "noauth-test")
+			if err := os.MkdirAll(hcDir, 0755); err != nil {
+				t.Fatalf("mkdir harness-config dir: %v", err)
+			}
+			hcYAML := "harness: noauth-test\nuser: scion\nimage: test-image:latest\n" +
+				"provisioner:\n  type: container-script\n  command: [\"python3\", \"provision.py\"]\n" +
+				"no_auth:\n  behavior: drop-to-shell\n" +
+				antigravityLikeAuthMetaYAML
+			if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(hcYAML), 0644); err != nil {
+				t.Fatalf("write harness-config config.yaml: %v", err)
+			}
+
+			tplDir := filepath.Join(globalScionDir, "templates", "default")
+			if err := os.MkdirAll(tplDir, 0755); err != nil {
+				t.Fatalf("mkdir template dir: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "noauth-test"}`), 0644); err != nil {
+				t.Fatalf("write template scion-agent.json: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644); err != nil {
+				t.Fatalf("write global settings.yaml: %v", err)
+			}
+
+			projectScionDir := filepath.Join(tmpDir, "project", ".scion")
+			agentName := "noauth-agent"
+			agentDir := filepath.Join(projectScionDir, "agents", agentName)
+			agentHome := filepath.Join(agentDir, "home")
+			if err := os.MkdirAll(agentHome, 0755); err != nil {
+				t.Fatalf("mkdir agent home: %v", err)
+			}
+			agentCfg := `{"harness_config": "noauth-test"`
+			if tc.persistedAuth != "" {
+				agentCfg += `, "auth_selectedType": "` + tc.persistedAuth + `"`
+			}
+			agentCfg += `}`
+			if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentCfg), 0644); err != nil {
+				t.Fatalf("write agent scion-agent.json: %v", err)
+			}
+
+			var capturedConfig runtime.RunConfig
+			mockRT := &runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{}, nil
+				},
+				RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+					capturedConfig = cfg
+					return "mock-id", nil
+				},
+			}
+
+			mgr := NewManager(mockRT)
+			_, err := mgr.Start(context.Background(), api.StartOptions{
+				Name:        agentName,
+				ProjectPath: projectScionDir,
+				BrokerMode:  true,
+				HarnessAuth: tc.harnessAuth,
+				Env:         tc.env,
+			})
+			if err != nil {
+				t.Fatalf("Start failed: %v", err)
+			}
+
+			if capturedConfig.NoAuth != tc.wantNoAuth {
+				t.Errorf("RunConfig.NoAuth = %t, want %t", capturedConfig.NoAuth, tc.wantNoAuth)
+			}
+			var selected string
+			if capturedConfig.ResolvedAuth != nil {
+				selected = capturedConfig.ResolvedAuth.EnvVars["SCION_HARNESS_SELECTED_AUTH"]
+			}
+			if selected != tc.wantSelected {
+				t.Errorf("SCION_HARNESS_SELECTED_AUTH = %q, want %q", selected, tc.wantSelected)
+			}
+
+			candidatesPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json")
+			data, err := os.ReadFile(candidatesPath)
+			if tc.wantNoAuth {
+				if err == nil {
+					t.Errorf("auth-candidates.json written in no-auth mode: %s", data)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("read auth-candidates.json: %v", err)
+			}
+			var payload map[string]interface{}
+			if err := json.Unmarshal(data, &payload); err != nil {
+				t.Fatalf("parse auth-candidates.json: %v", err)
+			}
+			if got := payload["explicit_type"]; got != tc.wantSelected {
+				t.Errorf("explicit_type = %v, want %q", got, tc.wantSelected)
+			}
+		})
+	}
+}
