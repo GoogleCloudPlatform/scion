@@ -1069,7 +1069,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	return srv.Shutdown(ctx)
+	err := srv.Shutdown(ctx)
+	// Write any resolution cache entries still waiting for their delayed
+	// write, after in-flight requests have finished adding to it.
+	if s.ghResolutionCache != nil {
+		s.ghResolutionCache.Flush()
+	}
+	return err
 }
 
 // Handler returns the HTTP handler for the server.

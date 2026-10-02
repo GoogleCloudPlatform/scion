@@ -80,6 +80,16 @@ type ResolvedSkill struct {
 	DeprecationMessage string `json:"-"`
 	ReplacementURI     string `json:"-"`
 	Optional           bool   `json:"-"` // Propagated from SkillReference for collision log level
+
+	// githubCredentialRef is set by GitHubSkillResolver when it returns a
+	// skill with at least one file whose Content is missing (an entry loaded
+	// from the on-disk resolution cache). It holds the gh:// URI of the
+	// request, which names at most the secret to use, never its value. The
+	// install step passes it to the GitHub credential lookup in the context
+	// (see ContextWithGitHubCredentialLookup) to find the same credential
+	// the resolver used, so a private repo read with a named credential is
+	// downloaded with that credential rather than the default one.
+	githubCredentialRef string
 }
 
 // DestName returns the directory name to use when installing this skill.
@@ -108,12 +118,10 @@ type ResolvedFile struct {
 	//
 	// The json:"-" tag intentionally excludes Content from the on-disk
 	// GitHubResolutionCache. Entries loaded from disk (e.g. after a broker
-	// restart within the TTL window) will have Content == nil and fall back
-	// to downloadSkillFile, which makes an unauthenticated request. For private
-	// repos this means the restart-within-TTL path has the same limitation as
-	// before this fix. A follow-up is needed to address that narrower window
-	// (e.g. by not caching private-repo entries to disk, or by re-fetching
-	// content when the disk-cache entry is used for install).
+	// restart within the TTL window) have Content == nil and fall back to
+	// downloadSkillFile. For those, installOneSkill looks up the credential
+	// the GitHub resolver would use for the skill's ref (see
+	// ResolvedSkill.githubCredentialRef) so private repos still download.
 	Content []byte `json:"-"`
 }
 
@@ -186,6 +194,38 @@ type gitHubTokenKey struct{}
 // the repo in question.
 func ContextWithGitHubToken(ctx context.Context, token string) context.Context {
 	return context.WithValue(ctx, gitHubTokenKey{}, token)
+}
+
+type gitHubCredentialLookupKey struct{}
+
+// GitHubCredentialLookup returns the GitHub credential to use for the given
+// gh:// URI, or "" if none applies. It is used at install time for skills
+// whose file content was not kept (see ResolvedSkill.githubCredentialRef).
+type GitHubCredentialLookup func(uri string) string
+
+// ContextWithGitHubCredentialLookup returns a context carrying lookup for the
+// install phase. The broker sets it to GitHubSkillResolver.CredentialForURI
+// of the resolver it uses for the same request, so install finds the same
+// credential the resolver used without that value travelling on the
+// resolved skill.
+func ContextWithGitHubCredentialLookup(ctx context.Context, lookup GitHubCredentialLookup) context.Context {
+	return context.WithValue(ctx, gitHubCredentialLookupKey{}, lookup)
+}
+
+// gitHubDownloadToken returns the credential installOneSkill presents for
+// skill's raw downloads: the credential the GitHub resolver uses for the
+// skill's ref, when the skill came from that resolver without content and a
+// lookup is available, and otherwise the context's default GitHub token.
+// downloadSkillFile only ever sends either to GitHub hosts.
+func gitHubDownloadToken(ctx context.Context, skill ResolvedSkill) string {
+	if skill.githubCredentialRef != "" {
+		if lookup, ok := ctx.Value(gitHubCredentialLookupKey{}).(GitHubCredentialLookup); ok && lookup != nil {
+			if tok := lookup(skill.githubCredentialRef); tok != "" {
+				return tok
+			}
+		}
+	}
+	return GitHubTokenFromContext(ctx)
 }
 
 // GitHubTokenFromContext retrieves the GitHub token for the install phase,
@@ -452,10 +492,11 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 		return nil, fmt.Errorf("failed to create skill staging dir: %w", err)
 	}
 
-	// Credential for raw.githubusercontent.com downloads of gh:// skills that
-	// the Hub resolved on our behalf. Empty for public repos and for skills
-	// that carry pre-fetched content.
-	ghToken := GitHubTokenFromContext(ctx)
+	// Credential for raw.githubusercontent.com downloads: for a skill the
+	// broker's GitHub resolver served without content, the credential it
+	// uses for that ref; otherwise the default token, used for gh:// skills
+	// the Hub resolved on our behalf. Empty for public repos.
+	ghToken := gitHubDownloadToken(ctx, skill)
 
 	var fileEntries []FileEntry
 
@@ -482,9 +523,7 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 		//
 		// Note: entries loaded from the on-disk resolution cache have
 		// Content == nil (json:"-" strips it), so they fall through to
-		// downloadSkillFile. This means the post-restart, within-TTL path
-		// retains the pre-fix limitation for private repos. See the Content
-		// field doc on ResolvedFile for details.
+		// downloadSkillFile with the credential chosen above.
 		if f.Content != nil {
 			if err := writeSkillFileContent(f.Content, destPath); err != nil {
 				return nil, fmt.Errorf("failed to write %s: %w", f.Path, err)

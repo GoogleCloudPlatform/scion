@@ -514,6 +514,10 @@ func (s *Server) attachSkillResolver(ctx context.Context, r *http.Request, in sk
 		if defaultGHToken != "" {
 			ctx = agent.ContextWithGitHubToken(ctx, defaultGHToken)
 		}
+		// For gh:// skills the GitHub resolver served from its on-disk cache
+		// (no file content kept), install looks up the same credential that
+		// resolver uses for the ref.
+		ctx = agent.ContextWithGitHubCredentialLookup(ctx, ghResolver.CredentialForURI)
 		if in.ProjectID != "" {
 			ctx = agent.ContextWithResolveProjectID(ctx, in.ProjectID)
 		}
