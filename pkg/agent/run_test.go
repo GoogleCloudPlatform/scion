@@ -7721,7 +7721,7 @@ func TestReResolveModelAlias(t *testing.T) {
 			envModel:    "medium",
 			cfg:         nil,
 			harnessName: "claude",
-			wantModel:   "claude-sonnet-5",
+			wantModel:   "claude-sonnet-5-5",
 			wantResolv:  true,
 		},
 		{
