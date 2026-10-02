@@ -186,9 +186,17 @@ func TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesRemap(t *testing
 // control case: the same flagged grant, but this dispatch's project-effective
 // settings resolve the profile to the same local container runtime the hub
 // believed it would — passthrough must survive unchanged.
+//
+// The profile matches the broker default, so resolveManagerForOpts normally
+// returns at its settings-level pre-check without resolving. The resolver is
+// still pinned to a mock "docker" runtime so the test cannot reach a real
+// runtime if that shortcut changes.
 func TestBuildStartContext_HubDefaultPassthroughKeptWhenRuntimeMatches(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
 	projectPath := writeRemapSettings(t, "docker")
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+		return &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	}
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
@@ -220,9 +228,16 @@ func TestBuildStartContext_HubDefaultPassthroughKeptWhenRuntimeMatches(t *testin
 // (explicit request or project-level default, never the hub-default rung)
 // must survive a runtime remap completely unaffected — the broker-side
 // re-check is scoped to the hub-default rung only, by construction.
+//
+// srv.resolveAuxiliaryRuntime returns a mock "kubernetes" runtime so the
+// remap never builds a real cluster client from the ambient KUBECONFIG/ADC
+// (ptone/scion#2680).
 func TestBuildStartContext_UnflaggedPassthroughUnaffectedByRuntimeRemap(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
 	projectPath := writeRemapSettings(t, "kubernetes")
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+		return &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	}
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
