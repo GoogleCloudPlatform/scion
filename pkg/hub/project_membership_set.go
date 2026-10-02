@@ -350,17 +350,34 @@ func roleContainsRoleBindingPermission(rd *store.RoleDefinition) bool {
 	return false
 }
 
+// roleDefinitionRefetchError reports which role definition
+// refetchRoleDefinitionsTx failed to re-read, wrapping the store error so
+// callers can still test it with errors.Is (e.g. store.ErrNotFound).
+type roleDefinitionRefetchError struct {
+	roleDefinitionID string
+	err              error
+}
+
+func (e *roleDefinitionRefetchError) Error() string {
+	return fmt.Sprintf("re-fetch role definition %s under lock: %v", e.roleDefinitionID, e.err)
+}
+
+func (e *roleDefinitionRefetchError) Unwrap() error { return e.err }
+
 // refetchRoleDefinitionsTx re-fetches each of defs through tx (rather than
 // trusting the pre-transaction-resolved pointers), by ID, preserving order.
 // Used by the in-tx role_binding.* re-check (review r1 A-O2) so a role
 // definition's permissions edited between Phase P and Phase T are seen by
-// the re-check, instead of silently reusing the Phase P snapshot.
+// the re-check, instead of silently reusing the Phase P snapshot. The
+// project lock does not cover role definitions; an edit committed after
+// this read is the accepted FYI-2 residual. A failed read is returned as a
+// *roleDefinitionRefetchError naming the failing ID.
 func refetchRoleDefinitionsTx(ctx context.Context, tx store.Store, defs []*store.RoleDefinition) ([]*store.RoleDefinition, error) {
 	refetched := make([]*store.RoleDefinition, 0, len(defs))
 	for _, d := range defs {
 		rd, err := tx.GetRoleDefinition(ctx, d.ID)
 		if err != nil {
-			return nil, fmt.Errorf("re-fetch role definition %s under lock: %w", d.ID, err)
+			return nil, &roleDefinitionRefetchError{roleDefinitionID: d.ID, err: err}
 		}
 		refetched = append(refetched, rd)
 	}
@@ -955,9 +972,27 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		// pre-transaction — so a role definition edited between Phase P and
 		// this point (e.g. role_binding.create added to a role already
 		// accepted by the pre-tx guard) is caught here too, using the same
-		// error as the pre-tx guard.
+		// error as the pre-tx guard. The project lock does not cover role
+		// definitions; an edit committed after this read is the accepted
+		// FYI-2 residual.
+		//
+		// R5-2 (review r5): a created role definition deleted between Phase
+		// P and this read (DeleteRoleDefinition refuses only roles that still
+		// have bindings) is reported exactly as Phase P reports an unknown ID
+		// (resolveDesiredRoleDefs): 400 invalid_role_set with
+		// details.roleDefinitionId. The request names a role that does not
+		// exist by the time it is applied, so a retry cannot succeed; 409
+		// membership_changed would invite a pointless retry.
 		refetchedCreates, err := refetchRoleDefinitionsTx(ctx, tx, plan1.Create)
 		if err != nil {
+			var rfErr *roleDefinitionRefetchError
+			if errors.As(err, &rfErr) && errors.Is(err, store.ErrNotFound) {
+				return asGovernanceDenial(MembershipDecision{
+					Allowed: false, DenialCode: ErrCodeInvalidRoleSet,
+					Reason: "unknown role definition: " + rfErr.roleDefinitionID, HTTPStatus: 400,
+					Details: map[string]interface{}{"roleDefinitionId": rfErr.roleDefinitionID},
+				})
+			}
 			return fmt.Errorf("re-fetch created role definitions under lock: %w", err)
 		}
 		if d := checkNoRoleBindingPermissionInCreatedCustomRoles(refetchedCreates); d != nil {

@@ -40,8 +40,10 @@ import (
 // SetMemberRoles hub tests (ptone/scion#2529 P1).
 //
 // Ports miller79/scion PR #127's handlers_roles_owner_custom_test.go fixture
-// and all 9 scenarios, re-targeted from POST /admin/role-bindings to
-// PUT/DELETE …/members/principals/{type}/{id}. The D1 ruling
+// and the 9 owner / hub-admin scenarios, re-targeted from POST
+// /admin/role-bindings to PUT/DELETE …/members/principals/{type}/{id}. The
+// PR's later 3 project-admin scenarios are intentionally inverted by P1
+// (project-admins cannot change custom roles), see AdminTier_*. The D1 ruling
 // (2026-10-01) blocks custom roles for agent principals, so the ported
 // "agent" scenario now expects 400 principal_ineligible instead of 403.
 //
@@ -1396,6 +1398,184 @@ func TestSetMemberRoles_InTxRoleBindingGuard_CatchesDefinitionEditedBetweenPhase
 	}
 	assert.Empty(t, mmrBindingsFor(t, realStore, "user", target, f.projectID), "nothing written when the in-tx re-check refuses")
 	assert.Empty(t, mmrAuditRows(t, realStore, f.projectID), "no audit rows when the in-tx re-check refuses")
+}
+
+// mmrDeleteSystemHubAdminBindings deletes userID's system-scope hub-admin
+// binding(s) directly on s, modelling a concurrent revocation of the hub
+// override that commits before SetMemberRoles takes its lock.
+func mmrDeleteSystemHubAdminBindings(t *testing.T, s store.Store, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	hubAdmin, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+	deleted := 0
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == hubAdmin.ID {
+			require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
+			deleted++
+		}
+	}
+	require.Equal(t, 1, deleted, "expected exactly one system hub-admin binding to revoke")
+}
+
+// TestSetMemberRoles_TOCTOU_HubAuthorityRevokedBetweenPhases is R5-1 (review
+// r5). The actor is a hub admin with NO role on the project, acting through
+// the hub override, and the request is a RemoveAll on f.member, a built-in
+// only plan, so no custom-role authority is ever asked for. Between Phase P
+// and the lock, a concurrent request (mmrAuthoritySwapStore) revokes the
+// actor's system-scope hub-admin binding.
+//
+// actorAuthorityChanged cannot catch this: the Phase P and Phase T
+// snapshots would both read role "" and hubOverride true, with empty
+// customAuth on both sides. The only guard is reevaluateActorTx's in-tx
+// hub-override revalidation (the needDelete branch), which must refuse with
+// 403 role_assignment_forbidden before anything is written. Without that
+// guard, the member's binding is deleted by an actor who no longer holds
+// any authority over it.
+func TestSetMemberRoles_TOCTOU_HubAuthorityRevokedBetweenPhases(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+	hubAdminID := tid(t.Name() + "-hubadmin")
+	require.NoError(t, f.store.CreateUser(ctx, &store.User{
+		ID: hubAdminID, Email: hubAdminID + "@test.com", DisplayName: "Hub Admin", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, f.store, hubAdminID)
+	mmrSeedHubAdmin(t, f.store, hubAdminID)
+
+	before := mmrBindingsFor(t, f.store, "user", f.member.ID, f.projectID)
+	require.NotEmpty(t, before, "fixture member must start with a binding to remove")
+
+	realStore := f.srv.membershipService.store
+	sw := &mmrAuthoritySwapStore{Store: realStore}
+	sw.swap = func() { mmrDeleteSystemHubAdminBindings(t, realStore, hubAdminID) }
+	f.srv.membershipService.store = sw
+	defer func() { f.srv.membershipService.store = realStore }()
+
+	svcCtx := mmrServiceCtx(hubAdminID, hubAdminID+"@test.com")
+	_, decision := f.srv.membershipService.SetMemberRoles(svcCtx, SetMemberRolesRequest{
+		ProjectID: f.projectID, PrincipalType: "user", PrincipalID: f.member.ID,
+		Actor:     mmrServiceIdentity(hubAdminID, hubAdminID+"@test.com"),
+		RemoveAll: true,
+	})
+
+	require.True(t, sw.didSwap, "the swap seam must have run: %+v", decision)
+	require.NotNil(t, decision, "a removal by an actor whose hub override was revoked mid-request must not commit")
+	assert.Equal(t, ErrCodeRoleAssignmentForbidden, decision.DenialCode, "%+v", decision)
+	assert.Equal(t, http.StatusForbidden, decision.HTTPStatus, "%+v", decision)
+	assert.Equal(t, roleDefIDs(before), roleDefIDs(mmrBindingsFor(t, realStore, "user", f.member.ID, f.projectID)), "the member's bindings must be unchanged")
+	assert.Empty(t, mmrAuditRows(t, realStore, f.projectID), "a refused request must write no audit rows")
+}
+
+// TestSetMemberRoles_TOCTOU_HubAuthorityRevokedBetweenPhases_Create is the
+// R5-1 create-side twin, pinning reevaluateActorTx's needCreate branch.
+// A create-only built-in plan is not reachable for a hub admin (every built-in
+// project role exceeds the hub-admin CanDelegate ceiling), and a custom plan
+// would trip actorAuthorityChanged through customAuth Via, so this test uses
+// the plan that does reach it: an owner -> member demotion of a co-owner,
+// which is a decrease (no CanDelegate) and both creates and deletes a
+// binding. The actor holds hub-admin AND a system-scope custom role carrying
+// only role_binding.delete; swap() revokes hub-admin, so under the lock the
+// actor still has hub delete authority but has lost hub create authority.
+// Only the needCreate branch can refuse, and must do so with 403 before
+// anything is written.
+func TestSetMemberRoles_TOCTOU_HubAuthorityRevokedBetweenPhases_Create(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+	hubAdminID := tid(t.Name() + "-hubadmin")
+	require.NoError(t, f.store.CreateUser(ctx, &store.User{
+		ID: hubAdminID, Email: hubAdminID + "@test.com", DisplayName: "Hub Admin", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, f.store, hubAdminID)
+	mmrSeedHubAdmin(t, f.store, hubAdminID)
+
+	deleteOnly, err := f.store.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "mmr-r5-1-delete-only-" + tid(t.Name())[:8],
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{PermRoleBindingDelete},
+	})
+	require.NoError(t, err)
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: deleteOnly.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      hubAdminID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Two owners so demoting one does not trip the last-owner guard.
+	coOwnerID := tid(t.Name() + "-co-owner")
+	createRS1UserWithRole(t, f.store, coOwnerID, coOwnerID+"@test.com", f.projectID, store.ProjectRoleOwner)
+	before := roleDefIDs(mmrBindingsFor(t, f.store, "user", coOwnerID, f.projectID))
+
+	realStore := f.srv.membershipService.store
+	sw := &mmrAuthoritySwapStore{Store: realStore}
+	sw.swap = func() { mmrDeleteSystemHubAdminBindings(t, realStore, hubAdminID) }
+	f.srv.membershipService.store = sw
+	defer func() { f.srv.membershipService.store = realStore }()
+
+	svcCtx := mmrServiceCtx(hubAdminID, hubAdminID+"@test.com")
+	_, decision := f.srv.membershipService.SetMemberRoles(svcCtx, SetMemberRolesRequest{
+		ProjectID: f.projectID, PrincipalType: "user", PrincipalID: coOwnerID,
+		Actor:          mmrServiceIdentity(hubAdminID, hubAdminID+"@test.com"),
+		DesiredRoleIDs: []string{f.memberRD.ID},
+	})
+
+	require.True(t, sw.didSwap, "the swap seam must have run: %+v", decision)
+	require.NotNil(t, decision, "a demotion by an actor whose hub create authority was revoked mid-request must not commit")
+	assert.Equal(t, ErrCodeRoleAssignmentForbidden, decision.DenialCode, "%+v", decision)
+	assert.Equal(t, http.StatusForbidden, decision.HTTPStatus, "%+v", decision)
+	assert.Equal(t, before, roleDefIDs(mmrBindingsFor(t, realStore, "user", coOwnerID, f.projectID)), "the co-owner's bindings must be unchanged")
+	assert.Empty(t, mmrAuditRows(t, realStore, f.projectID), "a refused request must write no audit rows")
+}
+
+// TestSetMemberRoles_TOCTOU_RoleDefinitionDeletedBetweenPhases is R5-2
+// (review r5). A custom role with no bindings can be deleted
+// (DeleteRoleDefinition refuses only roles that still have bindings) after
+// Phase P resolved it and before the lock. refetchRoleDefinitionsTx then
+// finds it gone; that must surface as the same 400 invalid_role_set +
+// details.roleDefinitionId that Phase P gives an unknown ID, not a raw 500.
+func TestSetMemberRoles_TOCTOU_RoleDefinitionDeletedBetweenPhases(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+
+	doomedRD, err := f.store.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "mmr-r5-2-doomed-" + tid(t.Name())[:8],
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"project.read"},
+	})
+	require.NoError(t, err)
+
+	target := tid(t.Name() + "-target")
+	require.NoError(t, f.store.CreateUser(ctx, &store.User{
+		ID: target, Email: target + "@test.com", DisplayName: "Target", Role: "member", Status: "active",
+	}))
+
+	realStore := f.srv.membershipService.store
+	sw := &mmrAuthoritySwapStore{Store: realStore}
+	sw.swap = func() { require.NoError(t, realStore.DeleteRoleDefinition(ctx, doomedRD.ID)) }
+	f.srv.membershipService.store = sw
+	defer func() { f.srv.membershipService.store = realStore }()
+
+	svcCtx := mmrServiceCtx(f.owner.ID, f.owner.Email)
+	_, decision := f.srv.membershipService.SetMemberRoles(svcCtx, SetMemberRolesRequest{
+		ProjectID: f.projectID, PrincipalType: "user", PrincipalID: target,
+		Actor:          mmrServiceIdentity(f.owner.ID, f.owner.Email),
+		DesiredRoleIDs: []string{f.memberRD.ID, doomedRD.ID},
+	})
+
+	require.True(t, sw.didSwap, "the swap seam must have run: %+v", decision)
+	require.NotNil(t, decision, "a role deleted between phases must be refused, not committed")
+	assert.Equal(t, ErrCodeInvalidRoleSet, decision.DenialCode, "%+v", decision)
+	assert.Equal(t, http.StatusBadRequest, decision.HTTPStatus, "%+v", decision)
+	assert.Equal(t, "unknown role definition: "+doomedRD.ID, decision.Reason, "%+v", decision)
+	if assert.NotNil(t, decision.Details, "%+v", decision) {
+		assert.Equal(t, doomedRD.ID, decision.Details["roleDefinitionId"], "%+v", decision)
+	}
+	assert.Empty(t, mmrBindingsFor(t, realStore, "user", target, f.projectID), "nothing written")
+	assert.Empty(t, mmrAuditRows(t, realStore, f.projectID), "a refused request must write no audit rows")
 }
 
 // ---------------------------------------------------------------------------
