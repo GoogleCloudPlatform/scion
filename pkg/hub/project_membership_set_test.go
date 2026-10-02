@@ -1339,6 +1339,65 @@ func TestSetMemberRoles_TOCTOU_PrincipalChangedBetweenPhases_ExpectedRoleIDs(t *
 	assert.Empty(t, mmrAuditRows(t, realStore, f.projectID), "a refused request must write no audit rows")
 }
 
+// TestSetMemberRoles_InTxRoleBindingGuard_CatchesDefinitionEditedBetweenPhases
+// is A-O2 (review r1, A-path): the in-tx role_binding.* re-check now
+// re-fetches each created role definition through tx (refetchRoleDefinitionsTx)
+// instead of reusing the Phase P desiredDefs snapshot, so a definition edited
+// between Phase P and the lock is caught too. Uses the same
+// mmrAuthoritySwapStore seam as the R2-2/R4-1 TOCTOU tests above: its swap()
+// runs exactly once, immediately before the real transaction, modelling a
+// concurrent edit that lands between the two checks.
+//
+// The created role starts with only "project.read" — accepted by the Phase P
+// guard and by the direct owner's CanDelegate ceiling — and swap() adds
+// "role_binding.create" to it directly in the store before the lock. Without
+// the re-fetch, Phase T's re-check still sees the Phase P snapshot (no
+// role_binding.*) and the grant commits; with it, the re-check sees the
+// edited definition and refuses with the same error the pre-tx guard would
+// have given it, before any binding is written.
+func TestSetMemberRoles_InTxRoleBindingGuard_CatchesDefinitionEditedBetweenPhases(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+
+	editableRD, err := f.store.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "mmr-o2-editable-" + tid(t.Name())[:8],
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"project.read"},
+	})
+	require.NoError(t, err)
+
+	target := tid(t.Name() + "-target")
+	require.NoError(t, f.store.CreateUser(ctx, &store.User{
+		ID: target, Email: target + "@test.com", DisplayName: "Target", Role: "member", Status: "active",
+	}))
+
+	realStore := f.srv.membershipService.store
+	sw := &mmrAuthoritySwapStore{Store: realStore}
+	sw.swap = func() {
+		edited := *editableRD
+		edited.Permissions = append(append([]string{}, editableRD.Permissions...), "role_binding.create")
+		_, err := realStore.UpdateRoleDefinition(ctx, &edited)
+		require.NoError(t, err)
+	}
+	f.srv.membershipService.store = sw
+	defer func() { f.srv.membershipService.store = realStore }()
+
+	svcCtx := mmrServiceCtx(f.owner.ID, f.owner.Email)
+	_, decision := f.srv.membershipService.SetMemberRoles(svcCtx, SetMemberRolesRequest{
+		ProjectID: f.projectID, PrincipalType: "user", PrincipalID: target,
+		Actor:          mmrServiceIdentity(f.owner.ID, f.owner.Email),
+		DesiredRoleIDs: []string{editableRD.ID},
+	})
+
+	require.NotNil(t, decision, "a role definition edited to carry role_binding.create between phases must still be refused")
+	assert.Equal(t, ErrCodeRoleAssignmentForbidden, decision.DenialCode, "same error as the pre-tx guard: %+v", decision)
+	if assert.NotNil(t, decision.Details) {
+		assert.Equal(t, editableRD.ID, decision.Details["roleDefinitionId"])
+	}
+	assert.Empty(t, mmrBindingsFor(t, realStore, "user", target, f.projectID), "nothing written when the in-tx re-check refuses")
+	assert.Empty(t, mmrAuditRows(t, realStore, f.projectID), "no audit rows when the in-tx re-check refuses")
+}
+
 // ---------------------------------------------------------------------------
 // Principal addressing
 // ---------------------------------------------------------------------------

@@ -350,6 +350,23 @@ func roleContainsRoleBindingPermission(rd *store.RoleDefinition) bool {
 	return false
 }
 
+// refetchRoleDefinitionsTx re-fetches each of defs through tx (rather than
+// trusting the pre-transaction-resolved pointers), by ID, preserving order.
+// Used by the in-tx role_binding.* re-check (review r1 A-O2) so a role
+// definition's permissions edited between Phase P and Phase T are seen by
+// the re-check, instead of silently reusing the Phase P snapshot.
+func refetchRoleDefinitionsTx(ctx context.Context, tx store.Store, defs []*store.RoleDefinition) ([]*store.RoleDefinition, error) {
+	refetched := make([]*store.RoleDefinition, 0, len(defs))
+	for _, d := range defs {
+		rd, err := tx.GetRoleDefinition(ctx, d.ID)
+		if err != nil {
+			return nil, fmt.Errorf("re-fetch role definition %s under lock: %w", d.ID, err)
+		}
+		refetched = append(refetched, rd)
+	}
+	return refetched, nil
+}
+
 // checkNoRoleBindingPermissionInCreatedCustomRoles refuses any CREATED
 // (never merely kept) custom role whose permissions include a role_binding.*
 // permission, for EVERY actor. Built-in roles are exempt: they are matrix-
@@ -932,12 +949,18 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 
 		plan1 := planRoleSet(current1, currentDefs1, desiredDefs)
 
-		// F1: re-check the structural role_binding.* guard under lock, from
-		// the same desiredDefs resolved pre-transaction. Accepted residual
-		// risk, out of scope for P1: a role definition's permissions are not
-		// re-fetched here, so a hub admin editing a bound role definition's
-		// permissions between phases is not caught by this re-check.
-		if d := checkNoRoleBindingPermissionInCreatedCustomRoles(plan1.Create); d != nil {
+		// F1 / A-O2 (review r1): re-check the structural role_binding.*
+		// guard under lock, against the CREATED role definitions' permissions
+		// re-fetched through tx — not the desiredDefs pointers resolved
+		// pre-transaction — so a role definition edited between Phase P and
+		// this point (e.g. role_binding.create added to a role already
+		// accepted by the pre-tx guard) is caught here too, using the same
+		// error as the pre-tx guard.
+		refetchedCreates, err := refetchRoleDefinitionsTx(ctx, tx, plan1.Create)
+		if err != nil {
+			return fmt.Errorf("re-fetch created role definitions under lock: %w", err)
+		}
+		if d := checkNoRoleBindingPermissionInCreatedCustomRoles(refetchedCreates); d != nil {
 			return asGovernanceDenial(*d)
 		}
 
