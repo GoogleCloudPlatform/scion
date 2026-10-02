@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -43,13 +44,23 @@ const fallbackMinBudget = 10 * time.Second
 
 // fallbackContext returns a context for the fallback resolver. If the primary
 // ctx is still healthy and has a usable budget left it is used as-is, so the
-// caller's cancellation and deadline are preserved. If it is already cancelled
-// or expired — or so close to its deadline that the fallback could not finish
-// (e.g. the Hub call consumed nearly all of the caller's budget) — the context
-// is detached from the cancellation signal and given a bounded budget so the
-// fallback can still complete. Values (logging, tracing) are preserved either
-// way.
+// caller's cancellation and deadline are preserved. If its deadline has
+// expired — or is so close that the fallback could not finish (e.g. the Hub
+// call consumed nearly all of the caller's budget) — the context is detached
+// from the deadline and given a bounded budget so the fallback can still
+// complete. Values (logging, tracing) are preserved either way.
+//
+// An explicitly cancelled ctx (context.Canceled, not DeadlineExceeded) is
+// returned as-is, so the fallback fails at once: cancellation means the
+// caller has gone away (the agent was deleted or stopped, or the Hub
+// abandoned the request), and nobody is left to use the result. Detaching in
+// that case kept a deleted agent's start running for up to fallbackTimeout,
+// long enough for its failure handling to run against a newer agent that had
+// since taken the same name.
 func fallbackContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return ctx, func() {}
+	}
 	if ctx.Err() == nil {
 		if dl, ok := ctx.Deadline(); !ok || time.Until(dl) >= fallbackMinBudget {
 			// Healthy with a usable budget — inherit deadline and cancellation.

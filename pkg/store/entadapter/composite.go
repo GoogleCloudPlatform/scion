@@ -157,6 +157,7 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 	txClient := tx.Client()
 	txStore := NewCompositeStore(txClient)
 	txStore.inTx = true
+	txStore.AccessConstraintStore.inTx = true
 
 	defer func() {
 		// Safety net: if Commit was not called (i.e. fn panicked or returned

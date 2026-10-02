@@ -1895,6 +1895,13 @@ func (s *Server) createAgentInProject(
 					// Broker reported missing required env vars — fail the dispatch.
 					// Clean up the provisioning agent and its files so orphaned
 					// local state doesn't trigger spurious sync-registration.
+					//
+					// DispatchAgentCreateWithGather returned this as a value, not
+					// an error, so its own revoke-on-failure defer did not fire —
+					// the credential it minted is revoked here instead, before the
+					// row is deleted (ptone/scion#1956: a create that fails after
+					// the mint must not leave the credential valid for its full TTL).
+					revokeAgentCredentialsBestEffort(ctx, s.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 					_ = dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
 					_ = s.store.DeleteAgent(ctx, agent.ID)
 					s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
@@ -2025,6 +2032,16 @@ func mergeDispatchedAgent(dst, src *store.Agent) {
 	}
 	if src.RuntimeState != "" {
 		dst.RuntimeState = src.RuntimeState
+	}
+	// A resume that hit a version conflict re-reads the row as dst and
+	// retries with src (the in-memory agent the dispatch already ran
+	// against, including the caller's clear of a stale exit reason/code
+	// from the prior generation). Carry that clear through for a running
+	// resume, the same as the other running-phase fields above — otherwise
+	// the retry's full-row write would keep dst's stale values instead.
+	if src.Phase == string(state.PhaseRunning) {
+		dst.ExitReason = src.ExitReason
+		dst.ExitCode = src.ExitCode
 	}
 }
 
@@ -3004,6 +3021,17 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 // Returns true if the broker is available (or no broker is assigned).
 // Returns false and writes a 503 error response if the broker is offline.
 func (s *Server) checkBrokerAvailability(w http.ResponseWriter, r *http.Request, agent *store.Agent) bool {
+	if s.brokerReachable(r.Context(), agent) {
+		return true
+	}
+	RuntimeBrokerUnavailable(w, agent.RuntimeBrokerID, nil)
+	return false
+}
+
+// brokerReachable reports whether the agent's runtime broker looks reachable,
+// without writing a response. It returns true when no broker is assigned, and
+// when the broker status cannot be read.
+func (s *Server) brokerReachable(ctx context.Context, agent *store.Agent) bool {
 	if agent.RuntimeBrokerID == "" {
 		return true
 	}
@@ -3014,19 +3042,14 @@ func (s *Server) checkBrokerAvailability(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Fall back to DB status check (covers co-located mode where there's no WebSocket)
-	broker, err := s.store.GetRuntimeBroker(r.Context(), agent.RuntimeBrokerID)
+	broker, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Failed to check broker status", "brokerID", agent.RuntimeBrokerID, "error", err)
 		// If we can't verify, let it through rather than blocking
 		return true
 	}
 
-	if broker.Status == store.BrokerStatusOnline {
-		return true
-	}
-
-	RuntimeBrokerUnavailable(w, agent.RuntimeBrokerID, nil)
-	return false
+	return broker.Status == store.BrokerStatusOnline
 }
 
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id string) {
@@ -3098,16 +3121,24 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		}
 	}
 
-	// Phase-aware delete: agents in "created" phase were never provisioned on the
-	// broker — no container, no workspace, no branch. Skip broker dispatch entirely
-	// and go straight to hub-side cleanup. This prevents hanging on a stale broker
-	// for agents that never left the creation phase.
-	skipBrokerDispatch := agent.Phase == string(state.PhaseCreated)
+	// Phase-aware delete: an agent in the "created" phase can still have
+	// state on its broker, in two cases:
+	//   - provision-only create: the broker provisioned it (worktree and
+	//     branch) and the agent stays in "created" until it is started;
+	//   - a start in flight: the creating request timed out before the
+	//     broker answered, and the broker may hold a pod, Secrets or
+	//     workspace files for it.
+	// Dispatch the delete on a best-effort basis, so both are removed: only
+	// when the broker looks reachable, and a dispatch error does not block
+	// removing the hub record. This keeps a stale broker from blocking the
+	// delete of an agent that never left the creation phase.
+	createdPhase := agent.Phase == string(state.PhaseCreated)
+	skipBrokerDispatch := createdPhase && !s.brokerReachable(ctx, agent)
 
 	// Verify broker is reachable before deleting to avoid orphaned containers.
 	// Force mode bypasses this check so stuck agents can always be cleaned up.
-	// Created-phase agents skip this check since they have nothing on the broker.
-	if !isManagedAgentRuntime(agent.Runtime) && !skipBrokerDispatch && !force && !s.checkBrokerAvailability(w, r, agent) {
+	// Created-phase agents skip this check: their dispatch is best-effort.
+	if !isManagedAgentRuntime(agent.Runtime) && !createdPhase && !force && !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}
 
@@ -3117,10 +3148,15 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 	now := time.Now()
 
 	// If a dispatcher is available, dispatch the deletion to the runtime broker.
-	// Skip dispatch for created-phase agents — they were never provisioned.
+	// Skip dispatch for created-phase agents whose broker is not reachable.
 	if dispatcher := s.GetDispatcher(); dispatcher != nil && agent.RuntimeBrokerID != "" && !skipBrokerDispatch {
 		if err := dispatcher.DispatchAgentDelete(ctx, agent, deleteFiles, removeBranch, softDelete, now); err != nil {
-			if force {
+			if createdPhase {
+				// Created phase: the dispatch is best-effort, continue with
+				// hub record deletion.
+				s.agentLifecycleLog.Warn("Failed to dispatch created-phase agent delete to broker (continuing)",
+					"agent_id", agent.ID, "error", err)
+			} else if force {
 				// Force mode: log warning and continue with hub record deletion
 				s.agentLifecycleLog.Warn("Failed to dispatch agent delete to broker (force=true, continuing)",
 					"agent_id", agent.ID, "error", err)
@@ -3144,7 +3180,7 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 	}
 
 	// Revoke all credentials for the deleted agent (best-effort, Phase 1H)
-	if _, err := s.store.RevokeAgentCredentialsByAgent(ctx, agent.ID, "system", "agent_deleted"); err != nil {
+	if _, err := s.store.RevokeAgentCredentialsByAgent(ctx, agent.ID, "system", agentCredentialRevokeReasonDeleted); err != nil {
 		slog.Warn("Failed to revoke agent credentials on delete", "agent_id", agent.ID, "error", err)
 	}
 

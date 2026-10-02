@@ -4950,7 +4950,7 @@ func TestChatV2_Send_SenderUsesEmailNotDisplayName(t *testing.T) {
 	// Grant the user hub membership and project access so the authz
 	// middleware doesn't reject the request.
 	ensureHubMembership(ctx, s, user.ID)
-	srv.createProjectMembersGroup(ctx, proj)
+	srv.seedProjectCreatorMembership(ctx, proj)
 	addProjectMemberWithRole(t, s, proj, user.ID, store.GroupMemberRoleMember)
 
 	// --- Subtest 1: human-to-human (no agent, type:chat) path ---

@@ -14,7 +14,26 @@
 
 package permissions
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
+)
+
+var (
+	_ credentialmeta.BoundaryKind = BoundaryKindProject
+	_ BoundaryKind                = credentialmeta.BoundaryProject
+)
+
+func TestBoundaryKindsAliasCanonicalContract(t *testing.T) {
+	t.Parallel()
+
+	serverKinds := []credentialmeta.BoundaryKind{BoundaryKindProject, BoundaryKindHub}
+	if want := credentialmeta.BoundaryKinds(); !reflect.DeepEqual(serverKinds, want) {
+		t.Fatalf("server boundary kinds = %v, canonical kinds = %v", serverKinds, want)
+	}
+}
 
 // expectedSelectorRegistry pins today's full derived selector set. A human
 // must update this table — an explicit review act — whenever a Registry

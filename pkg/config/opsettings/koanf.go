@@ -73,6 +73,8 @@ var layer0Prefixes = []string{
 	"server.hub.async_agent_launch",
 	"server.hub.launch_timeout",
 	"server.hub.launch_keepalive_seconds",
+	// Missing-container reconcile grace — read into ServerConfig at startup.
+	"server.hub.missing_agent_grace",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0

@@ -77,7 +77,7 @@ func cpmSetup(t *testing.T) (srv *Server, s store.Store, projectA, projectB stri
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, pA))
-	srv.createProjectMembersGroup(ctx, pA)
+	srv.seedProjectCreatorMembership(ctx, pA)
 	msgAuthzAddProjectMember(t, s, ownerA.ID, projectA, "project-a", store.GroupMemberRoleOwner)
 	// Set inbound policy to "any" (CreateProject doesn't persist this field; default revision is 1)
 	_, err := s.UpdateProjectMessagingPolicy(ctx, projectA, store.CrossProjectInboundAny, 1)
@@ -95,7 +95,7 @@ func cpmSetup(t *testing.T) (srv *Server, s store.Store, projectA, projectB stri
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, pB))
-	srv.createProjectMembersGroup(ctx, pB)
+	srv.seedProjectCreatorMembership(ctx, pB)
 	msgAuthzAddProjectMember(t, s, ownerB.ID, projectB, "project-b", store.GroupMemberRoleOwner)
 	// Set inbound policy to "any" (default revision is 1)
 	_, err = s.UpdateProjectMessagingPolicy(ctx, projectB, store.CrossProjectInboundAny, 1)
@@ -491,7 +491,7 @@ func TestCrossProjectAuth_InboundMembers_OriginNotMember(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, membersProject))
-	srv.createProjectMembersGroup(ctx, membersProject)
+	srv.seedProjectCreatorMembership(ctx, membersProject)
 	msgAuthzAddProjectMember(t, s, ownerB.ID, membersProjectID, "members-project", store.GroupMemberRoleOwner)
 	_, err := s.UpdateProjectMessagingPolicy(ctx, membersProjectID, store.CrossProjectInboundMembers, 1)
 	require.NoError(t, err, "failed to set inbound=members")
@@ -520,7 +520,7 @@ func TestCrossProjectAuth_InboundMembers_OriginIsMember(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, membersProject))
-	srv.createProjectMembersGroup(ctx, membersProject)
+	srv.seedProjectCreatorMembership(ctx, membersProject)
 	msgAuthzAddProjectMember(t, s, ownerB.ID, membersProjectID, "members2-project", store.GroupMemberRoleOwner)
 	_, err := s.UpdateProjectMessagingPolicy(ctx, membersProjectID, store.CrossProjectInboundMembers, 1)
 	require.NoError(t, err, "failed to set inbound=members")

@@ -90,6 +90,9 @@ jobs:
       - name: Vet Integration-Tagged Code
         run: make vet-integration
 
+      - name: Vet Integration-Tagged Code (extras)
+        run: make vet-integration-extras
+
       - name: Install ripgrep
         run: |
           if ! command -v rg &> /dev/null; then

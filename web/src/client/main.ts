@@ -36,6 +36,12 @@ import { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
 import { TerminalWorkspacePersistence, restoreUrlIntent } from './terminal-persistence.js';
 import { parseLayoutUrl } from './terminal-layout.js';
 import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
+import {
+  TERMINAL_PALETTE_NEW_AGENT_EVENT,
+  type TerminalPaletteNewAgentDetail,
+} from './terminal-workspace-events.js';
+import { nonOwnerOpenStatus, openPalettePickedAgent } from './terminal-palette-open.js';
+import { showToast } from '../utils/toast.js';
 import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../utils/feature-flags.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
 import {
@@ -216,6 +222,22 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
       window.history.replaceState(window.history.state, '', browserPath(`/terminals/${agentId}`));
       terminalWorkspace!.setCurrentPath(`/terminals/${agentId}`);
     },
+  });
+  // "Jump to agent" palette, new agent in a multi-pane layout only (the
+  // workspace places an already-open agent itself, and navigates like a rail
+  // click when only one pane is on screen — see its selectFromPalette).
+  terminalWorkspace.element.addEventListener(TERMINAL_PALETTE_NEW_AGENT_EVENT, (e) => {
+    const { agentId } = (e as CustomEvent<TerminalPaletteNewAgentDetail>).detail;
+    if (!terminalCoordinator || !terminalWorkspace) return;
+    void openPalettePickedAgent({
+      coordinator: terminalCoordinator,
+      workspace: terminalWorkspace,
+      agentId,
+      navigations: terminalNavigations,
+      navigationId,
+      currentNavigationId: () => navigationId,
+      notify: (message) => showToast(message, 'neutral'),
+    });
   });
   return terminalCoordinator;
 }
@@ -1029,13 +1051,7 @@ async function renderRoute(path: string): Promise<void> {
         const result = await coordinator.open(agentId, requestId);
         if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
         if (thisNav === navigationId && !coordinator.isOwner) {
-          terminalWorkspace?.setStatus(
-            result.status === 'selected'
-              ? 'Terminal selected in its owning tab.'
-              : result.status === 'pending'
-                ? 'Waiting for the owning tab to select this terminal.'
-                : 'Terminal workspace is unavailable in this tab.'
-          );
+          terminalWorkspace?.setStatus(nonOwnerOpenStatus(result.status));
         }
       }
       return;

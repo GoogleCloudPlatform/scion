@@ -39,6 +39,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -61,7 +62,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
-	"github.com/robfig/cron/v3"
 )
 
 const (
@@ -154,6 +154,12 @@ type ServerConfig struct {
 	// before being marked as stalled (default: 5 minutes). Only applies to
 	// agents with a recent heartbeat (not already offline).
 	StalledThreshold time.Duration
+	// MissingAgentGrace is how long a running agent must be continuously
+	// absent from its runtime broker's complete heartbeat inventory before
+	// the Hub marks it phase=error with exit reason container_missing (an
+	// existing preempted or evicted exit reason is kept) (default: 3 minutes,
+	// minimum: 1 minute; lower values use the default).
+	MissingAgentGrace time.Duration
 	// AutoSuspendStalled controls whether stalled agents are automatically
 	// suspended (container stopped, phase set to "suspended"). Default: false.
 	AutoSuspendStalled bool
@@ -422,6 +428,7 @@ func DefaultServerConfig() ServerConfig {
 		BrokerAuthConfig:       DefaultBrokerAuthConfig(),
 		LaunchTimeout:          5 * time.Minute,
 		LaunchKeepaliveSeconds: 15,
+		MissingAgentGrace:      DefaultMissingAgentGrace,
 	}
 }
 
@@ -1178,6 +1185,11 @@ type Server struct {
 	// Dedicated message logger for message audit trail (nil = uses messageLog fallback)
 	dedicatedMessageLog *slog.Logger
 
+	// missingAgents and lifecycleOps back the heartbeat missing-container
+	// reconcile (broker_heartbeat_reconcile.go). Zero values are ready to use.
+	missingAgents missingAgentTracker
+	lifecycleOps  lifecycleOpTracker
+
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
 	authLog           *slog.Logger
@@ -1245,6 +1257,12 @@ type Server struct {
 	// refreshGitHubSkillInBackground and ghRefreshFailureBackoff).
 	ghRefreshFailMu      sync.Mutex
 	ghLastRefreshFailure map[string]time.Time
+
+	// ghCooldown holds gh:// resolution requests back per credential
+	// identity after a GitHub rate-limit response (see agent.GitHubCooldown).
+	// Nil means the process-wide agent.SharedGitHubCooldown, the same
+	// tracker the broker-side resolver uses; tests set their own.
+	ghCooldown *agent.GitHubCooldown
 
 	// nonceCacheStore is the DB-backed HMAC nonce replay cache (nil when entClient is nil).
 	// When set, it replaces the in-memory NonceCache in BrokerAuthService for
@@ -1343,6 +1361,13 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	}
 	if cfg.LaunchKeepaliveSeconds <= 0 {
 		cfg.LaunchKeepaliveSeconds = defaults.LaunchKeepaliveSeconds
+	}
+	if cfg.MissingAgentGrace < MinMissingAgentGrace {
+		if cfg.MissingAgentGrace != 0 {
+			slog.Warn("missing_agent_grace below minimum 1m, using default",
+				"configured", cfg.MissingAgentGrace, "default", defaults.MissingAgentGrace)
+		}
+		cfg.MissingAgentGrace = defaults.MissingAgentGrace
 	}
 
 	srvCtx, srvCancel := context.WithCancel(context.Background())
@@ -3599,16 +3624,21 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 			}
 		}
 
+		// The container is stopped before phase=suspended is written; see
+		// beginLifecycleOp.
+		endLifecycleOp := s.beginLifecycleOp(agent.ID)
 		if agent.RuntimeBrokerID != "" {
 			if dispatcher == nil {
 				slog.Error("Scheduler: cannot auto-suspend agent because dispatcher is nil",
 					"agent_id", agent.ID, "agent_name", agent.Name)
+				endLifecycleOp()
 				continue
 			}
 			s.syncWorkspaceOnStop(ctx, agent)
 			if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
 				slog.Error("Scheduler: auto-suspend dispatch failed",
 					"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+				endLifecycleOp()
 				continue
 			}
 		}
@@ -3618,7 +3648,9 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 			ContainerStatus: "stopped",
 			Activity:        "",
 		}
-		if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
+		err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate)
+		endLifecycleOp()
+		if err != nil {
 			slog.Error("Scheduler: auto-suspend status update failed",
 				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
 			continue
@@ -4478,9 +4510,23 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		"schedule_id", sched.ID, "schedule_name", sched.Name,
 		"project_id", sched.ProjectID)
 
+	// Backstop for zone-prefixed expressions that reach the evaluator anyway
+	// (for example a row written after the startup pass, or by an older
+	// replica): pause the row instead of recording an invalid-expression
+	// error on every tick.
+	if hasCronZonePrefix(sched.CronExpr) {
+		if err := s.store.UpdateScheduleStatus(ctx, sched.ID, store.ScheduleStatusPaused); err != nil {
+			log.Error("schedule-evaluator: failed to pause schedule with unsupported zone prefix",
+				"cron_expr", sched.CronExpr, "error", err)
+			return
+		}
+		log.Warn("schedule paused: cron zone prefixes are not supported; edit the expression to UTC and resume",
+			"cron_expr", sched.CronExpr)
+		return
+	}
+
 	// Compute next run time
-	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-	cronSchedule, err := parser.Parse(sched.CronExpr)
+	cronSchedule, err := parseScheduleCron(sched.CronExpr)
 	if err != nil {
 		log.Error("schedule-evaluator: invalid cron expression",
 			"cron_expr", sched.CronExpr, "error", err)
@@ -4684,7 +4730,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler = NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
 	s.registerSchedulerHandlers()
 
-	s.scheduler.Start(ctx)
+	// Pause schedules whose cron expression carries an unsupported zone
+	// prefix before the evaluator's first tick, so it never runs them.
+	s.startScheduler(ctx)
 
 	// Start the DB connection-pool stats sampler (P3-6 -> P0-5 gauges). It is a
 	// no-op unless an enabled recorder was wired via SetDBMetrics and the store
@@ -5209,6 +5257,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/role-bindings/", s.guarded("/api/v1/admin/role-bindings/", s.handleAdminRoleBindingByID))
 	s.mux.HandleFunc("/api/v1/admin/permissions", s.guarded("/api/v1/admin/permissions", s.handleAdminPermissions))
 	s.mux.HandleFunc("/api/v1/admin/access-constraints", s.guarded("/api/v1/admin/access-constraints", s.handleAdminAccessConstraints))
+	s.mux.HandleFunc("GET /api/v1/admin/access-constraints/{id}/audit", s.guarded("GET /api/v1/admin/access-constraints/{id}/audit", s.handleAdminAccessConstraintAudit))
 	s.mux.HandleFunc("/api/v1/admin/access-constraints/", s.guarded("/api/v1/admin/access-constraints/", s.handleAdminAccessConstraintByID))
 	s.mux.HandleFunc("/api/v1/admin/access-constraint-previews", s.guarded("/api/v1/admin/access-constraint-previews", s.handleAdminAccessConstraintPreviews))
 	s.mux.HandleFunc("/api/v1/admin/access-constraint-previews/", s.guarded("/api/v1/admin/access-constraint-previews/", s.handleAdminAccessConstraintPreviews))

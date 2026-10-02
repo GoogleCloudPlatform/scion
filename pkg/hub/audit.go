@@ -729,7 +729,7 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 				_ = logger.LogBrokerAuthEvent(ctx, event)
 			}
 
-			next.ServeHTTP(w, r.WithContext(ctx))
+			serveAfterAuth(w, next, r.WithContext(ctx))
 		})
 	}
 }

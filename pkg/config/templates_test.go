@@ -1112,6 +1112,7 @@ func TestMergeScionConfig_NewFields(t *testing.T) {
 				Namespace:          "base-ns",
 				RuntimeClassName:   "base-runtime",
 				ServiceAccountName: "base-sa",
+				PriorityClassName:  "base-priority",
 				Resources: &api.K8sResources{
 					Requests: map[string]string{"cpu": "250m"},
 					Limits:   map[string]string{"memory": "512Mi"},
@@ -1129,6 +1130,7 @@ func TestMergeScionConfig_NewFields(t *testing.T) {
 				Namespace:          "override-ns",
 				RuntimeClassName:   "override-runtime",
 				ServiceAccountName: "override-sa",
+				PriorityClassName:  "override-priority",
 				Resources: &api.K8sResources{
 					Requests: map[string]string{"memory": "1Gi"},
 					Limits:   map[string]string{"cpu": "500m"},
@@ -1156,6 +1158,9 @@ func TestMergeScionConfig_NewFields(t *testing.T) {
 		}
 		if got.Kubernetes.ServiceAccountName != "override-sa" {
 			t.Errorf("expected ServiceAccountName override, got %q", got.Kubernetes.ServiceAccountName)
+		}
+		if got.Kubernetes.PriorityClassName != "override-priority" {
+			t.Errorf("expected PriorityClassName override, got %q", got.Kubernetes.PriorityClassName)
 		}
 		if got.Kubernetes.ImagePullPolicy != "Never" {
 			t.Errorf("expected ImagePullPolicy override, got %q", got.Kubernetes.ImagePullPolicy)

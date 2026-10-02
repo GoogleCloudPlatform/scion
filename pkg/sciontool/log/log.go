@@ -46,6 +46,18 @@ var (
 	logFile *os.File
 )
 
+// Timestamp formats t the way sciontool stamps the log files it writes for
+// the system (agent.log and the service lifecycle logs): a UTC RFC 3339
+// instant with nanoseconds. The agent process keeps its own TZ for the
+// workload; only the log written for the system is UTC, so lines from
+// agents in different zones name the same instant the same way. The
+// fraction is variable width (time.RFC3339Nano trims trailing zeros), so
+// parse timestamps before comparing or ordering them; do not compare the
+// strings.
+func Timestamp(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
 // SetQuiet suppresses stderr log output (but preserves file logging).
 // Used when running as a hook/status subprocess where stderr is captured by the host.
 func SetQuiet(enabled bool) {
@@ -173,7 +185,7 @@ func Debug(format string, args ...interface{}) {
 func write(level, tag, format string, args ...interface{}) {
 	ensureInit()
 
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	timestamp := Timestamp(time.Now())
 	message := fmt.Sprintf(format, args...)
 
 	tagStr := ""
@@ -250,7 +262,7 @@ func getLogFileLocked() (*os.File, error) {
 	}
 	logFile = f
 	// Write the fallback message to the new log file too
-	_, _ = logFile.WriteString(time.Now().Format("2006-01-02 15:04:05") + " " + fallbackMsg)
+	_, _ = logFile.WriteString(Timestamp(time.Now()) + " " + fallbackMsg)
 	return logFile, nil
 }
 

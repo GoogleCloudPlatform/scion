@@ -649,6 +649,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			s.messageLog.Error("agent DM: failed to mark message failed",
 				"message_id", msgID, "error", markErr)
 		}
+		if isBrokerAgentNotFound(dispatchErr) {
+			return nil, agentNotRunningDispatchError(msgID)
+		}
 		return nil, dispatchFailedError(msgID)
 	}
 

@@ -858,6 +858,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.read", Resource: "access_constraint", Action: "read",
 	},
+	"GET /api/v1/admin/access-constraints/{id}/audit": {
+		Pattern: "GET /api/v1/admin/access-constraints/{id}/audit", RouteID: "admin.accessConstraints.audit",
+		Classification: RoutePolicy,
+		Permission:     "hub.audit.read", Resource: "access_constraint", Action: "manage",
+	},
 	"/api/v1/admin/access-constraint-previews": {
 		Pattern: "/api/v1/admin/access-constraint-previews", RouteID: "admin.accessConstraintPreviews",
 		Classification: RouteHubAdmin,
