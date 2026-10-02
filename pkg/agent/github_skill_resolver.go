@@ -234,14 +234,14 @@ func (r *GitHubSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefer
 }
 
 // resolutionCacheKey returns a canonical cache key for a skill ref.
-// A SHA-256 hash of the token is included so that different credentials
-// produce separate cache entries, preventing cross-credential cache sharing
-// of private content. The raw token is never used as a key value.
+// credentialFingerprint's full digest of the token is included so that
+// different credentials produce separate cache entries, preventing
+// cross-credential cache sharing of private content. The raw token is never
+// used as a key value.
 func resolutionCacheKey(ghRef *GitHubSkillRef, token string) string {
 	var tokenSuffix string
 	if token != "" {
-		h := sha256.Sum256([]byte(token))
-		tokenSuffix = "#" + hex.EncodeToString(h[:8]) // 16-char hex prefix of hash
+		tokenSuffix = "#" + credentialFingerprint(token)
 	}
 	return fmt.Sprintf("gh://%s/%s/%s@%s%s",
 		ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, tokenSuffix)
@@ -270,13 +270,24 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 		}
 		isBranchRef := !isFullCommitSHA(effectiveRef)
 		credID := r.flightIdentity(ghRef, projectID, userID, token)
-		// flightKey deliberately omits the token (unlike cacheKey above): see
-		// ResolveWithFetch for why single-flight must key on a stable,
-		// project-scoped credential identity rather than a per-mint token
-		// hash.
+		// flightKey folds credID in after the ref: credID already includes a
+		// fingerprint of token's own value (see flightIdentity), so two
+		// different credential values for the same ref never share a flight.
 		flightKey := fmt.Sprintf("gh://%s/%s/%s@%s|%s", ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, credID)
 
-		skill, err := r.resolutionCache.ResolveWithFetch(ctx, cacheKey, flightKey, credID, isBranchRef, fetch)
+		// logRef carries no credential-derived material — unlike flightKey and
+		// credID, it is safe to put in a log line or an error message that
+		// might reach a caller (see ResolveWithFetch/coalesceFetch). It names
+		// the ref and the general kind of source that supplied the credential
+		// ("named" or "default"), without the credential's value, its
+		// fingerprint, the secret's own name, or the project/user scope.
+		sourceKind := "default"
+		if r.credentialSource(ghRef) != "" {
+			sourceKind = "named"
+		}
+		logRef := ghRef.Raw + " (" + sourceKind + ")"
+
+		skill, err := r.resolutionCache.ResolveWithFetch(ctx, cacheKey, flightKey, credID, logRef, isBranchRef, fetch)
 		if err != nil {
 			return nil, err
 		}
@@ -411,12 +422,17 @@ func (r *GitHubSkillResolver) credentialSource(ghRef *GitHubSkillRef) string {
 // projectID and userID are layered on top of the hash, not as a substitute
 // for it: they are not required for the no-two-values-merge invariant (the
 // hash alone already gives that), but keeping them means a project or user
-// isolation regression still shows up as a flight merge even in a test setup
-// that happens to reuse one token value across scopes, which is what the
-// project- and user-isolation tests are about. Falls back to a fixed label
-// when a scope is unavailable (empty ProjectID: the CLI path, which uses its
-// own per-process cache anyway; empty UserID: a caller that never carries
-// one) — the hash still makes that fallback a non-issue for correctness.
+// isolation regression still shows up as a flight merge even when two
+// callers happen to present the exact same token value — the case the hash
+// alone cannot tell apart, since identical values hash identically.
+// TestGitHubSkillResolver_ScopeLayeringIsolation pins exactly this: one fixed
+// token value, checked across a different project (default source), a
+// different user within one project (default source), and a different
+// project under a named source, asserting each pair still gets independent
+// flights. Falls back to a fixed label when a scope is unavailable (empty
+// ProjectID: the CLI path, which uses its own per-process cache anyway;
+// empty UserID: a caller that never carries one) — the hash still makes that
+// fallback a non-issue for the no-two-values-merge invariant.
 //
 // token == "" means the request is unauthenticated: that case is safe to
 // share across every caller regardless of project or user (anonymous public
@@ -425,7 +441,7 @@ func (r *GitHubSkillResolver) flightIdentity(ghRef *GitHubSkillRef, projectID, u
 	if token == "" {
 		return "anon"
 	}
-	tokenScope := tokenHashScope(token)
+	tokenScope := credentialFingerprint(token)
 
 	if src := r.credentialSource(ghRef); src != "" {
 		return scopeOrDefault(projectID, "no-project") + "|" + src + "|" + tokenScope
@@ -442,13 +458,17 @@ func scopeOrDefault(scope, fallback string) string {
 	return scope
 }
 
-// tokenHashScope derives a flight-identity scope from the credential's own
-// value. It is always included in flightIdentity's result (for every
-// credential source), which is what makes two different credential values
-// never merge, independent of how the identity is otherwise scoped.
-func tokenHashScope(token string) string {
+// credentialFingerprint returns the full hex-encoded SHA-256 digest of a
+// credential value. It is the one place that turns a credential value into a
+// map-key component, used by both flightIdentity (so two different values
+// never share a flight or a credential-cap slot) and resolutionCacheKey (so
+// they never share a cache entry either). The full digest is used, not a
+// truncated prefix: these are in-memory map keys only, so the extra bytes
+// cost nothing, and a truncated prefix would make "two different values
+// never merge" merely probabilistic instead of guaranteed.
+func credentialFingerprint(token string) string {
 	h := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(h[:8])
+	return hex.EncodeToString(h[:])
 }
 
 // githubContentEntry is the JSON structure returned by the GitHub Contents API.

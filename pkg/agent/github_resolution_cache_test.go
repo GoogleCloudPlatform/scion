@@ -284,7 +284,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_Coalesces(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			results[i], errs[i] = cache.ResolveWithFetch(context.Background(),
-				"coalesce-key", "coalesce-flight", "coalesce-cred", false, fetch)
+				"coalesce-key", "coalesce-flight", "coalesce-cred", "test-ref", false, fetch)
 		}(i)
 	}
 
@@ -336,7 +336,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCap(t *testing.T) {
 			// identity: single-flight cannot coalesce these, so only the
 			// per-credential cap can bound their concurrency.
 			_, _ = cache.ResolveWithFetch(context.Background(),
-				fmt.Sprintf("cap-cache-%d", i), fmt.Sprintf("cap-flight-%d", i), "shared-cred", false, fetch)
+				fmt.Sprintf("cap-cache-%d", i), fmt.Sprintf("cap-flight-%d", i), "shared-cred", "test-ref", false, fetch)
 		}()
 	}
 
@@ -357,7 +357,21 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCap(t *testing.T) {
 	}
 
 	close(proceed)
-	wg.Wait()
+
+	// Bounded: if a slot were leaked (release() not called on some path),
+	// wg.Wait() would never return and this would otherwise hang until the
+	// surrounding test binary's own timeout, far later than a credential-slot
+	// leak needs to be caught.
+	wgDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(wgDone)
+	}()
+	select {
+	case <-wgDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wg.Wait() did not return — a credential slot was likely leaked (release() not called on some path)")
+	}
 
 	// The remaining callers must still have completed (each one eventually
 	// acquired a slot once one freed up).
@@ -397,7 +411,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCapIsolatedAcrossPr
 				return ResolvedSkill{Name: fmt.Sprintf("a-%d", i)}, nil
 			}
 			_, _ = cache.ResolveWithFetch(context.Background(),
-				fmt.Sprintf("projA-cache-%d", i), fmt.Sprintf("projA-flight-%d", i), "project-A|default", false, fetch)
+				fmt.Sprintf("projA-cache-%d", i), fmt.Sprintf("projA-flight-%d", i), "project-A|default", "test-ref", false, fetch)
 		}()
 	}
 	for i := 0; i < maxInFlightPerCredential; i++ {
@@ -413,7 +427,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCapIsolatedAcrossPr
 			close(enteredB)
 			return ResolvedSkill{Name: "b"}, nil
 		}
-		_, _ = cache.ResolveWithFetch(context.Background(), "projB-cache", "projB-flight", "project-B|default", false, fetch)
+		_, _ = cache.ResolveWithFetch(context.Background(), "projB-cache", "projB-flight", "project-B|default", "test-ref", false, fetch)
 		close(doneB)
 	}()
 
@@ -494,7 +508,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_CancelledLeaderDoesNotFailWaiter
 	var errLeader, errWaiter error
 	doneLeader := make(chan struct{})
 	go func() {
-		resLeader, errLeader = cache.ResolveWithFetch(ctxLeader, "cancel-leader-key", flightKey, "cancel-leader-cred", false, fetch)
+		resLeader, errLeader = cache.ResolveWithFetch(ctxLeader, "cancel-leader-key", flightKey, "cancel-leader-cred", "test-ref", false, fetch)
 		close(doneLeader)
 	}()
 
@@ -506,7 +520,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_CancelledLeaderDoesNotFailWaiter
 
 	doneWaiter := make(chan struct{})
 	go func() {
-		resWaiter, errWaiter = cache.ResolveWithFetch(context.Background(), "cancel-leader-key", flightKey, "cancel-leader-cred", false, fetch)
+		resWaiter, errWaiter = cache.ResolveWithFetch(context.Background(), "cancel-leader-key", flightKey, "cancel-leader-cred", "test-ref", false, fetch)
 		close(doneWaiter)
 	}()
 
@@ -576,22 +590,21 @@ func TestGitHubResolutionCache_ResolveWithFetch_ShortDeadlineLeaderDoesNotFailWa
 	var proceedOnce sync.Once
 	closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
 	t.Cleanup(closeProceed)
-	fetchCancelled := make(chan struct{}, 1)
+	// flightCtx captures the context fetch actually runs under — the
+	// flight's own, shared by leader and waiter alike — the first (and only;
+	// singleflight calls fetch once here) time fetch runs, so it can be
+	// inspected deterministically below instead of racing a timer against
+	// whether a wrongly-applied leader deadline fires.
+	var flightCtx context.Context
 	fetch := func(fctx context.Context) (ResolvedSkill, error) {
-		enterOnce.Do(func() { close(entered) })
+		enterOnce.Do(func() {
+			flightCtx = fctx
+			close(entered)
+		})
 		select {
 		case <-proceed:
 			return ResolvedSkill{Name: "ok"}, nil
 		case <-fctx.Done():
-			// A correct bound (fixed ceiling, not the leader's deadline)
-			// never reaches this case here: the flight's own context has a
-			// multi-minute ceiling, far longer than the leader's deadline
-			// below. Reaching it would mean the flight was wrongly tied to
-			// that deadline.
-			select {
-			case fetchCancelled <- struct{}{}:
-			default:
-			}
 			return ResolvedSkill{}, fctx.Err()
 		}
 	}
@@ -611,7 +624,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_ShortDeadlineLeaderDoesNotFailWa
 	leaderCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	go func() {
-		_, _ = cache.ResolveWithFetch(leaderCtx, "short-deadline-key", flightKey, "short-deadline-cred", false, fetch)
+		_, _ = cache.ResolveWithFetch(leaderCtx, "short-deadline-key", flightKey, "short-deadline-cred", "test-ref", false, fetch)
 	}()
 
 	select {
@@ -624,7 +637,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_ShortDeadlineLeaderDoesNotFailWa
 	var wres ResolvedSkill
 	done := make(chan struct{})
 	go func() {
-		wres, werr = cache.ResolveWithFetch(context.Background(), "short-deadline-key", flightKey, "short-deadline-cred", false, fetch)
+		wres, werr = cache.ResolveWithFetch(context.Background(), "short-deadline-key", flightKey, "short-deadline-cred", "test-ref", false, fetch)
 		close(done)
 	}()
 
@@ -636,13 +649,21 @@ func TestGitHubResolutionCache_ResolveWithFetch_ShortDeadlineLeaderDoesNotFailWa
 
 	<-leaderCtx.Done() // let the leader's own deadline pass
 
-	// Give a leader-bound flight (the regression this test targets) a moment
-	// to observe its own deadline and cancel fetch, before releasing proceed
-	// — otherwise a short race could let the fetch succeed via proceed before
-	// the wrongly-applied deadline had a chance to fire, masking the defect.
-	select {
-	case <-fetchCancelled:
-	case <-time.After(time.Second):
+	// Deterministic check, no wait: the flight's own context must still be
+	// alive, with a deadline later than the leader's — proving the flight was
+	// never tied to the leader's own deadline, the moment that deadline has
+	// passed, rather than racing a timer against whether the wrongly-applied
+	// bound happens to have fired yet.
+	if err := flightCtx.Err(); err != nil {
+		t.Fatalf("flight context ended when the leader's own deadline passed: %v", err)
+	}
+	leaderDeadline, _ := leaderCtx.Deadline()
+	flightDeadline, ok := flightCtx.Deadline()
+	if !ok {
+		t.Fatal("expected the flight context to carry the fixed ceiling deadline")
+	}
+	if !flightDeadline.After(leaderDeadline) {
+		t.Fatalf("flight deadline %v is not after the leader's deadline %v — the flight may be bound to the leader's own deadline", flightDeadline, leaderDeadline)
 	}
 
 	closeProceed()
@@ -704,7 +725,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_StaleServesImmediately(t *testin
 		return ResolvedSkill{Name: "new", URI: key}, nil
 	}
 
-	skill, err := cache.ResolveWithFetch(context.Background(), key, "stale-flight", "stale-cred", true, fetch)
+	skill, err := cache.ResolveWithFetch(context.Background(), key, "stale-flight", "stale-cred", "test-ref", true, fetch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -748,8 +769,8 @@ func TestGitHubResolutionCache_ResolveWithFetch_StaleRefreshesOnce(t *testing.T)
 		return ResolvedSkill{Name: "new", URI: key}, nil
 	}
 
-	skill1, err1 := cache.ResolveWithFetch(context.Background(), key, "refresh-once-flight", "refresh-once-cred", true, fetch)
-	skill2, err2 := cache.ResolveWithFetch(context.Background(), key, "refresh-once-flight", "refresh-once-cred", true, fetch)
+	skill1, err1 := cache.ResolveWithFetch(context.Background(), key, "refresh-once-flight", "refresh-once-cred", "test-ref", true, fetch)
+	skill2, err2 := cache.ResolveWithFetch(context.Background(), key, "refresh-once-flight", "refresh-once-cred", "test-ref", true, fetch)
 	if err1 != nil || err2 != nil {
 		t.Fatalf("unexpected errors: %v, %v", err1, err2)
 	}
@@ -764,7 +785,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_StaleRefreshesOnce(t *testing.T)
 	// land: calling coalesceFetch directly with the same flight key either
 	// joins the still-running flight or, if it already finished, hits the
 	// fresh-cache re-check — either way it must not invoke fetch again.
-	refreshed, err := cache.coalesceFetch(context.Background(), "refresh-once-flight", "refresh-once-cred", key, true, fetch)
+	refreshed, err := cache.coalesceFetch(context.Background(), "refresh-once-flight", "refresh-once-cred", key, "test-ref", true, fetch)
 	if err != nil {
 		t.Fatalf("unexpected error joining the refresh flight: %v", err)
 	}
@@ -805,7 +826,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PastMaxStaleAgeResolvesSynchrono
 		return ResolvedSkill{Name: "fresh", URI: key}, nil
 	}
 
-	skill, err := cache.ResolveWithFetch(context.Background(), key, "too-old-flight", "too-old-cred", true, fetch)
+	skill, err := cache.ResolveWithFetch(context.Background(), key, "too-old-flight", "too-old-cred", "test-ref", true, fetch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -814,5 +835,120 @@ func TestGitHubResolutionCache_ResolveWithFetch_PastMaxStaleAgeResolvesSynchrono
 	}
 	if got := atomic.LoadInt32(&fetchCount); got != 1 {
 		t.Fatalf("expected exactly 1 synchronous fetch, got %d", got)
+	}
+}
+
+// TestGitHubResolutionCache_ResolveWithFetch_SHARefNeverServedStale is the
+// acceptance test for excluding commit-SHA refs from stale-serve: a SHA ref
+// is immutable once resolved, so "stale" has no meaning for it the way it
+// does for a branch ref — an expired SHA-ref entry must always trigger a
+// synchronous re-resolution, never the stale-serve path, regardless of how
+// recently it was cached (even well within MaxResolutionStaleAge).
+func TestGitHubResolutionCache_ResolveWithFetch_SHARefNeverServedStale(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	const key = "gh://o/r/s@abc123"
+	now := time.Now()
+	cache.mu.Lock()
+	cache.entries[key] = &resolutionCacheEntry{
+		Skill:       ResolvedSkill{Name: "old-sha-content", URI: key},
+		CachedAt:    now.Add(-time.Minute), // well within MaxResolutionStaleAge
+		ExpiresAt:   now.Add(-time.Second), // already past TTL
+		IsBranchRef: false,                 // a SHA-ref entry
+	}
+	cache.mu.Unlock()
+
+	var fetchCount int32
+	fetch := func(ctx context.Context) (ResolvedSkill, error) {
+		atomic.AddInt32(&fetchCount, 1)
+		return ResolvedSkill{Name: "fresh-sha-content", URI: key}, nil
+	}
+
+	// isBranchRef=false, matching what resolveOne computes for a full commit
+	// SHA ref — this is the one thing that must keep it off the stale path.
+	skill, err := cache.ResolveWithFetch(context.Background(), key, "sha-flight", "sha-cred", "test-ref", false, fetch)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if skill.Name != "fresh-sha-content" {
+		t.Fatalf("a SHA ref past its TTL must never be served stale, even within MaxResolutionStaleAge: got %q", skill.Name)
+	}
+	if got := atomic.LoadInt32(&fetchCount); got != 1 {
+		t.Fatalf("expected exactly 1 synchronous fetch for an expired SHA ref, got %d", got)
+	}
+}
+
+// TestGitHubResolutionCache_ResolveWithFetch_RefreshFailureBackoffSkipsRetry
+// is the acceptance test for the refresh-failure backoff: once a background
+// refresh has failed recently for a flight key, a later stale hit under that
+// key must not start another one — it must keep serving the stale value,
+// with no background refresh launched at all, until the backoff window
+// passes. The failure is primed directly via recordRefreshFailure, exactly
+// as the background goroutine in ResolveWithFetch would have left it after a
+// real failure, rather than racing to observe that goroutine's own
+// completion from an actual failing fetch.
+//
+// Checking "no flight was started" still needs a bound, since the decision
+// to skip is made synchronously inside ResolveWithFetch but a wrongly
+// launched refresh runs in its own goroutine: flightJoinHook (fired as the
+// first statement of coalesceFetch, before any actual fetch work) gives the
+// earliest possible signal of that goroutine running, so the bound below
+// only has to cover it getting scheduled at all, not completing any work.
+func TestGitHubResolutionCache_ResolveWithFetch_RefreshFailureBackoffSkipsRetry(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	const key = "gh://o/r/s@main"
+	const flightKey = "backoff-flight"
+	now := time.Now()
+	cache.mu.Lock()
+	cache.entries[key] = &resolutionCacheEntry{
+		Skill:       ResolvedSkill{Name: "old", URI: key},
+		CachedAt:    now.Add(-time.Hour),
+		ExpiresAt:   now.Add(-time.Minute),
+		IsBranchRef: true,
+	}
+	cache.mu.Unlock()
+
+	cache.recordRefreshFailure(flightKey)
+
+	flightStarted := make(chan struct{})
+	var startedOnce sync.Once
+	flightJoinHook = func(key string) {
+		if key == flightKey {
+			startedOnce.Do(func() { close(flightStarted) })
+		}
+	}
+	t.Cleanup(func() { flightJoinHook = nil })
+
+	var fetchCount int32
+	fetch := func(ctx context.Context) (ResolvedSkill, error) {
+		atomic.AddInt32(&fetchCount, 1)
+		return ResolvedSkill{Name: "new", URI: key}, nil
+	}
+
+	skill, err := cache.ResolveWithFetch(context.Background(), key, flightKey, "backoff-cred", "test-ref", true, fetch)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if skill.Name != "old" {
+		t.Fatalf("expected the stale value %q while backed off, got %q", "old", skill.Name)
+	}
+
+	select {
+	case <-flightStarted:
+		t.Fatal("a background refresh was started while within the refresh-failure backoff window")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if got := atomic.LoadInt32(&fetchCount); got != 0 {
+		t.Fatalf("expected no fetch while within the refresh-failure backoff window, got %d", got)
 	}
 }

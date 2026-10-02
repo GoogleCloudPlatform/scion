@@ -371,7 +371,7 @@ func injectFlightJoin(flightKey string) {
 // an individual caller's own cancellation is still honored promptly.
 func (c *GitHubResolutionCache) coalesceFetch(
 	ctx context.Context,
-	flightKey, credentialID, cacheKey string,
+	flightKey, credentialID, cacheKey, logRef string,
 	isBranchRef bool,
 	fetch func(context.Context) (ResolvedSkill, error),
 ) (ResolvedSkill, error) {
@@ -384,18 +384,20 @@ func (c *GitHubResolutionCache) coalesceFetch(
 		// deliberately makes it unrecoverable once there is a channel
 		// waiter). Recovering here, inside the function singleflight runs,
 		// converts it into a normal error instead, delivered to every waiter
-		// through resultCh like any other failure.
+		// through resultCh like any other failure. logRef, not flightKey, goes
+		// in the message: flightKey and credentialID carry a fingerprint of
+		// the credential value plus its project/user scope, and this error
+		// can reach a caller (see ResolveOpts/Resolve), so it must never
+		// carry anything derived from the credential itself.
 		defer func() {
 			if r := recover(); r != nil {
-				ferr = fmt.Errorf("panic during GitHub skill resolution for %s: %v", flightKey, r)
+				ferr = fmt.Errorf("panic during GitHub skill resolution for %s: %v", logRef, r)
 			}
 		}()
 
 		// Re-check: another caller may have already populated cacheKey while
-		// this call waited to become the flight leader — either a concurrent
-		// flight for this exact key, or (since flightKey intentionally
-		// ignores the per-mint token, see ResolveWithFetch) a different
-		// cacheKey sharing this flightKey's ref and credential class.
+		// this call waited to become the flight leader — a concurrent flight
+		// for this exact key that finished just before this one got to run.
 		if skill, ok := c.Get(cacheKey); ok {
 			return skill, nil
 		}
@@ -441,19 +443,27 @@ func (c *GitHubResolutionCache) coalesceFetch(
 //   - Otherwise, fetch runs synchronously, coalesced via flightKey and capped
 //     per credentialID (see coalesceFetch).
 //
-// cacheKey identifies the exact (ref, credential) pair for Get/Put — it may
-// include the credential's token, so that distinct per-mint tokens isolate
-// their cache entries (see resolutionCacheKey). flightKey and credentialID
-// must NOT be derived from the token itself: single-flight and the
-// per-credential cap exist specifically to coalesce concurrent resolutions
-// that share a ref and credential *class* even though each one mints its own
-// token, so keying on the token would defeat them — every caller would get a
-// distinct flightKey and never coalesce. They must also be scoped so that two
-// distinct credentials (e.g. two projects' same-named secret) never share a
-// flightKey or credentialID — see flightIdentity in github_skill_resolver.go.
+// cacheKey identifies the exact (ref, credential) pair for Get/Put — it
+// includes a fingerprint of the credential's own value, so that distinct
+// per-mint tokens isolate their cache entries (see resolutionCacheKey).
+// flightKey and credentialID are built the same way (see flightIdentity in
+// github_skill_resolver.go): each includes a cryptographic fingerprint of the
+// credential value in use, plus project and user scope, so two different
+// credential values never share a flight or a credential-cap slot, and two
+// distinct credentials (e.g. two projects' same-named secret) never collide
+// either — the same guarantee cacheKey gives Get/Put, applied here to
+// coalescing and the cap. The accepted cost: a GitHub App token minted fresh
+// for every create does not coalesce, or share a cap slot, with another mint
+// for the same repo on the broker fallback path, since each mint is its own
+// value and gets its own fingerprint.
+//
+// logRef is a credential-free label (ref plus the general kind of source,
+// never the credential's value, its fingerprint, or a secret's name) used
+// only for the log line and error message below — never flightKey or
+// credentialID, which must not reach a log or a caller-visible error.
 func (c *GitHubResolutionCache) ResolveWithFetch(
 	ctx context.Context,
-	cacheKey, flightKey, credentialID string,
+	cacheKey, flightKey, credentialID, logRef string,
 	isBranchRef bool,
 	fetch func(context.Context) (ResolvedSkill, error),
 ) (ResolvedSkill, error) {
@@ -464,13 +474,13 @@ func (c *GitHubResolutionCache) ResolveWithFetch(
 	if isBranchRef {
 		if skill, ok := c.getStale(cacheKey); ok {
 			if c.recentRefreshFailure(flightKey) {
-				fmt.Fprintf(os.Stderr, "github: WARNING: serving stale entry for %s; skipping refresh after a recent failure\n", flightKey)
+				fmt.Fprintf(os.Stderr, "github: WARNING: serving stale entry for %s; skipping refresh after a recent failure\n", logRef)
 			} else {
 				// A panic in fetch is recovered inside coalesceFetch's DoChan
 				// closure (see its comment), so this goroutine itself cannot
 				// panic from that; no recover needed at this level.
 				go func() {
-					_, ferr := c.coalesceFetch(context.Background(), flightKey, credentialID, cacheKey, isBranchRef, fetch)
+					_, ferr := c.coalesceFetch(context.Background(), flightKey, credentialID, cacheKey, logRef, isBranchRef, fetch)
 					if ferr != nil {
 						c.recordRefreshFailure(flightKey)
 					} else {
@@ -482,7 +492,7 @@ func (c *GitHubResolutionCache) ResolveWithFetch(
 		}
 	}
 
-	return c.coalesceFetch(ctx, flightKey, credentialID, cacheKey, isBranchRef, fetch)
+	return c.coalesceFetch(ctx, flightKey, credentialID, cacheKey, logRef, isBranchRef, fetch)
 }
 
 // GitHubResolutionCacheDir returns the directory for storing GitHub

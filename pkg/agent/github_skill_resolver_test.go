@@ -2176,3 +2176,150 @@ func TestGitHubSkillResolver_SameProjectSameUserDifferentTokenIsolation(t *testi
 		})
 	}
 }
+
+// TestGitHubSkillResolver_ScopeLayeringIsolation pins the project and user
+// scope layered on top of the credential-value hash in flightIdentity: even
+// when two callers present the exact same credential value, a different
+// project, a different user within one project under the default source, or
+// a different project under a named source must each still get independent
+// flights. The value hash alone cannot tell these cases apart — the
+// credential is identical in every subtest here — so only the project/user
+// layering can; dropping it (see flightIdentity) would silently merge these
+// cases back into one flight.
+func TestGitHubSkillResolver_ScopeLayeringIsolation(t *testing.T) {
+	const sharedToken = "tok-shared"
+	cases := []struct {
+		name                   string
+		leaderOpts, waiterOpts ResolveOpts
+		namedSource            bool
+	}{
+		{
+			name:       "same token, different project, default source",
+			leaderOpts: ResolveOpts{ProjectID: "project-1", UserID: "user-1"},
+			waiterOpts: ResolveOpts{ProjectID: "project-2", UserID: "user-1"},
+		},
+		{
+			name:       "same token, same project, different user, default source",
+			leaderOpts: ResolveOpts{ProjectID: "project-1", UserID: "user-1"},
+			waiterOpts: ResolveOpts{ProjectID: "project-1", UserID: "user-2"},
+		},
+		{
+			name:        "same token, different project, named source",
+			leaderOpts:  ResolveOpts{ProjectID: "project-1", UserID: "user-1"},
+			waiterOpts:  ResolveOpts{ProjectID: "project-2", UserID: "user-1"},
+			namedSource: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, mux := newTestGitHubServer(t)
+			authOK := func(r *http.Request) bool { return r.Header.Get("Authorization") == "Bearer "+sharedToken }
+
+			proceed := make(chan struct{})
+			var proceedOnce sync.Once
+			closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
+			t.Cleanup(closeProceed)
+
+			mux.HandleFunc("/repos/acme/shared/commits/main", func(w http.ResponseWriter, r *http.Request) {
+				<-proceed
+				if !authOK(r) {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write([]byte(testCommitSHA))
+			})
+			mux.HandleFunc("/repos/acme/shared/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+				if !authOK(r) {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_ = json.NewEncoder(w).Encode([]githubContentEntry{
+					{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
+				})
+			})
+			mux.HandleFunc("/raw/acme/shared/"+testCommitSHA+"/skills/s/SKILL.md", func(w http.ResponseWriter, r *http.Request) {
+				if !authOK(r) {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write([]byte("CONTENT"))
+			})
+
+			cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+			if err != nil {
+				t.Fatalf("NewGitHubResolutionCache: %v", err)
+			}
+			mk := func() *GitHubSkillResolver {
+				r := newTestGitHubResolver(server)
+				r.token = sharedToken
+				r.resolutionCache = cache
+				if tc.namedSource {
+					r.provisionCredentials = map[string]string{deriveGitHubTokenKey("acme", "shared"): sharedToken}
+				} else {
+					r.provisionCredentials = nil
+				}
+				return r
+			}
+			leader, waiter := mk(), mk()
+			ref := api.SkillReference{URI: "gh://acme/shared/s@main"}
+
+			var seenMu sync.Mutex
+			seenKeys := make(map[string]bool)
+			bothStarted := make(chan struct{})
+			var startedOnce sync.Once
+			flightJoinHook = func(key string) {
+				seenMu.Lock()
+				seenKeys[key] = true
+				n := len(seenKeys)
+				seenMu.Unlock()
+				if n >= 2 {
+					startedOnce.Do(func() { close(bothStarted) })
+				}
+			}
+			t.Cleanup(func() { flightJoinHook = nil })
+
+			doneLeader := make(chan struct{})
+			var resLeader *ResolveResult
+			go func() {
+				resLeader, _ = leader.Resolve(context.Background(), []api.SkillReference{ref}, tc.leaderOpts)
+				close(doneLeader)
+			}()
+
+			doneWaiter := make(chan struct{})
+			var resWaiter *ResolveResult
+			go func() {
+				resWaiter, _ = waiter.Resolve(context.Background(), []api.SkillReference{ref}, tc.waiterOpts)
+				close(doneWaiter)
+			}()
+
+			// Two distinct flight keys being touched proves the project/user
+			// scope told these two otherwise-identical credentials apart —
+			// under a dropped-scope regression, both calls would land on the
+			// same key and this would time out instead.
+			select {
+			case <-bothStarted:
+			case <-time.After(5 * time.Second):
+				t.Fatal("did not observe two independent flights — project/user scope may have been dropped, merging two different scopes under one identity")
+			}
+
+			closeProceed()
+
+			for _, done := range []chan struct{}{doneLeader, doneWaiter} {
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("a resolve did not complete after the flight was released")
+				}
+			}
+
+			for name, res := range map[string]*ResolveResult{"leader": resLeader, "waiter": resWaiter} {
+				if len(res.Resolved) != 1 {
+					t.Fatalf("%s: expected one resolved skill, got errors: %+v", name, res.Errors)
+				}
+				if got := string(res.Resolved[0].Files[0].Content); got != "CONTENT" {
+					t.Errorf("%s: expected content %q, got %q", name, "CONTENT", got)
+				}
+			}
+		})
+	}
+}
