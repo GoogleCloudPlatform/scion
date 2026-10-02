@@ -1655,6 +1655,16 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		corev1.EnvVar{Name: "LOGNAME", Value: config.UnixUsername},
 	)
 
+	// Worktree-per-agent on NFS: the agent works in its own worktree at
+	// /repo-root/worktrees/<agent name>, not at /workspace. Point sciontool
+	// init's workspace path there, so its clone step looks at (and, with an
+	// older init container that does not add worktrees, fills) the agent's
+	// own directory. Appended last so it wins over any earlier value.
+	nfsWorktree := config.NFSWorktreeName != "" && nfsInitContainerInjected(config)
+	if nfsWorktree {
+		envVars = append(envVars, corev1.EnvVar{Name: "SCION_WORKSPACE_PATH", Value: NFSWorktreeContainerPath(config.NFSWorktreeName)})
+	}
+
 	// Env vars are assembled above from several sources (harness env, config.Env,
 	// resolved auth, resolved secrets) that can legitimately overlap in name
 	// (e.g. SCION_AGENT_NAME, GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION).
@@ -1736,6 +1746,27 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			MountPath: "/workspace",
 		}
 	}
+	// The agent container's workspace mounts and working directory. The
+	// provisioning init container always mounts workspaceVolumeMount (the
+	// project's shared checkout on NFS).
+	agentVolumeMounts := []corev1.VolumeMount{workspaceVolumeMount}
+	agentWorkingDir := "/workspace"
+	if nfsWorktree {
+		// Same layout as the local runtimes: the shared .git at
+		// /repo-root/.git and the agent's worktree at
+		// /repo-root/worktrees/<agent name>. The worktree's .git file points
+		// at ../../.git/worktrees/<agent name> (relative paths), which
+		// resolves inside this layout.
+		gitSubPath, worktreeSubPath, err := nfsWorktreeSubPaths(config.NFSSubPath, config.NFSWorktreeName)
+		if err != nil {
+			return nil, err
+		}
+		agentWorkingDir = NFSWorktreeContainerPath(config.NFSWorktreeName)
+		agentVolumeMounts = []corev1.VolumeMount{
+			{Name: "workspace", MountPath: "/repo-root/.git", SubPath: gitSubPath},
+			{Name: "workspace", MountPath: agentWorkingDir, SubPath: worktreeSubPath},
+		}
+	}
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1753,7 +1784,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 					Command:         cmd,
 					Env:             envVars,
 					ImagePullPolicy: pullPolicy,
-					WorkingDir:      "/workspace",
+					WorkingDir:      agentWorkingDir,
 					Stdin:           true,
 					TTY:             true,
 					SecurityContext: &corev1.SecurityContext{
@@ -1762,7 +1793,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 							Drop: []corev1.Capability{"ALL"},
 						},
 					},
-					VolumeMounts: []corev1.VolumeMount{workspaceVolumeMount},
+					VolumeMounts: agentVolumeMounts,
 				},
 			},
 			Volumes:       []corev1.Volume{workspaceVolume},
@@ -1807,8 +1838,14 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// injected — the sentinel provides idempotent protection but NOT
 	// cross-node mutual exclusion.
 	if nfsInitContainerInjected(config) {
+		// waitOnly: a broker lock loser waits for the project's sentinel
+		// instead of provisioning. In worktree-per-agent mode every pod
+		// provisions, because each agent adds its own worktree; the
+		// provisioning lock on the export serializes the clone and every
+		// worktree add.
+		waitOnly := config.nfsProvisionLockLost && !nfsWorktree
 		var initCommand []string
-		if config.nfsProvisionLockLost {
+		if waitOnly {
 			// Lock loser: wait for the sentinel written by the winning node's
 			// provisioning init container. Does NOT provision.
 			initCommand = []string{"sciontool", "provision", "--wait-for-sentinel"}
@@ -1868,6 +1905,18 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 				Value: strings.Join(sharedDirPairs, ","),
 			})
 		}
+		// Worktree-per-agent: tell sciontool provision to add this agent's
+		// worktree after the shared checkout is ready. Env rather than
+		// flags, so an older sciontool ignores them and still provisions
+		// the shared checkout (the agent container's clone step then fills
+		// the agent's directory).
+		if nfsWorktree {
+			initEnv = append(initEnv,
+				corev1.EnvVar{Name: "SCION_WORKSPACE_MODE", Value: string(store.SharingModeWorktreePerAgent)},
+				corev1.EnvVar{Name: "SCION_AGENT_SLUG", Value: config.NFSWorktreeName},
+				corev1.EnvVar{Name: "SCION_AGENT_BRANCH", Value: config.NFSWorktreeBranch},
+			)
+		}
 		// When the broker created the workspace (and claim shared-dir)
 		// directories itself, or found them with setgid and group write,
 		// agents reach them through their group,
@@ -1876,7 +1925,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// (lock-winner) container runs the chown. An env var rather than a
 		// flag, so an older sciontool simply ignores it and keeps the strict
 		// behavior instead of rejecting an unknown flag.
-		if config.NFSWorkspacePreCreated && !config.nfsProvisionLockLost {
+		if config.NFSWorkspacePreCreated && !waitOnly {
 			initEnv = append(initEnv, corev1.EnvVar{
 				Name:  provision.ChownBestEffortEnv,
 				Value: "1",
@@ -1904,7 +1953,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 				Drop: []corev1.Capability{"ALL"},
 			},
 		}
-		if !config.nfsProvisionLockLost {
+		if !waitOnly {
 			initSecurityContext.RunAsUser = int64Ptr(0)
 			initSecurityContext.RunAsGroup = int64Ptr(0)
 			initSecurityContext.RunAsNonRoot = boolPtr(false)
@@ -3480,6 +3529,28 @@ func nfsSharedDirInitMounts(config RunConfig) ([]nfsSharedDirMount, error) {
 		})
 	}
 	return mounts, nil
+}
+
+// NFSWorktreeContainerPath is where the agent container mounts its own
+// worktree in worktree-per-agent mode on the NFS backend, and its working
+// directory: /repo-root/worktrees/<agent name>, the same path the local
+// runtimes use.
+func NFSWorktreeContainerPath(name string) string {
+	return "/repo-root/worktrees/" + name
+}
+
+// nfsWorktreeSubPaths returns the subPaths of the shared checkout's .git and
+// of the agent's worktree (<workspace>/worktrees/<agent name>) for
+// worktree-per-agent mode. name must be the agent's slug (lower-case
+// letters, digits and dashes), so it is always a single path segment.
+func nfsWorktreeSubPaths(workspaceSubPath, name string) (gitSubPath, worktreeSubPath string, err error) {
+	if slug, err := api.ValidateAgentName(name); err != nil || slug != name {
+		return "", "", fmt.Errorf("worktree-per-agent: agent name %q is not an agent slug", name)
+	}
+	if workspaceSubPath == "" {
+		return "", "", fmt.Errorf("worktree-per-agent: the NFS workspace subPath is empty")
+	}
+	return filepath.Join(workspaceSubPath, ".git"), filepath.Join(workspaceSubPath, "worktrees", name), nil
 }
 
 // nfsInitContainerInjected reports whether buildPod would add the
