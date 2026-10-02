@@ -565,3 +565,29 @@ func TestLaunchSender_TerminalNotEndedByAbortRecordedDuringIt(t *testing.T) {
 		t.Fatalf("expected exactly two attempts, got %d", got)
 	}
 }
+
+// TestLaunchSender_KeepaliveAnswerAfterTerminalStartIsDropped covers a
+// keepalive attempt that was already in flight when the terminal's first
+// attempt started: its answer is dropped, so even an abort-classifying
+// answer records nothing (design §3.8.5: from the terminal's first attempt
+// on, only the terminal's answer decides cleanup).
+func TestLaunchSender_KeepaliveAnswerAfterTerminalStartIsDropped(t *testing.T) {
+	var s *launchSender
+	rtb := &mockRuntimeBrokerService{
+		launchReportFunc: func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+			// The terminal starts while this keepalive attempt is in flight.
+			s.markTerminalStarted()
+			return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonDeleted}, nil
+		},
+	}
+	s = newTestLaunchSender(t, rtb, time.Hour)
+
+	s.sendKeepaliveOnce(context.Background())
+
+	if s.IsAborted() {
+		t.Fatal("a keepalive answer that arrived after the terminal started must not record an abort")
+	}
+	if got := s.LastAbortOutcome(); got != nil {
+		t.Fatalf("LastAbortOutcome = %+v, want nil", got)
+	}
+}
