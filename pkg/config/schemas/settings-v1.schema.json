@@ -883,6 +883,12 @@
           "description": "Broker keepalive interval, in seconds. Today it sets only the reaper's staleness window (8x this value); it will also be sent to the broker once the async dispatch path lands. Restart required to change.",
           "x-env-var": "SCION_SERVER_HUB_LAUNCHKEEPALIVESECONDS",
           "x-since": "1"
+        },
+        "missing_agent_grace": {
+          "type": "string",
+          "description": "How long a running agent must be absent from its runtime broker's complete heartbeat inventory before the Hub marks it phase 'error' with exit reason 'container_missing' (an existing preempted or evicted exit reason is kept) (e.g. '3m'; default '3m', minimum '1m').",
+          "x-env-var": "SCION_SERVER_HUB_MISSINGAGENTGRACE",
+          "x-since": "1"
         }
       }
     },

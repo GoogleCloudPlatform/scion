@@ -631,6 +631,22 @@ func isBrokerStatus(err error, code int) bool {
 	return errors.As(err, &se) && se.StatusCode == code
 }
 
+// isBrokerAgentNotFound reports whether err is the broker's 404 answer with
+// error code agent_not_found. For a message dispatch this means the broker
+// found no running container for the agent.
+func isBrokerAgentNotFound(err error) bool {
+	var se *brokerStatusError
+	if !errors.As(err, &se) || se.StatusCode != http.StatusNotFound {
+		return false
+	}
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	return json.Unmarshal([]byte(se.Body), &body) == nil && body.Error.Code == ErrCodeAgentNotFound
+}
+
 // brokerErrorMessage returns the message from a broker JSON error body
 // ({"error":{"message":...}}), or the raw body if it is not in that form.
 func (e *brokerStatusError) brokerErrorMessage() string {

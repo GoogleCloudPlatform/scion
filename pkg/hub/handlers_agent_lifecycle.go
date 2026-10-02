@@ -259,6 +259,10 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 		return &errHarnessNoResume{reason: reason}
 	}
 
+	// The container is stopped before phase=suspended is written; see
+	// beginLifecycleOp.
+	defer s.beginLifecycleOp(agent.ID)()
+
 	dispatcher := s.GetDispatcher()
 	if dispatcher != nil && agent.RuntimeBrokerID != "" {
 		s.syncWorkspaceOnStop(ctx, agent)
@@ -326,6 +330,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	if !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}
+
+	// While this lifecycle action runs, the agent's container may be
+	// legitimately absent with the row still in phase running (for example
+	// between the stop and the start of a restart); keep the heartbeat
+	// missing-container reconcile away from it until the final status write.
+	defer s.beginLifecycleOp(agent.ID)()
 
 	var newPhase string
 	var dispatchErr error

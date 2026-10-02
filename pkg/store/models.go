@@ -204,13 +204,20 @@ type ExposedPort struct {
 
 // AgentAppliedConfig stores the effective configuration of an agent.
 type AgentAppliedConfig struct {
-	Image         string              `json:"image,omitempty"`
-	HarnessConfig string              `json:"harnessConfig,omitempty"`
-	HarnessAuth   string              `json:"harnessAuth,omitempty"` // Late-binding override for auth_selected_type
-	Env           map[string]string   `json:"env,omitempty"`
-	Model         string              `json:"model,omitempty"`
-	ThinkingLevel *int                `json:"thinkingLevel,omitempty"`
-	Profile       string              `json:"profile,omitempty"`   // Settings profile for the runtime broker
+	Image         string            `json:"image,omitempty"`
+	HarnessConfig string            `json:"harnessConfig,omitempty"`
+	HarnessAuth   string            `json:"harnessAuth,omitempty"` // Late-binding override for auth_selected_type
+	Env           map[string]string `json:"env,omitempty"`
+	Model         string            `json:"model,omitempty"`
+	ThinkingLevel *int              `json:"thinkingLevel,omitempty"`
+	Profile       string            `json:"profile,omitempty"` // Settings profile for the runtime broker
+	// RuntimeTarget is the broker runtime target (runtime name, plus cluster
+	// context and namespace for Kubernetes) whose listing reported the agent.
+	// Recorded from heartbeats once two consecutive reports name the same
+	// target (see RuntimeTargetCandidate) and cleared when a create, start or
+	// restart is accepted; the missing-container reconcile only considers an
+	// agent whose recorded target a heartbeat lists as complete.
+	RuntimeTarget string              `json:"runtimeTarget,omitempty"`
 	Task          string              `json:"task,omitempty"`      // Initial task/prompt for the agent
 	Attach        bool                `json:"attach,omitempty"`    // If true, signals interactive attach mode to the broker/harness
 	Branch        string              `json:"branch,omitempty"`    // Git branch name (defaults to agent slug if empty)
@@ -220,6 +227,13 @@ type AgentAppliedConfig struct {
 	// Template info for Runtime Broker hydration
 	TemplateID   string `json:"templateId,omitempty"`   // Hub template ID for fetching
 	TemplateHash string `json:"templateHash,omitempty"` // Content hash for cache validation
+
+	// RuntimeTargetCandidate is a target reported by one heartbeat that
+	// differs from RuntimeTarget. It becomes RuntimeTarget only when the next
+	// heartbeat reports the same target, so a single heartbeat built before a
+	// start was accepted cannot record the agent's previous target. Cleared
+	// together with RuntimeTarget.
+	RuntimeTargetCandidate string `json:"runtimeTargetCandidate,omitempty"`
 
 	// Harness-config info for Runtime Broker hydration. When set, the broker
 	// fetches the harness-config from the Hub's storage backend instead of

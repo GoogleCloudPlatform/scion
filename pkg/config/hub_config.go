@@ -120,6 +120,12 @@ type HubServerConfig struct {
 	// before being marked as stalled. Default: 5 minutes.
 	StalledThreshold time.Duration `json:"stalledThreshold" yaml:"stalledThreshold" koanf:"stalledThreshold"`
 
+	// MissingAgentGrace is how long a running agent must be continuously
+	// absent from its runtime broker's complete heartbeat inventory before
+	// the Hub marks it phase=error with exit reason container_missing.
+	// Default: 3 minutes (minimum 1 minute).
+	MissingAgentGrace time.Duration `json:"missingAgentGrace" yaml:"missingAgentGrace" koanf:"missingAgentGrace"`
+
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
 	// path fallback introduced during GCS namespace migration. When true,
 	// only hub-scoped paths are checked; legacy paths are never consulted.
@@ -1338,6 +1344,7 @@ var snakeCaseFields = map[string]string{
 	"insecureskipverify":    "insecure_skip_verify",
 	"installationurl":       "installation_url",
 	"maxsize":               "max_size",
+	"missingagentgrace":     "missing_agent_grace",
 	"notificationchannels":  "notification_channels",
 	"privatekeypath":        "private_key_path",
 	"publicurl":             "public_url",
@@ -1415,6 +1422,7 @@ var camelCaseFields = map[string]string{
 	"logformat":                     "logFormat",
 	"loglevel":                      "logLevel",
 	"maintenancemessage":            "maintenanceMessage",
+	"missingagentgrace":             "missingAgentGrace",
 	"oidcaudience":                  "oidcAudience",
 	"platformauthsa":                "platformAuthSA",
 	"privatekey":                    "privateKey",
