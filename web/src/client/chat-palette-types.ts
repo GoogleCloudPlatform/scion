@@ -66,11 +66,27 @@ export interface PaletteDocumentTarget {
 }
 
 /**
- * The navigable result of a palette selection: `dm` targets (Agents/People
- * groups), `thread` targets (Threads group), or `document` targets
- * (Documents group).
+ * Selecting an agent row on a surface that acts on the agent itself rather
+ * than on a conversation with it (the terminal view's "Jump to agent"
+ * palette attaches to the agent's terminal).
  */
-export type PaletteTarget = PaletteDmTarget | PaletteThreadTarget | PaletteDocumentTarget;
+export interface PaletteAgentTarget {
+  kind: 'agent';
+  agentId: string;
+  displayName: string;
+}
+
+/**
+ * The navigable result of a palette selection: `dm` targets (chat's
+ * Agents/People groups), `thread` targets (Threads group), `document`
+ * targets (Documents group), or `agent` targets (agent rows on a non-chat
+ * surface).
+ */
+export type PaletteTarget =
+  | PaletteDmTarget
+  | PaletteThreadTarget
+  | PaletteDocumentTarget
+  | PaletteAgentTarget;
 
 /**
  * The four groups the full palette renders (Agents, Threads, People,
@@ -147,6 +163,15 @@ export interface PaletteRetryDetail {
  */
 export function dmCandidateId(peerKind: PeerKind, peerId: string): string {
   return JSON.stringify(['dm', peerKind, peerId]);
+}
+
+/**
+ * Build the stable candidate ID for an Agent target: a JSON-encoded tuple,
+ * matching {@link dmCandidateId}'s shape and stability guarantee, and never
+ * equal to a DM candidate ID for the same agent.
+ */
+export function agentCandidateId(agentId: string): string {
+  return JSON.stringify(['agent', agentId]);
 }
 
 /**

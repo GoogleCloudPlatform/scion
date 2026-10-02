@@ -4108,7 +4108,9 @@ export class ScionPageChat extends LitElement {
   private _handlePaletteSelect(e: CustomEvent<{ target: PaletteTarget }>): void {
     const target = e.detail?.target;
     this._closePaletteAndCancelLoad();
-    if (!target) return;
+    // Chat builds no `agent` candidates (its agent rows open a DM), so an
+    // `agent` target can only be stale or foreign UI state.
+    if (!target || target.kind === 'agent') return;
     if (target.kind === 'dm') {
       const group = target.peerKind === 'agent' ? 'agents' : 'people';
       const stillPresent = (this.v2PaletteGroups[group]?.candidates ?? []).some(
