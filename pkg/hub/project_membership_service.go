@@ -1410,13 +1410,9 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 
 		// Step 3: Point project.OwnerID at the new owner, so the old owner no
 		// longer gets access through the resource-owner relationship rule
-		// (ptone/scion#2554). Read via tx, not the outer store.
-		project, getErr := tx.GetProject(ctx, req.ProjectID)
-		if getErr != nil {
-			return fmt.Errorf("load project: %w", getErr)
-		}
-		project.OwnerID = req.NewOwnerID
-		if upErr := tx.UpdateProject(ctx, project); upErr != nil {
+		// (ptone/scion#2554). Write only the owner column via tx: a full-row
+		// UpdateProject would clobber fields a concurrent PATCH just wrote.
+		if upErr := tx.SetProjectOwnerID(ctx, req.ProjectID, req.NewOwnerID); upErr != nil {
 			return fmt.Errorf("update project owner: %w", upErr)
 		}
 

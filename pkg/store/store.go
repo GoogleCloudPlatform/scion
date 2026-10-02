@@ -649,6 +649,12 @@ type ProjectStore interface {
 	// Returns ErrNotFound if the project doesn't exist.
 	UpdateProject(ctx context.Context, project *Project) error
 
+	// SetProjectOwnerID updates only the project's OwnerID column, leaving
+	// every other field untouched. Used by ownership transfer so it cannot
+	// clobber fields written by a concurrent full-row UpdateProject.
+	// Returns ErrNotFound if the project doesn't exist.
+	SetProjectOwnerID(ctx context.Context, projectID, ownerID string) error
+
 	// DeleteProject removes a project by ID.
 	// Returns ErrNotFound if the project doesn't exist.
 	DeleteProject(ctx context.Context, id string) error

@@ -172,6 +172,35 @@ func TestProject_Update(t *testing.T) {
 	assert.Equal(t, int64(424242), *got.GitHubInstallationID)
 }
 
+// SetProjectOwnerID must change only OwnerID. A stale in-memory copy of the
+// project written afterwards by a full-row update is exactly the clobber the
+// narrow method exists to avoid, so check the other columns survive.
+func TestProject_SetProjectOwnerID(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	p := newProject(1)
+	p.OwnerID = uuid.NewString()
+	require.NoError(t, ps.CreateProject(ctx, p))
+
+	// A concurrent writer renames the project and sets a git remote.
+	p.Name = "Renamed"
+	p.GitRemote = "https://github.com/acme/renamed.git"
+	require.NoError(t, ps.UpdateProject(ctx, p))
+
+	newOwner := uuid.NewString()
+	require.NoError(t, ps.SetProjectOwnerID(ctx, p.ID, newOwner))
+
+	got, err := ps.GetProject(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, newOwner, got.OwnerID)
+	assert.Equal(t, "Renamed", got.Name, "SetProjectOwnerID must not touch other fields")
+	assert.Equal(t, "https://github.com/acme/renamed.git", got.GitRemote)
+	assert.Equal(t, p.Labels, got.Labels)
+
+	assert.ErrorIs(t, ps.SetProjectOwnerID(ctx, uuid.NewString(), newOwner), store.ErrNotFound)
+}
+
 func TestProject_SharedDirsRoundTrip(t *testing.T) {
 	ps := newTestProjectStore(t)
 	ctx := context.Background()
