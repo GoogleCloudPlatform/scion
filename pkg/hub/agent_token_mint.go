@@ -26,13 +26,17 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Agent-token mint sites, named in the agent_token_issue_denied audit record.
+// mintSite names an agent-token mint site in the agent_token_issue_denied
+// audit record. Each caller passes its own site constant.
+type mintSite string
+
+// Agent-token mint sites.
 const (
-	mintSiteCreate    = "create"
-	mintSiteStart     = "start"
-	mintSiteRestart   = "restart"
-	mintSiteResetAuth = "reset_auth"
-	mintSiteRefresh   = "refresh"
+	mintSiteCreate    mintSite = "create"
+	mintSiteStart     mintSite = "start"
+	mintSiteRestart   mintSite = "restart"
+	mintSiteResetAuth mintSite = "reset_auth"
+	mintSiteRefresh   mintSite = "refresh"
 )
 
 // mutationTypeAgentTokenIssueDenied is the audit mutation type written when a
@@ -55,7 +59,7 @@ const (
 // agentTokenIssueError is the error a mint site returns when
 // GenerateAgentTokenForAgent issues no token. It unwraps to the cause.
 type agentTokenIssueError struct {
-	Site string
+	Site mintSite
 	// Cause is set for a structural chain outcome (403).
 	Cause DenyCause
 	// Lookup is set for a store or lookup fault (503).
@@ -120,7 +124,7 @@ func (s *Server) GenerateAgentTokenForAgent(ctx context.Context, agent *store.Ag
 // mintAgentTokenAt calls gen.GenerateAgentTokenForAgent for the named site.
 // On error it writes the agent_token_issue_denied audit record synchronously
 // and returns an *agentTokenIssueError.
-func mintAgentTokenAt(ctx context.Context, gen AgentTokenGenerator, st store.Store, agent *store.Agent, site string) (string, error) {
+func mintAgentTokenAt(ctx context.Context, gen AgentTokenGenerator, st store.Store, agent *store.Agent, site mintSite) (string, error) {
 	token, err := gen.GenerateAgentTokenForAgent(ctx, agent)
 	if err == nil {
 		return token, nil
@@ -148,7 +152,7 @@ func recordAgentTokenIssueDenied(ctx context.Context, st store.Store, agent *sto
 	if st == nil {
 		return
 	}
-	summary, _ := json.Marshal(map[string]string{"site": e.Site, "deny_cause": e.errorClass()})
+	summary, _ := json.Marshal(map[string]string{"site": string(e.Site), "deny_cause": e.errorClass()})
 	record := &store.MutationAuditRecord{
 		MutationType: mutationTypeAgentTokenIssueDenied,
 		TargetType:   "agent",

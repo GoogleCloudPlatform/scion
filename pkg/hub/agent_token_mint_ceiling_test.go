@@ -160,13 +160,13 @@ func issueDeniedAudits(t *testing.T, s store.Store, agentID string) []*store.Mut
 
 // assertIssueDeniedAudit asserts one record naming the site and cause, and
 // no scope list.
-func assertIssueDeniedAudit(t *testing.T, s store.Store, agentID, site, cause string) {
+func assertIssueDeniedAudit(t *testing.T, s store.Store, agentID string, site mintSite, cause string) {
 	t.Helper()
 	recs := issueDeniedAudits(t, s, agentID)
 	require.Len(t, recs, 1)
 	var summary map[string]string
 	require.NoError(t, json.Unmarshal([]byte(recs[0].AfterSummary), &summary))
-	assert.Equal(t, map[string]string{"site": site, "deny_cause": cause}, summary)
+	assert.Equal(t, map[string]string{"site": string(site), "deny_cause": cause}, summary)
 	assert.NotContains(t, recs[0].AfterSummary, "scope")
 }
 
@@ -291,6 +291,85 @@ func TestDispatcherRestartAbortsOnMintError(t *testing.T) {
 	recs := issueDeniedAudits(t, f.store, a.ID)
 	assert.Equal(t, mintAuditSystemActorKind, recs[0].ActorPrincipalKind, "hub-initiated restart")
 	assert.Equal(t, mintAuditSystemActorID, recs[0].ActorPrincipalID)
+}
+
+// Reset-auth whose mint is denied or cannot be evaluated returns the mapped
+// status before any broker request, hands no token to the broker, and writes
+// an agent_token_issue_denied record naming the reset_auth site.
+func TestResetAuthAbortsOnMintError(t *testing.T) {
+	t.Run("no edge after the backfill", func(t *testing.T) {
+		f := newMintFixture(t, "reset-orphan")
+		setBackfillCompleted(t, f.store)
+		a := f.agent(t, "reset-orphan-agent", AgentRoleFull, state.PhaseRunning)
+
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/reset-auth", nil)
+		assertCeilingDenied(t, rec)
+		assert.False(t, f.client.resetAuthCalled, "no broker request")
+		assert.Empty(t, f.client.resetAuthToken, "no token handed to the broker")
+		assertIssueDeniedAudit(t, f.store, a.ID, mintSiteResetAuth, string(DenyCauseCeilingOrphaned))
+	})
+
+	t.Run("edge lookup fault", func(t *testing.T) {
+		f := newMintFixture(t, "reset-lookup")
+		a := f.agent(t, "reset-lookup-agent", AgentRoleFull, state.PhaseRunning)
+		f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, ceilPrincip, provSession)
+		f.srv.authzService.store = &edgeReadErrStore{Store: f.store}
+
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/reset-auth", nil)
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+		assert.Equal(t, ErrCodeUnavailable, decodeTargetAPIError(t, rec).Code)
+		assert.False(t, f.client.resetAuthCalled, "no broker request")
+		assert.Empty(t, f.client.resetAuthToken, "no token handed to the broker")
+		assertIssueDeniedAudit(t, f.store, a.ID, mintSiteResetAuth, mintErrorClassLookup)
+	})
+}
+
+// Start and restart each pass their own mint site to buildStartEnv, and the
+// audit record names it. buildStartEnv rejects any other site before a mint
+// or a broker request.
+func TestBuildStartEnvMintSiteFromCaller(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name     string
+		site     mintSite
+		dispatch func(f *mintFixture, a *store.Agent) error
+	}{
+		{name: "start", site: mintSiteStart, dispatch: func(f *mintFixture, a *store.Agent) error {
+			return f.disp.DispatchAgentStart(ctx, a, "", false)
+		}},
+		{name: "restart", site: mintSiteRestart, dispatch: func(f *mintFixture, a *store.Agent) error {
+			return f.disp.DispatchAgentRestart(ctx, a)
+		}},
+		{name: "create site", site: mintSiteCreate, dispatch: func(f *mintFixture, a *store.Agent) error {
+			_, err := f.disp.buildStartEnv(ctx, a, "TestCaller", mintSiteCreate)
+			return err
+		}},
+		{name: "unknown site", site: mintSite("resume"), dispatch: func(f *mintFixture, a *store.Agent) error {
+			_, err := f.disp.buildStartEnv(ctx, a, "TestCaller", mintSite("resume"))
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slug := "site-" + strings.ReplaceAll(tc.name, " ", "-")
+			f := newMintFixture(t, slug)
+			setBackfillCompleted(t, f.store)
+			a := f.agent(t, slug+"-agent", AgentRoleFull, state.PhaseRunning)
+
+			err := tc.dispatch(f, a)
+			require.Error(t, err)
+			assert.False(t, f.client.startCalled, "no broker start")
+			assert.False(t, f.client.restartCalled, "no broker restart")
+			switch tc.site {
+			case mintSiteStart, mintSiteRestart:
+				require.ErrorIs(t, err, ErrProvenanceMissing)
+				assertIssueDeniedAudit(t, f.store, a.ID, tc.site, string(DenyCauseCeilingOrphaned))
+			default:
+				assert.NotErrorIs(t, err, ErrProvenanceMissing)
+				assert.Contains(t, err.Error(), "unsupported mint site")
+				assert.Empty(t, issueDeniedAudits(t, f.store, a.ID), "no mint attempted")
+			}
+		})
+	}
 }
 
 // Refresh mints with the stored ancestry, not the presented token's.
@@ -427,6 +506,45 @@ func TestMintUsesChainCeiling(t *testing.T) {
 	}
 	assert.NotContains(t, after, ScopeAgentCreate)
 	assert.NotContains(t, after, GCPTokenScopeForSA(saID))
+}
+
+// A chain with an unrecorded hop above a bounded hop folds to the bounded
+// ceiling. The mint does not strip a recordedProvenanceRequired scope inside
+// that ceiling; the step-10 walk denies the permission at use on the
+// unrecorded hop, and a permission inside the bounded set that does not need
+// recorded provenance is allowed.
+func TestMixedChainMintKeepsScopeWalkDeniesAtUse(t *testing.T) {
+	f := newMintFixture(t, "mixed-chain")
+	ctx := context.Background()
+	f.srv.authzService.mintDevAuthOverride = false
+	sa := scaCreateSA(t, f.store, f.projectID)
+
+	parent := f.agent(t, "mixed-chain-parent", AgentRoleFull, state.PhaseRunning)
+	child := f.agent(t, "mixed-chain-child", AgentRoleFull, state.PhaseRunning)
+	child.Ancestry = []string{f.userID, parent.ID}
+	require.NoError(t, f.store.UpdateAgent(ctx, child))
+	f.edge(t, store.DelegationPrincipalUser, f.userID, parent.ID, store.EffectCeiling{}, store.AuthorityProvenance{})
+	f.edge(t, store.DelegationPrincipalAgent, parent.ID, child.ID,
+		boundedCeiling("project.read", "gcp_service_account.assign", "agent.create"), provAgent)
+	require.True(t, recordedProvenanceRequired["gcp_service_account.assign"])
+
+	chain, err := f.srv.authzService.chainEffectCeiling(ctx, child)
+	require.NoError(t, err)
+	require.Equal(t, store.EffectCeilingBounded, chain.Ceiling.Kind)
+	require.Equal(t, 1, chain.UnrecordedHops)
+
+	token, err := f.srv.GenerateAgentTokenForAgent(ctx, child)
+	require.NoError(t, err)
+	claims := f.tokenClaims(t, token)
+	assert.Contains(t, claims.Scopes, ScopeAgentSAAssign, "the mint does not strip the scope")
+
+	identity := &agentIdentityWrapper{AgentTokenClaims: claims}
+	actx := contextWithIdentity(ctx, identity)
+	assertUnrecordedDeny(t, f.srv.authzService.CheckAccess(actx, identity, gcpServiceAccountResource(sa), ActionAssign))
+	require.False(t, recordedProvenanceRequired["agent.create"])
+	create := f.srv.authzService.CheckAccess(actx, identity,
+		Resource{Type: "agent", ParentType: "project", ParentID: f.projectID}, ActionCreate)
+	assert.True(t, create.Allowed, "agent.create inside the bounded set: reason %q", create.Reason)
 }
 
 // A child created through DevAuthMiddleware: the create mint and a refresh

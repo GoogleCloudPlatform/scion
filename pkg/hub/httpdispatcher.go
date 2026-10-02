@@ -2193,15 +2193,22 @@ type startEnvResult struct {
 // warning's wording.
 //
 // caller is the log-message prefix ("DispatchAgentStart" or
-// "DispatchAgentRestart"); startedVerb is "start" or "restart", used only in
-// the secrets-resolution failure message, the one warning whose wording
-// differs (agent will <verb> without injected secrets) between the two
-// callers, and also names the mint site. It returns an error only when the
-// agent token is not issued.
-func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller, startedVerb string) (startEnvResult, error) {
-	mintSite := mintSiteStart
-	if startedVerb == "restart" {
-		mintSite = mintSiteRestart
+// "DispatchAgentRestart"). site is the caller's mint site, mintSiteStart or
+// mintSiteRestart; it names the site in the mint audit record and gives the
+// verb of the secrets-resolution failure message, the one warning whose
+// wording differs (agent will <verb> without injected secrets) between the
+// two callers. Any other site is an error before any work is done. It
+// returns an error only for such a site or when the agent token is not
+// issued.
+func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller string, site mintSite) (startEnvResult, error) {
+	var startedVerb string
+	switch site {
+	case mintSiteStart:
+		startedVerb = "start"
+	case mintSiteRestart:
+		startedVerb = "restart"
+	default:
+		return startEnvResult{}, fmt.Errorf("%s: unsupported mint site %q for a start", caller, site)
 	}
 	resolvedEnv := make(map[string]string)
 	var envClassifications map[string]api.EnvKind
@@ -2366,7 +2373,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// Generate a fresh agent token for Hub authentication. A mint error
 	// stops the start or restart before any broker request.
 	if d.tokenGenerator != nil {
-		token, err := mintAgentTokenAt(ctx, d.tokenGenerator, d.store, agent, mintSite)
+		token, err := mintAgentTokenAt(ctx, d.tokenGenerator, d.store, agent, site)
 		if err != nil {
 			return startEnvResult{}, fmt.Errorf("%s: %w", caller, err)
 		}
@@ -2447,7 +2454,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 	// Assemble the resolved env (shared with DispatchAgentRestart; see
 	// buildStartEnv).
-	startEnv, err := d.buildStartEnv(ctx, agent, "DispatchAgentStart", "start")
+	startEnv, err := d.buildStartEnv(ctx, agent, "DispatchAgentStart", mintSiteStart)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -2582,7 +2589,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// so the restarted container has full credentials and Hub connectivity.
 	// This mirrors the resolution in DispatchAgentStart — without it, env vars
 	// like GOOGLE_CLOUD_PROJECT are missing and auth provisioning fails.
-	startEnv, err := d.buildStartEnv(ctx, agent, "DispatchAgentRestart", "restart")
+	startEnv, err := d.buildStartEnv(ctx, agent, "DispatchAgentRestart", mintSiteRestart)
 	if err != nil {
 		return err
 	}
