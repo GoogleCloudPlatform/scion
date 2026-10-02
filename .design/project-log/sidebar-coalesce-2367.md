@@ -225,17 +225,23 @@ since the stale walk was still (wrongly) considered current for that
 generation, the call joined it instead of starting a fresh one, so nothing
 corrected the truncated result until the next periodic poll.
 
-Fix: `_hubMembersGeneration` is now also bumped whenever a conversation opens,
-from the single centralized `updated()` handler for `v2Conversation` changes
-(the same spot that already reports conversation changes for desktop
-notifications) rather than from each of the roughly twenty places
-`v2Conversation` is assigned. A walk started before that bump is now stale by
-generation the moment a conversation opens, regardless of what
-`v2Conversation` reads by the time the walk's promises settle — so the
-publish guard discards its result, and `loadHubMembers`'s in-flight check
-(already generation-aware from the previous pass's reconnect fix) starts a
-fresh walk instead of joining the stale one, which then publishes the
-complete list.
+Fix: `_hubMembersGeneration` is now also bumped whenever `v2Conversation` is
+assigned a truthy value, from the single centralized `updated()` handler for
+`v2Conversation` changes (the same spot that already reports conversation
+changes for desktop notifications) rather than from each of the roughly
+twenty assignment sites — including ones that are not "opening a
+conversation" in the user-facing sense, such as a mute toggle or a
+default-agent edit on the conversation already open. A walk started before
+that bump is stale by generation once `updated()` has run and observed the
+open, regardless of what `v2Conversation` itself reads by the time the
+walk's promises settle — so the publish guard discards its result, and
+`loadHubMembers`'s in-flight check (already generation-aware from the
+previous pass's reconnect fix) starts a fresh walk instead of joining the
+stale one, which then publishes the complete list. This covers a
+conversation that opens and later closes in two separate Lit update
+batches; a conversation opened and closed again within one batch is a
+separate gap, closed independently rather than by generation — see
+"Open-then-close within one Lit update batch" below.
 
 The existing `this.v2Conversation` checks in `shouldContinue` and the publish
 guard were kept rather than removed in favor of the generation alone: they
@@ -268,3 +274,84 @@ by this pass.
   was superseded by is still in flight, does not clear the shared in-flight
   flag out from under that fresh walk — a later call joins the fresh walk
   rather than starting a redundant third one.
+
+## Open-then-close within one Lit update batch (2026-10-02)
+
+The previous pass's generation bump runs from `updated()`, which only sees
+the *final* value of a batch of `v2Conversation` writes. If a conversation
+is opened and then cleared again before Lit has run that update cycle —
+possible when both writes land in the same microtask drain — `updated()`
+never observes the open at all, so `_hubMembersGeneration` never moves.
+`shouldContinue`, a live field read, still observes the conversation as open
+for the window between the two writes and stops a page fetch there — a
+genuine, intentional truncation — but with no generation bump to mark the
+walk stale, the publish guard at the end of the walk saw the (by-then-clear)
+`v2Conversation` and the unmoved generation and published the truncated list
+as the full hub roster; a join arriving in the same window, believing the
+in-flight walk would still produce a usable result, did not start its own
+walk either.
+
+Fix: `paginateAll` now rejects with `PaginationStoppedError` when
+`shouldContinue` returns false, instead of resolving with the partial list
+it had accumulated. `_fetchHubMembersOnce`'s publish logic already only acts
+on each leg's `Promise.allSettled` `'fulfilled'` result, so a stopped leg is
+never published, independent of the generation or `v2Conversation` at
+publish time. A new `_hubMembersInFlightStopped` flag records that a leg
+stopped this way; the publish guard also bails out on that flag for *both*
+legs of the attempt, not only the one that stopped — otherwise a single-page
+leg whose own `shouldContinue` check had already passed before the
+conversation opened would complete normally and publish once
+`Promise.allSettled` resolves, even though it belongs to the same
+now-defunct attempt as the stopped leg. `_runHubMembersLoad`'s loop treats
+the flag the same as a queued refresh and runs the walk once more, so a
+caller that joined the walk still ends up with a complete list instead of a
+stale one that never gets corrected until the next periodic poll. This
+closes the gap without depending on the relative timing of Lit's update
+scheduler and the fetch promise chain — the stale walk's generation-based
+invalidation and the new stopped-leg handling are independent and cover
+different windows: the former for a walk whose legs complete normally (no
+page ever observes the conversation as open) while a conversation opens and
+later closes in two separate update batches; the latter for a page that
+does observe it, in either one batch or two.
+
+### Disconnect racing a just-scheduled walk
+
+`loadHubMembers` coalesces same-turn callers behind a `queueMicrotask` before
+the actual walk starts. The walk used to read `_hubMembersGeneration` for the
+first time once that queued callback ran, rather than when `loadHubMembers`
+scheduled it. A `disconnectedCallback` landing in between — after the call
+that scheduled the walk, before its queued callback runs — bumps the
+generation first, so the walk would read the *post-disconnect* value as its
+own, making it believe it was the legitimate walk for the current
+generation and letting it fetch and publish into a page that is no longer
+connected. Fix: `loadHubMembers` now captures the generation at schedule
+time and passes it through to the walk, so a disconnect in that window
+correctly leaves the walk stale before it ever issues a request.
+
+### Files changed (this pass)
+
+| File | Change |
+| --- | --- |
+| `web/src/client/paginate-all.ts` | `shouldContinue` returning false now rejects with a new `PaginationStoppedError` (carrying the partial list) instead of resolving with it. |
+| `web/src/client/paginate-all.test.ts` | Updated the two `shouldContinue`-stops-the-walk tests for the rejection; added coverage for the partial list attached to the rejection. |
+| `web/src/components/pages/chat.ts` | Added `_hubMembersInFlightStopped`; `_fetchHubMembersOnce` sets it when either leg rejects with `PaginationStoppedError`, and its publish guard now also bails out on it — for *both* legs, not only the one that stopped, so a single-page leg whose own `shouldContinue` check already passed before the conversation opened can't publish stale data for an attempt that is about to be re-run; `_runHubMembersLoad`'s loop re-runs on the flag the same as a queued refresh; `loadHubMembers` also forces that re-run on a join, and now captures the generation at schedule time rather than reading it inside the queued callback; doc comments on `_hubMembersGeneration`, `_hubMembersInFlightStopped`, `loadHubMembers`, `_runHubMembersLoad`, and `_fetchHubMembersOnce` updated to describe the fix and reworded to say the generation bumps on any truthy `v2Conversation` assignment, not only on "opening a conversation". |
+| `web/src/components/pages/chat-hub-members-coalesce.test.ts` | New regression test reproducing the same-Lit-batch open/close truncation and asserting the full list publishes with the expected request count; new regression test isolating the generation check from the stopped-leg handling (both legs single-page, so neither ever stops, yet a conversation opening and closing in two separate update batches must still discard the stale result); new regression test for a walk scheduled just before a disconnect in the same microtask drain, asserting it issues no requests. |
+
+### Scenarios covered (tests, this pass)
+
+- Opening and closing a conversation within one Lit update batch, while a
+  page fetch is in flight, does not publish a truncated list — the walk
+  re-runs itself and the sidebar ends up with the full one, with the
+  expected total request count.
+- A walk whose legs are both already on their one-and-only (single) page
+  when a conversation opens and later closes again, in two separate update
+  batches, does not let that stale, fully-resolved result overwrite a fresh
+  walk's — exercising the generation check alone, independent of the
+  stopped-leg handling above.
+- `paginateAll` rejects with `PaginationStoppedError` (carrying whatever it
+  had accumulated) rather than resolving, both when `shouldContinue` stops a
+  walk already in progress and when it is already false before the first
+  page.
+- A walk scheduled via `loadHubMembers` immediately before a disconnect in
+  the same microtask drain issues no requests and publishes nothing into the
+  disconnected page.
