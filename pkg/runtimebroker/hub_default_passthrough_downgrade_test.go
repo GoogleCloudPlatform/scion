@@ -94,10 +94,20 @@ func writeRemapSettings(t *testing.T, runtimeType string) string {
 // TestBuildStartContext_HubDefaultPassthroughDowngradedOnRuntimeRemap covers
 // the create path: a passthrough grant flagged as RequireLocalRuntime, where
 // this dispatch's project-effective settings resolve the profile to a
-// non-local-container runtime, must downgrade to block.
+// runtime that is neither a local-container runtime nor Kubernetes, must
+// downgrade to block. srv.resolveAuxiliaryRuntime is overridden (the same pattern
+// newTestServerForSavedProfileRemap uses) to a fictitious runtime name
+// ("other") rather than "kubernetes": block is not offered on Kubernetes
+// (ptone/scion#2328), so Kubernetes is excluded from this downgrade (see
+// TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesRemap below), so
+// a real remap to Kubernetes would no longer exercise the downgrade path this
+// test is pinning.
 func TestBuildStartContext_HubDefaultPassthroughDowngradedOnRuntimeRemap(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
-	projectPath := writeRemapSettings(t, "kubernetes")
+	projectPath := writeRemapSettings(t, "other")
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+		return &runtime.MockRuntime{NameFunc: func() string { return "other" }}
+	}
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
@@ -124,6 +134,51 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedOnRuntimeRemap(t *test
 	}
 	if sc.Opts.Env["GCE_METADATA_ROOT"] != "localhost:18380" {
 		t.Errorf("expected GCE_METADATA_ROOT='localhost:18380' once downgraded, got %q", sc.Opts.Env["GCE_METADATA_ROOT"])
+	}
+}
+
+// TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesRemap: a
+// hub-default passthrough grant (RequireLocalRuntime) dispatched to a
+// profile that resolves to Kubernetes must NOT downgrade to block. Block is
+// not offered on Kubernetes (ptone/scion#2328) — Kubernetes could not accept
+// this downgrade's explicit "block" even if it produced one — and the
+// broker's own runtime-aware default for Kubernetes is already "passthrough"
+// anyway, so keeping the grant's passthrough unchanged produces the
+// identical outcome a downgrade-to-unset would. This is reconciled with
+// upstream's RequireLocalRuntime downgrade mechanism (main #2186).
+// srv.resolveAuxiliaryRuntime is overridden so settings resolving to "kubernetes"
+// returns a mock runtime rather than attempting a real cluster client (see
+// TestExtractRequiredEnvKeys_KubernetesImplicitPassthroughSkipsADC for the
+// same need in a different test file).
+func TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesRemap(t *testing.T) {
+	srv, _ := newTestServerForRuntimeRemap(t)
+	projectPath := writeRemapSettings(t, "kubernetes")
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+		return &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	}
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-remap-kubernetes-kept",
+		ProjectPath: projectPath,
+		Config: &CreateAgentConfig{
+			GCPIdentity: &GCPIdentityConfig{
+				MetadataMode:        "passthrough",
+				RequireLocalRuntime: true,
+			},
+		},
+		HTTPRequest: r,
+		Operation:   opCreate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if sc.Opts.Env["SCION_METADATA_MODE"] != "passthrough" {
+		t.Errorf("expected SCION_METADATA_MODE='passthrough' to survive a remap to Kubernetes unchanged, got %q", sc.Opts.Env["SCION_METADATA_MODE"])
+	}
+	if sc.Opts.Env["GCE_METADATA_HOST"] != "" {
+		t.Errorf("expected no GCE_METADATA_HOST redirect for a kept Kubernetes passthrough, got %q", sc.Opts.Env["GCE_METADATA_HOST"])
 	}
 }
 
@@ -228,8 +283,12 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag(t *testing
 // broker-default runtime is "docker", matching its project's active profile
 // — following newTestServer's own recipe (cwd-relative .scion) for the
 // template/harness-config scaffolding startAgent/restartAgent need. A
-// second profile, "local", is mapped to "kubernetes" and set as agentName's
-// own saved profile (agent-info.json).
+// second profile, "local", is mapped to remapRuntimeName and set as
+// agentName's own saved profile (agent-info.json). Callers pass "kubernetes"
+// to exercise the carve-out that keeps passthrough rather than downgrading
+// it (block is not offered on Kubernetes, ptone/scion#2328) or a
+// non-local/non-Kubernetes name like "other" to exercise the ordinary
+// downgrade-to-block path.
 //
 // No ForceRuntime is set, so both resolveManagerForOpts calls in
 // startAgent/restartAgent consult settings for real: the first (before the
@@ -238,7 +297,7 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag(t *testing
 // second (after it, in the handler itself) sees the agent's saved profile
 // and does not. Production always constructs a fresh agent.Manager around a
 // freshly resolved runtime for that second resolution; this fixture
-// overrides srv.runtimeResolver so that resolution returns this test's own
+// overrides srv.resolveAuxiliaryRuntime so that resolution returns this test's own
 // mock runtime (remapRuntime, returned to the caller) instead of attempting
 // a real cluster client, without changing what resolveManagerForOpts does
 // for any real dispatch or how its result is wired up afterward. The
@@ -246,7 +305,7 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag(t *testing
 // remapRuntime; tests assert on the env its RunFunc observes, not on the
 // outer mockManager (which only ever sees a dispatch that keeps the
 // broker's default runtime).
-func newTestServerForSavedProfileRemap(t *testing.T, agentName string) (*Server, *mockManager, *runtime.MockRuntime) {
+func newTestServerForSavedProfileRemap(t *testing.T, agentName, remapRuntimeName string) (*Server, *mockManager, *runtime.MockRuntime) {
 	t.Helper()
 	// See the comment in newTestServerForRuntimeRemap: isolate HOME and every
 	// ambient SCION_* variable before either of this fixture's two
@@ -274,12 +333,12 @@ func newTestServerForSavedProfileRemap(t *testing.T, agentName string) (*Server,
 		"    other:\n" +
 		"        runtime: docker\n" +
 		"    local:\n" +
-		"        runtime: kubernetes\n" +
+		"        runtime: " + remapRuntimeName + "\n" +
 		"runtimes:\n" +
 		"    docker:\n" +
 		"        type: docker\n" +
-		"    kubernetes:\n" +
-		"        type: kubernetes\n"
+		"    " + remapRuntimeName + ":\n" +
+		"        type: " + remapRuntimeName + "\n"
 	if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -328,8 +387,8 @@ func newTestServerForSavedProfileRemap(t *testing.T, agentName string) (*Server,
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
-	remapRuntime := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	srv.runtimeResolver = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	remapRuntime := &runtime.MockRuntime{NameFunc: func() string { return remapRuntimeName }}
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return remapRuntime
 	}
 	return srv, mgr, remapRuntime
@@ -341,12 +400,15 @@ func newTestServerForSavedProfileRemap(t *testing.T, agentName string) (*Server,
 // buildStartContext itself sees. The project's active profile resolves to
 // docker, matching the broker's own default, so buildStartContext's own
 // resolution does not downgrade; this agent's saved profile resolves to a
-// different, non-local-container runtime, and the re-check that runs after
-// that second resolution must still downgrade to block. Removing the
-// downgrade call after that second resolution (handlers.go) makes this
-// test fail; the earlier, first-resolution check alone is not enough here.
+// different runtime that is neither a local-container runtime nor
+// Kubernetes ("other" — see
+// TestStartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernetes
+// below for the Kubernetes carve-out), and the re-check that runs after that
+// second resolution must still downgrade to block. Removing the downgrade
+// call after that second resolution (handlers.go) makes this test fail; the
+// earlier, first-resolution check alone is not enough here.
 func TestStartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers(t *testing.T) {
-	srv, _, remapRuntime := newTestServerForSavedProfileRemap(t, "test-agent-1")
+	srv, _, remapRuntime := newTestServerForSavedProfileRemap(t, "test-agent-1", "other")
 	var capturedEnv []string
 	remapRuntime.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
 		capturedEnv = config.Env
@@ -376,6 +438,48 @@ func TestStartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers(t *te
 	}
 }
 
+// TestStartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernetes
+// pins the same carve-out as
+// TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesRemap above, one
+// resolution later: at the startAgent late-recheck layer, not just
+// buildStartContext's own earlier one. When the agent's own saved profile
+// resolves to Kubernetes rather than docker, the re-check that runs after
+// that second, authoritative resolution must NOT downgrade to block —
+// Kubernetes keeps its own runtime-aware default of passthrough instead.
+func TestStartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernetes(t *testing.T) {
+	srv, _, remapRuntime := newTestServerForSavedProfileRemap(t, "test-agent-1", "kubernetes")
+	var capturedEnv []string
+	remapRuntime.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
+		capturedEnv = config.Env
+		return "mock-id", nil
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"resolvedEnv": map[string]string{
+			"SCION_METADATA_MODE":                  "passthrough",
+			"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/start", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if !slices.Contains(capturedEnv, "SCION_METADATA_MODE=passthrough") {
+		t.Errorf("expected the saved-profile resolution to Kubernetes to keep passthrough, got env %v", capturedEnv)
+	}
+	if slices.ContainsFunc(capturedEnv, func(e string) bool { return strings.HasPrefix(e, "SCION_METADATA_MODE=block") }) {
+		t.Errorf("expected no block mode once resolved to Kubernetes, got env %v", capturedEnv)
+	}
+}
+
 // TestDowngradeUnverifiedHubDefaultPassthrough_NilEnv proves a nil env does
 // not panic even when every other condition would otherwise trigger the
 // write-the-block-bundle path (requireLocalRuntime true, mode passthrough,
@@ -383,13 +487,13 @@ func TestStartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers(t *te
 // currently passes a nil env — buildStartContext always allocates one — but
 // the function is meant to degrade safely rather than rely on that.
 func TestDowngradeUnverifiedHubDefaultPassthrough_NilEnv(t *testing.T) {
-	downgradeUnverifiedHubDefaultPassthrough(nil, nil, store.GCPMetadataModePassthrough, true, "kubernetes")
+	downgradeUnverifiedHubDefaultPassthrough(nil, nil, store.GCPMetadataModePassthrough, true, "other")
 }
 
 // TestRestartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers is
 // the restart-path twin of the start-path test above.
 func TestRestartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers(t *testing.T) {
-	srv, _, remapRuntime := newTestServerForSavedProfileRemap(t, "test-agent-1")
+	srv, _, remapRuntime := newTestServerForSavedProfileRemap(t, "test-agent-1", "other")
 	var capturedEnv []string
 	remapRuntime.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
 		capturedEnv = config.Env
@@ -416,5 +520,243 @@ func TestRestartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers(t *
 	}
 	if !slices.Contains(capturedEnv, "SCION_METADATA_MODE=block") {
 		t.Errorf("expected the saved-profile resolution to downgrade to block, got env %v", capturedEnv)
+	}
+}
+
+// TestRestartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernetes
+// is the restart-path twin of
+// TestStartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernetes
+// above.
+func TestRestartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernetes(t *testing.T) {
+	srv, _, remapRuntime := newTestServerForSavedProfileRemap(t, "test-agent-1", "kubernetes")
+	var capturedEnv []string
+	remapRuntime.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
+		capturedEnv = config.Env
+		return "mock-id", nil
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"resolvedEnv": map[string]string{
+			"SCION_METADATA_MODE":                  "passthrough",
+			"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/restart", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if !slices.Contains(capturedEnv, "SCION_METADATA_MODE=passthrough") {
+		t.Errorf("expected the saved-profile resolution to Kubernetes to keep passthrough, got env %v", capturedEnv)
+	}
+	if slices.ContainsFunc(capturedEnv, func(e string) bool { return strings.HasPrefix(e, "SCION_METADATA_MODE=block") }) {
+		t.Errorf("expected no block mode once resolved to Kubernetes, got env %v", capturedEnv)
+	}
+}
+
+// newTestServerForLateCheckOrdering builds a server for pinning that the
+// start/restart handlers' later, authoritative resolution — not just
+// buildStartContext's own earlier one — is what the Kubernetes/block
+// rejection runs against. Unlike newTestServerForSavedProfileRemap, this
+// fixture deliberately makes the two resolutions see different saved
+// profiles:
+//
+//   - The project's active profile ("other") resolves to docker; "local"
+//     resolves to remapRuntimeName (Kubernetes).
+//   - The mock agent record's Name is agentName, but its ContainerID is
+//     urlID — a different string. The HTTP request addresses the agent by
+//     urlID.
+//   - A saved profile of "local" (Kubernetes) exists only under urlID, not
+//     under agentName.
+//
+// On restart, the handler's own pre-buildStartContext lookup resolves the
+// URL id to the agent's Name (agentName) via matchesAgent, and
+// buildStartContext's own early resolution reads the saved profile under
+// that Name — finding nothing, so it falls back to the active profile
+// (docker) and does not reject. The handler's later, authoritative
+// resolution reads the saved profile under the URL id itself
+// (agent.GetSavedProfile(id, ...), handlers.go) — urlID — and finds
+// Kubernetes.
+//
+// On start, there is no such Name/id translation (buildStartContext's Name
+// input is the URL id directly on both the early and late reads), so the
+// divergence instead comes from the project path: this fixture does not
+// chdir into the project directory, so buildStartContext's own early
+// resolution — reached with no projectPath in the request, before
+// startAgent's own project-path fallback lookup runs — resolves a saved
+// profile against an empty/unrelated path and finds nothing (docker, no
+// reject). startAgent's own fallback lookup (over the mock manager's agent
+// list, keyed on ContainerID here) then populates opts.ProjectPath for real,
+// and the later resolution finds the Kubernetes profile saved under urlID at
+// that real path.
+func newTestServerForLateCheckOrdering(t *testing.T, agentName, urlID, remapRuntimeName string) (*Server, *mockManager, *runtime.MockRuntime) {
+	t.Helper()
+	// Isolate HOME and every ambient SCION_* variable, as
+	// newTestServerForSavedProfileRemap does. Deliberately no os.Chdir: see
+	// the doc comment above for why the start-path test depends on this
+	// fixture's working directory not matching the project directory below.
+	clearSCIONEnv(t)
+	t.Setenv("HOME", t.TempDir())
+
+	tmpDir := t.TempDir()
+	dotScion := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(dotScion, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settingsYAML := "schema_version: \"1\"\n" +
+		"active_profile: other\n" +
+		"profiles:\n" +
+		"    other:\n" +
+		"        runtime: docker\n" +
+		"    local:\n" +
+		"        runtime: " + remapRuntimeName + "\n" +
+		"runtimes:\n" +
+		"    docker:\n" +
+		"        type: docker\n" +
+		"    " + remapRuntimeName + ":\n" +
+		"        type: " + remapRuntimeName + "\n"
+	if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tpl := range []string{"default", "claude"} {
+		tplDir := filepath.Join(dotScion, "templates", tpl)
+		if err := os.MkdirAll(tplDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("harness_config: "+tpl+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, hc := range []string{"default", "claude"} {
+		hcDir := filepath.Join(dotScion, "harness-configs", hc)
+		if err := os.MkdirAll(hcDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: "+hc+"\nimage: test-image:"+hc+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The saved profile lives under urlID only — not under agentName — so
+	// only a resolution that looks the agent up by urlID finds Kubernetes.
+	writeSavedAgentProfile(t, dotScion, urlID, "local")
+
+	cfg := DefaultServerConfig()
+	cfg.BrokerID = "test-broker-id"
+	cfg.BrokerName = "test-host"
+
+	mgr := &mockManager{
+		agents: []api.AgentInfo{
+			{ID: agentName, Name: agentName, ContainerID: urlID, ProjectPath: dotScion, Phase: "running"},
+		},
+	}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(cfg, mgr, rt)
+	remapRuntime := &runtime.MockRuntime{NameFunc: func() string { return remapRuntimeName }}
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+		return remapRuntime
+	}
+	return srv, mgr, remapRuntime
+}
+
+// TestStartAgent_LateKubernetesBlockRejectionRunsBeforeStart pins the
+// ordering of the start path's later, saved-profile resolution: see
+// newTestServerForLateCheckOrdering's doc comment for how this fixture makes
+// only that later resolution see Kubernetes. An explicit "block" must still
+// be rejected with 400, before Start ever runs.
+func TestStartAgent_LateKubernetesBlockRejectionRunsBeforeStart(t *testing.T) {
+	srv, mgr, remapRuntime := newTestServerForLateCheckOrdering(t, "actual-agent-name", "url-id", "kubernetes")
+	remapRuntime.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
+		t.Fatal("Start must not run once the late Kubernetes/block rejection fires")
+		return "", nil
+	}
+
+	// Seed an existing scion-agent.json so an inlineConfig update (sent
+	// below) has something to write over if applyInlineConfigUpdate runs.
+	// The late rejection must fire before that write, so this must come back
+	// unchanged.
+	dotScion := mgr.agents[0].ProjectPath
+	agentDir := config.GetAgentDir(dotScion, "url-id", false)
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	original, err := json.Marshal(api.ScionConfig{Image: "original-image"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(agentDir, "scion-agent.json")
+	if err := os.WriteFile(cfgPath, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"resolvedEnv": map[string]string{
+			"SCION_METADATA_MODE": "block",
+		},
+		"inlineConfig": map[string]any{
+			"image": "changed-image",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/url-id/start", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("failed to read scion-agent.json after rejection: %v", err)
+	}
+	if string(after) != string(original) {
+		t.Errorf("expected scion-agent.json to stay unchanged by applyInlineConfigUpdate once the late rejection fires first, got %s, want %s", after, original)
+	}
+}
+
+// TestRestartAgent_LateKubernetesBlockRejectionRunsBeforeStop pins the same
+// ordering on the restart path, and additionally that the rejection runs
+// before the agent is stopped: see newTestServerForLateCheckOrdering's doc
+// comment for how this fixture makes only the later resolution see
+// Kubernetes. An explicit "block" must be rejected with 400 before Stop is
+// ever called.
+func TestRestartAgent_LateKubernetesBlockRejectionRunsBeforeStop(t *testing.T) {
+	srv, mgr, remapRuntime := newTestServerForLateCheckOrdering(t, "actual-agent-name", "url-id", "kubernetes")
+	remapRuntime.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
+		t.Fatal("Start must not run once the late Kubernetes/block rejection fires")
+		return "", nil
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"resolvedEnv": map[string]string{
+			"SCION_METADATA_MODE": "block",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/url-id/restart", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("expected the agent not to be stopped once the late rejection fires before the stop, got %d stop calls", mgr.stopCalls)
 	}
 }

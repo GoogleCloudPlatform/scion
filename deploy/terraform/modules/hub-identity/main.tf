@@ -35,64 +35,24 @@ resource "google_service_account" "agent" {
 #  (a) per-secret secretAccessor on this hub's own Terraform-managed secrets
 #      — <hub>-settings/-session-secret/-kubeconfig (hub-cloudrun) and
 #      <hub>-db-password (cloudsql-database), not here;
-#  (b) two conditioned grants below, both scoped to exactly a resource-name
-#      prefix this hub's own secrets fall under — never another hub's or the
-#      live stack's:
-#
-#      hub_secretmanager_admin_hub_prefixed (current) covers every scope —
+#  (b) hub_secretmanager_admin_hub_prefixed below, a conditioned grant scoped
+#      to exactly the resource-name prefix this hub's own secrets fall under
+#      — never another hub's or the live stack's. It covers every scope —
 #      hub, user, and project alike — under the hub-prefixed Secret Manager
 #      naming from ptone/scion#2152: scion-<sha256(hub_name)[:12]>-*, hashing
-#      hub_name alone rather than hub_name:scopeID. This is what makes user-
-#      and project-scope secret creation possible at all; before it, those
-#      scopes had no per-hub prefix to condition a grant on and creating one
-#      failed loudly with a 403.
-#
-#      hub_secretmanager_admin_hub_scope (legacy, transitional) is scoped to
-#      pkg/secret/gcpbackend.go's pre-#2152 gcpSecretName output for this
-#      hub's own HUB-scope secrets (user_signing_key, agent_signing_key,
-#      oidc_signing_key/keyset — created via the gcpsm backend at hub
-#      startup, needed for the hub to become healthy at all): for hub scope,
-#      gcpSecretName hashes hubID:scopeID with scopeID == hubID (self-scoped;
-#      confirmed against pkg/hub/oidckeys.go's store.ScopeHub calls, which
-#      all pass hubID as both scope and scopeID). hub_id is set to hub_name
-#      in the rendered settings, so the prefix is computable at plan time.
-#      Cross-checked the substr(sha256(...),0,12) vs. Go's
-#      hex.EncodeToString(sha256.Sum256(...)[:6]) equivalence arithmetically
-#      (both take the first 6 bytes of the same digest, hex-encoded). KEEP
-#      this grant — and hub-cloudrun's oidc_signing_key pre-provision, which
-#      is pinned to the same hash — until every hub sharing this project has
-#      been rebuilt on a #2152-carrying image and `migrate --delete-legacy`
-#      has run against it: until then, a live hub may still read or write
-#      its HUB-scope secrets under the pre-#2152 name, which only this grant
-#      covers.
+#      hub_name alone rather than hub_name:scopeID.
 #
 #      Whether an IAM condition on a resource-name prefix covers
 #      `secrets.create` (not just operations on an existing secret) was
 #      verified empirically against the live API: it does, so no
-#      pre-create fallback is needed for either grant.
+#      pre-create fallback is needed.
 #
 # project_number (below) always comes from the shared-lookup data source via
 # var.project_number, never a literal — a hardcoded project number in this
 # expression would silently stop matching if this Terraform were ever
 # pointed at a different project.
 locals {
-  hub_scope_secret_hash      = substr(sha256("${var.hub_name}:${var.hub_name}"), 0, 12)
-  hub_scope_secret_prefix    = "projects/${var.project_number}/secrets/scion-hub-${local.hub_scope_secret_hash}-"
   hub_prefixed_secret_prefix = "projects/${var.project_number}/secrets/scion-${substr(sha256(var.hub_name), 0, 12)}-"
-}
-
-# condition{} fields (title, description, expression) are ForceNew: editing any of them, even
-# description wording, destroys and re-creates this grant on live hubs. Put explanations in comments, not here.
-resource "google_project_iam_member" "hub_secretmanager_admin_hub_scope" {
-  project = var.project_id
-  role    = "roles/secretmanager.admin"
-  member  = "serviceAccount:${google_service_account.hub.email}"
-
-  condition {
-    title       = "${var.hub_name}-hub-scope-secrets"
-    description = "Only this hub's own hub-scope secrets (gcpSecretName(scope=hub, scopeID=hub_id)) — never another hub's or the live stack's."
-    expression  = "resource.name.startsWith(\"${local.hub_scope_secret_prefix}\")"
-  }
 }
 
 # condition{} fields (title, description, expression) are ForceNew: editing any of them, even
@@ -161,7 +121,7 @@ resource "google_service_account_iam_member" "hub_mints_own_tokens" {
 # No Secret Manager role at all. The agent
 # SA is the Workload Identity binding for agent pods, which run agent- and
 # user-supplied code: a project-wide accessor would let any agent pod read
-# scion-hub-*-user_signing_key/-agent_signing_key for the live hub (or any
+# scion-<hash>-user_signing_key/-agent_signing_key for the live hub (or any
 # other hub sharing this project) and mint valid tokens for it — escalation
 # from "runs an agent" to "administers an unrelated production hub", and
 # unfixable with an IAM condition (user/project-scope secret names have no

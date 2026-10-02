@@ -29,6 +29,9 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
+import { isValidTimeZone } from '../../utils/time.js';
+import '../shared/timezone-picker.js';
+import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import './admin-experiments.js';
 
 // ── Type definitions matching the Go API response ──
@@ -243,6 +246,7 @@ interface ServerConfigResponse {
   default_max_agent_role?: string;
   default_agent_role?: string;
   default_runtime_broker?: string;
+  default_timezone?: string;
   default_gcp_identity_mode?: string;
   default_gcp_identity_service_account_id?: string;
 
@@ -402,6 +406,7 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   default_max_agent_role: 'Default Maximum Agent Role',
   default_agent_role: 'Default Agent Role',
   default_runtime_broker: 'Default Runtime Broker',
+  default_timezone: 'Default Timezone',
   default_gcp_identity_mode: 'Default GCP Identity Mode',
   default_gcp_identity_service_account_id: 'Default GCP Identity Service Account',
   // endpoints section
@@ -489,6 +494,12 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private defaultAgentRole = '';
   @state() private defaultRuntimeBroker = '';
   @state() private runtimeBrokers: RuntimeBroker[] = [];
+  // Agent container timezone (agent_defaults.default_timezone). Empty means UTC.
+  @state() private defaultTimezone = '';
+
+  private get defaultTimezoneInvalid(): boolean {
+    return this.defaultTimezone !== '' && !isValidTimeZone(this.defaultTimezone);
+  }
 
   // Default GCP identity (hub-wide fallback)
   @state() private defaultGCPIdentityMode = '';
@@ -1509,6 +1520,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.defaultMaxAgentRole = data.default_max_agent_role || '';
     this.defaultAgentRole = data.default_agent_role || '';
     this.defaultRuntimeBroker = data.default_runtime_broker || '';
+    this.defaultTimezone = data.default_timezone || '';
     this.defaultGCPIdentityMode = data.default_gcp_identity_mode || '';
     this.defaultGCPIdentitySAID = data.default_gcp_identity_service_account_id || '';
 
@@ -1827,6 +1839,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('default_runtime_broker')) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
     }
+    if (ok('default_timezone')) {
+      payload.default_timezone = this.defaultTimezone || '';
+    }
     if (ok('default_gcp_identity_mode')) {
       payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
     }
@@ -2018,6 +2033,14 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
     if (ok('default_runtime_broker')) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || undefined;
+    }
+    // Sent unconditionally (not `|| undefined`): an explicit "" clears the
+    // field server-side (admin_settings.go's `DefaultTimezone *string`
+    // check), matching the default-agent-limits precedent above
+    // (ptone/scion#860). `|| undefined` would omit the key on clear and
+    // leave the stored value unchanged.
+    if (ok('default_timezone')) {
+      payload.default_timezone = this.defaultTimezone || '';
     }
 
     // Server
@@ -2265,13 +2288,21 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private async handleSaveError(res: Response): Promise<void> {
-    let body: Record<string, unknown>;
+    let parsed: unknown;
     try {
-      body = (await res.json()) as Record<string, unknown>;
+      parsed = await res.json();
     } catch {
       this.error = 'Failed to save settings';
       return;
     }
+    // A JSON body that is not an object (null, a bare string/number, an
+    // array) carries no error code or message to read, so treat it like a
+    // non-JSON body rather than dereferencing it below.
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      this.error = 'Failed to save settings';
+      return;
+    }
+    const body = parsed as Record<string, unknown>;
 
     switch (body.error) {
       case 'validation_failed':
@@ -2294,12 +2325,30 @@ export class ScionPageAdminServerConfig extends LitElement {
         break;
       }
 
-      default:
+      default: {
+        // Pre-existing bug, fixed here because tz-refactor task 12's AC
+        // needs it ("an invalid name shows the server's 422 message"): the
+        // Go writeError() helper (pkg/hub/errors.go), which backs every
+        // plain field-validation 400/422 on this page — default_timezone,
+        // agent_endpoint, default_user_role — responds with
+        // {error: {code, message, details}}, not the flat {error: "<code
+        // string>", ...} shape the cases above handle. body.error is an
+        // object there, so it never matched a case above, body.message is
+        // undefined (the message is nested at body.error.message, not
+        // top-level), and typeof body.error === 'string' is false, so this
+        // fell through to the generic fallback and the real message was
+        // silently lost.
+        const nestedError =
+          typeof body.error === 'object' && body.error !== null
+            ? (body.error as Record<string, unknown>)
+            : null;
         this.error =
           (body.message as string) ||
+          (nestedError?.message as string) ||
           (typeof body.error === 'string' ? body.error : null) ||
           'An unexpected error occurred';
         break;
+      }
     }
   }
 
@@ -3306,19 +3355,47 @@ export class ScionPageAdminServerConfig extends LitElement {
                   )}
                 </div>
                 <div class="form-field">
+                  <label>Default Timezone</label>
+                  <span class="hint"
+                    >Timezone (<code>TZ</code>) for agent containers that have no pinned timezone
+                    and no <code>TZ</code> environment variable. Empty means UTC. Does not affect
+                    how times are displayed.</span
+                  >
+                  ${this.renderFieldValue(
+                    'default_timezone',
+                    this.defaultTimezone || 'UTC (default)',
+                    html`${this.renderEnvBadge('default_timezone')}<scion-timezone-picker
+                        label="Default Timezone"
+                        placeholder="Search for a timezone..."
+                        empty-label="UTC"
+                        .value=${this.defaultTimezone}
+                        @timezone-change=${(e: CustomEvent<TimezoneChangeDetail>) => {
+                          this.defaultTimezone = e.detail.timezone;
+                        }}
+                      ></scion-timezone-picker>`
+                  )}
+                  ${this.defaultTimezoneInvalid
+                    ? html`<div class="error">
+                        "${this.defaultTimezone}" is not a recognized timezone. Saving will be
+                        rejected.
+                      </div>`
+                    : nothing}
+                </div>
+                <div class="form-field">
                   <label>Default GCP Identity Mode</label>
                   <span class="hint"
                     >Hub-wide fallback GCP metadata mode for new agents, applied when neither the
                     agent create request nor the project's default GCP identity setting names one.
                     Passthrough set here applies only to agents on the hub's embedded broker; agents
-                    on any other broker get Block. Assign requires a verified hub-scoped service
-                    account and gcpIamCheckMode=enforce.</span
+                    on any other broker get Block, except on the Kubernetes runtime, which does not
+                    offer Block — those agents get Passthrough instead. Assign requires a verified
+                    hub-scoped service account and gcpIamCheckMode=enforce.</span
                   >
                   ${this.renderFieldValue(
                     'default_gcp_identity_mode',
-                    this.defaultGCPIdentityMode || 'Block (default)',
+                    this.defaultGCPIdentityMode || 'None (runtime default: Block; Passthrough on Kubernetes)',
                     html`${this.renderEnvBadge('default_gcp_identity_mode')}<sl-select
-                        placeholder="Block (default)"
+                        placeholder="None (runtime default: Block; Passthrough on Kubernetes)"
                         clearable
                         value=${this.defaultGCPIdentityMode}
                         @sl-change=${(e: Event) => {
@@ -3836,10 +3913,10 @@ export class ScionPageAdminServerConfig extends LitElement {
               >Allow agent messaging across projects</sl-switch
             >
             <span class="hint">
-              When enabled, agents in Hub mode can send direct messages to agents in other projects on
-              this Hub. The sender needs Hub mode; each destination project independently chooses
-              whether to accept external messages. Disabling takes effect for new cross-project checks
-              and delayed deliveries. Already delivered messages are not recalled.
+              When enabled, agents in Hub mode can send direct messages to agents in other projects
+              on this Hub. The sender needs Hub mode; each destination project independently chooses
+              whether to accept external messages. Disabling takes effect for new cross-project
+              checks and delayed deliveries. Already delivered messages are not recalled.
             </span>
             ${this.crossProjectMessagingError
               ? html`<div class="status-message error" style="margin-top: 0.5rem">

@@ -43,7 +43,6 @@ import {
   isMacPlatform,
   type ScionHeader,
 } from './header.js';
-import { setFeatureFlag, NATIVE_CHAT_V2_FLAG } from '../../utils/feature-flags.js';
 import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import type { User } from '../../shared/types.js';
@@ -243,11 +242,10 @@ function paletteTooltip(el: ScionHeader): Element | null | undefined {
 afterEach(() => {
   document.body.innerHTML = '';
   vi.unstubAllGlobals();
-  setFeatureFlag(NATIVE_CHAT_V2_FLAG, true);
 });
 
-describe('palette button: render conditions (chat route x flag x user)', () => {
-  it('renders when signed in, on a v2 chat route', async () => {
+describe('palette button: render conditions (chat route x user)', () => {
+  it('renders when signed in, on a chat route', async () => {
     const el = await mountHeader();
     expect(paletteButton(el)).not.toBeNull();
   });
@@ -263,12 +261,6 @@ describe('palette button: render conditions (chat route x flag x user)', () => {
 
   it('is absent on a non-chat route', async () => {
     const el = await mountHeader({ currentPath: '/projects/abc' });
-    expect(paletteButton(el)).toBeNull();
-  });
-
-  it('is absent when web.native_chat_v2 is off', async () => {
-    setFeatureFlag(NATIVE_CHAT_V2_FLAG, false);
-    const el = await mountHeader();
     expect(paletteButton(el)).toBeNull();
   });
 

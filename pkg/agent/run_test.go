@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"sort"
@@ -390,6 +391,2168 @@ profiles:
 	}
 }
 
+// TestStart_RejectsPersistedWorkspaceSourceEqualToFilesystemRoot is the fail-closed
+// regression test for a workspace source that was resolved and persisted to
+// scion-agent.json by an older version of the resolution logic, before the
+// per-project workspace source validation existed. Start must still refuse
+// it on resume, and — critically — must not reach the point of calling the
+// runtime to set up the container: RunFunc must never be invoked.
+func TestStart_RejectsPersistedWorkspaceSourceEqualToFilesystemRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	runCalled := false
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			runCalled = true
+			return "mock-id", nil
+		},
+	}
+
+	agentDir := filepath.Join(projectScionDir, "agents", "local-test")
+	_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+		"harness": "generic",
+		"explicit_workspace": true,
+		"volumes": [{"source": "/", "target": "/workspace"}]
+	}`), 0644)
+
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "local-test",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err == nil {
+		t.Fatal("expected Start to fail for a persisted workspace source of '/'")
+	}
+	if !strings.Contains(err.Error(), "is not an allowed workspace path") {
+		t.Errorf("expected the rejection to come from workspace source validation, got: %v", err)
+	}
+	if runCalled {
+		t.Error("expected the runtime's Run to never be invoked (fail closed), but it was called")
+	}
+}
+
+// TestStart_RejectsPersistedWorkspaceSourceEqualToHome is the $HOME sibling
+// of TestStart_RejectsPersistedWorkspaceSourceEqualToFilesystemRoot.
+func TestStart_RejectsPersistedWorkspaceSourceEqualToHome(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	runCalled := false
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			runCalled = true
+			return "mock-id", nil
+		},
+	}
+
+	agentDir := filepath.Join(projectScionDir, "agents", "local-test")
+	_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+	agentJSON := fmt.Sprintf(`{
+		"harness": "generic",
+		"explicit_workspace": true,
+		"volumes": [{"source": %q, "target": "/workspace"}]
+	}`, tmpDir)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentJSON), 0644)
+
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "local-test",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err == nil {
+		t.Fatal("expected Start to fail for a persisted workspace source equal to $HOME")
+	}
+	if !strings.Contains(err.Error(), "is not an allowed workspace path") {
+		t.Errorf("expected the rejection to come from the deny-set floor, got: %v", err)
+	}
+	if runCalled {
+		t.Error("expected the runtime's Run to never be invoked (fail closed), but it was called")
+	}
+}
+
+// TestStart_RejectsUnresolvableGitRepoRoot is the regression test for a
+// fail-open gap: a project directory can satisfy git's own
+// is-inside-work-tree check while having no top-level work tree to resolve
+// at all -- a bare repository is the standard example (`git rev-parse
+// --is-inside-work-tree` succeeds and prints "false" there, but `git
+// rev-parse --show-toplevel` fails). workspaceSourceRoots must refuse this
+// case outright rather than returning no roots, which the caller would
+// otherwise treat as "no root available, check the rootless floor only" and
+// accept any absolute path that isn't '/', $HOME, or under ~/.scion.
+func TestStart_RejectsUnresolvableGitRepoRoot(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	// A bare repository: git considers a path inside it "inside a work
+	// tree" (is-inside-work-tree succeeds, printing "false") without there
+	// being any top-level work tree to resolve (show-toplevel fails). This
+	// is the real, reproducible way util.IsGitRepoDir can report true while
+	// util.RepoRootDir has nothing to return.
+	bareRepo := filepath.Join(tmpDir, "bare-project.git")
+	initCmd := exec.Command("git", "init", "--bare", bareRepo)
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	projectScionDir := filepath.Join(bareRepo, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	// A persisted, non-explicit workspace pointing somewhere unrelated --
+	// with the bug, this would be accepted by the rootless deny-set-only
+	// floor since it is neither '/', $HOME, nor under ~/.scion.
+	unrelatedWorkspace := filepath.Join(tmpDir, "unrelated-workspace")
+	_ = os.MkdirAll(unrelatedWorkspace, 0755)
+
+	agentDir := filepath.Join(projectScionDir, "agents", "bare-repo-agent")
+	_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+	agentJSON := fmt.Sprintf(`{"harness": "generic", "volumes": [{"source": %q, "target": "/workspace"}]}`, unrelatedWorkspace)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentJSON), 0644)
+
+	runCalled := false
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			runCalled = true
+			return "mock-id", nil
+		},
+	}
+
+	mgr := NewManager(mockRT)
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "bare-repo-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err == nil {
+		t.Fatal("expected Start to refuse a workspace source when the project's own repo root cannot be resolved")
+	}
+	if !strings.Contains(err.Error(), "does not resolve to its own git work tree") {
+		t.Errorf("expected the rejection to name the unresolvable repo root, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), projectScionDir) {
+		t.Errorf("expected the rejection to include the project directory path, got: %v", err)
+	}
+	if runCalled {
+		t.Error("expected the runtime's Run to never be invoked (fail closed), but it was called")
+	}
+}
+
+// TestStart_RejectsNestedBareRepoResolvingToEnclosingRepo is the regression
+// test for a residual variant of the unresolvable-repo-root gap: a bare
+// repository nested inside another repository's work tree does not error at
+// all when util.RepoRootDir resolves it. RepoRootDir retries from the parent
+// directory on a --show-toplevel failure, so the walk-up moves past the bare
+// repo's own directory entirely and returns the ENCLOSING repository's top
+// level -- a real, successfully-resolved root, just not projectDir's own.
+// Without workspaceSharesProjectRepo's common-git-dir cross-check, a
+// persisted workspace anywhere in the enclosing repo would be accepted.
+// SharedWorkspace: true makes Start validate the persisted outer-repo
+// source itself rather than a self-healed managed worktree, matching the
+// reported shape.
+func TestStart_RejectsNestedBareRepoResolvingToEnclosingRepo(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	// The enclosing repository: a normal, non-bare work tree.
+	outerRepo := filepath.Join(tmpDir, "outer")
+	setupTestGitRepoWithBranch(t, outerRepo, "unused-branch")
+
+	// A bare repository nested inside the outer repo's work tree, with
+	// .scion inside IT -- the exact shape that makes util.RepoRootDir's
+	// parent-retry walk past the bare repo and land on the outer repo.
+	nestedBare := filepath.Join(outerRepo, "vendor", "some-bare.git")
+	initCmd := exec.Command("git", "init", "--bare", nestedBare)
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	projectScionDir := filepath.Join(nestedBare, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	// A persisted workspace elsewhere in the OUTER repo -- with the bug,
+	// this is accepted because RepoRootDir silently resolves to the outer
+	// repo's root and containment is checked against that.
+	outerWorkspace := filepath.Join(outerRepo, "some-other-dir")
+	_ = os.MkdirAll(outerWorkspace, 0755)
+
+	agentDir := filepath.Join(projectScionDir, "agents", "nested-bare-agent")
+	_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+	agentJSON := fmt.Sprintf(`{"harness": "generic", "volumes": [{"source": %q, "target": "/workspace"}]}`, outerWorkspace)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentJSON), 0644)
+
+	runCalled := false
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			runCalled = true
+			return "mock-id", nil
+		},
+	}
+
+	mgr := NewManager(mockRT)
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:            "nested-bare-agent",
+		ProjectPath:     projectScionDir,
+		NoAuth:          true,
+		SharedWorkspace: true,
+	})
+	if err == nil {
+		t.Fatal("expected Start to refuse a workspace source when the resolved repo root belongs to a different (enclosing) repository")
+	}
+	if !strings.Contains(err.Error(), "does not resolve to its own git work tree") {
+		t.Errorf("expected the rejection to say the project does not resolve to its own git work tree, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), projectScionDir) {
+		t.Errorf("expected the rejection to include the project directory path, got: %v", err)
+	}
+	if runCalled {
+		t.Error("expected the runtime's Run to never be invoked (fail closed), but it was called")
+	}
+}
+
+// setupTestGitRepoWithBranch creates a real git repository at dir with an
+// initial commit and a branch named branchName pointing at that commit, for
+// tests that need util.BranchExists / util.FindWorktreeByBranch to see a
+// real repository, not a mocked one.
+func setupTestGitRepoWithBranch(t *testing.T, dir, branchName string) {
+	t.Helper()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	run("init")
+	run("config", "user.email", "you@example.com")
+	run("config", "user.name", "Your Name")
+	run("commit", "--allow-empty", "-m", "root commit")
+	run("branch", branchName)
+}
+
+// TestStart_AcceptsExistingWorktreeOutsideRepoRoot is a regression test: a
+// git project attaching to an existing worktree that
+// lives outside the repo root (provision.go's FindWorktreeByBranch path,
+// e.g. from a worktree created directly with `git worktree add
+// ../repo-feature`, or the legacy `.scion_worktrees` layout) must still be
+// accepted at Start() -- it worked before the workspace source validator
+// existed, via buildCommonRunArgs's "workspace outside repo root" fallback,
+// and must keep working now that Start() validates ahead of that.
+func TestStart_AcceptsExistingWorktreeOutsideRepoRoot(t *testing.T) {
+	// This test creates a real git worktree and needs isGit detection in
+	// ProvisionAgent to actually run: it's forced off when SCION_HOST_UID is
+	// set (the "running inside an agent container" guard), which this test
+	// binary's own environment may set regardless of the test.
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	agentName := "worktree-agent"
+	targetBranch := api.Slugify(agentName)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	setupTestGitRepoWithBranch(t, projectDir, targetBranch)
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/\n"), 0644)
+
+	// Attach an existing worktree for targetBranch OUTSIDE the repo root, as
+	// a plain `git worktree add` sibling would.
+	existingWorktree := filepath.Join(tmpDir, "project-worktree-sibling")
+	addCmd := exec.Command("git", "-C", projectDir, "worktree", "add", existingWorktree, targetBranch)
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, out)
+	}
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	// provision.go's git-branch/worktree lookups (util.BranchExists,
+	// util.FindWorktreeByBranch) run plain `git` commands with no explicit
+	// -C/dir argument, so they operate against the process's cwd.
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        agentName,
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err != nil {
+		t.Fatalf("expected Start to accept an existing worktree outside the repo root, got error: %v", err)
+	}
+
+	wantWorkspace, evalErr := filepath.EvalSymlinks(existingWorktree)
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", existingWorktree, evalErr)
+	}
+	if capturedConfig.Workspace != wantWorkspace {
+		t.Errorf("RunConfig.Workspace = %q, want %q", capturedConfig.Workspace, wantWorkspace)
+	}
+}
+
+// TestStart_RejectsNonWorktreeSourceOutsideRepoRoot is the negative sibling
+// of TestStart_AcceptsExistingWorktreeOutsideRepoRoot: a source outside the
+// repo root that is NOT a registered worktree of that repository (git
+// verification correctly returns false) must still be rejected. This is
+// also the missing "Start() non-explicit source outside root" containment
+// reject case.
+//
+// StartOptions.SharedWorkspace is set to true below, which keeps
+// GetAgent's agentWorkspace empty throughout -- without it, GetAgent's
+// resume path self-heals a missing <agentDir>/workspace by recreating a
+// managed worktree there (the project directory here is a real git repo,
+// and the target branch already exists), regardless of the persisted
+// volume's own source, which would silently replace the very path this
+// test needs to stay in place: an environment where that recreation isn't
+// itself blocked (SCION_HOST_UID unset) would make Start() succeed with
+// the freshly recreated worktree, never exercising the containment check
+// this test exists to prove. See TestStart_RejectsStaleRecreatedWorktree
+// for the same pattern.
+func TestStart_RejectsNonWorktreeSourceOutsideRepoRoot(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	agentName := "non-worktree-agent"
+	projectDir := filepath.Join(tmpDir, "project")
+	setupTestGitRepoWithBranch(t, projectDir, api.Slugify(agentName))
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/\n"), 0644)
+
+	// A directory that merely sits outside the repo -- never registered
+	// with git as a worktree of it -- passed as a persisted, non-explicit
+	// workspace source (the shape a bad or stale value would take).
+	notAWorktree := filepath.Join(tmpDir, "not-a-worktree")
+	_ = os.MkdirAll(notAWorktree, 0755)
+
+	runCalled := false
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			runCalled = true
+			return "mock-id", nil
+		},
+	}
+
+	agentDir := filepath.Join(projectScionDir, "agents", agentName)
+	_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+	agentJSON := fmt.Sprintf(`{"harness": "generic", "volumes": [{"source": %q, "target": "/workspace"}]}`, notAWorktree)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentJSON), 0644)
+
+	mgr := NewManager(mockRT)
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:            agentName,
+		ProjectPath:     projectScionDir,
+		NoAuth:          true,
+		SharedWorkspace: true,
+	})
+	if err == nil {
+		t.Fatal("expected Start to reject a non-worktree source outside the repo root")
+	}
+	if !strings.Contains(err.Error(), "is outside the permitted workspace root") {
+		t.Errorf("expected the rejection to come from containment, got: %v", err)
+	}
+	if runCalled {
+		t.Error("expected the runtime's Run to never be invoked (fail closed), but it was called")
+	}
+}
+
+// TestStart_RejectsAnotherRepositoryWorktree is the caller-context
+// regression test for a worktree-membership bug: containment must be
+// verified against THIS project's own repo, derived from projectDir, never
+// against whatever repo the source itself happens to belong to. A worktree
+// (main or linked) of a completely different repository must be refused at
+// Start(), even though util.IsRegisteredWorktree would report it as a real,
+// non-prunable registration -- just of the wrong repo.
+//
+// It reproduces the actual mechanism behind that bug: provision.go's
+// util.BranchExists / util.FindWorktreeByBranch run bare `git` commands with
+// no -C/dir argument, so they resolve against the process's current
+// directory, not necessarily the project actually being provisioned. If the
+// process happens to be sitting inside a DIFFERENT repository that has a
+// branch with the same name, Case 2's "attach to existing worktree" logic
+// discovers and attaches to that other repository's worktree, not this
+// project's. Root/membership containment must still catch that: it must be
+// verified against the project's OWN repo (derived from projectDir), never
+// against whatever repo the discovered source happens to belong to.
+func TestStart_RejectsAnotherRepositoryWorktree(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	agentName := "cross-repo-agent"
+	branch := api.Slugify(agentName)
+
+	// The agent's own project -- has the branch, but no worktree for it.
+	projectDir := filepath.Join(tmpDir, "project")
+	setupTestGitRepoWithBranch(t, projectDir, branch)
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/\n"), 0644)
+
+	// Two completely different, unrelated repositories that happen to use
+	// the SAME branch name -- one with that branch checked out in its main
+	// worktree, the other with it checked out in a linked worktree instead
+	// (git refuses to check the same branch out twice in one repo, so this
+	// needs two separate repos to cover both shapes).
+	otherRepoMain := filepath.Join(tmpDir, "other-repo-main")
+	setupTestGitRepoWithBranch(t, otherRepoMain, branch)
+	checkoutCmd := exec.Command("git", "-C", otherRepoMain, "checkout", branch)
+	if out, err := checkoutCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git checkout: %v: %s", err, out)
+	}
+
+	otherRepoLinked := filepath.Join(tmpDir, "other-repo-linked")
+	setupTestGitRepoWithBranch(t, otherRepoLinked, branch)
+	otherRepoWorktree := filepath.Join(tmpDir, "other-repo-linked-wt")
+	addCmd := exec.Command("git", "-C", otherRepoLinked, "worktree", "add", otherRepoWorktree, branch)
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, out)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	for _, tt := range []struct {
+		name string
+		// cwd is where the process is sitting when Start()'s bare,
+		// CWD-dependent git discovery runs -- inside the OTHER repository,
+		// not the project being provisioned.
+		cwd string
+	}{
+		{name: "another repo's main worktree", cwd: otherRepoMain},
+		{name: "another repo's linked worktree", cwd: otherRepoLinked},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			runCalled := false
+			mockRT := &runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{}, nil
+				},
+				RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+					runCalled = true
+					return "mock-id", nil
+				},
+			}
+
+			// Same agentName (and so the same target branch) in every
+			// subtest -- provision.go slugifies opts.Name to compute the
+			// branch it looks for, so this must match the branch set up in
+			// each "other repo" above for the discovery bug to trigger at
+			// all. Only agentDir is reset between subtests.
+			agentDir := filepath.Join(projectScionDir, "agents", agentName)
+			_ = os.RemoveAll(agentDir)
+
+			if err := os.Chdir(tt.cwd); err != nil {
+				t.Fatal(err)
+			}
+
+			mgr := NewManager(mockRT)
+			_, err := mgr.Start(context.Background(), api.StartOptions{
+				Name:        agentName,
+				ProjectPath: projectScionDir,
+				NoAuth:      true,
+			})
+			if err == nil {
+				t.Fatal("expected Start to reject a worktree belonging to a different repository")
+			}
+			if !strings.Contains(err.Error(), "is outside the permitted workspace root") {
+				t.Errorf("expected the rejection to come from containment, got: %v", err)
+			}
+			if runCalled {
+				t.Error("expected the runtime's Run to never be invoked (fail closed), but it was called")
+			}
+		})
+	}
+}
+
+// TestStart_RejectsRegisteredWorktreeResolvingToHome is the Start()-level
+// complement to TestValidateWorkspaceSource_UnusableSuppliedRootIsRejected
+// (the precise unit test, in workspace_source_guard_test.go, for the rule
+// that worktree/root verification decides whether repo-root containment
+// applies, never whether the universal '/' and $HOME deny-set floor
+// applies -- a supplied or verified root of $HOME is refused outright, not
+// silently treated as "no root"). This test exercises the real git-aware
+// code path in Start(): a git project whose effectiveWorkspace resolves to
+// $HOME must still be rejected, regardless of whether git worktree
+// verification runs against it.
+func TestStart_RejectsRegisteredWorktreeResolvingToHome(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	agentName := "home-worktree-agent"
+	projectDir := filepath.Join(tmpDir, "project")
+	setupTestGitRepoWithBranch(t, projectDir, api.Slugify(agentName))
+
+	// A REAL worktree, registered with the project's own repo, whose path
+	// becomes $HOME -- not just a directory that happens to equal $HOME.
+	// Even a git-verified worktree of the project's own repo must still be
+	// refused if it resolves to $HOME, because the deny-set floor runs
+	// unconditionally before worktree membership is ever considered.
+	homeWorktree := filepath.Join(tmpDir, "home-wt")
+	addCmd := exec.Command("git", "-C", projectDir, "worktree", "add", homeWorktree, api.Slugify(agentName))
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, out)
+	}
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", homeWorktree)
+
+	globalScionDir := filepath.Join(homeWorktree, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/\n"), 0644)
+
+	// A persisted config whose workspace volume is $HOME itself (the real
+	// registered worktree from above). Membership deciding whether repo-root
+	// containment applies must never override the unconditional $HOME
+	// refusal that runs first.
+	runCalled := false
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			runCalled = true
+			return "mock-id", nil
+		},
+	}
+
+	agentDir := filepath.Join(projectScionDir, "agents", agentName)
+	_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+	agentJSON := fmt.Sprintf(`{"harness": "generic", "volumes": [{"source": %q, "target": "/workspace"}]}`, homeWorktree)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentJSON), 0644)
+
+	mgr := NewManager(mockRT)
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        agentName,
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err == nil {
+		t.Fatal("expected Start to reject a registered worktree of the project's own repo that resolves to $HOME")
+	}
+	if !strings.Contains(err.Error(), "is not an allowed workspace path") {
+		t.Errorf("expected the rejection to come from the deny-set floor, got: %v", err)
+	}
+	if runCalled {
+		t.Error("expected the runtime's Run to never be invoked (fail closed), but it was called")
+	}
+}
+
+// TestStart_RejectsStaleRecreatedWorktree is the Start()-level counterpart
+// to the unit-level TestIsRegisteredWorktree_PrunableRecreatedPathRejected:
+// it exercises the same prunable-worktree-recreated-as-a-plain-directory
+// shape through Start() itself.
+// StartOptions.SharedWorkspace is set to true below, which keeps
+// GetAgent's agentWorkspace empty throughout -- without it, GetAgent's
+// resume path self-heals a missing <agentDir>/workspace by recreating a
+// managed worktree there regardless of the persisted volume's own source,
+// which would silently replace the very path this test needs to stay stale.
+func TestStart_RejectsStaleRecreatedWorktree(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	agentName := "stale-worktree-agent"
+	projectDir := filepath.Join(tmpDir, "project")
+	setupTestGitRepoWithBranch(t, projectDir, api.Slugify(agentName))
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/\n"), 0644)
+
+	// A real worktree, registered with the project's own repo...
+	staleWorktree := filepath.Join(tmpDir, "stale-wt")
+	addCmd := exec.Command("git", "-C", projectDir, "worktree", "add", staleWorktree, api.Slugify(agentName))
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, out)
+	}
+	// ...then removed directly (not via `git worktree remove`), leaving
+	// git's own registration in place but pointing at a gitdir that no
+	// longer resolves -- exactly what makes `git worktree list --porcelain`
+	// report the entry as prunable...
+	if err := os.RemoveAll(staleWorktree); err != nil {
+		t.Fatal(err)
+	}
+	// ...and recreated as a plain directory at the same path: nothing
+	// git-related, just a directory that happens to have the same name.
+	if err := os.MkdirAll(staleWorktree, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	runCalled := false
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			runCalled = true
+			return "mock-id", nil
+		},
+	}
+
+	agentDir := filepath.Join(projectScionDir, "agents", agentName)
+	_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+	agentJSON := fmt.Sprintf(`{"harness": "generic", "volumes": [{"source": %q, "target": "/workspace"}]}`, staleWorktree)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentJSON), 0644)
+
+	mgr := NewManager(mockRT)
+	// SharedWorkspace: true keeps GetAgent's agentWorkspace empty throughout,
+	// which skips the managed-worktree self-heal (recreating a fresh worktree
+	// at <agentDir>/workspace when it's missing). Without this, self-heal
+	// would prune the stale registration and recreate a valid worktree
+	// there, masking the exact persisted-volume shape this test needs to
+	// reach the containment check with.
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:            agentName,
+		ProjectPath:     projectScionDir,
+		NoAuth:          true,
+		SharedWorkspace: true,
+	})
+	if err == nil {
+		t.Fatal("expected Start to reject a stale worktree registration recreated as a plain directory")
+	}
+	if !strings.Contains(err.Error(), "is outside the permitted workspace root") {
+		t.Errorf("expected the rejection to come from containment (no longer a verified worktree, so only repo-root containment applies), got: %v", err)
+	}
+	if runCalled {
+		t.Error("expected the runtime's Run to never be invoked (fail closed), but it was called")
+	}
+}
+
+// TestStart_AcceptsMainWorktreeWhenProjectLivesInLinkedWorktree covers a
+// project whose own .scion directory lives in a linked worktree rather than
+// the repository's main one: the containment root workspaceSourceRoots
+// derives from projectDir is that linked worktree's own path, not the main
+// worktree's. A persisted source that is the repository's MAIN worktree
+// must still be accepted -- it is the same repository, just reached from a
+// project sitting in a different (linked) checkout of it -- which requires
+// recognizing the main worktree structurally rather than by repoRoot
+// equality (see util.IsRegisteredWorktree's doc comment).
+func TestStart_AcceptsMainWorktreeWhenProjectLivesInLinkedWorktree(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	agentName := "linked-project-agent"
+
+	// The repository's main worktree.
+	mainWorktree := filepath.Join(tmpDir, "main-repo")
+	setupTestGitRepoWithBranch(t, mainWorktree, "linked-branch")
+
+	// A linked worktree of the SAME repository -- this is where the
+	// project's own .scion directory lives, not the main worktree.
+	linkedWorktree := filepath.Join(tmpDir, "linked-repo")
+	addCmd := exec.Command("git", "-C", mainWorktree, "worktree", "add", linkedWorktree, "linked-branch")
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, out)
+	}
+
+	projectScionDir := filepath.Join(linkedWorktree, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(linkedWorktree, ".gitignore"), []byte("agents/\n"), 0644)
+
+	// The persisted source is the repository's MAIN worktree -- a
+	// legitimate location in the same repository as the project, reached
+	// from a project living in a different (linked) checkout of it.
+	runCalled := false
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			runCalled = true
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+
+	agentDir := filepath.Join(projectScionDir, "agents", agentName)
+	_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+	agentJSON := fmt.Sprintf(`{"harness": "generic", "volumes": [{"source": %q, "target": "/workspace"}]}`, mainWorktree)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentJSON), 0644)
+
+	mgr := NewManager(mockRT)
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:            agentName,
+		ProjectPath:     projectScionDir,
+		NoAuth:          true,
+		SharedWorkspace: true,
+	})
+	if err != nil {
+		t.Fatalf("expected Start to accept the repository's main worktree as a source for a project living in a linked worktree, got error: %v", err)
+	}
+	if !runCalled {
+		t.Fatal("expected the runtime's Run to be invoked")
+	}
+	wantWorkspace, evalErr := filepath.EvalSymlinks(mainWorktree)
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", mainWorktree, evalErr)
+	}
+	if capturedConfig.Workspace != wantWorkspace {
+		t.Errorf("RunConfig.Workspace = %q, want %q", capturedConfig.Workspace, wantWorkspace)
+	}
+}
+
+// TestStart_FiltersUnsafeWorkspaceVolumeInWorktreeCase is the regression test
+// for the gap in the worktree case (agentWorkspace set, not volume-derived):
+// buildCommonRunArgs mounts a worktree-subdirectory workspace at
+// /repo-root/<rel>, not /workspace, leaving the /workspace target slot free
+// for a raw, unvalidated volume from a persisted config to claim. A /workspace
+// -target volume must be filtered out of the generic volume list whenever
+// there is an effective workspace at all, not only when effectiveWorkspace
+// happens to differ from agentWorkspace by value (a comparison that silently
+// flips depending on symlink canonicalization -- see the comment at the
+// Volumes builder in Start()).
+func TestStart_FiltersUnsafeWorkspaceVolumeInWorktreeCase(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	agentName := "fresh-worktree-agent"
+	projectDir := filepath.Join(tmpDir, "project")
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = projectDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	_ = os.MkdirAll(projectDir, 0755)
+	run("init")
+	run("config", "user.email", "you@example.com")
+	run("config", "user.name", "Your Name")
+	run("commit", "--allow-empty", "-m", "root commit")
+	// Deliberately do NOT pre-create the agent's target branch, so
+	// ProvisionAgent creates a fresh managed worktree (agentWorkspace set)
+	// rather than attaching to an existing one.
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/\n"), 0644)
+
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        agentName,
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	}); err != nil {
+		t.Fatalf("initial Start failed: %v", err)
+	}
+
+	agentDir := filepath.Join(projectScionDir, "agents", agentName)
+	agentWorkspace := filepath.Join(agentDir, "workspace")
+	if _, err := os.Stat(agentWorkspace); err != nil {
+		t.Fatalf("expected a managed worktree at %s: %v", agentWorkspace, err)
+	}
+
+	// Simulate a template or a buggy persisted config with an extra
+	// /workspace-target volume alongside the legitimate worktree-derived
+	// workspace.
+	agentConfigPath := filepath.Join(agentDir, "scion-agent.json")
+	raw, err := os.ReadFile(agentConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg["volumes"] = []map[string]interface{}{
+		{"source": "/", "target": "/workspace"},
+	}
+	rewritten, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(agentConfigPath, rewritten, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var capturedConfig runtime.RunConfig
+	mockRT.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
+		capturedConfig = config
+		return "mock-id-2", nil
+	}
+
+	info, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        agentName,
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err != nil {
+		t.Fatalf("resume Start failed: %v", err)
+	}
+
+	for _, v := range capturedConfig.Volumes {
+		if v.Target == "/workspace" {
+			t.Errorf("expected the extra /workspace-target volume to be filtered out, found: %+v", v)
+		}
+	}
+
+	foundWarning := false
+	for _, w := range info.Warnings {
+		if strings.Contains(w, "/workspace") {
+			foundWarning = true
+		}
+	}
+	if !foundWarning {
+		t.Errorf("expected a warning about the dropped /workspace volume, got warnings: %v", info.Warnings)
+	}
+
+	wantWorkspace, evalErr := filepath.EvalSymlinks(agentWorkspace)
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", agentWorkspace, evalErr)
+	}
+	if capturedConfig.Workspace != wantWorkspace {
+		t.Errorf("RunConfig.Workspace = %q, want the legitimate managed worktree %q", capturedConfig.Workspace, wantWorkspace)
+	}
+}
+
+// TestStart_RejectsPreExistingGlobalAgentWorkspaceOutsideProjectDir covers
+// the intended edge case in the global project's containment root: a global
+// agent provisioned before <projectDir>/workspace existed (or otherwise
+// persisted with a workspace outside it) is refused on resume, now that the
+// global project's root is <projectDir>/workspace itself. This is a
+// deliberate behavior change, not a bug -- the error must name both ways to
+// recover (recreate the agent, or restart with an explicit --workspace),
+// since neither is obvious from the base rejection alone, whichever of
+// ValidateWorkspaceSource's two base messages ("outside the permitted
+// workspace root" for plain containment, "not an allowed workspace path" for
+// the ~/.scion floor) a given case happens to surface.
+func TestStart_RejectsPreExistingGlobalAgentWorkspaceOutsideProjectDir(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		// workspace, relative to tmpDir (== $HOME for this test), is the
+		// persisted volume source to simulate. "$HOME/wherever-cli-was-run-from"
+		// is outside ~/.scion entirely, so it would be refused under either
+		// root and does not by itself prove which root is actually being
+		// enforced. "~/.scion/templates" is the discriminating case: a
+		// ~/.scion root would accept it; the ~/.scion/workspace root
+		// refuses it, so only this case tells the two apart.
+		workspace string
+		// wantBaseError is the base-rejection substring each case surfaces.
+		// The two cases fail closed for different reasons: the first is
+		// outside ~/.scion entirely, so containment against the global
+		// project's own root (~/.scion/workspace) is what refuses it; the
+		// second is under ~/.scion but not in the named allow list, so the
+		// unconditional ~/.scion floor (ValidateWorkspaceSource) refuses it
+		// before containment is even checked.
+		wantBaseError string
+	}{
+		{name: "workspace outside $HOME/.scion entirely", workspace: "wherever-cli-was-run-from", wantBaseError: "is outside the permitted workspace root"},
+		{name: "workspace under $HOME/.scion but not .scion/workspace", workspace: filepath.Join(".scion", "templates"), wantBaseError: "is not an allowed workspace path"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+
+			oldWd, _ := os.Getwd()
+			_ = os.Chdir(tmpDir)
+			defer func() { _ = os.Chdir(oldWd) }()
+
+			originalHome := os.Getenv("HOME")
+			defer func() { _ = os.Setenv("HOME", originalHome) }()
+			_ = os.Setenv("HOME", tmpDir)
+
+			globalScionDir := filepath.Join(tmpDir, ".scion")
+			hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+			_ = os.MkdirAll(hcDir, 0755)
+			_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+			tplDir := filepath.Join(globalScionDir, "templates", "default")
+			_ = os.MkdirAll(tplDir, 0755)
+			_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+			_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+			// Simulate a workspace persisted by a global agent from before the
+			// current containment root (<projectDir>/workspace) took effect.
+			persistedWorkspace := filepath.Join(tmpDir, tt.workspace)
+			_ = os.MkdirAll(persistedWorkspace, 0755)
+
+			agentName := "pre-existing-global-agent"
+			agentDir := filepath.Join(globalScionDir, "agents", agentName)
+			_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+			agentJSON := fmt.Sprintf(`{"harness": "generic", "volumes": [{"source": %q, "target": "/workspace"}]}`, persistedWorkspace)
+			_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentJSON), 0644)
+
+			runCalled := false
+			mockRT := &runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{}, nil
+				},
+				RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+					runCalled = true
+					return "mock-id", nil
+				},
+			}
+
+			mgr := NewManager(mockRT)
+			_, err := mgr.Start(context.Background(), api.StartOptions{
+				Name:        agentName,
+				ProjectPath: globalScionDir,
+				NoAuth:      true,
+			})
+			if err == nil {
+				t.Fatal("expected Start to reject a pre-existing global agent's workspace outside <projectDir>/workspace")
+			}
+			if !strings.Contains(err.Error(), tt.wantBaseError) {
+				t.Errorf("expected the base rejection to contain %q, got: %v", tt.wantBaseError, err)
+			}
+			if !strings.Contains(err.Error(), "recreate") || !strings.Contains(err.Error(), "--workspace") {
+				t.Errorf("expected an actionable error naming both recovery paths (recreate the agent, or an explicit --workspace), got: %v", err)
+			}
+			if runCalled {
+				t.Error("expected the runtime's Run to never be invoked (fail closed), but it was called")
+			}
+		})
+	}
+}
+
+// TestStart_RejectsGlobalProjectInsideGitWorkTree covers the global project
+// whose own directory (~/.scion) is itself a git work tree -- a dotfiles
+// repository, for example. isGitWorkspaceProject then routes it through
+// workspaceSourceRoots' git branch, so ProvisionAgent creates a per-agent
+// worktree/workspace at ~/.scion/agents/<name>/workspace, the ordinary git-
+// project shape, not <projectDir>/workspace. That source can never pass the
+// ~/.scion floor (only ~/.scion/workspace and ~/.scion/projects/<slug> are
+// admitted), and root == ~/.scion itself is refused outright as a
+// misconfigured root, so the agent -- freshly created by this same call --
+// must fail closed with its own actionable message, not the generic
+// "delete and recreate" hint that cannot help a shape this fixed.
+func TestStart_RejectsGlobalProjectInsideGitWorkTree(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	if oldAutoExpose, ok := os.LookupEnv("SCION_AUTO_EXPOSE_PORTS"); ok {
+		_ = os.Unsetenv("SCION_AUTO_EXPOSE_PORTS")
+		defer func() { _ = os.Setenv("SCION_AUTO_EXPOSE_PORTS", oldAutoExpose) }()
+	}
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	// ~/.scion is itself a git work tree -- the dotfiles-repository shape.
+	// agents/ must be gitignored, the same requirement provision.go
+	// enforces for any project-local git project, checked before
+	// workspaceSourceRoots's own global-project handling runs.
+	if err := os.MkdirAll(globalScionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(globalScionDir, ".gitignore"), []byte("agents/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	setupTestGitRepoWithBranch(t, globalScionDir, "unused-branch")
+
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	runCalled := false
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			runCalled = true
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "git-tracked-global-agent",
+		ProjectPath: globalScionDir,
+		NoAuth:      true,
+	})
+	if err == nil {
+		t.Fatal("expected Start to refuse a fresh global agent when ~/.scion is itself a git work tree")
+	}
+	if !strings.Contains(err.Error(), "is itself inside a git work tree") {
+		t.Errorf("expected an error naming the actual shape (global project inside a git work tree), got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--workspace") {
+		t.Errorf("expected the error to name the actual recovery path (an explicit --workspace), got: %v", err)
+	}
+	if strings.Contains(err.Error(), "delete and recreate") {
+		t.Errorf("expected the generic recreate hint to be absent -- recreating cannot fix this shape, got: %v", err)
+	}
+	if runCalled {
+		t.Error("expected the runtime's Run to never be invoked (fail closed), but it was called")
+	}
+}
+
+// TestStart_AcceptsOrdinaryGitRepoNamedGlobal covers an ordinary git
+// project whose own repository root happens to be named "global" -- not
+// the real global project, which is identified by its resolved directory,
+// not by name. Start must treat it like any other git project: create a
+// worktree and reach Run, rather than refusing it as if it were the global
+// project's own directory misconfigured as a git work tree.
+func TestStart_AcceptsOrdinaryGitRepoNamedGlobal(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	// HOME is a separate directory from the project below, so the real
+	// global directory (HOME/.scion) and this project's own repository
+	// root are unambiguously different paths.
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	home := filepath.Join(tmpDir, "home")
+	_ = os.Setenv("HOME", home)
+
+	globalScionDir := filepath.Join(home, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	agentName := "ordinary-agent"
+	projectDir := filepath.Join(tmpDir, "global")
+	setupTestGitRepoWithBranch(t, projectDir, api.Slugify(agentName))
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	runCalled := false
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			runCalled = true
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        agentName,
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err != nil {
+		t.Fatalf("expected Start to accept an ordinary git repo named %q, got error: %v", filepath.Base(projectDir), err)
+	}
+	if !runCalled {
+		t.Error("expected the runtime's Run to be invoked")
+	}
+}
+
+// TestStart_GlobalProjectResumeUsesConsistentWorkspace covers restart/resume
+// for a global-project agent: ProvisionAgent's Case 3 creates a per-agent
+// subdirectory under ~/.scion/workspace (not a directory shared by every
+// global agent), and a second Start() call for the same agent -- simulating
+// a restart/resume, not a fresh provision -- must resolve to that exact
+// same directory again, not recreate a new one or fall back to the bare
+// ~/.scion/workspace root.
+func TestStart_GlobalProjectResumeUsesConsistentWorkspace(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	agentName := "resumable-global-agent"
+	var capturedWorkspaces []string
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedWorkspaces = append(capturedWorkspaces, config.Workspace)
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	for i := 0; i < 2; i++ {
+		if _, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:        agentName,
+			ProjectPath: globalScionDir,
+			NoAuth:      true,
+		}); err != nil {
+			t.Fatalf("Start call %d failed: %v", i+1, err)
+		}
+	}
+
+	if len(capturedWorkspaces) != 2 {
+		t.Fatalf("expected 2 captured RunConfig.Workspace values, got %d: %v", len(capturedWorkspaces), capturedWorkspaces)
+	}
+
+	wantWorkspace, err := filepath.EvalSymlinks(filepath.Join(globalScionDir, "workspace", agentName))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(want): %v", err)
+	}
+	for i, got := range capturedWorkspaces {
+		evalGot, err := filepath.EvalSymlinks(got)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(call %d): %v", i+1, err)
+		}
+		if evalGot != wantWorkspace {
+			t.Errorf("Start call %d: RunConfig.Workspace = %q, want %q", i+1, evalGot, wantWorkspace)
+		}
+	}
+	if capturedWorkspaces[0] != capturedWorkspaces[1] {
+		t.Errorf("expected the first and second Start calls to resolve to the identical workspace value, got %q then %q", capturedWorkspaces[0], capturedWorkspaces[1])
+	}
+}
+
+// setupHubMarkerProjectConfigsDir creates the externalized .scion directory
+// a hub-dispatched project's marker file resolves to
+// (config.ResolveProjectMarker's output: ~/.scion/project-configs/<dir>/.scion,
+// pkg/config/project_marker.go's ExternalProjectPath), along with the
+// harness-config, template and settings.yaml a fresh provision needs. It
+// returns the resolved .scion directory to pass as StartOptions.ProjectPath.
+// The marker file itself (~/.scion/projects/<slug>/.scion) is not created:
+// Start() never reads it -- resolution happens upstream, in whichever
+// dispatcher set ProjectPath -- so passing the already-resolved directory
+// directly reproduces the shape Start() actually sees.
+func setupHubMarkerProjectConfigsDir(t *testing.T, tmpHome, dirName string) string {
+	t.Helper()
+	projectConfigsDir := filepath.Join(tmpHome, ".scion", "project-configs", dirName)
+	projectScionDir := filepath.Join(projectConfigsDir, ".scion")
+
+	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
+	if err := os.MkdirAll(hcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tplDir := filepath.Join(projectScionDir, "templates", "default")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte("schema_version: \"1\"\nactive_profile: local\nprofiles:\n  local:\n    runtime: docker\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return projectScionDir
+}
+
+// TestStart_AcceptsGitCloneHubMarkerWorkspace covers a hub-dispatched git
+// project whose marker file resolves projectDir to its externalized
+// ~/.scion/project-configs/<dir>/.scion (a split-storage layout: the
+// project's own directory holds only a .scion marker file, not a full
+// .scion directory). ProvisionAgent's git-clone branch creates the
+// workspace at agentDir/workspace under that externalized directory
+// (pkg/agent/provision.go), i.e.
+// ~/.scion/project-configs/<dir>/.scion/agents/<agent>/workspace. Start()
+// must accept that shape, not just the ~/.scion/projects/<slug> family.
+func TestStart_AcceptsGitCloneHubMarkerWorkspace(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	projectScionDir := setupHubMarkerProjectConfigsDir(t, tmpDir, "hub-slug__11111111")
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "gc-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		GitClone:    &api.GitCloneConfig{URL: "https://example.com/repo.git"},
+	})
+	if err != nil {
+		t.Fatalf("expected Start to accept a git-clone hub-marker workspace, got error: %v", err)
+	}
+
+	wantWorkspace := filepath.Join(projectScionDir, "agents", "gc-agent", "workspace")
+	resolvedWant, evalErr := filepath.EvalSymlinks(wantWorkspace)
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", wantWorkspace, evalErr)
+	}
+	if capturedConfig.Workspace != resolvedWant {
+		t.Errorf("RunConfig.Workspace = %q, want %q", capturedConfig.Workspace, resolvedWant)
+	}
+}
+
+// TestStart_AcceptsNonGitHubMarkerWorkspace covers the non-git counterpart:
+// a hub-dispatched, non-git project whose marker file resolves projectDir to
+// the same externalized ~/.scion/project-configs/<dir>/.scion shape, with no
+// GitClone and no settings.WorkspacePath. ProvisionAgent resolves this to
+// its own agentDir/workspace, the same per-agent shape the git-clone branch
+// uses, rather than mounting the bare project-configs directory (which held
+// only configuration, never the project's actual files).
+func TestStart_AcceptsNonGitHubMarkerWorkspace(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	projectScionDir := setupHubMarkerProjectConfigsDir(t, tmpDir, "hub-slug2__21111111")
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "non-git-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err != nil {
+		t.Fatalf("expected Start to accept a non-git hub-marker workspace, got error: %v", err)
+	}
+
+	wantWorkspace := filepath.Join(projectScionDir, "agents", "non-git-agent", "workspace")
+	resolvedWant, evalErr := filepath.EvalSymlinks(wantWorkspace)
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", wantWorkspace, evalErr)
+	}
+	if capturedConfig.Workspace != resolvedWant {
+		t.Errorf("RunConfig.Workspace = %q, want %q", capturedConfig.Workspace, resolvedWant)
+	}
+}
+
+// TestStart_RejectsProjectConfigsAgentHome covers the refusal side of the
+// same project-configs shape: an agent's home directory
+// (~/.scion/project-configs/<dir>/.scion/agents/<agent>/home,
+// config.GetAgentHomePath, credential-bearing) must stay refused even
+// though its sibling .../workspace is now admitted, and even when the
+// persisted source somehow ends up pointing at it directly.
+func TestStart_RejectsProjectConfigsAgentHome(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	projectScionDir := setupHubMarkerProjectConfigsDir(t, tmpDir, "hub-slug3__31111111")
+
+	agentHome := config.GetAgentHomePath(projectScionDir, "bad-agent")
+	if err := os.MkdirAll(agentHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(projectScionDir, "agents", "bad-agent")
+	agentJSON := fmt.Sprintf(`{"harness": "generic", "volumes": [{"source": %q, "target": "/workspace"}]}`, agentHome)
+	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	runCalled := false
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			runCalled = true
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "bad-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err == nil {
+		t.Fatal("expected Start to refuse a persisted workspace pointing at an agent's own home directory under project-configs")
+	}
+	if !strings.Contains(err.Error(), "is not an allowed workspace path") {
+		t.Errorf("expected the rejection to come from the workspace-source floor, got: %v", err)
+	}
+	if runCalled {
+		t.Error("expected the runtime's Run to never be invoked (fail closed), but it was called")
+	}
+}
+
+// TestStart_RejectsPreExistingProjectConfigsAgentBareWorkspace covers the
+// project-configs counterpart to
+// TestStart_RejectsPreExistingGlobalAgentWorkspaceOutsideProjectDir: an
+// agent whose persisted workspace is its project's own bare externalized
+// directory (~/.scion/project-configs/<dir>, not the per-agent
+// .../agents/<agent-id>/workspace shape underneath it) is refused on
+// resume, since isAllowedProjectConfigsSubtree never admits the bare
+// directory itself. The error must name both ways to recover, the same as
+// the global case, since isProjectConfigsPath(projectDir) now joins
+// IsGlobalProjectDir(projectDir) in the recovery-hint wrap.
+func TestStart_RejectsPreExistingProjectConfigsAgentBareWorkspace(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	projectScionDir := setupHubMarkerProjectConfigsDir(t, tmpDir, "hub-slug4__41111111")
+
+	// The project's own bare externalized directory
+	// (~/.scion/project-configs/<dir>), not a per-agent subdirectory under
+	// it -- the shape isAllowedProjectConfigsSubtree never admits.
+	bareProjectConfigsDir := filepath.Dir(projectScionDir)
+
+	agentName := "pre-existing-pc-agent"
+	agentDir := filepath.Join(projectScionDir, "agents", agentName)
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	agentJSON := fmt.Sprintf(`{"harness": "generic", "volumes": [{"source": %q, "target": "/workspace"}]}`, bareProjectConfigsDir)
+	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	runCalled := false
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			runCalled = true
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        agentName,
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err == nil {
+		t.Fatal("expected Start to refuse a pre-existing project-configs agent's bare-directory workspace")
+	}
+	if !strings.Contains(err.Error(), "is not an allowed workspace path") {
+		t.Errorf("expected the base rejection to come from the ~/.scion allow-list floor, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "recreate") || !strings.Contains(err.Error(), "--workspace") {
+		t.Errorf("expected an actionable error naming both recovery paths (recreate the agent, or an explicit --workspace), got: %v", err)
+	}
+	if runCalled {
+		t.Error("expected the runtime's Run to never be invoked (fail closed), but it was called")
+	}
+}
+
+// TestStart_AcceptsSettingsWorkspacePath is the missing Start()-level
+// positive regression test for the externalized-project branch: a non-git
+// project whose settings.yaml sets workspace_path must have that path
+// accepted, mounted, and returned as-is (it already equals its own root).
+func TestStart_AcceptsSettingsWorkspacePath(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	// A broker/container environment can export the ambient port-publishing
+	// setting as a plain boolean string. Koanf's env provider maps it onto a
+	// bare key that collides with VersionedSettings' struct-typed field of
+	// the same name and fails the whole decode -- not just that one field --
+	// taking settings.WorkspacePath down with it. t.Setenv(key, "") is not
+	// enough here: the key merely being present still collides, so it must
+	// be fully unset for the duration of the test.
+	if oldAutoExpose, ok := os.LookupEnv("SCION_AUTO_EXPOSE_PORTS"); ok {
+		_ = os.Unsetenv("SCION_AUTO_EXPOSE_PORTS")
+		defer func() { _ = os.Setenv("SCION_AUTO_EXPOSE_PORTS", oldAutoExpose) }()
+	}
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	externalWorkspace := filepath.Join(tmpDir, "external-workspace")
+	_ = os.MkdirAll(externalWorkspace, 0755)
+
+	projectScionDir := filepath.Join(tmpDir, "project", ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(fmt.Sprintf(`schema_version: "1"
+workspace_path: %q
+`, externalWorkspace)), 0644)
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "externalized-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err != nil {
+		t.Fatalf("expected Start to accept settings.WorkspacePath, got error: %v", err)
+	}
+
+	wantWorkspace, evalErr := filepath.EvalSymlinks(externalWorkspace)
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", externalWorkspace, evalErr)
+	}
+	if capturedConfig.Workspace != wantWorkspace {
+		t.Errorf("RunConfig.Workspace = %q, want %q", capturedConfig.Workspace, wantWorkspace)
+	}
+}
+
+// TestStart_AcceptsSettingsWorkspacePathInGitProjectUnderContainerUID is the
+// regression test for a git/non-git detection mismatch between provisioning
+// and validation: ProvisionAgent treats a project as non-git whenever
+// SCION_HOST_UID is set (isGitWorkspaceProject's container override, to
+// avoid creating a worktree whose --relative-paths would be computed against
+// the container's mount layout rather than the host's), so a git project
+// with settings.WorkspacePath set is provisioned through the externalized,
+// non-git branch -- its workspace can legitimately sit outside the repo.
+// workspaceSourceRoots must apply the exact same override when validating
+// that workspace at Start(), including on every resume, or it re-classifies
+// the project as git and checks the externally configured workspace against
+// repo-root containment instead -- rejecting a configuration that
+// provisioning itself just accepted, purely because SCION_HOST_UID happened
+// to be set both times.
+func TestStart_AcceptsSettingsWorkspacePathInGitProjectUnderContainerUID(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "1001")
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	if oldAutoExpose, ok := os.LookupEnv("SCION_AUTO_EXPOSE_PORTS"); ok {
+		_ = os.Unsetenv("SCION_AUTO_EXPOSE_PORTS")
+		defer func() { _ = os.Setenv("SCION_AUTO_EXPOSE_PORTS", oldAutoExpose) }()
+	}
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	// The workspace lives OUTSIDE the git repo entirely -- only valid because
+	// this project is provisioned through the non-git, externalized branch.
+	externalWorkspace := filepath.Join(tmpDir, "external-workspace")
+	_ = os.MkdirAll(externalWorkspace, 0755)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	setupTestGitRepoWithBranch(t, projectDir, "unused-branch")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/\n"), 0644)
+	_ = os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(fmt.Sprintf(`schema_version: "1"
+workspace_path: %q
+`, externalWorkspace)), 0644)
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "container-uid-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err != nil {
+		t.Fatalf("expected Start to accept settings.WorkspacePath for a git project under SCION_HOST_UID, got error: %v", err)
+	}
+
+	wantWorkspace, evalErr := filepath.EvalSymlinks(externalWorkspace)
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", externalWorkspace, evalErr)
+	}
+	if capturedConfig.Workspace != wantWorkspace {
+		t.Errorf("RunConfig.Workspace = %q, want %q", capturedConfig.Workspace, wantWorkspace)
+	}
+}
+
+// TestStart_AcceptsExplicitHubManagedProjectsWorkspace is a Start()-level
+// positive test that was still missing: an explicit
+// opts.Workspace under ~/.scion/projects/<slug> (the shape
+// pkg/runtimebroker/handlers.go sets for hub-dispatched, non-git projects on
+// a local-runtime broker) must be accepted, and RunConfig.Workspace must be
+// the resolved path. An explicit workspace skips containment entirely (see
+// workspaceSourceRoots), so this exercises the rootless floor's
+// ~/.scion/projects/<slug> allowance specifically.
+func TestStart_AcceptsExplicitHubManagedProjectsWorkspace(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	hubWorkspace := filepath.Join(tmpDir, ".scion", "projects", "hub-slug", "workspace")
+	_ = os.MkdirAll(hubWorkspace, 0755)
+
+	projectDir := filepath.Join(tmpDir, "hub-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "hub-managed-agent",
+		ProjectPath: projectScionDir,
+		Workspace:   hubWorkspace,
+		NoAuth:      true,
+	})
+	if err != nil {
+		t.Fatalf("expected Start to accept an explicit workspace under ~/.scion/projects/<slug>, got error: %v", err)
+	}
+
+	wantWorkspace, evalErr := filepath.EvalSymlinks(hubWorkspace)
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", hubWorkspace, evalErr)
+	}
+	if capturedConfig.Workspace != wantWorkspace {
+		t.Errorf("RunConfig.Workspace = %q, want %q", capturedConfig.Workspace, wantWorkspace)
+	}
+}
+
+// TestStart_AcceptsNonGitInRepoFallbackWorkspace is the missing Start()-level
+// positive regression test for the plain non-git project fallback: no
+// settings.WorkspacePath, not the global project -- the workspace is the
+// project's own directory (parent of its .scion directory).
+func TestStart_AcceptsNonGitInRepoFallbackWorkspace(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	projectDir := filepath.Join(tmpDir, "plain-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "plain-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err != nil {
+		t.Fatalf("expected Start to accept the non-git in-repo fallback workspace, got error: %v", err)
+	}
+
+	wantWorkspace, evalErr := filepath.EvalSymlinks(projectDir)
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", projectDir, evalErr)
+	}
+	if capturedConfig.Workspace != wantWorkspace {
+		t.Errorf("RunConfig.Workspace = %q, want %q", capturedConfig.Workspace, wantWorkspace)
+	}
+}
+
+// TestStart_RunConfigWorkspaceIsResolvedPathForSymlinkedProject is the
+// missing Start()-level test asserting that RunConfig.Workspace, as handed
+// to the runtime, is the resolved path -- not just at the guard and
+// buildCommonRunArgs level, but end to end through Start() -- when the
+// project directory itself is reached through a symlink.
+func TestStart_RunConfigWorkspaceIsResolvedPathForSymlinkedProject(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	realProjectDir := filepath.Join(tmpDir, "real-project")
+	_ = os.MkdirAll(realProjectDir, 0755)
+	projectDirLink := filepath.Join(tmpDir, "project-link")
+	if err := os.Symlink(realProjectDir, projectDirLink); err != nil {
+		t.Fatal(err)
+	}
+	projectScionDir := filepath.Join(projectDirLink, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "symlinked-project-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err != nil {
+		t.Fatalf("expected Start to succeed for a symlinked project directory, got error: %v", err)
+	}
+
+	wantRealProjectDir, evalErr := filepath.EvalSymlinks(realProjectDir)
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", realProjectDir, evalErr)
+	}
+	if capturedConfig.Workspace != wantRealProjectDir {
+		t.Errorf("RunConfig.Workspace = %q, want the resolved real path %q (not a path through the symlink)", capturedConfig.Workspace, wantRealProjectDir)
+	}
+}
+
+// TestStart_RunConfigRepoRootIsResolvedPathForSymlinkedRepo is the
+// RepoRoot-side sibling of TestStart_RunConfigWorkspaceIsResolvedPathForSymlinkedProject:
+// a git project reached through a symlink must have RunConfig.RepoRoot
+// resolved the same way RunConfig.Workspace already is, so the two spellings
+// agree by the time buildCommonRunArgs compares them with filepath.Rel.
+func TestStart_RunConfigRepoRootIsResolvedPathForSymlinkedRepo(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	realProjectDir := filepath.Join(tmpDir, "real-project")
+	agentName := "symlinked-repo-agent"
+	setupTestGitRepoWithBranch(t, realProjectDir, api.Slugify(agentName))
+	projectDirLink := filepath.Join(tmpDir, "project-link")
+	if err := os.Symlink(realProjectDir, projectDirLink); err != nil {
+		t.Fatal(err)
+	}
+	projectScionDir := filepath.Join(projectDirLink, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectDirLink, ".gitignore"), []byte("agents/\n"), 0644)
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	if err := os.Chdir(projectDirLink); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        agentName,
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	})
+	if err != nil {
+		t.Fatalf("expected Start to succeed for a symlinked git project, got error: %v", err)
+	}
+
+	realResolvedRepoRoot, evalErr := filepath.EvalSymlinks(realProjectDir)
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", realProjectDir, evalErr)
+	}
+	if capturedConfig.RepoRoot != realResolvedRepoRoot {
+		t.Errorf("RunConfig.RepoRoot = %q, want the resolved real path %q (not a path through the symlink)", capturedConfig.RepoRoot, realResolvedRepoRoot)
+	}
+}
+
 func TestBuildAgentEnv_EmptyValuePassthrough(t *testing.T) {
 	// When a config env entry has an empty value (no ${VAR} reference),
 	// buildAgentEnv should implicitly look up the host env var of the same name.
@@ -612,6 +2775,125 @@ func TestStartResumeNonExistentAgent(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "does not exist") {
 		t.Errorf("expected error message to contain 'does not exist', got: %v", err)
+	}
+}
+
+// newResumePhaseTestFixture seeds a minimal on-disk Scion installation plus
+// an already-provisioned "resume-test" agent (scion-agent.json present, and
+// agent-info.json recording phase "suspended", the state a resume starts
+// from), wired to a mock runtime via the given ListFunc. It returns the
+// Manager and the project .scion dir, ready for a Start() call with
+// Resume: true.
+func newResumePhaseTestFixture(t *testing.T, listFunc func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error)) (Manager, string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	agentDir := filepath.Join(projectScionDir, "agents", "resume-test")
+	agentHome := filepath.Join(agentDir, "home")
+	_ = os.MkdirAll(agentHome, 0755)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{"harness": "generic"}`), 0644)
+	_ = os.WriteFile(filepath.Join(agentHome, "agent-info.json"),
+		[]byte(`{"id":"resume-test","name":"resume-test","phase":"suspended"}`), 0644)
+
+	mockRT := &runtime.MockRuntime{
+		ListFunc: listFunc,
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			return "mock-id", nil
+		},
+	}
+
+	return NewManager(mockRT), projectScionDir
+}
+
+// TestStartResumeSetsRunningPhase is the regression guard for ptone/scion#1956:
+// a resumed agent's Phase must be the canonical state.PhaseRunning,
+// not the non-standard "resumed" string run.go used to write. The hub's
+// waitForAgentReady only understood starting/running, so "resumed" made a
+// healthy resume look like a failure. This exercises the normal return path,
+// where the started container is found again in the runtime's listing
+// (run.go's "Fetch fresh info" branch).
+func TestStartResumeSetsRunningPhase(t *testing.T) {
+	mgr, projectScionDir := newResumePhaseTestFixture(t, func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+		return []api.AgentInfo{
+			{
+				ContainerID:     "mock-id",
+				Name:            "resume-test",
+				ContainerStatus: "Up 2 seconds",
+				Phase:           string(state.PhaseStarting),
+			},
+		}, nil
+	})
+
+	result, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "resume-test",
+		ProjectPath: projectScionDir,
+		BrokerMode:  true,
+		NoAuth:      true,
+		Resume:      true,
+	})
+	if err != nil {
+		t.Fatalf("Start with Resume should succeed, got: %v", err)
+	}
+
+	if result.Phase != string(state.PhaseRunning) {
+		t.Errorf("returned AgentInfo.Phase = %q, want %q", result.Phase, state.PhaseRunning)
+	}
+	if saved := GetSavedPhase("resume-test", projectScionDir); saved != string(state.PhaseRunning) {
+		t.Errorf("persisted agent-info.json phase = %q, want %q", saved, state.PhaseRunning)
+	}
+}
+
+// TestStartResumeSetsRunningPhase_FallbackPath covers the other return path
+// in run.go: when the started container cannot be found again in the
+// runtime's listing (e.g. a transient listing delay), Start falls back to
+// constructing an AgentInfo directly from "status" without consulting the
+// listing. That branch must also carry state.PhaseRunning, not "resumed".
+func TestStartResumeSetsRunningPhase_FallbackPath(t *testing.T) {
+	mgr, projectScionDir := newResumePhaseTestFixture(t, func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+		return []api.AgentInfo{}, nil
+	})
+
+	result, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "resume-test",
+		ProjectPath: projectScionDir,
+		BrokerMode:  true,
+		NoAuth:      true,
+		Resume:      true,
+	})
+	if err != nil {
+		t.Fatalf("Start with Resume should succeed, got: %v", err)
+	}
+
+	if result.Phase != string(state.PhaseRunning) {
+		t.Errorf("returned AgentInfo.Phase = %q, want %q", result.Phase, state.PhaseRunning)
+	}
+	if saved := GetSavedPhase("resume-test", projectScionDir); saved != string(state.PhaseRunning) {
+		t.Errorf("persisted agent-info.json phase = %q, want %q", saved, state.PhaseRunning)
 	}
 }
 
@@ -5469,6 +7751,18 @@ func TestResolveAuthEnvOverlay_MutatesCallerOptsEnv(t *testing.T) {
 // an unresolved alias (e.g. "large"), reResolveModelAlias should return the
 // concrete model from finalScionCfg.Model.
 func TestReResolveModelAlias(t *testing.T) {
+	// The built-in fallback cases derive their expectations from the
+	// embedded claude alias table so routine model bumps in
+	// harnesses/claude/config.yaml do not break this test. The guards
+	// ensure each alias really resolves to a concrete model, so the
+	// fallback assertions cannot pass vacuously.
+	builtin := harness.DefaultModelAliases("claude")
+	for _, alias := range []string{"large", "medium"} {
+		if v := builtin[alias]; v == "" || v == alias {
+			t.Fatalf("built-in claude alias %q = %q, want a concrete model", alias, v)
+		}
+	}
+
 	tests := []struct {
 		name        string
 		envModel    string
@@ -5550,7 +7844,7 @@ func TestReResolveModelAlias(t *testing.T) {
 			envModel:    "large",
 			cfg:         &api.ScionConfig{Model: "large"},
 			harnessName: "claude",
-			wantModel:   "claude-opus-5-5",
+			wantModel:   builtin["large"],
 			wantResolv:  true,
 		},
 		{
@@ -5558,7 +7852,7 @@ func TestReResolveModelAlias(t *testing.T) {
 			envModel:    "medium",
 			cfg:         nil,
 			harnessName: "claude",
-			wantModel:   "claude-sonnet-5",
+			wantModel:   builtin["medium"],
 			wantResolv:  true,
 		},
 		{

@@ -984,3 +984,188 @@ describe('scion-chat-message delivery state', () => {
     expect(icon?.getAttribute('name')).toBe('pause-circle');
   });
 });
+
+declare global {
+  interface Window {
+    __SCION_FEATURES__?: Record<string, boolean>;
+  }
+}
+
+describe('scion-chat-message gs:// linkification', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    window.__SCION_FEATURES__ = { 'web.gcs_links': true };
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    delete window.__SCION_FEATURES__;
+  });
+
+  /**
+   * `senderIsAgent` defaults to `fromAgent` for every existing call site,
+   * where the two coincide (either both true, an agent's own message, or
+   * both false, the viewer's own message). A caller wanting to test the
+   * distinction directly — v2's "not me" `fromAgent` layout heuristic vs.
+   * the real sender kind gs:// linkification must gate on — passes it
+   * explicitly.
+   */
+  async function mountGcs(
+    body: string,
+    fromAgent: boolean,
+    senderIsAgent: boolean = fromAgent
+  ): Promise<ScionChatMessage> {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = body;
+    el.fromAgent = fromAgent;
+    el.senderIsAgent = senderIsAgent;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+    return el;
+  }
+
+  function gcsLinks(el: ScionChatMessage): HTMLElement[] {
+    return Array.from(el.shadowRoot?.querySelectorAll('.md-content .gcs-link') ?? []);
+  }
+
+  it('links a gs:// URI in an agent message', async () => {
+    const el = await mountGcs('see gs://bkt/dir/file.md', true);
+    const links = gcsLinks(el);
+    expect(links).toHaveLength(1);
+    expect(links[0].dataset.gcsUri).toBe('gs://bkt/dir/file.md');
+    expect(links[0].classList.contains('entity-link')).toBe(true);
+  });
+
+  it('links the cross-project-exchange URI as a single gcs link and no path link', async () => {
+    const el = await mountGcs('gs://scion-xproject-exchange/workspace-volumes/dev-brief.md', true);
+    expect(gcsLinks(el)).toHaveLength(1);
+    expect(el.shadowRoot?.querySelectorAll('.md-content .path-link')).toHaveLength(0);
+    expect(gcsLinks(el)[0].dataset.gcsUri).toBe(
+      'gs://scion-xproject-exchange/workspace-volumes/dev-brief.md'
+    );
+  });
+
+  it('links a gs:// URI inside inline code', async () => {
+    const el = await mountGcs('run `gs://bkt/o.txt` now', true);
+    expect(gcsLinks(el)).toHaveLength(1);
+  });
+
+  it('does not link inside a fenced code block', async () => {
+    const el = await mountGcs('```\ngs://bkt/o.txt\n```', true);
+    expect(gcsLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link a directory-like trailing slash', async () => {
+    const el = await mountGcs('gs://bkt/dir/', true);
+    expect(gcsLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link a scheme-prefixed non-match', async () => {
+    const el = await mountGcs('xgs://bkt/o', true);
+    expect(gcsLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link the same text in a user-sent message', async () => {
+    const el = await mountGcs('gs://bkt/dir/file.md', false);
+    expect(gcsLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link another user\'s message even when v2 renders it as "not me" (fromAgent=true)', async () => {
+    // v2's fromAgent means "not the viewer" for layout — true for both an
+    // agent's message and another user's message in the same topic.
+    // Linkification must gate on the real sender kind, not that heuristic.
+    const el = await mountGcs('gs://bkt/dir/file.md', true, false);
+    expect(gcsLinks(el)).toHaveLength(0);
+  });
+
+  it('links an agent message rendered the same way (fromAgent=true, senderIsAgent=true) as the positive control', async () => {
+    const el = await mountGcs('gs://bkt/dir/file.md', true, true);
+    expect(gcsLinks(el)).toHaveLength(1);
+  });
+
+  it('does not link when the web.gcs_links experiment is off, even for an agent message', async () => {
+    window.__SCION_FEATURES__ = { 'web.gcs_links': false };
+    const el = await mountGcs('gs://bkt/dir/file.md', true);
+    expect(gcsLinks(el)).toHaveLength(0);
+  });
+
+  it('links a gs:// URI at the very start of the body', async () => {
+    const el = await mountGcs('gs://bkt/o.txt leads the message', true);
+    expect(gcsLinks(el)).toHaveLength(1);
+  });
+
+  it('produces no extra attributes or elements for a hostile name (quote/onmouseover)', async () => {
+    const el = await mountGcs('gs://bkt/a"onmouseover=alert(1)', true);
+    const links = gcsLinks(el);
+    // The regex stops the object capture before the quote, so the link
+    // that renders is for "a", not the full hostile string, and no
+    // onmouseover attribute or handler is ever created.
+    expect(links).toHaveLength(1);
+    expect(links[0].dataset.gcsUri).toBe('gs://bkt/a');
+    expect(links[0].getAttribute('onmouseover')).toBeNull();
+  });
+
+  // A hostile `<img>`/`<script>` name needs the real sanitizing renderer
+  // (marked + DOMPurify) to HTML-escape the raw `<`/`>` before this pass
+  // ever sees them; this file's markdown mock renders raw markdown into
+  // `<p>` without that escaping, so it cannot validly exercise this case.
+  // Covered instead by chat-file-links.test.ts's regex-boundary unit test
+  // (the object capture stops before `<`) and by the real-Chromium spec in
+  // web/e2e/chat-file-preview/.
+
+  it('emits a composed gcs-link-click event with bucket, object, name and messageId', async () => {
+    const el = await mountGcs('gs://bkt/dir/report.md', true);
+    el.messageId = 'msg-123';
+
+    let detail: { bucket: string; object: string; name: string; messageId: string } | undefined;
+    document.addEventListener('gcs-link-click', (e) => {
+      detail = (e as CustomEvent).detail;
+    });
+
+    const link = gcsLinks(el)[0];
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+
+    expect(detail).toEqual({
+      bucket: 'bkt',
+      object: 'dir/report.md',
+      name: 'report.md',
+      messageId: 'msg-123',
+    });
+  });
+
+  it('gs:// link wins leftmost over an embedded /workspace path, with no path-link inside it', async () => {
+    const el = await mountGcs('gs://bkt/workspace/x.md', true);
+    expect(gcsLinks(el)).toHaveLength(1);
+    expect(el.shadowRoot?.querySelectorAll('.md-content .path-link')).toHaveLength(0);
+  });
+
+  it('does not dispatch when data-gcs-uri is present but empty', async () => {
+    const el = await mountGcs('gs://bkt/o.txt', true);
+    const link = gcsLinks(el)[0];
+    link.setAttribute('data-gcs-uri', '');
+
+    let dispatched = false;
+    document.addEventListener('gcs-link-click', () => {
+      dispatched = true;
+    });
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+
+    expect(dispatched).toBe(false);
+  });
+
+  it('does not dispatch when data-gcs-uri fails to parse', async () => {
+    const el = await mountGcs('gs://bkt/o.txt', true);
+    const link = gcsLinks(el)[0];
+    link.setAttribute('data-gcs-uri', 'not-a-valid-uri');
+
+    let dispatched = false;
+    document.addEventListener('gcs-link-click', () => {
+      dispatched = true;
+    });
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+
+    expect(dispatched).toBe(false);
+  });
+});

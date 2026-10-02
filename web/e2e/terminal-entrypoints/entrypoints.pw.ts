@@ -89,7 +89,6 @@ async function setup(
       window.__SCION_FEATURES__ = {
         'web.terminal_workspace': e,
         'web.native_chat': true,
-        'web.native_chat_v2': true,
       };
       window.EventSource = class extends EventTarget {
         onopen: (() => void) | null = null;

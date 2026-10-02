@@ -111,6 +111,11 @@ type webSessionUser struct {
 	Name      string `json:"displayName"`
 	AvatarURL string `json:"avatarUrl,omitempty"`
 	Role      string `json:"role,omitempty"`
+
+	// Preferences is populated only by handleAuthMe, from a live store read,
+	// never cached on the session. It is nil wherever webSessionUser is
+	// built or read for purposes other than that response.
+	Preferences *store.UserPreferences `json:"preferences,omitempty"`
 }
 
 // getWebSessionUser retrieves the web session user from the request context.
@@ -231,7 +236,7 @@ var spaShellTemplate = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
     <title>Scion</title>
 
     <!-- Preconnect to CDNs for faster loading -->
@@ -331,9 +336,35 @@ var spaShellTemplate = `<!DOCTYPE html>
             -moz-osx-font-smoothing: grayscale;
         }
 
-        #app {
-            min-height: 100%;
+        /* mobile-frame:start -- kept identical (modulo comments and
+           indentation) to web/index.html; see TestSPAShellIndexHTMLParity. */
+        :root {
+            --scion-app-height: 100vh;
         }
+        @supports (height: 100dvh) {
+            :root {
+                --scion-app-height: 100dvh;
+            }
+        }
+
+        html, body {
+            overscroll-behavior: none;
+        }
+
+        #app {
+            height: 100%;
+            min-height: 0;
+        }
+
+        /* Frame mode: set by any app shell while mounted (see
+           web/src/components/shared/app-frame.ts). Document-scrolling pages
+           (login, invite, onboarding) never set it. */
+        html.scion-app-frame,
+        html.scion-app-frame body {
+            overflow: hidden;
+            height: 100%;
+        }
+        /* mobile-frame:end */
 
         /* Prevent FOUC for custom elements */
         scion-app:not(:defined),
@@ -2693,9 +2724,11 @@ func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 // Route: GET /auth/me
 func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	// Check context first (set by devAuthMiddleware or sessionAuthMiddleware)
-	if user := getWebSessionUser(r.Context()); user != nil {
+	if sessUser := getWebSessionUser(r.Context()); sessUser != nil {
+		resp := *sessUser
+		resp.Preferences = loadUserPreferences(r.Context(), ws.store, sessUser.UserID)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(user)
+		_ = json.NewEncoder(w).Encode(resp)
 		return
 	}
 
@@ -2723,6 +2756,7 @@ func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		AvatarURL: sessionString(session, sessKeyUserAvatar),
 		Role:      sessionString(session, sessKeyUserRole),
 	}
+	user.Preferences = loadUserPreferences(r.Context(), ws.store, uid)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(user)

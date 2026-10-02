@@ -269,6 +269,88 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// --- GCP identity mode: resolve and reject "block" on Kubernetes before
+	// any pod or env is built. ---
+	//
+	// This runs after the project-directory/marker resolution above (needed
+	// so settings and the saved profile below are read from the final,
+	// post-update location — a fresh hub-managed project or a stale-marker
+	// rewrite would otherwise resolve against the pre-update location) and
+	// before any env or pod work, which starts immediately below. Its inputs
+	// are in.Config.GCPIdentity, in.ResolvedEnv, in.Config.Env, and the
+	// resolved runtime, read directly here rather than from the merged `env`
+	// map, which does not exist yet.
+	//
+	// The runtime that matters is the one THIS dispatch actually uses, not
+	// the broker's default: a broker can register more than one profile
+	// (e.g. both a "docker" and a "kubernetes" profile), and a dispatch's
+	// profile selects which one it runs on. mgr and dispatchRuntimeType are
+	// resolved exactly once here, via resolveManagerForOpts (handlers.go) —
+	// the same function that ultimately selects the manager this function
+	// returns — and reused below instead of re-resolving, so within this one
+	// buildStartContext call the GCP check and the manager it returns cannot
+	// disagree, and settings are loaded only once per call. (start/restart
+	// perform their own, later, second resolution after this function
+	// returns — see the Manager resolution comment near the end of this
+	// function for why that one can still differ from this one.)
+	//
+	// The profile fed into that resolution must match opts.Profile below
+	// exactly (opts.Profile = in.Config.Profile, unconditionally) on create:
+	// a create/re-provision does not fall back to the agent's saved profile
+	// anywhere else in this function (ProvisionAgent, image resolution, the
+	// saved profile written back by provision.go all key off opts.Profile),
+	// so resolving the manager here from a different, saved-profile-derived
+	// value would let a create run on one runtime while everything else
+	// about it — including the GCP identity classification above — is
+	// computed for another. Only start/restart fall back to the agent's own
+	// saved profile (agent.GetSavedProfile): their Config is nil (no profile
+	// to read from a request body that doesn't exist), and handlers.go's
+	// startAgent/restartAgent already resolve the saved profile themselves,
+	// re-running this same check after their own, later resolution.
+	gcpIdentityProfile := ""
+	if in.Config != nil {
+		gcpIdentityProfile = in.Config.Profile
+	}
+	if gcpIdentityProfile == "" && in.Operation != opCreate {
+		gcpIdentityProfile = agent.GetSavedProfile(in.Name, in.ProjectPath)
+	}
+	mgr, dispatchRuntimeType := s.resolveManagerForOpts(api.StartOptions{
+		Name:        in.Name,
+		ProjectPath: in.ProjectPath,
+		Profile:     gcpIdentityProfile,
+	})
+	isKubernetes := isKubernetesRuntimeName(dispatchRuntimeType)
+
+	// Default when no GCP identity config is provided at all: "block" on
+	// every runtime except Kubernetes, so agents cannot access the underlying
+	// compute identity via the GCE metadata server unless the hub explicitly
+	// sets "passthrough" or "assign". Kubernetes does not support "block"
+	// (ptone/scion#2328 phase 1), so an unconfigured Kubernetes dispatch
+	// defaults to "passthrough" instead — the Hub's own resolution ladder
+	// leaves the mode unset (rather than writing an explicit "block") for
+	// exactly this case, precisely so the runtime-appropriate default can be
+	// applied here. Shared with the auth preflight's own GCP-credential
+	// check (handlers.go's extractRequiredEnvKeys), via effectiveGCPMetadataMode,
+	// so the two agree on whether GCP credentials will be available.
+	gcpMetadataMode := effectiveGCPMetadataMode(isKubernetes, in.Config, in.ResolvedEnv)
+	// "block" is not offered on the Kubernetes runtime. The rejection applies
+	// to any "block" that actually resolved — an explicit agent-level
+	// request, a project or hub default that is itself explicitly "block"
+	// and arrives via resolvedEnv, or an existing agent's own stored
+	// GCPIdentity from before this ruling (an earlier hub or web UI version
+	// could write an explicit "block" for what the caller intended as
+	// "nothing configured"; that stored value is not migrated — see
+	// ptone/scion#2328). It does not apply to the runtime-aware default
+	// above: a dispatch that names no GCP identity at all already defaults
+	// to "passthrough" on Kubernetes, so "block" reaching this check on
+	// Kubernetes always means an explicit choice somewhere in the chain. The
+	// message below names both fixes — edit this agent's own mode, or change
+	// the project/hub default for agents created after this — since the
+	// caller cannot tell from here which one applies to them.
+	if sce := rejectKubernetesBlock(dispatchRuntimeType, gcpMetadataMode); sce != nil {
+		return nil, sce
+	}
+
 	// --- Build merged environment ---
 	env := make(map[string]string)
 
@@ -450,24 +532,16 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		classifyBrokerEnv("SCION_DEBUG", api.EnvKindPlain)
 	}
 
-	// 8. GCP identity metadata server configuration.
-	// Default to "block" when no GCP identity config is provided, so agents
-	// cannot access the underlying compute identity via the GCE metadata
-	// server unless the hub explicitly sets "passthrough" or "assign".
+	// 8. GCP identity metadata server configuration: write env vars for the
+	// mode resolved and validated earlier in this function, after the
+	// project-marker/directory resolution block and before any env or pod
+	// work — see the comment there for why the Kubernetes/"block" check
+	// runs where it does.
 	//
-	// Priority: explicit Config.GCPIdentity (create path) > resolvedEnv
-	// values injected by the hub (start path) > secure "block" default.
-	gcpMetadataMode := store.GCPMetadataModeBlock // secure default
-	if in.Config != nil && in.Config.GCPIdentity != nil {
-		gcpMetadataMode = in.Config.GCPIdentity.MetadataMode
-	} else if mode := env["SCION_METADATA_MODE"]; mode != "" {
-		// The hub injects SCION_METADATA_MODE (and SA details) via
-		// resolvedEnv when dispatching a start for a provisioned agent.
-		gcpMetadataMode = mode
-	}
-	// requireLocalRuntime follows the identical struct-or-env precedence —
-	// see downgradeUnverifiedHubDefaultPassthrough's doc comment for what
-	// it means and how it's used below and in recheckHubDefaultPassthrough.
+	// requireLocalRuntime follows the identical struct-or-env precedence
+	// gcpMetadataMode used above — see downgradeUnverifiedHubDefaultPassthrough's
+	// doc comment for what it means and how it's used below and in
+	// recheckHubDefaultPassthrough.
 	requireLocalRuntime := false
 	if in.Config != nil && in.Config.GCPIdentity != nil {
 		requireLocalRuntime = in.Config.GCPIdentity.RequireLocalRuntime
@@ -768,12 +842,21 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Manager resolution ---
-	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
+	// mgr and dispatchRuntimeType were already resolved once, above, for the
+	// GCP identity check — reused here rather than calling
+	// resolveManagerForOpts a second time. sc.Manager, returned below, is
+	// only read by the create path (createAgent, handlers.go): start and
+	// restart discard it and perform their own, later resolution instead
+	// (opts.Profile is "" here on those two paths — their Config is nil —
+	// while the GCP check above used the dispatch's profile, Config.Profile
+	// on create or the agent's saved profile otherwise, so this resolution
+	// and theirs can legitimately see different profiles; see the
+	// downgradeUnverifiedHubDefaultPassthrough comment just below).
 
 	// See downgradeUnverifiedHubDefaultPassthrough's doc comment: on the
 	// create path this is the only, authoritative resolution; start/restart
 	// re-run this same check after their own, later resolution.
-	downgradeUnverifiedHubDefaultPassthrough(env, envCls, gcpMetadataMode, requireLocalRuntime, resolvedRuntimeType)
+	downgradeUnverifiedHubDefaultPassthrough(env, envCls, gcpMetadataMode, requireLocalRuntime, dispatchRuntimeType)
 
 	return &startContext{
 		Opts:               opts,
@@ -798,7 +881,15 @@ var hubDefaultPassthroughRuntimeTypes = map[string]bool{
 // GCP identity passthrough once the broker knows the runtime this agent will
 // actually run under (resolvedRuntimeType, from resolveManagerForOpts), and
 // rewrites env to the same "block" bundle buildStartContext's own block/
-// assign case sets, if that runtime is not a local container runtime.
+// assign case sets, if that runtime is not a local container runtime and not
+// Kubernetes. Kubernetes does not support "block" (ptone/scion#2328): a
+// Kubernetes resolution is left exactly as granted (passthrough) instead,
+// which is already the correct outcome by construction — it is the same
+// value the runtime-aware default (effectiveGCPMetadataMode) would have
+// produced had the hub left this agent's identity unset instead of granting
+// an unverified passthrough. Rewriting it to "block" here would both
+// contradict that default and immediately re-fail buildStartContext's own
+// earlier Kubernetes/"block" rejection on every subsequent start or restart.
 //
 // The hub's hub-default rung resolves an agent's runtime from the broker's
 // own registration-time data (RuntimeBroker.Profiles/DefaultProfile), which
@@ -845,7 +936,7 @@ func downgradeUnverifiedHubDefaultPassthrough(env map[string]string, envCls map[
 	if !requireLocalRuntime || currentMetadataMode != store.GCPMetadataModePassthrough {
 		return
 	}
-	if hubDefaultPassthroughRuntimeTypes[resolvedRuntimeType] {
+	if hubDefaultPassthroughRuntimeTypes[resolvedRuntimeType] || isKubernetesRuntimeName(resolvedRuntimeType) {
 		return
 	}
 	set := func(key, value string) {
@@ -871,6 +962,80 @@ type startContextError struct {
 
 func (e *startContextError) Error() string {
 	return e.Message
+}
+
+// isKubernetesRuntimeName reports whether name is a recognized spelling for
+// the Kubernetes runtime: "kubernetes", the "k8s" alias, or "remote" (a
+// settings.yaml runtime-type alias that pkg/runtime.GetRuntime normalizes to
+// "kubernetes" — see factory.go). resolveManagerForOpts (handlers.go)
+// constructs a real runtime via that normalization, so it never actually
+// returns "remote"; resolveRuntimeNameForOpts, its side-effect-free sibling,
+// returns settings.yaml's raw, unnormalized value without constructing
+// anything, so it can. "remote" is checked here explicitly for that case,
+// and kept for the former even though it is currently unreachable there, so
+// the two functions keep classifying identically if that ever changes.
+func isKubernetesRuntimeName(name string) bool {
+	return name == "kubernetes" || name == "k8s" || name == "remote"
+}
+
+// effectiveGCPMetadataMode resolves the GCP identity mode that applies for a
+// dispatch, given whether it targets Kubernetes and its GCP identity inputs
+// (an explicit cfg.GCPIdentity, or a mode carried via resolvedEnv/cfg.Env —
+// the same two raw sources buildStartContext's own merged `env` map is later
+// built from). It mirrors buildStartContext's resolution without
+// buildStartContext's validation/rejection: callers that need the "block is
+// not offered on Kubernetes" check (ptone/scion#2328 phase 1) must still go
+// through buildStartContext itself. This helper only answers "what mode
+// would apply" — shared with the auth preflight's own GCP-credential check
+// (handlers.go's extractRequiredEnvKeys), which needs to know whether GCP
+// credentials will be available, not whether the dispatch is valid.
+func effectiveGCPMetadataMode(isKubernetesDispatch bool, cfg *CreateAgentConfig, resolvedEnv map[string]string) string {
+	mode := store.GCPMetadataModeBlock // secure default (non-Kubernetes)
+	if isKubernetesDispatch {
+		mode = store.GCPMetadataModePassthrough
+	}
+	if cfg != nil && cfg.GCPIdentity != nil {
+		return cfg.GCPIdentity.MetadataMode
+	}
+	raw := resolvedEnv["SCION_METADATA_MODE"]
+	if cfg != nil {
+		for _, e := range cfg.Env {
+			parts := strings.SplitN(e, "=", 2)
+			if len(parts) == 2 && parts[0] == "SCION_METADATA_MODE" {
+				raw = parts[1]
+			}
+		}
+	}
+	if raw != "" {
+		// The hub supplies SCION_METADATA_MODE (and SA details) via
+		// resolvedEnv when dispatching a start for a provisioned agent. This
+		// is also how a resolved project or hub default GCP identity mode
+		// reaches the broker.
+		return raw
+	}
+	return mode
+}
+
+// rejectKubernetesBlock returns the actionable error for "block" on the
+// Kubernetes runtime (ptone/scion#2328) when metadataMode is explicitly
+// "block" and resolvedRuntimeType is a recognized Kubernetes spelling, or nil
+// otherwise. Shared by buildStartContext's own early check and by
+// startAgent/restartAgent's late recheck (handlers.go) against the second,
+// more specific manager resolution those two paths perform after a
+// saved-profile lookup buildStartContext cannot see — the same two-resolution
+// pattern recheckHubDefaultPassthrough already uses for the passthrough
+// downgrade, applied here so a profile that only resolves to Kubernetes after
+// that later lookup is rejected too, not just one visible to the early check.
+func rejectKubernetesBlock(resolvedRuntimeType, metadataMode string) *startContextError {
+	if metadataMode != store.GCPMetadataModeBlock || !isKubernetesRuntimeName(resolvedRuntimeType) {
+		return nil
+	}
+	return &startContextError{
+		Status: http.StatusBadRequest,
+		Message: fmt.Sprintf(
+			"GCP identity mode %q is not supported on the Kubernetes runtime; edit this agent's GCP identity mode to %q or %q, or change the project or hub default GCP identity mode for agents created after this",
+			store.GCPMetadataModeBlock, store.GCPMetadataModeAssign, store.GCPMetadataModePassthrough),
+	}
 }
 
 // redactCloneURL returns gc's clone URL with any userinfo removed, for

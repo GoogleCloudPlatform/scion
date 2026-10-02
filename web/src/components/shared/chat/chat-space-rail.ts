@@ -73,10 +73,26 @@ interface ThreadGroup {
   threadIds: string[];
 }
 
-/** User preferences for rail display. */
+/**
+ * A top-level rail entry for a space: either an ungrouped, non-general
+ * thread, or a thread group (rendered as one row, with its members nested
+ * underneath). Shared between `renderThreadList` and the order-computing
+ * helpers (`currentTopLevelOrder` and friends) so a drag/nudge snapshot is
+ * built from exactly the same items the user is looking at.
+ */
+type RailItem =
+  | { kind: 'thread'; id: string; thread: ChatSpaceThread }
+  | { kind: 'group'; id: string; group: ThreadGroup };
+
+/**
+ * User preferences for rail display. `threadSortMode` is only ever the
+ * user's alpha/recent choice for threads — a space counts as explicitly
+ * ordered when and only when `threadOrder[projectId]` is non-empty; there is
+ * no separate "custom" thread mode.
+ */
 interface RailPrefs {
   spaceSortMode: 'activity' | 'alpha' | 'custom';
-  threadSortMode: 'activity' | 'alpha' | 'custom';
+  threadSortMode: 'activity' | 'alpha';
   spaceOrder: string[] | undefined;
   threadOrder: Record<string, string[]> | undefined;
   threadGroups: Record<string, ThreadGroup[]> | undefined;
@@ -166,6 +182,7 @@ function saveCollapsedGroupIds(userId: string, ids: Set<string>): void {
   }
 }
 
+/** Parse a user-prefs payload. */
 function parseRailPrefs(payload: unknown): RailPrefs {
   const data = (payload ?? {}) as {
     spaceSortMode?: string;
@@ -234,11 +251,24 @@ function parseRailPrefs(payload: unknown): RailPrefs {
 
   const spaceSortMode = data.spaceSortMode;
   const threadSortMode = data.threadSortMode;
+  const resolvedSpaceSortMode: RailPrefs['spaceSortMode'] =
+    spaceSortMode === 'alpha' || spaceSortMode === 'custom' ? spaceSortMode : 'activity';
+
+  // A stored 'custom' thread mode maps to alpha when spaces sort alpha,
+  // otherwise activity; threadOrder is kept. A stored 'activity' mode also
+  // maps to alpha when spaces sort alpha. This build always writes the two
+  // together, so only data from other clients takes this path.
+  let resolvedThreadSortMode: RailPrefs['threadSortMode'];
+  if (threadSortMode === 'custom') {
+    resolvedThreadSortMode = resolvedSpaceSortMode === 'alpha' ? 'alpha' : 'activity';
+  } else {
+    resolvedThreadSortMode =
+      threadSortMode === 'alpha' || resolvedSpaceSortMode === 'alpha' ? 'alpha' : 'activity';
+  }
+
   return {
-    spaceSortMode:
-      spaceSortMode === 'alpha' || spaceSortMode === 'custom' ? spaceSortMode : 'activity',
-    threadSortMode:
-      threadSortMode === 'alpha' || threadSortMode === 'custom' ? threadSortMode : 'activity',
+    spaceSortMode: resolvedSpaceSortMode,
+    threadSortMode: resolvedThreadSortMode,
     spaceOrder,
     threadOrder,
     threadGroups,
@@ -391,6 +421,7 @@ export class ScionChatSpaceRail extends LitElement {
     .rail-body {
       flex: 1;
       overflow-y: auto;
+      overscroll-behavior: contain;
       padding: 0.25rem 0;
     }
 
@@ -1262,16 +1293,207 @@ export class ScionChatSpaceRail extends LitElement {
     return this.spaceFilter === 'all';
   }
 
-  /** The current thread display order (excluding #general) for a space. */
-  private currentThreadOrder(projectId: string): string[] {
-    return this.getSortedThreads(projectId)
-      .filter((t) => !t.isGeneral)
-      .map((t) => t.id);
+  /**
+   * A space is explicitly ordered iff it has a non-empty `threadOrder`
+   * snapshot — independent of `threadSortMode`, which only ever holds the
+   * alpha/recent choice.
+   */
+  private hasExplicitOrder(projectId: string): boolean {
+    return !!this.prefs.threadOrder?.[projectId]?.length;
   }
 
-  private async applyThreadOrder(projectId: string, order: string[]): Promise<void> {
-    const threadOrder = { ...(this.prefs.threadOrder ?? {}), [projectId]: order };
-    await this.savePrefs({ threadSortMode: 'custom', threadOrder });
+  /**
+   * Case-insensitive, locale-aware name comparison with an id tiebreak —
+   * shared by every alpha-sort call site (threads, groups, and the mixed
+   * top-level item list) so "Alphabetical" collates identically everywhere.
+   */
+  private compareByName(aName: string, bName: string, aId: string, bId: string): number {
+    const byName = aName.localeCompare(bName, undefined, { sensitivity: 'base' });
+    return byName !== 0 ? byName : aId.localeCompare(bId);
+  }
+
+  /**
+   * Newest-first activity comparison with an id tiebreak — shared by every
+   * activity-sort call site.
+   */
+  private compareByActivity(aTime: number, bTime: number, aId: string, bId: string): number {
+    return aTime !== bTime ? bTime - aTime : aId.localeCompare(bId);
+  }
+
+  /**
+   * Comparator for an explicit per-space snapshot: items present in `order`
+   * sort by position; items missing from it sort after, keeping their
+   * relative order. Shared by `sortTopLevelItems` and `getSortedThreads`.
+   */
+  private compareByExplicitOrder(
+    order: string[]
+  ): (a: { id: string }, b: { id: string }) => number {
+    const orderMap = new Map(order.map((id, i) => [id, i]));
+    return (a, b) => {
+      const ai = orderMap.get(a.id);
+      const bi = orderMap.get(b.id);
+      if (ai === undefined && bi === undefined) return 0;
+      if (ai === undefined) return 1;
+      if (bi === undefined) return -1;
+      return ai - bi;
+    };
+  }
+
+  /**
+   * A group's members resolved against known threads, sorted under the
+   * active mode unless this space has an explicit snapshot (see
+   * `hasExplicitOrder`). Shared by `currentGroupThreadOrder` and
+   * `renderThreadList`; `threadMap` is scoped to whichever thread set the
+   * caller needs (full space, or unread-filtered for display).
+   */
+  private orderGroupMembers(
+    projectId: string,
+    group: ThreadGroup,
+    threadMap: Map<string, ChatSpaceThread>
+  ): ChatSpaceThread[] {
+    const members = group.threadIds
+      .map((id) => threadMap.get(id))
+      .filter((t): t is ChatSpaceThread => t !== undefined);
+    if (!this.hasExplicitOrder(projectId)) {
+      const mode = this.prefs.threadSortMode;
+      members.sort((a, b) => this.compareThreadsForSort(a, b, mode));
+    }
+    return members;
+  }
+
+  /**
+   * A group's member ids in display order: resolved known members first
+   * (see `orderGroupMembers`), then any raw ids that didn't resolve to a
+   * known thread, appended unchanged rather than pruned. Shared by
+   * `currentGroupThreadOrder` and `freezeOtherGroupOrders`.
+   */
+  private displayedGroupIds(
+    projectId: string,
+    group: ThreadGroup,
+    threadMap: Map<string, ChatSpaceThread>
+  ): string[] {
+    const known = this.orderGroupMembers(projectId, group, threadMap).map((t) => t.id);
+    const knownSet = new Set(known);
+    const unknown = group.threadIds.filter((id) => !knownSet.has(id));
+    return [...known, ...unknown];
+  }
+
+  /** A group's members in the order currently on screen, as ids — see `displayedGroupIds`. */
+  private currentGroupThreadOrder(projectId: string, groupId: string): string[] {
+    const group = this.getGroups(projectId).find((g) => g.id === groupId);
+    if (!group) return [];
+    const threadMap = new Map((this.threadsBySpace.get(projectId) ?? []).map((t) => [t.id, t]));
+    return this.displayedGroupIds(projectId, group, threadMap);
+  }
+
+  /**
+   * Every group in a space snapshotted to its displayed order, except
+   * `exceptIds` (the group(s) the caller is about to write its own order
+   * for). Called whenever a drag/nudge gives a space its first explicit
+   * top-level snapshot, so every other group's raw `threadIds` matches what
+   * it was displaying rather than resurfacing later.
+   */
+  private freezeOtherGroupOrders(
+    projectId: string,
+    groups: ThreadGroup[],
+    exceptIds: ReadonlySet<string>
+  ): ThreadGroup[] {
+    const threadMap = new Map((this.threadsBySpace.get(projectId) ?? []).map((t) => [t.id, t]));
+    return groups.map((g) =>
+      exceptIds.has(g.id) ? g : { ...g, threadIds: this.displayedGroupIds(projectId, g, threadMap) }
+    );
+  }
+
+  /** The unordered top-level entries for a space: non-general, ungrouped
+   * threads, plus each group as a single entry. */
+  private topLevelRailItems(projectId: string, threads: ChatSpaceThread[]): RailItem[] {
+    const groups = this.getGroups(projectId);
+    const groupedThreadIds = new Set(groups.flatMap((g) => g.threadIds));
+    const items: RailItem[] = [];
+    for (const t of threads) {
+      if (t.isGeneral || groupedThreadIds.has(t.id)) continue;
+      items.push({ kind: 'thread', id: t.id, thread: t });
+    }
+    for (const g of groups) {
+      items.push({ kind: 'group', id: g.id, group: g });
+    }
+    return items;
+  }
+
+  /** The name to sort a top-level rail item by, under alpha. */
+  private railItemName(item: RailItem): string {
+    return item.kind === 'thread' ? item.thread.name : item.group.name;
+  }
+
+  /**
+   * Sort a space's top-level items: by the explicit snapshot when present
+   * (see `hasExplicitOrder`), otherwise pinned threads first, then the
+   * active alpha/activity mode. A group has no activity of its own, so under
+   * Recent it sorts by its most-recently-active member.
+   */
+  private sortTopLevelItems(
+    projectId: string,
+    items: RailItem[],
+    threadMap: Map<string, ChatSpaceThread>
+  ): RailItem[] {
+    const sorted = [...items];
+    if (this.hasExplicitOrder(projectId)) {
+      const order = this.prefs.threadOrder?.[projectId] ?? [];
+      sorted.sort(this.compareByExplicitOrder(order));
+      return sorted;
+    }
+
+    const mode = this.prefs.threadSortMode;
+    sorted.sort((a, b) => {
+      const aPinned = a.kind === 'thread' && a.thread.pinned ? 0 : 1;
+      const bPinned = b.kind === 'thread' && b.thread.pinned ? 0 : 1;
+      if (aPinned !== bPinned) return aPinned - bPinned;
+
+      if (mode === 'alpha') {
+        return this.compareByName(this.railItemName(a), this.railItemName(b), a.id, b.id);
+      }
+      const aTime = this.getItemLastActivity(a, threadMap);
+      const bTime = this.getItemLastActivity(b, threadMap);
+      return this.compareByActivity(aTime, bTime, a.id, b.id);
+    });
+    return sorted;
+  }
+
+  /** A space's top-level display order, as ids (ungrouped threads plus groups, each counted once). */
+  private currentTopLevelOrder(projectId: string): string[] {
+    const threads = this.threadsBySpace.get(projectId) ?? [];
+    const threadMap = new Map(threads.map((t) => [t.id, t]));
+    const items = this.topLevelRailItems(projectId, threads);
+    return this.sortTopLevelItems(projectId, items, threadMap).map((i) => i.id);
+  }
+
+  /** `order` with `id` moved to sit immediately before `anchorId`, or at the end if absent. */
+  private insertAdjacent(order: string[], id: string, anchorId: string): string[] {
+    const result = order.filter((x) => x !== id);
+    const idx = result.indexOf(anchorId);
+    result.splice(idx === -1 ? result.length : idx, 0, id);
+    return result;
+  }
+
+  /**
+   * Writes a space's top-level order and every group's member order in one
+   * save, always freezing groups (see `freezeOtherGroupOrders`) so an
+   * untouched group's raw order can't resurface later. Leaves
+   * `threadSortMode` untouched — only `threadOrder`'s presence makes a space
+   * explicit (see `hasExplicitOrder`).
+   */
+  private async saveThreadOrder(
+    projectId: string,
+    topLevelOrder?: string[],
+    updatedGroups?: ThreadGroup[]
+  ): Promise<void> {
+    const order = topLevelOrder ?? this.currentTopLevelOrder(projectId);
+    const groups =
+      updatedGroups ?? this.freezeOtherGroupOrders(projectId, this.getGroups(projectId), new Set());
+    await this.savePrefs({
+      threadOrder: { ...(this.prefs.threadOrder ?? {}), [projectId]: order },
+      threadGroups: { ...(this.prefs.threadGroups ?? {}), [projectId]: groups },
+    });
   }
 
   private handleThreadDragStart(e: DragEvent, threadId: string): void {
@@ -1304,59 +1526,58 @@ export class ScionChatSpaceRail extends LitElement {
     this.dragOverGroupId = null;
     if (!sourceId || sourceId === targetThreadId) return;
 
-    const order = this.currentThreadOrder(projectId);
-    const from = order.indexOf(sourceId);
-    const to = order.indexOf(targetThreadId);
-    if (from === -1 || to === -1) return;
-    const next = [...order];
-    const [moved] = next.splice(from, 1);
-    next.splice(to, 0, moved);
-
-    // If dropping on a thread inside a group, move the dragged thread into that group
     const groups = this.prefs.threadGroups?.[projectId];
-    if (groups) {
-      const targetGroup = groups.find((g) => g.threadIds.includes(targetThreadId));
-      const sourceGroup = groups.find((g) => g.threadIds.includes(sourceId));
-      if (targetGroup !== sourceGroup) {
-        const updatedGroups = groups.map((g) => {
-          // Remove from source group
-          const filtered = g.threadIds.filter((id) => id !== sourceId);
-          if (g === targetGroup) {
-            // Add to target group at the right position relative to the target
-            const targetIdx = filtered.indexOf(targetThreadId);
-            const inserted = [...filtered];
-            inserted.splice(targetIdx, 0, sourceId);
-            return { ...g, threadIds: inserted };
-          }
-          return { ...g, threadIds: filtered };
-        });
-        const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: updatedGroups };
-        await this.savePrefs({
-          threadSortMode: 'custom',
-          threadOrder: { ...(this.prefs.threadOrder ?? {}), [projectId]: next },
-          threadGroups,
-        });
-        return;
-      } else if (targetGroup) {
-        // Same group — reorder within it
-        const updatedGroups = groups.map((g) => {
-          if (g !== targetGroup) return g;
-          const ids = g.threadIds.filter((id) => id !== sourceId);
-          const idx = ids.indexOf(targetThreadId);
-          ids.splice(idx, 0, sourceId);
-          return { ...g, threadIds: ids };
-        });
-        const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: updatedGroups };
-        await this.savePrefs({
-          threadSortMode: 'custom',
-          threadOrder: { ...(this.prefs.threadOrder ?? {}), [projectId]: next },
-          threadGroups,
-        });
-        return;
-      }
+    const targetGroup = groups?.find((g) => g.threadIds.includes(targetThreadId));
+    const sourceGroup = groups?.find((g) => g.threadIds.includes(sourceId));
+
+    if (groups && (targetGroup || sourceGroup) && targetGroup !== sourceGroup) {
+      // Crossing a group boundary: into a group, out of one onto an
+      // ungrouped thread, or between two groups. Insertion uses each
+      // group's *displayed* order, not the raw `threadIds`, so the thread
+      // lands where it was dropped rather than wherever raw-index math
+      // happens to put it.
+      const touched = new Set(
+        [sourceGroup?.id, targetGroup?.id].filter((id): id is string => id !== undefined)
+      );
+      const updatedGroups = this.freezeOtherGroupOrders(projectId, groups, touched).map((g) => {
+        if (g.id === sourceGroup?.id && g.id !== targetGroup?.id) {
+          // Rebuild the source group from its displayed order too, same as the target branch below.
+          const displayed = this.currentGroupThreadOrder(projectId, g.id);
+          return { ...g, threadIds: displayed.filter((id) => id !== sourceId) };
+        }
+        if (g.id === targetGroup?.id) {
+          const displayed = this.currentGroupThreadOrder(projectId, g.id);
+          return { ...g, threadIds: this.insertAdjacent(displayed, sourceId, targetThreadId) };
+        }
+        return g;
+      });
+      const baseTopLevel = this.currentTopLevelOrder(projectId).filter((id) => id !== sourceId);
+      const topLevelOrder = targetGroup
+        ? baseTopLevel
+        : this.insertAdjacent(baseTopLevel, sourceId, targetThreadId);
+      await this.saveThreadOrder(projectId, topLevelOrder, updatedGroups);
+      return;
     }
 
-    await this.applyThreadOrder(projectId, next);
+    if (targetGroup) {
+      // Same group — reorder within its displayed order.
+      const frozen = this.freezeOtherGroupOrders(projectId, groups!, new Set([targetGroup.id]));
+      const updatedGroups = frozen.map((g) => {
+        if (g.id !== targetGroup.id) return g;
+        const displayed = this.currentGroupThreadOrder(projectId, g.id);
+        return { ...g, threadIds: this.insertAdjacent(displayed, sourceId, targetThreadId) };
+      });
+      await this.saveThreadOrder(projectId, undefined, updatedGroups);
+      return;
+    }
+
+    // Top-level reorder: neither thread is in a group.
+    const order = this.insertAdjacent(
+      this.currentTopLevelOrder(projectId).filter((id) => id !== sourceId),
+      sourceId,
+      targetThreadId
+    );
+    await this.saveThreadOrder(projectId, order);
   }
 
   private handleThreadDragEnd(): void {
@@ -1373,42 +1594,32 @@ export class ScionChatSpaceRail extends LitElement {
     const containingGroup = groups.find((g) => g.threadIds.includes(threadId));
 
     if (containingGroup) {
-      // Reorder within the group's threadIds
-      const ids = [...containingGroup.threadIds];
+      // Reorder within the group's currently-displayed order (see
+      // currentGroupThreadOrder) and save it as this space's explicit
+      // snapshot; otherwise the very next render would re-sort the group and
+      // silently undo the move.
+      const ids = this.currentGroupThreadOrder(projectId, containingGroup.id);
       const idx = ids.indexOf(threadId);
       const swapIdx = idx + delta;
-      if (swapIdx < 0 || swapIdx >= ids.length) return;
+      if (idx < 0 || swapIdx < 0 || swapIdx >= ids.length) return;
       [ids[idx], ids[swapIdx]] = [ids[swapIdx], ids[idx]];
 
-      const updatedGroups = groups.map((g) =>
+      const frozen = this.freezeOtherGroupOrders(projectId, groups, new Set([containingGroup.id]));
+      const updatedGroups = frozen.map((g) =>
         g.id === containingGroup.id ? { ...g, threadIds: ids } : g
       );
-      await this.savePrefs({
-        threadGroups: { ...(this.prefs.threadGroups ?? {}), [projectId]: updatedGroups },
-      });
+      // Snapshot the unchanged top-level order alongside the frozen groups so both are pinned.
+      await this.saveThreadOrder(projectId, this.currentTopLevelOrder(projectId), updatedGroups);
     } else {
-      // Reorder among ungrouped threads only (exclude grouped thread IDs)
-      const groupedIds = new Set(groups.flatMap((g) => g.threadIds));
-      const currentOrder = [...this.currentThreadOrder(projectId)];
-      const ungroupedOrder = currentOrder.filter((id) => !groupedIds.has(id));
-
-      const idx = ungroupedOrder.indexOf(threadId);
+      // Reorder among top-level items (ungrouped threads, and groups as
+      // single units) in their currently-displayed order.
+      const order = [...this.currentTopLevelOrder(projectId)];
+      const idx = order.indexOf(threadId);
       const swapIdx = idx + delta;
-      if (idx < 0 || swapIdx < 0 || swapIdx >= ungroupedOrder.length) return;
+      if (idx < 0 || swapIdx < 0 || swapIdx >= order.length) return;
+      [order[idx], order[swapIdx]] = [order[swapIdx], order[idx]];
 
-      // Identify swap target in the ungrouped list
-      const swapTarget = ungroupedOrder[swapIdx];
-
-      // Apply swap in the FULL order (find actual positions)
-      const fullIdx = currentOrder.indexOf(threadId);
-      const fullSwapIdx = currentOrder.indexOf(swapTarget);
-      if (fullIdx < 0 || fullSwapIdx < 0) return;
-      [currentOrder[fullIdx], currentOrder[fullSwapIdx]] = [
-        currentOrder[fullSwapIdx],
-        currentOrder[fullIdx],
-      ];
-
-      await this.applyThreadOrder(projectId, currentOrder);
+      await this.saveThreadOrder(projectId, order);
     }
   }
 
@@ -1419,18 +1630,17 @@ export class ScionChatSpaceRail extends LitElement {
     const containingGroup = groups.find((g) => g.threadIds.includes(threadId));
 
     if (containingGroup) {
-      // Check edges within the group
-      const ids = containingGroup.threadIds;
+      // Check edges within the group's currently-displayed order.
+      const ids = this.currentGroupThreadOrder(projectId, containingGroup.id);
       return edge === 'first' ? ids[0] === threadId : ids[ids.length - 1] === threadId;
     }
 
-    // Check edges among ungrouped threads only (exclude grouped thread IDs)
-    const groupedIds = new Set(groups.flatMap((g) => g.threadIds));
-    const ungroupedOrder = this.currentThreadOrder(projectId).filter((id) => !groupedIds.has(id));
-    if (ungroupedOrder.length === 0) return true;
-    const index = ungroupedOrder.indexOf(threadId);
+    // Check edges among top-level items (ungrouped threads, groups as units).
+    const order = this.currentTopLevelOrder(projectId);
+    if (order.length === 0) return true;
+    const index = order.indexOf(threadId);
     if (index === -1) return true;
-    return edge === 'first' ? index === 0 : index === ungroupedOrder.length - 1;
+    return edge === 'first' ? index === 0 : index === order.length - 1;
   }
 
   // ---------------------------------------------------------------------------
@@ -1515,6 +1725,15 @@ export class ScionChatSpaceRail extends LitElement {
           newGroup,
         ]
       : [...currentGroups, newGroup];
+    const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
+
+    // Only touch threadOrder for a space that already has its own snapshot
+    // (see `hasExplicitOrder`) — writing a first, membership-only entry here
+    // would itself become the explicit-order signal.
+    if (!this.hasExplicitOrder(projectId)) {
+      await this.savePrefs({ threadGroups });
+      return;
+    }
 
     // Insert the group ID into threadOrder so it co-mingles with threads.
     const currentOrder = [...(this.prefs.threadOrder?.[projectId] ?? [])];
@@ -1529,8 +1748,6 @@ export class ScionChatSpaceRail extends LitElement {
     } else {
       currentOrder.push(newGroup.id);
     }
-
-    const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
     const threadOrder = { ...(this.prefs.threadOrder ?? {}), [projectId]: currentOrder };
     await this.savePrefs({ threadGroups, threadOrder });
   }
@@ -1575,6 +1792,14 @@ export class ScionChatSpaceRail extends LitElement {
     const deletedGroup = this.getGroups(projectId).find((g) => g.id === groupId);
     const groups = this.getGroups(projectId).filter((g) => g.id !== groupId);
     const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
+
+    // Without this space's own explicit snapshot (see `hasExplicitOrder`),
+    // there is no threadOrder entry to replace, and writing a partial one
+    // here would itself become the explicit-order signal.
+    if (!this.hasExplicitOrder(projectId)) {
+      await this.savePrefs({ threadGroups });
+      return;
+    }
 
     // Replace the group ID in threadOrder with its former thread IDs,
     // filtering out any that already exist elsewhere to avoid duplicates.
@@ -1662,43 +1887,46 @@ export class ScionChatSpaceRail extends LitElement {
     return maxTime;
   }
 
+  /**
+   * Compare two threads under the alpha or activity sort mode, via the
+   * `compareByName`/`compareByActivity` primitives every alpha/activity sort
+   * call site shares, so "Alphabetical"/"Recent" collate identically
+   * everywhere.
+   */
+  private compareThreadsForSort(
+    a: ChatSpaceThread,
+    b: ChatSpaceThread,
+    mode: 'alpha' | 'activity'
+  ): number {
+    if (mode === 'alpha') {
+      return this.compareByName(a.name, b.name, a.id, b.id);
+    }
+    const aTime = a.lastActivityAt ? new Date(a.lastActivityAt).getTime() : 0;
+    const bTime = b.lastActivityAt ? new Date(b.lastActivityAt).getTime() : 0;
+    return this.compareByActivity(aTime, bTime, a.id, b.id);
+  }
+
   private getSortedThreads(projectId: string): ChatSpaceThread[] {
     const threads = [...(this.threadsBySpace.get(projectId) || [])];
 
-    // In custom sort mode, the user's explicit order takes control.
-    // #general is always first regardless.
-    if (this.prefs.threadSortMode === 'custom') {
-      const order = this.prefs.threadOrder?.[projectId];
-      if (order && order.length > 0) {
-        const general = threads.filter((t) => t.isGeneral);
-        const rest = threads.filter((t) => !t.isGeneral);
-        const orderMap = new Map(order.map((id, i) => [id, i]));
-        rest.sort((a, b) => {
-          const ai = orderMap.get(a.id);
-          const bi = orderMap.get(b.id);
-          if (ai === undefined && bi === undefined) return 0;
-          if (ai === undefined) return 1;
-          if (bi === undefined) return -1;
-          return ai - bi;
-        });
-        return [...general, ...rest];
-      }
+    // With an explicit snapshot, the user's order takes control. #general is
+    // always first regardless.
+    if (this.hasExplicitOrder(projectId)) {
+      const order = this.prefs.threadOrder?.[projectId] ?? [];
+      const general = threads.filter((t) => t.isGeneral);
+      const rest = threads.filter((t) => !t.isGeneral);
+      rest.sort(this.compareByExplicitOrder(order));
+      return [...general, ...rest];
     }
 
-    // Separate #general, pinned, and regular
+    // Separate #general, pinned, and regular.
     const general = threads.filter((t) => t.isGeneral);
     const pinned = threads.filter((t) => !t.isGeneral && t.pinned);
     const regular = threads.filter((t) => !t.isGeneral && !t.pinned);
 
-    // Sort pinned and regular
-    const sortFn =
-      this.prefs.threadSortMode === 'alpha'
-        ? (a: ChatSpaceThread, b: ChatSpaceThread) => a.name.localeCompare(b.name)
-        : (a: ChatSpaceThread, b: ChatSpaceThread) => {
-            const aTime = a.lastActivityAt ? new Date(a.lastActivityAt).getTime() : 0;
-            const bTime = b.lastActivityAt ? new Date(b.lastActivityAt).getTime() : 0;
-            return bTime - aTime;
-          };
+    const mode = this.prefs.threadSortMode;
+    const sortFn = (a: ChatSpaceThread, b: ChatSpaceThread) =>
+      this.compareThreadsForSort(a, b, mode);
 
     pinned.sort(sortFn);
     regular.sort(sortFn);
@@ -2147,9 +2375,44 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
-  private startCreateThread(projectId: string): void {
-    this.creatingThread = projectId;
-    this.newThreadName = '';
+  /**
+   * Open the new-thread name entry for a space. `groupId` is the group the
+   * thread is filed into once created; every request sets it, so a target
+   * left by an earlier group-menu request cannot carry over.
+   */
+  private startCreateThread(projectId: string, groupId: string | null = null): void {
+    this._createThreadGroupId = groupId;
+    // The name-entry row renders inside the space's thread list, so a
+    // collapsed space must open for the row to be visible.
+    this.expandSpace(projectId);
+    // Asking again for the space whose row is already open keeps the typed
+    // name; only a fresh entry starts empty.
+    if (this.creatingThread !== projectId) {
+      this.creatingThread = projectId;
+      this.newThreadName = '';
+    }
+    // Focus on every request, not only when the row first opens, so a repeat
+    // New thread brings focus back from the menu that issued it.
+    void this.updateComplete.then(() => this.focusCreateThreadInput());
+  }
+
+  /**
+   * Focus the new-thread name input. Native focus also scrolls the input
+   * into view, so no separate scroll is needed.
+   */
+  private async focusCreateThreadInput(): Promise<void> {
+    const input = this.shadowRoot?.querySelector<
+      HTMLElement & { updateComplete?: Promise<unknown> }
+    >('.create-thread sl-input');
+    if (!input) return;
+    await input.updateComplete;
+    input.focus();
+  }
+
+  /** Close the new-thread name entry without creating a thread. */
+  private cancelCreateThread(): void {
+    this.creatingThread = '';
+    this._createThreadGroupId = null;
   }
 
   /** IDs of topics created by this client — suppresses SSE-triggered reloads. */
@@ -2345,10 +2608,10 @@ export class ScionChatSpaceRail extends LitElement {
             slot="trigger"
             name="sort-down"
             class="sort-btn"
-            label="Sort spaces"
+            label="Sort"
           ></sl-icon-button>
           <sl-menu @sl-select=${this.handleSortSelect}>
-            <sl-menu-label>Sort spaces</sl-menu-label>
+            <sl-menu-label>Sort</sl-menu-label>
             <sl-menu-item
               type="checkbox"
               value="activity"
@@ -2387,15 +2650,23 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
-  /** Handle sort mode selection from the dropdown. */
+  /**
+   * Alphabetical/Recent is a single, rail-wide choice: it sets
+   * `spaceSortMode` and `threadSortMode` together, and clears every space's
+   * `threadOrder` snapshot so the choice actually discards custom thread
+   * arrangements (see `hasExplicitOrder`) instead of leaving them to
+   * resurface on a later drag. Custom applies to space order only —
+   * per-space thread order has its own trigger: dragging or nudging a
+   * thread.
+   */
   private handleSortSelect(e: Event): void {
     const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
     const item = detail?.item;
     const value = item?.getAttribute('value');
 
-    // Space sort modes
+    // Space + thread sort modes
     if (value === 'activity' || value === 'alpha') {
-      void this.savePrefs({ spaceSortMode: value });
+      void this.savePrefs({ spaceSortMode: value, threadSortMode: value, threadOrder: {} });
       return;
     }
     if (value === 'custom') {
@@ -2560,12 +2831,12 @@ export class ScionChatSpaceRail extends LitElement {
           !isCollapsed
             ? html`
                 <div class="thread-list">
-                  ${this.renderThreadList(threads, space.projectId)}
                   ${
                     this.creatingThread === space.projectId
                       ? this.renderCreateThread(space.projectId)
                       : nothing
                   }
+                  ${this.renderThreadList(threads, space.projectId)}
                 </div>
               `
             : nothing
@@ -2593,55 +2864,18 @@ export class ScionChatSpaceRail extends LitElement {
     // whose threads are all filtered out resolves to zero members below —
     // that is what lets the unread filter hide it without a separate check.
     const threadMap = new Map(visibleThreads.map((t) => [t.id, t]));
-    const groupedThreadIds = new Set(groups.flatMap((g) => g.threadIds));
 
     // #general threads always come first
     const generalThreads = visibleThreads.filter((t) => t.isGeneral);
 
-    // Build unified item list: ungrouped non-general threads + groups
-    type RailItem =
-      | { kind: 'thread'; id: string; thread: ChatSpaceThread }
-      | { kind: 'group'; id: string; group: ThreadGroup };
-
-    const items: RailItem[] = [];
-    for (const t of visibleThreads) {
-      if (t.isGeneral || groupedThreadIds.has(t.id)) continue;
-      items.push({ kind: 'thread', id: t.id, thread: t });
-    }
-    for (const g of groups) {
-      items.push({ kind: 'group', id: g.id, group: g });
-    }
-
-    // Sort items based on current mode
-    if (this.prefs.threadSortMode === 'custom') {
-      const order = this.prefs.threadOrder?.[projectId] ?? [];
-      const orderMap = new Map(order.map((id, i) => [id, i]));
-      items.sort((a, b) => {
-        const ai = orderMap.get(a.id);
-        const bi = orderMap.get(b.id);
-        if (ai === undefined && bi === undefined) return 0;
-        if (ai === undefined) return 1;
-        if (bi === undefined) return -1;
-        return ai - bi;
-      });
-    } else {
-      // Activity or alpha — pinned ungrouped threads surface first.
-      items.sort((a, b) => {
-        const aPinned = a.kind === 'thread' && a.thread.pinned ? 0 : 1;
-        const bPinned = b.kind === 'thread' && b.thread.pinned ? 0 : 1;
-        if (aPinned !== bPinned) return aPinned - bPinned;
-
-        if (this.prefs.threadSortMode === 'alpha') {
-          const aName = a.kind === 'thread' ? a.thread.name : a.group.name;
-          const bName = b.kind === 'thread' ? b.thread.name : b.group.name;
-          return aName.localeCompare(bName);
-        }
-        // activity (default)
-        const aTime = this.getItemLastActivity(a, threadMap);
-        const bTime = this.getItemLastActivity(b, threadMap);
-        return bTime - aTime;
-      });
-    }
+    // Build and sort the unified item list: ungrouped non-general threads,
+    // plus each group as a single entry — see `topLevelRailItems` and
+    // `sortTopLevelItems`.
+    const items = this.sortTopLevelItems(
+      projectId,
+      this.topLevelRailItems(projectId, visibleThreads),
+      threadMap
+    );
 
     return html`
       ${generalThreads.map((t) => this.renderThread(t, projectId))}
@@ -2650,9 +2884,9 @@ export class ScionChatSpaceRail extends LitElement {
           return this.renderThread(item.thread, projectId);
         }
         const group = item.group;
-        const groupThreads = group.threadIds
-          .map((id) => threadMap.get(id))
-          .filter((t): t is ChatSpaceThread => t !== undefined);
+        // Alpha/activity apply within group membership too, unless this
+        // space has an explicit snapshot (see `hasExplicitOrder`).
+        const groupThreads = this.orderGroupMembers(projectId, group, threadMap);
         // Under the unread filter, a group left with no visible threads
         // (empty, or every member read) is noise — hide it entirely rather
         // than showing a bare "(0)" header.
@@ -2768,8 +3002,8 @@ export class ScionChatSpaceRail extends LitElement {
       `;
     }
 
-    // Thread is draggable when in custom sort mode (or any mode, since dragging
-    // auto-switches to custom), but not for the #general thread.
+    // Every thread is draggable except #general; dragging gives its space an
+    // explicit order regardless of the active sort mode.
     const isDraggable = !thread.isGeneral;
     const isDragging = this.draggingThreadId === thread.id;
     const isDragOver = this.dragOverThreadId === thread.id && this.draggingThreadId !== thread.id;
@@ -2830,11 +3064,11 @@ export class ScionChatSpaceRail extends LitElement {
               void this.submitCreateThread(projectId);
             }
             if (e.key === 'Escape') {
-              this.creatingThread = '';
+              this.cancelCreateThread();
             }
           }}
           @sl-blur=${() => {
-            if (!this.newThreadName.trim()) this.creatingThread = '';
+            if (!this.newThreadName.trim()) this.cancelCreateThread();
           }}
           style="flex: 1"
         ></sl-input>
@@ -3076,8 +3310,7 @@ export class ScionChatSpaceRail extends LitElement {
           class="context-menu-item"
           @click=${() => {
             this.groupContextMenuTarget = null;
-            this._createThreadGroupId = group.id;
-            this.startCreateThread(projectId);
+            this.startCreateThread(projectId, group.id);
           }}
         >
           <sl-icon name="plus-lg"></sl-icon>

@@ -618,16 +618,16 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			}
 		}
 	}
-	// Validate hub-level default_timezone (IANA name check).
+	// Validate hub-level default_timezone (IANA name check; rejects "Local",
+	// same rule as the file-mode handler and as the per-user display
+	// preference — design §3 A (d)).
 	if doc, ok := sectionDocs["agent_defaults"]; ok {
 		var agentDefaults opsettings.AgentDefaultsSettings
 		if err := json.Unmarshal(doc, &agentDefaults); err == nil {
-			if agentDefaults.DefaultTimezone != "" {
-				if _, err := time.LoadLocation(agentDefaults.DefaultTimezone); err != nil {
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid default_timezone %q: %v", agentDefaults.DefaultTimezone, err), nil)
-					return
-				}
+			if err := validateDefaultTimezone(agentDefaults.DefaultTimezone); err != nil {
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+					fmt.Sprintf("invalid default_timezone %q: %v", agentDefaults.DefaultTimezone, err), nil)
+				return
 			}
 			if !s.validateHubDefaultGCPIdentity(w, r.Context(), agentDefaults) {
 				return

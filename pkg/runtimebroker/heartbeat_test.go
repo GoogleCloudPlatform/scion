@@ -34,6 +34,26 @@ type mockRuntimeBrokerService struct {
 	heartbeatErr   error
 
 	messageFailureReports []*hubclient.MessageFailuresReport
+
+	// launchReports records every ReportAgentLaunch call, in order.
+	launchReports []*mockLaunchReportCall
+	// launchReportFunc, when set, computes ReportAgentLaunch's answer for
+	// each report; it lets a test script a sequence of Hub answers (claim
+	// applied, a checkpoint 409, a terminal "completed", ...). When nil,
+	// ReportAgentLaunch answers "applied" to everything.
+	launchReportFunc func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error)
+	// ctxHook, when set, is called with the ctx ReportAgentLaunch actually
+	// received for every call, so a test can inspect the attempt ctx a
+	// launchSender call site built (e.g. its deadline) without needing the
+	// call to fail or time out.
+	ctxHook func(ctx context.Context)
+}
+
+// mockLaunchReportCall records one ReportAgentLaunch invocation.
+type mockLaunchReportCall struct {
+	BrokerID string
+	AgentID  string
+	Report   *hubclient.AgentLaunchReport
 }
 
 type mockHeartbeatCall struct {
@@ -94,6 +114,46 @@ func (m *mockRuntimeBrokerService) getHeartbeatCalls() []mockHeartbeatCall {
 	return append([]mockHeartbeatCall{}, m.heartbeatCalls...)
 }
 
+func (m *mockRuntimeBrokerService) ReportAgentLaunch(ctx context.Context, brokerID, agentID string, req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+	m.mu.Lock()
+	m.launchReports = append(m.launchReports, &mockLaunchReportCall{BrokerID: brokerID, AgentID: agentID, Report: req})
+	fn := m.launchReportFunc
+	hook := m.ctxHook
+	m.mu.Unlock()
+	if hook != nil {
+		hook(ctx)
+	}
+	if fn == nil {
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+	// Run fn in its own goroutine and select on it against ctx, so a test's
+	// fn that deliberately never returns (simulating an unresponsive Hub) is
+	// still bounded by the real attemptCtx launchSender builds -- this mock
+	// has no HTTP transport of its own to enforce that, unlike the real
+	// hubclient.RuntimeBrokerService implementation.
+	type fnResult struct {
+		result *hubclient.AgentLaunchReportResult
+		err    error
+	}
+	done := make(chan fnResult, 1)
+	go func() {
+		result, err := fn(req)
+		done <- fnResult{result, err}
+	}()
+	select {
+	case r := <-done:
+		return r.result, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (m *mockRuntimeBrokerService) getLaunchReports() []*mockLaunchReportCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]*mockLaunchReportCall{}, m.launchReports...)
+}
+
 // heartbeatMockManager implements agent.Manager for testing.
 type heartbeatMockManager struct {
 	agents []api.AgentInfo
@@ -102,6 +162,14 @@ type heartbeatMockManager struct {
 
 func (m *heartbeatMockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	return nil, nil
+}
+
+func (m *heartbeatMockManager) Preflight(ctx context.Context, opts api.StartOptions) error {
+	return nil
+}
+
+func (m *heartbeatMockManager) CleanupLaunch(ctx context.Context, handles []agent.ResourceHandle) error {
+	return nil
 }
 
 func (m *heartbeatMockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -137,6 +205,10 @@ func (m *heartbeatMockManager) MessageRaw(ctx context.Context, agentID, projectI
 }
 
 func (m *heartbeatMockManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+	return nil
+}
+
+func (m *heartbeatMockManager) SendKeysLocal(ctx context.Context, projectPath, agentSlug, expectedAgentID, keys string) error {
 	return nil
 }
 

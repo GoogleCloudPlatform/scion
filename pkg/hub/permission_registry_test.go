@@ -108,7 +108,8 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 		// secret-read decision share one token capability. No other
 		// permission gains this mapping (TestMaterialPermissions_AgentScopeMappingExplicit).
 		ScopeProjectSecretRead: {"project.secret_read", "secret.use"},
-		ScopeAgentCreate:       {"agent.create", "gcp_service_account.assign"},
+		ScopeAgentCreate:       {"agent.create"},
+		ScopeAgentSAAssign:     {"gcp_service_account.assign"},
 		ScopeAgentLifecycle:    {"agent.attach", "agent.delete", "agent.lifecycle"},
 		ScopeAgentNotify:       {"agent.notify"},
 		ScopeAgentTokenRefresh: {"agent.token_refresh"},

@@ -52,6 +52,19 @@ type KubernetesRuntime struct {
 	GKEMode           bool // Enables GKE-specific features (SecretProviderClass CSI, GCS FUSE)
 	GKEAutoDetected   bool // True when GKE was auto-detected (enables Autopilot tolerance only)
 	ListAllNamespaces bool // When true, List() queries all namespaces for scion pods
+
+	// execReadyClock supplies the time source and sleep function used by
+	// waitForExecReady's backoff loop. It defaults to real time via
+	// NewKubernetesRuntime; tests override it to drive the retry/backoff/cap
+	// logic deterministically without a real sleep.
+	execReadyClock execReadyClock
+
+	// execProbe is the readiness probe waitForExecReady runs on each
+	// attempt. Nil (the default from NewKubernetesRuntime) means "exec a
+	// cheap no-op command via execInPod"; tests replace it with a func that
+	// blocks on its ctx argument to exercise the per-probe timeout without a
+	// real exec transport.
+	execProbe execProbeFunc
 }
 
 // agentContainerName is the name of the primary scion agent container in
@@ -67,7 +80,20 @@ func NewKubernetesRuntime(client *k8s.Client) *KubernetesRuntime {
 	return &KubernetesRuntime{
 		Client:           client,
 		DefaultNamespace: defaultKubernetesNamespace(),
+		execReadyClock:   realExecReadyClock(),
 	}
+}
+
+// DefaultKubernetesNamespace returns the namespace a Kubernetes runtime
+// resolves to when a profile sets no explicit namespace: the same
+// cheap, local-only chain NewKubernetesRuntime uses (SCION_K8S_NAMESPACE,
+// POD_NAMESPACE, the in-cluster service account file, else "default").
+// Exported so callers that need this fallback without constructing a runtime
+// — e.g. runtimebroker comparing an unresolved profile's effective namespace
+// against the broker's own default before deciding whether to fully resolve
+// it — don't have to duplicate the chain.
+func DefaultKubernetesNamespace() string {
+	return defaultKubernetesNamespace()
 }
 
 func defaultKubernetesNamespace() string {
@@ -188,6 +214,14 @@ func isSyncTransientError(err error) bool {
 		"i/o timeout",
 		"TLS handshake",
 		"use of closed network connection",
+		// F15: a scale-from-zero node's API-server-to-kubelet exec tunnel
+		// (e.g. the GKE konnectivity agent) is not up yet when the first
+		// exec lands right after the container starts. Observed as
+		// "stream failed: error dialing backend: No agent available".
+		// Both substrings are matched independently so either wording
+		// variant of the same underlying condition is caught.
+		"no agent available",
+		"error dialing backend",
 	}
 	for _, pattern := range transientPatterns {
 		if strings.Contains(strings.ToLower(msg), strings.ToLower(pattern)) {
@@ -197,11 +231,203 @@ func isSyncTransientError(err error) bool {
 	return false
 }
 
+// execReadyMaxWait bounds the cumulative elapsed time (wall time between
+// probe attempts, including time spent inside each probe) that
+// waitForExecReady spends retrying the exec-tunnel probe before giving up.
+// A single in-flight probe is bounded separately by execReadyProbeTimeout,
+// so the actual wall-clock wait is execReadyMaxWait plus at most one more
+// execReadyProbeTimeout for the final, cap-triggering probe.
+const execReadyMaxWait = 90 * time.Second
+
+// execReadyMaxBackoff caps the exponential backoff between probes.
+const execReadyMaxBackoff = 8 * time.Second
+
+// execReadyMaxBackoffShift is the largest exponent execReadyWithRetry's
+// backoff computation will shift by (1<<3 == 8, matching execReadyMaxBackoff
+// in seconds). Capping the shift itself, not just the resulting duration,
+// keeps the computation well away from any shift-count edge cases for a
+// larger-than-expected attempt count.
+const execReadyMaxBackoffShift = 3
+
+// execReadyProbeTimeout bounds a single readiness probe so one stalled dial
+// (e.g. a tunnel that accepts the connection and then hangs) cannot hold
+// waitForExecReady well past execReadyMaxWait. A probe that hits this
+// per-attempt deadline is treated the same as any other transient probe
+// failure and retried under the usual backoff and cap — see
+// wrapProbeTimeout. A var, not a const, so tests can shrink it to run the
+// per-probe-timeout path in milliseconds instead of execReadyProbeTimeout's
+// production value.
+var execReadyProbeTimeout = 10 * time.Second
+
+// execReadyClock supplies the time source and sleep function used by the
+// exec-readiness retry loop. Production code gets this from
+// NewKubernetesRuntime; tests replace it with a fake clock so the loop's
+// cap and backoff behavior can be exercised without a real sleep.
+type execReadyClock struct {
+	now   func() time.Time
+	sleep func(ctx context.Context, d time.Duration) error
+}
+
+// realExecReadyClock returns the production clock: wall time plus a sleep
+// that honors context cancellation.
+func realExecReadyClock() execReadyClock {
+	return execReadyClock{
+		now: time.Now,
+		sleep: func(ctx context.Context, d time.Duration) error {
+			// time.NewTimer plus an explicit Stop, rather than time.After,
+			// so an early ctx cancellation doesn't leave the timer running
+			// (and ineligible for GC) until it fires on its own.
+			timer := time.NewTimer(d)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			}
+		},
+	}
+}
+
+// wrapProbeTimeout rewrites err so that a deadline caused by the probe's own
+// execReadyProbeTimeout (not the caller's ctx) reads as a timeout. This
+// matters because isSyncTransientError recognizes "timeout" but not Go's
+// plain "context deadline exceeded", so without the rewrite a stalled probe
+// would be misclassified as non-transient and fail the whole wait instead
+// of being retried. When ctx itself is already done, err is returned
+// unchanged — that case should propagate (and the next clock.sleep call
+// will return ctx.Err() to end the loop) rather than being retried forever.
+func wrapProbeTimeout(ctx, probeCtx context.Context, err error) error {
+	if err == nil || ctx.Err() != nil || !errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("exec readiness probe timeout after %s: %w", execReadyProbeTimeout, err)
+}
+
+// execProbeFunc is the shape of the readiness probe waitForExecReady runs on
+// each attempt. The production default execs a cheap no-op command; tests
+// replace KubernetesRuntime.execProbe with a func that blocks on ctx so the
+// per-probe timeout (execReadyProbeTimeout, applied by the caller via
+// context.WithTimeout before invoking the probe) can be exercised without a
+// real exec transport.
+type execProbeFunc func(ctx context.Context, namespace, podName string) error
+
+// waitForExecReady probes the pod's exec tunnel with a cheap no-op command
+// until it succeeds, a non-transient error occurs, ctx is cancelled, or
+// execReadyMaxWait of cumulative elapsed time passes (see
+// execReadyProbeTimeout for the per-probe bound). A pod and its main
+// container reporting Running (waitForPodReady) does not mean the
+// API-server-to-kubelet exec tunnel is ready: on a scale-from-zero node the
+// tunnel can still be coming up for tens of seconds afterward, and the
+// first real exec (home sync, or the startup-gate touch when HomeDir is
+// unset) would otherwise fail outright. Call this once, right after
+// waitForPodReady and before any other exec into the pod. agentName is used
+// only for log correlation.
+func (r *KubernetesRuntime) waitForExecReady(ctx context.Context, namespace, podName, agentName string) error {
+	probe := r.execProbe
+	if probe == nil {
+		probe = func(ctx context.Context, namespace, podName string) error {
+			_, err := r.execInPod(ctx, namespace, podName, []string{"true"})
+			return err
+		}
+	}
+	return r.execReadyWithRetry(ctx, func() error {
+		probeCtx, cancel := context.WithTimeout(ctx, execReadyProbeTimeout)
+		defer cancel()
+		return wrapProbeTimeout(ctx, probeCtx, probe(probeCtx, namespace, podName))
+	}, agentName, namespace, podName)
+}
+
+// execReadyWithRetry runs op with bounded exponential backoff (1s, 2s, 4s,
+// 8s, capped thereafter at execReadyMaxBackoff), retrying only errors
+// isSyncTransientError classifies as transient, until op succeeds, a
+// non-transient error is returned (fail fast, no retry), ctx is cancelled,
+// or execReadyMaxWait of cumulative wait time is exhausted. Factored out
+// from waitForExecReady so tests can drive it with a test-supplied op and a
+// fake clock instead of a real exec transport and real sleeps. agentName,
+// namespace and podName are log correlation fields only.
+func (r *KubernetesRuntime) execReadyWithRetry(ctx context.Context, op func() error, agentName, namespace, podName string) error {
+	clock := r.execReadyClock
+	if clock.now == nil || clock.sleep == nil {
+		// A KubernetesRuntime built as a literal rather than via
+		// NewKubernetesRuntime has a zero-value execReadyClock; fall back to
+		// the real one instead of a nil-func panic.
+		clock = realExecReadyClock()
+	}
+	start := clock.now()
+	logFields := func(extra ...any) []any {
+		base := []any{"phase", "wait-exec", "agent", agentName, "namespace", namespace, "pod", podName}
+		return append(base, extra...)
+	}
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		lastErr = op()
+		if lastErr == nil {
+			runtimeLog.Info("Pod exec tunnel ready",
+				logFields("attempts", attempt+1, "elapsed_ms", clock.now().Sub(start).Milliseconds())...)
+			return nil
+		}
+		if !isSyncTransientError(lastErr) {
+			return lastErr
+		}
+
+		elapsed := clock.now().Sub(start)
+		if elapsed >= execReadyMaxWait {
+			return fmt.Errorf("gave up after %s (%d attempts): %w",
+				elapsed.Round(time.Second), attempt+1, lastErr)
+		}
+
+		// Exponential backoff: 1s, 2s, 4s, 8s, then holds at
+		// execReadyMaxBackoff. The shift itself is capped (not just the
+		// resulting duration, after the fact) so a surprisingly large
+		// attempt count — the elapsed check above is what actually keeps
+		// attempt small in practice, so this is a second, independent
+		// guard — can't compute a degenerate (zero or, pre-Go's
+		// well-defined large-shift semantics, negative-looking) backoff
+		// instead of simply holding at the cap.
+		shift := attempt
+		if shift > execReadyMaxBackoffShift {
+			shift = execReadyMaxBackoffShift
+		}
+		backoff := time.Duration(1<<uint(shift)) * time.Second
+		if backoff > execReadyMaxBackoff {
+			backoff = execReadyMaxBackoff
+		}
+		if remaining := execReadyMaxWait - elapsed; backoff > remaining {
+			backoff = remaining
+		}
+		runtimeLog.Warn("Pod exec tunnel not ready, retrying",
+			logFields("attempt", attempt+1, "backoff", backoff, "elapsed_ms", elapsed.Milliseconds(), "error", lastErr)...)
+		if err := clock.sleep(ctx, backoff); err != nil {
+			return err
+		}
+	}
+}
+
 func ensureAnnotations(annotations map[string]string) map[string]string {
 	if annotations != nil {
 		return annotations
 	}
 	return make(map[string]string)
+}
+
+// chownRecursiveArgs returns the in-pod `chown -R` argv that recursively
+// re-owns path to owner:owner, or (nil, false) when owner is empty. An empty
+// owner must refuse outright rather than produce a command either caller
+// could otherwise build from it: an owner:group spec of ":" (no real target
+// user), or, for the home-directory caller, a destination path of
+// util.GetHomeDir("") == "/home" -- a critical system directory, not any
+// particular user's home.
+//
+// This returns argv directly, not a shell string, so execInPod runs chown
+// itself rather than a shell asked to parse one: owner and path reach the
+// process as literal argv elements, with no quoting step in between for
+// either value to escape.
+func chownRecursiveArgs(owner, path string) (args []string, ok bool) {
+	if owner == "" {
+		return nil, false
+	}
+	return []string{"chown", "-R", fmt.Sprintf("%s:%s", owner, owner), path}, true
 }
 
 func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, error) {
@@ -227,6 +453,23 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		}
 	}
 
+	// Reject a workspace source that is not an allowed workspace path before
+	// it is persisted to the pod annotation that both this function's own
+	// sync step and the standalone Sync() command later trust. Act on the
+	// resolved, symlink-free path it returns. As in buildCommonRunArgs, no
+	// per-project root is passed: a workspace outside RepoRoot is a
+	// supported shape (an explicit --workspace, in particular) that
+	// RunConfig carries no flag to distinguish from a bad value, so only
+	// the fixed deny-set applies here; per-project root containment is
+	// enforced upstream, at the pkg/agent Start() call site.
+	if config.Workspace != "" {
+		resolvedWorkspace, err := ValidateWorkspaceSource(config.Workspace, "")
+		if err != nil {
+			return "", err
+		}
+		config.Workspace = resolvedWorkspace
+	}
+
 	// Persist workspace path in annotations for later sync
 	if config.Workspace != "" {
 		config.Annotations = ensureAnnotations(config.Annotations)
@@ -239,6 +482,19 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		config.Annotations["scion.git_clone_url"] = config.GitClone.URL
 	}
 
+	// Same reasoning as config.Workspace above: reject a home directory that
+	// is not an allowed agent-home path before it is persisted to the pod
+	// annotation that Sync() later trusts, and before it is copied into the
+	// pod below -- otherwise an unacceptable value would reach the pod on
+	// this first Run and only be caught afterward, on the next Sync.
+	if config.HomeDir != "" {
+		resolvedHomeDir, err := ValidateAgentHomeSource(config.HomeDir, "")
+		if err != nil {
+			return "", err
+		}
+		config.HomeDir = resolvedHomeDir
+	}
+
 	if config.HomeDir != "" {
 		config.Annotations = ensureAnnotations(config.Annotations)
 		config.Annotations["scion.homedir"] = config.HomeDir
@@ -248,6 +504,11 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	// Persist the resolved namespace as an annotation for lifecycle operations
 	config.Annotations = ensureAnnotations(config.Annotations)
 	config.Annotations["scion.namespace"] = namespace
+
+	// preCreateStart times the pre-create API calls below (secret/SPC
+	// cleanup and creation, PVC creation) as one aggregate, for start-time
+	// attribution. It does not change what any of these calls do.
+	preCreateStart := time.Now()
 
 	// Pre-clean stale resources from a previous agent with the same name.
 	// This handles cases where the agent was force-deleted from the hub
@@ -310,6 +571,9 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		}
 	}
 
+	runtimeLog.Info("Pre-create setup complete", "agent", config.Name, "namespace", namespace,
+		"phase", "pre-create", "elapsed_ms", time.Since(preCreateStart).Milliseconds())
+
 	// --- N2-2b: Per-project advisory lock for NFS init-container provisioning ---
 	//
 	// When backend=nfs with a bound PV claim, acquire the per-project lock
@@ -370,12 +634,15 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 
 	runtimeLog.Info("Creating pod", "agent", config.Name, "namespace", namespace, "image", config.Image, "phase", "pod-create")
 	fmt.Printf("  Provisioning pod '%s' in namespace '%s'...\n", config.Name, namespace)
+	podCreateStart := time.Now()
 	createdPod, err := r.Client.Clientset.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		// Clean up orphaned secrets on pod creation failure
 		r.cleanupAgentSecrets(ctx, namespace, config.Name)
 		return "", fmt.Errorf("failed to create pod: %w", err)
 	}
+	runtimeLog.Info("Pod created", "agent", config.Name, "namespace", namespace,
+		"phase", "pod-create", "elapsed_ms", time.Since(podCreateStart).Milliseconds())
 
 	// Wait for Ready
 	runtimeLog.Info("Waiting for pod ready", "agent", config.Name, "namespace", namespace, "phase", "wait-schedule")
@@ -383,23 +650,45 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		return createdPod.Name, err
 	}
 
+	// Wait for Running to really mean exec-able before the first exec below
+	// (home sync, or the startup-gate touch when HomeDir is unset). This is
+	// the only exec call site that runs unconditionally for every pod this
+	// function creates — local or NFS backend, fresh create or a restart's
+	// stop-then-create — so placing it here once covers all of them. See
+	// waitForExecReady's doc comment for why Running alone is insufficient.
+	runtimeLog.Info("Waiting for pod exec tunnel", "agent", config.Name, "namespace", namespace, "phase", "wait-exec")
+	if err := r.waitForExecReady(ctx, namespace, createdPod.Name, config.Name); err != nil {
+		return createdPod.Name, fmt.Errorf("pod exec tunnel not ready: %w", err)
+	}
+
 	if config.HomeDir != "" {
 		destHome := util.GetHomeDir(config.UnixUsername)
 		runtimeLog.Info("Syncing agent home", "agent", config.Name, "source", config.HomeDir, "dest", destHome, "phase", "home-sync")
 		fmt.Printf("  Syncing agent home (%s -> %s)...\n", config.HomeDir, destHome)
+		homeSyncStart := time.Now()
 		err = r.syncWithRetry(ctx, func() error {
 			return r.syncToPod(ctx, namespace, createdPod.Name, config.HomeDir, destHome)
 		})
 		if err != nil {
 			return createdPod.Name, fmt.Errorf("failed to sync home: %w", err)
 		}
+		syncMs := time.Since(homeSyncStart).Milliseconds()
 		// Fix ownership: tar extraction runs as root via K8s exec, so synced
 		// files are owned by root. chown them to the scion user so the
 		// privilege-dropped harness process can access its home directory.
-		chownCmd := fmt.Sprintf("chown -R %s:%s %s", config.UnixUsername, config.UnixUsername, destHome)
-		if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"sh", "-c", chownCmd}); err != nil {
+		chownStart := time.Now()
+		//
+		// An empty UnixUsername makes destHome itself util.GetHomeDir("") ==
+		// "/home" (a critical system directory, not a per-user home), so the
+		// in-pod chown below is refused outright rather than recursively
+		// re-owning every home directory on the node.
+		if chownArgs, ok := chownRecursiveArgs(config.UnixUsername, destHome); !ok {
+			runtimeLog.Warn("Skipping home directory chown: UnixUsername is empty", "agent", config.Name, "destHome", destHome)
+		} else if _, err := r.execInPod(ctx, namespace, createdPod.Name, chownArgs); err != nil {
 			runtimeLog.Debug("Failed to chown home directory (non-fatal)", "error", err)
 		}
+		runtimeLog.Info("Home sync complete", "agent", config.Name, "phase", "home-sync",
+			"sync_ms", syncMs, "chown_ms", time.Since(chownStart).Milliseconds())
 	}
 
 	// Workspace sync: NFS-backed pods have workspace bytes pre-populated by the
@@ -420,17 +709,25 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	if config.Workspace != "" && (config.WorkspaceBackendName != "nfs" || !nfsProvisioned) {
 		runtimeLog.Info("Syncing workspace", "agent", config.Name, "source", config.Workspace, "phase", "workspace-sync")
 		fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", config.Workspace)
+		workspaceSyncStart := time.Now()
 		err = r.syncWithRetry(ctx, func() error {
 			return r.syncToPod(ctx, namespace, createdPod.Name, config.Workspace, "/workspace")
 		})
 		if err != nil {
 			return createdPod.Name, fmt.Errorf("failed to sync workspace: %w", err)
 		}
-		// Fix workspace ownership for the scion user
-		chownCmd := fmt.Sprintf("chown -R %s:%s /workspace", config.UnixUsername, config.UnixUsername)
-		if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"sh", "-c", chownCmd}); err != nil {
+		syncMs := time.Since(workspaceSyncStart).Milliseconds()
+		chownStart := time.Now()
+		// Fix workspace ownership for the scion user. An empty UnixUsername
+		// would build an owner:group spec of ":" -- refused outright rather
+		// than run chown with no actual target user.
+		if chownArgs, ok := chownRecursiveArgs(config.UnixUsername, "/workspace"); !ok {
+			runtimeLog.Warn("Skipping workspace chown: UnixUsername is empty", "agent", config.Name)
+		} else if _, err := r.execInPod(ctx, namespace, createdPod.Name, chownArgs); err != nil {
 			runtimeLog.Debug("Failed to chown workspace (non-fatal)", "error", err)
 		}
+		runtimeLog.Info("Workspace sync complete", "agent", config.Name, "phase", "workspace-sync",
+			"sync_ms", syncMs, "chown_ms", time.Since(chownStart).Milliseconds())
 	} else if config.WorkspaceBackendName == "nfs" && nfsProvisioned {
 		runtimeLog.Info("Skipping workspace sync (NFS backend: workspace pre-populated by init container)",
 			"agent", config.Name, "phase", "workspace-sync-skip")
@@ -440,9 +737,12 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	// so it's safe to launch sciontool init → tmux → harness. The gate loop
 	// in the pod command polls for this marker file (see buildPod for details).
 	runtimeLog.Info("Signaling startup gate", "agent", config.Name, "phase", "startup-gate")
+	gateStart := time.Now()
 	if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"touch", "/tmp/.scion-home-ready"}); err != nil {
 		return createdPod.Name, fmt.Errorf("failed to signal startup gate: %w", err)
 	}
+	runtimeLog.Info("Startup gate signaled", "agent", config.Name, "phase", "startup-gate",
+		"elapsed_ms", time.Since(gateStart).Milliseconds())
 
 	runtimeLog.Info("Agent started successfully", "agent", createdPod.Name, "namespace", namespace, "phase", "complete")
 	fmt.Printf("Agent '%s' started successfully.\n", createdPod.Name)
@@ -551,6 +851,13 @@ func (r *KubernetesRuntime) createAgentSecret(ctx context.Context, namespace, ag
 // references to K8s-synced secrets for environment variable injection.
 func (r *KubernetesRuntime) createSecretProviderClass(ctx context.Context, namespace, agentName string, secrets []api.ResolvedSecret, labels map[string]string) (string, error) {
 	spcName := fmt.Sprintf("scion-agent-%s", agentName)
+	// envSecretName is only ever referenced below when !r.GKEMode (the
+	// secretObjects block a few lines down is skipped entirely in GKE mode).
+	// Run only calls createSecretProviderClass when r.GKEMode is true
+	// (useGKEPath starts from r.GKEMode), so today this name is declared but
+	// never placed into secretObjects, and the Secrets Store CSI driver never
+	// materializes it. cleanupAgentSecrets deliberately does not delete this
+	// name; see its doc comment.
 	envSecretName := fmt.Sprintf("scion-agent-%s-env", agentName)
 
 	// Build the GCP SM secrets parameter as YAML
@@ -750,30 +1057,65 @@ func toStringInterfaceMap(m map[string]string) map[string]interface{} {
 	return result
 }
 
-// cleanupAgentSecrets removes K8s Secrets and (if GKE mode) SecretProviderClasses
-// associated with an agent, identified by the scion.agent label.
+// cleanupAgentSecrets removes the per-agent Secrets (scion-agent-<name>,
+// scion-auth-<name>) and, in GKE mode, the SecretProviderClass created for an
+// agent. These three names are the only per-agent Secret/SecretProviderClass
+// objects this runtime ever creates (createAgentSecret and
+// createSecretProviderClass for scion-agent-<name>, createAuthFileSecret for
+// scion-auth-<name> — there is no fourth creation site), so deleting exactly
+// these three leaves nothing of this runtime's own making behind.
+//
+// agentName must be the exact identifier used to create those objects —
+// config.Name in Run, and the pod-name id in Delete. Delete's id is normally
+// the pod name (config.Name): callers resolve the agent to its pod first and
+// pass that name, falling back to the raw id only when the pod is not listed
+// (see pkg/agent/manager.go Stop). createAgentSecret, createSecretProviderClass,
+// and createAuthFileSecret derive their object names deterministically from
+// that same agentName (scion-agent-<agentName>, scion-auth-<agentName>),
+// which already embeds the project when the caller built it as
+// "<project>--<agent>" (see containerName in pkg/agent/run.go). Deleting by
+// that exact name is therefore inherently agent- and project-scoped: it
+// cannot be confused with another agent's or another project's objects, even
+// when several projects share a namespace and an agent's bare name.
+//
+// It does NOT also derive and delete a "scion-agent-<agentName>-env" name for
+// the CSI driver-synced Secret described on envSecretName in
+// createSecretProviderClass. Unlike the two names above, that one is built by
+// appending a suffix rather than being the object's own creation-time name,
+// so it is not guaranteed to be unique: a slug may itself end in "-env" (an
+// agent literally named "<agent>-env" is valid), in which case the derived
+// name collides with that other agent's own real, deterministic
+// scion-agent-<other-agent> Secret. Guessing it is therefore unsafe, and that
+// object is not reachable via Run today anyway (see envSecretName's own
+// comment), so it is simply left alone.
+//
+// Known limitation: deletion here, like the Pod deletion in Delete and
+// cleanupStalePod, is unconditional on the deterministic name alone, with no
+// check of which run/incarnation of "this agent name" currently owns it. A
+// delete that overlaps in time with a fast recreate of the same agent name
+// can therefore remove the new incarnation's object instead of the old one's.
+// Closing that fully needs an incarnation identifier threaded through the
+// Runtime interface's Delete/Stop methods (shared across every runtime
+// backend), which is out of scope here.
 func (r *KubernetesRuntime) cleanupAgentSecrets(ctx context.Context, namespace, agentName string) {
-	selector := fmt.Sprintf("scion.agent=%s", agentName)
-
-	// Delete K8s Secrets by listing then deleting individually
-	secretList, err := r.Client.Clientset.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: selector,
-	})
-	if err == nil {
-		for _, s := range secretList.Items {
-			_ = r.Client.Clientset.CoreV1().Secrets(namespace).Delete(ctx, s.Name, metav1.DeleteOptions{})
+	secretNames := []string{
+		fmt.Sprintf("scion-agent-%s", agentName), // env/variable/file secrets (createAgentSecret)
+		fmt.Sprintf("scion-auth-%s", agentName),  // ResolvedAuth files (createAuthFileSecret)
+	}
+	for _, name := range secretNames {
+		if err := r.Client.Clientset.CoreV1().Secrets(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+			runtimeLog.Warn("Failed to delete per-agent Secret during cleanup",
+				"kind", "Secret", "name", name, "agent", agentName, "namespace", namespace, "error", err)
 		}
 	}
 
-	// Delete SecretProviderClasses if GKE mode
+	// SecretProviderClass shares the same name as the main agent Secret, but
+	// is a distinct GVR (secrets-store.csi.x-k8s.io), so there is no collision.
 	if r.GKEMode {
-		spcList, err := r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: selector,
-		})
-		if err == nil {
-			for _, spc := range spcList.Items {
-				_ = r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).Delete(ctx, spc.GetName(), metav1.DeleteOptions{})
-			}
+		spcName := fmt.Sprintf("scion-agent-%s", agentName)
+		if err := r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).Delete(ctx, spcName, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+			runtimeLog.Warn("Failed to delete per-agent SecretProviderClass during cleanup",
+				"kind", "SecretProviderClass", "name", spcName, "agent", agentName, "namespace", namespace, "error", err)
 		}
 	}
 }
@@ -1422,6 +1764,15 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 
 		initEnv := nfsProvisionEnv(config.GitCloneForInit)
+		// SCION_PROJECT_ID lets the init container's own provisioning logs
+		// (cmd/sciontool/commands/provision.go) identify which project they're
+		// provisioning, instead of falling back to "unknown" — unconditional
+		// and independent of GitCloneForInit, since every NFS-backed pod has a
+		// ProjectID regardless of whether the project is git-backed.
+		initEnv = append(initEnv, corev1.EnvVar{
+			Name:  "SCION_PROJECT_ID",
+			Value: config.ProjectID,
+		})
 		if len(sharedDirPairs) > 0 {
 			initEnv = append(initEnv, corev1.EnvVar{
 				Name:  "SCION_SHARED_DIR_PATHS",
@@ -1784,7 +2135,112 @@ func classifyTerminalWaitingReason(podName, initContainerName, reason, message s
 	}
 }
 
+// podTimingUnavailable marks a podLifecycleTimings field as not computable,
+// e.g. because the pod lacks the corresponding condition or container state
+// yet. Callers omit the log attribute rather than reporting a misleading 0.
+const podTimingUnavailable int64 = -1
+
+// podLifecycleTimings holds elapsed durations, in milliseconds, from a pod's
+// CreationTimestamp to each lifecycle milestone. Computed from pod status
+// fields already fetched by waitForPodReady's existing Get call — no extra
+// API calls. Any field left at podTimingUnavailable means the corresponding
+// condition or container state was missing (e.g. not yet reported) when the
+// pod snapshot was taken.
+//
+// Precision note: CreationTimestamp and the condition/container timestamps
+// below are all metav1.Time, serialized at whole-second (RFC3339) precision
+// by the API server, scheduler, kubelet and container runtime respectively.
+// So on a real cluster these values are always a multiple of 1000 with up to
+// about ±1s of rounding error, despite the _ms suffix — they are not
+// sub-second measurements.
+type podLifecycleTimings struct {
+	scheduledMs        int64
+	initializedMs      int64
+	containersReadyMs  int64
+	containerStartedMs int64
+}
+
+// nonNegativeMs converts d to milliseconds, clamping negative results to 0.
+// LastTransitionTime/StartedAt and CreationTimestamp are written by
+// different components (apiserver, scheduler, kubelet, container runtime)
+// on different clocks, all at whole-second precision, so clock skew plus
+// truncation can occasionally make a "later" event look earlier than pod
+// creation. Clamping avoids both logging a misleading negative duration and
+// an unlucky -1ms colliding with the podTimingUnavailable sentinel.
+func nonNegativeMs(d time.Duration) int64 {
+	if d < 0 {
+		return 0
+	}
+	return d.Milliseconds()
+}
+
+// computePodLifecycleTimings derives podLifecycleTimings for containerName
+// from pod's conditions and container statuses, relative to pod's
+// CreationTimestamp. It is pure and side-effect free so it can be unit
+// tested without a real (or fake) Kubernetes API server.
+func computePodLifecycleTimings(pod *corev1.Pod, containerName string) podLifecycleTimings {
+	t := podLifecycleTimings{
+		scheduledMs:        podTimingUnavailable,
+		initializedMs:      podTimingUnavailable,
+		containersReadyMs:  podTimingUnavailable,
+		containerStartedMs: podTimingUnavailable,
+	}
+	if pod == nil {
+		return t
+	}
+	created := pod.CreationTimestamp.Time
+	if created.IsZero() {
+		return t
+	}
+
+	for _, cond := range pod.Status.Conditions {
+		if cond.Status != corev1.ConditionTrue || cond.LastTransitionTime.IsZero() {
+			continue
+		}
+		switch cond.Type {
+		case corev1.PodScheduled:
+			t.scheduledMs = nonNegativeMs(cond.LastTransitionTime.Sub(created))
+		case corev1.PodInitialized:
+			t.initializedMs = nonNegativeMs(cond.LastTransitionTime.Sub(created))
+		case corev1.ContainersReady:
+			t.containersReadyMs = nonNegativeMs(cond.LastTransitionTime.Sub(created))
+		}
+	}
+
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name != containerName {
+			continue
+		}
+		if cs.State.Running != nil && !cs.State.Running.StartedAt.IsZero() {
+			t.containerStartedMs = nonNegativeMs(cs.State.Running.StartedAt.Sub(created))
+		}
+	}
+
+	return t
+}
+
+// logPodLifecycleTimings emits one Info log line with wait_ready_ms (the
+// total time spent in waitForPodReady) plus any lifecycle milestones that
+// computePodLifecycleTimings could determine, omitting unavailable ones.
+func logPodLifecycleTimings(namespace, podName string, waitMs int64, t podLifecycleTimings) {
+	attrs := []any{"pod", podName, "namespace", namespace, "phase", "wait-schedule", "wait_ready_ms", waitMs}
+	if t.scheduledMs != podTimingUnavailable {
+		attrs = append(attrs, "scheduled_ms", t.scheduledMs)
+	}
+	if t.initializedMs != podTimingUnavailable {
+		attrs = append(attrs, "initialized_ms", t.initializedMs)
+	}
+	if t.containersReadyMs != podTimingUnavailable {
+		attrs = append(attrs, "containers_ready_ms", t.containersReadyMs)
+	}
+	if t.containerStartedMs != podTimingUnavailable {
+		attrs = append(attrs, "container_started_ms", t.containerStartedMs)
+	}
+	runtimeLog.Info("Pod ready", attrs...)
+}
+
 func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podName string) error {
+	waitStart := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute) // GKE Autopilot can be slow
 	defer cancel()
 
@@ -1897,6 +2353,8 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 			if pod.Status.Phase == corev1.PodRunning {
 				// Also ensure container is actually running
 				if containerStatus != nil && containerStatus.State.Running != nil {
+					logPodLifecycleTimings(namespace, podName, time.Since(waitStart).Milliseconds(),
+						computePodLifecycleTimings(pod, agentContainerName))
 					return nil
 				}
 			}
@@ -1910,7 +2368,32 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 	}
 }
 
+// countingReader wraps an io.Reader and counts the bytes read through it.
+// Used to measure the size of the tar stream sent to a pod during sync
+// without needing to buffer it.
+type countingReader struct {
+	r     io.Reader
+	count int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.count += int64(n)
+	return n, err
+}
+
 func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, sourcePath, destPath string) error {
+	// Guard against fake/test clientsets where Config is nil (no real API
+	// server), same as execInPod. Also guard Client itself: a KubernetesRuntime
+	// built as a literal rather than via NewKubernetesRuntime has a nil
+	// Client, and r.Client.Config would panic before ever reaching the
+	// Config check. Without either guard, a test or caller hitting this path
+	// with no exec transport gets a nil-pointer panic from the REST client
+	// deep inside the SPDY executor setup below instead of a clear error.
+	if r.Client == nil || r.Client.Config == nil {
+		return fmt.Errorf("K8s REST config not available (test environment)")
+	}
+	syncStart := time.Now()
 	fmt.Printf("  Preparing tar archive from %s...\n", sourcePath)
 	tarCmd := exec.CommandContext(ctx, "tar", "-cz", "-C", sourcePath, ".")
 	tarCmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
@@ -1918,6 +2401,7 @@ func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, s
 	if err != nil {
 		return err
 	}
+	counted := &countingReader{r: stdout}
 
 	if err := tarCmd.Start(); err != nil {
 		return err
@@ -1957,7 +2441,7 @@ func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, s
 	var stderr bytes.Buffer
 	// We stream to os.Stdout to see if there is any output from tar that helps debugging
 	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdin:  stdout,
+		Stdin:  counted,
 		Stdout: os.Stdout,
 		Stderr: &stderr,
 	})
@@ -1980,6 +2464,8 @@ func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, s
 	}
 
 	fmt.Printf("  Sync to %s complete.\n", destPath)
+	runtimeLog.Info("Sync to pod complete", "pod", podName, "dest", destPath,
+		"elapsed_ms", time.Since(syncStart).Milliseconds(), "bytes", counted.count)
 	return nil
 }
 
@@ -2068,7 +2554,10 @@ func (r *KubernetesRuntime) Delete(ctx context.Context, id string) error {
 		namespace = r.resolveNamespace(ctx, id)
 	}
 
-	// Clean up agent secrets and SecretProviderClasses before deleting the pod
+	// Clean up agent secrets and SecretProviderClasses before deleting the
+	// pod. id is the pod name regardless of whether the pod itself still
+	// exists, so this is scoped to the right agent and project even when
+	// the pod was already gone (see cleanupAgentSecrets).
 	r.cleanupAgentSecrets(ctx, namespace, id)
 
 	// 'id' is the pod name
@@ -2460,8 +2949,43 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		return fmt.Errorf("agent '%s' does not have a workspace path recorded", id)
 	}
 
+	// Only a path that passes the fixed floors may be used here, as either a
+	// sync source (broker disk -> agent, SyncTo direction) or a sync
+	// destination (agent -> broker disk, SyncFrom direction). This is a
+	// value read straight from a persisted pod annotation, not freshly
+	// computed, so it needs this check independent of whatever validated it
+	// (or didn't) when it was first written. No per-project root is
+	// available at this call site — only agent annotations/labels are in
+	// scope, with no project directory or settings to derive one from — so
+	// only the fixed deny-set applies, not per-project root containment.
+	resolvedWorkspacePath, err := ValidateWorkspaceSource(workspacePath, "")
+	if err != nil {
+		return err
+	}
+	workspacePath = resolvedWorkspacePath
+
 	homeDir := agent.Annotations["scion.homedir"]
 	username := agent.Annotations["scion.username"]
+
+	// Same reasoning as workspacePath above: homeDir is a host path read
+	// straight from a persisted annotation, used below as either a sync
+	// destination (SyncFrom) or a sync source (SyncTo), and needs the same
+	// check independent of whatever validated it when first written. This is
+	// an agent's home directory, not a workspace, so it goes through
+	// ValidateAgentHomeSource rather than ValidateWorkspaceSource: the two
+	// admit disjoint shapes under ~/.scion (see ValidateAgentHomeSource's
+	// doc comment). Agent homes under ~/.scion take one of three layouts
+	// (global, hub-managed, or externalized git project); a home outside
+	// ~/.scion entirely (a plain in-repo project's own agent home, for
+	// example) is subject to the fixed floors only, the same as any other
+	// source this function's sibling validates.
+	if homeDir != "" {
+		resolvedHomeDir, err := ValidateAgentHomeSource(homeDir, "")
+		if err != nil {
+			return err
+		}
+		homeDir = resolvedHomeDir
+	}
 
 	// Resolve namespace
 	namespace := r.DefaultNamespace
@@ -2613,6 +3137,16 @@ func (r *KubernetesRuntime) execWithOptionalStdin(ctx context.Context, id string
 // execInPod runs a command in the pod's "agent" container as root (the default
 // K8s exec user). This is used for administrative tasks like chown after syncing files.
 func (r *KubernetesRuntime) execInPod(ctx context.Context, namespace, podName string, cmd []string) (string, error) {
+	execStart := time.Now()
+	// cmdName identifies the exec for logging without ever including its
+	// arguments: call sites pass fixed command verbs (sh, touch) but never
+	// secret or credential values, and this keeps it that way even if a
+	// future call site's arguments did carry something sensitive.
+	cmdName := ""
+	if len(cmd) > 0 {
+		cmdName = cmd[0]
+	}
+
 	// Guard against fake/test clientsets where Config is nil (no real API server).
 	if r.Client.Config == nil {
 		return "", fmt.Errorf("K8s REST config not available (test environment)")
@@ -2644,8 +3178,12 @@ func (r *KubernetesRuntime) execInPod(ctx context.Context, namespace, podName st
 		Stderr: &stderr,
 	})
 	if err != nil {
+		runtimeLog.Debug("exec in pod failed", "pod", podName, "cmd", cmdName,
+			"elapsed_ms", time.Since(execStart).Milliseconds(), "error", err)
 		return stdout.String(), fmt.Errorf("exec failed: %w (stderr: %s)", err, stderr.String())
 	}
+	runtimeLog.Debug("exec in pod complete", "pod", podName, "cmd", cmdName,
+		"elapsed_ms", time.Since(execStart).Milliseconds())
 	return stdout.String(), nil
 }
 

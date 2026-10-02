@@ -52,6 +52,12 @@ func TestDefaultModelAliases_KnownHarnessReturnsBuiltInTable(t *testing.T) {
 	aliases := DefaultModelAliases("claude")
 	assert.NotEmpty(t, aliases)
 	assert.Contains(t, aliases, "large")
+	// Each alias must resolve to a concrete model. Model strings are not
+	// pinned here because they are bumped intentionally in config.yaml.
+	for alias, model := range aliases {
+		assert.NotEmpty(t, model, "alias %q", alias)
+		assert.NotEqual(t, alias, model, "alias %q resolves to itself", alias)
+	}
 }
 
 // TestDefaultModelAliases_UnknownOrEmptyHarnessReturnsNil is the "nil/empty

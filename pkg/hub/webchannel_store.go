@@ -71,12 +71,9 @@ type WebChatStore interface {
 
 	// GetThreads returns thread watermarks for the given user and project,
 	// ordered by last_activity_at descending, limited to `limit` rows.
-	// This is the backing query for GET /api/v1/chat/threads.
+	// The wave-1 thread-rail route this backed is gone; the remaining
+	// caller is a test that reads back TouchThread's watermark write.
 	GetThreads(ctx context.Context, userID, projectID string, limit int) ([]WebChatThread, error)
-
-	// MarkThreadRead advances the last_read_at watermark for the given
-	// (user, project, agent) thread to the current time.
-	MarkThreadRead(ctx context.Context, userID, projectID, agentID string) error
 
 	// --- Wave-2 Topic methods ---
 
@@ -720,20 +717,6 @@ SELECT agent_id, COALESCE(last_message_id, ''), COALESCE(last_activity_at, ''), 
 		threads = append(threads, t)
 	}
 	return threads, rows.Err()
-}
-
-// MarkThreadRead advances the last_read_at watermark to now.
-func (s *sqliteWebChatStore) MarkThreadRead(ctx context.Context, userID, projectID, agentID string) error {
-	const query = `
-UPDATE webchat_thread
-   SET last_read_at = ?
- WHERE user_id = ? AND project_id = ? AND agent_id = ?
-`
-	_, err := s.db.ExecContext(ctx, query, time.Now().UTC().Format(time.RFC3339Nano), userID, projectID, agentID)
-	if err != nil {
-		return fmt.Errorf("webchat store: mark thread read: %w", err)
-	}
-	return nil
 }
 
 // ---------------------------------------------------------------------------

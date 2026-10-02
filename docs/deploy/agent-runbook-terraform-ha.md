@@ -676,7 +676,7 @@ apply, expect an all-adds plan. Then:
 terraform -chdir=deploy/terraform/configurations/hub apply /tmp/<hub_name>.tfplan
 ```
 
-**A 403 on a secret named `scion-hub-<hash>-...` shortly after this apply is
+**A 403 on a secret named `scion-<hash>-...` shortly after this apply is
 IAM propagation, not a wrong condition.** Re-apply — meaning re-plan into a
 new plan file and go through the plan-review gate again — do not widen any
 IAM condition to work around it.
@@ -894,14 +894,16 @@ Read this section before touching an existing (not brand-new) deployment.
   keys. If a hub image's error message suggests granting broad
   `secretmanager.admin` project-wide, **do not follow that suggestion** in
   a shared project; it means the hub image predates the hub-prefixed secret
-  naming and needs an upgrade instead. A legacy, wider grant made obsolete
-  by a hub-prefixed migration is a **separate, future code change** —
-  removing it needs its own migration tool run and its own per-resource
-  ack under the plan-review gate; it is not a step this runbook performs.
-  See
-  [`docs/deploy/migrate-names-cloudrun.md`](migrate-names-cloudrun.md) —
-  landing separately; if that file doesn't exist yet in this checkout, the
-  legacy grant should stay in place until it does.
+  naming and needs an upgrade instead. The modules no longer carry the
+  legacy hub-scope grant or the legacy OIDC-signing-key pre-create at all
+  (a fresh hub generates and stores its own OIDC key on first boot under
+  the hub-prefixed name) — see
+  [`docs/deploy/migrate-names-cloudrun.md`](migrate-names-cloudrun.md) for
+  the migration that preceded their removal.
+- **Upgrading an existing hub to a module version without the legacy
+  grant/pre-create:** see
+  [`docs/deploy/migrate-names-cloudrun.md`](migrate-names-cloudrun.md#7-for-terraform-managed-hubs-what-can-be-removed-afterward)
+  §7 for the required run order and what to expect in the plan.
 
 ---
 
@@ -909,7 +911,7 @@ Read this section before touching an existing (not brand-new) deployment.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `403` on `scion-hub-<hash>-...` shortly after a hub's first apply | IAM condition propagation delay | Re-apply. Do not widen the condition. |
+| `403` on `scion-<hash>-...` shortly after a hub's first apply | IAM condition propagation delay | Re-apply. Do not widen the condition. |
 | Agent starts but can't reach Vertex despite Workload Identity being wired | GCP identity is still Block | Set Passthrough — see step 9. |
 | Agent pod fails with image-pull `NotFound` on `workspace-provision` | Harness image not published to `image_registry` | Publish the image, or pick a different harness. See the README's "Harness images" section. |
 | Agent create returns `503` but the agent goes on to start | Cold Autopilot node exceeding the hub's client timeout to the runtime broker | Not necessarily a failure. Confirm whether the agent started (step 8.4) before retrying the *create* — a blind retry on an agent that did start risks creating a duplicate. |

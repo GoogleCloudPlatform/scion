@@ -643,5 +643,18 @@ func Spec() []TableFixture {
 				"created_at": baseTime, "updated_at": baseTime,
 			},
 		}},
+
+		// ---- User terminal workspaces ----
+		{Table: "user_terminal_workspaces", Rows: []row{
+			{
+				"id":                 "c1d00000-0000-0000-0000-000000000001",
+				"user_id":            userID,
+				"agent_ids":          `["` + agentID + `"]`,
+				"frontmost_agent_id": agentID,
+				"schema_version":     1,
+				"revision":           1,
+				"update_time":        baseTime,
+			},
+		}},
 	}
 }

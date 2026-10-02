@@ -16,20 +16,38 @@
 
 package hub
 
-// End-to-end routing tests for the api.AgentActionKeys early branches wired
-// into handleAgentAction (handlers_agents_core.go) and
-// handleProjectAgentAction (handlers_projects_core.go) -- task 2.1's round-1
-// review (reviews/2.1-r1.md, findings 2 and 3) required these to be driven
-// through the real mux (srv.Handler()), not just the extracted
+// End-to-end routing tests for the api.AgentActionKeys branches wired into
+// handleAgentAction (handlers_agents_core.go) and handleProjectAgentAction
+// (handlers_projects_core.go). Originally written against task 2.1's
+// temporary routing seam (ptone/scion#2195), driven through the real mux
+// (srv.Handler()) rather than just the extracted
 // authorizeAgentKeys/authorizeAgentKeysCrossProject functions the sibling
-// file authorize_agentkeys_matrix_test.go covers. No real keys handler
-// exists yet (task 2.2 adds ExecuteAgentKeys): every "allowed" case below
-// still ends in the generic `not_found`/"Action" 404 the two switches'
-// shared default branch already produces for any action without a
-// dispatch case, exactly like hitting any other not-yet-implemented action
-// on these routes today. These tests only assert that the AUTHORIZATION
-// decision reached before that point is correct and identical in shape
-// across both route shapes.
+// file authorize_agentkeys_matrix_test.go covers.
+//
+// Task 2.2 (ptone/scion#2196) replaced that seam wholesale with the real
+// ExecuteAgentKeys operation (execute_agent_keys.go), per the binding
+// integration obligation recorded on ptone/scion#2196 and the design-owner
+// ruling on ptone/scion#2195 (contract §3's phase-boundary clarification).
+// Two consequences updated throughout this file:
+//
+//   - ValidateBody now runs before target resolution and authorization, so
+//     every request below must carry a valid {"keys":...} body
+//     (validKeysBody) -- an empty/nil body previously reached the
+//     authorization decision under 2.1's seam because no validation existed
+//     yet; under 2.2 it would 400 invalid_request before ever reaching the
+//     authorization code these tests exist to pin.
+//   - An operation ID is minted as soon as validation succeeds and appears
+//     on every outcome from that point on, including denials and
+//     resolution misses that previously had none under 2.1's temporary
+//     seam (contract §3 invariant 3). None of these route tests installs a
+//     dispatcher (via SetDispatcher) unless it says so explicitly, so an
+//     *authorized* call now reaches real admission and ends in 503
+//     keys_unavailable (no dispatcher configured, hence no immediate route)
+//     -- replacing 2.1's "falls through to the generic unimplemented-action
+//     404" placeholder outcome. The fixture agents do carry a real
+//     RuntimeBrokerID (see newAgentKeysRouteFixture) for the tests in
+//     execute_agent_keys_test.go that install the real HTTPAgentDispatcher
+//     and need it to resolve.
 
 import (
 	"bytes"
@@ -38,14 +56,21 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
+
+// validKeysBody is a minimal, valid /keys request body -- everywhere a test
+// below needs to get past ValidateBody so it can exercise the
+// resolution/authorization/admission behavior beyond it.
+var validKeysBody = map[string]string{"keys": "C-c"}
 
 // agentKeysRouteFixture builds a server plus two real projects/agents so the
 // tests below can exercise both /keys route shapes end-to-end.
@@ -82,14 +107,32 @@ func newAgentKeysRouteFixture(t *testing.T) *agentKeysRouteFixture {
 	projB := &store.Project{ID: tid("agentkeys-route-proj-b"), Name: "Route B", Slug: "agentkeys-route-proj-b", OwnerID: owner.ID}
 	require.NoError(t, s.CreateProject(ctx, projB))
 
+	// A real store.RuntimeBroker row, assigned to both fixture agents below,
+	// so RuntimeBrokerID resolves to something real -- required for the
+	// real-dispatcher integration tests (TestExecuteAgentKeys_RealHTTPDispatcher*
+	// in execute_agent_keys_test.go), which route through
+	// HTTPAgentDispatcher.DispatchAgentKeys and its own
+	// getBrokerEndpoint(ctx, target.RuntimeBrokerID) store lookup. Tests that
+	// use the fake dispatcher (fakeAgentKeysDispatcher) never look at this
+	// broker row at all, so its presence does not change their behavior; an
+	// authorized call with no dispatcher configured at all (the default
+	// unless a test opts in via SetDispatcher) still ends in 503
+	// keys_unavailable, since that determination is
+	// s.GetDispatcher() == nil, not anything about the target agent.
+	broker := &store.RuntimeBroker{
+		ID: tid("agentkeys-route-broker"), Name: "agentkeys-route-broker", Slug: "agentkeys-route-broker",
+		Endpoint: "http://broker.invalid:9800", Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
 	agentA := &store.Agent{
 		ID: tid("agentkeys-route-agent-a"), Slug: "agentkeys-route-agent-a", Name: "Agent A",
-		ProjectID: projA.ID, Phase: string(state.PhaseRunning), OwnerID: owner.ID,
+		ProjectID: projA.ID, Phase: string(state.PhaseRunning), OwnerID: owner.ID, RuntimeBrokerID: broker.ID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentA))
 	agentB := &store.Agent{
 		ID: tid("agentkeys-route-agent-b"), Slug: "agentkeys-route-agent-b", Name: "Agent B",
-		ProjectID: projB.ID, Phase: string(state.PhaseRunning), OwnerID: owner.ID,
+		ProjectID: projB.ID, Phase: string(state.PhaseRunning), OwnerID: owner.ID, RuntimeBrokerID: broker.ID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentB))
 
@@ -114,28 +157,22 @@ func (f *agentKeysRouteFixture) agentToken(t *testing.T, callerAgentID, callerPr
 	return tok
 }
 
-// errorEnvelope decodes a Hub error envelope response body.
-func errorEnvelope(t *testing.T, body []byte) (code, message string) {
-	t.Helper()
-	var env struct {
-		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	require.NoError(t, json.Unmarshal(body, &env), "response body: %s", string(body))
-	return env.Error.Code, env.Error.Message
+// keysErrorEnvelope decodes a Hub error envelope response body, including
+// the details map so callers can inspect operation_id presence/value.
+type keysErrorEnvelope struct {
+	Code    string                 `json:"code"`
+	Message string                 `json:"message"`
+	Details map[string]interface{} `json:"details"`
 }
 
-// unimplementedActionNotFoundMessage is NotFound(w, "Action")'s exact
-// message -- what an *authorized* keys call currently produces (no
-// dispatch case exists yet; contract §10's phase-boundary note). It is
-// deliberately distinct from a target-resolution miss's message on either
-// route shape (writeErrorFromErr's "Resource not found" on T,
-// NotFound(w, "Agent")'s "Agent not found" on P), so tests can tell
-// "authorized, no handler yet" apart from "target not found" even though
-// both currently answer 404 not_found.
-const unimplementedActionNotFoundMessage = "Action not found"
+func decodeKeysError(t *testing.T, body []byte) keysErrorEnvelope {
+	t.Helper()
+	var env struct {
+		Error keysErrorEnvelope `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(body, &env), "response body: %s", string(body))
+	return env.Error
+}
 
 // agentKeysLookupSpyStore wraps a store.Store and counts calls to the two
 // agent-resolution methods, so a test can prove no agent lookup ran before
@@ -173,43 +210,38 @@ func (s *agentKeysLookupSpyStore) lookupCount() int32 {
 
 // TestAgentActionKeysRoute_TopLevel_CrossProjectAndMissing pins AK-21 (an
 // existing, foreign-project target: 422) and AK-21b (a target ID that does
-// not exist in any project: 404) on the top-level route.
+// not exist in any project: 404) on the top-level route. Task 2.2: both now
+// carry the real operation ID (contract §3 invariant 3).
 func TestAgentActionKeysRoute_TopLevel_CrossProjectAndMissing(t *testing.T) {
 	f := newAgentKeysRouteFixture(t)
 	token := f.agentToken(t, tid("agentkeys-route-caller-t"), f.projectA.ID, ScopeAgentLifecycle)
 
 	t.Run("AK-21: existing target in a foreign project -> 422", func(t *testing.T) {
-		rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentInB.ID+"/keys", nil, token)
-		assertKeysRouteOutcome(t, "top-level", rec, http.StatusUnprocessableEntity, "cross_project_keys_unsupported")
+		rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentInB.ID+"/keys", validKeysBody, token)
+		assertKeysDenialOutcome(t, "top-level", rec, http.StatusUnprocessableEntity, "cross_project_keys_unsupported")
 	})
 
 	t.Run("AK-21b: nonexistent target ID -> 404 not_found", func(t *testing.T) {
-		rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+tid("agentkeys-route-nonexistent")+"/keys", nil, token)
+		rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+tid("agentkeys-route-nonexistent")+"/keys", validKeysBody, token)
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
 		}
-		if code, _ := errorEnvelope(t, rec.Body.Bytes()); code != "not_found" {
-			t.Errorf("code = %q, want not_found (not agent_not_found)", code)
+		env := decodeKeysError(t, rec.Body.Bytes())
+		if env.Code != "not_found" {
+			t.Errorf("code = %q, want not_found (not agent_not_found)", env.Code)
 		}
-		// Round-6 review finding 1: pin the keys-shaped not_found as
-		// sanitized too (contract §3 invariant 3's non-operation-ID half
-		// names "keys-shaped not_found" alongside keys_denied and
-		// cross_project_keys_unsupported), not just "code == not_found and
-		// message != the unimplemented-action one". writeErrorFromErr's
-		// message for a store.ErrNotFound is the fixed "Resource not
-		// found" on this route; assertSanitizedDenialBody's generic checks
-		// (no operation_id, no details, no leaked "keys: " reason) apply
-		// here exactly as they do to a 403/422 denial, even though this
-		// 404 comes from writeErrorFromErr rather than
-		// writeAgentKeysAuthzDenial.
-		assertSanitizedDenialBody(t, "top-level", rec, "Resource not found")
+		// Keys' own not_found shape (contract §3 invariant 3): a fixed,
+		// sanitized message and a real operation ID, never the other
+		// resolver's agent_not_found/{agent_slug,project_id} shape.
+		assertKeysDenialOutcome(t, "top-level", rec, http.StatusNotFound, "not_found")
 	})
 }
 
 // TestAgentActionKeysRoute_ProjectScoped_CrossProjectNoLookup pins AK-21c:
 // on the project-scoped route, an agent-credential cross-project refusal
 // must be decided before any agent-target lookup, so an existing and a
-// nonexistent slug produce identical 422 responses and neither triggers a
+// nonexistent slug produce identical (modulo each response's own,
+// necessarily distinct, operation ID) 422 responses and neither triggers a
 // store lookup.
 func TestAgentActionKeysRoute_ProjectScoped_CrossProjectNoLookup(t *testing.T) {
 	f := newAgentKeysRouteFixture(t)
@@ -219,35 +251,28 @@ func TestAgentActionKeysRoute_ProjectScoped_CrossProjectNoLookup(t *testing.T) {
 	f.srv.store = spy
 
 	existing := doRequestWithAgentToken(t, f.srv, http.MethodPost,
-		"/api/v1/projects/"+f.projectB.ID+"/agents/"+f.agentInB.Slug+"/keys", nil, token)
+		"/api/v1/projects/"+f.projectB.ID+"/agents/"+f.agentInB.Slug+"/keys", validKeysBody, token)
 	nonexistent := doRequestWithAgentToken(t, f.srv, http.MethodPost,
-		"/api/v1/projects/"+f.projectB.ID+"/agents/does-not-exist/keys", nil, token)
+		"/api/v1/projects/"+f.projectB.ID+"/agents/does-not-exist/keys", validKeysBody, token)
 	// AK-21c names both {project} forms the route accepts: the canonical
 	// UUID (exercised above) and the hosted {uuid}__{slug} form (contract
 	// §2.1). resolveProjectID extracts the UUID from either before this
 	// branch ever compares project.ID, so both must behave identically
 	// (round-4 review finding 3).
 	hostedForm := doRequestWithAgentToken(t, f.srv, http.MethodPost,
-		"/api/v1/projects/"+f.projectB.ID+"__"+f.projectB.Slug+"/agents/"+f.agentInB.Slug+"/keys", nil, token)
+		"/api/v1/projects/"+f.projectB.ID+"__"+f.projectB.Slug+"/agents/"+f.agentInB.Slug+"/keys", validKeysBody, token)
 
 	cases := map[string]*httptest.ResponseRecorder{
 		"existing slug": existing, "nonexistent slug": nonexistent, "hosted {uuid}__{slug} project form": hostedForm,
 	}
 	for name, rec := range cases {
-		assertKeysRouteOutcome(t, name, rec, http.StatusUnprocessableEntity, "cross_project_keys_unsupported")
+		assertKeysDenialOutcome(t, name, rec, http.StatusUnprocessableEntity, "cross_project_keys_unsupported")
 	}
 
-	// Byte-for-byte, not just status/code (round-5 review finding 2): a
-	// message or details difference that reveals whether the slug exists
-	// would pass a status/code-only comparison.
-	if !bytes.Equal(existing.Body.Bytes(), nonexistent.Body.Bytes()) {
-		t.Fatalf("existing and nonexistent slug response bodies differ:\n%s\nvs\n%s",
-			existing.Body.String(), nonexistent.Body.String())
-	}
-	if !bytes.Equal(existing.Body.Bytes(), hostedForm.Body.Bytes()) {
-		t.Fatalf("canonical-UUID and hosted-form response bodies differ:\n%s\nvs\n%s",
-			existing.Body.String(), hostedForm.Body.String())
-	}
+	// Identical except each response's own operation ID: a message or
+	// details difference beyond that would reveal whether the slug exists.
+	assertSameOutcomeModuloOperationID(t, "existing vs nonexistent slug", existing, nonexistent)
+	assertSameOutcomeModuloOperationID(t, "canonical-UUID vs hosted-form", existing, hostedForm)
 
 	if got := spy.lookupCount(); got != 0 {
 		t.Fatalf("expected zero agent lookups before the cross-project refusal, got %d (GetAgent=%d GetAgentBySlug=%d)",
@@ -264,8 +289,12 @@ func TestAgentActionKeysRoute_ProjectScoped_CrossProjectNoLookup(t *testing.T) {
 // nonexistent UUID; AK-21f: a bare slug, which never resolves). This test
 // closes that gap for both caller kinds, asserting the shared gate's
 // ordinary "Project not found" 404 (identical across callers, no
-// operation_id, and decided before any keys-specific code -- including the
-// cross-project pre-check -- ever runs, per AK-21e/AK-21f).
+// operation_id, and decided before any keys-specific code -- including
+// ValidateBody and the cross-project pre-check -- ever runs, per
+// AK-21e/AK-21f). Unaffected by task 2.2: this gate runs in
+// handleProjectAgents, entirely before handleProjectAgentAction (and so
+// before ExecuteAgentKeys) is ever called, so the request body's content
+// does not matter here -- nil is kept deliberately to underline that.
 func TestAgentActionKeysRoute_ProjectScoped_ProjectResolutionGate(t *testing.T) {
 	f := newAgentKeysRouteFixture(t)
 	agentCallerToken := f.agentToken(t, tid("agentkeys-route-caller-projgate"), f.projectA.ID, ScopeAgentLifecycle)
@@ -318,21 +347,20 @@ func TestAgentActionKeysRoute_ProjectScoped_ProjectResolutionGate(t *testing.T) 
 // assertProjectResolutionGate404 asserts the shared project resolver's
 // ordinary 404 (contract AK-21e/AK-21f): code not_found, message "Project
 // not found" (NotFound(w, "Project")'s exact text, distinct from the keys
-// gate's own "Agent not found"/"Action not found" messages), and no
-// operation_id in the body.
+// gate's own "Agent not found" message), and no operation_id in the body.
 func assertProjectResolutionGate404(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
 	}
-	code, message := errorEnvelope(t, rec.Body.Bytes())
-	if code != "not_found" {
-		t.Errorf("code = %q, want not_found", code)
+	env := decodeKeysError(t, rec.Body.Bytes())
+	if env.Code != "not_found" {
+		t.Errorf("code = %q, want not_found", env.Code)
 	}
-	if message != "Project not found" {
-		t.Errorf("message = %q, want %q", message, "Project not found")
+	if env.Message != "Project not found" {
+		t.Errorf("message = %q, want %q", env.Message, "Project not found")
 	}
-	if bytes.Contains(rec.Body.Bytes(), []byte("operation_id")) {
+	if _, present := env.Details["operation_id"]; present {
 		t.Errorf("body must not carry an operation_id (decided before any keys-specific code runs): %s", rec.Body.String())
 	}
 }
@@ -340,32 +368,30 @@ func assertProjectResolutionGate404(t *testing.T, rec *httptest.ResponseRecorder
 // TestAgentActionKeysRoute_ProjectScoped_SameProjectMissingAgent pins that a
 // same-project resolution miss reports the keys contract's own "not_found"
 // code, not the route's other resolver's "agent_not_found" shape (contract
-// §3 invariant 3).
+// §3 invariant 3), and -- task 2.2 -- now carries a real operation ID.
 func TestAgentActionKeysRoute_ProjectScoped_SameProjectMissingAgent(t *testing.T) {
 	f := newAgentKeysRouteFixture(t)
 	token := f.agentToken(t, tid("agentkeys-route-caller-p2"), f.projectA.ID, ScopeAgentLifecycle)
 
 	rec := doRequestWithAgentToken(t, f.srv, http.MethodPost,
-		"/api/v1/projects/"+f.projectA.ID+"/agents/does-not-exist/keys", nil, token)
+		"/api/v1/projects/"+f.projectA.ID+"/agents/does-not-exist/keys", validKeysBody, token)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
 	}
-	if code, _ := errorEnvelope(t, rec.Body.Bytes()); code != "not_found" {
-		t.Errorf("code = %q, want not_found (not agent_not_found)", code)
+	env := decodeKeysError(t, rec.Body.Bytes())
+	if env.Code != "not_found" {
+		t.Errorf("code = %q, want not_found (not agent_not_found)", env.Code)
 	}
-	// Round-6 review finding 1: pin the keys-shaped not_found as sanitized
-	// too, the same way 403/422 denials already are. NotFound(w, "Agent")'s
-	// fixed message is "Agent not found"; a regression that kept the
-	// not_found code but carried the other resolver's
-	// agent_not_found-style details (or an operation_id) would otherwise
-	// pass this test.
-	assertSanitizedDenialBody(t, "project-scoped", rec, "Agent not found")
+	assertKeysDenialOutcome(t, "project-scoped", rec, http.StatusNotFound, "not_found")
 }
 
 // TestAgentActionKeysRoute_ProjectScoped_StoreErrorIsNotA404 pins round-2
 // review finding 4: a store failure during target resolution must surface
-// as a generic 5xx (writeErrorFromErr), never as a 404 that would tell an
-// operator "agent does not exist" during a store outage.
+// as a generic 5xx (writeErrorFromErr's mapping), never as a 404 that would
+// tell an operator "agent does not exist" during a store outage. Task 2.2
+// extends this: since beginAgentKeysRequest has already minted an operation
+// ID by this point (contract §3 invariant 3), the 5xx must carry it too,
+// via finishAgentKeysInternalError.
 func TestAgentActionKeysRoute_ProjectScoped_StoreErrorIsNotA404(t *testing.T) {
 	f := newAgentKeysRouteFixture(t)
 	token := f.agentToken(t, tid("agentkeys-route-caller-p3"), f.projectA.ID, ScopeAgentLifecycle)
@@ -374,99 +400,141 @@ func TestAgentActionKeysRoute_ProjectScoped_StoreErrorIsNotA404(t *testing.T) {
 	f.srv.store = spy
 
 	rec := doRequestWithAgentToken(t, f.srv, http.MethodPost,
-		"/api/v1/projects/"+f.projectA.ID+"/agents/"+f.agentInA.Slug+"/keys", nil, token)
+		"/api/v1/projects/"+f.projectA.ID+"/agents/"+f.agentInA.Slug+"/keys", validKeysBody, token)
+	assertKeysInternalErrorOutcome(t, "project-scoped", rec, spy)
+}
+
+// TestAgentActionKeysRoute_TopLevel_StoreErrorIsNotA404 is the top-level
+// route's counterpart to the project-scoped test above:
+// agentKeysLookupSpyStore.GetAgent already supports failLookups, so the same
+// store-outage scenario applies here too.
+func TestAgentActionKeysRoute_TopLevel_StoreErrorIsNotA404(t *testing.T) {
+	f := newAgentKeysRouteFixture(t)
+	token := f.agentToken(t, tid("agentkeys-route-caller-t3"), f.projectA.ID, ScopeAgentLifecycle)
+
+	spy := &agentKeysLookupSpyStore{Store: f.store, failLookups: true}
+	f.srv.store = spy
+
+	rec := doRequestWithAgentToken(t, f.srv, http.MethodPost,
+		"/api/v1/agents/"+f.agentInA.ID+"/keys", validKeysBody, token)
+	assertKeysInternalErrorOutcome(t, "top-level", rec, spy)
+}
+
+// assertKeysInternalErrorOutcome asserts rec is a generic 5xx (never a
+// 404), carries a non-empty details.operation_id, and that the 5xx actually
+// came from the keys branch's own agent-resolution attempt: a 500 from
+// anywhere else would otherwise satisfy a status-only check too.
+func assertKeysInternalErrorOutcome(t *testing.T, label string, rec *httptest.ResponseRecorder, spy *agentKeysLookupSpyStore) {
+	t.Helper()
 	if rec.Code == http.StatusNotFound {
-		t.Fatalf("a store failure must not surface as 404: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("%s: a store failure must not surface as 404: %d %s", label, rec.Code, rec.Body.String())
 	}
 	if rec.Code < 500 {
-		t.Fatalf("status = %d, want a 5xx for a store failure: %s", rec.Code, rec.Body.String())
+		t.Fatalf("%s: status = %d, want a 5xx for a store failure: %s", label, rec.Code, rec.Body.String())
 	}
-	// Round-3 review (finding 2): pin that the 5xx actually comes from the
-	// keys branch's own agent-resolution attempt, not from some earlier
-	// failure that happens to also route through the spied store (a 500
-	// from anywhere else would otherwise satisfy the two checks above too).
+	env := decodeKeysError(t, rec.Body.Bytes())
+	opID, _ := env.Details["operation_id"].(string)
+	if opID == "" {
+		t.Errorf("%s: expected a non-empty operation_id on a post-validation internal error, got details=%v", label, env.Details)
+	}
 	if got := spy.lookupCount(); got == 0 {
-		t.Fatalf("expected the resolution attempt to reach the spied store (lookupCount=0)")
+		t.Fatalf("%s: expected the resolution attempt to reach the spied store (lookupCount=0)", label)
 	}
 }
 
-// keysDenialFixedMessage is writeAgentKeysAuthzDenial's fixed, sanitized
-// message for each denial outcome it produces (authorize_agentkeys.go).
+// keysDenialFixedMessage is agentKeysOutcomeMessage's fixed, sanitized
+// message for each outcome this file exercises (execute_agent_keys.go).
 var keysDenialFixedMessage = map[string]string{
 	"keys_denied":                    "Insufficient permissions",
 	"cross_project_keys_unsupported": "Cross-project keys access is not supported for agent callers",
+	"not_found":                      "Agent not found",
+	"keys_unavailable":               "Keys dispatch is currently unavailable",
+	"raw_combination_unsupported":    "This legacy request combination is not supported for keys delivery",
 }
 
-// assertKeysRouteOutcome asserts rec matches (wantStatus, wantCode) and,
-// depending on the outcome, the exact body shape the seam promises:
-//
-//   - 404 not_found (authorized, unimplemented): the message is exactly the
-//     unimplemented-action one -- distinguishing "authorized, no handler
-//     yet" from a target-resolution miss, which answers the identical
-//     status/code with a different message (round-2 review finding 3).
-//   - 403 keys_denied / 422 cross_project_keys_unsupported (a denial from
-//     writeAgentKeysAuthzDenial): the body is sanitized -- see
-//     assertSanitizedDenialBody. This is the test the KeysAuthzDecision doc
-//     comment asks for and the design ruling's omit-operation_id condition
-//     depends on (round-5 review finding 1; ruling on ptone/scion#2195).
-func assertKeysRouteOutcome(t *testing.T, label string, rec *httptest.ResponseRecorder, wantStatus int, wantCode string) {
+// assertKeysDenialOutcome asserts rec matches (wantStatus, wantCode), that
+// the message is the exact fixed string for that outcome (never
+// KeysAuthzDecision.Reason or any other request-derived text), and that a
+// real, non-empty operation ID is present (contract §3 invariant 3: every
+// outcome from validation onward carries one).
+func assertKeysDenialOutcome(t *testing.T, label string, rec *httptest.ResponseRecorder, wantStatus int, wantCode string) {
 	t.Helper()
 	if rec.Code != wantStatus {
 		t.Fatalf("%s: status = %d, want %d: %s", label, rec.Code, wantStatus, rec.Body.String())
 	}
-	code, message := errorEnvelope(t, rec.Body.Bytes())
-	if code != wantCode {
-		t.Errorf("%s: code = %q, want %q", label, code, wantCode)
+	env := decodeKeysError(t, rec.Body.Bytes())
+	if env.Code != wantCode {
+		t.Errorf("%s: code = %q, want %q", label, env.Code, wantCode)
 	}
-	if wantStatus == http.StatusNotFound && wantCode == "not_found" {
-		if message != unimplementedActionNotFoundMessage {
-			t.Errorf("%s: message = %q, want %q (an authorized-but-unimplemented call, not a resolution miss)",
-				label, message, unimplementedActionNotFoundMessage)
-		}
-		return
+	if wantMessage, ok := keysDenialFixedMessage[wantCode]; ok && env.Message != wantMessage {
+		t.Errorf("%s: message = %q, want exactly %q", label, env.Message, wantMessage)
 	}
-	if fixedMessage, ok := keysDenialFixedMessage[wantCode]; ok {
-		assertSanitizedDenialBody(t, label, rec, fixedMessage)
+	opID, _ := env.Details["operation_id"].(string)
+	if opID == "" {
+		t.Errorf("%s: expected a non-empty operation_id in details, got %v", label, env.Details)
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte("keys: ")) {
+		t.Errorf("%s: body must not leak the internal audit reason prefix: %s", label, rec.Body.String())
 	}
 }
 
-// assertSanitizedDenialBody pins the design ruling's condition for a seam
-// denial omitting operation_id (contract §3's phase-boundary clarification,
-// ptone/scion#2195): the response must carry the exact, fixed message for
-// its outcome, no operation_id, no details, and none of
-// KeysAuthzDecision.Reason (tagged "keys: " for audit logs -- see
-// authorize_agentkeys.go's denyAgentKeys/denyAgentKeysCrossProject -- but
-// never meant to reach an HTTP body).
-func assertSanitizedDenialBody(t *testing.T, label string, rec *httptest.ResponseRecorder, wantMessage string) {
+// assertKeysDenialOutcomeAuditMatches asserts that the last "outcome"-event
+// "agent keys audit" record captured in log carries the exact same
+// operation_id as rec's response -- pinning "exactly one real operation ID"
+// (contract §3's phase-boundary clarification / the binding operation-ID
+// ruling) for outcomes where assertKeysDenialOutcome alone only checks
+// non-emptiness, not equality with what was actually minted and audited. A
+// second, freshly minted ID written into the response after the audit
+// record used the real one would pass assertKeysDenialOutcome but fail this
+// check. The caller must have installed log capture (installSentinelLogCapture)
+// before making the request that produced rec.
+func assertKeysDenialOutcomeAuditMatches(t *testing.T, label string, rec *httptest.ResponseRecorder, log *bytes.Buffer) {
 	t.Helper()
-	body := rec.Body.Bytes()
-	_, message := errorEnvelope(t, body)
-	if message != wantMessage {
-		t.Errorf("%s: message = %q, want exactly %q", label, message, wantMessage)
-	}
-	if bytes.Contains(body, []byte("operation_id")) {
-		t.Errorf("%s: body must not carry an operation_id: %s", label, string(body))
-	}
-	if bytes.Contains(body, []byte(`"details"`)) {
-		t.Errorf("%s: body must not carry a details field: %s", label, string(body))
-	}
-	if bytes.Contains(body, []byte("keys: ")) {
-		t.Errorf("%s: body must not leak the internal audit reason prefix: %s", label, string(body))
+	env := decodeKeysError(t, rec.Body.Bytes())
+	opID, _ := env.Details["operation_id"].(string)
+	outcome := lastOutcomeAuditRecord(t, log)
+	if outcome["operation_id"] != opID {
+		t.Errorf("%s: audit operation_id %q != response operation_id %q", label, outcome["operation_id"], opID)
 	}
 }
 
-// TestAgentActionKeysRoute_BothShapesAgree replaces the round-1 AC4 tests
-// that passed even with this PR's production code deleted
-// (TestAgentActionKeys_RouteMetadataCoversBothRouteShapes /
-// TestAgentActionKeys_CapabilityProjectionConsistentAcrossRouteShapes,
-// finding 3): it drives both route shapes through the real mux for the same
-// identity/target pair and asserts they reach the same outcome, and that
-// the attach capability ComputeCapabilities projects for the caller agrees
-// with the keys route's own allow/deny decision. Round-2 review finding 8
-// added the user-session cases: the P route's cross-project pre-check
-// returning nil for a human caller (no blanket ban) was previously covered
-// only at the function level (TestAuthorizeAgentKeysCrossProject), not
-// end-to-end through the real mux.
+// assertSameOutcomeModuloOperationID asserts two recorded responses carry
+// the same status, code, message and details, except that their
+// operation_id values are each non-empty and (as freshly minted UUIDs per
+// request) not required to match each other.
+func assertSameOutcomeModuloOperationID(t *testing.T, label string, a, b *httptest.ResponseRecorder) {
+	t.Helper()
+	if a.Code != b.Code {
+		t.Fatalf("%s: status differs: %d vs %d", label, a.Code, b.Code)
+	}
+	envA := decodeKeysError(t, a.Body.Bytes())
+	envB := decodeKeysError(t, b.Body.Bytes())
+	if envA.Code != envB.Code {
+		t.Fatalf("%s: code differs: %q vs %q", label, envA.Code, envB.Code)
+	}
+	if envA.Message != envB.Message {
+		t.Fatalf("%s: message differs: %q vs %q", label, envA.Message, envB.Message)
+	}
+	opA, _ := envA.Details["operation_id"].(string)
+	opB, _ := envB.Details["operation_id"].(string)
+	if opA == "" || opB == "" {
+		t.Fatalf("%s: expected both responses to carry a non-empty operation_id: %q vs %q", label, opA, opB)
+	}
+	delete(envA.Details, "operation_id")
+	delete(envB.Details, "operation_id")
+	if len(envA.Details) != 0 || len(envB.Details) != 0 {
+		t.Fatalf("%s: details differ beyond operation_id: %v vs %v", label, envA.Details, envB.Details)
+	}
+}
+
+// TestAgentActionKeysRoute_BothShapesAgree drives both route shapes through
+// the real mux for the same identity/target pair and asserts they reach the
+// same outcome, and that the attach capability ComputeCapabilities projects
+// for the caller agrees with the keys route's own allow/deny decision.
+// Task 2.2: the "allowed" case now reaches real admission and ends in 503
+// keys_unavailable (no dispatcher configured on the fixture server),
+// replacing 2.1's "falls through to the generic unimplemented-action 404"
+// placeholder.
 func TestAgentActionKeysRoute_BothShapesAgree(t *testing.T) {
 	f := newAgentKeysRouteFixture(t)
 
@@ -485,9 +553,9 @@ func TestAgentActionKeysRoute_BothShapesAgree(t *testing.T) {
 			wantAttach     bool
 		}{
 			{
-				name:  "authorized agent, same project (unimplemented handler, not a denial)",
+				name:  "authorized agent, same project (admitted, no broker configured)",
 				token: allowedToken, callerIdentity: authzHelperAgent(f.projectA.ID, ScopeAgentLifecycle),
-				wantStatus: http.StatusNotFound, wantCode: "not_found", wantAttach: true,
+				wantStatus: http.StatusServiceUnavailable, wantCode: "keys_unavailable", wantAttach: true,
 			},
 			{
 				name:  "agent missing lifecycle scope",
@@ -498,12 +566,12 @@ func TestAgentActionKeysRoute_BothShapesAgree(t *testing.T) {
 
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				topLevel := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentInA.ID+"/keys", nil, tc.token)
+				topLevel := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentInA.ID+"/keys", validKeysBody, tc.token)
 				projectScoped := doRequestWithAgentToken(t, f.srv, http.MethodPost,
-					"/api/v1/projects/"+f.projectA.ID+"/agents/"+f.agentInA.Slug+"/keys", nil, tc.token)
+					"/api/v1/projects/"+f.projectA.ID+"/agents/"+f.agentInA.Slug+"/keys", validKeysBody, tc.token)
 
-				assertKeysRouteOutcome(t, "top-level", topLevel, tc.wantStatus, tc.wantCode)
-				assertKeysRouteOutcome(t, "project-scoped", projectScoped, tc.wantStatus, tc.wantCode)
+				assertKeysDenialOutcome(t, "top-level", topLevel, tc.wantStatus, tc.wantCode)
+				assertKeysDenialOutcome(t, "project-scoped", projectScoped, tc.wantStatus, tc.wantCode)
 
 				// Capability projection must agree with the route decision:
 				// the same identity/resource pair, evaluated independently
@@ -527,8 +595,8 @@ func TestAgentActionKeysRoute_BothShapesAgree(t *testing.T) {
 			wantAttach bool
 		}{
 			{
-				name: "owner attaches to own agent (unimplemented handler, not a denial)",
-				user: f.owner, wantStatus: http.StatusNotFound, wantCode: "not_found", wantAttach: true,
+				name: "owner attaches to own agent (admitted, no broker configured)",
+				user: f.owner, wantStatus: http.StatusServiceUnavailable, wantCode: "keys_unavailable", wantAttach: true,
 			},
 			{
 				name: "non-owner denied",
@@ -538,12 +606,12 @@ func TestAgentActionKeysRoute_BothShapesAgree(t *testing.T) {
 
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				topLevel := doRequestAsUser(t, f.srv, tc.user, http.MethodPost, "/api/v1/agents/"+f.agentInA.ID+"/keys", nil)
+				topLevel := doRequestAsUser(t, f.srv, tc.user, http.MethodPost, "/api/v1/agents/"+f.agentInA.ID+"/keys", validKeysBody)
 				projectScoped := doRequestAsUser(t, f.srv, tc.user, http.MethodPost,
-					"/api/v1/projects/"+f.projectA.ID+"/agents/"+f.agentInA.Slug+"/keys", nil)
+					"/api/v1/projects/"+f.projectA.ID+"/agents/"+f.agentInA.Slug+"/keys", validKeysBody)
 
-				assertKeysRouteOutcome(t, "top-level", topLevel, tc.wantStatus, tc.wantCode)
-				assertKeysRouteOutcome(t, "project-scoped", projectScoped, tc.wantStatus, tc.wantCode)
+				assertKeysDenialOutcome(t, "top-level", topLevel, tc.wantStatus, tc.wantCode)
+				assertKeysDenialOutcome(t, "project-scoped", projectScoped, tc.wantStatus, tc.wantCode)
 
 				identity := NewAuthenticatedUser(tc.user.ID, tc.user.Email, tc.user.DisplayName, tc.user.Role, "api")
 				caps := f.srv.GetAuthzService().ComputeCapabilities(context.Background(), identity, agentResource(f.agentInA))
@@ -574,12 +642,12 @@ func TestAgentActionKeysRoute_ExpectedDivergence_AgentMissingScopeCrossProject(t
 	f := newAgentKeysRouteFixture(t)
 	token := f.agentToken(t, tid("agentkeys-route-divergence-caller"), f.projectA.ID, ScopeAgentCreate) // no lifecycle scope
 
-	topLevel := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentInB.ID+"/keys", nil, token)
-	assertKeysRouteOutcome(t, "top-level", topLevel, http.StatusForbidden, "keys_denied")
+	topLevel := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentInB.ID+"/keys", validKeysBody, token)
+	assertKeysDenialOutcome(t, "top-level", topLevel, http.StatusForbidden, "keys_denied")
 
 	projectScoped := doRequestWithAgentToken(t, f.srv, http.MethodPost,
-		"/api/v1/projects/"+f.projectB.ID+"/agents/"+f.agentInB.Slug+"/keys", nil, token)
-	assertKeysRouteOutcome(t, "project-scoped", projectScoped, http.StatusUnprocessableEntity, "cross_project_keys_unsupported")
+		"/api/v1/projects/"+f.projectB.ID+"/agents/"+f.agentInB.Slug+"/keys", validKeysBody, token)
+	assertKeysDenialOutcome(t, "project-scoped", projectScoped, http.StatusUnprocessableEntity, "cross_project_keys_unsupported")
 }
 
 // TestAgentActionKeysRoute_RevokedAgentCredential_NeverReachesTheGate
@@ -602,7 +670,7 @@ func TestAgentActionKeysRoute_RevokedAgentCredential_NeverReachesTheGate(t *test
 	ctx := context.Background()
 
 	targetID := tid("agentkeys-route-revoke-target")
-	createCredTestAgent(t, s, targetID, project.ID, user.ID)
+	createCredTestAgent(t, s, targetID, project.ID, user.ID) // Phase: "running" by default
 
 	callerID := tid("agentkeys-route-revoke-caller")
 	createCredTestAgent(t, s, callerID, project.ID, user.ID)
@@ -618,22 +686,17 @@ func TestAgentActionKeysRoute_RevokedAgentCredential_NeverReachesTheGate(t *test
 	// Before revocation: the token authenticates and reaches the keys gate
 	// (proves the setup is valid, so the post-revocation 401 below is
 	// meaningful). The caller has full-role lifecycle scope on its own
-	// project's agent, so this must be an authorization "allowed" (404
-	// "Action", unimplemented handler) -- asserted by exact message
-	// (round-2 review finding 3), not merely "not 401", so this sanity
-	// check cannot pass on an unrelated failure that also happens to avoid
-	// 401.
-	before := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agents/"+targetID+"/keys", nil, token)
-	if before.Code != http.StatusNotFound {
-		t.Fatalf("token should authenticate and be allowed before revocation, got %d: %s", before.Code, before.Body.String())
-	}
-	if _, message := errorEnvelope(t, before.Body.Bytes()); message != unimplementedActionNotFoundMessage {
-		t.Fatalf("expected the unimplemented-action message before revocation, got %q: %s", message, before.Body.String())
-	}
+	// project's agent, so this must be an authorization "allowed" outcome
+	// (503 keys_unavailable: admitted, but no dispatcher configured on this
+	// fixture server) -- asserted by exact message, not merely "not
+	// 401", so this sanity check cannot pass on an unrelated failure that
+	// also happens to avoid 401.
+	before := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agents/"+targetID+"/keys", validKeysBody, token)
+	assertKeysDenialOutcome(t, "before revocation", before, http.StatusServiceUnavailable, "keys_unavailable")
 
 	require.NoError(t, s.RevokeAgentCredential(ctx, cred.ID, "test", "explicit"))
 
-	after := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agents/"+targetID+"/keys", nil, token)
+	after := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agents/"+targetID+"/keys", validKeysBody, token)
 	if after.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 after revocation (never reaching authorizeAgentKeys), got %d: %s",
 			after.Code, after.Body.String())
@@ -650,7 +713,7 @@ func TestAgentActionKeysRoute_ExpiredAgentToken_NeverReachesTheGate(t *testing.T
 	srv, s, user, project := setupCredentialTestServer(t)
 
 	targetID := tid("agentkeys-route-expired-target")
-	createCredTestAgent(t, s, targetID, project.ID, user.ID)
+	createCredTestAgent(t, s, targetID, project.ID, user.ID) // Phase: "running" by default
 	callerID := tid("agentkeys-route-expired-caller")
 	createCredTestAgent(t, s, callerID, project.ID, user.ID)
 
@@ -661,13 +724,8 @@ func TestAgentActionKeysRoute_ExpiredAgentToken_NeverReachesTheGate(t *testing.T
 	// fixture that would 401 regardless of TokenDuration.
 	validToken, err := srv.GenerateAgentToken(callerID, project.ID, nil, AgentRoleFull, nil)
 	require.NoError(t, err)
-	before := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agents/"+targetID+"/keys", nil, validToken)
-	if before.Code != http.StatusNotFound {
-		t.Fatalf("control: a non-expired token should authenticate and be allowed, got %d: %s", before.Code, before.Body.String())
-	}
-	if _, message := errorEnvelope(t, before.Body.Bytes()); message != unimplementedActionNotFoundMessage {
-		t.Fatalf("control: expected the unimplemented-action message, got %q: %s", message, before.Body.String())
-	}
+	before := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agents/"+targetID+"/keys", validKeysBody, validToken)
+	assertKeysDenialOutcome(t, "control", before, http.StatusServiceUnavailable, "keys_unavailable")
 
 	origDuration := srv.agentTokenService.config.TokenDuration
 	srv.agentTokenService.config.TokenDuration = -1 * time.Hour // already expired at mint time
@@ -675,7 +733,7 @@ func TestAgentActionKeysRoute_ExpiredAgentToken_NeverReachesTheGate(t *testing.T
 	srv.agentTokenService.config.TokenDuration = origDuration
 	require.NoError(t, err)
 
-	rec := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agents/"+targetID+"/keys", nil, expiredToken)
+	rec := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agents/"+targetID+"/keys", validKeysBody, expiredToken)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for an expired token (never reaching authorizeAgentKeys), got %d: %s",
 			rec.Code, rec.Body.String())
@@ -685,9 +743,124 @@ func TestAgentActionKeysRoute_ExpiredAgentToken_NeverReachesTheGate(t *testing.T
 	// project-scoped route shape must also 401 before reaching either the
 	// cross-project pre-check or authorizeAgentKeys.
 	recP := doRequestWithAgentToken(t, srv, http.MethodPost,
-		"/api/v1/projects/"+project.ID+"/agents/"+targetID+"/keys", nil, expiredToken)
+		"/api/v1/projects/"+project.ID+"/agents/"+targetID+"/keys", validKeysBody, expiredToken)
 	if recP.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for an expired token on the project-scoped route, got %d: %s",
 			recP.Code, recP.Body.String())
+	}
+}
+
+// newValidationOrderingFixture builds an agentKeysRouteFixture plus a
+// lookup-count spy store and a fully-controllable fake dispatcher, for
+// TestAgentActionKeysRoute_ValidationPrecedesResolutionAndAuthorization.
+func newValidationOrderingFixture(t *testing.T) (*agentKeysRouteFixture, *agentKeysLookupSpyStore, *fakeAgentKeysDispatcher) {
+	t.Helper()
+	f := newAgentKeysRouteFixture(t)
+	spy := &agentKeysLookupSpyStore{Store: f.store}
+	f.srv.store = spy
+	d := newFakeAgentKeysDispatcher()
+	f.srv.SetDispatcher(d)
+	return f, spy, d
+}
+
+// assertValidationOrderingOutcome asserts rec is exactly the given
+// pre-operation-ID validation failure (wantStatus/wantCode -- never merely
+// "400 or 413", since that would not catch e.g. an oversized keys field
+// regressing from 413 payload_too_large to 400, or an unknown field
+// regressing from 400 to 413), with no operation_id in details, and that
+// neither an agent lookup nor a dispatcher call ever happened -- proving
+// validation ran, and refused the request with the correct outcome, before
+// resolution or authorization got a chance to run at all.
+func assertValidationOrderingOutcome(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int, wantCode string, spy *agentKeysLookupSpyStore, d *fakeAgentKeysDispatcher) {
+	t.Helper()
+	if rec.Code != wantStatus {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, wantStatus, rec.Body.String())
+	}
+	env := decodeKeysError(t, rec.Body.Bytes())
+	if env.Code != wantCode {
+		t.Errorf("code = %q, want %q", env.Code, wantCode)
+	}
+	if _, present := env.Details["operation_id"]; present {
+		t.Errorf("a validation failure must not carry an operation_id: %v", env.Details)
+	}
+	if got := spy.lookupCount(); got != 0 {
+		t.Errorf("expected zero agent lookups before validation, got %d", got)
+	}
+	if got := d.callCount(); got != 0 {
+		t.Errorf("expected zero dispatcher calls before validation, got %d", got)
+	}
+}
+
+// TestAgentActionKeysRoute_ValidationPrecedesResolutionAndAuthorization pins
+// contract §3 invariant 2 (ValidateBody precedes both agent-target
+// resolution and authorization) on both route shapes, against a
+// nonexistent target, a foreign target (agent caller), and a denied caller.
+// Before this test, only this file's header comment and
+// execute_agent_keys.go's doc comments asserted the ordering; nothing
+// failed if beginAgentKeysRequest moved after resolution or authorization.
+func TestAgentActionKeysRoute_ValidationPrecedesResolutionAndAuthorization(t *testing.T) {
+	invalidBodies := []struct {
+		name       string
+		body       map[string]string
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "invalid: unknown field", body: map[string]string{"keys": "C-c", "unexpected": "field"},
+			wantStatus: http.StatusBadRequest, wantCode: "invalid_request"},
+		{name: "invalid: missing keys", body: map[string]string{},
+			wantStatus: http.StatusBadRequest, wantCode: "invalid_request"},
+		{name: "invalid: empty keys", body: map[string]string{"keys": ""},
+			wantStatus: http.StatusBadRequest, wantCode: "invalid_request"},
+		{name: "oversized: keys field 4097B", body: map[string]string{"keys": strings.Repeat("a", agentkeys.MaxBytes+1)},
+			wantStatus: http.StatusRequestEntityTooLarge, wantCode: "payload_too_large"},
+		{name: "oversized: raw body > 32KiB", body: map[string]string{"keys": strings.Repeat("a", agentkeys.MaxHTTPBodyBytes+100)},
+			wantStatus: http.StatusRequestEntityTooLarge, wantCode: "payload_too_large"},
+	}
+
+	for _, bc := range invalidBodies {
+		t.Run(bc.name, func(t *testing.T) {
+			t.Run("nonexistent target/top-level", func(t *testing.T) {
+				f, spy, d := newValidationOrderingFixture(t)
+				token := f.agentToken(t, tid("agentkeys-route-valorder-caller"), f.projectA.ID, ScopeAgentLifecycle)
+				rec := doRequestWithAgentToken(t, f.srv, http.MethodPost,
+					"/api/v1/agents/"+tid("agentkeys-route-valorder-nonexistent")+"/keys", bc.body, token)
+				assertValidationOrderingOutcome(t, rec, bc.wantStatus, bc.wantCode, spy, d)
+			})
+			t.Run("nonexistent target/project-scoped", func(t *testing.T) {
+				f, spy, d := newValidationOrderingFixture(t)
+				token := f.agentToken(t, tid("agentkeys-route-valorder-caller"), f.projectA.ID, ScopeAgentLifecycle)
+				rec := doRequestWithAgentToken(t, f.srv, http.MethodPost,
+					"/api/v1/projects/"+f.projectA.ID+"/agents/does-not-exist/keys", bc.body, token)
+				assertValidationOrderingOutcome(t, rec, bc.wantStatus, bc.wantCode, spy, d)
+			})
+			t.Run("foreign target (agent caller)/top-level", func(t *testing.T) {
+				f, spy, d := newValidationOrderingFixture(t)
+				token := f.agentToken(t, tid("agentkeys-route-valorder-caller"), f.projectA.ID, ScopeAgentLifecycle)
+				rec := doRequestWithAgentToken(t, f.srv, http.MethodPost,
+					"/api/v1/agents/"+f.agentInB.ID+"/keys", bc.body, token)
+				assertValidationOrderingOutcome(t, rec, bc.wantStatus, bc.wantCode, spy, d)
+			})
+			t.Run("foreign target (agent caller)/project-scoped", func(t *testing.T) {
+				f, spy, d := newValidationOrderingFixture(t)
+				token := f.agentToken(t, tid("agentkeys-route-valorder-caller"), f.projectA.ID, ScopeAgentLifecycle)
+				rec := doRequestWithAgentToken(t, f.srv, http.MethodPost,
+					"/api/v1/projects/"+f.projectB.ID+"/agents/"+f.agentInB.Slug+"/keys", bc.body, token)
+				assertValidationOrderingOutcome(t, rec, bc.wantStatus, bc.wantCode, spy, d)
+			})
+			t.Run("denied caller/top-level", func(t *testing.T) {
+				f, spy, d := newValidationOrderingFixture(t)
+				token := f.agentToken(t, tid("agentkeys-route-valorder-denied"), f.projectA.ID) // no lifecycle scope
+				rec := doRequestWithAgentToken(t, f.srv, http.MethodPost,
+					"/api/v1/agents/"+f.agentInA.ID+"/keys", bc.body, token)
+				assertValidationOrderingOutcome(t, rec, bc.wantStatus, bc.wantCode, spy, d)
+			})
+			t.Run("denied caller/project-scoped", func(t *testing.T) {
+				f, spy, d := newValidationOrderingFixture(t)
+				token := f.agentToken(t, tid("agentkeys-route-valorder-denied"), f.projectA.ID)
+				rec := doRequestWithAgentToken(t, f.srv, http.MethodPost,
+					"/api/v1/projects/"+f.projectA.ID+"/agents/"+f.agentInA.Slug+"/keys", bc.body, token)
+				assertValidationOrderingOutcome(t, rec, bc.wantStatus, bc.wantCode, spy, d)
+			})
+		})
 	}
 }

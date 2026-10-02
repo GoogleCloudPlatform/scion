@@ -98,18 +98,18 @@ func TestLegacyLayoutMigration_FindAgentAndStopSucceed(t *testing.T) {
 	if stopRec.Code != http.StatusAccepted {
 		t.Fatalf("stop: expected 202, got %d: %s", stopRec.Code, stopRec.Body.String())
 	}
-	if mgr.stopCalls != 1 || mgr.lastStopAgentID != "cid-legacy" {
-		t.Errorf("stop: expected 1 call on cid-legacy, got %d call(s) on %q", mgr.stopCalls, mgr.lastStopAgentID)
+	if mgr.StopCalls() != 1 || mgr.LastStopAgentID() != "cid-legacy" {
+		t.Errorf("stop: expected 1 call on cid-legacy, got %d call(s) on %q", mgr.StopCalls(), mgr.LastStopAgentID())
 	}
 
 	rec := doDelete(t, srv, agentName, "projectId="+projectID+"&deleteFiles=true")
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("delete: expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.lastDeleteContainerID != "cid-legacy" {
-		t.Errorf("delete: deleted container %q, want cid-legacy", mgr.lastDeleteContainerID)
+	if mgr.LastDeleteContainerID() != "cid-legacy" {
+		t.Errorf("delete: deleted container %q, want cid-legacy", mgr.LastDeleteContainerID())
 	}
-	if mgr.lastDeleteProjectPath != legacyScionDir {
-		t.Errorf("delete: file deletion project path %q, want %q", mgr.lastDeleteProjectPath, legacyScionDir)
+	if mgr.LastDeleteProjectPath() != legacyScionDir {
+		t.Errorf("delete: file deletion project path %q, want %q", mgr.LastDeleteProjectPath(), legacyScionDir)
 	}
 }

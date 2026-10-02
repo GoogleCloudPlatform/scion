@@ -60,6 +60,17 @@ type BrokerProfile struct {
 	Available bool   `json:"available"`
 	Context   string `json:"context,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
+	// Attach reports whether this profile's runtime supports interactive
+	// attach (pkg/runtime.AttachCapableRuntime, via HasAttachSupport). A
+	// pointer, not a plain bool: this broker can only answer for a profile
+	// backed by a runtime instance it has already built (the default
+	// runtime, or an auxiliary runtime some prior request already
+	// constructed) — buildInfoProfiles never builds one just to answer this
+	// field. nil means unknown (no live instance to ask), which every
+	// consumer must read as supported, the same missing-capability default
+	// HasAttachSupport itself uses for a runtime that doesn't implement the
+	// interface.
+	Attach *bool `json:"attach,omitempty"`
 }
 
 // BrokerCapabilities describes what this runtime broker can do.
@@ -73,6 +84,12 @@ type BrokerCapabilities struct {
 	// §3.4). The hub gates `scion reincarnate` on this — see
 	// store.BrokerCapabilities.Reprovision and its 412 gate in pkg/hub.
 	Reprovision bool `json:"reprovision"`
+	// AsyncLaunch indicates this broker understands CreateAgentRequest's
+	// AsyncLaunch field and the launch-report protocol (design
+	// t1-async-create-v11.md §3.2, §7 P1b-1). The hub uses it only to skip
+	// BeginLaunch for a broker known to lack support; the create response's
+	// LaunchPending echo is authoritative either way.
+	AsyncLaunch bool `json:"asyncLaunch"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
@@ -272,6 +289,22 @@ type CreateAgentRequest struct {
 	// These are NEVER forwarded to the agent container environment or harness scripts.
 	// Populated by the Hub from project-scope secrets at dispatch time.
 	ProvisionCredentials map[string]string `json:"provisionCredentials,omitempty"`
+
+	// AsyncLaunch requests the non-blocking create path (design
+	// t1-async-create-v11.md §3.2, §7 P1b-1). With it absent or false,
+	// createAgent's behavior is unchanged. ProvisionOnly and Reprovision
+	// ignore it.
+	AsyncLaunch bool `json:"asyncLaunch,omitempty"`
+	// LaunchID is the Hub's launch identifier (BeginLaunch's return value),
+	// echoed back on every report for this launch.
+	LaunchID string `json:"launchId,omitempty"`
+	// LaunchTimeoutSeconds is the remaining launch budget at send time
+	// (ceil(launch_deadline - send time)), not the Hub's configured
+	// launchTimeout setting.
+	LaunchTimeoutSeconds int `json:"launchTimeoutSeconds,omitempty"`
+	// LaunchKeepaliveSeconds is the Hub's configured keepalive interval. The
+	// broker defaults to 15 when absent (design §3.7).
+	LaunchKeepaliveSeconds int `json:"launchKeepaliveSeconds,omitempty"`
 }
 
 // CreateAgentConfig contains configuration for agent creation.
@@ -373,6 +406,19 @@ type CreateAgentResponse struct {
 	// treats an absent echo on a reprovision dispatch as a failure, which is
 	// what keeps that failure mode closed instead of a silent no-op.
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
+
+	// LaunchPending is set true instead of running Manager.Start inline when
+	// the broker accepted an async launch (design §3.2, §7 P1b-1): the Hub
+	// writes MarkLaunchAccepted and the broker continues in runLaunch. Agent
+	// is nil on this branch — the launch is not running yet.
+	LaunchPending bool `json:"launchPending,omitempty"`
+	// LaunchID echoes the request's LaunchID, so the sending Hub node can
+	// confirm this is an answer to its own BeginLaunch before calling
+	// MarkLaunchAccepted (design §3.4 dispatchLaunching).
+	LaunchID string `json:"launchId,omitempty"`
+	// LaunchInstanceID is this broker process's launch-owner identity,
+	// generated once at broker start. The Hub stores it as launch_owner.
+	LaunchInstanceID string `json:"launchInstanceId,omitempty"`
 }
 
 // EnvRequirementsResponse is returned by the broker when GatherEnv is true

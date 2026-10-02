@@ -32,7 +32,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 64
+const expectedTableCount = 65
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -101,6 +101,14 @@ func TestFixtureLoadable(t *testing.T) {
 		ctx, "fixture-provider", "https://issuer.fixture.example", "fixture-subject-001")
 	require.NoError(t, err, "external_identities fixture row must be readable via ExternalIdentityStore")
 	assert.Equal(t, userID, identity.UserID)
+
+	// The user_terminal_workspaces row must likewise be readable through its
+	// real store adapter: the same non-hex-id pitfall as above applies to its
+	// field.UUID("id", ...) column.
+	workspace, err := entadapter.NewUserTerminalWorkspaceStore(client).GetUserTerminalWorkspace(ctx, userID)
+	require.NoError(t, err, "user_terminal_workspaces fixture row must be readable via UserTerminalWorkspaceStore")
+	assert.Equal(t, []string{agentID}, workspace.AgentIDs)
+	assert.Equal(t, agentID, workspace.FrontmostAgentID)
 }
 
 // TestFixtureDeterministic verifies the spec produces a stable set of row

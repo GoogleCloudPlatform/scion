@@ -603,25 +603,48 @@ filter matched nothing, not an error.
 
 ## 7. For Terraform-managed hubs: what can be removed afterward
 
-Once the final dry run in §4 (pass 5) shows zero pending items for **every** hub
-sharing a GCP project, the legacy IAM grant and the legacy pre-created secret that
-only existed to bridge the old naming scheme can be removed, each as its own
-per-resource acknowledgment rather than a single blanket change:
+The `terraform-ha` modules no longer carry the legacy conditioned
+`secretmanager.admin` grant or the legacy pre-created OIDC signing key secret —
+both were scoped to the hub's pre-migration secret-name prefix,
+`scion-hub-<h>-*`, where `<h>` is the first 12 hex characters of
+`sha256("<hub_id>:<hub_id>")` (`legacyGCPSecretName`, `pkg/secret/gcpbackend.go`).
+See
+[Secrets: IAM Permissions and Secret Naming](https://scion-ai.dev/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
+for how the hub-prefixed replacement is computed. A fresh hub now generates and
+stores its own OIDC signing key on first boot under the hub-prefixed name
+instead of reading a Terraform-pre-created one.
 
-- the legacy conditioned `secretmanager.admin` (or equivalent) grant scoped to the
-  hub's pre-migration secret-name prefix, `scion-hub-<h>-*`, where `<h>` is the first
-  12 hex characters of `sha256("<hub_id>:<hub_id>")` (`legacyGCPSecretName`,
-  `pkg/secret/gcpbackend.go`) — see
-  [Secrets: IAM Permissions and Secret Naming](https://scion-ai.dev/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
-  for how the hub-prefixed replacement is computed;
-- the Terraform-managed pre-create of the legacy-named OIDC signing key secret —
-  once every hub image resolves the OIDC key under the hub-prefixed name instead,
-  the pre-create under the legacy name is no longer read by anything.
+**Run this runbook through pass 4 (`--delete-legacy`) and confirm pass 5's
+"zero pending" result for every hub sharing a GCP project *before* upgrading
+that project's Terraform to a module version without the legacy grant.** Pass
+4 needs the legacy grant to delete the legacy-named secrets; once the grant is
+gone, `migrate-names` can no longer reach them at all. Applying this version
+after passes 1-3 but before pass 4 is not destructive: the remaining
+legacy-named secrets just can no longer be deleted by `migrate-names` (which
+runs as the hub SA) and must be removed by hand with `gcloud secrets delete`.
+Applying it before passes 1-3 is not safe: Terraform deletes the legacy OIDC
+secret on apply, and on an unmigrated hub that secret is the only copy, so any
+record whose `SecretRef` still points at the legacy name starts failing with
+`PermissionDenied`.
 
-Do this only after confirming the final dry run's "zero pending" result — removing the
-legacy grant first means `migrate-names` can no longer even read the legacy names, so a
-"zero pending" result measured after removal only proves IAM was narrowed, not that
-migration finished.
+**Expected plan delta after `--delete-legacy` (pass 4) has already run:** for
+each existing hub, applying this version should show the legacy
+`secretmanager.admin` grant and `tls_private_key.oidc_signing_key` destroyed;
+the OIDC secret and its version dropped from state on refresh (already
+deleted out-of-band by pass 4, so they show as "changed outside of Terraform",
+not as a destroy); the Cloud Run service updated in place (the legacy env var
+removed); and `time_sleep.iam_propagation` replaced. This version also
+replaces `module.agent_runtime_k8s.kubernetes_job_v1.nfs_init` once, on each
+existing hub's first apply of it: the Job moves from a fixed name to a
+generated name, and both are ForceNew, so Terraform create-before-destroys
+the Job; the new Job re-runs the same idempotent mkdir/chown as the one it
+replaces. That same apply updates
+`module.hub_cloudrun.terraform_data.boot_prerequisites` in place, because its
+`nfs_init_job` input is only known after the replacement Job is created. The
+only add in this plan is that replacement Job (a replace counts as one add
+and one destroy); nothing else is added. If
+the OIDC secret/version show up as a destroy instead, pass 4 has not actually
+deleted them yet — stop and confirm pass 5 first.
 
 ## 8. Break-glass
 

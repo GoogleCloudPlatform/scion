@@ -507,6 +507,42 @@ func TestSendOutboundMessage_NonOKError(t *testing.T) {
 	}
 }
 
+// TestAgentService_GetLogs_RuntimeLogsUnsupported verifies that the hub's
+// 501/runtime_logs_unsupported response (pkg/hub/handlers_logs.go, the
+// passthrough for a runtime returning pkg/runtime.ErrLogsNotSupported)
+// reaches the CLI's error value intact: same status, same code, same fixed
+// message, no re-wrapping. This is what cmd/logs.go's getHubLogs returns
+// verbatim to the caller in hub mode, so this is also what "scion logs"
+// prints.
+func TestAgentService_GetLogs_RuntimeLogsUnsupported(t *testing.T) {
+	const fixedMessage = "agent logs are not available on this runtime"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		_, _ = w.Write([]byte(`{"error":{"code":"runtime_logs_unsupported","message":"` + fixedMessage + `"}}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+
+	logs, err := client.Agents().GetLogs(context.Background(), "agent-1", nil)
+	assert.Empty(t, logs)
+	require.Error(t, err)
+
+	var apiErr *apiError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, http.StatusNotImplemented, apiErr.StatusCode)
+		assert.Equal(t, "runtime_logs_unsupported", apiErr.Code)
+		assert.Equal(t, fixedMessage, apiErr.Message)
+		// No runtime-specific scope or workload identifiers leak through
+		// the passthrough.
+		assert.NotContains(t, apiErr.Error(), "namespace")
+		assert.NotContains(t, apiErr.Error(), "pod")
+	}
+}
+
 // apiError is a local type alias so the test can assert on apiclient.APIError
 // fields without importing apiclient (which would create a test-only import
 // from within the hubclient package).

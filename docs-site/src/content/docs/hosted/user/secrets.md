@@ -41,6 +41,10 @@ Both environment variables and secrets support **Injection Modes**, which contro
 - **As Needed (Default)**: The variable or secret is only injected if it is explicitly requested in the agent's template (`scion-agent.yaml`) or harness configuration. This is the recommended mode for most credentials to minimize the attack surface.
 - **Always**: The variable or secret is injected into *every* agent started within that scope, regardless of whether it is explicitly requested.
 
+:::note[GITHUB_TOKEN and the Always mode]
+When you enter a GitHub token while creating a git-backed project in the web UI, the Hub saves it as a project-scoped `GITHUB_TOKEN` secret with `always` injection mode. The token has to be present in the first environment-resolution pass so that `sciontool init` can clone the repository in **Clone-per-agent** and **Worktree-per-agent** sharing modes. On startup, the Hub also runs a one-time migration that moves any existing `GITHUB_TOKEN` secret from `as_needed` to `always`. Secrets you set after that migration keep the mode you give them, so pass `--always` when you set `GITHUB_TOKEN` yourself.
+:::
+
 You can set the injection mode via the CLI using the `--always` flag:
 
 ```bash
@@ -232,6 +236,7 @@ Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
 *   **`GET /api/v1/agents/{agentID}/secrets`**: Lists available secret metadata in the agent's project.
 *   **`GET /api/v1/agents/{agentID}/secrets/{key}`**: Retrieves a single secret's metadata and its base64-encoded value.
 *   **`PUT /api/v1/agents/{agentID}/secrets/{key}`**: Stores or updates a secret.
+*   **`POST /api/v1/agent/secrets`**: Fetches several secret values in one call. There is no agent ID in the URL: the Hub identifies the agent from its token. The request body is `{"keys": ["KEY_A", "KEY_B"]}` (at most 100 keys). Each entry in the response has a `status` of `ok`, `not_found`, or `entitled_but_unavailable`. `sciontool init` calls this endpoint at startup to fetch the keys listed in `SCION_SECRET_KEYS`.
 
 #### Security & Audit Logging
 *   **Authentication**: API access is restricted to the running agent container. The agent must include its unique Hub-issued JWT (loaded from `SCION_HUB_TOKEN`) in the `Authorization: Bearer <token>` header of every request.

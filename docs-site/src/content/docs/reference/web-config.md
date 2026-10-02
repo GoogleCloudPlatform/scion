@@ -68,17 +68,17 @@ Feature flags control the availability of Web Dashboard features. Registered exp
 | Flag | Default | Description |
 | :--- | :--- | :--- |
 | `web.native_chat` | ON | Enable the [Native Web Chat](/scion/workstation/dashboard/#native-web-chat) workspace. |
-| `web.native_chat_v2` | ON | Enable the wave-2 native chat UI. |
 | `web.terminal_workspace` | ON | Enable the [Terminal Workspace](/scion/workstation/dashboard/#terminal-workspace) — a multi-pane terminal environment as a top-level workspace. |
+| `web.gcs_links` | OFF | Linkify a `gs://bucket/object` URI an agent posts in chat, and let the viewer fetch and preview that object through the hub. Also gates the hub's `GET /api/v1/gcs/object` endpoint, which additionally requires a configured GCP token generator. |
 
-`web.terminal_workspace` is a registered experiment; the other two flags above are not (see [Experiments](/scion/reference/experiments/) for what that distinction means). `web.native_chat` and `web.native_chat_v2` are instead driven by the hub's `nativeChatEnabled` setting (from `/api/v1/settings/public`): when it is `false`, boot writes both flags to `false` directly into the flag bag `isFeatureEnabled` checks first, ahead of any localStorage override.
+`web.terminal_workspace` and `web.gcs_links` are registered experiments; `web.native_chat` is not (see [Experiments](/scion/reference/experiments/) for what that distinction means). `web.native_chat` is instead driven by the hub's `nativeChatEnabled` setting (from `/api/v1/settings/public`): when it is `false`, boot writes the flag to `false` directly into the flag bag `isFeatureEnabled` checks first, ahead of any localStorage override.
 
-To disable a registered experiment hub-wide, use the Experiments tab. A localStorage override has no effect on a registered experiment for a signed-in user on a working hub — it only applies to an unregistered flag (for example `web.native_chat_v2`), or on a page load where the experiments fetch fails:
+To disable a registered experiment hub-wide, use the Experiments tab. A localStorage override has no effect on a registered experiment for a signed-in user on a working hub — it only applies to an unregistered flag (such as `web.native_chat`), or on a page load where the experiments fetch fails:
 
 ```js
 // localStorage override (development only; no effect on a registered
 // experiment unless the experiments fetch fails)
-localStorage.setItem('scion:feature:web.native_chat_v2', 'false');
+localStorage.setItem('scion:feature:web.native_chat', 'false');
 ```
 
 ## Security Settings

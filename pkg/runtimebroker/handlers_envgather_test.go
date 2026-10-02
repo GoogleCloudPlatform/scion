@@ -501,8 +501,8 @@ runtimes:
 	if w1.Code != http.StatusCreated {
 		t.Fatalf("first create: expected 201, got %d: %s", w1.Code, w1.Body.String())
 	}
-	if mgr.startCalls != 1 {
-		t.Fatalf("first create: expected startCalls=1, got %d", mgr.startCalls)
+	if mgr.StartCalls() != 1 {
+		t.Fatalf("first create: expected startCalls=1, got %d", mgr.StartCalls())
 	}
 
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -512,8 +512,8 @@ runtimes:
 	if w2.Code != http.StatusCreated {
 		t.Fatalf("second create: expected 201 replay, got %d: %s", w2.Code, w2.Body.String())
 	}
-	if mgr.startCalls != 1 {
-		t.Fatalf("second create should replay without starting again, startCalls=%d", mgr.startCalls)
+	if mgr.StartCalls() != 1 {
+		t.Fatalf("second create should replay without starting again, startCalls=%d", mgr.StartCalls())
 	}
 }
 
@@ -2299,6 +2299,110 @@ profiles:
 					tt.metadataMode, w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+// TestExtractRequiredEnvKeys_KubernetesImplicitPassthroughSkipsADC covers
+// ptone/scion#2328: a dispatch profile that resolves to the Kubernetes
+// runtime gets passthrough by default when no GCP identity is configured at
+// all (no GCPIdentity field here, unlike
+// TestEnvGather_VertexAI_GCPIdentitySkipsADC above). extractRequiredEnvKeys
+// must recognize that implicit passthrough as GCP-credentialed the same way
+// buildStartContext would at actual dispatch time — otherwise an
+// unconfigured Kubernetes agent using vertex-ai would be wrongly asked for
+// an ADC file it will never need.
+//
+// Calls extractRequiredEnvKeys directly rather than through the full HTTP
+// create handler: nothing else about the create path (template hydration,
+// hub connectivity, actual dispatch) is relevant to this preflight
+// computation. The preflight resolves the runtime's name via
+// resolveRuntimeNameForOpts, which never builds a real runtime client (see
+// that function's doc comment, handlers.go) — unlike resolveManagerForOpts,
+// a settings profile that resolves to "kubernetes" here does not attempt a
+// real cluster connection, so no resolveAuxiliaryRuntime mock is needed.
+func TestExtractRequiredEnvKeys_KubernetesImplicitPassthroughSkipsADC(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: kubernetes
+runtimes:
+  kubernetes:
+    type: kubernetes
+`)
+
+	req := CreateAgentRequest{
+		Name:        "test-agent-vertex-k8s-implicit",
+		ProjectPath: projectDir,
+		ResolvedEnv: map[string]string{
+			"GOOGLE_CLOUD_PROJECT": "my-project",
+			"GOOGLE_CLOUD_REGION":  "us-central1",
+		},
+		Config: &CreateAgentConfig{
+			Template: "claude",
+			Profile:  "default",
+		},
+	}
+
+	required, secretInfo, _, _ := srv.extractRequiredEnvKeys(req, "")
+	if len(required) != 0 {
+		t.Errorf("expected no required keys once Kubernetes' implicit passthrough is recognized as GCP-credentialed, got %v (secretInfo: %v)", required, secretInfo)
+	}
+}
+
+// TestExtractRequiredEnvKeys_DockerResolvedEnvPassthroughSkipsADC is the
+// Docker-side counterpart of
+// TestExtractRequiredEnvKeys_KubernetesImplicitPassthroughSkipsADC, and a
+// behavior-change regression pin: before ptone/scion#2328, this preflight's
+// GCP-credential check (gcpSAAssigned) only ever consulted req.Config.GCPIdentity,
+// so a mode carried in req.ResolvedEnv (e.g. a resolved project or hub
+// default GCP identity, supplied the same way buildStartContext's own
+// SCION_METADATA_MODE fallback reads it — see effectiveGCPMetadataMode) was
+// invisible to it on every runtime, not just Kubernetes. Routing this
+// preflight through effectiveGCPMetadataMode to add the Kubernetes-aware
+// default also picked up that resolvedEnv source for Docker and every other
+// runtime: a Docker dispatch with a resolvedEnv-carried "passthrough" (no
+// Config.GCPIdentity at all here) now also skips the ADC file requirement,
+// where previously it would not have. Disclosed in the PR body as a
+// Docker-visible behavior change, not just a Kubernetes one.
+func TestExtractRequiredEnvKeys_DockerResolvedEnvPassthroughSkipsADC(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: docker
+runtimes:
+  docker:
+    type: docker
+`)
+
+	req := CreateAgentRequest{
+		Name:        "test-agent-vertex-docker-resolvedenv-passthrough",
+		ProjectPath: projectDir,
+		ResolvedEnv: map[string]string{
+			"GOOGLE_CLOUD_PROJECT": "my-project",
+			"GOOGLE_CLOUD_REGION":  "us-central1",
+			"SCION_METADATA_MODE":  store.GCPMetadataModePassthrough,
+		},
+		Config: &CreateAgentConfig{
+			Template: "claude",
+			Profile:  "default",
+		},
+	}
+
+	required, secretInfo, _, _ := srv.extractRequiredEnvKeys(req, "")
+	if len(required) != 0 {
+		t.Errorf("expected no required keys once a resolvedEnv-carried passthrough mode is recognized as GCP-credentialed on Docker, got %v (secretInfo: %v)", required, secretInfo)
 	}
 }
 

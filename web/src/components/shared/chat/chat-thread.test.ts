@@ -5827,3 +5827,42 @@ describe('scion-chat-thread /stop slash command', () => {
     });
   });
 });
+
+describe('scion-chat-thread gcs-link-click', () => {
+  type GcsInternals = {
+    filePreview: {
+      kind: string;
+      messageId: string;
+      bucket: string;
+      object: string;
+      name: string;
+    } | null;
+    handleGcsLinkClick(
+      e: CustomEvent<{ bucket: string; object: string; name: string; messageId: string }>
+    ): void;
+  };
+
+  it('sets the preview target directly from the event detail, with no project resolution', async () => {
+    const el = await mount();
+    const internals = el as unknown as GcsInternals;
+
+    internals.handleGcsLinkClick(
+      new CustomEvent('gcs-link-click', {
+        detail: {
+          bucket: 'scion-xproject-exchange',
+          object: 'workspace-volumes/dev-brief.md',
+          name: 'dev-brief.md',
+          messageId: 'msg-1',
+        },
+      })
+    );
+
+    expect(internals.filePreview).toEqual({
+      kind: 'gcs',
+      messageId: 'msg-1',
+      bucket: 'scion-xproject-exchange',
+      object: 'workspace-volumes/dev-brief.md',
+      name: 'dev-brief.md',
+    });
+  });
+});

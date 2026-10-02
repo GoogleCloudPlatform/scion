@@ -33,6 +33,7 @@ import { chatNotifications } from './chat-notifications.js';
 import { chatUnread } from './chat-unread.js';
 import { TerminalCoordinator } from './terminal-coordinator.js';
 import { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
+import { TerminalWorkspacePersistence, restoreUrlIntent } from './terminal-persistence.js';
 import { parseLayoutUrl } from './terminal-layout.js';
 import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
 import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../utils/feature-flags.js';
@@ -151,6 +152,7 @@ let cachedAdminStatus: AdminStatus | null = null;
 let terminalWorkspaceEnabled = false;
 let terminalCoordinator: TerminalCoordinator | null = null;
 let terminalWorkspace: TerminalWorkspaceRoot | null = null;
+let terminalPersistence: TerminalWorkspacePersistence | null = null;
 /** Set after account teardown to prevent stale callbacks from recreating sessions. */
 let accountTornDown = false;
 let routeOutlet: HTMLElement | null = null;
@@ -191,7 +193,8 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
     {
       initialize: (): Promise<TerminalResources> =>
         Promise.reject(new Error('Retained pane initializer required.')),
-      create: (registry, agentId): TerminalSession => terminalWorkspace!.create(registry, agentId),
+      create: (registry, agentId, options): TerminalSession =>
+        terminalWorkspace!.create(registry, agentId, options),
       select: (session, signal, requestId): void => {
         if (signal.aborted) throw new Error('Terminal workspace stopped.');
         const expected = requestId && terminalNavigations.get(requestId);
@@ -203,6 +206,17 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
       },
     }
   );
+  terminalPersistence = new TerminalWorkspacePersistence({
+    coordinator: terminalCoordinator,
+    workspace: terminalWorkspace,
+    onRestoredSelection: (agentId): void => {
+      // Only while the route is still bare /terminals: restore() can settle
+      // after the user has already navigated elsewhere.
+      if (window.location.pathname !== browserPath('/terminals') || window.location.search) return;
+      window.history.replaceState(window.history.state, '', browserPath(`/terminals/${agentId}`));
+      terminalWorkspace!.setCurrentPath(`/terminals/${agentId}`);
+    },
+  });
   return terminalCoordinator;
 }
 
@@ -956,6 +970,16 @@ async function renderRoute(path: string): Promise<void> {
       // selection to avoid a flash of single → multi layout transition.
       const queryString = path.includes('?') ? path.split('?')[1] : window.location.search;
       const layoutUrl = parseLayoutUrl(queryString);
+
+      // ── Persisted terminal list restore (ptone/scion#2278) ──────────
+      // Runs for every render into /terminals…, before the URL-driven code
+      // below: an explicit URL decides what is visible and connected, and
+      // the saved list decides rail membership only.
+      if (coordinator && terminalPersistence) {
+        await terminalPersistence.restore(restoreUrlIntent(pathname, queryString));
+        if (thisNav !== navigationId) return;
+      }
+
       if (layoutUrl && coordinator && terminalWorkspace) {
         // Suppress URL sync while restoring to avoid feedback loops
         terminalWorkspace.setSuppressUrlSync(true);

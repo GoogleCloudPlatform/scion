@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 97
+**Operations:** 103
 
 ## Table of Contents
 
@@ -30,6 +30,12 @@
 - [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access token for a service account
 - [agent.lifecycle.create](#agentlifecyclecreate) — Create an agent in a project
 - [agent.lifecycle.delete](#agentlifecycledelete) — Delete an agent
+- [agent.lifecycle.control](#agentlifecyclecontrol) — Start, stop, suspend or restart an agent
+- [agent.lifecycle.restore](#agentlifecyclerestore) — Restore a soft-deleted agent
+- [agent.lifecycle.exec](#agentlifecycleexec) — Run a command in an agent's container
+- [agent.lifecycle.env](#agentlifecycleenv) — Submit environment values to an agent
+- [agent.lifecycle.resetauth](#agentlifecycleresetauth) — Reset an agent's harness authentication
+- [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent
 - [project.lifecycle.create](#projectlifecyclecreate) — Create a new project
 - [project.lifecycle.delete](#projectlifecycledelete) — Delete a project with cascading security state cleanup and atomic audit
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
@@ -1092,11 +1098,18 @@
 
 **Effects:** `create-resource`
 
+### Delegation
+
+- **Kind:** `non_amplification`
+- Actor must hold the role and scopes delegated to the new agent (CanDelegate non-amplification); an agent actor is also evaluated against the delegation ceiling of its live delegation chain for agent.create on the target project
+
 **Denial Codes:** `forbidden`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAgentCreate_ExplicitRoleAboveParentDenied`
+- `pkg/hub:TestAgentCreate_RequiresLiveDelegator`
 
 ---
 
@@ -1134,6 +1147,198 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## agent.lifecycle.control
+
+**Domain:** agent
+
+**Description:** Start, stop, suspend or restart an agent
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/start` |
+| http_route | POST | `/api/v1/agents/{id}/stop` |
+| http_route | POST | `/api/v1/agents/{id}/suspend` |
+| http_route | POST | `/api/v1/agents/{id}/restart` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/start` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/stop` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/suspend` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/restart` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `agent.lifecycle`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+
+---
+
+## agent.lifecycle.restore
+
+**Domain:** agent
+
+**Description:** Restore a soft-deleted agent
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/restore` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/restore` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `agent.lifecycle`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+
+---
+
+## agent.lifecycle.exec
+
+**Domain:** agent
+
+**Description:** Run a command in an agent's container
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/exec` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/exec` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `agent.attach`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+
+---
+
+## agent.lifecycle.env
+
+**Domain:** agent
+
+**Description:** Submit environment values to an agent
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/env` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/env` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `agent.attach`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+
+---
+
+## agent.lifecycle.resetauth
+
+**Domain:** agent
+
+**Description:** Reset an agent's harness authentication
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/reset-auth` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/reset-auth` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `agent.attach`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+
+---
+
+## agent.lifecycle.reincarnate
+
+**Domain:** agent
+
+**Description:** Reincarnate an agent
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/reincarnate` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/reincarnate` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `agent.lifecycle`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
 
 ---
 
@@ -3567,8 +3772,6 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/chat/prefs` |
 | http_route | PUT | `/api/v1/chat/prefs` |
-| http_route | GET | `/api/v1/chat/threads` |
-| http_route | POST | `/api/v1/chat/threads/{id}/read` |
 | http_route | GET | `/api/v1/chat/spaces` |
 | http_route | GET | `/api/v1/chat/spaces/{id}/threads` |
 | http_route | GET | `/api/v1/chat/conversations/{id}/messages` |

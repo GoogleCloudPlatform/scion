@@ -131,7 +131,7 @@ afterEach(() => {
  * `createUnattachedPage()` directly, at the default (non-`/chat`) test
  * document URL, would let `_isOnChatRoute()` reject the event regardless of
  * whether the guard actually under test did anything — the same vacuity
- * that would otherwise mask the terminal-surface/visibility-call/isV2
+ * that would otherwise mask the terminal-surface/visibility-call
  * guards. Every test below uses this fixture and ends with a positive
  * control (the identical event with only the condition under test flipped)
  * to prove the rest of the guard chain is actually live.
@@ -289,32 +289,6 @@ describe('the _isPageVisible() call site in _handleGlobalKeydown, isolated from 
     ancestor.hidden = false;
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
     expect(togglePalette).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('the isV2 guard in _handleGlobalKeydown', () => {
-  it('v1 (isV2 false) never toggles the palette or calls preventDefault, even on /chat and visible', () => {
-    // Asserting only that no switcher element renders proves nothing about
-    // this guard (v1 never renders one). Without it, v1 Ctrl+K would call
-    // preventDefault (stealing the browser's native Ctrl+K) and still run
-    // togglePalette (lazy import + agents/DM GETs).
-    const page = createUnattachedPage();
-    window.history.pushState({}, '', '/chat');
-    page.isV2 = false;
-    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
-    const event = makeKeydownEvent({ metaKey: true });
-
-    page._handleGlobalKeydown(event);
-
-    expect(togglePalette).not.toHaveBeenCalled();
-    expect(event.defaultPrevented).toBe(false);
-
-    // Positive control: flip isV2 back on, identical event does toggle and preventDefault.
-    page.isV2 = true;
-    const event2 = makeKeydownEvent({ metaKey: true });
-    page._handleGlobalKeydown(event2);
-    expect(togglePalette).toHaveBeenCalledTimes(1);
-    expect(event2.defaultPrevented).toBe(true);
   });
 });
 
@@ -1683,19 +1657,6 @@ describe('_handlePaletteOpenRequest: the header button opens with { mode: "open"
     expect(togglePalette).not.toHaveBeenCalled();
 
     vi.mocked(page._isUnrelatedModalActive).mockReturnValue(false);
-    page._handlePaletteOpenRequest();
-    expect(togglePalette).toHaveBeenCalledTimes(1);
-  });
-
-  it('does nothing when isV2 is off, with a positive control', () => {
-    const page = createEligiblePage();
-    Object.defineProperty(page, 'isV2', { value: false, configurable: true });
-    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
-
-    page._handlePaletteOpenRequest();
-    expect(togglePalette).not.toHaveBeenCalled();
-
-    Object.defineProperty(page, 'isV2', { value: true, configurable: true });
     page._handlePaletteOpenRequest();
     expect(togglePalette).toHaveBeenCalledTimes(1);
   });

@@ -1027,6 +1027,24 @@ export class StateManager extends EventTarget {
    * "created" supplies a base, via `applyCompactedDelta` — see that type's
    * doc comment for why folding stays O(1) per ID without losing anything a
    * raw, unbounded list of every delta would have kept.
+   *
+   * The same raw delta is also recorded into every currently open seed
+   * epoch (`recordSeedEpochDelta`, called by `handleAgentEvent` right after
+   * this), so each epoch accumulates its own copy of whatever is buffered
+   * here. The expiry timer below must keep those copies in sync: without
+   * it, a drain whose epoch is still open 30s later would replay, at seed
+   * time, a delta `pendingAgentDeltas` has already dropped — live state and
+   * the seeded state would disagree about an ID that was never resolved by
+   * a "created" or "deleted" event (see the timer callback below).
+   *
+   * This timer is meant to outlive only the *unknown* phase for `agentId`:
+   * `seedAgents` clears it (via `clearPendingAgentDelta`) as soon as any
+   * seed — tokened or not — makes the ID known, exactly like `created`/
+   * `deleted` do, so it should never actually fire once `state.agents` has
+   * the ID. The callback still guards its epoch purge with that check,
+   * because epoch entries recorded after the ID became known share the
+   * same per-ID slot as the original buffered entry, and must not be wiped
+   * just because this now-stale timer still happened to be live.
    */
   private bufferAgentDelta(agentId: string, delta: Partial<Agent>): void {
     const prev = this.pendingAgentDeltas.get(agentId) ?? emptyCompactedDelta();
@@ -1039,6 +1057,14 @@ export class StateManager extends EventTarget {
     const timer = setTimeout(() => {
       this.pendingAgentDeltas.delete(agentId);
       this.pendingAgentDeltaTimers.delete(agentId);
+      // Defense in depth only; see this function's doc comment for why
+      // reaching this with a known `agentId` is unexpected.
+      if (this.state.agents.has(agentId)) return;
+      // Drop this ID's recorded entry from every still-open seed epoch too
+      // (§7): see this function's doc comment for why.
+      for (const epoch of this.seedEpochs.values()) {
+        epoch.deltas.delete(agentId);
+      }
     }, StateManager.PENDING_DELTA_TTL_MS);
     this.pendingAgentDeltaTimers.set(agentId, timer);
   }
@@ -1247,11 +1273,12 @@ export class StateManager extends EventTarget {
    * `state.agents`: those never had a base to merge against before, and
    * this snapshot is the first one they get, the same relationship a
    * `created` event has to its own buffered `pendingAgentDeltas` entry.
-   * Once applied, the ID's `pendingAgentDeltas` entry (if any) is cleared,
-   * so a `created` event that still arrives later does not re-apply the
-   * same deltas a second time. A token invalidated by a scope change (or
-   * never opened, or already ended) makes this call a complete no-op: the
-   * snapshot may belong to a scope state no longer holds.
+   * Every seeded ID's `pendingAgentDeltas` entry (and its 30s expiry timer)
+   * is cleared unconditionally, for every seed, tokened or not — see
+   * `bufferAgentDelta`'s doc comment for why. A token invalidated by a
+   * scope change (or never opened, or already ended) makes this call a
+   * complete no-op: the snapshot may belong to a scope state no longer
+   * holds.
    *
    * A token is single-use: this call ends the epoch itself once every
    * agent is seeded, so a caller's own `endSeedEpoch` afterward (per the
@@ -1286,10 +1313,10 @@ export class StateManager extends EventTarget {
       const recorded = recordedDeltas?.get(agent.id);
       if (recorded) {
         toStore = applyCompactedDelta(toStore, recorded, agent.id);
-        // Consumed: a later "created" for this ID must not re-apply the
-        // same buffered deltas a second time.
-        this.clearPendingAgentDelta(agent.id);
       }
+      // Unconditional, not just when `recorded` was found — see
+      // `bufferAgentDelta`'s doc comment for why.
+      this.clearPendingAgentDelta(agent.id);
       this.state.agents.set(agent.id, toStore);
     }
 

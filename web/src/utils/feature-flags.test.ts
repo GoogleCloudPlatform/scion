@@ -28,7 +28,6 @@ import {
   setFeatureFlag,
   setServerFlags,
   resetServerFlagStateForTests,
-  NATIVE_CHAT_V2_FLAG,
   TERMINAL_WORKSPACE_FLAG,
 } from './feature-flags.js';
 
@@ -39,6 +38,8 @@ import { ACCESS_BOUNDARIES_READ_FLAG } from './feature-flags.js';
 import { ACCESS_BOUNDARIES_AUTHORING_FLAG } from './feature-flags.js';
 // @ts-expect-error NATIVE_CHAT_PALETTE_FLAG was removed (the palette is always on)
 import { NATIVE_CHAT_PALETTE_FLAG } from './feature-flags.js';
+// @ts-expect-error NATIVE_CHAT_V2_FLAG was removed (v2 is always on)
+import { NATIVE_CHAT_V2_FLAG } from './feature-flags.js';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -50,7 +51,6 @@ beforeEach(() => {
   // Clear any localStorage overrides
   try {
     localStorage.removeItem('scion:feature:web.native_chat');
-    localStorage.removeItem('scion:feature:web.native_chat_v2');
     localStorage.removeItem('scion:feature:web.access_boundaries_read');
     localStorage.removeItem('scion:feature:web.access_boundaries_authoring');
     localStorage.removeItem('scion:feature:web.terminal_workspace');
@@ -94,20 +94,22 @@ describe('feature-flags: palette flag removed', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Removed v2 flag
+// ---------------------------------------------------------------------------
+
+describe('feature-flags: v2 flag removed', () => {
+  it('does not export NATIVE_CHAT_V2_FLAG', () => {
+    expect(NATIVE_CHAT_V2_FLAG).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Retained native_chat flags
 // ---------------------------------------------------------------------------
 
 describe('feature-flags: native_chat flags retained', () => {
-  it('exports NATIVE_CHAT_V2_FLAG', () => {
-    expect(NATIVE_CHAT_V2_FLAG).toBe('web.native_chat_v2');
-  });
-
   it('web.native_chat defaults to ON', () => {
     expect(isFeatureEnabled('web.native_chat')).toBe(true);
-  });
-
-  it('web.native_chat_v2 defaults to ON', () => {
-    expect(isFeatureEnabled('web.native_chat_v2')).toBe(true);
   });
 });
 
@@ -132,7 +134,6 @@ describe('feature-flags: terminal_workspace default-on', () => {
 
   it('other default-on flags are unaffected', () => {
     expect(isFeatureEnabled('web.native_chat')).toBe(true);
-    expect(isFeatureEnabled('web.native_chat_v2')).toBe(true);
   });
 
   it('unrelated flags not in DEFAULT_ON_FLAGS still default to false', () => {

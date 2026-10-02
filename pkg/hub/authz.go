@@ -160,8 +160,16 @@ type CredentialContext struct {
 	ID        string
 	Type      string
 	ProjectID string
-	Scopes    []string
-	Ceiling   permissions.FrozenPermissionCeiling
+	// Boundary carries the credential-side boundary (project or hub) for a
+	// UAT credential; nil for every other credential kind. ProjectID is
+	// filled from the same boundary for a project-scoped UAT, so a caller
+	// that reads only ProjectID sees a value consistent with Boundary. A
+	// boundary-aware caller should read Boundary directly, never infer
+	// hub-vs-project from an empty ProjectID, which is never a positive
+	// claim of hub scope by itself.
+	Boundary *TokenBoundary
+	Scopes   []string
+	Ceiling  permissions.FrozenPermissionCeiling
 
 	// Descriptive credential metadata. Decoration is additive,
 	// server-derived attribution (token name/boundary/purpose/labels) for
@@ -257,6 +265,11 @@ type Decision struct {
 	Actor   *DecisionActor `json:"actor,omitempty"`
 	Purpose string         `json:"purpose,omitempty"`
 
+	// DeniedBy names the pipeline stage that produced a deny, as a stable
+	// snake_case value. It is empty on allow and on a deny that is not
+	// attributed to a named stage. Reason is independent of it.
+	DeniedBy DeniedBy `json:"deniedBy,omitempty"`
+
 	// PermissionID is the caller-supplied AuthzRequest.Permission, recorded
 	// only when it is a canonical ID present in the permissions registry.
 	// It is never derived from Resource/Action, and never an unregistered
@@ -291,6 +304,17 @@ type Decision struct {
 	Provenance *DecisionProvenance `json:"provenance,omitempty"`
 }
 
+// DeniedBy is the stable identifier of the stage that denied a decision.
+type DeniedBy string
+
+const (
+	// DeniedByDelegationCeiling: the agent's delegation chain does not
+	// supply the permission (a non-live delegator, a delegator that does
+	// not hold the permission, a missing or ambiguous edge, or a failed
+	// lookup).
+	DeniedByDelegationCeiling DeniedBy = "delegation_ceiling"
+)
+
 // DenyCause is a structural tag for a subset of deny reasons that callers
 // need to distinguish without string-matching Reason. It is deliberately
 // small and closed: only the causes a caller actually branches on get a
@@ -300,12 +324,14 @@ type DenyCause string
 const (
 	// DenyCauseCeilingOrphaned marks a delegation-ceiling deny where the
 	// delegator (the principal that created the agent, directly or
-	// transitively) no longer resolves at all — e.g. its user was deleted.
+	// transitively) does not resolve, is deleted (including a retained
+	// soft-deleted agent), or is the migration sentinel.
 	DenyCauseCeilingOrphaned DenyCause = "ceiling_orphaned"
 
 	// DenyCauseCeilingDelegatorLacksPermission marks a delegation-ceiling
-	// deny where the delegator still exists but no longer holds the
-	// permission being exercised.
+	// deny where the delegator exists but does not hold the permission
+	// being exercised, including a user that is not active (for example
+	// suspended or invited), super-admin or not.
 	DenyCauseCeilingDelegatorLacksPermission DenyCause = "ceiling_delegator_lacks_permission"
 
 	// DenyCauseCeilingError marks a delegation-ceiling deny caused by a
@@ -313,7 +339,27 @@ const (
 	// policy fact about the delegator. Callers should treat this like an
 	// ordinary denial, not surface it as a specific reason.
 	DenyCauseCeilingError DenyCause = "ceiling_error"
+
+	// DenyCauseResolutionError marks a deny caused by a store or resolution
+	// fault rather than a policy fact. decide() sets it on four paths:
+	// principal resolution (Step 2), role-binding resolution (Step 3),
+	// role-definition resolution (Step 4), and access-constraint load
+	// failure (Step 7c, detected after Step 9 because the failure there
+	// is folded into a deny-all restriction rather than an early return).
+	DenyCauseResolutionError DenyCause = "resolution_error"
 )
+
+// IsIndeterminate reports whether this deny was caused by a store or
+// resolution fault on the tagged paths, rather than a policy fact — the
+// access check could not be decided. Tagged: principal, role-binding,
+// role-definition and access-constraint resolution in decide(), and the
+// delegation-ceiling error. Not yet tagged: relationship-fact and
+// source-active lookup failures (isCurrentHubMember, relationshipSourceActive,
+// progenySourceFor). A false result for those candidates does not prove a
+// policy deny.
+func (d Decision) IsIndeterminate() bool {
+	return !d.Allowed && (d.DenyCause == DenyCauseResolutionError || d.DenyCause == DenyCauseCeilingError)
+}
 
 // EvaluationDetail provides detailed info for the evaluate endpoint.
 type EvaluationDetail struct {
@@ -348,6 +394,11 @@ type AuthzService struct {
 	// progenyAdapters holds progeny sharing-source adapters registered
 	// through RegisterProgenyAdapter.
 	progenyAdapters progenyAdapterRegistry
+
+	// sourceResolver identifies an agent's authoritative source user for
+	// the execution-project relationship stage. Nil selects the stored
+	// agent row and typed delegation edges.
+	sourceResolver ExecutionSourceResolver
 
 	// devLocalEnabled backs devLocalAuthorityEnabled (devauth.go,
 	// ptone/scion#2342 B.3 R6). Set once at server construction via
@@ -574,7 +625,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
 		}
-		d := Decision{Allowed: false, Reason: "principal resolution error (fail-closed)"}
+		d := Decision{Allowed: false, Reason: "principal resolution error (fail-closed)", DenyCause: DenyCauseResolutionError}
 		if request.Explain {
 			d.Provenance = &DecisionProvenance{
 				Permission:      permissionID,
@@ -617,7 +668,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
 		}
-		d := Decision{Allowed: false, Reason: "binding resolution error (fail-closed)"}
+		d := Decision{Allowed: false, Reason: "binding resolution error (fail-closed)", DenyCause: DenyCauseResolutionError}
 		if request.Explain {
 			d.Provenance = &DecisionProvenance{
 				Permission:      permissionID,
@@ -642,7 +693,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
 		}
-		d := Decision{Allowed: false, Reason: "role resolution error (fail-closed)"}
+		d := Decision{Allowed: false, Reason: "role resolution error (fail-closed)", DenyCause: DenyCauseResolutionError}
 		if request.Explain {
 			d.Provenance = &DecisionProvenance{
 				Permission:      permissionID,
@@ -754,8 +805,22 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
-	// 7c. Access constraints (AC1).
-	acRestrictions := a.loadAccessConstraintRestrictions(ctx, closure, resourceCtx)
+	// 7c. Access constraints (AC1). Calls the error-returning form directly
+	// (rather than loadAccessConstraintRestrictions) so a load failure can be
+	// tagged as DenyCauseResolutionError below, instead of looking like an
+	// ordinary policy deny. Behaviour on error is unchanged: the same
+	// deny-all "access_constraint_error" restriction is appended.
+	var constraintLoadFailed bool
+	acRestrictions, acErr := a.accessConstraintRestrictions(ctx, closure, resourceCtx)
+	if acErr != nil {
+		a.logger.Warn("failed to load access constraints (fail-closed)", "error", acErr)
+		acRestrictions = []Restriction{{
+			Kind:        "access_constraint_error",
+			Description: "constraint loading failed (fail-closed)",
+			// nil Check denies everything.
+		}}
+		constraintLoadFailed = true
+	}
 	restrictions = append(restrictions, acRestrictions...)
 
 	// ── Step 8: Evaluate via AK1 kernel ───────────────────────────────
@@ -802,26 +867,40 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
+	// If the access-constraint load failed (7c), and the outcome is a deny,
+	// tag it so callers can distinguish a store fault from a policy fact.
+	// This runs regardless of which path produced the deny (kernel or
+	// relationship candidates), because the deny-all restriction from 7c
+	// applies to both. Step 10 below only overwrites DenyCause on decisions
+	// that were allowed at this point, so it cannot clobber this tag.
+	if !decision.Allowed && constraintLoadFailed {
+		decision.DenyCause = DenyCauseResolutionError
+	}
+
 	// ── Step 10: Agent delegation ceiling (post-decision) ────────────
-	// Applies to ALL allowed decisions regardless of grant source
-	// (kernel or relationship grant). C-1 fix: previously only ran on
-	// kernel-allowed decisions because Step 9 returned early.
+	// Applies to every allowed decision for an agent principal, whatever
+	// the grant source (kernel or relationship grant). The ceiling
+	// evaluates the exact permission resolved above. A failed lookup
+	// denies.
 	if decision.Allowed && isAgentPrincipal(principal.Kind) {
 		if agent, ok := principal.Identity.(AgentIdentity); ok {
 			if getDelegationCeilingCache(ctx) == nil {
 				ctx = contextWithDelegationCeilingCache(ctx)
 			}
+			ceilingReq := request
+			ceilingReq.Principal = principal
+			ceilingReq.Permission = permissionID
 			var ceilingCause DenyCause
-			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(ctx, request, agent.ID(), nil, &ceilingCause)
+			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(ctx, ceilingReq, permissionID, agent.ID(), nil, &ceilingCause)
 			if ceilingErr != nil {
-				if !isReadOnlyOperation(request.Action) {
-					decision.Allowed = false
-					decision.Reason = "delegation ceiling check failed (fail-closed): " + ceilingErr.Error()
-					decision.DenyCause = DenyCauseCeilingError
-				}
+				decision.Allowed = false
+				decision.Reason = "delegation ceiling check failed (fail-closed): " + ceilingErr.Error()
+				decision.DeniedBy = DeniedByDelegationCeiling
+				decision.DenyCause = DenyCauseCeilingError
 			} else if !ceilingAllowed {
 				decision.Allowed = false
 				decision.Reason = ceilingReason
+				decision.DeniedBy = DeniedByDelegationCeiling
 				decision.DenyCause = ceilingCause
 			}
 		}
@@ -1226,7 +1305,7 @@ func formatBoundaryScope(scopeType, scopeID string) string {
 // authority into kernel-evaluable bindings so the agent's project-scoped
 // permissions flow through the standard evaluation pipeline.
 func (a *AuthzService) buildAgentSyntheticBindings(agent AgentIdentity) ([]CandidateBinding, map[string]*RolePermissions) {
-	scopes := agent.Scopes()
+	scopes := effectiveAgentScopes(agent)
 	if len(scopes) == 0 {
 		return nil, nil
 	}
@@ -1264,8 +1343,70 @@ func (a *AuthzService) buildAgentSyntheticBindings(agent AgentIdentity) ([]Candi
 	return candidates, roleDefs
 }
 
-// agentScopesToPermissionIDs maps agent JWT token scopes to canonical permission IDs
-// by looking up each scope in the permissions registry.
+// isLegacyPreSplitAgentJWT reports whether identity is a genuine pre-split
+// hub-signed agent JWT: one that ValidateAgentToken actually verified and
+// found carried no scope_schema claim on the wire (AgentTokenClaims.
+// legacyScopeSchema; see CurrentAgentScopeSchema's doc comment for why that
+// flag, not a zero ScopeSchema value, is the signal). Direct construction of
+// an AgentTokenClaims literal never sets legacyScopeSchema, so every
+// in-process identity built that way — a stored-record wrapper, a
+// scheduled-dispatch creator identity, a synthetic secret-resolution
+// identity, and so on — reports false here regardless of which scopes it
+// carries. A non-hub-JWT AgentIdentity (federated, or any future kind) also
+// reports false: this compatibility exists only to grandfather a token this
+// hub's own signer actually minted before the split, and an identity that
+// never went through that signer was never granted anything under the
+// pre-split combined scope to begin with.
+func isLegacyPreSplitAgentJWT(identity AgentIdentity) bool {
+	wrapped, ok := identity.(*agentIdentityWrapper)
+	return ok && wrapped.AgentTokenClaims != nil && wrapped.legacyScopeSchema
+}
+
+// effectiveAgentScopes is the single place the ptone/scion#2339
+// compatibility rule applies, so every scope-level consumer agrees on what a
+// legacy token means. For a genuine pre-split hub JWT
+// (isLegacyPreSplitAgentJWT) that holds ScopeAgentCreate but not
+// ScopeAgentSAAssign, it appends ScopeAgentSAAssign — the same single
+// combined scope granted both permissions when the token was minted, so the
+// token keeps authorizing what it authorized then. Every other identity's
+// scopes pass through unchanged, including a current-schema token that
+// deliberately holds ScopeAgentCreate without ScopeAgentSAAssign (a future
+// per-scope-ceiling-filtered mint must not be widened back here).
+//
+// Every scope-level consumer — the synthetic project-scoped grant
+// (buildAgentSyntheticBindings), the credential-scope restriction
+// (agentScopeRestriction), and agent-to-agent delegation admission
+// (canAgentDelegateToAgent) — must call this instead of agent.Scopes()
+// directly, so a permission one of them grants can never be taken back by
+// another reading a different, stale scope list.
+func effectiveAgentScopes(agent AgentIdentity) []AgentTokenScope {
+	scopes := agent.Scopes()
+	if !isLegacyPreSplitAgentJWT(agent) {
+		return scopes
+	}
+	hasCreate, hasAssign := false, false
+	for _, s := range scopes {
+		switch s {
+		case ScopeAgentCreate:
+			hasCreate = true
+		case ScopeAgentSAAssign:
+			hasAssign = true
+		}
+	}
+	if !hasCreate || hasAssign {
+		return scopes
+	}
+	extended := make([]AgentTokenScope, len(scopes), len(scopes)+1)
+	copy(extended, scopes)
+	return append(extended, ScopeAgentSAAssign)
+}
+
+// agentScopesToPermissionIDs maps agent JWT token scopes to canonical
+// permission IDs by looking up each scope in the permissions registry. It is
+// a pure registry lookup with no compatibility logic of its own — callers
+// evaluating an agent's actual authority must pass effectiveAgentScopes(agent)
+// rather than agent.Scopes() so the ptone/scion#2339 compatibility rule is
+// applied exactly once, upstream of this function.
 func agentScopesToPermissionIDs(scopes []AgentTokenScope) []string {
 	scopeSet := make(map[string]bool, len(scopes))
 	for _, s := range scopes {
@@ -1301,16 +1442,19 @@ func ceilingRestriction(ceiling permissions.FrozenPermissionCeiling) Restriction
 	}
 }
 
-// agentScopeRestriction builds a kernel Restriction from agent JWT token scopes.
-// Only permissions that map to the agent's declared scopes are allowed, with one
-// exception: permissions.PermissionGCPServiceAccountUse is decided against the
-// specific resource this restriction was built for
-// (agentGCPServiceAccountUseScopeMatch), never against the static AgentScopes
+// agentScopeRestriction builds a kernel Restriction from agent JWT token
+// scopes. Only permissions the agent's effective scopes grant are allowed —
+// computed via effectiveAgentScopes + agentScopesToPermissionIDs, the exact
+// pipeline step 5b's synthetic binding uses, so the two always agree on what
+// a legacy pre-split token (ptone/scion#2339) authorizes — with one
+// exception: permissions.PermissionGCPServiceAccountUse is decided against
+// the specific resource this restriction was built for
+// (agentGCPServiceAccountUseScopeMatch), never against effectiveAgentScopes's
 // map below -- see gcpServiceAccountUseBinding's doc comment for why a static
 // list cannot express a per-instance token scope. Every other permission is
-// decided by that static map alone.
+// decided by that map alone.
 func agentScopeRestriction(agent AgentIdentity, resource Resource) Restriction {
-	scopes := agent.Scopes()
+	scopes := effectiveAgentScopes(agent)
 	if len(scopes) == 0 {
 		// No scopes: deny everything (fail closed).
 		return Restriction{
@@ -1318,18 +1462,9 @@ func agentScopeRestriction(agent AgentIdentity, resource Resource) Restriction {
 			Description: "agent JWT has no scopes (fail closed)",
 		}
 	}
-	scopeSet := make(map[string]bool, len(scopes))
-	for _, s := range scopes {
-		scopeSet[string(s)] = true
-	}
 	allowed := make(map[string]struct{})
-	for _, p := range permissions.Registry {
-		for _, s := range p.AgentScopes {
-			if scopeSet[s] {
-				allowed[p.ID] = struct{}{}
-				break
-			}
-		}
+	for _, id := range agentScopesToPermissionIDs(scopes) {
+		allowed[id] = struct{}{}
 	}
 	return Restriction{
 		Kind:        "credential_scope",
@@ -1695,14 +1830,20 @@ func suppliedCredentialCompatible(ctx context.Context, principal PrincipalContex
 // ctx provenance the middleware sets, not the supplied kind by itself.
 func brokerOnBehalfOfAuthorizes(ctx context.Context, principal PrincipalContext, supplied CredentialContext) bool {
 	broker := GetBrokerIdentityFromContext(ctx)
-	if broker == nil || broker.Type() != "broker" || supplied.Type != "broker" {
+	// isNilIdentity, not broker == nil: BrokerIdentity embeds Identity, so a
+	// typed-nil concrete broker identity (see isNilIdentity) is a non-nil
+	// interface value and would otherwise reach broker.Type() below.
+	if isNilIdentity(broker) || broker.Type() != "broker" || supplied.Type != "broker" {
 		return false
 	}
 	obo, ok := BrokerOnBehalfOfFromContext(ctx)
 	if !ok || obo.BrokerID == "" {
 		return false
 	}
-	if obo.BrokerID != broker.ID() || obo.Broker == nil || obo.Broker.ID() != broker.ID() {
+	// isNilIdentity, not obo.Broker == nil, for the same reason: obo.Broker is
+	// a BrokerIdentity and a typed-nil value here would otherwise reach
+	// obo.Broker.ID() below.
+	if obo.BrokerID != broker.ID() || isNilIdentity(obo.Broker) || obo.Broker.ID() != broker.ID() {
 		return false
 	}
 	effective := GetIdentityFromContext(ctx)
@@ -1785,7 +1926,11 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 	}
 	switch v := identity.(type) {
 	case *ScopedUserIdentity:
-		cc := CredentialContext{Kind: CredentialKindUAT, ID: v.CredentialID(), ProjectID: v.ScopedProjectID(), Scopes: v.ScopedScopes(), Ceiling: v.Ceiling()}
+		// The typed-nil case is handled by the guard above, before this
+		// switch is reached, so v is guaranteed non-nil here and
+		// v.Boundary() cannot dereference a nil receiver.
+		boundary := v.Boundary()
+		cc := CredentialContext{Kind: CredentialKindUAT, ID: v.CredentialID(), ProjectID: v.ScopedProjectID(), Boundary: &boundary, Scopes: v.ScopedScopes(), Ceiling: v.Ceiling()}
 		// Carry the descriptive decoration, if ValidateToken attached one,
 		// through to the credential context. This is the single copy point;
 		// decoration is never otherwise derived here. Decoration() already

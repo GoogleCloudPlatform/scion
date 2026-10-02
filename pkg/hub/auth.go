@@ -443,7 +443,8 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(scopedUser))
 				ctx = contextWithAuthType(ctx, AuthTypeUAT)
 				if cfg.Debug {
-					log.Debug("UAT authenticated", "email", scopedUser.Email(), "project_id", scopedUser.ScopedProjectID())
+					boundary := scopedUser.Boundary()
+					log.Debug("UAT authenticated", "email", scopedUser.Email(), "boundary_kind", string(boundary.Kind), "project_id", boundary.ProjectID)
 				}
 
 			case tokenTypeUser:

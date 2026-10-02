@@ -107,6 +107,11 @@
       "disposition": "terminal"
     },
     {
+      "code": 4501,
+      "name": "pty_attach_unsupported",
+      "disposition": "terminal"
+    },
+    {
       "code": 4503,
       "name": "pty_upstream_unavailable",
       "disposition": "retry"

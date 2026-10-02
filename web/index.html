@@ -18,7 +18,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content" />
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <title>Scion - Agent Orchestration Platform</title>
   <link rel="stylesheet" href="/node_modules/@shoelace-style/shoelace/dist/themes/light.css" />
@@ -41,6 +41,37 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; font-family: var(--scion-font-sans, system-ui, sans-serif); }
     body { background: var(--scion-bg, #f8fafc); color: var(--scion-text, #1e293b); }
+
+    /* mobile-frame:start -- kept identical (modulo comments and
+       indentation) to pkg/hub/web.go; see TestSPAShellIndexHTMLParity. */
+    :root {
+      --scion-app-height: 100vh;
+    }
+    @supports (height: 100dvh) {
+      :root {
+        --scion-app-height: 100dvh;
+      }
+    }
+
+    html,
+    body {
+      overscroll-behavior: none;
+    }
+
+    #app {
+      height: 100%;
+      min-height: 0;
+    }
+
+    /* Frame mode: set by any app shell while mounted (see
+       web/src/components/shared/app-frame.ts). Document-scrolling pages
+       (login, invite, onboarding) never set it. */
+    html.scion-app-frame,
+    html.scion-app-frame body {
+      overflow: hidden;
+      height: 100%;
+    }
+    /* mobile-frame:end */
   </style>
 </head>
 <body>
