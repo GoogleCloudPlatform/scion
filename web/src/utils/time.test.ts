@@ -167,6 +167,15 @@ const ZONEINFO_NON_ZONE_ENTRIES = new Set([
   'localtime',
   'posixrules',
   'Factory',
+  // "right" and "posix" are whole-tree duplicates of the same zone data
+  // (right/ with leap seconds baked in, posix/ without), not zone-name
+  // path components — "right/Africa/Abidjan" isn't itself an IANA name,
+  // Go's time.LoadLocation doesn't accept that prefixed form either, and
+  // "Africa/Abidjan" (without the prefix) is already covered via the main
+  // tree. A fuller tzdata package (e.g. GitHub Actions' ubuntu-latest
+  // runner, unlike this container's slimmer one) ships both trees.
+  'right',
+  'posix',
 ]);
 
 /** Recursively lists zone names under `dir` (e.g. "Asia/Tokyo", "CET"). */
