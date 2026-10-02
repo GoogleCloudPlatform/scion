@@ -127,7 +127,7 @@ func hubAdminUser(t *testing.T, f *bypassAgentsFixture) *store.User {
 // picking a hub-wide account. Both calls are idempotent.
 func createAgentAsOwner(t *testing.T, f *bypassAgentsFixture, req CreateAgentRequest) *httptest.ResponseRecorder {
 	t.Helper()
-	f.srv.createProjectMembersGroup(context.Background(), f.proj)
+	f.srv.seedProjectCreatorMembership(context.Background(), f.proj)
 	require.NoError(t, f.srv.createProjectOwnerRoleBinding(context.Background(), f.proj.ID, f.owner.ID))
 	return doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
 		"/api/v1/projects/"+f.proj.ID+"/agents", req)
@@ -226,7 +226,7 @@ func TestAgentCreate_HubScopedSA_AssignableByCreatorAndAdmin(t *testing.T) {
 		sa := hubScopedSAForAgent(t, f, true) // created by a stranger
 		admin := hubAdminUser(t, f)
 
-		f.srv.createProjectMembersGroup(context.Background(), f.proj)
+		f.srv.seedProjectCreatorMembership(context.Background(), f.proj)
 		require.NoError(t, f.srv.createProjectOwnerRoleBinding(context.Background(), f.proj.ID, f.owner.ID))
 		rec := doRequestAsUser(t, f.srv, admin, http.MethodPost,
 			"/api/v1/projects/"+f.proj.ID+"/agents", CreateAgentRequest{
@@ -716,6 +716,7 @@ func createdAgentIdentityOrNil(t *testing.T, f *bypassAgentsFixture, name string
 // because authorizeSAAssignment enforces mode coupling (D4) and Hub policy.
 func TestAgentCreate_HubScopedProjectDefault_IsApplied(t *testing.T) {
 	f := bypassAgentsSetup(t)
+	bindFixtureOwner(t, f)
 	// P10: mode=enforce + hub membership required for hub-scoped default
 	setMode(f.srv, SAAssignCheckEnforce)
 	f.srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub@test.iam.gserviceaccount.com"})

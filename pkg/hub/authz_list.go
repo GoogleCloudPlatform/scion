@@ -75,7 +75,8 @@ func (a *AuthzService) ResolveListScopes(ctx context.Context, identity Identity,
 	// re-check suspension because no suspended identity reaches this code path.
 
 	// Step 1: Resolve principal closure (direct principal + transitive groups).
-	principals, err := a.authorizationPrincipals(ctx, identity)
+	authzIn := a.inputsFor(ctx, identity)
+	principals, err := authzIn.Principals()
 	if err != nil {
 		a.logger.WarnContext(ctx, "ResolveListScopes: failed to resolve principals",
 			"error", err, "permission", permissionID)
@@ -96,7 +97,7 @@ func (a *AuthzService) ResolveListScopes(ctx context.Context, identity Identity,
 	// Step 2: Load applicable role bindings for all principals in the closure.
 	// We pass nil for scopeTypes and scopeIDs to get all bindings (both system
 	// and project scoped) so ResolveAuthorizedScopes can compute the full set.
-	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	bindings, err := authzIn.Bindings()
 	if err != nil {
 		a.logger.WarnContext(ctx, "ResolveListScopes: failed to load role bindings",
 			"error", err, "permission", permissionID)
@@ -108,8 +109,7 @@ func (a *AuthzService) ResolveListScopes(ctx context.Context, identity Identity,
 	}
 
 	// Step 3: Collect unique role definition IDs and load them.
-	roleDefIDs := collectRoleDefinitionIDs(bindings)
-	roleDefinitions, err := a.loadRoleDefinitions(ctx, roleDefIDs)
+	roleDefinitions, err := authzIn.RoleDefs()
 	if err != nil {
 		a.logger.WarnContext(ctx, "ResolveListScopes: failed to load role definitions",
 			"error", err, "permission", permissionID)

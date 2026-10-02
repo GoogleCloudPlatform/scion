@@ -78,7 +78,7 @@ func setupAgentSkillFixture(t *testing.T) *agentSkillFixture {
 		OwnerID: alice.ID, CreatedBy: alice.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, q))
-	srv.createProjectMembersGroup(ctx, q)
+	srv.seedProjectCreatorMembership(ctx, q)
 
 	createTestUserWithProjectRole(t, s, u.ID, u.Email, p.ID, store.ProjectRoleMember)
 	createTestUserWithProjectRole(t, s, u.ID, u.Email, q.ID, store.ProjectRoleMember)

@@ -20,9 +20,15 @@ import type { ScionTerminalPane } from '../components/terminal/terminal-pane.js'
 import {
   TERMINAL_SESSION_COUNT_EVENT,
   TERMINAL_DRAG_MIME,
+  TERMINAL_PALETTE_NEW_AGENT_EVENT,
   type TerminalSessionCountDetail,
+  type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
 import { enterAppFrame, exitAppFrame } from '../components/shared/app-frame.js';
+import { hasOpenModalDescendant } from '../components/shared/open-modal.js';
+import { TERMINAL_PALETTE_OPEN_REQUEST_EVENT } from './terminal-palette-events.js';
+import type { GroupState, PaletteGroup, PaletteTarget } from './chat-palette-types.js';
+import type { ScionQuickPalette } from '../components/shared/palette/quick-palette.js';
 import '../components/shared/header.js';
 import '../components/terminal/terminal-pane.js';
 
@@ -96,6 +102,48 @@ export class TerminalWorkspaceRoot {
   private readonly placeholders = new Map<number, HTMLElement>();
   private readonly ariaLive = document.createElement('div');
   private readonly placeMenu = document.createElement('div');
+  /**
+   * The "Jump to agent" palette, created on first open by
+   * {@link mountPalette} so its component and data modules stay out of the
+   * main bundle. Null until then.
+   */
+  private palette: ScionQuickPalette | null = null;
+  private paletteMount: Promise<ScionQuickPalette> | null = null;
+  /** Whether the palette is open or opening (its module may still be loading). */
+  private paletteOpen = false;
+  /** Per-group load state for the palette's one (Agents) group. */
+  private paletteGroups: Partial<Record<PaletteGroup, GroupState>> = {
+    agents: { status: 'loading', candidates: [] },
+  };
+  private paletteAbort: AbortController | null = null;
+  /** Bumped on every {@link loadPaletteAgents} call, so a superseded load's resolution can't publish over a newer one. */
+  private paletteGeneration = 0;
+  /** The deep-active element captured when the palette opened, refocused on a non-selection dismiss (escape/backdrop/close button) — not on a successful selection, where the newly-placed pane takes focus instead. */
+  private paletteInvoker: HTMLElement | null = null;
+  /**
+   * The most recent pane to receive real DOM focus, tracked continuously via
+   * a persistent `focusin` listener (installed in the constructor) rather
+   * than read reactively at open/select time — see that listener's own doc
+   * comment for why a point-in-time read is unreliable here. Cleared when
+   * that session closes ({@link syncSessions}).
+   */
+  private lastFocusedPaneSessionKey: string | null = null;
+  private paletteClosedBySelection = false;
+  /**
+   * The agent picked from the palette, whose pane takes focus once it is
+   * visible and the palette's close has settled — see
+   * {@link focusPaletteTarget}.
+   */
+  private paletteFocusAgentId: string | null = null;
+  /** Whether the palette's close animation and Shoelace's own focus restore have both finished. */
+  private paletteDialogSettled = false;
+  /**
+   * Multi-pane placement for a palette-picked agent with no session yet:
+   * set by {@link selectFromPalette} before it asks `main.ts` to open the
+   * agent, and consumed by {@link create} for that agent only — see that
+   * method's own doc comment.
+   */
+  private palettePlacement: { agentId: string; focusedSessionKey: string | null } | null = null;
   readonly layoutManager = new TerminalLayoutManager();
   private registryUnsubscribe: (() => void) | null = null;
   private registry: TerminalSessionRegistry | null = null;
@@ -196,6 +244,12 @@ export class TerminalWorkspaceRoot {
         this.closePlaceMenu();
       }
     });
+
+    // "Jump to agent" palette: agents-only, no DMs/Threads/People. Created
+    // lazily on first open — see mountPalette().
+    this.element.addEventListener(TERMINAL_PALETTE_OPEN_REQUEST_EVENT, () => this.openPalette());
+    document.addEventListener('keydown', this.handleGlobalKeydown);
+    document.addEventListener('focusin', this.handleGlobalFocusIn);
 
     this.shell.append(this.rail, this.createPaneArea());
     this.element.append(this.header, this.shell, this.ariaLive, this.placeMenu);
@@ -324,6 +378,36 @@ export class TerminalWorkspaceRoot {
     this.header.currentPath = path;
   }
 
+  /**
+   * Create a retained pane for `agentId`. Called by the coordinator adapter
+   * (`main.ts`) for every brand-new session, regardless of what triggered it
+   * — rail navigation, a URL/layout restore, or the "Jump to agent" palette.
+   *
+   * Placement differs for two cases, checked in order:
+   *
+   * 1. `options?.deferConnect` — a background restore entry (see
+   *    `TerminalWorkspacePersistence`): it must not become visible or
+   *    selected, so neither placement path below runs at all. The caller
+   *    selects the frontmost entry separately.
+   * 2. A pending palette placement for this same `agentId` — set by
+   *    `selectFromPalette` (multi-pane only) before it asks `main.ts` to
+   *    open the agent, consumed here to place the new pane via
+   *    `addOrReplaceFocused` (fill next empty / replace focused) instead of
+   *    `open()`'s overflow-to-single default. This hint travels through a
+   *    field rather than a `create()` parameter because the coordinator's
+   *    `TerminalCoordinatorAdapter.create` signature is shared by every
+   *    entry point and crosses tabs via `BroadcastChannel` — placement is a
+   *    purely local, same-tab UI decision with no meaning in any other tab.
+   *    `create()` runs asynchronously after `coordinator.open()` is called
+   *    (the coordinator awaits its lock claim and then defers `create()` to
+   *    a microtask), so the hint is keyed by agent ID: a `create()` for any
+   *    other agent in between never consumes it. `main.ts` clears it once
+   *    that open settles. A palette selection never sets `deferConnect`, so
+   *    the two never compete.
+   *
+   * Everything else falls through to `open()`'s existing overflow-to-single
+   * default, unchanged.
+   */
   create(
     registry: TerminalSessionRegistry,
     agentId: string,
@@ -339,11 +423,13 @@ export class TerminalWorkspaceRoot {
     try {
       const session = pane.open(registry, agentId, options);
       this.panes.set(session.state.key, pane);
-      // deferConnect entries are restored in the background: they must not
-      // become visible or selected, so layoutManager.open() (which would
-      // show/select them) is skipped. The caller selects the frontmost
-      // entry separately.
-      if (!options?.deferConnect) {
+      if (options?.deferConnect) {
+        // See this method's own doc comment, case 1.
+      } else if (this.palettePlacement?.agentId === agentId) {
+        const { focusedSessionKey } = this.palettePlacement;
+        this.palettePlacement = null;
+        this.layoutManager.addOrReplaceFocused(session.state.key, focusedSessionKey);
+      } else {
         // Check overflow: if the current multi preset is at capacity, switch to
         // single so the newly opened agent is visible.  Multi-pane assignments
         // are preserved — the user can switch back to see the prior grid.
@@ -383,6 +469,355 @@ export class TerminalWorkspaceRoot {
     this.refresh();
   }
 
+  // ── "Jump to agent" palette ─────────────────────────────────────────────
+
+  /**
+   * Called by `main.ts` once the `coordinator.open()` for a palette-picked
+   * agent settles, whether or not it ever reached `create()` (the agent may
+   * be unreachable, unauthorized or deleted), so the hint can never leak
+   * into a later, unrelated `create()` for that agent. A hint still in place
+   * means no pane was created for the pick, so the pick's focus target is
+   * dropped too: a pane that turns up later must not take focus away from
+   * whatever the user has moved on to.
+   */
+  cancelPalettePlacement(agentId: string): void {
+    if (this.palettePlacement?.agentId !== agentId) return;
+    this.palettePlacement = null;
+    if (this.paletteFocusAgentId === agentId) this.paletteFocusAgentId = null;
+  }
+
+  /**
+   * Removes the document-level listeners this root installs. The root lives
+   * for the whole tab in production; tests call this between instances.
+   */
+  dispose(): void {
+    document.removeEventListener('keydown', this.handleGlobalKeydown);
+    document.removeEventListener('focusin', this.handleGlobalFocusIn);
+  }
+
+  /**
+   * Tracks {@link lastFocusedPaneSessionKey} continuously as real DOM focus
+   * moves, rather than reading it reactively at open or select time. Both
+   * of those points are too late: opening the palette moves real focus into
+   * its own query input (a correct focus trap, firing a real `focusout` on
+   * whatever pane was focused), and *opening the palette via the header
+   * button* moves it there even earlier — `handlePaletteButtonClick` in
+   * header.ts focuses the button itself, for its own invoker-tracking
+   * purposes, before ever dispatching the open-request event this host
+   * reacts to. By either point, a point-in-time "what pane has focus right
+   * now" read already sees nothing. Recording it continuously instead,
+   * every time focus actually lands in a pane, sidesteps both races — it
+   * holds whatever pane was *last* focused regardless of what (if anything)
+   * has stolen focus since.
+   *
+   * Once the palette's close has settled, focus landing in a pane other than
+   * the picked agent's means the user has moved on, so the pick's pending
+   * focus target is dropped. Before then, Shoelace's own focus restore may
+   * land in the pane the palette was opened from, which is not a user move.
+   */
+  private readonly handleGlobalFocusIn = (e: FocusEvent): void => {
+    for (const node of e.composedPath()) {
+      if (!(node instanceof Element) || node.tagName !== 'SCION-TERMINAL-PANE') continue;
+      for (const [key, pane] of this.panes) {
+        if (pane === node) {
+          this.lastFocusedPaneSessionKey = key;
+          if (
+            this.paletteDialogSettled &&
+            this.paletteFocusAgentId !== null &&
+            this.entries.get(key)?.state.agentId !== this.paletteFocusAgentId
+          ) {
+            this.paletteFocusAgentId = null;
+          }
+          return;
+        }
+      }
+    }
+  };
+
+  /**
+   * Opens the palette: captures the current deep-active element to restore
+   * focus to on a non-selection dismiss, and (re)loads the Agents group —
+   * every open gets a fresh list, since agents can start/stop between opens.
+   * The focused pane itself (for a later `addOrReplaceFocused` call) is not
+   * captured here — see {@link handleGlobalFocusIn}'s own doc comment for
+   * why it is instead tracked continuously, as focus changes happen.
+   *
+   * The palette element is mounted closed and only then opened, so Shoelace
+   * always sees a real false->true transition on a connected element.
+   */
+  private openPalette(): void {
+    if (this.paletteOpen) return;
+    this.paletteInvoker =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    this.paletteClosedBySelection = false;
+    this.paletteFocusAgentId = null;
+    this.paletteOpen = true;
+    void this.loadPaletteAgents();
+    this.mountPalette().then(
+      (palette) => {
+        if (this.paletteOpen) palette.open = true;
+      },
+      () => {
+        this.paletteOpen = false;
+        this.paletteAbort?.abort();
+        this.paletteInvoker = null;
+      }
+    );
+  }
+
+  /**
+   * Loads the palette component and creates its element, once. A failed
+   * load is not cached, so the next open retries it.
+   */
+  private mountPalette(): Promise<ScionQuickPalette> {
+    this.paletteMount ??= import('../components/shared/palette/quick-palette.js')
+      .then(async () => {
+        const palette = document.createElement('scion-quick-palette');
+        palette.label = 'Jump to agent';
+        palette.placeholder = 'Search agents…';
+        palette.groups = this.paletteGroups;
+        palette.addEventListener('palette-select', (e) =>
+          this.handlePaletteSelect(e as CustomEvent<{ target: PaletteTarget }>)
+        );
+        palette.addEventListener('palette-retry', () => void this.loadPaletteAgents());
+        palette.addEventListener('palette-dismiss', () => this.closePalette());
+        palette.addEventListener('sl-after-hide', () => this.handlePaletteAfterHide());
+        this.element.append(palette);
+        // Assigned before the first render settles, so a load that finishes
+        // in the meantime still reaches the element.
+        this.palette = palette;
+        await palette.updateComplete;
+        return palette;
+      })
+      .catch((err: unknown) => {
+        this.paletteMount = null;
+        throw err;
+      });
+    return this.paletteMount;
+  }
+
+  private closePalette(): void {
+    this.paletteOpen = false;
+    if (this.palette) this.palette.open = false;
+    this.paletteAbort?.abort();
+  }
+
+  /**
+   * Closes the palette when the workspace hides (a route change away from
+   * /terminals): the invoker is hidden with it, so nothing is refocused
+   * when the close settles. Clearing the invoker is enough: while the
+   * palette is open no selection is pending, since `openPalette()` clears
+   * it and a selection closes the palette before recording its target.
+   * Closing releases Shoelace's focus trap and scroll lock, which would
+   * otherwise stay active on the destination page, and aborts the
+   * in-flight load.
+   */
+  private closePaletteWithoutFocusRestore(): void {
+    this.paletteInvoker = null;
+    this.closePalette();
+  }
+
+  /** Fires once Shoelace's close animation actually completes, regardless of how the palette closed. */
+  private handlePaletteAfterHide(): void {
+    if (this.paletteClosedBySelection) {
+      // Shoelace queues its own focus restore to the dialog's trigger in a
+      // timeout just before firing this event; focusing the picked pane in a
+      // later timeout keeps that restore from overriding it.
+      setTimeout(() => {
+        this.paletteDialogSettled = true;
+        this.focusPaletteTarget();
+      });
+    } else {
+      this.paletteInvoker?.focus();
+    }
+    this.paletteInvoker = null;
+  }
+
+  /**
+   * Focuses the palette-picked agent's pane once it is visible and the
+   * palette's close has settled. Runs after the close settles and after
+   * every refresh, since a new agent's pane may appear only later, once its
+   * session is created.
+   */
+  private focusPaletteTarget(): void {
+    const agentId = this.paletteFocusAgentId;
+    if (!agentId || !this.paletteDialogSettled) return;
+    const key = this.findSessionKeyByAgentId(agentId);
+    const pane = key ? this.panes.get(key) : undefined;
+    if (!pane || pane.hidden) return;
+    this.paletteFocusAgentId = null;
+    pane.focusTerminal();
+  }
+
+  private setPaletteAgents(state: GroupState): void {
+    this.paletteGroups = { agents: state };
+    if (this.palette) this.palette.groups = this.paletteGroups;
+  }
+
+  /**
+   * Load (or reload) the palette's one Agents group from the real,
+   * paginated, attach-filtered agents list, publishing partial results per
+   * page — see `terminal-palette-data.ts`.
+   */
+  private async loadPaletteAgents(): Promise<void> {
+    this.paletteAbort?.abort();
+    const controller = new AbortController();
+    this.paletteAbort = controller;
+    const generation = ++this.paletteGeneration;
+    const isCurrent = (): boolean => generation === this.paletteGeneration;
+    this.setPaletteAgents({
+      status: 'loading',
+      candidates: this.paletteGroups.agents?.candidates ?? [],
+    });
+    try {
+      const { loadTerminalPaletteAgents } = await import('./terminal-palette-data.js');
+      const candidates = await loadTerminalPaletteAgents({
+        controller,
+        isCurrent,
+        onProgress: (partial) => this.setPaletteAgents({ status: 'loading', candidates: partial }),
+      });
+      // A superseded load never gets here: it rejects with an AbortError.
+      this.setPaletteAgents({ status: 'ready', candidates });
+    } catch (err) {
+      if (!isCurrent()) return;
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      const message = err instanceof Error ? err.message : '';
+      this.setPaletteAgents({
+        status: 'error',
+        candidates: this.paletteGroups.agents?.candidates ?? [],
+        ...(message ? { error: message } : {}),
+      });
+    }
+  }
+
+  /**
+   * A palette selection is untrusted stale UI state until checked against
+   * the freshly loaded group — same reasoning as chat's own palette host.
+   */
+  private handlePaletteSelect(e: CustomEvent<{ target: PaletteTarget }>): void {
+    const target = e.detail?.target;
+    this.closePalette();
+    if (!target || target.kind !== 'agent') return;
+    const agentId = target.agentId;
+    const stillPresent = (this.paletteGroups.agents?.candidates ?? []).some(
+      (c) => c.target.kind === 'agent' && c.target.agentId === agentId
+    );
+    if (!stillPresent) return;
+    this.paletteClosedBySelection = true;
+    this.paletteFocusAgentId = agentId;
+    this.paletteDialogSettled = false;
+    this.selectFromPalette(agentId);
+  }
+
+  /**
+   * Whether only one pane is on screen: the single preset, or a narrow
+   * viewport, where {@link positionPanes} shows only the first occupied
+   * slot of a multi-pane preset.
+   */
+  private isSinglePaneView(): boolean {
+    return this.layoutManager.getState().active === 'single' || !!this.narrowQuery?.matches;
+  }
+
+  /**
+   * Shows the picked agent.
+   *
+   * When only one pane is on screen, switches to the single preset and
+   * navigates to `/terminals/<agentId>`, exactly like a rail click, so the
+   * URL follows the shown agent and a pane placed in a multi-pane slot can
+   * never end up off screen. Multi-pane assignments are kept for when the
+   * user switches back.
+   *
+   * Otherwise ADDS the agent to the next empty pane; if the grid is already
+   * full, REPLACES the focused pane instead of collapsing to single (see
+   * `TerminalLayoutManager.addOrReplaceFocused`). An agent with an existing
+   * session in this tab is placed directly — no new PTY connection is being
+   * made, so there is nothing for the coordinator to arbitrate, the same
+   * reasoning the rail's own drag-and-drop/"Place in pane" actions already
+   * rely on. A brand new agent is routed through the coordinator exactly
+   * like every other terminal-opening entry point, via
+   * `TERMINAL_PALETTE_NEW_AGENT_EVENT` — `main.ts` is the only listener,
+   * since it alone holds that module-local reference — and placed by
+   * {@link create}.
+   */
+  private selectFromPalette(agentId: string): void {
+    if (this.isSinglePaneView()) {
+      this.layoutManager.setLayout('single');
+      this.dispatchNavigation(`/terminals/${agentId}`);
+      return;
+    }
+    const focusedSessionKey = this.lastFocusedPaneSessionKey;
+    const existingKey = this.findSessionKeyByAgentId(agentId);
+    if (existingKey) {
+      this.layoutManager.addOrReplaceFocused(existingKey, focusedSessionKey);
+      return;
+    }
+    this.palettePlacement = { agentId, focusedSessionKey };
+    this.element.dispatchEvent(
+      new CustomEvent<TerminalPaletteNewAgentDetail>(TERMINAL_PALETTE_NEW_AGENT_EVENT, {
+        detail: { agentId },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  // ── Keyboard shortcut: Cmd+K everywhere, Ctrl+K outside a pane ──────────
+
+  /**
+   * Cmd+K (Meta+K) opens the palette everywhere, including with a terminal
+   * pane focused: xterm never cancels or stops-propagating a plain Meta+K
+   * (it has no C0/C1 mapping for it), so this plain bubble-phase listener
+   * already sees it from inside a pane with no capture-phase trick needed.
+   * Ctrl+K opens the palette only when focus is outside a pane: xterm DOES
+   * send Ctrl+K to the PTY (kill-line, `\x0b`) and then stops its own
+   * propagation, so a pane-focused Ctrl+K never reaches here at all — the
+   * explicit `eventFromTerminalPane` check below is belt-and-suspenders, not
+   * what does the work. Only `ctrlKey` skips that check; `metaKey` must still
+   * open the palette from inside a pane, so it is deliberately exempted.
+   *
+   * While the palette is open, the same shortcut closes it, as in chat.
+   */
+  private readonly handleGlobalKeydown = (e: KeyboardEvent): void => {
+    if (this.element.hidden) return;
+    if (e.defaultPrevented || e.repeat || e.isComposing) return;
+    if (e.altKey || e.shiftKey) return;
+    // Exactly one of Ctrl/Meta — not both, not neither.
+    if (e.metaKey === e.ctrlKey) return;
+    if (e.key.toLowerCase() !== 'k') return;
+    if (this.paletteOpen) {
+      e.preventDefault();
+      this.closePalette();
+      return;
+    }
+    if (e.ctrlKey && this.eventFromTerminalPane(e)) return;
+    if (this.hasUnrelatedModalOpen()) return;
+    e.preventDefault();
+    this.openPalette();
+  };
+
+  /**
+   * True when the event's real (composedPath) origin is inside a terminal
+   * pane. Every xterm surface lives inside a `scion-terminal-pane`, so the
+   * pane element alone identifies it.
+   */
+  private eventFromTerminalPane(e: KeyboardEvent): boolean {
+    return e
+      .composedPath()
+      .some((node) => node instanceof Element && node.tagName === 'SCION-TERMINAL-PANE');
+  }
+
+  /**
+   * Is a modal other than the palette open anywhere on the page, including
+   * inside shadow roots? A terminal pane renders its own `sl-dialog`s (the
+   * Capture Auth scope and secret-conflict dialogs) inside its shadow root,
+   * where a light-DOM query cannot see them. A dialog left open in a hidden
+   * retained pane is off screen and does not count. The palette host is
+   * excluded: its own `sl-dialog` lives in its shadow root.
+   */
+  private hasUnrelatedModalOpen(): boolean {
+    return hasOpenModalDescendant(document, this.palette);
+  }
+
   setStatus(message: string): void {
     const state = this.layoutManager.getState();
     const slots = this.layoutManager.getVisibleSlots();
@@ -395,6 +830,7 @@ export class TerminalWorkspaceRoot {
   }
 
   show(visible: boolean): void {
+    if (!visible && this.paletteOpen) this.closePaletteWithoutFocusRestore();
     this.element.hidden = !visible;
     this.element.style.display = visible ? 'flex' : 'none';
     if (visible && !this._frameEntered) {
@@ -426,6 +862,7 @@ export class TerminalWorkspaceRoot {
       this.panes.delete(key);
       // Close in layout manager to clear all preset references
       this.layoutManager.close(key);
+      if (this.lastFocusedPaneSessionKey === key) this.lastFocusedPaneSessionKey = null;
     }
     for (const session of sessions) {
       if (this.entries.has(session.state.key)) continue;
@@ -608,6 +1045,7 @@ export class TerminalWorkspaceRoot {
     // Visibility
     this.refreshPaneVisibility();
     this.publishCount();
+    this.focusPaletteTarget();
   }
 
   /** Update layout toolbar button highlighting. */

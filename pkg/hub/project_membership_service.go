@@ -133,6 +133,12 @@ type MembershipDecision struct {
 	DenialCode string
 	Reason     string
 	HTTPStatus int
+	// Details carries structured denial context (e.g. roleDefinitionId,
+	// requiredPermission, currentRoleDefinitionIds) for the PUT/DELETE
+	// principal endpoints (ptone/scion#2529 P1). Additive: nil for every
+	// existing call site, which keeps AddMember/UpdateMemberRole/RemoveMember
+	// responses byte-identical.
+	Details map[string]interface{}
 }
 
 // MembershipResult is the outcome of a successful membership mutation.
@@ -667,6 +673,35 @@ func isProtectedRole(role string) bool {
 }
 
 // ---------------------------------------------------------------------------
+// Role kind
+// ---------------------------------------------------------------------------
+
+// roleKindBuiltIn and roleKindCustom are the only two values projectRoleKind
+// returns. Review r2 R2-6: N1 centralised the derivation in projectRoleKind,
+// but the "builtin"/"custom" string literals it returns were still
+// hand-typed at every comparison and default site; a typo there would
+// compile. These constants are that single spelling.
+const (
+	roleKindBuiltIn = "builtin"
+	roleKindCustom  = "custom"
+)
+
+// projectRoleKind returns roleKindBuiltIn or roleKindCustom for a
+// project-scoped role name, for the additive roleKind response field
+// (ptone/scion#2529 P1). N1 (review r1): this was previously inlined at four
+// call sites
+// (list/add/buildProjectMemberGroup in handlers_project_members.go, plus the
+// audit code in project_membership_set.go); extracted here so there is
+// exactly one definition of "builtin" vs "custom" for display and audit
+// purposes.
+func projectRoleKind(roleName string) string {
+	if store.IsBuiltInProjectMembershipRole(roleName) {
+		return roleKindBuiltIn
+	}
+	return roleKindCustom
+}
+
+// ---------------------------------------------------------------------------
 // Principal eligibility
 // ---------------------------------------------------------------------------
 
@@ -676,6 +711,21 @@ func isProtectedRole(role string) bool {
 //   - project-admin: direct user or group (D3 approved)
 //   - project-member: user, agent, or group
 func principalEligibleForRole(principalType, roleName string) bool {
+	// L4 (review r1): the custom-role branch is reached only for a role name
+	// explicitly known NOT to be built-in — not as the switch's default. A
+	// name that reaches the switch below without matching any case (e.g. an
+	// unanticipated built-in role added to the registry but not here) fails
+	// closed instead of silently falling through to the permissive
+	// user/group rule meant for custom roles.
+	if !store.IsBuiltInProjectMembershipRole(roleName) {
+		// Custom project-scoped roles (ptone/scion#2529 D1, ruling "block"):
+		// user and group only. A custom binding on an agent is a delegation
+		// grant and stays hub-gated via /admin/role-bindings. This is the
+		// one eligibility switch for custom roles; no other call site may
+		// special-case principal type for custom-role eligibility.
+		return principalType == store.RoleBindingPrincipalUser ||
+			principalType == store.RoleBindingPrincipalGroup
+	}
 	switch roleName {
 	case store.ProjectRoleOwner:
 		return principalType == store.RoleBindingPrincipalUser
@@ -688,6 +738,9 @@ func principalEligibleForRole(principalType, roleName string) bool {
 			principalType == store.RoleBindingPrincipalAgent ||
 			principalType == store.RoleBindingPrincipalGroup
 	default:
+		// Fail closed: IsBuiltInProjectMembershipRole said this name is
+		// built-in, but it matches none of the cases above. Should not
+		// happen; if it ever does, refuse rather than guess.
 		return false
 	}
 }
@@ -1408,6 +1461,16 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 			}
 		}
 
+		// Step 3: Point project.OwnerID at the new owner, so the old owner no
+		// longer gets access through the resource-owner relationship rule
+		// (ptone/scion#2554). Use the narrow writer, not a Get plus full-row
+		// UpdateProject: a full-row write can clobber a concurrent PATCH. That
+		// interleaving is not expressible in a single-threaded test, so this
+		// call site is guarded by review.
+		if upErr := tx.SetProjectOwnerID(ctx, req.ProjectID, req.NewOwnerID); upErr != nil {
+			return fmt.Errorf("update project owner: %w", upErr)
+		}
+
 		// Post-state invariant: verify at least one active direct owner exists.
 		// This query runs inside the transaction so it sees the committed state.
 		ownerCount, countErr := svc.countActiveDirectOwnersFromStore(ctx, tx, req.ProjectID)
@@ -1606,6 +1669,67 @@ func (svc *ProjectMembershipService) highestAuthorityBindingFromStore(ctx contex
 		}
 	}
 	return best
+}
+
+// applyRolePlanTx applies one rolePlan's mutations inside an open
+// SetMemberRoles transaction (ptone/scion#2529 P1, project_membership_set.go):
+// every Remove is deleted, then every Create is created (D4 partial unique
+// index ordering: a stale not-yet-deleted binding row must not collide with
+// the new one). The new binding half of plan.BuiltInChange, if any, inherits
+// NotBefore/ExpiresAt from the old binding it replaces; every other create
+// uses notBefore/expiresAt as given.
+//
+// This is the ONLY place SetMemberRoles mutates role bindings, and it is a
+// purpose-named step — not a reusable forwarder — so the authzop mutation
+// catalog (catalog.go) can classify it as exactly what it is: the governed
+// delete-then-create step of the membership service's "set roles for
+// principal" engine (review r1 F3). By the time this is called,
+// SetMemberRoles has already run the credential gate and CanDelegate
+// pre-transaction, and has re-evaluated governance/custom-role authority —
+// including the F1 role_binding.* structural guard and an actor-authority-
+// change check (review r2 R2-2) — under the project lock inside this same
+// transaction, immediately before this call. This is the same ordering
+// AddMember/UpdateMemberRole/TransferOwnership use before replaceBindingTx
+// above. The last-owner check runs AFTER this call, inside the same
+// transaction: it is a post-state count over the full binding set (the
+// Remove/Create pairs this function just applied), and a violation rolls
+// back every mutation this call made, along with everything else in the
+// transaction (review r2 R2-1). A dedicated OperationID (e.g.
+// project.membership.set) is deferred: wiring one needs a route_metadata.go
+// entry, out of scope for P1 (ptone/scion#2529).
+//
+// Returns the created bindings keyed by role definition ID, for the caller's
+// audit rows and built-in-swap bookkeeping.
+func (svc *ProjectMembershipService) applyRolePlanTx(ctx context.Context, tx store.Store, plan rolePlan, principalType, principalID, projectID, createdBy string, notBefore, expiresAt *time.Time) (map[string]*store.RoleBinding, error) {
+	for _, b := range plan.Remove {
+		if err := tx.DeleteRoleBinding(ctx, b.ID); err != nil {
+			return nil, fmt.Errorf("delete binding %s: %w", b.ID, err)
+		}
+	}
+
+	created := make(map[string]*store.RoleBinding, len(plan.Create))
+	for _, d := range plan.Create {
+		nb := &store.RoleBinding{
+			RoleDefinitionID: d.ID,
+			PrincipalType:    principalType,
+			PrincipalID:      principalID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          projectID,
+			CreatedBy:        createdBy,
+			NotBefore:        notBefore,
+			ExpiresAt:        expiresAt,
+		}
+		if plan.BuiltInChange != nil && plan.BuiltInChange.New.ID == d.ID {
+			nb.NotBefore = plan.BuiltInChange.Old.NotBefore
+			nb.ExpiresAt = plan.BuiltInChange.Old.ExpiresAt
+		}
+		cb, err := tx.CreateRoleBinding(ctx, nb)
+		if err != nil {
+			return nil, fmt.Errorf("create binding for role %s: %w", d.ID, err)
+		}
+		created[d.ID] = cb
+	}
+	return created, nil
 }
 
 // enforceLastOwnerTx checks that at least two active direct owners exist,

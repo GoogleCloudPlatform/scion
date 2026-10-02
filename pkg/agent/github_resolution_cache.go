@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -75,11 +76,24 @@ const (
 
 	resolutionCacheFileName = "github-resolution-cache.json"
 
+	// resolutionCacheDirMode and resolutionCacheFileMode are the permissions
+	// of the cache directory and file. Keys carry a fingerprint of the
+	// credential in use, so the file is kept readable by its owner only.
+	resolutionCacheDirMode  os.FileMode = 0o700
+	resolutionCacheFileMode os.FileMode = 0o600
+
 	// ttlJitterFraction bounds how far JitteredTTL spreads a TTL from its
 	// nominal value, as a fraction of that TTL (plus or minus 10%). See
 	// JitteredTTL.
 	ttlJitterFraction = 0.10
 )
+
+// resolutionCacheSaveDelay is how long a Put waits before the cache file is
+// rewritten. Puts that arrive during this window share one write, so a burst
+// of resolutions rewrites the file once instead of once per Put. A variable
+// only so this package's tests can make the delayed write never fire on its
+// own and call Flush explicitly instead.
+var resolutionCacheSaveDelay = 2 * time.Second
 
 // JitteredTTL returns ttl adjusted by a uniformly random amount within
 // +/-ttlJitterFraction of ttl, so cache entries written together — the
@@ -134,6 +148,33 @@ type GitHubResolutionCache struct {
 	// refreshFailureBackoff).
 	refreshMu          sync.Mutex
 	lastRefreshFailure map[string]time.Time
+
+	// saveDelay is how long a Put waits before the file is rewritten (see
+	// resolutionCacheSaveDelay and scheduleSave).
+	saveDelay time.Duration
+
+	// pendingMu guards savePending and saveTimer: whether a rewrite of the
+	// file has been requested and not yet started.
+	pendingMu   sync.Mutex
+	savePending bool
+	saveTimer   *time.Timer
+
+	// saveMu serializes rewrites of the file, so two writers never race on
+	// the rename and the newest snapshot is always the one left on disk.
+	saveMu sync.Mutex
+
+	// writeData writes the encoded cache to the temp file before it is
+	// synced and renamed into place. Tests replace it to simulate a failed
+	// write; nil means a plain write.
+	writeData func(w io.Writer, data []byte) error
+
+	// saveCount counts completed rewrites of the file. Tests use it to
+	// check that writes are coalesced.
+	saveCount atomic.Int64
+
+	// onFlush, when non-nil, is called at the end of every Flush that wrote
+	// the file. Tests use it to wait for the delayed write without sleeping.
+	onFlush func()
 }
 
 type resolutionCacheEntry struct {
@@ -148,8 +189,8 @@ type resolutionCacheEntry struct {
 	IsBranchRef bool `json:"isBranchRef"`
 }
 
-// entryAlive reports whether entry should still be retained in memory (and,
-// for non-credential entries, on disk): either it is still fresh, or it is a
+// entryAlive reports whether entry should still be retained in memory and on
+// disk: either it is still fresh, or it is a
 // branch ref within MaxResolutionStaleAge of its original CachedAt and so
 // might still be served stale. This is deliberately more permissive than the
 // "is this fresh" check in Get — it governs retention, not freshness.
@@ -165,20 +206,50 @@ type resolutionCacheFile struct {
 }
 
 // NewGitHubResolutionCache creates or loads a resolution cache at the
-// given directory with the specified TTL.
+// given directory with the specified TTL. The directory is created with
+// mode 0700, and an existing directory or cache file with looser
+// permissions is tightened (see resolutionCacheDirMode).
 func NewGitHubResolutionCache(dir string, ttl time.Duration) (*GitHubResolutionCache, error) {
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, resolutionCacheDirMode); err != nil {
 		return nil, err
 	}
+	// MkdirAll leaves an existing directory as it is, and a new one is
+	// subject to the umask, so set the mode explicitly in both cases.
+	if err := tightenMode(dir, resolutionCacheDirMode); err != nil {
+		// For example a directory owned by another user. The cache still
+		// works; only its permissions are not what this process would set.
+		fmt.Fprintf(os.Stderr, "github: WARNING: cannot set mode of resolution cache directory: %v\n", err)
+	}
 	c := &GitHubResolutionCache{
-		dir:      dir,
-		ttl:      ttl,
-		entries:  make(map[string]*resolutionCacheEntry),
-		filePath: filepath.Join(dir, resolutionCacheFileName),
+		dir:       dir,
+		ttl:       ttl,
+		entries:   make(map[string]*resolutionCacheEntry),
+		filePath:  filepath.Join(dir, resolutionCacheFileName),
+		saveDelay: resolutionCacheSaveDelay,
 	}
 	c.load()
 	return c, nil
 }
+
+// tightenMode sets path's permission bits to mode if it grants anything
+// more than mode does. A missing path is not an error.
+func tightenMode(path string, mode os.FileMode) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if info.Mode().Perm()&^mode == 0 {
+		return nil
+	}
+	return chmod(path, mode)
+}
+
+// chmod is os.Chmod, replaceable by tests to simulate a path the process
+// cannot change.
+var chmod = os.Chmod
 
 // Get returns a cached ResolvedSkill for the given URI if it exists
 // and has not expired. The returned value is a deep copy safe for
@@ -203,19 +274,20 @@ func (c *GitHubResolutionCache) Get(uri string) (ResolvedSkill, bool) {
 }
 
 // putEntry stores a resolved skill in the cache, recording whether it is a
-// branch ref (see resolutionCacheEntry.IsBranchRef).
+// branch ref (see resolutionCacheEntry.IsBranchRef), and schedules a
+// rewrite of the cache file (see scheduleSave).
 //
-// Credential-bearing entries — those whose URI key contains a token-hash
-// suffix (the "#<hex>" appended by resolutionCacheKey when a GitHub token is
-// present) — are kept in-memory only and never written to disk. This prevents
-// the stale-404 class of bug described in issue #565: ResolvedFile.Content is
-// tagged json:"-" and is not preserved through serialisation, so a disk-cache
-// hit after a broker restart returns Content == nil. installOneSkill then
-// falls back to downloadSkillFile using the broker's default GitHub token —
-// not the per-URI named credential — causing a 404 on private repos. By
-// keeping credential entries in-memory only, Content survives for the full
-// TTL window within the same process, and there is no stale entry to load
-// after a restart.
+// Entries resolved with a credential are persisted too. Their key ends in
+// "#" plus a SHA-256 fingerprint of the credential (see resolutionCacheKey);
+// the credential itself is never part of an entry. ResolvedFile.Content is
+// not written to disk (json:"-"), so an entry loaded after a restart has no
+// file bytes. GitHubSkillResolver handles that case by passing the
+// credential it resolved with to the install step for that skill's
+// downloads (see ResolvedSkill.githubCredentialRef and gitHubDownloadToken),
+// so a private repo read with a named credential is not downloaded with a
+// different one. When the request cannot supply that credential at install,
+// the resolver does not use a content-less entry at all and resolves the ref
+// again (see GitHubSkillResolver.resolveOne).
 func (c *GitHubResolutionCache) putEntry(uri string, skill ResolvedSkill, isBranchRef bool) {
 	c.mu.Lock()
 	now := time.Now()
@@ -226,61 +298,196 @@ func (c *GitHubResolutionCache) putEntry(uri string, skill ResolvedSkill, isBran
 		IsBranchRef: isBranchRef,
 	}
 	c.evictExpired()
-
-	// Credential-bearing URI keys contain a "#<tokenhash>" suffix.
-	// Keep them in-memory only — do not persist to disk.
-	if strings.Contains(uri, "#") {
-		c.mu.Unlock()
-		return
-	}
-
-	// For public-repo entries, persist to disk. Exclude any credential
-	// entries that may be present in the map from earlier Puts.
-	snapshot := make(map[string]*resolutionCacheEntry, len(c.entries))
-	for k, v := range c.entries {
-		if !strings.Contains(k, "#") {
-			snapshot[k] = v
-		}
-	}
 	c.mu.Unlock()
 
-	c.save(snapshot)
+	c.scheduleSave()
 }
 
-// load reads the cache from disk. Best-effort: errors are silently ignored.
+// scheduleSave requests a rewrite of the cache file after saveDelay. If a
+// rewrite is already pending, this Put is covered by it: the pending
+// rewrite takes its snapshot when it runs, not when it was requested.
+func (c *GitHubResolutionCache) scheduleSave() {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	if c.savePending {
+		return
+	}
+	c.savePending = true
+	c.saveTimer = time.AfterFunc(c.saveDelay, c.Flush)
+}
+
+// Flush writes the current entries to disk now if a rewrite is pending, and
+// cancels the pending timer. It is called by that timer, and may be called
+// directly (for example on shutdown) so that no Put is lost. Safe for
+// concurrent use.
+//
+// savePending is cleared before the snapshot is taken, so a Put that lands
+// after the snapshot schedules a new rewrite rather than being dropped.
+func (c *GitHubResolutionCache) Flush() {
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
+
+	c.pendingMu.Lock()
+	if !c.savePending {
+		c.pendingMu.Unlock()
+		return
+	}
+	c.savePending = false
+	if c.saveTimer != nil {
+		c.saveTimer.Stop()
+		c.saveTimer = nil
+	}
+	c.pendingMu.Unlock()
+
+	c.save(c.snapshot())
+	if c.onFlush != nil {
+		c.onFlush()
+	}
+}
+
+// snapshot returns a copy of the live entries map for writing to disk.
+// Entries are never modified after they are stored, so sharing the entry
+// pointers with the copy is safe.
+func (c *GitHubResolutionCache) snapshot() map[string]*resolutionCacheEntry {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	now := time.Now()
+	out := make(map[string]*resolutionCacheEntry, len(c.entries))
+	for k, v := range c.entries {
+		if entryAlive(v, now) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// validResolutionCacheKey reports whether key has the format
+// resolutionCacheKey produces today: "gh://..." optionally followed by "#"
+// and a full 64-character lowercase hex SHA-256 fingerprint. Keys written
+// by older builds (for example with a shorter fingerprint) can never be
+// looked up again and are dropped on load.
+func validResolutionCacheKey(key string) bool {
+	if !strings.HasPrefix(key, "gh://") {
+		return false
+	}
+	i := strings.IndexByte(key, '#')
+	if i < 0 {
+		return true
+	}
+	fp := key[i+1:]
+	if len(fp) != 64 {
+		return false
+	}
+	for _, r := range fp {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// load reads the cache from disk. It keeps every entry the current
+// stale-serve rules can still use (see entryAlive) and drops entries past
+// that horizon, entries with a key in an old format, and malformed entries.
+// If anything was dropped, the file is rewritten once so it does not keep
+// carrying them. Best-effort: a missing or unreadable file starts the cache
+// empty.
 func (c *GitHubResolutionCache) load() {
 	data, err := os.ReadFile(c.filePath)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			util.Debugf("github: cannot read resolution cache file: %v", err)
+		}
 		return
 	}
+	// The file may predate the 0600 mode; tighten it now rather than
+	// waiting for the next rewrite.
+	if err := tightenMode(c.filePath, resolutionCacheFileMode); err != nil {
+		fmt.Fprintf(os.Stderr, "github: WARNING: cannot set mode of resolution cache file: %v\n", err)
+	}
+
 	var f resolutionCacheFile
 	if err := json.Unmarshal(data, &f); err != nil {
-		return
-	}
-	if f.Entries == nil {
+		// Unreadable content: replace it with an empty file.
+		util.Debugf("github: resolution cache file is not valid JSON, rewriting it")
+		c.save(map[string]*resolutionCacheEntry{})
 		return
 	}
 	now := time.Now()
-	for uri, entry := range f.Entries {
-		if entryAlive(entry, now) {
-			c.entries[uri] = entry
+	dropped := 0
+	for key, entry := range f.Entries {
+		if entry == nil || !validResolutionCacheKey(key) || !entryAlive(entry, now) {
+			dropped++
+			continue
 		}
+		c.entries[key] = entry
 	}
-	util.Debugf("github: loaded %d resolution cache entries from disk", len(c.entries))
+	util.Debugf("github: loaded %d resolution cache entries from disk, dropped %d", len(c.entries), dropped)
+	if dropped > 0 {
+		c.save(c.snapshot())
+	}
 }
 
-// save persists the given entries snapshot to disk atomically. Best-effort.
+// save writes entries to the cache file atomically: it writes a temp file in
+// the same directory with mode 0600, syncs it, and renames it over the cache
+// file, so a reader never sees a partial file. Callers other than load must
+// hold saveMu. A failure is logged and otherwise ignored: the in-memory
+// cache keeps working and resolution never fails because of it. Log lines
+// name the file only, never a key.
 func (c *GitHubResolutionCache) save(entries map[string]*resolutionCacheEntry) {
-	f := resolutionCacheFile{Entries: entries}
-	data, err := json.MarshalIndent(f, "", "  ")
+	data, err := json.MarshalIndent(resolutionCacheFile{Entries: entries}, "", "  ")
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "github: WARNING: cannot encode resolution cache: %v\n", err)
 		return
 	}
-	tmpPath := c.filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	if err := c.writeFileAtomic(data); err != nil {
+		fmt.Fprintf(os.Stderr, "github: WARNING: cannot write resolution cache file: %v\n", err)
 		return
 	}
-	_ = os.Rename(tmpPath, c.filePath)
+	c.saveCount.Add(1)
+}
+
+func (c *GitHubResolutionCache) writeFileAtomic(data []byte) (err error) {
+	// os.CreateTemp creates the file with mode 0600 (resolutionCacheFileMode),
+	// and a umask can only narrow that, so no further chmod is needed. An
+	// existing cache file with a wider mode is tightened in load.
+	tmp, err := os.CreateTemp(c.dir, resolutionCacheFileName+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	write := c.writeData
+	if write == nil {
+		write = func(w io.Writer, b []byte) error {
+			_, werr := w.Write(b)
+			return werr
+		}
+	}
+	if err = write(tmp, data); err != nil {
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmpPath, c.filePath); err != nil {
+		return err
+	}
+	// Sync the directory so the rename itself survives a crash. Not all
+	// platforms support this; a failure here does not undo the write.
+	if d, derr := os.Open(c.dir); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 // evictExpired removes entries that are no longer alive (see entryAlive).
@@ -463,6 +670,20 @@ func (c *GitHubResolutionCache) coalesceFetch(
 	isBranchRef bool,
 	fetch func(context.Context) (ResolvedSkill, error),
 ) (ResolvedSkill, error) {
+	return c.coalesceFetchAccept(ctx, flightKey, credentialID, cacheKey, logRef, isBranchRef, nil, fetch)
+}
+
+// coalesceFetchAccept is coalesceFetch with accept applied to the in-flight
+// re-check of the cache (see resolveWithFetchAccept). Callers passing a
+// non-nil accept must use a flightKey distinct from callers that do not, so
+// they never join a flight whose result accept would reject.
+func (c *GitHubResolutionCache) coalesceFetchAccept(
+	ctx context.Context,
+	flightKey, credentialID, cacheKey, logRef string,
+	isBranchRef bool,
+	accept func(ResolvedSkill) bool,
+	fetch func(context.Context) (ResolvedSkill, error),
+) (ResolvedSkill, error) {
 	injectFlightJoin(flightKey)
 	resultCh := c.flight.DoChan(flightKey, func() (result interface{}, ferr error) {
 		// DoChan always runs this function in a goroutine it spawns itself
@@ -486,7 +707,7 @@ func (c *GitHubResolutionCache) coalesceFetch(
 		// Re-check: another caller may have already populated cacheKey while
 		// this call waited to become the flight leader — a concurrent flight
 		// for this exact key that finished just before this one got to run.
-		if skill, ok := c.Get(cacheKey); ok {
+		if skill, ok := c.Get(cacheKey); ok && (accept == nil || accept(skill)) {
 			return skill, nil
 		}
 
@@ -559,12 +780,30 @@ func (c *GitHubResolutionCache) ResolveWithFetch(
 	refreshAllowed func() bool,
 	fetch func(context.Context) (ResolvedSkill, error),
 ) (ResolvedSkill, error) {
-	if skill, ok := c.Get(cacheKey); ok {
+	return c.resolveWithFetchAccept(ctx, cacheKey, flightKey, credentialID, logRef, isBranchRef, refreshAllowed, nil, fetch)
+}
+
+// resolveWithFetchAccept is ResolveWithFetch, except that a cached value
+// (fresh or stale) is only used if accept is nil or returns true for it;
+// otherwise the ref is fetched synchronously, as on a miss. A fetched value
+// is always returned, and stored as usual. See coalesceFetchAccept for the
+// flightKey requirement.
+func (c *GitHubResolutionCache) resolveWithFetchAccept(
+	ctx context.Context,
+	cacheKey, flightKey, credentialID, logRef string,
+	isBranchRef bool,
+	refreshAllowed func() bool,
+	accept func(ResolvedSkill) bool,
+	fetch func(context.Context) (ResolvedSkill, error),
+) (ResolvedSkill, error) {
+	acceptable := func(skill ResolvedSkill) bool { return accept == nil || accept(skill) }
+
+	if skill, ok := c.Get(cacheKey); ok && acceptable(skill) {
 		return skill, nil
 	}
 
 	if isBranchRef {
-		if skill, ok := c.getStale(cacheKey); ok {
+		if skill, ok := c.getStale(cacheKey); ok && acceptable(skill) {
 			refreshStarted := false
 			if refreshAllowed != nil && !refreshAllowed() {
 				fmt.Fprintf(os.Stderr, "github: WARNING: serving stale entry for %s; skipping refresh during a rate-limit cooldown\n", logRef)
@@ -576,7 +815,7 @@ func (c *GitHubResolutionCache) ResolveWithFetch(
 				// closure (see its comment), so this goroutine itself cannot
 				// panic from that; no recover needed at this level.
 				go func() {
-					_, ferr := c.coalesceFetch(context.Background(), flightKey, credentialID, cacheKey, logRef, isBranchRef, fetch)
+					_, ferr := c.coalesceFetchAccept(context.Background(), flightKey, credentialID, cacheKey, logRef, isBranchRef, accept, fetch)
 					if ferr != nil {
 						c.recordRefreshFailure(flightKey)
 					} else {
@@ -589,7 +828,7 @@ func (c *GitHubResolutionCache) ResolveWithFetch(
 		}
 	}
 
-	return c.coalesceFetch(ctx, flightKey, credentialID, cacheKey, logRef, isBranchRef, fetch)
+	return c.coalesceFetchAccept(ctx, flightKey, credentialID, cacheKey, logRef, isBranchRef, accept, fetch)
 }
 
 // GitHubResolutionCacheDir returns the directory for storing GitHub

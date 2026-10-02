@@ -42,22 +42,22 @@ async function gotoChat(page: Page, overrides: Parameters<typeof setupApiMocks>[
 }
 
 function paletteDialog(page: Page) {
-  return page.locator('scion-chat-switcher sl-dialog[label="Quick switcher"]');
+  return page.locator('scion-quick-palette sl-dialog[label="Quick switcher"]');
 }
 
 function groupOptions(page: Page, group: string) {
   return page.locator(
-    `scion-chat-switcher [aria-labelledby="palette-heading-${group}"] .palette-option`
+    `scion-quick-palette [aria-labelledby="palette-heading-${group}"] .palette-option`
   );
 }
 
-/** Run an axe scan scoped to the palette subtree and assert zero critical/serious violations. The two-element selector array pierces scion-page-chat's shadow root to reach scion-chat-switcher. */
+/** Run an axe scan scoped to the palette subtree and assert zero critical/serious violations. The two-element selector array pierces scion-page-chat's shadow root to reach scion-quick-palette. */
 async function assertPaletteAxeClean(page: Page): Promise<void> {
   const results = await new AxeBuilder({ page })
     .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
     // A 2+ element array is axe-core's shadow-DOM-piercing selector path
     // (unlike a bare CSS-selector string, which only ever searches light
-    // DOM and silently matches nothing here — `scion-chat-switcher` lives
+    // DOM and silently matches nothing here — `scion-quick-palette` lives
     // inside `scion-page-chat`'s own shadow root). Scoped to the palette
     // itself, not the whole fixture page: this isolated fixture never mounts
     // the real app shell (header, base layout) that would normally supply
@@ -66,7 +66,7 @@ async function assertPaletteAxeClean(page: Page): Promise<void> {
     // contrast findings this fixture has no way to reproduce faithfully.
     // Scoping to the palette itself still checks its real contrast for
     // real, against the real `theme.css` tokens loaded by this fixture.
-    .include(['scion-page-chat', 'scion-chat-switcher'])
+    .include(['scion-page-chat', 'scion-quick-palette'])
     .analyze();
 
   const serious = results.violations.filter(
@@ -129,9 +129,9 @@ function contrastRatio(rgbA: string, rgbB: string): number {
  */
 async function assertActiveSecondaryLabelContrast(page: Page): Promise<void> {
   await page.keyboard.press('Control+k');
-  await page.locator('scion-chat-switcher #palette-query-input').fill(AGENT_WITH_DM.name);
+  await page.locator('scion-quick-palette #palette-query-input').fill(AGENT_WITH_DM.name);
   await expect(groupOptions(page, 'agents')).toHaveCount(1);
-  const secondary = page.locator('scion-chat-switcher .palette-option.active .palette-secondary');
+  const secondary = page.locator('scion-quick-palette .palette-option.active .palette-secondary');
   await expect(secondary).toHaveText(AGENT_WITH_DM.slug);
 
   const { color, backgroundColor } = await secondary.evaluate((el) => {
@@ -143,7 +143,7 @@ async function assertActiveSecondaryLabelContrast(page: Page): Promise<void> {
   });
   expect(contrastRatio(color, backgroundColor)).toBeGreaterThanOrEqual(4.5);
 
-  const kbd = page.locator('scion-chat-switcher .palette-help kbd').first();
+  const kbd = page.locator('scion-quick-palette .palette-help kbd').first();
   const kbdColors = await kbd.evaluate((el) => {
     const style = getComputedStyle(el);
     return { color: style.color, backgroundColor: style.backgroundColor };
@@ -177,10 +177,10 @@ test('empty state (no query matches in any group) passes axe', async ({ page }) 
   await gotoChat(page, POPULATED_FIXTURE);
   await page.keyboard.press('Control+k');
   await expect(groupOptions(page, 'threads')).toHaveCount(1);
-  await page.locator('scion-chat-switcher #palette-query-input').fill('zzz-no-such-match-zzz');
-  await expect(page.locator('scion-chat-switcher .palette-option')).toHaveCount(0);
+  await page.locator('scion-quick-palette #palette-query-input').fill('zzz-no-such-match-zzz');
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveCount(0);
   await expect(
-    page.locator('scion-chat-switcher [aria-labelledby="palette-heading-agents"] .palette-empty')
+    page.locator('scion-quick-palette [aria-labelledby="palette-heading-agents"] .palette-empty')
   ).toBeVisible();
 
   await assertPaletteAxeClean(page);
@@ -195,7 +195,7 @@ test('error state (a group failed to load) passes axe', async ({ page }) => {
   await page.waitForFunction(() => !!document.querySelector('scion-page-chat'));
   await page.keyboard.press('Control+k');
   await expect(
-    page.locator('scion-chat-switcher [data-palette-group="agents"] .palette-group-error')
+    page.locator('scion-quick-palette [data-palette-group="agents"] .palette-group-error')
   ).toBeVisible();
 
   await assertPaletteAxeClean(page);
@@ -225,8 +225,8 @@ test('empty state passes axe at 480px in dark theme', async ({ page }) => {
   await enableDarkTheme(page);
   await page.keyboard.press('Control+k');
   await expect(groupOptions(page, 'threads')).toHaveCount(1);
-  await page.locator('scion-chat-switcher #palette-query-input').fill('zzz-no-such-match-zzz');
-  await expect(page.locator('scion-chat-switcher .palette-option')).toHaveCount(0);
+  await page.locator('scion-quick-palette #palette-query-input').fill('zzz-no-such-match-zzz');
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveCount(0);
 
   await assertPaletteAxeClean(page);
 });

@@ -20,7 +20,7 @@
  * guards, the unrelated-modal guard, and dispatch to the grouped palette.
  *
  * happy-dom does not retarget events across shadow roots (see the
- * chat-switcher tests), so real composedPath()-through-shadow-DOM and
+ * quick-palette tests), so real composedPath()-through-shadow-DOM and
  * focus-restore assertions live in e2e/chat-palette (Chromium) instead.
  * These tests build the composedPath() arrays directly, which is a fact
  * about how the code consumes the event (it only ever calls
@@ -62,7 +62,7 @@ beforeAll(async () => {
   // warms the module cache so that background import resolves
   // near-instantly instead of running a first-time module transform that
   // can still be unresolved when this file's own tests finish and their
-  // environment tears down. `chat-switcher.js` is a different import —
+  // environment tears down. `quick-palette.js` is a different import —
   // `togglePalette`'s first-open lazy load, not `initV2()`'s — and every
   // test below that reaches it already awaits it to completion; it is
   // warmed here too so that a connected page can never leave it in flight
@@ -70,7 +70,7 @@ beforeAll(async () => {
   await Promise.all([
     import('../shared/chat/chat-space-rail.js'),
     import('../shared/chat/chat-members.js'),
-    import('../shared/chat/chat-switcher.js'),
+    import('../shared/palette/quick-palette.js'),
   ]);
 });
 
@@ -408,7 +408,7 @@ describe('_isUnrelatedModalActive: live DOM query', () => {
 
   it('does not count the switcher/palette own dialog (inside its shadow root) as an unrelated modal', () => {
     const page = createUnattachedPage();
-    const switcherEl = document.createElement('scion-chat-switcher');
+    const switcherEl = document.createElement('scion-quick-palette');
     const shadow = switcherEl.attachShadow({ mode: 'open' });
     const ownDialog = document.createElement('sl-dialog') as HTMLElement & { open?: boolean };
     ownDialog.open = true;
@@ -456,7 +456,7 @@ describe('shortcut dispatch: the palette is the single shortcut owner', () => {
     const captureSpy = vi.spyOn(page, '_capturePaletteInvokerFocus');
 
     // Neither call is awaited individually — both presses land while the
-    // first press's `await loadChatSwitcher()` is still pending, reproducing
+    // first press's `await loadQuickPalette()` is still pending, reproducing
     // the exact race this guards against.
     const first = page.togglePalette();
     const second = page.togglePalette();
@@ -1552,7 +1552,7 @@ describe('palette closes proactively on route change or another modal opening', 
   it('the palette opening its own dialog does not close itself', () => {
     const page = createUnattachedPage();
     page.v2PaletteOpen = true;
-    const switcherEl = document.createElement('scion-chat-switcher');
+    const switcherEl = document.createElement('scion-quick-palette');
     Object.defineProperty(page, '_switcherEl', { value: switcherEl, configurable: true });
     const ownDialog = document.createElement('sl-dialog');
 

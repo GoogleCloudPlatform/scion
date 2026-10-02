@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 )
 
 // APIError represents a structured error response from the API.
@@ -29,6 +30,13 @@ type APIError struct {
 	Message    string                 // Human-readable message
 	Details    map[string]interface{} // Additional context
 	RequestID  string                 // Request tracking ID
+	// RetryAfterSeconds is the response's Retry-After header, in seconds,
+	// when present and parseable as a non-negative integer (the only form
+	// the Hub's rate-limited/keys-unavailable responses send — see contract
+	// C§2.4a). 0 means the header was absent or not a plain integer (e.g.
+	// an HTTP-date form, which this field does not parse); callers must not
+	// treat 0 as "retry immediately."
+	RetryAfterSeconds int
 }
 
 // Error implements the error interface.
@@ -111,6 +119,15 @@ func ParseErrorResponse(resp *http.Response) *APIError {
 
 	// Try to get the request ID from the header
 	apiErr.RequestID = resp.Header.Get("X-Request-ID")
+
+	// Retry-After (RFC 7231 §7.1.3): the Hub only ever sends the
+	// delta-seconds form on 429/503 keys responses, never the HTTP-date
+	// form, so a plain non-negative integer is the only shape parsed here.
+	if ra := resp.Header.Get("Retry-After"); ra != "" {
+		if secs, err := strconv.Atoi(ra); err == nil && secs >= 0 {
+			apiErr.RetryAfterSeconds = secs
+		}
+	}
 
 	// Try to parse the response body
 	body, err := io.ReadAll(resp.Body)

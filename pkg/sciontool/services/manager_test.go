@@ -635,6 +635,9 @@ func TestOpenLogs_Enforced_RefusesHardlinkedLogPath(t *testing.T) {
 // starts. The enforced=false twin below proves the fixture itself is not
 // what refuses the service.
 func TestManager_Start_Enforced_DropsServiceWithHardlinkedLogPath(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires CAP_SETGID (root) for the sibling service's own Credential drop; os/exec calls setgroups(2) whenever SysProcAttr.Credential is set, even to a uid>0 target — see TestManager_Start_EnforcedRefusesUndroppableCredentials for the unprivileged-safe equivalent of this test's enforced-mode refusal")
+	}
 	cleanup := setupTestEnv(t)
 	defer cleanup()
 
@@ -656,7 +659,13 @@ func TestManager_Start_Enforced_DropsServiceWithHardlinkedLogPath(t *testing.T) 
 		{Name: "evil", Command: []string{"sh", "-c", "echo PWNED"}},
 		{Name: "ok", Command: []string{"sleep", "60"}},
 	}
-	err := mgr.Start(context.Background(), specs, 0, 0, "", true)
+	// uid/gid are a real, non-zero target (this test requires root, via
+	// the Geteuid check above) rather than 0: with requirePrivilegeDrop=true,
+	// uid/gid<=0 refuses to start ANY service (see
+	// TestManager_Start_EnforcedRefusesUndroppableCredentials), which would
+	// mask the hard-link refusal this test is actually about.
+	const dropUID, dropGID = 1000, 1000
+	err := mgr.Start(context.Background(), specs, dropUID, dropGID, "", true)
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -682,6 +691,51 @@ func TestManager_Start_Enforced_DropsServiceWithHardlinkedLogPath(t *testing.T) 
 	}
 	if string(got) != "v" {
 		t.Errorf("victim content = %q, want %q (unchanged)", got, "v")
+	}
+}
+
+// TestManager_Start_EnforcedRefusesUndroppableCredentials proves that
+// managedService.start's own Credential-decision guard — not just the
+// caller-side requirePrivilegeDropOrFail clamp one layer up — refuses to
+// start a service whose uid/gid do not both pass the Credential predicate
+// when requirePrivilegeDrop is set, instead of silently starting it with no
+// Credential (i.e. as whatever this process is, root in production). The
+// marker file's absence proves the command was never exec'd.
+func TestManager_Start_EnforcedRefusesUndroppableCredentials(t *testing.T) {
+	cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	cases := []struct {
+		name     string
+		uid, gid int
+	}{
+		{name: "uid0", uid: 0, gid: 1000},
+		{name: "gid0", uid: 1000, gid: 0},
+		{name: "both0", uid: 0, gid: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "ran")
+			mgr := New(5 * time.Second)
+			specs := []api.ServiceSpec{
+				{Name: "svc", Command: []string{"sh", "-c", "touch " + marker}},
+			}
+			err := mgr.Start(context.Background(), specs, tc.uid, tc.gid, "", true)
+			defer func() {
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = mgr.Shutdown(shutdownCtx)
+			}()
+			if !errors.Is(err, ErrPrivilegeDropRequired) {
+				t.Errorf("Start(uid=%d, gid=%d, requirePrivilegeDrop) err = %v, want ErrPrivilegeDropRequired", tc.uid, tc.gid, err)
+			}
+			// Give a wrongly-started process a moment to create the marker
+			// before asserting its absence.
+			time.Sleep(50 * time.Millisecond)
+			if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+				t.Errorf("the service ran (marker exists, stat err=%v); it must not start without a droppable credential in enforced mode", statErr)
+			}
+		})
 	}
 }
 
@@ -798,8 +852,19 @@ func countLogDirFds(t *testing.T, logDir string) int {
 // Only "first" should have any fds left open under logDir once Start
 // returns, and none once Shutdown completes.
 func TestManager_Start_NoFdLeakOnPartialOpenOrStartFailure(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires CAP_SETGID (root) for \"first\"'s and \"warmup\"'s own Credential drop; os/exec calls setgroups(2) whenever SysProcAttr.Credential is set, even to a uid>0 target — see TestManager_Start_EnforcedRefusesUndroppableCredentials for the unprivileged-safe equivalent of the enforced-mode refusal this test's fixture also exercises")
+	}
 	cleanup := setupTestEnv(t)
 	defer cleanup()
+
+	// A real, non-zero target (this test requires root, via the
+	// Geteuid check above): with requirePrivilegeDrop=true, uid/gid<=0
+	// refuses to start ANY service (see
+	// TestManager_Start_EnforcedRefusesUndroppableCredentials), which would
+	// prevent "first"/"warmup" from starting at all and change this test's
+	// fd-count assertions.
+	const dropUID, dropGID = 1000, 1000
 
 	home := os.Getenv("HOME")
 	logDir := filepath.Join(home, ".scion", "services", "logs")
@@ -808,7 +873,7 @@ func TestManager_Start_NoFdLeakOnPartialOpenOrStartFailure(t *testing.T) {
 	// this package's log calls create, unrelated to service log fds) and
 	// establish logDir on disk before the real test measures fd deltas.
 	warmup := New(5 * time.Second)
-	if err := warmup.Start(context.Background(), []api.ServiceSpec{{Name: "warmup", Command: []string{"true"}}}, 0, 0, "", true); err != nil {
+	if err := warmup.Start(context.Background(), []api.ServiceSpec{{Name: "warmup", Command: []string{"true"}}}, dropUID, dropGID, "", true); err != nil {
 		t.Fatalf("warmup Start: %v", err)
 	}
 	time.Sleep(200 * time.Millisecond)
@@ -856,7 +921,7 @@ func TestManager_Start_NoFdLeakOnPartialOpenOrStartFailure(t *testing.T) {
 	before := countLogDirFds(t, logDir)
 
 	mgr := New(5 * time.Second)
-	_ = mgr.Start(context.Background(), specs, 0, 0, "", true) // error expected; fds are what this checks
+	_ = mgr.Start(context.Background(), specs, dropUID, dropGID, "", true) // error expected; fds are what this checks
 
 	afterStart := countLogDirFds(t, logDir)
 	if delta := afterStart - before; delta != 3 {
@@ -1037,4 +1102,44 @@ func TestManager_Start_DropsInvalidNamesButStartsOthers(t *testing.T) {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = mgr.Shutdown(shutdownCtx)
+}
+
+// TestWriteLifecycle_TimestampIsUTC checks that service lifecycle log lines
+// carry the same UTC RFC 3339 timestamp as agent.log, whatever the process
+// zone.
+func TestWriteLifecycle_TimestampIsUTC(t *testing.T) {
+	origLocal := time.Local
+	time.Local = time.FixedZone("JST", 9*60*60)
+	defer func() { time.Local = origLocal }()
+
+	path := filepath.Join(t.TempDir(), "svc.lifecycle.log")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	svc := &managedService{lifecycleFile: f}
+	svc.writeLifecycle("Service started (pid %d)", 42)
+	_ = f.Close()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	line := strings.TrimSuffix(string(data), "\n")
+	if !strings.HasPrefix(line, "[") {
+		t.Fatalf("lifecycle line = %q, want a bracketed timestamp", line)
+	}
+	ts, rest, ok := strings.Cut(line[1:], "] ")
+	if !ok {
+		t.Fatalf("lifecycle line = %q, want \"[<timestamp>] <message>\"", line)
+	}
+	if rest != "Service started (pid 42)" {
+		t.Errorf("lifecycle message = %q, want %q", rest, "Service started (pid 42)")
+	}
+	if !strings.HasSuffix(ts, "Z") {
+		t.Errorf("lifecycle timestamp %q is not UTC (want a trailing Z)", ts)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, ts); err != nil {
+		t.Errorf("lifecycle timestamp %q is not RFC 3339: %v", ts, err)
+	}
 }

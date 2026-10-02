@@ -15,7 +15,7 @@
  */
 
 /**
- * Tests for <scion-chat-switcher>'s grouped palette rendering: the sl-dialog
+ * Tests for <scion-quick-palette>'s grouped palette rendering: the sl-dialog
  * presentation, keyboard model, and per-group states.
  *
  * happy-dom does not retarget events across shadow roots, so real
@@ -28,9 +28,13 @@
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
-await import('./chat-switcher.js');
-type ScionChatSwitcher = import('./chat-switcher.js').ScionChatSwitcher;
-import type { GroupState, PaletteTarget } from '../../../client/chat-palette-types.js';
+await import('./quick-palette.js');
+type ScionQuickPalette = import('./quick-palette.js').ScionQuickPalette;
+import type {
+  GroupState,
+  PaletteGroup,
+  PaletteTarget,
+} from '../../../client/chat-palette-types.js';
 import { dmCandidateId } from '../../../client/chat-palette-types.js';
 import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
 
@@ -60,8 +64,10 @@ function agentsGroup(
   };
 }
 
-async function mountPalette(groups?: Record<'agents', GroupState>): Promise<ScionChatSwitcher> {
-  const el = document.createElement('scion-chat-switcher') as ScionChatSwitcher;
+async function mountPalette(
+  groups?: Partial<Record<PaletteGroup, GroupState>>
+): Promise<ScionQuickPalette> {
+  const el = document.createElement('scion-quick-palette');
   el.open = true;
   if (groups) el.groups = groups;
   document.body.appendChild(el);
@@ -69,7 +75,7 @@ async function mountPalette(groups?: Record<'agents', GroupState>): Promise<Scio
   return el;
 }
 
-describe('scion-chat-switcher: renders a grouped Agents list', () => {
+describe('scion-quick-palette: renders a grouped Agents list', () => {
   afterEach(() => {
     document.body.innerHTML = '';
   });
@@ -82,6 +88,25 @@ describe('scion-chat-switcher: renders a grouped Agents list', () => {
     expect(input?.getAttribute('role')).toBe('combobox');
     const heading = el.shadowRoot?.querySelector('.palette-group-heading');
     expect(heading?.textContent).toContain('Agents');
+  });
+
+  it('uses surface-neutral copy for its label and placeholder by default', async () => {
+    const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+    const dialog = el.shadowRoot?.querySelector('sl-dialog');
+    const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
+    expect(dialog?.getAttribute('label')).toBe('Quick switcher');
+    expect(input.placeholder).toBe('Search…');
+  });
+
+  it("renders the host's label and placeholder", async () => {
+    const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+    el.label = 'Jump to agent';
+    el.placeholder = 'Search agents…';
+    await el.updateComplete;
+    const dialog = el.shadowRoot?.querySelector('sl-dialog');
+    const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
+    expect(dialog?.getAttribute('label')).toBe('Jump to agent');
+    expect(input.placeholder).toBe('Search agents…');
   });
 
   it('shows a loading state while the group is loading', async () => {
@@ -402,6 +427,22 @@ describe('scion-chat-switcher: renders a grouped Agents list', () => {
     expect(help?.textContent).toContain('close');
   });
 
+  it('the keyboard-help region omits the Tab hint when only one group is rendered', async () => {
+    const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+    const help = el.shadowRoot?.querySelector('#palette-keyboard-help');
+    expect(help?.textContent).toContain('navigate');
+    expect(help?.textContent).not.toContain('next group');
+  });
+
+  it('the keyboard-help region shows the Tab hint when more than one group is rendered', async () => {
+    const el = await mountPalette({
+      ...agentsGroup([{ peerId: 'a1', label: 'Coder One' }]),
+      people: { status: 'ready', candidates: [] },
+    });
+    const help = el.shadowRoot?.querySelector('#palette-keyboard-help');
+    expect(help?.textContent).toContain('next group');
+  });
+
   it('the status region announces the ranked match count for the current query, not the raw group size', async () => {
     const el = await mountPalette(
       agentsGroup([
@@ -482,7 +523,7 @@ describe('scion-chat-switcher: renders a grouped Agents list', () => {
     // query-change render triggered by narrowing to zero matches (asserted
     // below, *before* Tab), and Tab's own
     // `ranked.length === 0 -> activeId = null` branch is unreachable in
-    // the current architecture for the same reason (see chat-switcher.ts's
+    // the current architecture for the same reason (see quick-palette.ts's
     // `reconcileActiveId`), so removing just that inner assignment leaves
     // this test green. What this test actually verifies is that the Tab
     // handler's other code (`this.rankedPaletteCandidates`,
@@ -744,7 +785,7 @@ describe('scion-chat-switcher: renders a grouped Agents list', () => {
     });
     const options = el.shadowRoot?.querySelectorAll('.palette-option');
     (options?.[1] as HTMLElement).click();
-    expect(detailTarget?.peerId).toBe('a2');
+    expect(detailTarget).toMatchObject({ peerId: 'a2' });
   });
 
   it('Escape reaching sl-request-close dispatches palette-dismiss with reason escape', async () => {
@@ -945,7 +986,7 @@ describe('scion-chat-switcher: renders a grouped Agents list', () => {
 
   it('reopening with the same groups reference (no groups/query change) resets the active row to the new global best', async () => {
     // willUpdate's `changedKeys.has('queryText') || changed.has('groups') ||
-    // changed.has('open')` (chat-switcher.ts) needs the `|| changed.has(
+    // changed.has('open')` (quick-palette.ts) needs the `|| changed.has(
     // 'open')` half: the earlier "fresh open" block always resets
     // `manualSelection` to false, but does not itself touch `activeId` — so
     // without also re-running reconcileActiveId on open, a manually-selected
@@ -986,7 +1027,7 @@ describe('scion-chat-switcher: renders a grouped Agents list', () => {
 
   it('groups={} (every group absent) renders without throwing', async () => {
     // renderPaletteGroup's `if (!state) return nothing;` guard
-    // (chat-switcher.ts) is reachable: `groups` is typed
+    // (quick-palette.ts) is reachable: `groups` is typed
     // `Partial<Record<PaletteGroup, GroupState>>` and is a public,
     // attribute-false property, so `{}` is a valid value reachable through
     // that public API even though the current sole caller (chat.ts) never
@@ -1031,7 +1072,7 @@ describe('scion-chat-switcher: renders a grouped Agents list', () => {
   });
 });
 
-describe('scion-chat-switcher: keyboard-affordance legend and aria-describedby follow touch modality', () => {
+describe('scion-quick-palette: keyboard-affordance legend and aria-describedby follow touch modality', () => {
   afterEach(() => {
     document.body.innerHTML = '';
     vi.unstubAllGlobals();
@@ -1070,7 +1111,7 @@ describe('scion-chat-switcher: keyboard-affordance legend and aria-describedby f
   });
 });
 
-describe('scion-chat-switcher: --palette-vvh tracks window.visualViewport while open', () => {
+describe('scion-quick-palette: --palette-vvh tracks window.visualViewport while open', () => {
   /** happy-dom has no real `visualViewport` — a minimal fake the test can resize with `fire()`. */
   class FakeVisualViewport {
     height = 700;

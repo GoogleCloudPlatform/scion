@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -34,7 +35,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
@@ -42,6 +45,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
 )
@@ -65,6 +69,13 @@ type KubernetesRuntime struct {
 	// blocks on its ctx argument to exercise the per-probe timeout without a
 	// real exec transport.
 	execProbe execProbeFunc
+
+	// PriorityClassName is the runtime-level default spec.priorityClassName
+	// applied to agent pods (settings runtimes.<name>.priority_class_name).
+	// An explicit per-template/agent kubernetes.priorityClassName overrides
+	// this in buildPod. Empty means no priority class is set (today's
+	// behaviour).
+	PriorityClassName string
 }
 
 // agentContainerName is the name of the primary scion agent container in
@@ -516,6 +527,10 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	r.cleanupAgentSecrets(ctx, namespace, config.Name)
 	r.cleanupStalePod(ctx, namespace, config.Name)
 
+	// The hub transport credential is delivered through the per-agent Secret
+	// (secretKeyRef) rather than as a plain pod env value.
+	config.Env, config.ResolvedSecrets = divertTransportCredential(config.Env, config.ResolvedSecrets)
+
 	// Create K8s Secret or SecretProviderClass before the pod
 	if len(config.ResolvedSecrets) > 0 {
 		useGKEPath := r.GKEMode
@@ -844,6 +859,70 @@ func (r *KubernetesRuntime) createAgentSecret(ctx context.Context, namespace, ag
 	}
 
 	return secretName, nil
+}
+
+// transportCredentialSecretKey is the data key under which the hub transport
+// credential is stored in the per-agent Secret (scion-agent-<name>). It is
+// chosen to be unlikely to collide with the Name of a user- or
+// project-defined secret; divertTransportCredential drops any resolved
+// secret that uses it.
+const transportCredentialSecretKey = "scion-transport-credential"
+
+// divertTransportCredential moves the hub transport credential
+// (transportauth.EnvTransportToken) out of the plain KEY=VALUE env list and
+// into the resolved secrets as an environment-type entry, so that it lands in
+// the per-agent Secret and the pod references it via secretKeyRef.
+//
+// It returns new slices and never modifies the backing arrays of its inputs.
+// When the credential is absent (or empty) from env, both inputs are returned
+// unchanged.
+//
+// The hub-provided value takes precedence: any existing environment-type
+// resolved secret that targets the same env var, and any resolved secret
+// that uses transportCredentialSecretKey as its Name, is dropped (with a
+// warning) so the pod spec carries exactly one entry for the variable and
+// the Secret carries exactly one value under the key.
+func divertTransportCredential(env []string, secrets []api.ResolvedSecret) ([]string, []api.ResolvedSecret) {
+	const prefix = transportauth.EnvTransportToken + "="
+	var value string
+	found := false
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) && len(e) > len(prefix) {
+			// Last non-empty occurrence wins; an empty entry is treated as
+			// unset (see the absent case below).
+			value = e[len(prefix):]
+			found = true
+		}
+	}
+	if !found {
+		return env, secrets
+	}
+
+	outEnv := make([]string, 0, len(env))
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			continue
+		}
+		outEnv = append(outEnv, e)
+	}
+
+	outSecrets := make([]api.ResolvedSecret, 0, len(secrets)+1)
+	for _, s := range secrets {
+		if (s.Type == "environment" && s.Target == transportauth.EnvTransportToken) || s.Name == transportCredentialSecretKey {
+			runtimeLog.Warn("Dropping resolved secret that conflicts with the hub transport credential",
+				"secret", s.Name, "target", s.Target, "source", s.Source)
+			continue
+		}
+		outSecrets = append(outSecrets, s)
+	}
+	outSecrets = append(outSecrets, api.ResolvedSecret{
+		Name:   transportCredentialSecretKey,
+		Type:   "environment",
+		Target: transportauth.EnvTransportToken,
+		Value:  value,
+		Source: "hub",
+	})
+	return outEnv, outSecrets
 }
 
 // createSecretProviderClass creates a SecretProviderClass CRD for GKE
@@ -1591,7 +1670,6 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	//     pods and nodes without per-start chown (design §9.1).
 	//   - Local backend: host GID (today's behavior) so synced files remain
 	//     writable by the broker user.
-	const containerUID int64 = 1000
 	fsGroupGID := int64(os.Getgid()) // default: host GID (local backend)
 	if config.WorkspaceBackendName == "nfs" {
 		nfsGID := config.NFSGID
@@ -1700,7 +1778,14 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// F-111 (design §9): this used to also require config.GitCloneForInit !=
 	// nil, which meant non-git projects got no init container at all and no
 	// mkdir/chown ever ran — the per-project subPath then didn't exist when
-	// the main container mounted it, and kubelet created it as root:root.
+	// the main container mounted it, and the kubelet had to create it.
+	// The kubelet's mkdir only yields a root:root directory on exports that
+	// allow root to create directories (no_root_squash); on exports that map
+	// root to an anonymous user it is denied and the pod never starts. When
+	// the broker has the export mounted, pkg/agent (ensureNFSWorkspaceLeaf)
+	// now creates the workspace subPath (and the subPaths of shared dirs
+	// served from the same claim) before the pod exists, so the
+	// kubelet only falls back to creating it when the broker has no mount.
 	// The gate now keys only on nfs backend + a bound PV claim, matching
 	// nfsProvisionCommand's own nil-safety (it already emits a plain
 	// `sciontool provision` when gc == nil); GitCloneForInit continues to
@@ -1731,7 +1816,11 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			// Lock winner (or no locker available): provision (mkdir+chown,
 			// plus clone if GitCloneForInit is set) if sentinel is absent,
 			// skip if already provisioned. The command is idempotent.
-			initCommand = nfsProvisionCommand(config.GitCloneForInit)
+			// Ownership follows the pod securityContext above: uid is the
+			// RunAsUser the agent runs as, gid is the NFS fsGroup. The
+			// configured NFS uid is not applied to RunAsUser, so it is not
+			// passed here either.
+			initCommand = nfsProvisionCommand(config.GitCloneForInit, containerUID, fsGroupGID)
 		}
 
 		// F-111: shared dirs served from the workspace PVC by subPath
@@ -1777,6 +1866,20 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			initEnv = append(initEnv, corev1.EnvVar{
 				Name:  "SCION_SHARED_DIR_PATHS",
 				Value: strings.Join(sharedDirPairs, ","),
+			})
+		}
+		// When the broker created the workspace (and claim shared-dir)
+		// directories itself, or found them with setgid and group write,
+		// agents reach them through their group,
+		// so a chown the export does not allow (root mapped to an anonymous
+		// user) is logged instead of failing the pod. Only the provisioning
+		// (lock-winner) container runs the chown. An env var rather than a
+		// flag, so an older sciontool simply ignores it and keeps the strict
+		// behavior instead of rejecting an unknown flag.
+		if config.NFSWorkspacePreCreated && !config.nfsProvisionLockLost {
+			initEnv = append(initEnv, corev1.EnvVar{
+				Name:  provision.ChownBestEffortEnv,
+				Value: "1",
 			})
 		}
 
@@ -2101,6 +2204,24 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 				})
 			}
 		}
+	}
+
+	// Priority class: an explicit per-template/agent kubernetes.priorityClassName
+	// wins over the runtime-level default (settings runtimes.<name>.priority_class_name,
+	// carried on r.PriorityClassName). Unset at both levels leaves
+	// pod.Spec.PriorityClassName unset — today's behaviour. Scion does not
+	// create the PriorityClass object; it must already exist on the cluster.
+	effectivePriorityClass := r.PriorityClassName
+	prioritySource := "runtimes.<name>.priority_class_name"
+	if config.Kubernetes != nil && config.Kubernetes.PriorityClassName != "" {
+		effectivePriorityClass = config.Kubernetes.PriorityClassName
+		prioritySource = "kubernetes.priorityClassName"
+	}
+	if effectivePriorityClass != "" {
+		if errs := k8svalidation.IsDNS1123Subdomain(effectivePriorityClass); len(errs) > 0 {
+			return nil, fmt.Errorf("invalid %s %q: %s", prioritySource, effectivePriorityClass, strings.Join(errs, "; "))
+		}
+		pod.Spec.PriorityClassName = effectivePriorityClass
 	}
 
 	return pod, nil
@@ -2585,6 +2706,32 @@ func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podN
 	}
 }
 
+// k8sDisruptionExitReason inspects a pod for signs that it was removed by a
+// Kubernetes-initiated disruption rather than a normal stop or a container
+// crash: the pod-level status reason "Evicted" (kubelet node-pressure
+// eviction), or a DisruptionTarget condition. Returns "" when neither signal
+// is present. Callers should only use the result once the pod has actually
+// reached a terminal phase, or is already committed to termination (a
+// non-nil DeletionTimestamp alongside a live DisruptionTarget condition).
+func k8sDisruptionExitReason(pod *corev1.Pod) string {
+	if pod.Status.Reason == "Evicted" {
+		return string(state.ExitReasonEvicted)
+	}
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type != corev1.DisruptionTarget || cond.Status != corev1.ConditionTrue {
+			continue
+		}
+		if cond.Reason == corev1.PodReasonPreemptionByScheduler {
+			return string(state.ExitReasonPreempted)
+		}
+		// TerminationByKubelet, EvictionByEvictionAPI, or any other
+		// DisruptionTarget reason (for example a taint-manager or pod-GC
+		// removal) is reported as evicted.
+		return string(state.ExitReasonEvicted)
+	}
+	return ""
+}
+
 func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 	namespace := r.DefaultNamespace
 	// When ListAllNamespaces is enabled, query across all namespaces
@@ -2654,6 +2801,32 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 					}
 				}
 				break
+			}
+		}
+
+		// A pod that reached a terminal phase may have gotten there through a
+		// Kubernetes-initiated disruption rather than a normal stop or a
+		// container crash. Check only once the pod is terminal (agentStatus
+		// is stopped or error): a DisruptionTarget condition can appear on a
+		// pod that is still running out its grace period, and that pod must
+		// not be reported as preempted/evicted before it actually is —
+		// unless it is already committed to termination (deletionTimestamp),
+		// which the branch below covers.
+		if agentStatus == string(state.PhaseStopped) || agentStatus == string(state.PhaseError) {
+			if reason := k8sDisruptionExitReason(&p); reason != "" {
+				exitReason = reason
+			}
+		} else if p.DeletionTimestamp != nil {
+			// Scheduler preemption and Eviction API deletions remove the pod
+			// object outright once termination completes — often before any
+			// heartbeat observes a terminal phase at all, since List() polls
+			// rather than watches. A pod with a deletionTimestamp and a live
+			// DisruptionTarget condition is already committed to that
+			// termination, so report the reason now, ahead of it actually
+			// stopping. agentStatus (the reported Phase) is deliberately
+			// left alone — this pod has not stopped yet.
+			if reason := k8sDisruptionExitReason(&p); reason != "" {
+				exitReason = reason
 			}
 		}
 
@@ -3318,18 +3491,30 @@ func nfsInitContainerInjected(config RunConfig) bool {
 	return config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 }
 
-// nfsProvisionCommand builds the Command slice for the lock-winner init
-// container. It invokes `sciontool provision` with numeric/enum flags for
-// depth and mode. URL and branch are passed via env vars (nfsProvisionEnv)
-// to prevent shell injection.
-func nfsProvisionCommand(gc *api.GitCloneConfig) []string {
-	if gc == nil || gc.URL == "" {
-		return []string{"sciontool", "provision"}
-	}
+// containerUID is the uid agent pods run as (pod RunAsUser/RunAsGroup):
+// the image's non-root scion user. The NFS provisioning init container
+// chowns the workspace to this uid so the agent owns what it clones.
+const containerUID int64 = 1000
 
+// nfsProvisionCommand builds the Command slice for the lock-winner init
+// container. It invokes `sciontool provision` with numeric flags for depth
+// and the workspace ownership uid/gid. URL and branch are passed via env vars
+// (nfsProvisionEnv) to prevent shell injection.
+//
+// buildPod passes the identity the agent container runs as: uid is the pod
+// RunAsUser (containerUID) and gid is the pod fsGroup (the resolved
+// workspace_storage.nfs gid). A zero value omits the flag, so sciontool's
+// own default of 1000 applies.
+func nfsProvisionCommand(gc *api.GitCloneConfig, uid, gid int64) []string {
 	cmd := []string{"sciontool", "provision"}
-	if gc.Depth != nil {
+	if gc != nil && gc.URL != "" && gc.Depth != nil {
 		cmd = append(cmd, "--depth", fmt.Sprintf("%d", *gc.Depth))
+	}
+	if uid != 0 {
+		cmd = append(cmd, "--uid", strconv.FormatInt(uid, 10))
+	}
+	if gid != 0 {
+		cmd = append(cmd, "--gid", strconv.FormatInt(gid, 10))
 	}
 	return cmd
 }

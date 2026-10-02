@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstrainthistory"
 	"github.com/google/uuid"
 )
 
@@ -244,6 +245,21 @@ func (_c *AccessConstraintCreate) SetNillableID(v *uuid.UUID) *AccessConstraintC
 	return _c
 }
 
+// AddHistoryIDs adds the "history" edge to the AccessConstraintHistory entity by IDs.
+func (_c *AccessConstraintCreate) AddHistoryIDs(ids ...string) *AccessConstraintCreate {
+	_c.mutation.AddHistoryIDs(ids...)
+	return _c
+}
+
+// AddHistory adds the "history" edges to the AccessConstraintHistory entity.
+func (_c *AccessConstraintCreate) AddHistory(v ...*AccessConstraintHistory) *AccessConstraintCreate {
+	ids := make([]string, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _c.AddHistoryIDs(ids...)
+}
+
 // Mutation returns the AccessConstraintMutation object of the builder.
 func (_c *AccessConstraintCreate) Mutation() *AccessConstraintMutation {
 	return _c.mutation
@@ -464,6 +480,22 @@ func (_c *AccessConstraintCreate) createSpec() (*AccessConstraint, *sqlgraph.Cre
 	if value, ok := _c.mutation.Updated(); ok {
 		_spec.SetField(accessconstraint.FieldUpdated, field.TypeTime, value)
 		_node.Updated = value
+	}
+	if nodes := _c.mutation.HistoryIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   accessconstraint.HistoryTable,
+			Columns: []string{accessconstraint.HistoryColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(accessconstrainthistory.FieldID, field.TypeString),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
 	}
 	return _node, _spec
 }
