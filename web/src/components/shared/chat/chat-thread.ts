@@ -2098,8 +2098,16 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const { text, mentions, attachmentIds, replyToId, replyToContent, onSuccess, onError } =
-      e.detail;
+    const {
+      text,
+      interrupt,
+      mentions,
+      attachmentIds,
+      replyToId,
+      replyToContent,
+      onSuccess,
+      onError,
+    } = e.detail;
     const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
     if (!hasContent || this.sending) return;
 
@@ -2161,6 +2169,11 @@ export class ScionChatThread extends LitElement {
       };
       if (mentions && mentions.length > 0) {
         body.mentions = mentions;
+      }
+      // "Send with interruption": only sent when requested so ordinary sends
+      // keep the minimal body.
+      if (interrupt) {
+        body.interrupt = true;
       }
       // W7: Include attachment IDs.
       if (attachmentIds && attachmentIds.length > 0) {
