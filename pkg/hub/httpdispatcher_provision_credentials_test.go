@@ -95,7 +95,7 @@ func newProvisionCredsDispatcher(backend secret.SecretBackend) (*HTTPAgentDispat
 	return d, buf
 }
 
-func findRecord(recs []map[string]any, level, msgSuffix string) map[string]any {
+func findProvisionCredsRecord(recs []map[string]any, level, msgSuffix string) map[string]any {
 	for _, r := range recs {
 		if r["level"] == level && strings.HasSuffix(r["msg"].(string), msgSuffix) {
 			return r
@@ -111,7 +111,7 @@ func TestResolveProvisionCredentials_ListFailureWarns(t *testing.T) {
 	creds := d.resolveProvisionCredentials(context.Background(), agent, "buildCreateRequest")
 	assert.Nil(t, creds)
 
-	rec := findRecord(buf.records(t), "WARN", "failed to list project secrets for ProvisionCredentials")
+	rec := findProvisionCredsRecord(buf.records(t), "WARN", "failed to list project secrets for ProvisionCredentials")
 	require.NotNil(t, rec, "a List failure must be logged at Warn without debug; log: %s", buf.String())
 	assert.Equal(t, "agent-1", rec["agent_id"])
 	assert.Equal(t, "project-1", rec["project_id"])
@@ -134,12 +134,12 @@ func TestResolveProvisionCredentials_GetFailureWarnsWithNameOnly(t *testing.T) {
 	assert.Equal(t, map[string]string{"GH_OTHER": value}, creds)
 
 	recs := buf.records(t)
-	warn := findRecord(recs, "WARN", "failed to get project secret for ProvisionCredentials")
+	warn := findProvisionCredsRecord(recs, "WARN", "failed to get project secret for ProvisionCredentials")
 	require.NotNil(t, warn, "a Get failure must be logged at Warn without debug; log: %s", buf.String())
 	assert.Equal(t, "GH_SCION_FRONTIERS", warn["secret"])
 	assert.Equal(t, "project-1", warn["project_id"])
 
-	info := findRecord(recs, "INFO", "ProvisionCredentials resolved")
+	info := findProvisionCredsRecord(recs, "INFO", "ProvisionCredentials resolved")
 	require.NotNil(t, info, "the credential count must be logged at Info; log: %s", buf.String())
 	assert.EqualValues(t, 1, info["count"])
 
@@ -151,7 +151,7 @@ func TestResolveProvisionCredentials_CountWhenNone(t *testing.T) {
 	agent := &store.Agent{ID: "agent-1", ProjectID: "project-1"}
 
 	assert.Nil(t, d.resolveProvisionCredentials(context.Background(), agent, "DispatchAgentStart"))
-	info := findRecord(buf.records(t), "INFO", "ProvisionCredentials resolved")
+	info := findProvisionCredsRecord(buf.records(t), "INFO", "ProvisionCredentials resolved")
 	require.NotNil(t, info, "log: %s", buf.String())
 	assert.EqualValues(t, 0, info["count"])
 }
