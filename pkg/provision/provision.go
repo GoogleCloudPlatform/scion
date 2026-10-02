@@ -2518,13 +2518,13 @@ func IsValidJoinWorktree(base, candidate string) error {
 // worktree (this function's current behavior, matching this stack's
 // original design and tests), or hard-refuse the whole dispatch, is an open
 // design question pending resolution, for the local (non-MountedWorktree)
-// path. For MountedWorktree, the sharer-registry JOIN check above (the one
-// candidate check that does not route through this function) refuses an
-// invalid candidate outright instead of falling through, matching the
-// behavior it is layered on top of; that outcome is settled, not part of
-// this open question. Do not change this function's fallback-vs-refuse
-// behavior, or the registry site's MountedWorktree refusal, without
-// checking that resolution first.
+// path. For MountedWorktree, the sharer-registry JOIN check in ensureWorktree
+// (the one candidate check that does not route through this function)
+// refuses an invalid candidate outright instead of falling through, matching
+// upstream's own outcome for that candidate shape; that outcome is settled,
+// not part of this open question. Do not change this function's
+// fallback-vs-refuse behavior, or the registry site's MountedWorktree
+// refusal, without checking that resolution first.
 func validateJoinCandidate(base, path, agentID, branchName, source string) bool {
 	if err := IsValidJoinWorktree(base, path); err != nil {
 		slog.Warn("ProvisionShared: join candidate failed worktree relationship validation, refusing to join",
@@ -2768,9 +2768,8 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 			} else if in.MountedWorktree {
 				// Unlike the local path below, MountedWorktree refuses an
 				// invalid registry candidate outright instead of falling
-				// through to create a fresh worktree: the pod mounts a single,
-				// pre-selected directory for this agent, so silently creating
-				// a second worktree elsewhere would never actually reach it.
+				// through to create a fresh worktree, matching upstream's
+				// own outcome for this candidate shape.
 				return worktreeOutcome{}, fmt.Errorf("ProvisionShared: the sharer registry for branch %q names %s, which is not a direct worktree of this checkout; refusing to join it", branchName, existingWtPath)
 			} else {
 				slog.Warn("ProvisionShared: registry worktree path failed relationship validation, will create new worktree",
