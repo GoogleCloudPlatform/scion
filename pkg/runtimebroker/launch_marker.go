@@ -84,7 +84,11 @@ func writeLaunchMarker(projectPath string, sharedWorkspace bool, slug, launchID 
 		_ = os.Remove(tmpPath)
 		return closeErr
 	}
-	return os.Rename(tmpPath, path)
+	if renameErr := os.Rename(tmpPath, path); renameErr != nil {
+		_ = os.Remove(tmpPath)
+		return renameErr
+	}
+	return nil
 }
 
 // readLaunchMarker returns the launch ID currently recorded for slug, or ""

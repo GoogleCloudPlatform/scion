@@ -168,3 +168,34 @@ func TestLaunchMarker_SharedWorkspaceExternalLayout(t *testing.T) {
 		t.Fatalf("readLaunchMarker = %q, want L1", got)
 	}
 }
+
+// TestLaunchMarker_FailedRenameRemovesTempFile covers writeLaunchMarker
+// removing its temp file when the final rename fails: the marker path is a
+// non-empty directory, so renaming the temp file onto it fails, and no
+// "<slug>.*.tmp" file may be left behind in the markers directory.
+func TestLaunchMarker_FailedRenameRemovesTempFile(t *testing.T) {
+	projectDir := t.TempDir()
+	const slug = "agent-rename-fails"
+
+	dir, err := launchMarkersDir(projectDir, false)
+	if err != nil {
+		t.Fatalf("launchMarkersDir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, slug), 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, slug, "keep"), []byte("x"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := writeLaunchMarker(projectDir, false, slug, "L-1"); err == nil {
+		t.Fatal("expected writeLaunchMarker to fail when the marker path is a non-empty directory")
+	}
+	leftovers, err := filepath.Glob(filepath.Join(dir, slug+".*.tmp"))
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("expected the temp file to be removed after a failed rename, found %v", leftovers)
+	}
+}
