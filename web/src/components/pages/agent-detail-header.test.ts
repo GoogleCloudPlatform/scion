@@ -50,8 +50,8 @@ function makeAgent(overrides: Partial<Agent>): Agent {
   } as Agent;
 }
 
-/** Label each top-level action in .header-actions, in DOM order. */
-function headerActionLabels(agent: Agent): string[] {
+/** Render the page header for `agent` and return its .header-actions. */
+function renderHeaderActions(agent: Agent): Element {
   const el = document.createElement('scion-page-agent-detail') as ScionPageAgentDetail;
   el.agentId = agent.id;
   (el as unknown as { agent: Agent }).agent = agent;
@@ -60,7 +60,12 @@ function headerActionLabels(agent: Agent): string[] {
   render(tpl, host);
   const actions = host.querySelector('.header-actions');
   expect(actions).not.toBeNull();
-  return Array.from(actions!.children).map((child) => {
+  return actions!;
+}
+
+/** Label each top-level action in .header-actions, in DOM order. */
+function headerActionLabels(agent: Agent): string[] {
+  return Array.from(renderHeaderActions(agent).children).map((child) => {
     const link = child.matches('a') ? child : child.querySelector(':scope > a');
     if (link?.getAttribute('href')?.startsWith('/agents/graph?')) return GRAPH;
     const button = child.matches('sl-button') ? child : child.querySelector('sl-button');
@@ -130,17 +135,31 @@ describe('agent detail header actions order', () => {
   });
 
   it('keeps the graph link target and tooltip', () => {
-    const el = document.createElement('scion-page-agent-detail') as ScionPageAgentDetail;
-    el.agentId = 'a-1';
-    (el as unknown as { agent: Agent }).agent = makeAgent({ phase: 'running' });
-    const host = document.createElement('div');
-    render((el as unknown as { renderHeader(): TemplateResult }).renderHeader(), host);
-    const first = host.querySelector('.header-actions')!.firstElementChild!;
+    const first = renderHeaderActions(makeAgent({ phase: 'running' })).firstElementChild!;
     expect(first.tagName.toLowerCase()).toBe('sl-tooltip');
     expect(first.getAttribute('content')).toBe('See this agent in graph');
     expect(first.querySelector('a')!.getAttribute('href')).toBe(
       '/agents/graph?project=p-1&focus=a-1'
     );
+  });
+
+  it('puts the graph link before a disabled Message in its own tooltip', () => {
+    const agent = makeAgent({
+      phase: 'running',
+      _messageability: { canMessage: false, canReachViewer: true, reason: 'missing_permission' },
+    });
+    expect(headerActionLabels(agent)).toEqual([
+      GRAPH,
+      'Message',
+      'Terminal',
+      'Suspend',
+      'Stop',
+      'trash',
+    ]);
+    const message = renderHeaderActions(agent).children[1];
+    expect(message.tagName.toLowerCase()).toBe('sl-tooltip');
+    expect(message.getAttribute('content')).toBeTruthy();
+    expect(message.querySelector(':scope > sl-button')!.hasAttribute('disabled')).toBe(true);
   });
 
   it('puts the graph link first even with no other actions permitted', () => {
