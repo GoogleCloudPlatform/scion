@@ -204,6 +204,9 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		return
 	case gateCompleted:
 		alreadyCompleted = true
+		// "completed" skips every remaining checkpoint (design §3.8.2's
+		// table), including the runtime's pre-create checkpoints.
+		sender.recordKeepaliveCompleted()
 	}
 	if sender.IsAborted() {
 		s.handleKeepaliveAbort(sender, rec, lc)
@@ -268,6 +271,11 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		return
 	}
 	lc.opts = opts
+	// Runtime hooks (design §3.8.3, §3.8.4): a Hub-answered checkpoint
+	// immediately before each resource-creating call, and each created
+	// resource recorded for CleanupLaunch.
+	lc.opts.Checkpoint = sender.Checkpoint
+	lc.opts.OnResourceCreated = rec.AddHandle
 	if sender.IsAborted() {
 		s.handleKeepaliveAbort(sender, rec, lc)
 		return
@@ -328,6 +336,11 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			return
 		}
 		code, message := classifyStartError(ctx, sr.err)
+		if sender.CheckpointUnreachable() {
+			// A pre-create checkpoint blocked until ctx' expired with no
+			// definitive Hub answer (design §3.8.2: failed{hub_unreachable}).
+			code, message = "hub_unreachable", "checkpoint: hub unreachable"
+		}
 		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, code, message)
 		return
 	}
@@ -435,7 +448,7 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	if err := mgr.CleanupLaunch(cleanupCtx, rec.Handles); err != nil {
+	if err := mgr.CleanupLaunch(cleanupCtx, rec.HandlesSnapshot()); err != nil {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up launch resources",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
 	}

@@ -1579,6 +1579,10 @@ authDone:
 			return l
 		}(),
 		Annotations: projectkeys.ProjectPathLabels(projectDir),
+		// Async-launch hooks (design t1-async-create-v11.md §3.8.3,
+		// §3.8.4); nil on the synchronous path.
+		Checkpoint:        opts.Checkpoint,
+		OnResourceCreated: opts.OnResourceCreated,
 	}
 	slog.Info("agent start: pre-runtime provisioning complete", "agent", opts.Name,
 		"elapsed_ms", time.Since(startEntry).Milliseconds())
