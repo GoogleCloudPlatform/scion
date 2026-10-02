@@ -615,3 +615,33 @@ func TestStartScheduler_PausesBeforeFirstTick(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, events.Items, "no event is materialized")
 }
+
+// noopPauseStore reports success from UpdateScheduleStatus without writing,
+// so a "paused" row stays active and keeps coming back from the store.
+type noopPauseStore struct {
+	store.Store
+	calls int
+}
+
+func (n *noopPauseStore) UpdateScheduleStatus(context.Context, string, string) error {
+	n.calls++
+	return nil
+}
+
+func TestPauseZonePrefixedSchedules_NoopPauseTerminates(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	logs := authzHelperCaptureLogs(t)
+
+	row := seedSchedule(t, s, projectID, "noop-pause", zonePrefixedExprs[0], store.ScheduleStatusActive)
+	noop := &noopPauseStore{Store: s}
+	srv.store = noop
+
+	runZonePrefixPass(t, srv)
+
+	assert.Equal(t, 1, noop.calls, "the row is handled once")
+	assert.Len(t, zonePrefixWarnings(t, logs), 1, "one warning, not a stream")
+	require.Len(t, capturedErrors(t, logs, "schedule zone-prefix check: stopped, the store returned no new rows"), 1)
+	got, err := s.GetSchedule(context.Background(), row.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduleStatusActive, got.Status, "the no-op store did not write")
+}

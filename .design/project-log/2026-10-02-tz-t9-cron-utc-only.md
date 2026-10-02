@@ -25,10 +25,12 @@
   of UTC) or never advance (west of UTC). The pass would then miss prefixed rows or hang hub
   startup, before an operator could run the fix. Instead, the store query
   `ListActiveZonePrefixedSchedules` (active, `cron_expr` LIKE `CRON_TZ=%` or `TZ=%`, ordered by ID,
-  with an exclude list) feeds a fetch-then-pause loop (batches of 200). Pausing a row removes it from the next fetch. Rows that
-  are fetched but not paused (the pause failed, or SQLite's case-insensitive LIKE matched a
-  non-prefix) are excluded, so every batch shrinks the candidate set and the loop always ends. A
-  batch with no new rows stops it with an error naming `utc-timestamp-normalize`.
+  with an exclude list) feeds a fetch-then-pause loop (batches of 200). Pausing a row removes it
+  from the next fetch. Rows that are fetched but not paused (the pause failed, or SQLite's
+  case-insensitive LIKE matched a non-prefix) are sent back as excluded IDs. Every handled ID,
+  paused ones included, is recorded locally and handled at most once. A batch with no new ID (for
+  example a pause that reported success without taking effect) stops the loop with an error naming
+  `utc-timestamp-normalize`, so the loop always ends.
 - **Backstop.** `executeSchedule` pauses a prefixed row and returns, so a row written after start
   (direct DB edit, older replica) is paused at its first tick instead of erroring every tick.
 - **Store fix (prerequisite).** `ListSchedules` returned a `NextCursor` but never read

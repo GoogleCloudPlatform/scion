@@ -87,12 +87,19 @@ var zonePrefixPassBatchSize = 200
 // prefixed rows and pauses them, which removes them from the next fetch.
 // Rows that are fetched but not paused (the pause failed, or the store's
 // prefix match was looser than hasCronZonePrefix) are excluded from later
-// fetches, so every batch shrinks the candidate set and the loop always
-// terminates. Errors are logged, not returned; the evaluator backstop in
+// fetches. Every ID is handled at most once: a batch that contains no ID
+// the pass has not already handled (for example because a pause reported
+// success without taking effect) stops the loop with an error. Each
+// iteration therefore handles at least one new row or ends the pass, so it
+// terminates after at most one iteration per candidate row. Errors are logged, not returned; the evaluator backstop in
 // executeSchedule covers any row this pass misses.
 func (s *Server) pauseZonePrefixedSchedules(ctx context.Context) {
 	log := slog.With("subsystem", "scheduler")
-	excluded := make(map[string]struct{})
+	// seen holds every ID this pass has handled (paused, failed or not a
+	// zone prefix). Only failed and non-prefix IDs go to the store as
+	// excludeIDs, keeping its parameter list small; paused rows drop out
+	// of the query on their own.
+	seen := make(map[string]struct{})
 	var excludeIDs []string
 	paused, failed := 0, 0
 	for {
@@ -106,12 +113,12 @@ func (s *Server) pauseZonePrefixedSchedules(ctx context.Context) {
 		}
 		progressed := false
 		for _, sched := range batch {
-			if _, seen := excluded[sched.ID]; seen {
+			if _, ok := seen[sched.ID]; ok {
 				continue
 			}
 			progressed = true
+			seen[sched.ID] = struct{}{}
 			if !hasCronZonePrefix(sched.CronExpr) {
-				excluded[sched.ID] = struct{}{}
 				excludeIDs = append(excludeIDs, sched.ID)
 				continue
 			}
@@ -120,7 +127,6 @@ func (s *Server) pauseZonePrefixedSchedules(ctx context.Context) {
 					"schedule_id", sched.ID, "project_id", sched.ProjectID,
 					"cron_expr", sched.CronExpr, "error", err)
 				failed++
-				excluded[sched.ID] = struct{}{}
 				excludeIDs = append(excludeIDs, sched.ID)
 				continue
 			}
@@ -130,8 +136,9 @@ func (s *Server) pauseZonePrefixedSchedules(ctx context.Context) {
 				"cron_expr", sched.CronExpr)
 		}
 		if !progressed {
-			// The store returned only rows already handled. This should
-			// not happen; stop rather than spin at startup.
+			// The store returned only rows already handled, for example
+			// a pause that reported success but did not take effect.
+			// Stop rather than spin at startup.
 			log.Error("schedule zone-prefix check: stopped, the store returned no new rows; "+
 				"check store health, and on a SQLite hub upgraded from a non-UTC zone run the "+
 				"utc-timestamp-normalize maintenance operation", "paused", paused)
