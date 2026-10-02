@@ -187,6 +187,20 @@ func TestApplyContainerBridgeOverride(t *testing.T) {
 			want:                 "http://localhost:9810",
 		},
 		{
+			name:                 "k8s alias keeps localhost endpoint",
+			endpoint:             "http://localhost:9810",
+			containerHubEndpoint: "http://host.containers.internal:9810",
+			runtimeName:          "k8s",
+			want:                 "http://localhost:9810",
+		},
+		{
+			name:                 "remote alias keeps localhost endpoint",
+			endpoint:             "http://localhost:9810",
+			containerHubEndpoint: "http://host.containers.internal:9810",
+			runtimeName:          "remote",
+			want:                 "http://localhost:9810",
+		},
+		{
 			name:                 "remote endpoint is unchanged",
 			endpoint:             "https://hub.example.com",
 			containerHubEndpoint: "http://host.containers.internal:9810",
@@ -276,6 +290,20 @@ func TestColocatedExtraHosts(t *testing.T) {
 			endpoint:  "https://hub.example.com",
 			colocated: true,
 			runtime:   "kubernetes",
+			wantLen:   0,
+		},
+		{
+			name:      "colocated k8s alias",
+			endpoint:  "https://hub.example.com",
+			colocated: true,
+			runtime:   "k8s",
+			wantLen:   0,
+		},
+		{
+			name:      "colocated remote alias",
+			endpoint:  "https://hub.example.com",
+			colocated: true,
+			runtime:   "remote",
 			wantLen:   0,
 		},
 		{
