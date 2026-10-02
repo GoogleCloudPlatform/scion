@@ -204,6 +204,26 @@ ahead of `upstream/main` after the rebase.
   `time/tzdata` symbols in each (R1-7).
 - `make ci`/`make ci-full` were not run locally (broker-01 throttle, per
   the brief's override); fork CI runs the full suite.
+- **Fork CI (`gh pr checks 2522 -R ptone/scion`):** `Mergeability Gate`,
+  `golangci-lint`, `pkg/hub SQLite Tests`, `T1 Launch Store PostgreSQL
+  Tests`, `shellcheck`, `Lint 405 Allow header (reporting only)` and
+  `single-node-vm deploy.sh test harness` all pass. `Build & Test` and
+  `Full Test Suite (reporting only)` fail, both on the same single
+  failure: `TestReResolveModelAlias/nil_cfg_falls_back_to_built-in_table_when_harness_is_known`
+  in `pkg/agent` (`reResolveModelAlias() model = "claude-sonnet-5-5", want
+  "claude-sonnet-5"`), reproduced identically on a re-run of the same CI
+  job. This is **not caused by this branch**: `pkg/agent`,
+  `harnesses/claude/config.yaml` and everything `reResolveModelAlias`
+  touches are untouched by this change; the test passes locally every way
+  tried (isolated, full `pkg/agent` package, with and without `-tags
+  no_sqlite`) against both this branch and a pristine
+  `GoogleCloudPlatform/scion@b44fcf25` checkout; and the identical failure
+  (same test, same wrong value) is independently reproducing right now on
+  at least three other, unrelated, concurrently-running fork PRs/branches
+  (`fix/skill-resolve-fail-fast`, `scion/agent-keys-4-1-tests`,
+  `kr-t1-p1b1`) that don't touch this code either. This looks like a
+  fork-wide CI environment issue (CI-only, not reproducible locally),
+  flagged to tz-em; not fixed here (out of scope, shared infrastructure).
 
 ## Deliberately out of scope (per the issue)
 
