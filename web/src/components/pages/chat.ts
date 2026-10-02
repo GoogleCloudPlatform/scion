@@ -44,7 +44,7 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 
 import type { PageData, Agent } from '../../shared/types.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
-import { navigateTo, stateManager } from '../../client/main.js';
+import { navigateTo, replaceRoute, stateManager } from '../../client/main.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread } from '../../client/chat-unread.js';
@@ -1459,10 +1459,27 @@ export class ScionPageChat extends LitElement {
     if (legacyThreadMatch) {
       const projectId = decodeURIComponent(legacyThreadMatch[1]);
       const topicId = decodeURIComponent(legacyThreadMatch[2]);
-      // Redirect to the readable URL if we know the slug
+      // Rewrite to the readable URL in place once the slug is known, then
+      // parse that. navigateTo would rebuild the page (resetting the mobile
+      // panel the user may have swiped to since) and push an entry that Back
+      // lands on only to redirect forward again.
       const slug = this._projectIdToSlug.get(projectId);
       if (slug) {
-        navigateTo(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(topicId)}`);
+        const viewing = this.isAlreadyViewingThread(projectId, topicId);
+        if (viewing && this.v2Conversation && this.v2Conversation.projectSlug !== slug) {
+          this.v2Conversation = { ...this.v2Conversation, projectSlug: slug };
+        }
+        void replaceRoute(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(topicId)}`).then(
+          () => {
+            // The shell titles itself from the path it now records; put the
+            // open thread's own title back on top.
+            const conv = this.v2Conversation;
+            if (conv && this.isAlreadyViewingThread(projectId, topicId)) {
+              dispatchPageTitle(this, conv.threadName ? `#${conv.threadName}` : 'Thread', 'Chat');
+            }
+          }
+        );
+        this.parseV2Route();
         return;
       }
       // See isAlreadyViewingThread's doc comment for why this guard matters.
@@ -1522,10 +1539,9 @@ export class ScionPageChat extends LitElement {
         return;
       }
 
-      this.mobilePanel = 'center';
-      dispatchPageTitle(this, 'DM', 'Chat');
-
       if (segment.startsWith('dm:')) {
+        this.mobilePanel = 'center';
+        dispatchPageTitle(this, 'DM', 'Chat');
         // Legacy DM key format (e.g. dm:agent:UUID:user:UUID) — use directly
         this.v2Conversation = {
           conversationKey: segment,
@@ -1551,6 +1567,16 @@ export class ScionPageChat extends LitElement {
           // If we already have the correct DM conversation open, skip.
           if (this.v2Conversation?.conversationKey === dmKey) {
             return;
+          }
+          // A /chat/dm/<peerId> URL never equals the open conversation's key,
+          // so a re-parse (rail-loaded) lands here for a DM that is already
+          // open. If it is the same peer, the key is only being corrected
+          // (the agent roster arrived after the first parse): update it in
+          // place and leave the mobile panel where the user put it.
+          const samePeer = !!this.v2Conversation?.isDM && this.v2Conversation.peerId === segment;
+          if (!samePeer) {
+            this.mobilePanel = 'center';
+            dispatchPageTitle(this, 'DM', 'Chat');
           }
 
           let peerName = '';

@@ -32,11 +32,21 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { render, type TemplateResult } from 'lit';
 import { apiFetch } from '../../client/api.js';
+import { replaceRoute } from '../../client/main.js';
+import { PAGE_TITLE_EVENT } from '../../client/page-title.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
+  replaceRoute: vi.fn((path: string) => {
+    window.history.replaceState(
+      window.history.state,
+      '',
+      path + window.location.search + window.location.hash
+    );
+    return Promise.resolve();
+  }),
   stateManager: new EventTarget(),
 }));
 
@@ -209,6 +219,107 @@ describe('chat page — mobile panel default and header navigation', () => {
     el.parseV2Route();
 
     expect(el.mobilePanel).toBe('center');
+  });
+
+  it('opens a DM linked by peer ID on the conversation panel', () => {
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+
+    el.parseV2Route();
+
+    expect(el.v2Conversation).toMatchObject({
+      conversationKey: 'dm:agent:agent-1:user:user-me',
+      peerId: 'agent-1',
+    });
+    expect(el.mobilePanel).toBe('center');
+  });
+
+  it('leaves the panel alone when a peer-ID DM route is re-parsed while that DM is open', () => {
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    el.parseV2Route();
+    const opened = el.v2Conversation;
+    // The user swipes back to the rail; the URL stays on the DM.
+    el.mobilePanel = 'left';
+
+    el.parseV2Route();
+
+    expect(el.mobilePanel).toBe('left');
+    expect(el.v2Conversation).toBe(opened);
+  });
+
+  it('corrects a peer-ID DM opened before the agents loaded, without moving the panel', () => {
+    const el = createPage();
+    el.v2AgentMembers = [];
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    el.parseV2Route();
+    // With no agents known yet, the peer is taken for a user.
+    expect(el.v2Conversation.conversationKey).toBe('dm:user:agent-1:user:user-me');
+    el.mobilePanel = 'left';
+
+    // The agents arrive and the rail reload re-parses the same route.
+    el.v2AgentMembers = [{ id: 'agent-1', kind: 'agent', displayName: 'Coder One' }];
+    el.parseV2Route();
+
+    expect(el.v2Conversation).toMatchObject({
+      conversationKey: 'dm:agent:agent-1:user:user-me',
+      peerId: 'agent-1',
+      peerKind: 'agent',
+    });
+    expect(el.mobilePanel).toBe('left');
+  });
+
+  it('leaves the panel alone when a full-key DM route is re-parsed while that DM is open', () => {
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/dm/dm:agent:agent-1:user:user-me');
+    el.parseV2Route();
+    el.mobilePanel = 'left';
+
+    el.parseV2Route();
+
+    expect(el.mobilePanel).toBe('left');
+  });
+
+  it('rewrites a legacy thread URL in place without reopening the open thread', () => {
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/space/p1/thread/topic-1#msg-m1');
+    el.parseV2Route();
+    expect(el.mobilePanel).toBe('center');
+    const opened = el.v2Conversation;
+    el.mobilePanel = 'left';
+    const historyLength = window.history.length;
+
+    // The rail's first load makes the slug known and re-parses the route.
+    el._slugToProjectId.set('alpha', 'p1');
+    el._projectIdToSlug.set('p1', 'alpha');
+    el.parseV2Route();
+
+    expect(replaceRoute).toHaveBeenCalledWith('/chat/alpha/topic-1');
+    expect(window.location.pathname).toBe('/chat/alpha/topic-1');
+    expect(window.location.hash).toBe('#msg-m1');
+    expect(window.history.length).toBe(historyLength);
+    // Same thread, now carrying the slug the URL names.
+    expect(el.v2Conversation).toEqual({ ...opened, projectSlug: 'alpha' });
+    expect(el.mobilePanel).toBe('left');
+  });
+
+  it('re-titles the thread once the router has caught up with the rewrite', async () => {
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/space/p1/thread/topic-1');
+    el.parseV2Route();
+    el.v2Conversation = { ...el.v2Conversation, threadName: 'general' };
+    const titles: string[][] = [];
+    el.addEventListener(PAGE_TITLE_EVENT, (e: Event) =>
+      titles.push((e as CustomEvent).detail.segments)
+    );
+
+    el._slugToProjectId.set('alpha', 'p1');
+    el._projectIdToSlug.set('p1', 'alpha');
+    el.parseV2Route();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(titles.at(-1)).toEqual(['#general', 'Chat']);
   });
 
   it('renders a back button that returns to the rail', () => {
