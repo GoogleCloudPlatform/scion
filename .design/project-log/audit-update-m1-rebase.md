@@ -7,6 +7,64 @@ authoritative `GoogleCloudPlatform/scion` main fetched on 2026-10-02. It is
 ready for an independent M1 review. This does not authorize milestone 2 work or
 merge-queue notification.
 
+## Superseding second rebase cycle
+
+Upstream `main` advanced after the first lease-safe publication, leaving PR
+#2292 conflicting. The issue owner explicitly authorized the same exclusive
+integrator to perform a second cycle. This section supersedes the first-cycle
+selected-head and residual-risk statements below while retaining them as
+historical evidence.
+
+- Prior published M1 head and exact second lease expectation:
+  `44d21648bd40426ea0a6a98b100e52e1b844e283`.
+- Second authoritative upstream fetch timestamp:
+  `2026-10-02T14:28:41Z`.
+- Required second minimum and selected upstream `main` (exact match):
+  `28d83ede4e7c5969da4817a144d12adb672de324`.
+- The selected head is a descendant of the first-cycle selected head
+  `509bd856f2f0855842ac1847fa8977c871ad4f2c` and adds five upstream commits.
+- Second-cycle rebased code/evidence head before this report update:
+  `dda55b53f037539ad36aaa0353beb5d5e13bb361`.
+
+The second exact replay used the prior selected upstream head as the old base
+and replayed all 39 delivered commits onto `28d83ede...`. One conflict occurred
+in `pkg/hub/authz.go` while replaying credential metadata compatibility:
+
+- New upstream intent: preserve the internal-only `hub_delivery` credential
+  kind and its constructor/gate restrictions.
+- M1 intent: alias the six shared externally carried credential kinds to the
+  canonical dependency-neutral `credentialmeta` constants.
+- Resolution: retain the six canonical aliases plus upstream's separately
+  documented typed `CredentialKindHubDelivery = "hub_delivery"` constant.
+  This does not add `hub_delivery` to serialized audit credential metadata or
+  make it request-carriable.
+
+Second-cycle range-diff maps all 39 prior delivered commits to 39 replayed
+commits in the same order. Thirty-eight are patch-identical; only the credential
+compatibility commit differs by the additive `hub_delivery` preservation. The
+changed-path set is identical, there are no skipped/squashed/no-op commits, and
+the M2/decision-audit delta remains empty. Canonical `go generate ./pkg/ent`
+again produced no delta.
+
+Second-cycle validation passed:
+
+- the same core and focused Hub normal tests under `-p 2`;
+- credential metadata, audit envelope, focused Ent history/cap/transaction,
+  and focused Hub governance/history/auth race tests under `-race -p 2`;
+- the focused upstream `HubDelivery`/`DeliveryGate` suite plus canonical
+  credential-kind parity;
+- scoped vet and bounded single-concurrency lint (`0 issues`);
+- focused web tests (4 files / 70 tests), typecheck, production ESLint (zero
+  errors; the same 28 warnings), and scoped Prettier;
+- gofmt inspection, `git diff --check`, generated-Ent inspection, and the
+  repeated semantic contract audit.
+
+The first-cycle scoped Go and production web builds passed. They were not run a
+second time because the task brief permits at most one heavy build; the
+second-cycle normal/race tests compiled the affected packages against the new
+base. The earlier Ent race limitation is closed by the correctly scoped
+`^TestConstraintHistory_` race run, which passed in 17.205s.
+
 ## Provenance
 
 - Required and observed old fork head:
@@ -151,10 +209,10 @@ Inconclusive/limited gates:
 
 ## Residual risk and M2 handoff
 
-The only residual local-validation gap is the inconclusive Ent adapter race
-portion described above. There is no known semantic defect and no failed
-required gate remaining. A fresh independent M1 review is required before any
-further milestone action.
+The first-cycle Ent adapter race limitation described above was closed in the
+superseding second cycle by the passing focused history race gate. There is no
+known semantic defect and no failed required gate remaining. A fresh
+independent M1 review is required before any further milestone action.
 
 Milestone 2 remains frozen and untouched. A future, separately authorized M2
 integrator must begin only after M1 review/acceptance, independently verify the
