@@ -93,7 +93,7 @@ type RuntimeBrokerProjectUploadResponse struct {
 // 5. Updates sync state
 func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -133,7 +133,7 @@ func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Reques
 // GET /api/v1/projects/{projectId}/workspace/cache/status
 func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -179,7 +179,7 @@ func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request
 // POST /api/v1/projects/{projectId}/workspace/cache/notify
 func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

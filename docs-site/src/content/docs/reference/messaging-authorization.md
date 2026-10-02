@@ -215,8 +215,18 @@ is evaluated on the **human principal at delivery time**.
   by a project owner does not pierce.
 
 - **`none` is sealed.** Only super-admin can reach `none`-mode agents on the
-  message plane. Project owners and lineage users retain `attach`/PTY access
-  (mode governs only the message plane), but cannot deliver messages.
+  message plane. The agent's creator, users in its ancestry chain, and
+  anyone else holding `agent.attach` on it directly keep `attach`/PTY access
+  and the keys operation (`POST /:id/keys`; mode governs only the message
+  plane), but cannot deliver messages. **Project owners and admins do not
+  get this through their role** — `agent.attach` is explicitly excluded
+  from what those roles grant (see
+  [Permissions & Policy](/scion/hosted/ha/permissions/#access-control--authorization)) —
+  so a project owner who is not the agent's creator or in its ancestry
+  chain is sealed out of `none`-mode agents the same as anyone else without
+  a direct grant. The `scion keys` CLI uses the keys operation in Hub mode,
+  so the `none`-mode seal does not apply to it; a legacy `raw` message is
+  normalized into the same operation and is likewise authorized like attach.
 
 ---
 
@@ -250,8 +260,10 @@ This is a quarantine kill-switch independent of the agent's role.
 - Delivery to a newly-quarantined agent fails closed. The sender receives a
   system-plane notice about the delivery failure.
 - **Super-admin** can still reach quarantined agents.
-- **Attach/PTY** remains available to holders of `agent.attach`. Mode governs
-  only the message plane.
+- **Attach/PTY, and the keys operation (`POST /:id/keys`),** remain available
+  to holders of `agent.attach`. Mode governs only the message plane. This
+  includes the `scion keys` CLI and the deprecated `message --raw` alias,
+  both of which use the keys operation.
 - **System-plane** messages (scheduled events, lifecycle notifications)
   continue to be delivered.
 
@@ -355,6 +367,49 @@ machine-readable denial code:
 
 Denial codes are returned in the `MessageDecision.Code` field and in API
 error responses. The UI maps these codes to user-visible explanations.
+
+---
+
+## Raw Message Restrictions
+
+Raw delivery (the deprecated `raw` flag on the message API) sends literal
+keystrokes to an agent's terminal with no envelope. It is kept only for
+migration; prefer `scion keys` or `POST /:id/keys`. The deprecated
+`scion message --raw` CLI alias does not use this flag: it calls the keys
+operation directly, like `scion keys`.
+
+**Single-agent message routes.** On `POST /api/v1/agents/:id/message` and its
+project-scoped equivalent, a `raw` request is never delivered by the message
+path. The Hub detects it before message-mode authorization runs and
+normalizes it into the keys operation, so it is authorized like
+`agent.attach` (message mode neither grants nor blocks it) and produces keys
+outcome codes, with no conversation resolution, persistence, wake, or
+fan-out. Only a plain direct message to the URL's agent is accepted. The
+bridge-specific rejections are below; every other keys outcome (for example
+`400 invalid_request` for missing or invalid content, `413
+payload_too_large`, `403 keys_denied`, `409`, `429`, `503`) applies exactly as
+for `/:id/keys`:
+
+| Code | Rejected request |
+|------|---------|
+| `invalid_request` (`400`) | `raw` with `plain`, or `message` and `structured_message.msg` that disagree. |
+| `raw_combination_unsupported` (`422`) | `raw` with `interrupt`, `notify`, `wake`, mentions, attachments, metadata, multiple recipients, broadcast or observer-only delivery, conversation addressing (conversation ID, channel, thread ID, surface, external or parent reference), `delivery_text`, or a recipient that does not match the URL's agent. |
+| `cross_project_keys_unsupported` (`422`) | `raw` from an agent in a different project. On the top-level route this applies to an agent holding the lifecycle scope; one without it gets `403 keys_denied` first, as on `/:id/keys`. |
+| `keys_unsupported` (`422`) | `raw` to an agent on a managed backend, or behind a Runtime Broker without keys support. |
+
+See [API Reference](/scion/reference/api/#agents-apiv1agents) for the full
+keys outcome table and the other changes from the earlier raw path.
+
+**Other ingress.** Routes with no keys equivalent reject raw outright,
+before any side effect, with `422` `unsupported_capability` (or `400` for
+`raw` with `plain`) and one of these values in `details.reason`:
+
+| Reason | Rejected combination |
+|------|---------|
+| `raw_plain_conflict` | `raw` with `plain` on the project broadcast route (`400`). |
+| `raw_broadcast_unsupported` | `raw` on the project broadcast route. |
+| `raw_scheduling_unsupported` | `raw` on a schedule or scheduled event. |
+| `raw_broker_ingress_unsupported` | `raw` on a Message Broker plugin's inbound route (`/api/v1/broker/inbound` or `/api/v1/broker/inbound/routed`). |
 
 ---
 

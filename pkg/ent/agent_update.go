@@ -597,6 +597,26 @@ func (_u *AgentUpdate) ClearAppliedConfig() *AgentUpdate {
 	return _u
 }
 
+// SetHarnessConfig sets the "harness_config" field.
+func (_u *AgentUpdate) SetHarnessConfig(v string) *AgentUpdate {
+	_u.mutation.SetHarnessConfig(v)
+	return _u
+}
+
+// SetNillableHarnessConfig sets the "harness_config" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableHarnessConfig(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetHarnessConfig(*v)
+	}
+	return _u
+}
+
+// ClearHarnessConfig clears the value of the "harness_config" field.
+func (_u *AgentUpdate) ClearHarnessConfig() *AgentUpdate {
+	_u.mutation.ClearHarnessConfig()
+	return _u
+}
+
 // SetAncestry sets the "ancestry" field.
 func (_u *AgentUpdate) SetAncestry(v []string) *AgentUpdate {
 	_u.mutation.SetAncestry(v)
@@ -1328,6 +1348,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.AppliedConfigCleared() {
 		_spec.ClearField(agent.FieldAppliedConfig, field.TypeString)
+	}
+	if value, ok := _u.mutation.HarnessConfig(); ok {
+		_spec.SetField(agent.FieldHarnessConfig, field.TypeString, value)
+	}
+	if _u.mutation.HarnessConfigCleared() {
+		_spec.ClearField(agent.FieldHarnessConfig, field.TypeString)
 	}
 	if value, ok := _u.mutation.Ancestry(); ok {
 		_spec.SetField(agent.FieldAncestry, field.TypeJSON, value)
@@ -2156,6 +2182,26 @@ func (_u *AgentUpdateOne) ClearAppliedConfig() *AgentUpdateOne {
 	return _u
 }
 
+// SetHarnessConfig sets the "harness_config" field.
+func (_u *AgentUpdateOne) SetHarnessConfig(v string) *AgentUpdateOne {
+	_u.mutation.SetHarnessConfig(v)
+	return _u
+}
+
+// SetNillableHarnessConfig sets the "harness_config" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableHarnessConfig(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetHarnessConfig(*v)
+	}
+	return _u
+}
+
+// ClearHarnessConfig clears the value of the "harness_config" field.
+func (_u *AgentUpdateOne) ClearHarnessConfig() *AgentUpdateOne {
+	_u.mutation.ClearHarnessConfig()
+	return _u
+}
+
 // SetAncestry sets the "ancestry" field.
 func (_u *AgentUpdateOne) SetAncestry(v []string) *AgentUpdateOne {
 	_u.mutation.SetAncestry(v)
@@ -2917,6 +2963,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.AppliedConfigCleared() {
 		_spec.ClearField(agent.FieldAppliedConfig, field.TypeString)
+	}
+	if value, ok := _u.mutation.HarnessConfig(); ok {
+		_spec.SetField(agent.FieldHarnessConfig, field.TypeString, value)
+	}
+	if _u.mutation.HarnessConfigCleared() {
+		_spec.ClearField(agent.FieldHarnessConfig, field.TypeString)
 	}
 	if value, ok := _u.mutation.Ancestry(); ok {
 		_spec.SetField(agent.FieldAncestry, field.TypeJSON, value)

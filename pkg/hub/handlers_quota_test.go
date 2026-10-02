@@ -487,6 +487,106 @@ func TestQuotaAPI_UsageMe_WithLimits(t *testing.T) {
 	assert.True(t, found, "expected to find limit %s in usage/me response", limit.ID)
 }
 
+// TestQuotaAPI_UsageMe_UserScopedLimitReflectsReservation proves a
+// user-scoped limit still appears in /usage/me with its correct current
+// count once the user holds a reservation against it — the counterpart to
+// TestQuotaAPI_UsageMe_ExcludesBrokerScopedLimit below (ptone/scion#2313:
+// only the broker-scoped row is dropped, user-scoped rows are unchanged).
+// It reserves at the (system, empty scope_id) shape getMyUsage queries,
+// not the scope shape any production limit is actually reserved at.
+func TestQuotaAPI_UsageMe_UserScopedLimitReflectsReservation(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+
+	limit, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "me_test_limit_reserved",
+		ResourceType: "agent",
+		Unit:         "count",
+		Description:  "test",
+		DefaultValue: 5,
+	})
+	require.NoError(t, err)
+
+	memberU := &store.User{
+		ID:          tid("quota-member-3"),
+		Email:       "quota-member-3@example.com",
+		DisplayName: "Quota Member 3",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, memberU))
+
+	_, err = srv.quotaService.Reserve(ctx, limit.Name, memberU.ID, store.QuotaScopeSystem, "", tid("resource-me-3"))
+	require.NoError(t, err)
+
+	rec := doRequestAsUser(t, srv, memberU, http.MethodGet, "/api/v1/usage/me", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp myUsageResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	var found bool
+	for _, entry := range resp.Items {
+		if entry.LimitDefinition.ID == limit.ID {
+			found = true
+			assert.Equal(t, int64(1), entry.Current)
+			assert.Equal(t, int64(5), entry.Max)
+			break
+		}
+	}
+	assert.True(t, found, "expected to find limit %s in usage/me response", limit.ID)
+}
+
+// TestQuotaAPI_UsageMe_ExcludesBrokerScopedLimit proves the fix for
+// ptone/scion#2313: max_agents_per_broker reservations live at
+// store.QuotaScopeBroker keyed by broker ID (broker_quota.go), never at the
+// store.QuotaScopeSystem/userID pair getMyUsage queries, so the row always
+// showed "0 used" regardless of real broker usage — and it isn't a per-user
+// quota to begin with. The row must be omitted from /usage/me entirely, even
+// when the broker actually holds active reservations.
+func TestQuotaAPI_UsageMe_ExcludesBrokerScopedLimit(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("broker-usage-me"),
+		Name:   "Usage Me Broker",
+		Slug:   "usage-me-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	limit := maxAgentsPerBrokerLimit(t, s)
+
+	// Simulate an active broker reservation, the way broker_quota.go does
+	// when an agent is dispatched to this broker.
+	_, err := srv.quotaService.Reserve(ctx, store.LimitMaxAgentsPerBroker, broker.ID, store.QuotaScopeBroker, broker.ID, tid("agent-usage-me"))
+	require.NoError(t, err)
+	require.Equal(t, int64(1), brokerReservationCount(t, s, broker.ID), "sanity check: reservation should be active")
+
+	memberU := &store.User{
+		ID:          tid("quota-member-4"),
+		Email:       "quota-member-4@example.com",
+		DisplayName: "Quota Member 4",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, memberU))
+
+	rec := doRequestAsUser(t, srv, memberU, http.MethodGet, "/api/v1/usage/me", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp myUsageResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	for _, entry := range resp.Items {
+		assert.NotEqual(t, limit.ID, entry.LimitDefinition.ID,
+			"max_agents_per_broker must not appear in /usage/me, even with active broker reservations")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Tests: Admin permission enforcement
 // ---------------------------------------------------------------------------
@@ -801,6 +901,49 @@ func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_UnitChangeForbidden(t *test
 		ResourceType: systemDef.ResourceType,
 		Unit:         "instances",
 		DefaultValue: 16,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_PaddedFieldsNormalized
+// verifies that trimming happens before the system-seeded comparison
+// (ptone/scion#2343): a PUT that merely pads resource_type/unit with
+// whitespace is normalised and succeeds, while a PUT that still trims to a
+// genuinely different protected field value is rejected.
+func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_PaddedFieldsNormalized(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	systemDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "system_padded_test",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 100,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	// Padding that normalises to the existing values: should succeed.
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, updateLimitDefinitionRequest{
+		Name:         systemDef.Name,
+		ResourceType: "  agent  ",
+		Unit:         " count ",
+		DefaultValue: 200,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var updated store.LimitDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&updated))
+	assert.Equal(t, "agent", updated.ResourceType)
+	assert.Equal(t, "count", updated.Unit)
+	assert.Equal(t, int64(200), updated.DefaultValue)
+
+	// Padding that still trims to a genuinely different value: still rejected.
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, updateLimitDefinitionRequest{
+		Name:         systemDef.Name,
+		ResourceType: "  project  ",
+		Unit:         "count",
+		DefaultValue: 300,
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }

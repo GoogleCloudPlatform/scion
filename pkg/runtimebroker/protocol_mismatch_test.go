@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
@@ -92,6 +93,14 @@ func (m *protocolMockManager) Provision(ctx context.Context, opts api.StartOptio
 	return nil, nil
 }
 
+func (m *protocolMockManager) Preflight(ctx context.Context, opts api.StartOptions) error {
+	return nil
+}
+
+func (m *protocolMockManager) CleanupLaunch(ctx context.Context, handles []agent.ResourceHandle) error {
+	return nil
+}
+
 func (m *protocolMockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	return nil, nil
 }
@@ -119,6 +128,9 @@ func (m *protocolMockManager) MessageRaw(ctx context.Context, agentID, projectID
 }
 
 func (m *protocolMockManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+	return nil
+}
+func (m *protocolMockManager) SendKeysLocal(ctx context.Context, projectPath, agentSlug, expectedAgentID, keys string) error {
 	return nil
 }
 func (m *protocolMockManager) Watch(ctx context.Context, agentID string) (<-chan api.StatusEvent, error) {

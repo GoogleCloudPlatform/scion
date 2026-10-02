@@ -62,7 +62,6 @@ function agentsGroup(
 
 async function mountPalette(groups: Record<'agents', GroupState>): Promise<ScionChatSwitcher> {
   const el = document.createElement('scion-chat-switcher') as ScionChatSwitcher;
-  el.paletteMode = true;
   el.open = true;
   el.groups = groups;
   document.body.appendChild(el);

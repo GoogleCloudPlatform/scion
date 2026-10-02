@@ -93,6 +93,9 @@ type ServerConfigResponse struct {
 	// Quotas controls hub-level quota enforcement toggles.
 	Quotas *config.QuotaSettings `json:"quotas,omitempty"`
 
+	// AgentSecrets controls hub-level policy for secrets written by agents.
+	AgentSecrets *config.AgentSecretsSettings `json:"agent_secrets,omitempty"`
+
 	// Federation holds the federation authentication config for the admin API.
 	Federation *config.V1FederationConfig `json:"federation,omitempty"`
 
@@ -152,6 +155,9 @@ type ServerConfigUpdateRequest struct {
 	// Quotas controls hub-level quota enforcement toggles.
 	Quotas *config.QuotaSettings `json:"quotas,omitempty"`
 
+	// AgentSecrets controls hub-level policy for secrets written by agents.
+	AgentSecrets *config.AgentSecretsSettings `json:"agent_secrets,omitempty"`
+
 	// Federation holds the federation authentication config update.
 	Federation *config.V1FederationConfig `json:"federation,omitempty"`
 }
@@ -188,7 +194,7 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 			}
 			s.handlePutServerConfigDB(w, r, ops)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodPost)
 		}
 		return
 	}
@@ -217,7 +223,7 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 		}
 		s.handlePutServerConfig(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodPost)
 	}
 }
 
@@ -229,7 +235,7 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	user := GetUserIdentityFromContext(r.Context())
 
 	if r.Method != http.MethodDelete {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 		return
 	}
 
@@ -352,6 +358,7 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
 		AutoExposePorts:      vs.AutoExposePorts,
 		Quotas:               vs.Quotas,
+		AgentSecrets:         vs.AgentSecrets,
 
 		DefaultGCPIdentityMode:             vs.DefaultGCPIdentityMode,
 		DefaultGCPIdentityServiceAccountID: vs.DefaultGCPIdentityServiceAccountID,
@@ -372,6 +379,26 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 
 	maskSensitiveFields(&resp)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// validateDefaultTimezone checks an agent_defaults.default_timezone
+// candidate against the rule design.md §3 A (d) also uses for the per-user
+// display-timezone preference: it must be a real IANA time zone name, and
+// nonPortableTimezoneNames is rejected even though time.LoadLocation accepts
+// those names. An empty string means UTC and is always valid.
+//
+// Delegates to validateIANATimezone (timezone_validate.go), shared with the
+// per-user display-timezone preference validator (handlers_users_core.go's
+// validateUserTimezone), so the two can't drift. Unlike validateUserTimezone,
+// this one adds no wrapping of its own: errNonPortableTimezone's own text
+// ("not an IANA time zone name") already says everything "default_timezone"
+// needs — there is no "Auto" concept to mention here, which is the only
+// reason validateUserTimezone's wording has to differ from the sentinel's.
+func validateDefaultTimezone(tz string) error {
+	if tz == "" {
+		return nil
+	}
+	return validateIANATimezone(tz)
 }
 
 // handlePutServerConfig updates the global settings.yaml.
@@ -445,6 +472,19 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			DefaultGCPIdentityMode:             mode,
 			DefaultGCPIdentityServiceAccountID: saID,
 		}) {
+			return
+		}
+	}
+
+	// Validate the hub default timezone (IANA name check) before writing.
+	// Same rule, same 422, as the DB-mode handler (admin_settings_db.go) —
+	// without this, an invalid name is written to settings.yaml silently and
+	// never rejected in file mode.
+	if req.DefaultTimezone != nil {
+		tz := *req.DefaultTimezone
+		if err := validateDefaultTimezone(tz); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+				fmt.Sprintf("invalid default_timezone %q: %v", tz, err), nil)
 			return
 		}
 	}
@@ -684,6 +724,14 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 			raw["quotas"] = marshalToMap(req.Quotas)
 		} else {
 			delete(raw, "quotas")
+		}
+	}
+	if req.AgentSecrets != nil {
+		// Section-generic zero check; see the Quotas block above.
+		if !isZeroStruct(req.AgentSecrets) {
+			raw["agent_secrets"] = marshalToMap(req.AgentSecrets)
+		} else {
+			delete(raw, "agent_secrets")
 		}
 	}
 	if req.Federation != nil {

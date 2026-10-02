@@ -248,6 +248,13 @@ func (a *grantGuardAgentIdentity) OriginUserID() string {
 	return ""
 }
 func (a *grantGuardAgentIdentity) TokenID() string { return "test-token" }
+
+// localAncestryProvenance opts this fake into AncestryIsHubAttested: the
+// marker is not inherited from Type() == "agent", so test fakes must opt in
+// explicitly.
+func (a *grantGuardAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceAgentJWT
+}
 func (a *grantGuardAgentIdentity) Scopes() []AgentTokenScope {
 	return a.scopes
 }

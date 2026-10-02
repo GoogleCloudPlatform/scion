@@ -194,6 +194,7 @@ func TestBuildPod_NFSBackend_InitContainer_Present(t *testing.T) {
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
 		NFSSubPath:           "projects/proj-123/workspace",
+		ProjectID:            "proj-123",
 		GitCloneForInit: &api.GitCloneConfig{
 			URL:    "https://github.com/example/repo.git",
 			Branch: "main",
@@ -252,7 +253,7 @@ func TestBuildPod_NFSBackend_InitContainer_Present(t *testing.T) {
 	}
 
 	// Verify env vars are set on the container (URL/branch via env, not args)
-	var hasURL, hasBranch bool
+	var hasURL, hasBranch, hasProjectID bool
 	for _, env := range ic.Env {
 		if env.Name == "SCION_CLONE_URL" && env.Value == "https://github.com/example/repo.git" {
 			hasURL = true
@@ -260,12 +261,18 @@ func TestBuildPod_NFSBackend_InitContainer_Present(t *testing.T) {
 		if env.Name == "SCION_CLONE_BRANCH" && env.Value == "main" {
 			hasBranch = true
 		}
+		if env.Name == "SCION_PROJECT_ID" && env.Value == "proj-123" {
+			hasProjectID = true
+		}
 	}
 	if !hasURL {
 		t.Error("init container missing SCION_CLONE_URL env var")
 	}
 	if !hasBranch {
 		t.Error("init container missing SCION_CLONE_BRANCH env var")
+	}
+	if !hasProjectID {
+		t.Error("init container missing SCION_PROJECT_ID env var (logs would show project=unknown)")
 	}
 }
 
@@ -284,6 +291,7 @@ func TestBuildPod_NFSBackend_InitContainer_Present_NonGit(t *testing.T) {
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
 		NFSSubPath:           "projects/proj-123/workspace",
+		ProjectID:            "proj-123",
 		// GitCloneForInit is nil — non-git, shared-plain project.
 	}
 
@@ -300,11 +308,16 @@ func TestBuildPod_NFSBackend_InitContainer_Present_NonGit(t *testing.T) {
 	ic := pod.Spec.InitContainers[0]
 	assert.Equal(t, []string{"sciontool", "provision"}, ic.Command,
 		"non-git init container should run plain provision, no clone flags")
+	var hasProjectID bool
 	for _, env := range ic.Env {
 		if env.Name == "SCION_CLONE_URL" || env.Name == "SCION_CLONE_BRANCH" {
 			t.Errorf("non-git init container should not have clone env var %s", env.Name)
 		}
+		if env.Name == "SCION_PROJECT_ID" && env.Value == "proj-123" {
+			hasProjectID = true
+		}
 	}
+	assert.True(t, hasProjectID, "non-git init container missing SCION_PROJECT_ID env var")
 }
 
 // TestBuildPod_NFSBackend_InitContainer_SecurityContext_Winner verifies the

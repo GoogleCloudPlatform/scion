@@ -499,7 +499,7 @@ type ProjectSyncStatusResponse struct {
 // handleProjectSyncStatus returns the sync status for a project.
 func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

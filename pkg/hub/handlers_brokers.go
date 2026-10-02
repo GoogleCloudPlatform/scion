@@ -33,7 +33,7 @@ import (
 // at the route guard.
 func (s *Server) handleBrokersEndpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 	s.createBrokerRegistration(w, r)
@@ -211,7 +211,10 @@ func (s *Server) authorizedForBrokerOwnerAction(ctx context.Context, user UserId
 		return true, nil
 	}
 
-	if brokerIdent != nil && brokerIdent.BrokerID() == brokerID {
+	// isNilIdentity, not brokerIdent != nil: BrokerIdentity embeds Identity, so
+	// a typed-nil concrete broker identity (see isNilIdentity) is a non-nil
+	// interface value and would otherwise reach brokerIdent.BrokerID() below.
+	if !isNilIdentity(brokerIdent) && brokerIdent.BrokerID() == brokerID {
 		return true, nil
 	}
 
@@ -245,7 +248,7 @@ func ownerForNewBroker(callerUser UserIdentity) string {
 // This is an unauthenticated endpoint - the join token serves as authentication.
 func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -348,7 +351,7 @@ func (s *Server) handleBrokerByIDRoutes(w http.ResponseWriter, r *http.Request) 
 // shortcut.
 func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request, brokerID string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

@@ -93,7 +93,7 @@ func (BrokerDispatch) Fields() []ent.Field {
 		field.String("initiator_principal_id").
 			Optional().
 			Nillable(),
-		// session | uat | agent | legacy_unknown — see
+		// session | uat | agent | dev_local | legacy_unknown — see
 		// store.InitiatorCredentialKind*.
 		field.String("initiator_credential_kind").
 			Optional().

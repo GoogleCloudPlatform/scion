@@ -312,6 +312,10 @@ The Hub uses a dedicated service account solely for transport-layer auth. The Hu
 | Hub's runtime SA | `roles/iam.serviceAccountTokenCreator` | Transport SA (`platform_auth_sa`) |
 | Transport SA | IAP-secured web user **or** Cloud Run invoker | The Hub's backend service |
 
+### Seeing requests IAP rejects
+
+When IAP enforces access directly on a Cloud Run service (for example, the IAP proxy in front of a single-node Hub), a request IAP rejects never reaches the container. It does not appear in the Cloud Run service's logs or the Hub's logs. To see IAP's own authorization decisions, enable **Data Access** audit logs (**Data Read**) for the `iap.googleapis.com` service, then filter Cloud Logging on `protoPayload.serviceName="iap.googleapis.com"` and `protoPayload.authorizationInfo.granted=false`. A mismatched `auth.proxy.iap.audience` is different: IAP passes the request through and the Hub rejects it, so it does show up in the Hub's logs. For step-by-step Console and `auditConfigs` instructions, see [Requests IAP rejects never reach Cloud Run or the Hub logs](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/single-node-vm.md#requests-iap-rejects-never-reach-cloud-run-or-the-hub-logs) in the repository.
+
 ## Security notes
 
 1. **Only the signed assertion is trusted.** The unsigned `X-Goog-Authenticated-User-Email` and `X-Goog-Authenticated-User-Id` headers are completely ignored.

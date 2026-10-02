@@ -249,7 +249,7 @@ var (
 	flagStringLiteral     = regexp.MustCompile(`'([^']+)'`)
 	// nativeChatAllowlist names are explicitly allowed in DEFAULT_ON_FLAGS even
 	// though they are not registered experiments (ptone/scion#2217).
-	nativeChatAllowlist = []string{"web.native_chat", "web.native_chat_v2"}
+	nativeChatAllowlist = []string{"web.native_chat"}
 )
 
 // defaultOnFlagsFromTS extracts the string literals inside the

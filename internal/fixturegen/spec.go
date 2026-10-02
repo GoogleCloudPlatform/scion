@@ -625,5 +625,36 @@ func Spec() []TableFixture {
 				"resource_id": agentID, "reserved": 1, "created_at": baseTime,
 			},
 		}},
+
+		// ---- Agent identity keys ----
+		{Table: "agent_identity_keys", Rows: []row{
+			{
+				"id": "a1d00000-0000-0000-0000-000000000001", "project_id": projectID,
+				"key": "worker", "agent_id": agentID,
+			},
+		}},
+
+		// ---- External identities ----
+		{Table: "external_identities", Rows: []row{
+			{ // NULL email exercises the optional/informational field
+				"id":       "e1d00000-0000-0000-0000-000000000001",
+				"provider": "fixture-provider", "issuer": "https://issuer.fixture.example",
+				"subject": "fixture-subject-001", "user_id": userID,
+				"created_at": baseTime, "updated_at": baseTime,
+			},
+		}},
+
+		// ---- User terminal workspaces ----
+		{Table: "user_terminal_workspaces", Rows: []row{
+			{
+				"id":                 "c1d00000-0000-0000-0000-000000000001",
+				"user_id":            userID,
+				"agent_ids":          `["` + agentID + `"]`,
+				"frontmost_agent_id": agentID,
+				"schema_version":     1,
+				"revision":           1,
+				"update_time":        baseTime,
+			},
+		}},
 	}
 }

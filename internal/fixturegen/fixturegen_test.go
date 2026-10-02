@@ -32,14 +32,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-//
-// Was 60; ptone/scion#2061 P2's broker_settings table (pkg/ent/schema/brokersetting.go)
-// brings the real total to 64. This count was already stale before that
-// change: agent_identity_keys and external_identities were added to the ent
-// schema upstream, after this fixturegen package existed, without fixture
-// rows to match, and remain unfixed here as a pre-existing, unrelated gap —
-// see the Missing assertion below.
-const expectedTableCount = 64
+const expectedTableCount = 65
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -94,6 +87,28 @@ func TestFixtureLoadable(t *testing.T) {
 	require.NoError(t, err, "broker_settings fixture row must be readable via BrokerSettingStore")
 	require.NotNil(t, settings.Settings.MaxAgents)
 	assert.EqualValues(t, 5, *settings.Settings.MaxAgents)
+
+	// The agent_identity_keys and external_identities rows must likewise be
+	// readable through their real store adapters, not just present as rows:
+	// the same non-hex-id pitfall as above applies to these two tables'
+	// field.UUID("id", ...) columns.
+	keys, err := entadapter.NewAgentIdentityKeyStore(client).ListAgentIdentityKeys(ctx, projectID)
+	require.NoError(t, err, "agent_identity_keys fixture row must be readable via AgentIdentityKeyStore")
+	require.Len(t, keys, 1)
+	assert.Equal(t, "worker", keys[0].Key)
+
+	identity, err := entadapter.NewExternalIdentityStore(client).GetExternalIdentity(
+		ctx, "fixture-provider", "https://issuer.fixture.example", "fixture-subject-001")
+	require.NoError(t, err, "external_identities fixture row must be readable via ExternalIdentityStore")
+	assert.Equal(t, userID, identity.UserID)
+
+	// The user_terminal_workspaces row must likewise be readable through its
+	// real store adapter: the same non-hex-id pitfall as above applies to its
+	// field.UUID("id", ...) column.
+	workspace, err := entadapter.NewUserTerminalWorkspaceStore(client).GetUserTerminalWorkspace(ctx, userID)
+	require.NoError(t, err, "user_terminal_workspaces fixture row must be readable via UserTerminalWorkspaceStore")
+	assert.Equal(t, []string{agentID}, workspace.AgentIDs)
+	assert.Equal(t, agentID, workspace.FrontmostAgentID)
 }
 
 // TestFixtureDeterministic verifies the spec produces a stable set of row

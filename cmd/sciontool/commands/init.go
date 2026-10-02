@@ -7,8 +7,11 @@ package commands
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -28,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/autoexpose"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -35,11 +39,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 	scionportforward "github.com/GoogleCloudPlatform/scion/pkg/sciontool/portforward"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -81,9 +87,51 @@ Examples:
   sciontool init --grace-period=30s -- claude`,
 	DisableFlagParsing: false,
 	Run: func(cmd *cobra.Command, args []string) {
-		exitCode := runInit(args)
+		exitCode := RunInit(args, InitRunOptions{})
 		os.Exit(exitCode)
 	},
+}
+
+// InitRunOptions configures a single invocation of RunInit. The zero value
+// matches `sciontool init`'s historical CLI behaviour except where noted.
+// These fields exist as a seam for an in-process caller that embeds RunInit
+// instead of going through the `sciontool init` CLI path.
+type InitRunOptions struct {
+	// DisableTermSignalForwarding controls whether RunInit skips installing
+	// its own SIGTERM/SIGINT handler that runs pre-stop hooks and gracefully
+	// shuts down the child process. The zero value (false) matches
+	// `sciontool init`'s (the CLI command's) historical behaviour — signal
+	// forwarding on — without that command needing to set anything. A caller
+	// that is itself PID 1 and owns SIGTERM handling for the whole process
+	// sets this to true so the two handlers don't race on the same signal.
+	DisableTermSignalForwarding bool
+
+	// RequirePrivilegeDrop is a seam for a caller whose runtime has no
+	// legitimate "still UID 0" outcome: it is threaded through to the
+	// generic filesystem-hardening helpers below (chownTreeRootOwned,
+	// blockClaudeDebugSymlink, cleanGcloudConfigForMetadata,
+	// readServicesYAML) so each can pick its hardened, fd-based
+	// implementation instead of its historical path-based one. `sciontool
+	// init` (the CLI command) always leaves this false — that behaviour is
+	// unchanged: every helper above stays byte-identical to before this
+	// field existed. It does not, on its own, refuse to start the harness or
+	// change any other decision; that enforcement is a separate concern.
+	RequirePrivilegeDrop bool
+
+	// DisablePortForwarding skips starting the hub port-forward tunnel
+	// manager and the auto-expose port scanner. `sciontool init` (the CLI
+	// command) always leaves this false — that behaviour is unchanged. A
+	// caller whose network path can't route that traffic sets this to true.
+	DisablePortForwarding bool
+}
+
+// forwardsTermSignal reports whether RunInit should install its own
+// SIGTERM/SIGINT handler, given DisableTermSignalForwarding. Kept as its own
+// tiny method (rather than inlining the negation at the one call site) so
+// the "zero-value InitRunOptions matches sciontool init's historical
+// CLI behaviour" property has a single, directly unit-testable home.
+func (opts InitRunOptions) forwardsTermSignal() bool {
+	return !opts.DisableTermSignalForwarding
 }
 
 func init() {
@@ -100,7 +148,102 @@ func init() {
 	}
 }
 
-func runInit(args []string) int {
+// resolveAgentHome resolves the scion user's home directory for agent state
+// files (agent-info.json, hooks, etc.). Init runs as root (HOME=/root), but
+// this must point at the scion user's home whenever a drop actually
+// happened (or would have, in rootless mode) so status/hook files land
+// where the agent process that reads them expects.
+//
+// Extracted from RunInit's body so it can be reused by other early-return
+// failure paths without duplicating the lookup.
+func resolveAgentHome(targetUID int, rootless bool) string {
+	agentHome := os.Getenv("HOME")
+	if targetUID != 0 {
+		if scionUser, err := user.LookupId(strconv.Itoa(targetUID)); err == nil {
+			agentHome = scionUser.HomeDir
+		} else {
+			log.Debug("Could not look up user for UID %d: %v", targetUID, err)
+		}
+	} else if rootless {
+		if scionUser, err := user.Lookup("scion"); err == nil {
+			agentHome = scionUser.HomeDir
+		} else {
+			log.Debug("Could not look up scion user in rootless mode: %v", err)
+		}
+	}
+	return agentHome
+}
+
+// reportInitFailure reports a RunInit failure: local agent-info state to
+// PhaseError with a message, plus a best-effort direct Hub report. For
+// runtimes whose broker reads the container's agent-info.json as part of its
+// own status heartbeat, that local write is a second, independent path to
+// the same result if the direct Hub call fails or the Hub isn't configured;
+// for a runtime whose broker has no such fallback, the direct Hub call is
+// the only failure signal that reaches the Hub at all. cause's message ends
+// up in the Hub-visible message and possibly a caller's own exposed
+// response, so callers must only pass fixed, secret-free errors — never one
+// built from raw command output or file contents.
+//
+// Shared by every RunInit failure path that needs to report before
+// returning, rather than each constructing its own StatusHandler.
+func reportInitFailure(agentHome string, cause error) {
+	statusHandler := handlers.NewStatusHandler()
+	statusHandler.StatusPath = filepath.Join(agentHome, "agent-info.json")
+	errMsg := cause.Error()
+	_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
+	_ = statusHandler.SetMessage(errMsg)
+	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
+		hubCtx, hubCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if hubErr := hubClient.ReportState(hubCtx, state.PhaseError, "", errMsg); hubErr != nil {
+			log.Error("Failed to report init failure to Hub: %v", hubErr)
+		}
+		hubCancel()
+	} else {
+		log.Info("Hub client not configured, init failure will be relayed via broker heartbeat")
+	}
+}
+
+// harnessSupervisorConfig builds the supervisor.Config for the harness
+// child process from RunInit's inputs. It is a pure function of its
+// arguments — it reads no globals and has no side effects — so it can be
+// pinned by a table-driven unit test without invoking RunInit itself.
+func harnessSupervisorConfig(opts InitRunOptions, gracePeriod time.Duration, targetUID, targetGID int, rootless bool, envOverlay map[string]string, nativeTelemetryPolicy string, secretOverrides map[string]string) supervisor.Config {
+	return supervisor.Config{
+		GracePeriod:           gracePeriod,
+		UID:                   targetUID,
+		GID:                   targetGID,
+		Username:              "scion",
+		Rootless:              rootless,
+		EnvOverlay:            envOverlay,
+		NativeTelemetryPolicy: nativeTelemetryPolicy,
+		SecretOverrides:       secretOverrides,
+		RequirePrivilegeDrop:  opts.RequirePrivilegeDrop,
+	}
+}
+
+// runGitCloneWorkspace is gitCloneWorkspace's own call site as a package
+// var, so a test driving RunInit can observe when the workspace clone step
+// runs without shelling out to a real git process or depending on
+// SCION_GIT_CLONE_URL pointing at a reachable remote. Production code
+// always leaves this at its default.
+var runGitCloneWorkspace = gitCloneWorkspace
+
+// RunInit runs the sciontool init logic: it sets up the container user,
+// clones the workspace, runs lifecycle hooks, launches the child process
+// under supervision, and reports status/heartbeats to the Hub until the
+// child exits. It returns the process's intended exit code and never calls
+// os.Exit itself, so it is safe to call in-process from other entry points
+// (see InitRunOptions.DisableTermSignalForwarding).
+//
+// This is the exact logic `sciontool init -- <cmd>` runs; it is exported so
+// other subcommands can reuse it instead of forking a copy.
+func RunInit(args []string, opts InitRunOptions) int {
+	// initStart times sciontool init's own startup sequence, for start-time
+	// attribution (dispatch -> pod ready -> init -> harness). See the
+	// elapsed_ms log lines below.
+	initStart := time.Now()
+
 	// Start the reaper goroutine for zombie process cleanup.
 	// This is critical when running as PID 1 in a container.
 	procreap.StartReaper()
@@ -144,22 +287,7 @@ func runInit(args []string) int {
 	// (HOME=/root), but agent-info.json and other agent state files live
 	// in the scion user's home directory. This must happen before the
 	// StatusHandler is created so it writes to the correct path.
-	// In rootless mode, targetUID is 0 but we still need the scion user's
-	// home directory since the child process environment will use it.
-	agentHome := os.Getenv("HOME")
-	if targetUID != 0 {
-		if scionUser, err := user.LookupId(strconv.Itoa(targetUID)); err == nil {
-			agentHome = scionUser.HomeDir
-		} else {
-			log.Debug("Could not look up user for UID %d: %v", targetUID, err)
-		}
-	} else if rootless {
-		if scionUser, err := user.Lookup("scion"); err == nil {
-			agentHome = scionUser.HomeDir
-		} else {
-			log.Debug("Could not look up scion user in rootless mode: %v", err)
-		}
-	}
+	agentHome := resolveAgentHome(targetUID, rootless)
 
 	// Stage secrets from the SCION_STAGED_SECRETS env var. The broker
 	// serializes file and variable secrets into this single base64 blob
@@ -172,10 +300,13 @@ func runInit(args []string) int {
 		staged, err := stagedsecrets.Decode(encoded)
 		if err != nil {
 			log.Error("Failed to decode staged secrets: %v", err)
+			// Structural (base64/JSON) decode errors, never secret content.
+			reportInitFailure(agentHome, fmt.Errorf("failed to decode staged secrets: %w", err))
 			return 1
 		}
 		if err := stagedsecrets.Write(agentHome, staged); err != nil {
 			log.Error("Failed to write staged secrets: %v", err)
+			reportInitFailure(agentHome, fmt.Errorf("failed to write staged secrets: %w", err))
 			return 1
 		}
 		_ = os.Unsetenv(stagedsecrets.EnvVar)
@@ -285,6 +416,7 @@ func runInit(args []string) int {
 		log.Error("Failed to load harness manifest: %v", harnessReqErr)
 		// Treat parse errors on a present manifest as fatal — the harness
 		// staged something we cannot interpret.
+		reportInitFailure(agentHome, fmt.Errorf("failed to load harness manifest: %w", harnessReqErr))
 		return 1
 	}
 
@@ -302,7 +434,10 @@ func runInit(args []string) int {
 	// first also prevents provisioner-created files (e.g. .agents/) from
 	// causing isWorkspaceEmpty to return false and skipping the clone.
 	// See: https://github.com/ptone/scion/issues/739
-	if err := gitCloneWorkspace(targetUID, targetGID, agentHome); err != nil {
+	cloneStepStart := time.Now()
+	cloneErr := runGitCloneWorkspace(targetUID, targetGID, agentHome)
+	slog.Info("sciontool init: clone step complete", "elapsed_ms", time.Since(cloneStepStart).Milliseconds(), "ok", cloneErr == nil)
+	if err := cloneErr; err != nil {
 		log.Error("Git clone failed: %v", err)
 
 		// Update local agent-info.json to error state so local status readers
@@ -328,7 +463,10 @@ func runInit(args []string) int {
 
 	// Run pre-start hooks (after setup, before child process)
 	log.Info("Running pre-start hooks...")
-	if err := lifecycleManager.RunPreStart(); err != nil {
+	preStartStart := time.Now()
+	preStartErr := lifecycleManager.RunPreStart()
+	slog.Info("sciontool init: pre-start hooks complete", "elapsed_ms", time.Since(preStartStart).Milliseconds(), "ok", preStartErr == nil)
+	if err := preStartErr; err != nil {
 		log.Error("Pre-start hooks failed: %v", err)
 		if harnessReq.Required || projectHookStaged {
 			// On restart, check for an existing env overlay from a previous
@@ -359,20 +497,7 @@ func runInit(args []string) int {
 	// may write files owned by root:root into the bind-mounted workspace
 	// or the agent home directory. The non-root broker cannot delete
 	// root-owned files later, so we chown them now.
-	if targetUID != 0 && os.Geteuid() == 0 {
-		workspacePath := os.Getenv("SCION_WORKSPACE_PATH")
-		if workspacePath == "" {
-			workspacePath = "/workspace"
-		}
-		for _, dir := range []string{workspacePath, agentHome} {
-			if dir == "" {
-				continue
-			}
-			if err := chownTreeRootOwned(dir, targetUID, targetGID); err != nil {
-				log.Error("Failed to chown %s after pre-start hooks: %v", dir, err)
-			}
-		}
-	}
+	runPostPreStartOwnershipFixup(targetUID, targetGID, agentHome, opts.RequirePrivilegeDrop)
 
 	// Load the env overlay produced by the pre-start provisioner. Resolve
 	// any from_file references to in-memory values so secrets are not
@@ -389,14 +514,14 @@ func runInit(args []string) int {
 		if err != nil {
 			log.Error("Failed to load harness env overlay %s: %v", overlayPath, err)
 			if harnessReq.Required {
-				_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
-				_ = statusHandler.SetMessage(fmt.Sprintf("invalid harness env overlay: %v", err))
+				reportInitFailure(agentHome, fmt.Errorf("invalid harness env overlay: %w", err))
 				return 1
 			}
 		} else if len(overlay) > 0 {
 			if policy, ok := overlay[hooks.NativeTelemetryPolicyKey]; ok {
 				if policy != "enabled" && policy != "disabled" {
 					log.Error("Invalid native telemetry policy marker")
+					reportInitFailure(agentHome, errors.New("invalid native telemetry policy marker in harness env overlay"))
 					return 1
 				}
 				nativeTelemetryPolicy = policy
@@ -410,7 +535,9 @@ func runInit(args []string) int {
 	// Configure git credentials for shared-workspace projects (git-workspace hybrid).
 	// The workspace is pre-cloned on the host; agents need credentials to push/pull.
 	if resolveIsSharedGitWorkspace() {
-		configureSharedWorkspaceGit(agentHome)
+		if err := configureSharedWorkspaceGit(agentHome, targetUID, targetGID, opts.RequirePrivilegeDrop); err != nil {
+			log.Error("Refusing shared workspace git configuration: %v", err)
+		}
 	}
 
 	// Write critical environment variables to a shell-sourceable file so that
@@ -427,28 +554,37 @@ func runInit(args []string) int {
 	// silently a no-op on VirtioFS mounts used by the Apple VZ runtime.
 	if isClaude(childArgs) {
 		debugDir := filepath.Join(agentHome, ".claude", "debug")
-		if err := os.MkdirAll(debugDir, 0755); err != nil {
-			log.Error("Failed to create debug directory %s: %v", debugDir, err)
-		} else if err := os.Chmod(debugDir, 0555); err != nil {
-			log.Error("Failed to chmod debug directory %s: %v", debugDir, err)
-		} else {
-			log.Debug("Blocked debug symlink: set %s to read-only", debugDir)
-		}
+		runBlockClaudeDebugSymlink(debugDir, opts.RequirePrivilegeDrop)
 	}
 
 	servicesPath := filepath.Join(agentHome, ".scion", "scion-services.yaml")
 	log.Debug("Looking for services config at: %s", servicesPath)
-	if data, err := os.ReadFile(servicesPath); err == nil {
+	if data, err := runReadServicesYAML(servicesPath, opts.RequirePrivilegeDrop); err == nil {
 		var specs []api.ServiceSpec
 		if err := yaml.Unmarshal(data, &specs); err != nil {
 			log.Error("Failed to parse scion-services.yaml: %v", err)
-		} else if len(specs) > 0 {
-			log.Info("Starting %d sidecar service(s)...", len(specs))
-			svcManager = services.New(gracePeriod)
-			svcCtx := context.Background()
-			if err := svcManager.Start(svcCtx, specs, targetUID, targetGID, "scion"); err != nil {
-				log.Error("Failed to start services: %v", err)
-				// Continue — service failure shouldn't block harness
+		} else {
+			// Authoritative gate for the service-Name-as-path-component
+			// content-trust class: reject anything that isn't safe to use
+			// as a single path component BEFORE any consumer of Name ever
+			// sees it. See ValidateServiceName's own doc comment for the
+			// exact rule and why this runs unconditionally, on every
+			// runtime. An invalid Name drops only that one service —
+			// every other valid service still gets its own chance to
+			// start.
+			specs = validateServiceSpecs(specs)
+			if len(specs) > 0 {
+				log.Info("Starting %d sidecar service(s)...", len(specs))
+				svcManager = services.New(gracePeriod)
+				svcCtx := context.Background()
+				servicesStart := time.Now()
+				svcErr := runServicesStart(svcCtx, svcManager, specs, targetUID, targetGID, "scion", opts.RequirePrivilegeDrop)
+				slog.Info("sciontool init: sidecar services started", "elapsed_ms", time.Since(servicesStart).Milliseconds(),
+					"count", len(specs), "ok", svcErr == nil)
+				if err := svcErr; err != nil {
+					log.Error("Failed to start services: %v", err)
+					// Continue — service failure shouldn't block harness
+				}
 			}
 		}
 	}
@@ -482,7 +618,7 @@ func runInit(args []string) int {
 		// during its first-run configuration detection.
 		// We preserve application_default_credentials.json which may be
 		// bind-mounted as a secret (gcloud-adc).
-		cleanGcloudConfigForMetadata(filepath.Join(agentHome, ".config", "gcloud"))
+		runCleanGcloudConfigForMetadata(filepath.Join(agentHome, ".config", "gcloud"), opts.RequirePrivilegeDrop)
 		// Wire up dynamic token retrieval so the metadata server always
 		// uses the latest agent token after refresh, not the startup value.
 		metaCfg.TokenFunc = func() string {
@@ -518,7 +654,7 @@ func runInit(args []string) int {
 		}
 		metadataServer = metadata.New(*metaCfg)
 		metaCtx := context.Background()
-		if err := metadataServer.Start(metaCtx); err != nil {
+		if err := runMetadataServerStart(metaCtx, metadataServer); err != nil {
 			log.Error("Failed to start metadata server: %v", err)
 			// Continue — metadata failure shouldn't block harness
 		} else {
@@ -548,23 +684,16 @@ func runInit(args []string) int {
 	if secretKeysRaw := os.Getenv("SCION_SECRET_KEYS"); secretKeysRaw != "" {
 		keys := splitSecretKeys(secretKeysRaw)
 		if len(keys) > 0 && hubClient != nil && hubClient.IsConfigured() {
-			secretOverrides = fetchSecretOverrides(hubClient, keys)
+			secretFetchStart := time.Now()
+			secretOverrides = runFetchSecretOverrides(hubClient, keys)
+			slog.Info("sciontool init: secret fetch complete", "elapsed_ms", time.Since(secretFetchStart).Milliseconds(), "count", len(keys))
 		} else if len(keys) > 0 {
 			log.Error("SCION_SECRET_KEYS is set but hub client is not configured — cannot fetch secrets")
 		}
 	}
 
 	// Create supervisor with configuration
-	config := supervisor.Config{
-		GracePeriod:           gracePeriod,
-		UID:                   targetUID,
-		GID:                   targetGID,
-		Username:              "scion",
-		Rootless:              rootless,
-		EnvOverlay:            harnessEnvOverlay,
-		NativeTelemetryPolicy: nativeTelemetryPolicy,
-		SecretOverrides:       secretOverrides,
-	}
+	config := harnessSupervisorConfig(opts, gracePeriod, targetUID, targetGID, rootless, harnessEnvOverlay, nativeTelemetryPolicy, secretOverrides)
 	sup := supervisor.New(config)
 
 	// Create a cancellable context for graceful shutdown
@@ -575,14 +704,22 @@ func runInit(args []string) int {
 	// requestedShutdown tracks whether the process received an intentional
 	// SIGTERM/SIGINT so classifyExit can distinguish a clean stop from a crash.
 	var requestedShutdown atomic.Bool
-	sigHandler := supervisor.NewSignalHandler(sup, cancel).
-		WithPreStopHook(func() error {
-			requestedShutdown.Store(true)
-			log.Info("Running pre-stop hooks...")
-			return lifecycleManager.RunPreStop()
-		})
-	sigHandler.Start()
-	defer sigHandler.Stop()
+	if opts.forwardsTermSignal() {
+		sigHandler := supervisor.NewSignalHandler(sup, cancel).
+			WithPreStopHook(func() error {
+				requestedShutdown.Store(true)
+				log.Info("Running pre-stop hooks...")
+				return lifecycleManager.RunPreStop()
+			})
+		sigHandler.Start()
+		defer sigHandler.Stop()
+	} else {
+		// DisableTermSignalForwarding: the caller owns SIGTERM handling for
+		// the whole process, so RunInit must not also listen for it here —
+		// doing so would shut down the child out from under the caller's own
+		// signal handling. See InitRunOptions.DisableTermSignalForwarding.
+		log.Info("Termination-signal forwarding disabled for this init run; the child will not be stopped on SIGTERM/SIGINT by this code path")
+	}
 
 	// Run the child process under supervision
 	// We use a goroutine to allow post-start hooks to run after process starts
@@ -591,6 +728,12 @@ func runInit(args []string) int {
 		err  error
 	}, 1)
 
+	// since_init_ms (not elapsed_ms, unlike the other sciontool init: lines
+	// above): this is the time since process start, the same quantity as
+	// startup_ms below, not the duration of a single step. Naming it
+	// differently keeps a step-line summation from silently double-counting
+	// it.
+	slog.Info("sciontool init: launching harness", "since_init_ms", time.Since(initStart).Milliseconds())
 	go func() {
 		code, err := sup.Run(ctx, childArgs)
 		exitChan <- struct {
@@ -615,6 +758,7 @@ func runInit(args []string) int {
 		// Child exited immediately - likely a startup error
 		if result.err != nil {
 			log.Error("Child exited immediately with error: %v (uid=%d, gid=%d)", result.err, os.Geteuid(), os.Getegid())
+			reportInitFailure(agentHome, fmt.Errorf("child process failed to start: %w", result.err))
 			return 1
 		}
 		log.Info("Child exited immediately with code %d (uid=%d, gid=%d)", result.code, os.Geteuid(), os.Getegid())
@@ -636,6 +780,11 @@ func runInit(args []string) int {
 			startedAtStr := time.Now().UTC().Format(time.RFC3339)
 			zeroCount := 0
 			s := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWorking}
+			// startup_ms (elapsed since sciontool init started) rides in
+			// Metadata rather than a new StatusUpdate field: it is
+			// observability only, read by the hub purely for a log line,
+			// never persisted to a column (see updateAgentStatus).
+			startupMs := strconv.FormatInt(time.Since(initStart).Milliseconds(), 10)
 			if err := hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
 				Phase:             state.PhaseRunning,
 				Activity:          state.ActivityWorking,
@@ -644,6 +793,7 @@ func runInit(args []string) int {
 				StartedAt:         startedAtStr,
 				CurrentTurns:      &zeroCount,
 				CurrentModelCalls: &zeroCount,
+				Metadata:          map[string]string{"startup_ms": startupMs},
 			}); err != nil {
 				log.Error("Failed to report running status to Hub: %v", err)
 			} else {
@@ -666,23 +816,34 @@ func runInit(args []string) int {
 			})
 			log.Info("Started Hub heartbeat loop (interval: %s)", hub.DefaultHeartbeatInterval)
 
-			go scionportforward.NewManager(hubClient).Run(ctx)
-			log.Info("Started port-forward tunnel manager")
+			// Skip both the port-forward tunnel manager and auto-expose when
+			// the caller sets InitRunOptions.DisablePortForwarding.
+			if opts.DisablePortForwarding {
+				log.Info("port forwarding disabled: skipping port-forward tunnel manager and auto-expose")
+			} else {
+				go scionportforward.NewManager(hubClient).Run(ctx)
+				log.Info("Started port-forward tunnel manager")
 
-			// Auto-expose: detect and register listening ports
-			if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
-				reconciler := autoexpose.NewReconciler(hubClient, autoExposeCfg)
-				reconciler.SetMessageClient(&hubMessageAdapter{client: hubClient})
-				go reconciler.Run(ctx)
-				log.Info("Started auto-expose port scanner (interval: %s, mode: %s)", autoExposeCfg.Interval, autoExposeCfg.FilterMode)
+				// Auto-expose: detect and register listening ports
+				if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
+					reconciler := autoexpose.NewReconciler(hubClient, autoExposeCfg)
+					reconciler.SetMessageClient(&hubMessageAdapter{client: hubClient})
+					go reconciler.Run(ctx)
+					log.Info("Started auto-expose port scanner (interval: %s, mode: %s)", autoExposeCfg.Interval, autoExposeCfg.FilterMode)
+				}
 			}
 
 			// Read the agent token from the canonical token file (written by
 			// the host-side agent manager before the container started).
-			// Init runs as root — chown the file so the scion user can read it.
+			// Init runs as root — chown the file so the scion user can read
+			// it. ChownTokenFile resolves the file via a symlink-safe fd
+			// chain and fchowns the open fd, rather than a path-based chown
+			// that a symlink swapped in after this point (this runs after
+			// sup.Run has started, so the workload is already alive) could
+			// redirect to an arbitrary file.
 			token := hub.ReadTokenFile()
 			if token != "" && targetUID > 0 {
-				if err := os.Chown(hub.TokenFilePath(), targetUID, targetGID); err != nil {
+				if err := hub.ChownTokenFile(targetUID, targetGID); err != nil {
 					log.Error("Failed to chown token file to UID=%d: %v", targetUID, err)
 				}
 			}
@@ -748,15 +909,13 @@ func runInit(args []string) int {
 			// credential helper (which runs as the scion user) can read it.
 			initialToken := os.Getenv("GITHUB_TOKEN")
 			if initialToken != "" {
-				if err := hub.WriteGitHubTokenFile(tokenPath, initialToken); err != nil {
+				// Ownership is applied by WriteGitHubTokenFile itself
+				// (fchown on the open fd, before the rename onto the final
+				// path), not by a separate path-based os.Chown afterwards.
+				if err := hub.WriteGitHubTokenFile(tokenPath, initialToken, targetUID, targetGID); err != nil {
 					log.Error("Failed to write initial GitHub token file: %v", err)
 				} else {
 					log.Info("Wrote initial GitHub token to %s", tokenPath)
-					if targetUID > 0 {
-						if err := os.Chown(tokenPath, targetUID, targetGID); err != nil {
-							log.Error("Failed to chown GitHub token file to UID=%d: %v", targetUID, err)
-						}
-					}
 				}
 			}
 
@@ -771,14 +930,10 @@ func runInit(args []string) int {
 					log.Error("Failed to parse GitHub token expiry %q: %v", expiryStr, err)
 				} else {
 					// Write the initial expiry so the credential helper can
-					// detect stale tokens even before the first refresh cycle.
-					if err := hub.WriteGitHubTokenExpiry(tokenPath, ghTokenExpiry); err != nil {
+					// detect stale tokens even before the first refresh
+					// cycle. Ownership is applied on the fd, as above.
+					if err := hub.WriteGitHubTokenExpiry(tokenPath, ghTokenExpiry, targetUID, targetGID); err != nil {
 						log.Error("Failed to write initial GitHub token expiry file: %v", err)
-					} else if targetUID > 0 {
-						expiryPath := hub.GitHubTokenExpiryPath(tokenPath)
-						if err := os.Chown(expiryPath, targetUID, targetGID); err != nil {
-							log.Error("Failed to chown GitHub token expiry file to UID=%d: %v", targetUID, err)
-						}
 					}
 					// Schedule first refresh 10 minutes before expiry (tokens last 1 hour)
 					ghRefreshAt := ghTokenExpiry.Add(-10 * time.Minute)
@@ -850,17 +1005,13 @@ func runInit(args []string) int {
 	maxModelCalls := handlers.ParseEnvInt("SCION_MAX_MODEL_CALLS")
 	if maxTurns > 0 || maxModelCalls > 0 {
 		limitsPath := filepath.Join(agentHome, "agent-limits.json")
-		if err := handlers.InitLimitsFile(limitsPath, maxTurns, maxModelCalls); err != nil {
+		// InitLimitsFile chowns the file itself (fchown on the temp file's
+		// fd, before the rename) when targetUID > 0, so hook processes
+		// running as the dropped-privilege scion user can read/write it.
+		if err := handlers.InitLimitsFile(limitsPath, maxTurns, maxModelCalls, targetUID, targetGID); err != nil {
 			log.Error("Failed to initialize agent-limits.json: %v", err)
 		} else {
 			log.Info("Limits initialized: max_turns=%d, max_model_calls=%d", maxTurns, maxModelCalls)
-		}
-		// Chown the limits file so the scion user (hook processes) can read/write it.
-		// Init runs as root but hooks run as the dropped-privilege scion user.
-		if targetUID != 0 {
-			if err := os.Chown(limitsPath, targetUID, targetGID); err != nil {
-				log.Error("Failed to chown agent-limits.json: %v", err)
-			}
 		}
 		// Remove stale trigger file from a previous run
 		_ = os.Remove(handlers.LimitsTriggerFile)
@@ -1060,6 +1211,7 @@ waitLoop:
 
 	if result.err != nil {
 		log.Error("Supervisor error: %v", result.err)
+		reportInitFailure(agentHome, fmt.Errorf("supervisor error: %w", result.err))
 		return 1
 	}
 
@@ -1083,11 +1235,41 @@ func registerLifecycleTelemetryHandler(manager *hooks.LifecycleManager, provider
 	return handler
 }
 
-// readHarnessExitCode reads and parses the harness exit-code file written by the
-// tmux agent-window wrapper. Returns nil if the file is missing or unparseable
-// (e.g. the container was SIGKILLed/OOM-killed before the harness could write).
+// harnessExitCodeMaxBytes bounds the read in readHarnessExitCode: the file
+// only ever holds a small decimal exit code, so any read this long has
+// already found something other than what the harness wrapper writes.
+const harnessExitCodeMaxBytes = 32
+
+// readHarnessExitCode reads and parses the harness exit-code file written by
+// the tmux agent-window wrapper. Returns nil if the file is missing or
+// unparseable (e.g. the container was SIGKILLed/OOM-killed before the
+// harness could write), and also — without blocking and without reading —
+// if any component of the path is a symlink or the leaf isn't a regular
+// file: this process runs as root, and the workload owns the directory
+// this path lives in, so a FIFO planted here must not be able to make
+// root's shutdown path hang forever, and a symlink at the leaf or at an
+// intermediate directory component must not be able to make it parse an
+// unrelated file's contents as an exit code. O_NONBLOCK is what keeps a
+// FIFO's open() itself from blocking on a reader when there is no writer.
 func readHarnessExitCode() *int {
-	data, err := os.ReadFile(state.HarnessExitCodeFile)
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(state.HarnessExitCodeFile)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+
+	f, err := dirfd.OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		return nil
+	}
+
+	data, err := io.ReadAll(io.LimitReader(f, harnessExitCodeMaxBytes))
 	if err != nil {
 		return nil
 	}
@@ -1288,22 +1470,27 @@ func extractChildCommand(args []string) []string {
 // because the kernel populates that file from the execve(2) arguments and
 // never updates it afterward.
 //
+// Uses rootexec.SelfExe() ("/proc/self/exe"), never os.Executable(): this
+// runs as root, and os.Executable() re-reads this binary's path from disk —
+// if that path sits somewhere workload-writable on a given runtime, a
+// binary planted there between process start and this call would be the
+// one re-executed as root. "/proc/self/exe" is the kernel's own magic
+// symlink to the already-running inode, so it always re-execs the exact
+// image already in memory, regardless of what (if anything) now sits at
+// its on-disk path.
+//
 // On success this function does not return (the process image is replaced).
 // On failure it returns an error and the caller should continue — the
 // in-process environment is already clean, only /proc exposure remains.
+//
+// There is no separate, skippable symlink-resolution step here —
+// filepath.EvalSymlinks would be redundant: syscall.Exec passes the literal
+// string "/proc/self/exe", and it is the KERNEL, not this process, that resolves
+// that magic symlink to the running inode at the moment of the execve
+// syscall itself — standard behavior on Linux >= 2.6.
 func reExecWithCleanEnv() error {
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve executable: %w", err)
-	}
-	// Resolve symlinks (/proc/self/exe → real path) because some kernels
-	// require the execve target to be a regular file, not a symlink.
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		return fmt.Errorf("resolve symlinks: %w", err)
-	}
 	log.Info("Re-execing to clear staged secrets from /proc/%d/environ", os.Getpid())
-	return syscall.Exec(exe, os.Args, os.Environ())
+	return syscall.Exec(rootexec.SelfExe(), os.Args, os.Environ())
 }
 
 // setupHostUser modifies the scion user's UID/GID to match the host user.
@@ -1872,33 +2059,174 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 	return nil
 }
 
-// chownTreeRootOwned recursively chowns files owned by root (UID 0) to
-// the specified uid:gid. Files already owned by the target user are
-// skipped for efficiency. This is called after pre-start hooks to fix up
-// files created by provisioners running as root, which would otherwise be
-// undeletable by the non-root broker.
-func chownTreeRootOwned(root string, uid, gid int) error {
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
+// chownTreeRootOwnedFilter is chownTreeRootOwned's shouldChown call site as
+// a package var, so a test can simulate "every entry looks root-owned" (and
+// later "no entry does, because a real chown(2) already fixed them") without
+// needing the test process to actually own root-owned files or hold
+// CAP_CHOWN itself. Production code always leaves this at its default,
+// isRootOwned.
+var chownTreeRootOwnedFilter = isRootOwned
+
+// chownTreeRootOwned recursively chowns entries owned by root (UID 0) to
+// the specified uid:gid; entries already owned by anyone else are left
+// alone. It is called after pre-start hooks to fix up files created by
+// provisioners running as root, which would otherwise be undeletable by the
+// non-root broker. Returns the number of entries the walk visited in total
+// and the number actually rechowned. A missing root (e.g. no /workspace) is
+// a silent no-op — nil, 0, 0 — on both branches below.
+//
+// requirePrivilegeDrop is the caller's own opts.RequirePrivilegeDrop. The
+// call from postPreStartOwnershipFixup runs on every runtime whenever the
+// calling process is root, not just an enforced one, while sidecar
+// services/pre-start-spawned processes may already be alive — but only an
+// enforced caller has an actual, less-privileged workload user on the other
+// side of that boundary to defend against, and only an enforced caller has
+// an ancestor-path symlink threat model where a workload process can plant
+// one. A legitimate unenforced setup can symlink an ancestor of $HOME or
+// /workspace (e.g. from a bind-mounted host path), and refusing that would
+// break it. So:
+//   - requirePrivilegeDrop == false: the historical filepath.WalkDir +
+//     os.Lchown(path) walk, unconditionally chowning the root filter admits
+//     — byte-identical to the pre-existing behaviour, ancestor symlinks and
+//     all.
+//   - requirePrivilegeDrop == true: fsutil.CheckRoot refuses root outright
+//     on its own path/name alone when it is a known critical system path or
+//     looks like a filesystem root by content; fsutil.CheckMountSource
+//     additionally refuses root when it is itself a mount point whose bind
+//     source names a critical system directory (see that function's doc
+//     comment for exactly what it does and does not detect). Checking
+//     CheckRoot first means an already-invalid root is never checked
+//     against the mount table at all. Then dirfd.ChownTreeNoFollow, the
+//     same openat(O_NOFOLLOW) fd-relative walk supervisor.chownRecursive
+//     uses, with its hard-link guard enabled — never a full-path os.Lchown,
+//     which re-resolves every intermediate component on every call and can
+//     be redirected by a symlink a scion-uid process swaps into one of them
+//     mid-walk.
+func chownTreeRootOwned(root string, uid, gid int, requirePrivilegeDrop bool) (walked, changed int, err error) {
+	if !requirePrivilegeDrop {
+		return chownTreeRootOwnedPathBased(root, uid, gid)
+	}
+	if err := fsutil.CheckRoot(root); err != nil {
+		return 0, 0, err
+	}
+	if err := checkMountSource(root); err != nil {
+		return 0, 0, err
+	}
+	// dirfd.ChownTreeNoFollow's own doc comment: only an error opening or
+	// stat'ing root itself comes back as its own returned error; every
+	// per-entry problem goes through onErr instead, so the walk always
+	// completes and reports its full counts even when individual entries
+	// fail. A real per-entry failure must still be reported here, not just
+	// logged, so this collects every non-hard-link-guard error onErr sees
+	// and joins them into the result below -- deciding from the root-only
+	// err returned above first (never a joined error, so errors.Is on it
+	// can never be satisfied by an unrelated entry also matching
+	// os.ErrNotExist and masking a real failure alongside it) before even
+	// looking at the collected per-entry errors.
+	var entryErrs []error
+	walked, changed, err = dirfd.ChownTreeNoFollow(root, uid, gid, chownTreeRootOwnedFilter, true, func(name string, cerr error) {
+		if errors.Is(cerr, dirfd.ErrHardlinkedRegularFile) {
+			log.Info("chownTreeRootOwned: WARN: skipping %s: %v", name, cerr)
+			return
+		}
+		log.Error("chownTreeRootOwned: failed to chown %s: %v", name, cerr)
+		// dirfd.ChownTreeNoFollow's onErr receives a bare errno-style error
+		// with no path or name embedded (unlike the historical
+		// filepath.WalkDir-based errors this replaces) -- wrap it with name
+		// here, once, so an aggregate of several per-entry failures still
+		// says which entries they came from instead of repeating the same
+		// unattributed message once per failure.
+		entryErrs = append(entryErrs, fmt.Errorf("%s: %w", name, cerr))
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return walked, changed, err
+	}
+	if len(entryErrs) > 0 {
+		return walked, changed, errors.Join(entryErrs...)
+	}
+	return walked, changed, nil
+}
+
+// isRootOwned is chownTreeRootOwned's default shouldChown filter: only
+// entries whose current owning uid is 0 (root) are eligible.
+func isRootOwned(entryUID uint32) bool { return entryUID == 0 }
+
+// chownTreeRootOwnedPathBased is chownTreeRootOwned's historical
+// implementation, used whenever requirePrivilegeDrop is false. filepath.
+// WalkDir does not follow a symlinked leaf, and os.Lchown does not follow
+// the leaf either, but both re-resolve every path component above the leaf
+// on every call, so this is not used where requirePrivilegeDrop is true.
+func chownTreeRootOwnedPathBased(root string, uid, gid int) (walked, changed int, err error) {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
 			// Skip permission errors on walk (e.g., lost+found).
 			return nil
 		}
-		info, err := d.Info()
-		if err != nil {
+		walked++
+		info, ierr := d.Info()
+		if ierr != nil {
 			return nil
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok {
+		if !ok || !chownTreeRootOwnedFilter(stat.Uid) {
 			return nil
 		}
-		if stat.Uid == 0 {
-			if chErr := os.Lchown(path, uid, gid); chErr != nil {
-				log.Error("chownTreeRootOwned: failed to chown %s: %v", path, chErr)
-			}
+		if chErr := os.Lchown(path, uid, gid); chErr != nil {
+			log.Error("chownTreeRootOwned: failed to chown %s: %v", path, chErr)
+			return nil
 		}
+		changed++
 		return nil
 	})
+	return walked, changed, err
 }
+
+// runPostPreStartOwnershipFixup is postPreStartOwnershipFixup's call site as
+// a package var, so a test driving RunInit can observe it without needing
+// to run as root. Production code always leaves this at its default.
+var runPostPreStartOwnershipFixup = postPreStartOwnershipFixup
+
+// postPreStartGeteuid is os.Geteuid's call site inside
+// postPreStartOwnershipFixup, as a package var: a seam so a test can
+// simulate euid 0 without actually running as root. Production code always
+// leaves this at its default.
+var postPreStartGeteuid = os.Geteuid
+
+// runChownTreeRootOwned is chownTreeRootOwned's call site as a package var:
+// this seam lets a test (with postPreStartGeteuid stubbed to report euid 0)
+// capture the requirePrivilegeDrop value postPreStartOwnershipFixup forwards,
+// without the test actually performing a real recursive chown. Production
+// code always leaves this at its default.
+var runChownTreeRootOwned = chownTreeRootOwned
+
+// postPreStartOwnershipFixup chowns root-owned files that pre-start hooks
+// (which run before the privilege drop) left in the workspace or agent home.
+func postPreStartOwnershipFixup(targetUID, targetGID int, agentHome string, requirePrivilegeDrop bool) {
+	if targetUID == 0 || postPreStartGeteuid() != 0 {
+		return
+	}
+	workspacePath := os.Getenv("SCION_WORKSPACE_PATH")
+	if workspacePath == "" {
+		workspacePath = "/workspace"
+	}
+	for _, dir := range []string{workspacePath, agentHome} {
+		if dir == "" {
+			continue
+		}
+		if _, _, err := runChownTreeRootOwned(dir, targetUID, targetGID, requirePrivilegeDrop); err != nil {
+			log.Error("Failed to chown %s after pre-start hooks: %v", dir, err)
+		}
+	}
+}
+
+// checkMountSource is fsutil.CheckMountSource, held behind a package
+// variable so a test can stub it (to prove chownTreeRootOwned actually
+// calls it) without needing a real mount to exercise. The production value
+// is fixed; only tests reassign it, and always restore it afterward.
+var checkMountSource = fsutil.CheckMountSource
 
 func ensureWorkspaceOwnership(workspacePath string, uid, gid, currentEUID int, chown func(string, int, int) error) {
 	// Only root can successfully chown a mounted workspace. In restricted
@@ -1936,17 +2264,88 @@ func resolveIsSharedGitWorkspace() bool {
 	return os.Getenv("SCION_SHARED_WORKSPACE") == "true"
 }
 
+// errSharedWorkspaceGitPrivilegeDropRequired is returned when
+// RequirePrivilegeDrop is set but uid/gid are not both usable to run git as
+// the workload, so an enforced runtime with no real workload identity to
+// drop to never runs git config as root. gitCloneWorkspace has no
+// equivalent guard of its own: it never receives RequirePrivilegeDrop at
+// all, and falls back to the "scion" system user itself whenever uid is 0.
+var errSharedWorkspaceGitPrivilegeDropRequired = errors.New(
+	"configureSharedWorkspaceGit: privilege drop required but uid/gid were not both set; refusing to run git as root")
+
 // configureSharedWorkspaceGit sets up git credentials for shared-workspace
-// (git-workspace hybrid) projects. The workspace is a pre-cloned git repo shared
-// by all agents; each agent gets its own credential helper in $HOME/.gitconfig
-// so credentials don't pollute the shared workspace.
-func configureSharedWorkspaceGit(agentHome string) {
+// (git-workspace hybrid) projects. The workspace is a pre-cloned git repo
+// shared by all agents; each agent gets its own credential helper in
+// $HOME/.gitconfig so credentials don't pollute the shared workspace.
+//
+// When uid/gid are both usable, every `git config --file <gitconfigPath>`
+// call below runs AS the workload, via configureGitCommand's
+// SysProcAttr.Credential: git itself reads and rewrites gitconfigPath under
+// the same identity that already owns agentHome and everything in it. A
+// symlink at .gitconfig (the layout a dotfile manager such as chezmoi,
+// stow, or dotbot commonly produces, or one pointed at a file outside
+// agentHome entirely) is then exactly as safe — or unsafe — as if the
+// workload had run `git config` itself: git writes through it in place, so
+// the symlink survives, and if it targets something the workload identity
+// cannot write (e.g. a root-owned file), the write fails with an ordinary
+// permission error, leaving that target untouched. A planted symlink
+// therefore gives the workload nothing it could not do by running git
+// itself.
+//
+// When RequirePrivilegeDrop is set but uid/gid are not both usable, this
+// refuses outright (errSharedWorkspaceGitPrivilegeDropRequired) rather than
+// running git config as root against a directory the workload controls.
+//
+// Otherwise (rootless, where PID 1 already IS the workload's own uid with
+// no separate root identity to protect against, or an unenforced runtime
+// with no host UID configured at all) there is no workload identity
+// distinct from the one already running this code, so git config runs
+// directly against gitconfigPath under this process's own identity, no
+// Credential override.
+//
+// Independently of all three cases above, gitconfigPath is stat'd (never
+// opened) before every run: a FIFO planted there would make git's own open
+// block forever with no writer, hanging RunInit, and stat — unlike open —
+// never blocks on one. A hung startup is a concrete, self-contained failure
+// mode any of the three cases above can hit, not a symlink-specific
+// privilege question the uid separation above already answers.
+func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivilegeDrop bool) error {
 	log.Info("Configuring git credentials for shared workspace")
+
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+
+	if fi, err := os.Stat(gitconfigPath); err == nil && !fi.Mode().IsRegular() {
+		log.Warn("Refusing existing %s: not a regular file (mode %v); leaving it untouched and skipping shared-workspace git configuration.", gitconfigPath, fi.Mode())
+		return nil
+	}
+
+	var configureCmd func(cmd *exec.Cmd)
+	switch {
+	case uid > 0 && gid > 0:
+		configureCmd = func(cmd *exec.Cmd) { configureGitCommand(cmd, uid, gid) }
+	case requirePrivilegeDrop:
+		return errSharedWorkspaceGitPrivilegeDropRequired
+	default:
+		configureCmd = func(cmd *exec.Cmd) {}
+	}
+
+	runGitConfig := func(args ...string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		gitPath, rerr := rootexec.Resolve("git")
+		if rerr != nil {
+			log.Error("Failed to resolve a trusted git binary: %v", rerr)
+			return
+		}
+		cmd := exec.CommandContext(ctx, gitPath, append([]string{"config", "--file", gitconfigPath}, args...)...)
+		configureCmd(cmd)
+		if out, cerr := procreap.CombinedOutputManaged(cmd); cerr != nil {
+			log.Error("Failed to run git config %v: %s %v", args, string(out), cerr)
+		}
+	}
 
 	// Configure credential helper using sciontool's credential-helper command,
 	// which handles both GITHUB_TOKEN env var and GitHub App token refresh.
-	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-
 	var credentialHelper string
 	if os.Getenv("SCION_GITHUB_APP_ENABLED") == "true" {
 		// Use sciontool credential-helper for GitHub App token refresh
@@ -1956,31 +2355,32 @@ func configureSharedWorkspaceGit(agentHome string) {
 		credentialHelper = `!f() { echo "password=${GITHUB_TOKEN}"; echo "username=oauth2"; }; f`
 	}
 
-	// Use git config to set the credential helper in the user's gitconfig.
 	// This is idempotent and works even if provisioning already set it.
-	cmd := exec.Command("git", "config", "--file", gitconfigPath, "credential.helper", credentialHelper)
-	if out, err := procreap.CombinedOutputManaged(cmd); err != nil {
-		log.Error("Failed to configure credential helper: %s %v", string(out), err)
-	}
+	runGitConfig("credential.helper", credentialHelper)
 
 	// Configure git identity for the agent
 	agentName := os.Getenv("SCION_AGENT_NAME")
 	if agentName == "" {
 		agentName = "unknown"
 	}
-
 	configs := []struct{ key, value string }{
 		{"user.name", fmt.Sprintf("Scion Agent (%s)", agentName)},
 		{"user.email", "agent@scion.dev"},
 	}
 	for _, cfg := range configs {
-		cmd := exec.Command("git", "config", "--file", gitconfigPath, cfg.key, cfg.value)
-		if out, err := procreap.CombinedOutputManaged(cmd); err != nil {
-			log.Error("Failed to set git config %s: %s %v", cfg.key, string(out), err)
-		}
+		runGitConfig(cfg.key, cfg.value)
 	}
+	return nil
 }
 
+// configureGitCommand points cmd's environment and (when this process is
+// root and uid/gid name someone else) its Credential at the workload
+// identity. It has no opinion on RequirePrivilegeDrop: a caller that needs
+// to refuse outright when uid/gid<=0 must do so itself before calling this
+// (see configureSharedWorkspaceGit's own guard) — this helper only ever
+// sets Credential when it can, it never enforces that one was required.
+// gitCloneWorkspace, this function's other caller, has no such guard: it
+// never receives RequirePrivilegeDrop at all.
 func configureGitCommand(cmd *exec.Cmd, uid, gid int) {
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if uid <= 0 {
@@ -2096,6 +2496,90 @@ func isClaude(childArgs []string) bool {
 	return false
 }
 
+// runBlockClaudeDebugSymlink is blockClaudeDebugSymlink's call site as a
+// package var, so a test can observe it without needing real root
+// privileges. Production code always leaves this at its default.
+var runBlockClaudeDebugSymlink = blockClaudeDebugSymlink
+
+// blockClaudeDebugSymlink pre-creates debugDir ($HOME/.claude/debug) as
+// read-only (0555) so Claude Code cannot later create a symlink inside it —
+// see this function's call site for why that matters.
+//
+// requirePrivilegeDrop is RunInit's own opts.RequirePrivilegeDrop. When
+// false, this keeps the exact historical behaviour — os.MkdirAll followed
+// by os.Chmod(debugDir, ...) — unchanged: a legitimate unenforced setup may
+// bind-mount or symlink .claude itself (e.g. from a host directory), and
+// refusing that would break it, with no privilege boundary at stake to
+// justify the change.
+//
+// When true this runs as root: os.MkdirAll silently succeeds (via os.Stat,
+// which follows symlinks) if debugDir already exists as anything, including
+// a symlink, and the os.Chmod that follows it then chmods whatever that
+// symlink points at — so a scion-uid process (a sidecar service, or a
+// process a pre-start hook spawned) that plants ~/.claude/debug as a
+// symlink to an arbitrary root-owned directory before this runs gets that
+// directory chmod'd to 0555 (world-readable) by root. dirfd.EnsureDirNoFollow
+// refuses a symlinked leaf outright instead of creating/resolving through
+// it, and the chmod that follows is fchmod on the fd EnsureDirNoFollow
+// already resolved, never a path-based os.Chmod that could be redirected by
+// anything changed afterward. A refusal is logged (path only) and this
+// simply skips the chmod rather than failing init closed — a planted
+// symlink must not be able to stop the workload from starting.
+func blockClaudeDebugSymlink(debugDir string, requirePrivilegeDrop bool) {
+	if !requirePrivilegeDrop {
+		if err := os.MkdirAll(debugDir, 0755); err != nil {
+			log.Error("Failed to create debug directory %s: %v", debugDir, err)
+		} else if err := os.Chmod(debugDir, 0555); err != nil {
+			log.Error("Failed to chmod debug directory %s: %v", debugDir, err)
+		} else {
+			log.Debug("Blocked debug symlink: set %s to read-only", debugDir)
+		}
+		return
+	}
+
+	// EnsureDirNoFollow only creates its own leaf (it requires the parent
+	// chain to already exist, unlike os.MkdirAll) — this runs before the
+	// harness itself has started, so $HOME/.claude may not exist yet.
+	// Ensure it first, no-follow at every component just like the leaf
+	// below, then close it: only the leaf (debugDir) needs to stay open for
+	// the chmod.
+	claudeDir, err := dirfd.EnsureDirNoFollow(filepath.Dir(debugDir), 0755)
+	if err != nil {
+		log.Error("Refusing debug directory %s: parent is not a plain directory", debugDir)
+		return
+	}
+	_ = claudeDir.Close()
+
+	d, err := dirfd.EnsureDirNoFollow(debugDir, 0755)
+	if err != nil {
+		// Refuse (e.g. a symlink or non-directory at debugDir) rather than
+		// follow/create through it — but this hardening is a convenience
+		// mitigation for a Claude Code quirk, not something the workload's
+		// startup can be allowed to depend on: log and move on instead of
+		// failing init closed.
+		log.Error("Refusing debug directory %s: not a plain directory", debugDir)
+		return
+	}
+	defer func() { _ = d.Close() }()
+	if blockClaudeDebugAfterEnsureForTest != nil {
+		blockClaudeDebugAfterEnsureForTest(debugDir)
+	}
+	if err := d.Chmod(0555); err != nil {
+		log.Error("Failed to chmod debug directory %s: %v", debugDir, err)
+		return
+	}
+	log.Debug("Blocked debug symlink: set %s to read-only", debugDir)
+}
+
+// blockClaudeDebugAfterEnsureForTest is a test-only seam: it fires after
+// EnsureDirNoFollow(debugDir) has already returned its fd and before the
+// chmod that follows. It lets a test simulate the workload swapping
+// debugDir's own entry in its parent for a symlink to a victim directory in
+// that exact window, and prove the chmod that follows still lands on the fd
+// EnsureDirNoFollow already resolved, never on whatever the entry becomes
+// afterward. Always nil in production.
+var blockClaudeDebugAfterEnsureForTest func(debugDir string)
+
 // scionEnvVarPrefixes lists environment variable prefixes that are written
 // to the scion-env file for shell sessions to source.
 var scionEnvVarPrefixes = []string{
@@ -2108,12 +2592,38 @@ var scionEnvVarPrefixes = []string{
 // filtered environment, losing env vars that were passed via docker run -e. This
 // file is sourced by the agent's .bashrc so that tool-spawned shell processes
 // recover the full environment.
+// scionDirOwnerUID is writeEnvFile's "who owns the already-open .scion dir
+// fd" call site, factored out as a package var so a test can simulate a
+// root-owned directory (uid 0) without needing the test process to actually
+// be root. Production code always leaves this at its real, fd-based
+// syscall.Fstat implementation.
+var scionDirOwnerUID = func(fd int) (uint32, error) {
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return 0, err
+	}
+	return st.Uid, nil
+}
+
+// writeEnvFileAfterWriteForTest is a test-only seam (see its call site in
+// writeEnvFile). Production code never sets it.
+var writeEnvFileAfterWriteForTest func(scionDir string)
+
 func writeEnvFile(agentHome string, uid, gid int) {
 	scionDir := filepath.Join(agentHome, ".scion")
-	if err := os.MkdirAll(scionDir, 0755); err != nil {
+	// EnsureDirNoFollow resolves and creates (if missing) .scion via
+	// mkdirat, and returns an already-open O_NOFOLLOW fd for it. Chowning
+	// through that fd below, rather than a separate path-based os.Chown
+	// after the fact, is what makes this safe: a file descriptor stays
+	// bound to the inode it was opened against no matter what the
+	// workload — which owns $HOME and this call runs as root while it's
+	// alive — does to the ".scion" directory entry afterwards.
+	scionDirFile, err := dirfd.EnsureDirNoFollow(scionDir, 0755)
+	if err != nil {
 		log.Error("Failed to create .scion dir for env file: %v", err)
 		return
 	}
+	defer func() { _ = scionDirFile.Close() }()
 
 	var lines []string
 	lines = append(lines, "# Auto-generated by sciontool init — do not edit")
@@ -2131,21 +2641,46 @@ func writeEnvFile(agentHome string, uid, gid int) {
 	}
 
 	envPath := filepath.Join(scionDir, "scion-env")
-	tmpPath := envPath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
-		log.Error("Failed to write temporary scion-env file: %v", err)
-		return
-	}
-	if err := os.Rename(tmpPath, envPath); err != nil {
-		log.Error("Failed to atomically rename scion-env file: %v", err)
-		_ = os.Remove(tmpPath)
+	content := []byte(strings.Join(lines, "\n") + "\n")
+	// Ownership of the file itself is applied by WriteFileNoFollowChown
+	// (fchown on the open fd, before the rename onto the final path), not
+	// by a separate path-based os.Chown call afterwards: this file lives
+	// under $HOME/.scion, which the scion user owns and can replace with a
+	// symlink between an old-style write+rename and a path-based chown.
+	if err := hub.WriteFileNoFollowChown(envPath, content, 0644, uid, gid); err != nil {
+		log.Error("Failed to write scion-env file: %v", err)
 		return
 	}
 
+	// Test-only seam: lets a test simulate the workload swapping out
+	// $HOME/.scion for a symlink in the window between the file write
+	// completing and the directory chown below, without needing a real
+	// inotify-driven race. Always nil in production.
+	if writeEnvFileAfterWriteForTest != nil {
+		writeEnvFileAfterWriteForTest(scionDir)
+	}
+
 	if uid > 0 {
-		// Chown the directory and file so the scion user can read them
-		_ = os.Chown(scionDir, uid, gid)
-		_ = os.Chown(envPath, uid, gid)
+		// Fstat the SAME held fd (never re-resolving the path) to check who
+		// currently owns .scion before chowning it. writeEnvFile runs on
+		// every refresh, not just the first time: once .scion is already
+		// owned by the target uid, re-chowning it to the same value on
+		// every subsequent refresh is a pure no-op that still costs a
+		// chown(2) syscall for nothing. Root-owned (uid 0) is the only
+		// state this should actually act on; any other owner is left alone
+		// rather than blindly reassigned.
+		st, serr := scionDirOwnerUID(int(scionDirFile.Fd()))
+		if serr != nil {
+			log.Error("Failed to stat %s: %v", scionDir, serr)
+		} else if st == 0 {
+			// fchown the same fd EnsureDirNoFollow resolved above — never a
+			// path-based os.Chown, which would re-resolve ".scion" from
+			// scratch and could be redirected to an arbitrary directory by
+			// a symlink the workload swapped in after that resolution.
+			if err := scionDirFile.Chown(uid, gid); err != nil {
+				log.Error("Failed to chown %s: %v", scionDir, err)
+			}
+		}
 	}
 
 	log.Debug("Wrote %d env vars to %s", len(lines)-1, envPath)
@@ -2252,6 +2787,18 @@ func splitSecretKeys(raw string) []string {
 	return keys
 }
 
+// runFetchSecretOverrides is fetchSecretOverrides's call site as a package
+// var, so a test can observe that it runs without making a real hub
+// request. Production code always leaves this at its default.
+var runFetchSecretOverrides = fetchSecretOverrides
+
+// runMetadataServerStart is (*metadata.Server).Start's call site as a
+// package var, so a test can observe that this step runs without binding a
+// real listener socket. Production code always leaves this at its default.
+var runMetadataServerStart = func(ctx context.Context, s *metadata.Server) error {
+	return s.Start(ctx)
+}
+
 // fetchSecretOverrides calls the hub's POST /api/v1/agent/secrets endpoint
 // and returns the successfully fetched values as a key→value map suitable
 // for supervisor.Config.SecretOverrides.
@@ -2296,25 +2843,179 @@ func fetchSecretOverrides(client *hub.Client, keys []string) map[string]string {
 	return overrides
 }
 
+// gcloudConfigKeepFile is the one entry cleanGcloudConfigForMetadata never
+// removes: it may be bind-mounted as a gcloud-adc secret, independent of the
+// rest of gcloud's local config state.
+const gcloudConfigKeepFile = "application_default_credentials.json"
+
+// runCleanGcloudConfigForMetadata is cleanGcloudConfigForMetadata's call
+// site as a package var, so a test can observe the requirePrivilegeDrop
+// argument it receives. Production code always leaves this at its default.
+var runCleanGcloudConfigForMetadata = cleanGcloudConfigForMetadata
+
 // cleanGcloudConfigForMetadata removes gcloud configuration state files from
 // the given directory while preserving application_default_credentials.json,
 // which may be bind-mounted as a gcloud-adc secret. Clearing the config state
 // forces gcloud to re-initialize and discover the emulated metadata server.
-func cleanGcloudConfigForMetadata(gcloudDir string) {
-	entries, err := os.ReadDir(gcloudDir)
-	if err != nil {
-		// Directory doesn't exist — nothing to clean.
+//
+// requirePrivilegeDrop is RunInit's own opts.RequirePrivilegeDrop. When
+// false this keeps the exact historical path-based behaviour (os.ReadDir +
+// os.RemoveAll by joined path) unchanged: a legitimate unenforced setup may
+// bind-mount a symlink at gcloudDir itself (e.g. a host-mounted gcloud
+// config directory), and refusing that would break it, with no privilege
+// boundary at stake to justify the behaviour change.
+//
+// When true this runs as root, after sidecar services have already started
+// (so a scion-uid process may already be alive), against a directory the
+// scion user owns: a symlink planted there — deterministically before this
+// runs, or swapped mid-walk once it's a real directory being emptied — must
+// not let root delete or descend into an attacker-chosen target.
+// dirfd.OpenDirNoFollow refuses (rather than follows) a symlinked gcloudDir
+// outright, and dirfd.RemoveContentsNoFollow removes its contents via
+// unlinkat relative to that held fd, never re-resolving a joined path
+// string. A refusal here is logged (path only) and this simply skips the
+// cleanup rather than failing init closed.
+func cleanGcloudConfigForMetadata(gcloudDir string, requirePrivilegeDrop bool) {
+	if !requirePrivilegeDrop {
+		entries, err := os.ReadDir(gcloudDir)
+		if err != nil {
+			// Directory doesn't exist — nothing to clean.
+			return
+		}
+		for _, e := range entries {
+			if e.Name() == gcloudConfigKeepFile {
+				continue
+			}
+			p := filepath.Join(gcloudDir, e.Name())
+			if err := os.RemoveAll(p); err != nil {
+				log.Debug("Could not remove gcloud config entry %s: %v", p, err)
+			}
+		}
 		return
 	}
-	for _, e := range entries {
-		if e.Name() == "application_default_credentials.json" {
+
+	dir, err := dirfd.OpenDirNoFollow(gcloudDir)
+	if err != nil {
+		// errors.Is, not os.IsNotExist: OpenDirNoFollow's error is wrapped
+		// with fmt.Errorf when a missing component is one of gcloudDir's
+		// intermediate directories rather than gcloudDir's own leaf, and
+		// os.IsNotExist only unwraps the specific *PathError/*LinkError/
+		// *SyscallError types, not an arbitrary %w chain.
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Error("Refusing to clean gcloud config dir %s: not a plain directory", gcloudDir)
+		}
+		return
+	}
+	defer func() { _ = dir.Close() }()
+
+	if _, err := dirfd.RemoveContentsNoFollow(dir, func(name string) bool { return name == gcloudConfigKeepFile }, func(name string, rerr error) {
+		log.Debug("Could not remove gcloud config entry %s: %v", name, rerr)
+	}); err != nil {
+		log.Debug("Could not clean gcloud config dir %s: %v", gcloudDir, err)
+	}
+}
+
+// servicesYAMLMaxBytes bounds readServicesYAML's enforced-mode read. A
+// legitimate scion-services.yaml describing even a large number of
+// sidecars is a few kilobytes; 1 MiB is generous headroom with no
+// legitimate case anywhere near it.
+const servicesYAMLMaxBytes = 1 << 20
+
+// runReadServicesYAML is readServicesYAML's call site as a package var, so a
+// test can observe the requirePrivilegeDrop argument it receives. Production
+// code always leaves this at its default.
+var runReadServicesYAML = readServicesYAML
+
+// readServicesYAML reads the sidecar-services config file at path.
+// requirePrivilegeDrop is RunInit's own opts.RequirePrivilegeDrop.
+//
+// When false this keeps the exact historical behaviour — os.ReadFile(path),
+// which follows a symlink at any component — unchanged: a legitimate
+// unenforced setup may symlink this file (e.g. from a mounted config
+// directory), and refusing that would break it, with no privilege boundary
+// at stake to justify the change.
+//
+// When true this reads as root, after pre-start hooks have already run as
+// the workload user (which owns $HOME/.scion outright): a symlink planted
+// at path must not let root read and act on an arbitrary file's content.
+// dirfd.OpenParentNoFollow + O_NOFOLLOW refuses (rather than follows) a
+// symlinked path, and the opened fd is fstat'd and refused unless it is a
+// single-link regular file. A refusal here is logged (path only) and
+// reported as an error, which the caller already treats as "no services to
+// start" rather than a fatal init error. The enforced branch's read is
+// bounded (servicesYAMLMaxBytes); the non-enforced branch stays genuinely
+// byte-identical to the previous os.ReadFile call, unbounded exactly as it
+// always was.
+func readServicesYAML(path string, requirePrivilegeDrop bool) ([]byte, error) {
+	if !requirePrivilegeDrop {
+		return os.ReadFile(path)
+	}
+
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Error("Refusing to read %s: %v", path, err)
+		}
+		return nil, err
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+
+	f, err := dirfd.OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Error("Refusing to read %s: not a plain file", path)
+		}
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+		return nil, err
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
+		log.Error("Refusing to read %s: not a single-link regular file", path)
+		return nil, fmt.Errorf("refusing to read %s: not a single-link regular file", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, servicesYAMLMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > servicesYAMLMaxBytes {
+		log.Error("Refusing to read %s: exceeds %d bytes", path, servicesYAMLMaxBytes)
+		return nil, fmt.Errorf("refusing to read %s: exceeds %d bytes", path, servicesYAMLMaxBytes)
+	}
+	return data, nil
+}
+
+// runServicesStart is (*services.Manager).Start's call site as a package
+// var, so a test can observe the requirePrivilegeDrop argument it receives
+// without spawning a real sidecar process. Production code always leaves
+// this at its default.
+var runServicesStart = func(ctx context.Context, m *services.Manager, specs []api.ServiceSpec, uid, gid int, username string, requirePrivilegeDrop bool) error {
+	return m.Start(ctx, specs, uid, gid, username, requirePrivilegeDrop)
+}
+
+// validateServiceSpecs is the authoritative gate for the service-Name-as-
+// path-component content-trust class (see services.ValidateServiceName's
+// own doc comment for the exact rule): it runs immediately after
+// scion-services.yaml is parsed, before any consumer of Name ever sees it,
+// and drops any spec whose Name is invalid — logged, name
+// quoted/capped/escaped via services.SafeNameForLog, never a raw
+// workload-chosen string — while keeping every other valid spec, regardless
+// of position, so one bad entry cannot take down the rest of the batch.
+// Applies unconditionally, on every runtime: a legitimate Name is a plain
+// identifier, so no valid caller is ever affected.
+func validateServiceSpecs(specs []api.ServiceSpec) []api.ServiceSpec {
+	valid := make([]api.ServiceSpec, 0, len(specs))
+	for _, spec := range specs {
+		if err := services.ValidateServiceName(spec.Name); err != nil {
+			log.Error("Dropping service with invalid name %s: %v", services.SafeNameForLog(spec.Name), err)
 			continue
 		}
-		p := filepath.Join(gcloudDir, e.Name())
-		if err := os.RemoveAll(p); err != nil {
-			log.Debug("Could not remove gcloud config entry %s: %v", p, err)
-		}
+		valid = append(valid, spec)
 	}
+	return valid
 }
 
 // hasCapSetUID checks whether the current process has CAP_SETUID (bit 7)
@@ -2332,6 +3033,12 @@ func hasCapSetUID() bool {
 // parseCapSetUID parses the content of /proc/self/status and returns true
 // if CAP_SETUID (bit 7) is present in the effective capability set.
 func parseCapSetUID(statusContent string) bool {
+	return parseCapBit(statusContent, 7) // CAP_SETUID = bit 7
+}
+
+// parseCapBit parses /proc/self/status content and returns whether the given
+// bit is set in the effective capability set (CapEff).
+func parseCapBit(statusContent string, bit uint) bool {
 	for _, line := range strings.Split(statusContent, "\n") {
 		if strings.HasPrefix(line, "CapEff:") {
 			hexStr := strings.TrimSpace(strings.TrimPrefix(line, "CapEff:"))
@@ -2339,7 +3046,7 @@ func parseCapSetUID(statusContent string) bool {
 			if err != nil {
 				return false
 			}
-			return caps&(1<<7) != 0 // CAP_SETUID = bit 7
+			return caps&(1<<bit) != 0
 		}
 	}
 	return false

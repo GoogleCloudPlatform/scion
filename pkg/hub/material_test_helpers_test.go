@@ -294,8 +294,11 @@ func (r *recordingMaterialAuditor) LogAgentSecretReadEvent(ctx context.Context, 
 // without erroring (TestMaterialAudit_EmittedWithoutAuditLoggerInterfaceChange).
 type plainAuditLogger struct{}
 
-func (plainAuditLogger) LogBrokerAuthEvent(context.Context, *BrokerAuthEvent) error   { return nil }
-func (plainAuditLogger) LogGCPTokenEvent(context.Context, *GCPTokenEvent) error       { return nil }
+func (plainAuditLogger) LogBrokerAuthEvent(context.Context, *BrokerAuthEvent) error { return nil }
+func (plainAuditLogger) LogGCPTokenEvent(context.Context, *GCPTokenEvent) error     { return nil }
+func (plainAuditLogger) LogGCSLinkFetchEvent(context.Context, *GCSLinkFetchEvent) error {
+	return nil
+}
 func (plainAuditLogger) LogInviteAuditEvent(context.Context, *InviteAuditEvent) error { return nil }
 func (plainAuditLogger) LogLifecycleHookEvent(context.Context, *LifecycleHookEvent) error {
 	return nil

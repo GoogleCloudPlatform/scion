@@ -311,17 +311,14 @@ describe('chat page — deep-linked thread header', () => {
 });
 
 describe('chat page — mobile swipe navigation', () => {
-  beforeAll(() => {
-    (window as any).innerWidth = 400;
-  });
-
-  afterEach(() => {
-    (window as any).innerWidth = 400;
-  });
-
+  // The element is never connected (see the file doc comment), so the
+  // connectedCallback matchMedia listener that drives `isMobileLayout` in
+  // real usage never runs — set it directly here, the same way `mobilePanel`
+  // is set directly below, instead of mutating `window.innerWidth`.
   it('swipes right from the conversation to the rail, and back left', () => {
     vi.useFakeTimers();
     const el = createPageOnConversation();
+    el.isMobileLayout = true;
 
     swipe(el, { dx: 120 });
     expect(el.mobilePanel).toBe('left');
@@ -333,6 +330,7 @@ describe('chat page — mobile swipe navigation', () => {
   it('swipes left from the conversation to the members panel, and back right', () => {
     vi.useFakeTimers();
     const el = createPageOnConversation();
+    el.isMobileLayout = true;
 
     swipe(el, { dx: -120 });
     expect(el.mobilePanel).toBe('right');
@@ -344,6 +342,7 @@ describe('chat page — mobile swipe navigation', () => {
   it('does not run past the outermost panels', () => {
     vi.useFakeTimers();
     const el = createPage();
+    el.isMobileLayout = true;
     el.mobilePanel = 'left';
 
     swipe(el, { dx: 120 });
@@ -357,10 +356,12 @@ describe('chat page — mobile swipe navigation', () => {
   it('accepts a short fast flick but not a short slow drag', () => {
     vi.useFakeTimers();
     const flick = createPageOnConversation();
+    flick.isMobileLayout = true;
     swipe(flick, { dx: 60, durationMs: 150 });
     expect(flick.mobilePanel).toBe('left');
 
     const slow = createPageOnConversation();
+    slow.isMobileLayout = true;
     swipe(slow, { dx: 60, durationMs: 900 });
     expect(slow.mobilePanel).toBe('center');
   });
@@ -368,6 +369,7 @@ describe('chat page — mobile swipe navigation', () => {
   it('ignores a mostly vertical drag — that is the message list scrolling', () => {
     vi.useFakeTimers();
     const el = createPageOnConversation();
+    el.isMobileLayout = true;
 
     swipe(el, { dx: 120, dy: 200 });
 
@@ -376,8 +378,8 @@ describe('chat page — mobile swipe navigation', () => {
 
   it('ignores swipes on desktop viewports', () => {
     vi.useFakeTimers();
-    (window as any).innerWidth = 1400;
     const el = createPageOnConversation();
+    el.isMobileLayout = false;
 
     swipe(el, { dx: 200 });
 

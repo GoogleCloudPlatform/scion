@@ -63,6 +63,9 @@ Controls the central Hub API server.
 | `admin_emails` | list | `[]` | List of emails granted super-admin access. Listed users are always admins: they are promoted on sign-in. When the list is non-empty, an admin whose email is removed from it is demoted to [`default_user_role`](#authentication-serverauth) at the next hub restart or their next sign-in, whichever comes first. At restart, both `admin_emails` and the default role come from `settings.yaml` or the environment, so a change made only in the Admin UI (Postgres mode) takes effect at the user's next sign-in. If the default role was set only in the Admin UI, a user demoted at restart becomes Member. Two exceptions: admins promoted from **Admin > Users** (or the users API) stay admins, and nobody is demoted if the startup safety check failed (for example, no existing user matched the list at startup and there were no UI-promoted admins); demotions resume only after the configuration is fixed and the hub is restarted. Roles set from the admin UI for users who were never config admins (`member`, `viewer`) are not changed by this list. |
 | `soft_delete_retention` | duration | | Duration to retain soft-deleted agents (e.g., `"72h"`). |
 | `soft_delete_retain_files` | bool | `false` | Preserve workspace files during the soft-delete period. |
+| `async_agent_launch` | bool | `false` | **Reserved.** No create path reads this yet, so setting it has no effect until the async dispatch path lands. Once live: the non-blocking agent create kill switch — a launch is non-blocking only when this is on **and** the client request also opts in (`acceptAsyncLaunch`); clients that never opt in stay synchronous permanently. Restart required to change. |
+| `launch_timeout` | duration | `"5m"` | **Reserved.** Not yet read by any create path. Once live: the whole-launch budget for an opted-in launch, from acceptance to a terminal Hub state. Values below `30s` are rejected (the broker's fixed 20s abort margin would leave no time for a launch to run) and the default is used instead. Restart required to change. |
+| `launch_keepalive_seconds` | int | `15` | Broker keepalive interval, in seconds. Today it sets only the reaper's staleness window (when a launch is presumed lost, 8x this value); it will also be sent to the broker once the async dispatch path lands. Restart required to change. |
 | `cors` | object | | CORS configuration (see below). |
 
 #### CORS (`server.hub.cors`)
@@ -652,6 +655,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Logging | `log_level`, `log_format` |
 | CORS | `hub.cors.*`, `broker.cors` |
 | Messaging/plugins | `message_broker.*`, `plugins.*` |
+| Async agent create | `hub.async_agent_launch`, `hub.launch_timeout`, `hub.launch_keepalive_seconds` |
 
 ### Layer 1 — Operational (Postgres `hub_settings` table)
 

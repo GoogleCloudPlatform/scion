@@ -1402,14 +1402,26 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 // here is broker-wide (see hubclient.ProjectProvider.AgentCount) and, on an
 // unlimited broker, may lag up to the reconcile interval — it is not the
 // project's own agent count.
+//
+// When AgentLimitSource is "not_enforced" (Amendment A1: the P1b enforcement
+// switch is off), " (not enforced)" is appended after the count/limit, e.g.
+// "7/30 (not enforced)" — AgentLimit is still shown, since it is the real
+// resolved cap, but the suffix makes clear it is not currently rejecting
+// creates.
 func formatProviderCapacity(p hubclient.ProjectProvider) string {
 	if p.AgentCount == nil {
 		return "-"
 	}
+	var capacity string
 	if p.AgentLimit != nil {
-		return fmt.Sprintf("%d/%d", *p.AgentCount, *p.AgentLimit)
+		capacity = fmt.Sprintf("%d/%d", *p.AgentCount, *p.AgentLimit)
+	} else {
+		capacity = fmt.Sprintf("%d", *p.AgentCount)
 	}
-	return fmt.Sprintf("%d", *p.AgentCount)
+	if p.AgentLimitSource == "not_enforced" {
+		capacity += " (not enforced)"
+	}
+	return capacity
 }
 
 // providerCapacityIndicator renders the parenthesized, labeled suffix shown

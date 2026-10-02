@@ -645,6 +645,20 @@ func (e *brokerStatusError) brokerErrorMessage() string {
 	return strings.TrimSpace(e.Body)
 }
 
+// brokerErrorCode returns the machine-readable code from a broker JSON error
+// body ({"error":{"code":...}}), or "" if the body is not in that form.
+func (e *brokerStatusError) brokerErrorCode() string {
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(e.Body), &body); err == nil {
+		return body.Error.Code
+	}
+	return ""
+}
+
 func (c *ControlChannelBrokerClient) buildRequestHeaders(ctx context.Context, brokerID, method, path, query string, body []byte) (map[string]string, error) {
 	headers := map[string]string{
 		"Content-Type": "application/json",

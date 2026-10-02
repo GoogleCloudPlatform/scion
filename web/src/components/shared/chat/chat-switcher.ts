@@ -15,12 +15,13 @@
  */
 
 /**
- * Chat quick-switcher component (Cmd/Ctrl-K).
+ * Chat quick command palette component (Cmd/Ctrl-K).
  *
- * Renders a modal overlay with a search input and a filterable list of
- * conversations. Keyboard navigation (Arrow Up/Down, Enter, Escape) is
- * supported. Conversations are sorted by most recent activity first when
- * the search field is empty.
+ * Renders a labeled sl-dialog with a combobox query input and four grouped
+ * result regions (Agents, Threads, People, Documents), one global keyboard
+ * model across all four, and typed selection/dismiss/retry events. It makes
+ * no API calls and does not navigate itself — the page supplies `groups` and
+ * reacts to its events.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -40,27 +41,7 @@ import {
   type HighlightRange,
   type RankedCandidate,
 } from '../../../utils/chat-palette-match.js';
-
-/** A conversation entry displayable in the switcher. */
-export interface SwitcherConversation {
-  /** Topic UUID or DM key. */
-  conversationKey: string;
-  /** Display name: thread name, DM peer name, etc. */
-  name: string;
-  /** Project/space name for context. */
-  spaceName: string;
-  /** True for DMs, false for threads. */
-  isDM: boolean;
-  /** ISO timestamp for sorting by recency. */
-  lastActivityAt?: string;
-  /** Project ID for thread navigation (not set for DMs). */
-  projectId?: string;
-}
-
-/** Detail emitted on `switcher-select`. */
-export interface SwitcherSelectDetail {
-  conversationKey: string;
-}
+import { TouchPrimaryController } from '../../../utils/input-modality.js';
 
 /** Rows shown per group before "show more". */
 const PALETTE_GROUP_VISIBLE_LIMIT = 10;
@@ -83,30 +64,7 @@ const PALETTE_GROUP_NOUN: Record<PaletteGroup, { singular: string; plural: strin
 
 @customElement('scion-chat-switcher')
 export class ScionChatSwitcher extends LitElement {
-  /** Full list of conversations to search through. */
-  @property({ type: Array })
-  conversations: SwitcherConversation[] = [];
-
-  @state() private searchTerm = '';
-  @state() private selectedIndex = 0;
-
-  @query('#switcher-input')
-  private inputEl!: HTMLInputElement;
-
-  // ===========================================================================
-  // Grouped palette presentation (native chat quick command palette).
-  //
-  // Gated by `paletteMode`, default false. The legacy flat-list presentation
-  // above (properties, styles, render path) is completely unchanged: with
-  // `paletteMode` unset, chat-switcher.test.ts exercises that same code
-  // path unconditionally.
-  // ===========================================================================
-
-  /** Selects the grouped sl-dialog presentation instead of the legacy flat overlay. */
-  @property({ type: Boolean, attribute: 'palette-mode' })
-  paletteMode = false;
-
-  /** Whether the palette dialog is open. Only meaningful when `paletteMode` is true. */
+  /** Whether the palette dialog is open. */
   @property({ type: Boolean }) open = false;
 
   /** Per-group load state, keyed by {@link PaletteGroup}. */
@@ -137,8 +95,25 @@ export class ScionChatSwitcher extends LitElement {
   @query('#palette-query-input')
   private paletteInputEl?: HTMLInputElement;
 
+  /** Whether the device's primary pointer is touch — drives the keyboard-affordance omissions in {@link renderPalette} below. */
+  private touchPrimary = new TouchPrimaryController(this);
+
   static override styles = [
     css`
+      :host {
+        /* Combined height of the dialog's own chrome around the results
+           list at narrow widths: the input row, its border, the dialog's
+           own top/bottom margins, and -- where shown -- the keyboard-help
+           legend below the results. Measured empirically against this
+           exact layout: ~111px (6.9375rem) with the legend hidden (touch),
+           ~137px (8.5625rem) with it shown (a narrow but non-touch window,
+           since the legend is gated on touch, not on width). Rounded up
+           from the larger of the two with a small safety margin, as a named
+           property rather than a bare number in the max-height rule below,
+           so a future chrome change has one place to update. */
+        --palette-chrome-height: 9rem;
+      }
+
       .palette-dialog::part(panel) {
         width: min(560px, 92vw);
       }
@@ -179,8 +154,65 @@ export class ScionChatSwitcher extends LitElement {
       }
 
       @media (max-width: 768px) {
+        .palette-dialog::part(panel) {
+          /* Near-full-width and top-anchored (see ::part(base) below): a
+             centred panel puts the lower results under the iOS on-screen
+             keyboard, which anchoring at the top avoids. Shoelace's own
+             dialog part sets max-width to calc(100% - var(--sl-spacing-2x-large))
+             (2.25rem, i.e. 36px, by default) on this same part, which
+             otherwise clamps width below well before 100vw - 1rem at narrow
+             widths (354px, not 374px, at a 390px viewport) -- this rule
+             needs its own max-width to actually win that clamp, not just a
+             width.
+             Specificity is not what decides this either way: per CSS
+             Cascade 4's "Context" rule, a ::part() declaration from this
+             outer tree always wins over the shadow tree's own styles for a
+             given property, regardless of either rule's specificity or
+             source order -- which is exactly why plain width above already
+             took effect on its own. max-width only needed its own explicit
+             declaration here because the clamp comes from that same
+             property, not because of any specificity contest. */
+          width: calc(100vw - 1rem);
+          max-width: calc(100vw - 1rem);
+          margin-top: max(env(safe-area-inset-top), 0.5rem);
+        }
+
+        .palette-dialog::part(base) {
+          align-items: flex-start;
+        }
+
         .palette-results {
           grid-template-columns: 1fr;
+          /* Neither vh nor dvh shrinks for the iOS keyboard, so a fixed 50vh
+             here would leave the bottom rows hidden under it --
+             --palette-vvh (set from window.visualViewport's own height while
+             open, see _onVisualViewportResize) does shrink.
+             --palette-chrome-height (defined on :host above) is the
+             dialog's own header, input row and margins. Falls back to
+             100dvh when visualViewport isn't available at all, so this
+             never regresses to an unbounded scroller. */
+          max-height: calc(var(--palette-vvh, 100dvh) - var(--palette-chrome-height));
+          overscroll-behavior: contain;
+        }
+      }
+
+      /* Tap targets: at least 44x44 for every interactive row/button, per
+         Apple/WCAG touch-target guidance — not needed on desktop, where
+         pointer precision makes the smaller default sizing fine. */
+      @media (hover: none) and (pointer: coarse) {
+        .palette-option {
+          /* .palette-option's own padding (0.5rem top+bottom = 16px) is
+             added on top of min-height under the default content-box
+             sizing, inflating every row to 60px instead of the intended
+             44px minimum — border-box folds the padding back into that
+             44px instead of adding to it. */
+          box-sizing: border-box;
+          min-height: 44px;
+          justify-content: center;
+        }
+
+        .palette-group-cell sl-button::part(base) {
+          min-height: 44px;
         }
       }
 
@@ -211,10 +243,14 @@ export class ScionChatSwitcher extends LitElement {
        * Pointer affordance only — hover must never change which row Enter
        * would commit. A CSS-only :hover state (rather than a @mouseenter
        * handler updating activeId) guarantees that: hovering repaints
-       * nothing but appearance.
+       * nothing but appearance. Scoped to hover-capable devices: on touch,
+       * :hover sticks after a tap until the next tap lands elsewhere, which
+       * would otherwise leave a stale highlighted row.
        */
-      .palette-option:hover:not(.active) {
-        background: var(--scion-bg-subtle, #f8fafc);
+      @media (hover: hover) {
+        .palette-option:hover:not(.active) {
+          background: var(--scion-bg-subtle, #f8fafc);
+        }
       }
 
       .palette-option mark {
@@ -226,10 +262,19 @@ export class ScionChatSwitcher extends LitElement {
 
       .palette-secondary {
         font-size: var(--chat-fs-base);
-        color: var(--scion-text-muted, #94a3b8);
+        /* Not --scion-text-muted: that token (neutral-500 in light mode)
+           fails WCAG AA (4.34:1) against the selected row's
+           --scion-bg-subtle background. --scion-text-secondary is a
+           theme-aware token already darker in light mode and lighter in
+           dark mode than --scion-text-muted, clearing AA against
+           --scion-bg-subtle in both themes (a raw --scion-neutral-600
+           value would pass in light mode but fail badly in dark mode,
+           where that scale point is a dark gray on a dark background). */
+        color: var(--scion-text-secondary, #475569);
       }
 
       .palette-empty,
+      .palette-empty-overall,
       .palette-loading,
       .palette-group-error,
       .palette-group-incomplete {
@@ -264,6 +309,14 @@ export class ScionChatSwitcher extends LitElement {
         font-family: inherit;
         font-size: var(--chat-fs-xs);
         background: var(--scion-bg-subtle, #f1f5f9);
+        /* Not the surrounding .palette-help's inherited --scion-text-muted:
+           that token fails WCAG AA against this chip's own
+           --scion-bg-subtle background in light mode. --scion-text-secondary
+           is theme-aware (darker in light mode, lighter in dark mode) and
+           clears AA against --scion-bg-subtle in both — see
+           .palette-secondary's own comment above for why a raw
+           --scion-neutral-600 value specifically would not. */
+        color: var(--scion-text-secondary, #475569);
       }
 
       .palette-status {
@@ -275,213 +328,7 @@ export class ScionChatSwitcher extends LitElement {
         white-space: nowrap;
       }
     `,
-    css`
-      :host {
-        display: block;
-      }
-
-      .overlay {
-        position: fixed;
-        inset: 0;
-        z-index: 9999;
-        display: flex;
-        align-items: flex-start;
-        justify-content: center;
-        padding-top: 15vh;
-        background: rgba(0, 0, 0, 0.4);
-      }
-
-      .panel {
-        width: min(520px, 90vw);
-        max-height: 60vh;
-        display: flex;
-        flex-direction: column;
-        background: var(--scion-surface, #fff);
-        border: 1px solid var(--scion-border, #e2e8f0);
-        border-radius: 0.5rem;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
-        overflow: hidden;
-      }
-
-      .search-row {
-        display: flex;
-        align-items: center;
-        padding: 0.75rem 1rem;
-        border-bottom: 1px solid var(--scion-border, #e2e8f0);
-        gap: 0.5rem;
-      }
-
-      .search-row sl-icon {
-        color: var(--scion-text-muted, #64748b);
-        font-size: var(--chat-fs-2xl);
-      }
-
-      .search-row input {
-        flex: 1;
-        border: none;
-        outline: none;
-        font-size: var(--chat-fs-xl);
-        background: transparent;
-        color: var(--scion-text, #1e293b);
-      }
-
-      .search-row input::placeholder {
-        color: var(--scion-text-muted, #94a3b8);
-      }
-
-      .results {
-        overflow-y: auto;
-        max-height: calc(60vh - 3.5rem);
-      }
-
-      .empty {
-        padding: 2rem 1rem;
-        text-align: center;
-        color: var(--scion-text-muted, #94a3b8);
-        font-size: var(--chat-fs-lg);
-      }
-
-      .item {
-        display: flex;
-        flex-direction: column;
-        padding: 0.5rem 1rem;
-        cursor: pointer;
-        gap: 0.125rem;
-        border-left: 3px solid transparent;
-      }
-
-      .item:hover,
-      .item.selected {
-        background: var(--scion-bg-subtle, #f1f5f9);
-        border-left-color: var(--scion-primary, #3b82f6);
-      }
-
-      .item-name {
-        font-size: var(--chat-fs-lg);
-        font-weight: 500;
-        color: var(--scion-text, #1e293b);
-      }
-
-      .item-context {
-        font-size: var(--chat-fs-base);
-        color: var(--scion-text-muted, #94a3b8);
-      }
-
-      .dm-badge {
-        display: inline-block;
-        font-size: var(--chat-fs-sm);
-        padding: 0 0.25rem;
-        border-radius: 0.125rem;
-        background: var(--scion-bg-subtle, #f1f5f9);
-        color: var(--scion-text-muted, #64748b);
-        margin-left: 0.25rem;
-      }
-
-      .shortcut-hint {
-        padding: 0.375rem 1rem;
-        font-size: var(--chat-fs-sm);
-        color: var(--scion-text-muted, #94a3b8);
-        border-top: 1px solid var(--scion-border, #e2e8f0);
-        display: flex;
-        gap: 1rem;
-      }
-
-      kbd {
-        display: inline-block;
-        padding: 0 0.25rem;
-        border: 1px solid var(--scion-border, #e2e8f0);
-        border-radius: 0.125rem;
-        font-family: inherit;
-        font-size: var(--chat-fs-xs);
-        background: var(--scion-bg-subtle, #f1f5f9);
-      }
-    `,
   ];
-
-  override firstUpdated(): void {
-    if (this.paletteMode) return;
-    // Autofocus the input after render.
-    requestAnimationFrame(() => {
-      this.inputEl?.focus();
-    });
-  }
-
-  private get filtered(): SwitcherConversation[] {
-    const term = this.searchTerm.toLowerCase().trim();
-    let list = this.conversations;
-
-    if (term) {
-      list = list.filter(
-        (c) => c.name.toLowerCase().includes(term) || c.spaceName.toLowerCase().includes(term)
-      );
-    }
-
-    // Sort by most recent activity first.
-    return [...list].sort((a, b) => {
-      const ta = a.lastActivityAt ? new Date(a.lastActivityAt).getTime() : 0;
-      const tb = b.lastActivityAt ? new Date(b.lastActivityAt).getTime() : 0;
-      return tb - ta;
-    });
-  }
-
-  private handleInput(e: InputEvent): void {
-    this.searchTerm = (e.target as HTMLInputElement).value;
-    this.selectedIndex = 0;
-  }
-
-  private handleKeydown(e: KeyboardEvent): void {
-    const items = this.filtered;
-    switch (e.key) {
-      case 'ArrowDown':
-        e.preventDefault();
-        this.selectedIndex = Math.min(this.selectedIndex + 1, items.length - 1);
-        this.scrollSelectedIntoView();
-        break;
-      case 'ArrowUp':
-        e.preventDefault();
-        this.selectedIndex = Math.max(this.selectedIndex - 1, 0);
-        this.scrollSelectedIntoView();
-        break;
-      case 'Enter':
-        e.preventDefault();
-        if (items.length > 0 && this.selectedIndex < items.length) {
-          this.selectConversation(items[this.selectedIndex]);
-        }
-        break;
-      case 'Escape':
-        e.preventDefault();
-        this.close();
-        break;
-    }
-  }
-
-  private scrollSelectedIntoView(): void {
-    requestAnimationFrame(() => {
-      const selected = this.shadowRoot?.querySelector('.item.selected');
-      selected?.scrollIntoView({ block: 'nearest' });
-    });
-  }
-
-  private selectConversation(conv: SwitcherConversation): void {
-    this.dispatchEvent(
-      new CustomEvent<SwitcherSelectDetail>('switcher-select', {
-        detail: { conversationKey: conv.conversationKey },
-        bubbles: true,
-        composed: true,
-      })
-    );
-  }
-
-  private close(): void {
-    this.dispatchEvent(new CustomEvent('switcher-close', { bubbles: true, composed: true }));
-  }
-
-  private handleOverlayClick(e: MouseEvent): void {
-    // Close only when clicking the backdrop, not the panel.
-    if ((e.target as HTMLElement)?.classList.contains('overlay')) {
-      this.close();
-    }
-  }
 
   // ---------------------------------------------------------------------
   // Grouped palette: ranking, DOM option IDs, keyboard, and rendering.
@@ -562,7 +409,6 @@ export class ScionChatSwitcher extends LitElement {
   }
 
   override willUpdate(changed: PropertyValues<ScionChatSwitcher>): void {
-    if (!this.paletteMode) return;
     // `queryText` is a private @state field: TypeScript's `keyof` on a class
     // omits private/protected member names, so PropertyValues<T>'s generic
     // `has<K extends keyof T>` rejects the literal even though the field is
@@ -576,6 +422,13 @@ export class ScionChatSwitcher extends LitElement {
       this.committed = false;
       this.expandedGroups = new Set();
     }
+    if (changed.has('open')) {
+      if (this.open) {
+        this._startVisualViewportTracking();
+      } else {
+        this._stopVisualViewportTracking();
+      }
+    }
     if (changedKeys.has('queryText')) {
       // A query edit resets manual navigation and any show-more expansion —
       // the new match set starts back at each group's first 10 rows.
@@ -585,6 +438,51 @@ export class ScionChatSwitcher extends LitElement {
       const ranked = this.rankedPaletteCandidates;
       this.reconcileActiveId(ranked, changedKeys.has('queryText'));
     }
+  }
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    // A reconnect while `open` is already `true` (its value unchanged
+    // across the disconnect/reconnect) never flips `willUpdate`'s own
+    // `changed.has('open')` check, so that path alone would never restart
+    // tracking here even though `disconnectedCallback` always tears it
+    // down. Not reachable today (the switcher is never moved/reparented
+    // while open), but a future change that does so should not silently
+    // lose vvh tracking.
+    if (this.open) this._startVisualViewportTracking();
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this._stopVisualViewportTracking();
+  }
+
+  /**
+   * Neither `vh` nor `dvh` shrinks when the iOS on-screen keyboard opens, so
+   * a `50vh`-based results scroller would keep the lower rows hidden under
+   * it. `window.visualViewport` does shrink, so its height is mirrored onto
+   * `--palette-vvh` on this host while open, which the narrow-viewport
+   * results sizing (see styles) consumes instead of a fixed viewport unit.
+   * Desktop never sets this custom property, so its own `50vh` rule is
+   * unaffected.
+   */
+  private readonly _onVisualViewportResize = (): void => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    this.style.setProperty('--palette-vvh', `${vv.height}px`);
+  };
+
+  private _startVisualViewportTracking(): void {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    vv.addEventListener('resize', this._onVisualViewportResize);
+    this._onVisualViewportResize();
+  }
+
+  private _stopVisualViewportTracking(): void {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    vv.removeEventListener('resize', this._onVisualViewportResize);
   }
 
   private handlePaletteQueryInput(e: InputEvent): void {
@@ -633,6 +531,36 @@ export class ScionChatSwitcher extends LitElement {
   private nonEmptyPaletteGroups(ranked: Array<RankedCandidate<PaletteCandidate>>): PaletteGroup[] {
     const present = new Set(ranked.map((r) => r.candidate.group));
     return PALETTE_GROUP_ORDER.filter((g) => present.has(g));
+  }
+
+  /**
+   * True once every present group has finished loading and none of them
+   * matched anything. A `role=listbox` requires at least one real
+   * `role=option`/`role=group` descendant (WAI-ARIA's required-owned-elements
+   * rule); each individual group's own "No matches" text is a plain,
+   * unroled placeholder, so a query (or an empty index) that matches nothing
+   * anywhere would otherwise leave the listbox with none. This is checked
+   * only once every present group is done loading, so the placeholder never
+   * claims "no results" while a group is still in flight.
+   */
+  private paletteHasNoResultsAnywhere(): boolean {
+    if (this.rankedPaletteCandidates.length > 0) return false;
+    return PALETTE_GROUP_ORDER.every((g) => this.groups[g]?.status !== 'loading');
+  }
+
+  /**
+   * IDs the listbox owns via `aria-owns`, in reading order. The listbox
+   * element itself has no DOM children (see `renderPalette`) — each group's
+   * `role=group` region lives inside its own grid cell alongside its
+   * retry/show-more controls, which `aria-owns` cannot be used to select
+   * around, so the region is reattached to the listbox this way instead.
+   */
+  private paletteListboxOwnedIds(): string {
+    const ids: string[] = PALETTE_GROUP_ORDER.filter((g) => this.groups[g]).map((g) =>
+      this.paletteGroupRegionId(g)
+    );
+    if (this.paletteHasNoResultsAnywhere()) ids.push('palette-empty-overall');
+    return ids.join(' ');
   }
 
   /**
@@ -817,6 +745,24 @@ export class ScionChatSwitcher extends LitElement {
     return html`${parts}`;
   }
 
+  /** The `role=group` element's own DOM ID for {@link group} — referenced by the listbox's `aria-owns` (see `renderPalette`), since this element is not one of the listbox's own DOM children (see renderPaletteGroup's doc comment below). */
+  private paletteGroupRegionId(group: PaletteGroup): string {
+    return `palette-group-region-${group}`;
+  }
+
+  /**
+   * One grid cell: a plain (unroled) wrapper around the group's `role=group`
+   * region (heading, loading/empty text, and `role=option` rows only — the
+   * content WAI-ARIA's listbox permits) plus, as its *siblings* rather than
+   * its descendants, the group's retry/incomplete/show-more controls.
+   * `role=listbox`/`role=group` forbid an interactive `role=button`
+   * descendant anywhere in their subtree (axe's aria-required-children
+   * flags it even nested several levels down through unroled divs), so
+   * those controls must sit outside the `role=group` element entirely — see
+   * `renderPalette`'s `aria-owns`, which reattaches the (DOM-external)
+   * region to the listbox for assistive tech despite this split. The wrapper
+   * keeps them all stacked in one visual reading order regardless.
+   */
   private renderPaletteGroup(group: PaletteGroup): unknown {
     const state = this.groups[group];
     if (!state) return nothing;
@@ -828,11 +774,51 @@ export class ScionChatSwitcher extends LitElement {
     const hiddenCount = ranked.length - visible.length;
 
     return html`
-      <div role="group" aria-labelledby="palette-heading-${group}">
-        <div id="palette-heading-${group}" class="palette-group-heading">${label}</div>
-        ${state.status === 'loading' && state.candidates.length === 0
-          ? html`<div class="palette-loading">Loading…</div>`
-          : nothing}
+      <div class="palette-group-cell" data-palette-group=${group}>
+        <div
+          id=${this.paletteGroupRegionId(group)}
+          role="group"
+          aria-labelledby="palette-heading-${group}"
+        >
+          <div id="palette-heading-${group}" class="palette-group-heading">${label}</div>
+          ${state.status === 'loading' && state.candidates.length === 0
+            ? html`<div class="palette-loading">Loading…</div>`
+            : nothing}
+          ${state.status === 'loading' && state.candidates.length > 0 && ranked.length === 0
+            ? html`<div class="palette-loading">Loading more…</div>`
+            : nothing}
+          ${state.status !== 'loading' && state.status !== 'error' && ranked.length === 0
+            ? html`<div class="palette-empty">No matches</div>`
+            : nothing}
+          ${visible.map(
+            (r) => html`
+              <div
+                id=${this.domIdFor(r.candidate.id)}
+                role="option"
+                aria-selected=${r.candidate.id === this.activeId}
+                class="palette-option ${r.candidate.id === this.activeId ? 'active' : ''}"
+                @click=${() => {
+                  this.manualSelection = true;
+                  this.setActiveId(r.candidate.id);
+                  this.commitActivePaletteCandidate();
+                }}
+              >
+                <div>
+                  ${r.highlightField === 'label'
+                    ? this.renderHighlighted(r.candidate.label, r.highlight)
+                    : r.candidate.label}
+                </div>
+                ${r.candidate.secondaryLabel
+                  ? html`<div class="palette-secondary">
+                      ${r.highlightField === 'secondaryLabel'
+                        ? this.renderHighlighted(r.candidate.secondaryLabel, r.highlight)
+                        : r.candidate.secondaryLabel}
+                    </div>`
+                  : nothing}
+              </div>
+            `
+          )}
+        </div>
         ${state.status === 'error'
           ? html`
               <div class="palette-group-error">
@@ -853,37 +839,6 @@ export class ScionChatSwitcher extends LitElement {
               </div>
             `
           : nothing}
-        ${state.status !== 'loading' && state.status !== 'error' && ranked.length === 0
-          ? html`<div class="palette-empty">No matches</div>`
-          : nothing}
-        ${visible.map(
-          (r) => html`
-            <div
-              id=${this.domIdFor(r.candidate.id)}
-              role="option"
-              aria-selected=${r.candidate.id === this.activeId}
-              class="palette-option ${r.candidate.id === this.activeId ? 'active' : ''}"
-              @click=${() => {
-                this.manualSelection = true;
-                this.setActiveId(r.candidate.id);
-                this.commitActivePaletteCandidate();
-              }}
-            >
-              <div>
-                ${r.highlightField === 'label'
-                  ? this.renderHighlighted(r.candidate.label, r.highlight)
-                  : r.candidate.label}
-              </div>
-              ${r.candidate.secondaryLabel
-                ? html`<div class="palette-secondary">
-                    ${r.highlightField === 'secondaryLabel'
-                      ? this.renderHighlighted(r.candidate.secondaryLabel, r.highlight)
-                      : r.candidate.secondaryLabel}
-                  </div>`
-                : nothing}
-            </div>
-          `
-        )}
         ${hiddenCount > 0
           ? html`
               <div class="palette-show-more">
@@ -917,9 +872,13 @@ export class ScionChatSwitcher extends LitElement {
       return `${matchCount} matching ${matchCount === 1 ? noun.singular : noun.plural}`;
     }
 
-    const loadingGroups = presentGroups.filter(
-      (g) => this.groups[g]!.status === 'loading' && this.groups[g]!.candidates.length === 0
-    );
+    // Not gated on `candidates.length === 0`: a group can be `loading` with
+    // partial (progressively-published) candidates already in — e.g.
+    // Agents mid-pagination — and still needs to announce as loading, since
+    // its current match count (for a query that only matches a page not in
+    // yet) can otherwise misreport as a final "0 matching results" that
+    // reads as "this doesn't exist" rather than "still loading".
+    const loadingGroups = presentGroups.filter((g) => this.groups[g]!.status === 'loading');
     if (loadingGroups.length === presentGroups.length) {
       return 'Loading…';
     }
@@ -955,8 +914,8 @@ export class ScionChatSwitcher extends LitElement {
             aria-expanded="true"
             aria-controls="palette-result-list"
             aria-activedescendant=${activeDomId ?? nothing}
-            aria-describedby="palette-keyboard-help"
-            placeholder="Search agents, threads, people…"
+            aria-describedby=${this.touchPrimary.isTouch ? nothing : 'palette-keyboard-help'}
+            placeholder="Search agents, threads, people, documents…"
             .value=${this.queryText}
             autocomplete="off"
             @input=${this.handlePaletteQueryInput}
@@ -965,16 +924,37 @@ export class ScionChatSwitcher extends LitElement {
             @compositionend=${this.handlePaletteCompositionEnd}
           />
         </div>
-        <div id="palette-result-list" role="listbox" class="palette-results" aria-label="Results">
+        <div
+          id="palette-result-list"
+          role="listbox"
+          aria-label="Results"
+          aria-owns=${this.paletteListboxOwnedIds()}
+        ></div>
+        <div class="palette-results">
           ${this.renderPaletteGroup('agents')} ${this.renderPaletteGroup('threads')}
-          ${this.renderPaletteGroup('people')}
+          ${this.renderPaletteGroup('people')} ${this.renderPaletteGroup('documents')}
+          ${this.paletteHasNoResultsAnywhere()
+            ? html`<div
+                id="palette-empty-overall"
+                class="palette-empty-overall"
+                role="option"
+                aria-disabled="true"
+                aria-selected="false"
+              >
+                No matching results
+              </div>`
+            : nothing}
         </div>
-        <div id="palette-keyboard-help" class="palette-help">
-          <span><kbd>Tab</kbd> next group</span>
-          <span><kbd>↑↓</kbd> navigate</span>
-          <span><kbd>↵</kbd> open</span>
-          <span><kbd>esc</kbd> close</span>
-        </div>
+        ${this.touchPrimary.isTouch
+          ? nothing
+          : html`
+              <div id="palette-keyboard-help" class="palette-help">
+                <span><kbd>Tab</kbd> next group</span>
+                <span><kbd>↑↓</kbd> navigate</span>
+                <span><kbd>↵</kbd> open</span>
+                <span><kbd>esc</kbd> close</span>
+              </div>
+            `}
         <div class="palette-status" role="status" aria-live="polite">
           ${this.paletteStatusText()}
         </div>
@@ -983,54 +963,7 @@ export class ScionChatSwitcher extends LitElement {
   }
 
   override render() {
-    if (this.paletteMode) {
-      return this.renderPalette();
-    }
-    const items = this.filtered;
-    return html`
-      <div class="overlay" @click=${this.handleOverlayClick} @keydown=${this.handleKeydown}>
-        <div class="panel">
-          <div class="search-row">
-            <sl-icon name="search"></sl-icon>
-            <input
-              id="switcher-input"
-              type="text"
-              placeholder="Search conversations..."
-              .value=${this.searchTerm}
-              @input=${this.handleInput}
-              autocomplete="off"
-            />
-          </div>
-          <div class="results">
-            ${items.length === 0
-              ? html`<div class="empty">
-                  ${this.searchTerm ? 'No matching conversations' : 'No conversations'}
-                </div>`
-              : items.map(
-                  (item, i) => html`
-                    <div
-                      class="item ${i === this.selectedIndex ? 'selected' : ''}"
-                      @click=${() => this.selectConversation(item)}
-                      @mouseenter=${() => {
-                        this.selectedIndex = i;
-                      }}
-                    >
-                      <div class="item-name">
-                        ${item.name} ${item.isDM ? html`<span class="dm-badge">DM</span>` : nothing}
-                      </div>
-                      <div class="item-context">${item.spaceName}</div>
-                    </div>
-                  `
-                )}
-          </div>
-          <div class="shortcut-hint">
-            <span><kbd>↑↓</kbd> navigate</span>
-            <span><kbd>↵</kbd> select</span>
-            <span><kbd>esc</kbd> close</span>
-          </div>
-        </div>
-      </div>
-    `;
+    return this.renderPalette();
   }
 }
 

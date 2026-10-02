@@ -6,6 +6,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
 import { TerminalSessionRegistry } from './terminal-sessions.js';
+import { _appFrameRefCountForTests } from '../components/shared/app-frame.js';
 
 // Mock terminal-pane custom element before importing workspace root
 vi.mock('@xterm/xterm', () => ({
@@ -708,5 +709,337 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
       })
     );
     expect(session.reconnecting).toBe(true);
+  });
+});
+
+describe('idle entries', () => {
+  class FakeSocket {
+    static instances: FakeSocket[] = [];
+    readyState = 0;
+    onopen: (() => void) | null = null;
+    onclose: ((event: { code: number; reason?: string }) => void) | null = null;
+    onmessage: ((event: { data: unknown }) => void) | null = null;
+    send = vi.fn();
+    close = vi.fn();
+    constructor(readonly url: string) {
+      FakeSocket.instances.push(this);
+    }
+    open(): void {
+      this.readyState = 1;
+      this.onopen?.();
+    }
+    data(payload = ''): void {
+      this.onmessage?.({ data: JSON.stringify({ type: 'data', data: btoa(payload) }) });
+    }
+  }
+  class FakeEventSource extends EventTarget {
+    static instances: FakeEventSource[] = [];
+    onopen: (() => void) | null = null;
+    close = vi.fn();
+    constructor(readonly url: string) {
+      super();
+      FakeEventSource.instances.push(this);
+    }
+  }
+
+  const agentId = '66666666-6666-4666-8666-666666666666';
+  let root: TerminalWorkspaceRoot;
+  let fetcher: ReturnType<typeof vi.fn>;
+  let agentPhase: string;
+
+  function agentResponse(phase: string, activity?: string): Response {
+    return new Response(JSON.stringify({ id: agentId, name: 'test', phase, activity }), {
+      status: 200,
+    });
+  }
+
+  function mySource(): FakeEventSource {
+    return FakeEventSource.instances[FakeEventSource.instances.length - 1];
+  }
+
+  function railItem(): HTMLElement {
+    return root.element.querySelector('.terminal-rail-item') as HTMLElement;
+  }
+
+  beforeEach(() => {
+    FakeSocket.instances = [];
+    FakeEventSource.instances = [];
+    agentPhase = 'running';
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    fetcher = vi.fn(() => Promise.resolve(agentResponse(agentPhase)));
+    vi.stubGlobal('fetch', fetcher);
+    vi.stubGlobal('WebSocket', FakeSocket);
+    vi.stubGlobal('EventSource', FakeEventSource);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // create(..., { deferConnect: true }) itself only skips its own
+  // layoutManager.open() call; syncSessions()'s separate "no active
+  // session" auto-select fallback would otherwise still pick up a lone new
+  // entry. The real restore path always wraps entry creation in
+  // withAutoSelectSuspended for exactly this reason, so these tests do the
+  // same to observe a deliberately-idle, unselected entry.
+  it('deferConnect leaves layoutManager state unchanged and creates no socket', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i1',
+    });
+    const before = root.layoutManager.getState();
+    const session = root.withAutoSelectSuspended(() =>
+      root.create(registry, agentId, { deferConnect: true })
+    );
+    await flush();
+    expect(root.layoutManager.getState()).toEqual(before);
+    expect(session.state.connection).toBe('idle');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('idle copy: rail says "Not connected", no Reconnect button in rail or pane, no error styling', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i2',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    await flush();
+
+    const item = railItem();
+    expect(item.dataset.connection).toBe('idle');
+    const stateLabel = item.querySelector('.terminal-state-label');
+    expect(stateLabel?.textContent).toContain('Not connected');
+    const reconnectBtn = item.querySelector<HTMLButtonElement>(
+      '[aria-label^="Reconnect"].terminal-icon-action'
+    );
+    expect(reconnectBtn?.disabled).toBe(true);
+
+    const pane = root.element.querySelector('scion-terminal-pane')!;
+    const paneReconnect = pane.shadowRoot?.querySelector('.reconnect-btn');
+    expect(paneReconnect).toBeNull();
+    const idleOverlay = pane.shadowRoot?.querySelector('.idle-overlay');
+    expect(idleOverlay).not.toBeNull();
+    expect(idleOverlay?.textContent).toContain('Select this terminal to connect');
+    const errorBanner = pane.shadowRoot?.querySelector('.error-banner');
+    expect(errorBanner).toBeNull();
+  });
+
+  it('selecting an idle entry connects it', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i3',
+    });
+    const session = root.withAutoSelectSuspended(() =>
+      root.create(registry, agentId, { deferConnect: true })
+    );
+    await flush();
+    expect(session.state.connection).toBe('idle');
+    expect(fetcher).not.toHaveBeenCalled();
+
+    // Selecting moves the pane into the visible slot, which drives
+    // setFrontmost(true) and, from 'idle', connect(). The session-level
+    // mechanics of a connect attempt are already covered by
+    // terminal-sessions.test.ts; here it is enough to prove selection is
+    // what triggers it, by observing the agent-fetch and pty-preflight
+    // requests.
+    root.select(session);
+    await flush();
+    expect(session.state.connection).not.toBe('idle');
+    await vi.waitFor(() =>
+      expect(fetcher.mock.calls.some(([url]) => String(url).includes('/pty'))).toBe(true)
+    );
+  });
+
+  // select() is also the path the saved-terminal-list restore feature uses
+  // to focus the persisted frontmost entry once it has been created idle
+  // (see terminal-persistence.ts), not just the user clicking a rail item —
+  // so a restored frontmost entering view must engage frame mode exactly
+  // like any other route into show(true), with no separate wiring needed.
+  it('selecting an idle entry also enters frame mode, the same as show(true)', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i3-frame',
+    });
+    const session = root.withAutoSelectSuspended(() =>
+      root.create(registry, agentId, { deferConnect: true })
+    );
+    await flush();
+    const start = _appFrameRefCountForTests();
+
+    root.select(session);
+    expect(_appFrameRefCountForTests()).toBe(start + 1);
+
+    root.show(false);
+    expect(_appFrameRefCountForTests()).toBe(start);
+  });
+
+  it('withAutoSelectSuspended: creating into an empty workspace selects nothing inside, but auto-selects outside', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i4',
+    });
+    root.withAutoSelectSuspended(() => {
+      root.create(registry, agentId, { deferConnect: true });
+    });
+    await flush();
+    expect(root.layoutManager.getState().single[0]).toBeNull();
+
+    const agentId2 = '77777777-7777-4777-8777-777777777777';
+    fetcher = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ id: agentId2, name: 'test2', phase: agentPhase }), {
+          status: 200,
+        })
+      )
+    );
+    vi.stubGlobal('fetch', fetcher);
+    // Closing the idle entry drives the registry back to empty, then a
+    // normal (non-suspended) create auto-selects as usual.
+    registry.list()[0].close();
+    await flush();
+    const session2 = root.create(registry, agentId2);
+    await flush();
+    expect(root.layoutManager.getState().single[0]).toBe(session2.state.key);
+  });
+
+  it('idle and metadata: a stopped agent stays idle; selecting it while still stopped shows unavailable', async () => {
+    agentPhase = 'stopped';
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i5',
+    });
+    const session = root.withAutoSelectSuspended(() =>
+      root.create(registry, agentId, { deferConnect: true })
+    );
+    await flush();
+    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThanOrEqual(1));
+    mySource().onopen?.();
+    mySource().dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({ subject: `agent.${agentId}.status`, data: { phase: 'stopped' } }),
+      })
+    );
+    // Stays idle: marking a never-connected entry unavailable would strand
+    // it (noteAgentAvailable requires everConnected).
+    expect(session.state.connection).toBe('idle');
+
+    // Selecting while still stopped behaves like today's open of a stopped
+    // agent: the attempt fails unavailable. (The independent metadata poll
+    // and the session's own attach() can race on which one first classifies
+    // the failure, so either agent-state reason is acceptable here; both
+    // are in AGENT_UNAVAILABLE_REASONS and render the same "Unavailable"
+    // copy.)
+    root.select(session);
+    await flush();
+    await vi.waitFor(() => expect(session.state.connection).toBe('unavailable'));
+    expect(['agent-phase', 'agent-stopped']).toContain(session.state.disconnectReason);
+  });
+
+  it('idle and metadata: a stopped agent stays idle until selected; selecting it once it is running connects', async () => {
+    agentPhase = 'stopped';
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i5b',
+    });
+    const session = root.withAutoSelectSuspended(() =>
+      root.create(registry, agentId, { deferConnect: true })
+    );
+    await flush();
+    expect(session.state.connection).toBe('idle');
+
+    // The agent restarts before the user ever selects the idle entry. Idle
+    // entries ignore the SSE bridge's running-rearm branch regardless (it
+    // only acts on 'unavailable' sessions), but selecting always drives a
+    // fresh connect() / attach() that sees the agent's current state.
+    agentPhase = 'running';
+    root.select(session);
+    await flush();
+    expect(session.state.connection).not.toBe('idle');
+    await vi.waitFor(() =>
+      expect(fetcher.mock.calls.some(([url]) => String(url).includes('/pty'))).toBe(true)
+    );
+  });
+
+  it('idle and metadata: a deleted agent shows "Agent was deleted." and selecting it starts no attempt', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i6',
+    });
+    const session = root.withAutoSelectSuspended(() =>
+      root.create(registry, agentId, { deferConnect: true })
+    );
+    await flush();
+    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThanOrEqual(1));
+    mySource().onopen?.();
+    mySource().dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({ subject: `agent.${agentId}.deleted`, data: {} }),
+      })
+    );
+    await vi.waitFor(() => expect(session.state.connection).toBe('unavailable'));
+    expect(session.state.disconnectReason).toBe('agent-deleted');
+    expect(session.state.error).toBe('Agent was deleted.');
+
+    // Selecting starts no attempt: setFrontmost(true) on a non-idle,
+    // never-connected session falls to maybeAutoAttempt(), which requires
+    // everConnected and so no-ops. (The metadata layer's own background poll
+    // calls fetch independently of selection, so asserting on the session's
+    // own connection/disconnectReason here is the precise check; the global
+    // fetch mock is shared with that poll.)
+    root.select(session);
+    await flush();
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-deleted');
+  });
+});
+
+describe('show() frame-mode ref counting', () => {
+  let root: TerminalWorkspaceRoot;
+  let startCount: number;
+
+  beforeEach(() => {
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    startCount = _appFrameRefCountForTests();
+  });
+
+  afterEach(() => {
+    // show(false) only releases the ref if this root itself currently holds
+    // one (its own _frameEntered flag), so one call is enough regardless of
+    // which test ran — no loop needed. The count comparison (rather than a
+    // bare call) fails loudly if a test left the ref unbalanced instead of
+    // silently leaking state into other test files.
+    root.show(false);
+    root.element.remove();
+    expect(_appFrameRefCountForTests()).toBe(startCount);
+  });
+
+  it('enters frame mode on the first show(true) and exits on show(false)', () => {
+    const start = _appFrameRefCountForTests();
+    root.show(true);
+    expect(_appFrameRefCountForTests()).toBe(start + 1);
+    root.show(false);
+    expect(_appFrameRefCountForTests()).toBe(start);
+  });
+
+  it('a repeated show(true) (successive /terminals navigations) does not inflate the count', () => {
+    const start = _appFrameRefCountForTests();
+    root.show(true);
+    root.show(true);
+    root.show(false);
+    expect(_appFrameRefCountForTests()).toBe(start);
+  });
+
+  it('a redundant show(false) before ever showing is a no-op', () => {
+    const start = _appFrameRefCountForTests();
+    root.show(false);
+    expect(_appFrameRefCountForTests()).toBe(start);
   });
 });

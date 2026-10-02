@@ -25,6 +25,13 @@ once per project, and `hub`, applied once per hub on top of it. Hubs sharing
 this infra form **one trust domain, not a hard multi-tenancy boundary** — see
 the module README for exactly what is and isn't isolated between them.
 
+The modules are safe to apply in a project that already runs other Scion
+infrastructure. Every resource name derives from a prefix (`name_prefix` for
+the shared layer, `hub_name` for a hub), and nothing existing is imported or
+adopted: a name collision fails the apply. All IAM grants are additive
+(`google_*_iam_member` only), so applying never replaces a project's existing
+IAM bindings.
+
 ## When to choose it
 
 Choose this over the manual GCP setup guide when you want:

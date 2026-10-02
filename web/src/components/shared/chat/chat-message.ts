@@ -39,7 +39,13 @@ import {
   extensionOf,
   isRecognizedFilePath,
   isMarkdownFileName,
+  formatFileSize,
+  GCS_URI_PATTERN,
+  buildGcsLinkHtml,
+  parseGcsUri,
+  resolveGcsMatch,
 } from '../../../utils/chat-file-links.js';
+import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import './chat-file-preview.js';
 import type { PreviewTarget } from './chat-file-preview.js';
 import '../code-editor.js';
@@ -200,17 +206,47 @@ const ENTITY_PATTERNS: EntityPattern[] = [
 ];
 
 /**
+ * gs:// object link pattern, appended only for a message that is eligible
+ * per the gate below (the `web.gcs_links` experiment and agent-sent) —
+ * never for a user-sent message. Leftmost-wins in `styleEntityLinksInText`
+ * means this still beats a `path-link` match starting later in the same
+ * match (e.g. `gs://bkt/workspace/x.md`, where the file-path pattern would
+ * otherwise match the `/workspace/x.md` tail): both patterns are tried and
+ * the one that starts earliest wins, and the gs:// match always starts at
+ * or before the `/workspace/...` substring it contains.
+ */
+const GCS_ENTITY_PATTERN: EntityPattern = {
+  regex: GCS_URI_PATTERN,
+  linkBuilder: (m) => {
+    const boundary = m[1];
+    const bucket = m[2];
+    const resolved = resolveGcsMatch(m);
+    // No valid object at this occurrence (a directory-like trailing '/', or
+    // the fragment/query/param continuation rule) — leave the raw matched
+    // text unchanged rather than linking a truncated name.
+    if (!resolved) return m[0];
+    return boundary + buildGcsLinkHtml(bucket, resolved.object) + resolved.suffix;
+  },
+};
+
+/**
  * Apply entity link patterns to a text segment (outside code/HTML regions).
  * Each match is replaced by the pattern's linkBuilder output. Patterns are
  * tried left-to-right through the string; the first match at each position
  * wins. This is intentionally simple: it scans linearly and does not try to
  * handle overlapping matches from different patterns.
+ *
+ * `includeGcs` appends {@link GCS_ENTITY_PATTERN} for this call only — the
+ * gate (the web.gcs_links experiment && the real sender is an agent) is
+ * evaluated once per render by the caller, not baked into a shared, mutable
+ * pattern list.
  */
-function styleEntityLinksInText(text: string): string {
+function styleEntityLinksInText(text: string, includeGcs: boolean): string {
   // Collect all matches from all patterns, then sort by position.
   const replacements: { start: number; end: number; replacement: string }[] = [];
 
-  for (const pattern of ENTITY_PATTERNS) {
+  const patterns = includeGcs ? [...ENTITY_PATTERNS, GCS_ENTITY_PATTERN] : ENTITY_PATTERNS;
+  for (const pattern of patterns) {
     // Clone the regex so each call starts from index 0.
     // Ensure the global flag is always set so re.exec() advances lastIndex
     // and cannot loop infinitely on a zero-width or non-advancing match.
@@ -254,16 +290,16 @@ function styleEntityLinksInText(text: string): string {
  *
  * Follows the exact same skip-region approach as `styleMentions()`.
  */
-function styleEntityLinks(htmlStr: string): string {
+function styleEntityLinks(htmlStr: string, includeGcs: boolean): string {
   const skip = new RegExp(ENTITY_SKIP_REGION, 'gi');
   let out = '';
   let cursor = 0;
   let match: RegExpExecArray | null;
   while ((match = skip.exec(htmlStr)) !== null) {
-    out += styleEntityLinksInText(htmlStr.slice(cursor, match.index)) + match[0];
+    out += styleEntityLinksInText(htmlStr.slice(cursor, match.index), includeGcs) + match[0];
     cursor = match.index + match[0].length;
   }
-  return out + styleEntityLinksInText(htmlStr.slice(cursor));
+  return out + styleEntityLinksInText(htmlStr.slice(cursor), includeGcs);
 }
 
 // ---------------------------------------------------------------------------
@@ -432,13 +468,6 @@ function attachmentURL(id: string): string {
   return `/api/v1/chat/attachments/${encodeURIComponent(id)}`;
 }
 
-/** Format file size for display. */
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 /**
  * Spans of rendered markdown that @mention styling must step over: code
  * regions, whose text is literal, and HTML tags, whose attributes must not be
@@ -506,6 +535,16 @@ export class ScionChatMessage extends LitElement {
   @property({ type: Boolean })
   fromAgent = false;
 
+  /**
+   * Whether the message's actual sender is an agent, independent of
+   * `fromAgent`. v2 chat-thread computes `fromAgent` as "not me" (any
+   * sender other than the current viewer, including another *user*) for
+   * layout purposes; gs:// linkification needs the real sender kind, since
+   * "user-sent messages never link" means any user, not just the viewer.
+   */
+  @property({ type: Boolean })
+  senderIsAgent = false;
+
   /** Whether the message is plain text (no markdown rendering). */
   @property({ type: Boolean })
   plain = false;
@@ -517,6 +556,15 @@ export class ScionChatMessage extends LitElement {
   /** Sender unique ID for avatar colour hashing (avoids collisions from similar names). */
   @property()
   senderId = '';
+
+  /**
+   * The store message id, set by chat-thread from the rendered message's
+   * `id`. Carried on a `gcs-link-click` event so the hub can derive the
+   * sender's SA from a message the viewer is authorized to read, without a
+   * client-supplied agent or SA identifier.
+   */
+  @property()
+  messageId = '';
 
   /** Sender display name for v2 multi-sender rendering. */
   @property()
@@ -1838,7 +1886,13 @@ export class ScionChatMessage extends LitElement {
       if (taskId !== this.renderTaskId) return;
       let rendered = renderer.render(this.body);
       rendered = styleMentions(rendered);
-      rendered = styleEntityLinks(rendered);
+      // gs:// links are gated on the server-reported feature flag AND the
+      // message being agent-sent — a user-sent message never links, however
+      // the body happens to be spelled.
+      rendered = styleEntityLinks(
+        rendered,
+        this.senderIsAgent && isFeatureEnabled('web.gcs_links')
+      );
       rendered = styleGithubRefs(rendered);
       this.renderedHtml = rendered;
     } catch {
@@ -1876,7 +1930,12 @@ export class ScionChatMessage extends LitElement {
    * handlers based on the click target.
    */
   private handleContentClick(e: MouseEvent): void {
-    // Check for path-link click first (more specific selector).
+    // Check for the more specific selectors first.
+    const gcsTarget = (e.target as HTMLElement | null)?.closest('.gcs-link[data-gcs-uri]');
+    if (gcsTarget) {
+      this.handleGcsLinkClick(e, gcsTarget as HTMLElement);
+      return;
+    }
     const pathTarget = (e.target as HTMLElement | null)?.closest('.path-link[data-file-path]');
     if (pathTarget) {
       this.handlePathLinkClick(e, pathTarget as HTMLElement);
@@ -1903,6 +1962,32 @@ export class ScionChatMessage extends LitElement {
         bubbles: true,
         composed: true,
         detail: { path: filePath },
+      })
+    );
+  }
+
+  /**
+   * Clicking a gs:// link parses `data-gcs-uri` and dispatches a composed
+   * `gcs-link-click` event carrying the bucket, object and this message's
+   * id. Unlike a path-link click, there is no project resolution and no
+   * chat-thread round-trip: chat-thread only ever assigns the event detail
+   * straight onto the preview target.
+   */
+  private handleGcsLinkClick(e: MouseEvent, target: HTMLElement): void {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const uri = target.dataset.gcsUri;
+    if (!uri) return;
+    const parsed = parseGcsUri(uri);
+    if (!parsed) return;
+    const name = parsed.object.split('/').pop() || parsed.object;
+
+    this.dispatchEvent(
+      new CustomEvent('gcs-link-click', {
+        bubbles: true,
+        composed: true,
+        detail: { bucket: parsed.bucket, object: parsed.object, name, messageId: this.messageId },
       })
     );
   }

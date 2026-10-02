@@ -280,7 +280,7 @@ impersonating a user.
 | --- | --- |
 | Human session | `ActionAttach` on the target agent; retains owner/privacy/cross-member restrictions (same as today's `agentActionPermission` default branch, `pkg/hub/authorize.go:392`-411, function `agentActionPermission`) |
 | User access token | Same human authority, intersected with credential scope and project/hub boundary; a token name or automation label is not an agent identity |
-| Agent credential | Valid current credential, lifecycle scope (`ScopeAgentLifecycle`), and sender's current project **equal to** target project; no self/parent/ancestor shortcut |
+| Agent credential | Valid current credential, lifecycle scope (`ScopeAgentLifecycle`), sender's current project **equal to** target project (no self/parent/ancestor shortcut), **and** live attach authority on the target via `authorizeAgentTargetAction(ctx, identity, target, ActionAttach)` — same-project equality alone is no longer sufficient (ptone/scion#2460, superseding the Phase 5 deferral for this one gate; see §10's Phase 5 note). No permissive fallback: an invalid/revoked delegation or an evaluator failure denies |
 | Broker credential | Only authenticated Hub→broker execution under the internal contract (§4); never direct public `/keys` authority |
 
 Key points, restated because they are easy to get backwards:
@@ -299,12 +299,24 @@ Key points, restated because they are easy to get backwards:
   registry entry from `agent.message` (`registry.go:133`, `CapabilityKind: CapabilityScope`, no
   `AgentScopes`); granting one never grants the other. `agent.attach`'s `Enforcement` list
   currently reads `["pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/pty_handlers.go"]`;
-  task 2.1 must append `"pkg/hub/authorize.go:authorizeAgentKeys"` to that list when it lands, so
-  the registry stays an accurate index of what enforces each permission.
+  task 2.1 must append `"pkg/hub/authorize_agentkeys.go:authorizeAgentKeys"` to that list when it
+  lands (the file `authorizeAgentKeys` is actually defined in), so the registry stays an accurate
+  index of what enforces each permission.
 - CLI-side project resolution must honor the selected project: resolve a unique target within it,
   never pass an empty scope that could select a same-named agent from a different project.
   Projects without a Hub ID use the existing local project identity/filter; ambiguous resolution
-  fails rather than guessing.
+  fails rather than guessing. **Clarified by task 3.1 (ptone/scion#2198/#2468 finding 3, design
+  ruling by agent-raw):** "the existing local project identity/filter" is not a CLI-only
+  concern — `agent.Manager.SendKeys` itself requires a non-empty Hub-linked project ID and fails
+  closed otherwise (see §4.3's frozen signature), so a project with no Hub ID needs a
+  manager-level entry point that accepts a different, still-unambiguous scope, not a CLI
+  workaround that invents a project-ID value or relaxes `SendKeys`'s own precondition. The
+  additive `agent.Manager.SendKeysLocal`, scoped by the caller's already-resolved local
+  project-config directory path instead of a Hub-linked project ID, is that entry point — see
+  §4.3's "Frozen manager signature" for its signature and the invariants it shares with
+  `SendKeys`. The CLI still owns resolving a unique target within whichever scope applies and
+  failing on ambiguity; it now simply has two manager entry points to call into depending on
+  which identity dimension the selected project has.
 - `api.AgentActionKeys` is registered with an **explicit** mapping in `agentActionPermission`
   (§ "Go contract types") rather than left to that function's default branch — this is what
   decision 2 means by "distinguish the route action from an independently granted authz
@@ -337,6 +349,23 @@ Key points, restated because they are easy to get backwards:
      route specifically, no target-agent lookup of any kind, successful or not, may precede or be
      required by this comparison** (AK-21c).
   5. `authorizeAgentKeys` runs only after 1-4 pass.
+
+  **Phase-boundary clarification (design-owner ruling, recorded on ptone/scion#2195):** 2.1 owns and
+  implements now, on both route shapes with real route/store-spy tests: invariant 1 (authentication
+  precedes everything), invariant 4 (the project-boundary refusal decided before any target-agent
+  lookup on the project-scoped route), invariant 5 (`authorizeAgentKeys` runs only after invariants
+  1 and 4 pass — 2 and 3 are 2.2's), and invariant 3's *non-operation-ID* half — a resolution miss
+  must use keys' own `not_found` shape, not the other resolver's. 2.1 does **not** implement
+  invariant 2 (`ValidateBody`) and does not read the request body at all; invariant 3's
+  *operation-ID* half presupposes that validation having already run, so 2.1's routing seam may
+  emit its temporary, sanitized denials (`keys_denied`, `cross_project_keys_unsupported`,
+  keys-shaped `not_found`) **without** an operation ID — never a synthesized placeholder or an ID
+  minted ahead of validation. The success path stays non-executing (no dispatch case exists yet, so
+  it falls through to the existing generic "unknown action" 404). 2.2 (ptone/scion#2196) must
+  replace this seam wholesale, not layer on top of it: `ValidateBody` → mint one real operation ID →
+  2.1's already-established ordering/resolution behavior → `authorizeAgentKeys` → remaining
+  admission/dispatch, so every outcome from validation onward carries the real ID, matching
+  invariant 3 in full.
 
   **Top-level route (T), verified consistent with these invariants today:**
   `handlers_agents_core.go`'s `set_message_mode`/`reincarnate`/`message` special cases (`:2936`,
@@ -652,6 +681,68 @@ frozen rule, each 1.2 adapter would classify differently. Frozen now, in `pkg/ag
   `OutcomeKeysOutcomeUnknown`, the same fail-safe as any other unrecognized error — never a guess
   that some proven-safe classification applies.
 
+- **Additive local-scope sibling (recorded by task 3.1, ptone/scion#2198/#2468 finding 3; design
+  ruling by agent-raw, scope explicitly extended from 1.1 to 3.1 by the campaign lead since 1.1 is
+  already merged upstream with no active owner):**
+  `SendKeysLocal(ctx context.Context, projectPath, agentSlug, expectedAgentID, keys string) error`,
+  on `pkg/agent.Manager`/`AgentManager`, alongside `SendKeys` above — not a replacement for it, and
+  never a fallback either direction fails over into. `SendKeys` and the broker/Hub contract above
+  (§4.1-§4.3's wire format, deadline, and error-classification rules) are entirely unchanged by
+  this addition; `SendKeysLocal` is reachable only from local-mode CLI callers
+  (`cmd/keys.go`/`cmd/message.go`'s `--raw` alias), never from the runtime-broker handler or any
+  Hub-side dispatch path.
+
+  This exists because `SendKeys`'s frozen precondition — a non-empty Hub-linked `projectID`,
+  matching a container's `"scion.project_id"` label — has no value to supply for a purely local
+  project that has never been linked to a Hub project: such a container carries no
+  `"scion.project_id"` label at all (`pkg/agent/run.go` sets it only from a non-empty
+  `settings.Hub.ProjectID`), so no string a caller could invent would correctly scope the lookup.
+  §3's local-resolution paragraph already required "the existing local project identity/filter" to
+  keep working for this case; `SendKeysLocal` is the manager-level primitive that makes that
+  possible without relaxing `SendKeys`'s own fail-closed precondition or inventing a synthetic
+  project-ID label value.
+
+  `projectPath` must be the non-empty, already-resolved project-config directory from
+  `config.GetResolvedProjectDir` — the same value `run.go` records as a started container's
+  `"scion.project_path"` label — never a project *name*: two local project directories can share a
+  display name, so name alone is never a safe scope (this is the one respect in which
+  `SendKeysLocal` does **not** mirror `selectAgentTarget`, the existing Stop/Delete resolution
+  helper, which does accept a name-only, unlabeled fallback — `SendKeysLocal` never does).
+
+  `SendKeysLocal` shares `SendKeys`'s entire delivery core verbatim: the same atomic
+  resolve-identity-check-execute binding (no two-step check-then-use split), the same injection
+  lock, tmux version gate, terminal-readiness probe, pre-delivery target re-verification, deadline
+  enforcement at every one of `SendKeys`'s checkpoints, sensitive-exec transport, single-attempt
+  (no-replay) delivery, and error classification (the same `ErrTargetNotFound`/
+  `ErrAgentNotRunning`/`ErrTerminalNotReady`/`ErrKeysUnsupported`/`ErrKeysNotStarted`/
+  `*agentkeys.ValidationError` return classes `SendKeys` documents above, with the identical
+  "proven before delivery began" meaning) — differing only in which identity dimension
+  (`projectID` vs. `projectPath`) resolution is scoped by. `projectPath` and `expectedAgentID` must
+  both be non-empty, checked before any resolution, identically to `SendKeys`'s own precondition; an
+  empty scope fails closed to `agentkeys.ErrTargetNotFound` rather than falling back to an unscoped
+  lookup, the same as `SendKeys`.
+
+  Path-scope resolution compares a candidate container's `"scion.project_path"` label against the
+  caller's `projectPath` through the same alias-aware rule the existing runtime backends
+  (`pkg/runtime/{docker,podman,apple_container}.go`) already apply when filtering on that label
+  (`projectkeys.LabelValuesMatch`/`ResolvedPathEqual`): a path recorded before a project directory
+  was renamed (with a symlink left behind at the old location) still resolves to the same
+  container, exactly as every other project-path-scoped command already relies on today. This is
+  not new filtering logic; it is the existing rule, applied to a second manager entry point.
+
+  Implemented in `pkg/agent/manager.go`: `SendKeys`'s body was factored into a private
+  `sendKeysCore(ctx, scope keysScope, agentSlug, expectedAgentID, keys)`, where `keysScope` carries
+  exactly one of `projectID`/`projectPath`; both `SendKeys` and `SendKeysLocal` validate their own
+  precondition and then call `sendKeysCore` with the matching scope. `resolveKeysTarget` builds its
+  `List` filter from whichever of the two label keys (`"scion.project_id"` or
+  `"scion.project_path"`) the scope carries. See `pkg/agent/sendkeyslocal_test.go` for the test
+  suite this addition shipped with (unlinked-project delivery, same-slug-different-path isolation,
+  same-directory-name-different-full-path isolation — proving name alone is not the scope —,
+  ambiguity, missing/wrong `agent_id`, wrong/missing path, a container recreated during the
+  resolve/re-verify window, path aliases via a real symlink fixture, invalid keys, an unsupported
+  backend, a lock-wait deadline, and no-internal-retry — each mirroring `SendKeys`'s own existing
+  coverage for the Hub-ID-scoped case).
+
 ### 4.4 Dispatcher/broker-client interfaces
 
 ```go
@@ -789,7 +880,8 @@ field-rejection cases, which are not the same shape as AK-3..AK-6.
 | — | All | Two logical key presses in one call | **Not supported** — no atomic sequence API; caller must issue two calls |
 | AK-18 | T/P | Human session, no `ActionAttach` on target | 403 `keys_denied` |
 | AK-19 | T/P | No authentication | 401 `unauthorized` |
-| AK-20 | T/P | Agent credential, same project, lifecycle scope | 200 `dispatched` |
+| AK-20 | T/P | Agent credential, same project, lifecycle scope, **and** live attach authority on the target (ptone/scion#2460); pre-backfill, the shared evaluator's legacy allowance counts, as for attach | 200 `dispatched` |
+| AK-20a | T/P | Agent credential, same project, lifecycle scope, but no attach authority (no live delegation edge (post-backfill), delegator lacks attach, an invalid/revoked delegation, or an evaluator failure) | 403 `keys_denied` — same-project equality alone no longer admits; no finer reason in the response, same fixed message as every other `keys_denied` cause (ptone/scion#2460) |
 | AK-21 | T | Agent credential, cross-project target that exists | 422 `cross_project_keys_unsupported` (§3.1 Option 1: resolve first, then compare) |
 | AK-21b | T | Agent credential, target ID does not exist in any project | 404 `not_found` — distinguishes "foreign" from "nonexistent" per §3.1 |
 | AK-21c | P | Agent credential, URL `{project}` (UUID or hosted `{uuid}__{slug}` form) resolves to a project != credential's project | 422 `cross_project_keys_unsupported`, decided before any target-agent lookup — target existence is never queried (§3.1) |
@@ -1247,7 +1339,16 @@ size reduction, not just a logical consequence to leave implicit.
   (`pkg/hub/agentrole.go:56`-66); the more restricted roles do not have it. Concretely: a
   non-`full`-role agent that can successfully send `message --raw` to a same-project agent today
   will get 403 `keys_denied` from the identical call once 2.3 ships, even though nothing about its
-  role or the target changed.
+  role or the target changed. **As of ptone/scion#2460, the bridge also inherits the
+  attach-relationship requirement** §3's Agent-credential row now carries: `ScopeAgentLifecycle`
+  plus same-project membership is not sufficient on its own, because `authorizeAgentKeys` also
+  requires live attach authority on the target via `authorizeAgentTargetAction`. Concretely: a
+  `full`-role, same-project agent is still denied 403 `keys_denied` from `message --raw` once 2.3
+  ships if it has no live delegation edge reaching attach authority on the target (post-backfill;
+  pre-backfill, the shared evaluator's legacy allowance admits it, same as any other attach-gated
+  action), or if its delegator lacks attach authority, or if the delegation is invalid/revoked —
+  2.3 inherits all of this automatically by calling `authorizeAgentKeys`, not a bridge-specific
+  check.
 - **Humans.** A human with message authority but not `ActionAttach` on the target sees the same
   shift: allowed today via `authorizeAgentMessage`, denied after 2.3 via `authorizeAgentKeys`.
 
@@ -1431,7 +1532,17 @@ deliberately left absent) then 2.2 (`ExecuteAgentKeys`, limits, audit, consuming
 Dispatcher`); 2.3 follows 2.2 and 0.2 (owns the message-handler cutover using the field table in
 §6.1); client owner → 3.1 (hubclient + CLI `keys`/alias, including the `cmd/keys.go` help-text fix
 from §2.3); docs/inventory owner → 3.2. Phase 5 (relationship-authorization integration) stays
-explicitly deferred pending #2119/#2120.
+explicitly deferred pending #2119/#2120, **except** for the agent-credential gate itself:
+ptone/scion#2460 supersedes that deferral for `authorizeAgentKeys`'s agent-credential branch
+specifically — same-project equality is no longer sufficient there; see §3's Agent-credential row
+and AK-20/AK-20a. Every other
+Phase 5 scope item (the human-session branch, the broker/system-credential branch, and the wider
+relationship-authorization integration this deferral otherwise covers) remains open and deferred;
+this is a narrow, named exception to the deferral, not its closure.
+
+**Phase boundary between 2.1 and 2.2:** see §3's "Phase-boundary clarification" paragraph for the
+normative text (what 2.1 implements now vs. what 2.2 must add) and ptone/scion#2196 for 2.2's
+integration obligation in full. Kept in one place to avoid the two copies drifting.
 
 ## 11. Retirement gate and master-body decision record (AC4)
 
@@ -1561,7 +1672,13 @@ each specified in full there:**
   role has `ScopeAgentLifecycle`) that can send a same-project `message --raw` today gets 403
   `keys_denied` after 2.3 ships, and the same happens to a human with message authority but not
   `ActionAttach`. This follows from adopted decision 2 and is intentional, but is a real,
-  rollout-visible authority change alongside the size reduction above. See contract §6.3.
+  rollout-visible authority change alongside the size reduction above. As of ptone/scion#2460, the
+  bridge also inherits the attach-relationship requirement `authorizeAgentKeys`'s agent-credential
+  branch now carries: even a `full`-role, same-project agent gets 403 `keys_denied` from
+  `message --raw` if it has no live delegation edge reaching attach authority on the target
+  (post-backfill), if its delegator lacks attach authority, or if the delegation is
+  invalid/revoked — automatically, since 2.3 must call `authorizeAgentKeys` and never a
+  bridge-specific check. See contract §6.3.
 - **Bridge body-size cap (new, disclosed).** The bridge's pre-authorization read (needed to
   determine raw selection before `authorizeAgentMessage` runs) introduces a 2 MiB body-size bound
   where no bound of any kind exists on the message path today. A body built only from `msg`/`message`

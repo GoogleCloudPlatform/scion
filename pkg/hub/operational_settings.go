@@ -77,8 +77,9 @@ type sectionState struct {
 //     DefaultTemplate, DefaultHarnessConfig, DefaultMaxTurns, DefaultMaxModelCalls,
 //     DefaultMaxDuration, DefaultResources, and NotificationChannels.
 //   - File mode (BuildLayer1SnapshotFromFile): only the fields that the old
-//     reloadSettings() consumed are populated, plus DefaultHarnessConfig which
-//     is read from the top-level default_harness_config key in settings.yaml.
+//     reloadSettings() consumed are populated, plus DefaultHarnessConfig and
+//     DefaultTimezone, which are read from the top-level
+//     default_harness_config and default_timezone keys in settings.yaml.
 //     Fields like SoftDeleteRetention, DefaultTemplate, etc. remain at zero
 //     values because the old reloadSettings never applied them on reload — they
 //     are consumed only at startup. This maintains file-mode parity (the
@@ -115,6 +116,9 @@ type Layer1Snapshot struct {
 
 	// Quotas
 	EnforceBrokerQuotas *bool
+
+	// Agent secrets
+	AgentSecretsUserScopeOnly *bool
 
 	// Project defaults
 	DefaultScratchpad *bool
@@ -830,6 +834,12 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		snap.EnforceBrokerQuotas = &v
 	}
 
+	// Agent secrets
+	if k.Exists("agent_secrets.user_scope_only") {
+		v := k.Bool("agent_secrets.user_scope_only")
+		snap.AgentSecretsUserScopeOnly = &v
+	}
+
 	// Project defaults
 	if k.Exists("project_defaults.default_scratchpad") {
 		v := k.Bool("project_defaults.default_scratchpad")
@@ -945,7 +955,7 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 // are consumed at startup, not on reload). In postgres mode, the full koanf-based
 // Snapshot() populates all fields. See the Layer1Snapshot type comment for details.
 //
-// Exception: DefaultHarnessConfig, DefaultGCPIdentityMode and
+// Exception: DefaultHarnessConfig, DefaultTimezone, DefaultGCPIdentityMode and
 // DefaultGCPIdentityServiceAccountID are populated from GlobalConfig so that
 // hubAgentDefaults() reflects them in file mode, including immediately after a
 // file-mode admin PUT (reloadSettings).
@@ -980,8 +990,13 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	// AutoExposePortsEnabled, which is intentionally not populated here).
 	snap.EnforceBrokerQuotas = gc.EnforceBrokerQuotas
 
+	// Agent secrets — read from settings.yaml top-level agent_secrets
+	// section, so a file-mode admin save takes effect without a restart.
+	snap.AgentSecretsUserScopeOnly = gc.AgentSecretsUserScopeOnly
+
 	// Agent defaults — read from settings.yaml top-level keys
 	snap.DefaultHarnessConfig = gc.DefaultHarnessConfig
+	snap.DefaultTimezone = gc.DefaultTimezone
 	snap.DefaultGCPIdentityMode = gc.DefaultGCPIdentityMode
 	snap.DefaultGCPIdentityServiceAccountID = gc.DefaultGCPIdentityServiceAccountID
 
@@ -1058,6 +1073,18 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	s.config.EnforceBrokerQuotas = snap.EnforceBrokerQuotas
 	if !boolPtrEqual(oldEnforceBrokerQuotas, snap.EnforceBrokerQuotas) {
 		applied = append(applied, "enforce_broker_quotas")
+	}
+
+	// Agent secrets. Like quotas above, nil is a real, meaningful value —
+	// the permissive default (agents may write project scope) — not
+	// "unset, leave the current value alone". So this assigns
+	// unconditionally: a snapshot with AgentSecretsUserScopeOnly==nil
+	// (switch cleared, section deleted, or a PUT of {}) must flip live
+	// enforcement off immediately.
+	oldAgentSecretsUserScopeOnly := s.config.AgentSecretsUserScopeOnly
+	s.config.AgentSecretsUserScopeOnly = snap.AgentSecretsUserScopeOnly
+	if !boolPtrEqual(oldAgentSecretsUserScopeOnly, snap.AgentSecretsUserScopeOnly) {
+		applied = append(applied, "agent_secrets_user_scope_only")
 	}
 
 	// Admin emails — sanitize (TrimSpace + ToLower, drop empties) to match
@@ -1156,10 +1183,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	//
 	// Written unconditionally from the snapshot rather than only-if-non-empty,
 	// so that clearing a value in the DB clears it here too. In file mode,
-	// BuildLayer1SnapshotFromFile populates DefaultHarnessConfig and the two
-	// GCP identity defaults; other agent-defaults fields remain at zero values
-	// in file mode, so this assignment is a no-op for those fields and
-	// file-mode dispatch is unchanged.
+	// BuildLayer1SnapshotFromFile populates DefaultHarnessConfig,
+	// DefaultTimezone and the two GCP identity defaults; other agent-defaults
+	// fields remain at zero values in file mode, so this assignment is a
+	// no-op for those fields and file-mode dispatch is unchanged.
 	newDefaults := opsettings.AgentDefaultsSettings{
 		DefaultTemplate:                    snap.DefaultTemplate,
 		DefaultHarnessConfig:               snap.DefaultHarnessConfig,

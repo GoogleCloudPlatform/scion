@@ -179,7 +179,7 @@ func TestDEF127_S3b_EmptyResponseBody(t *testing.T) {
 
 func TestDEF128b_ParticipantFilter_MutationTest(t *testing.T) {
 	// This test demonstrates that removing the ParticipantID constraint
-	// from BuildLogFilter causes a non-manage user's messages to be
+	// from BuildLogFilter causes a non-full-history user's messages to be
 	// unscoped. The test constructs the filter with and without a
 	// ParticipantID to show the difference.
 
@@ -217,7 +217,7 @@ func TestDEF128b_ParticipantFilter_MutationTest(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// DEF-128b defect #1: non-manage + no user identity → deny (fail closed)
+// DEF-128b defect #1: non-full-history + no user identity → deny (fail closed)
 // ---------------------------------------------------------------------------
 
 // nonUserIdentity is a minimal Identity that does NOT implement UserIdentity.
@@ -231,7 +231,7 @@ func (n *nonUserIdentity) ID() string   { return n.id }
 func (n *nonUserIdentity) Type() string { return "synthetic" }
 
 func TestDEF128b_NonManageNonUser_Denied(t *testing.T) {
-	// A non-manage caller with no UserIdentity must be denied (403), not
+	// A non-full-history caller with no UserIdentity must be denied (403), not
 	// served an unscoped query. This is the fail-closed invariant.
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -267,7 +267,7 @@ func TestDEF128b_NonManageNonUser_Denied(t *testing.T) {
 	srv.handleAgentMessageLogs(rec, req, agent.ID)
 
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("non-manage + non-user: expected 403, got %d: %s",
+		t.Fatalf("non-full-history + non-user: expected 403, got %d: %s",
 			rec.Code, rec.Body.String())
 	}
 }
@@ -316,7 +316,8 @@ func TestDEF128b_MutA_AgentNonUser_FailClosed(t *testing.T) {
 
 	// Build an agent identity in the SAME project with ScopeProjectRead.
 	// This passes checkAgentReadScope and, via the "agent project read
-	// baseline" in CheckAccess, passes ActionRead while failing ActionManage.
+	// baseline" in CheckAccess, passes ActionRead while failing the
+	// agent.attach full-history check.
 	// Crucially, GetUserIdentityFromContext returns nil for an agent.
 	callerAgent := authzHelperAgent(project.ID, ScopeProjectRead)
 
@@ -341,7 +342,7 @@ func TestDEF128b_MutA_AgentNonUser_FailClosed(t *testing.T) {
 
 func TestDEF128b_MutB_DenialAuditLog(t *testing.T) {
 	// This test catches MUT-B: deleting the logAuthzDenial(...) call in
-	// handleAgentMessageLogs. A non-manage user who also fails ActionRead
+	// handleAgentMessageLogs. A non-full-history user who also fails ActionRead
 	// must produce both a 403 AND a structured "authorization denied" log
 	// record. Removing logAuthzDenial still returns 403 but drops the
 	// audit record — the test's log assertion fails.
@@ -370,8 +371,8 @@ func TestDEF128b_MutB_DenialAuditLog(t *testing.T) {
 	}
 
 	// Use a member user: not admin, not owner, no policies granting read
-	// on this agent. CheckAccess(ActionManage) and CheckAccess(ActionRead)
-	// both deny. The handler should call logAuthzDenial then return 403.
+	// on this agent. The agent.attach full-history check and
+	// CheckAccess(ActionRead) both deny. The handler should call logAuthzDenial then return 403.
 	member := authzHelperMember()
 
 	req := httptest.NewRequest(http.MethodGet,

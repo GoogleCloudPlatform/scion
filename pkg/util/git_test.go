@@ -366,6 +366,354 @@ func TestCreateWorktree_RejectsInsideContainer(t *testing.T) {
 	}
 }
 
+// addWorktreeDirect runs `git -C repoRoot worktree add` directly, not
+// through CreateWorktree, whose own directory computation assumes the new
+// worktree's parent directory is already inside a git working tree -- not
+// true for a genuine sibling of repoRoot, which is exactly the shape these
+// tests need to create.
+func addWorktreeDirect(t *testing.T, repoRoot, path, branch string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "-b", branch, path)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, output)
+	}
+}
+
+// TestSplitPorcelainRecords_HandlesCRLF proves CRLF-terminated porcelain
+// output is still split into the correct per-worktree records: a literal
+// "\r\n\r\n" blank-line separator shares no "\n\n" substring with an
+// unnormalized split, so without the CRLF-to-LF normalization this would
+// return the whole input as a single record instead of two, and each
+// record's "worktree <path>" line would carry a trailing "\r" into the
+// parsed path.
+func TestSplitPorcelainRecords_HandlesCRLF(t *testing.T) {
+	input := "worktree /repo\r\nHEAD abc123\r\nbranch refs/heads/main\r\n\r\nworktree /repo/.scion-worktrees/wt1\r\nHEAD def456\r\nbranch refs/heads/feature\r\n"
+	records := splitPorcelainRecords(input)
+	if len(records) != 2 {
+		t.Fatalf("splitPorcelainRecords(CRLF input) returned %d record(s), want 2: %q", len(records), records)
+	}
+	if !strings.Contains(records[0], "worktree /repo\n") {
+		t.Errorf("record[0] = %q, want a \"worktree /repo\" line with no trailing \\r", records[0])
+	}
+	if !strings.Contains(records[1], "worktree /repo/.scion-worktrees/wt1\n") {
+		t.Errorf("record[1] = %q, want a \"worktree /repo/.scion-worktrees/wt1\" line with no trailing \\r", records[1])
+	}
+}
+
+// TestSplitPorcelainRecords_PlainLFUnchanged proves the normalization step
+// is a no-op on ordinary LF-only output (what git actually emits on Linux),
+// so the CRLF handling added for TestSplitPorcelainRecords_HandlesCRLF does
+// not change behavior on the common path.
+func TestSplitPorcelainRecords_PlainLFUnchanged(t *testing.T) {
+	input := "worktree /repo\nHEAD abc123\n\nworktree /repo/.scion-worktrees/wt1\nHEAD def456\n"
+	records := splitPorcelainRecords(input)
+	if len(records) != 2 {
+		t.Fatalf("splitPorcelainRecords(LF input) returned %d record(s), want 2: %q", len(records), records)
+	}
+}
+
+func TestIsRegisteredWorktree_MainWorktreeAccepted(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	ok, err := IsRegisteredWorktree(mainRepo, mainRepo)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if !ok {
+		t.Error("expected the main repository itself to be a registered worktree")
+	}
+}
+
+// TestIsRegisteredWorktree_MainWorktreeAcceptedWhenRepoRootIsLinkedWorktree
+// covers a project that lives in a linked worktree rather than the main
+// one: repoRoot (derived from the project's own directory) is the linked
+// worktree's path, not the main worktree's. The main worktree must still be
+// recognized as belonging to the same repository -- recognized because its
+// .git is a directory that resolves to the repository's common git dir, not
+// by equality with repoRoot, which never holds in this shape even though
+// both worktrees share one repository.
+func TestIsRegisteredWorktree_MainWorktreeAcceptedWhenRepoRootIsLinkedWorktree(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	linkedPath := filepath.Join(filepath.Dir(mainRepo), "linked-repo-feature")
+	addWorktreeDirect(t, mainRepo, linkedPath, "feature")
+	defer func() { _, _ = RemoveWorktree(linkedPath, true) }()
+
+	// repoRoot is the LINKED worktree here, simulating a project that lives
+	// there; path is the MAIN worktree, which must still be recognized as
+	// this repository's own.
+	ok, err := IsRegisteredWorktree(linkedPath, mainRepo)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if !ok {
+		t.Error("expected the main worktree to be accepted when repoRoot is a linked worktree of the same repository")
+	}
+}
+
+func TestIsRegisteredWorktree_SiblingWorktreeAccepted(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	// A plain sibling worktree, not under any particular convention --
+	// `git worktree add` accepts any destination.
+	siblingPath := filepath.Join(filepath.Dir(mainRepo), "sibling-repo-feature")
+	addWorktreeDirect(t, mainRepo, siblingPath, "feature")
+	defer func() { _, _ = RemoveWorktree(siblingPath, true) }()
+
+	ok, err := IsRegisteredWorktree(mainRepo, siblingPath)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if !ok {
+		t.Error("expected a plain sibling worktree to be accepted as a registered worktree")
+	}
+}
+
+func TestIsRegisteredWorktree_ScionWorktreesConventionAccepted(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	// The legacy {parent}/.scion_worktrees/{project}/{agent} layout is just
+	// another caller-named destination as far as git worktree add is concerned
+	// -- it needs no special-case handling, only real git registration.
+	wtPath := filepath.Join(filepath.Dir(mainRepo), ".scion_worktrees", "proj", "agent")
+	addWorktreeDirect(t, mainRepo, wtPath, "agent-branch")
+	defer func() { _, _ = RemoveWorktree(wtPath, true) }()
+
+	ok, err := IsRegisteredWorktree(mainRepo, wtPath)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if !ok {
+		t.Error("expected a .scion_worktrees-convention worktree to be accepted as a registered worktree")
+	}
+}
+
+func TestIsRegisteredWorktree_NonWorktreeDirRejected(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	// An ordinary directory that merely sits next to the repo, never
+	// registered with git as a worktree of it.
+	notAWorktree := filepath.Join(filepath.Dir(mainRepo), "just-a-directory")
+	if err := os.MkdirAll(notAWorktree, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := IsRegisteredWorktree(mainRepo, notAWorktree)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if ok {
+		t.Error("expected a non-worktree directory to be rejected")
+	}
+}
+
+func TestIsRegisteredWorktree_DifferentRepoWorktreeRejected(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	repoA := setupGitRepo(t)
+	repoB := setupGitRepo(t)
+
+	// A worktree that genuinely belongs to a DIFFERENT repository must not
+	// be accepted as a worktree of repoA.
+	wtOfB := filepath.Join(filepath.Dir(repoB), "repoB-feature")
+	addWorktreeDirect(t, repoB, wtOfB, "feature")
+	defer func() { _, _ = RemoveWorktree(wtOfB, true) }()
+
+	ok, err := IsRegisteredWorktree(repoA, wtOfB)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if ok {
+		t.Error("expected a worktree of a different repository to be rejected")
+	}
+}
+
+func TestIsRegisteredWorktree_SymlinkToNonRegisteredPathRejected(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	outside := filepath.Join(filepath.Dir(mainRepo), "outside-target")
+	if err := os.MkdirAll(outside, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(filepath.Dir(mainRepo), "link-to-outside")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := IsRegisteredWorktree(mainRepo, link)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if ok {
+		t.Error("expected a symlink resolving to a non-registered path to be rejected")
+	}
+}
+
+func TestIsRegisteredWorktree_GitListFailureFailsClosed(t *testing.T) {
+	// repoRoot is not a git repository at all, so `git worktree list` fails.
+	// The failure itself must be surfaced as an error, not silently reported
+	// as "not a worktree" -- and certainly never as "is a worktree."
+	notARepo := t.TempDir()
+	somePath := t.TempDir()
+
+	ok, err := IsRegisteredWorktree(notARepo, somePath)
+	if err == nil {
+		t.Fatal("expected an error when git worktree list fails, got nil")
+	}
+	if ok {
+		t.Error("expected false alongside the error (fail closed, never fail open)")
+	}
+}
+
+func TestIsRegisteredWorktree_PrunableRecreatedPathRejected(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	staleWt := filepath.Join(filepath.Dir(mainRepo), "stale-wt")
+	addWorktreeDirect(t, mainRepo, staleWt, "stale-branch")
+
+	// Remove the worktree directory directly (not via `git worktree
+	// remove`), leaving git's own registration in place but pointing at a
+	// gitdir that no longer resolves -- exactly what makes `git worktree
+	// list --porcelain` report the entry as prunable.
+	if err := os.RemoveAll(staleWt); err != nil {
+		t.Fatal(err)
+	}
+	// Recreate a plain directory at the same path: nothing git-related,
+	// just a directory that happens to have the same name.
+	if err := os.MkdirAll(staleWt, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := IsRegisteredWorktree(mainRepo, staleWt)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if ok {
+		t.Error("expected a prunable (stale) worktree registration, now a plain recreated directory, to be rejected")
+	}
+
+	_ = PruneWorktreesIn(mainRepo)
+}
+
+// TestIsRegisteredWorktree_RecreatedWithForeignGitDirRefused covers a
+// worktree path that was removed and then recreated as the root of a
+// completely different, independent repository (via `git init`, not `git
+// worktree add`) -- as opposed to
+// TestIsRegisteredWorktree_PrunableRecreatedPathRejected's plain directory,
+// which git's own porcelain output flags "prunable" and IsRegisteredWorktree
+// filters out before either structural check ever runs. A fresh `git init`
+// leaves a real directory at .git, so the record is NOT prunable (git only
+// checks that something is there, not that it points back correctly), and
+// the path-equality check against the registered worktree path still
+// matches. Recognition then depends entirely on isMainWorktreeOf resolving
+// the recreated .git directory and finding it does NOT equal the original
+// repository's common git dir (see git.go's isMainWorktreeOf) -- no other
+// existing test depends on that specific comparison, which is what makes
+// this case worth pinning directly.
+func TestIsRegisteredWorktree_RecreatedWithForeignGitDirRefused(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	linkedPath := filepath.Join(filepath.Dir(mainRepo), "linked-repo-for-foreign-gitdir-test")
+	addWorktreeDirect(t, mainRepo, linkedPath, "linked-branch")
+	defer func() { _, _ = RemoveWorktree(linkedPath, true) }()
+
+	recreatedWt := filepath.Join(filepath.Dir(mainRepo), "recreated-wt")
+	addWorktreeDirect(t, mainRepo, recreatedWt, "recreated-branch")
+
+	// Remove the worktree directory entirely, then recreate it as the root
+	// of a brand new, unrelated repository -- not via `git worktree add`, so
+	// it is never registered with mainRepo at all. What is left on disk at
+	// recreatedWt is a normal (directory) .git, structurally identical in
+	// shape to a main worktree's .git, but it resolves to this new repo's
+	// own git dir, not mainRepo's common git dir.
+	if err := os.RemoveAll(recreatedWt); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(recreatedWt, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "init", recreatedWt)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+
+	ok, err := IsRegisteredWorktree(mainRepo, recreatedWt)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree(mainRepo): %v", err)
+	}
+	if ok {
+		t.Error("expected a worktree path recreated with a foreign repo's own .git dir to be rejected against the main repo")
+	}
+
+	ok, err = IsRegisteredWorktree(linkedPath, recreatedWt)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree(linkedPath): %v", err)
+	}
+	if ok {
+		t.Error("expected a worktree path recreated with a foreign repo's own .git dir to be rejected against a linked worktree repoRoot")
+	}
+
+	_ = PruneWorktreesIn(mainRepo)
+}
+
+// TestIsLinkedWorktreeOf_RejectsGitdirEqualToWorktreesDir covers a real
+// linked worktree's gitdir always naming a specific entry under worktrees/,
+// never the worktrees directory itself -- there is no registration that is
+// the whole administrative directory, so a gitdir resolving to exactly
+// worktreesDir must not be treated as a match.
+func TestIsLinkedWorktreeOf_RejectsGitdirEqualToWorktreesDir(t *testing.T) {
+	mainRepo := setupGitRepo(t)
+
+	commonDir, err := GetCommonGitDir(mainRepo)
+	if err != nil {
+		t.Fatalf("GetCommonGitDir: %v", err)
+	}
+	worktreesDir := filepath.Join(commonDir, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	wtPath := filepath.Join(filepath.Dir(mainRepo), "gitdir-equals-worktreesdir")
+	if err := os.MkdirAll(wtPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(wtPath, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+worktreesDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if isLinkedWorktreeOf(wtPath, worktreesDir) {
+		t.Error("expected a gitdir equal to worktreesDir itself to be rejected, got true")
+	}
+
+	// A gitdir naming a real entry under worktreesDir is still accepted --
+	// this fix must not over-refuse the legitimate shape.
+	namedEntry := filepath.Join(worktreesDir, "some-worktree")
+	if err := os.MkdirAll(namedEntry, 0755); err != nil {
+		t.Fatal(err)
+	}
+	wtPath2 := filepath.Join(filepath.Dir(mainRepo), "gitdir-names-real-entry")
+	if err := os.MkdirAll(wtPath2, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtPath2, ".git"), []byte("gitdir: "+namedEntry+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !isLinkedWorktreeOf(wtPath2, worktreesDir) {
+		t.Error("expected a gitdir naming a real entry under worktreesDir to be accepted, got false")
+	}
+}
+
 func TestPruneWorktrees_SkipsInsideContainer(t *testing.T) {
 	// When SCION_HOST_UID is set (agent container), pruning should be a no-op
 	// to prevent destroying sibling worktree metadata that appears stale from

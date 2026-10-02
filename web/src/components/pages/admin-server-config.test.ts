@@ -66,6 +66,7 @@ const SCHEMA_RESPONSE = {
         'default_max_model_calls',
         'default_max_duration',
         'default_resources',
+        'default_timezone',
       ],
     },
     telemetry: {
@@ -93,6 +94,9 @@ const SCHEMA_RESPONSE = {
         'server.github_app.private_key_path',
       ],
     },
+    agent_secrets: {
+      koanf_paths: ['agent_secrets.user_scope_only'],
+    },
   },
 };
 
@@ -102,7 +106,7 @@ function createFetchHandler(
     schemaResponse?: Record<string, unknown> | null;
     putHandler?: (body: Record<string, unknown>) => {
       status: number;
-      body: Record<string, unknown>;
+      body: unknown;
     };
     messagingResponse?: Record<string, unknown>;
   }
@@ -570,6 +574,169 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  // ── Agent Defaults card: default_timezone (tz-refactor task 12) ──
+
+  describe('Agent Defaults card — default_timezone', () => {
+    function timezonePicker(el: HTMLElement): Element | null {
+      return query(el, 'scion-timezone-picker');
+    }
+
+    function emitTimezoneChange(el: HTMLElement, timezone: string): void {
+      timezonePicker(el)!.dispatchEvent(
+        new CustomEvent('timezone-change', { detail: { timezone } })
+      );
+    }
+
+    it('loads the current default_timezone into the picker', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', default_timezone: 'Asia/Tokyo' });
+      element = await createComponent(createFetchHandler(config));
+
+      const picker = timezonePicker(element);
+      expect(picker).not.toBeNull();
+      expect((picker as HTMLElement & { value: string }).value).toBe('Asia/Tokyo');
+    });
+
+    it('DB mode: PUT payload includes the edited default_timezone', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', default_timezone: '' });
+      let capturedPayload: Record<string, unknown> | null = null;
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      emitTimezoneChange(element, 'Europe/Berlin');
+      await (element as any).updateComplete;
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.default_timezone).toBe('Europe/Berlin');
+    });
+
+    it('DB mode: clearing default_timezone sends an explicit empty string', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', default_timezone: 'Asia/Tokyo' });
+      let capturedPayload: Record<string, unknown> | null = null;
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      emitTimezoneChange(element, '');
+      await (element as any).updateComplete;
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.default_timezone).toBe('');
+    });
+
+    it('file mode: clearing default_timezone sends an explicit empty string, not an omitted key', async () => {
+      // Regression guard: unlike default_runtime_broker (`|| undefined`),
+      // default_timezone must send "" explicitly on clear, because the
+      // backend's *string field treats an omitted key as "no change" and
+      // only an explicit "" as "clear" (see admin_settings.go).
+      const config = makeBaseConfig({ settings_tier: 'file', default_timezone: 'Asia/Tokyo' });
+      let capturedPayload: Record<string, unknown> | null = null;
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      emitTimezoneChange(element, '');
+      await (element as any).updateComplete;
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(capturedPayload).not.toBeNull();
+      expect('default_timezone' in capturedPayload!).toBe(true);
+      expect(capturedPayload!.default_timezone).toBe('');
+    });
+
+    it('file mode: PUT payload includes the edited default_timezone', async () => {
+      const config = makeBaseConfig({ settings_tier: 'file', default_timezone: '' });
+      let capturedPayload: Record<string, unknown> | null = null;
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      emitTimezoneChange(element, 'Asia/Kathmandu');
+      await (element as any).updateComplete;
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.default_timezone).toBe('Asia/Kathmandu');
+    });
+
+    it('an env-overridden default_timezone renders read-only with the env badge, in file mode', async () => {
+      const config = makeBaseConfig({
+        settings_tier: 'file',
+        default_timezone: 'Asia/Tokyo',
+        env_overrides: ['default_timezone'],
+      });
+      element = await createComponent(createFetchHandler(config));
+
+      expect(timezonePicker(element)).toBeNull();
+      const readOnlyValues = queryAll(element, '.read-only-value');
+      const values = readOnlyValues.map((el) => el.textContent?.trim());
+      expect(values).toContain('Asia/Tokyo');
+    });
+
+    it('shows an inline error for a name isValidTimeZone rejects, without blocking the field', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', default_timezone: '' });
+      element = await createComponent(createFetchHandler(config));
+
+      emitTimezoneChange(element, 'Not/A/Timezone');
+      await (element as any).updateComplete;
+
+      expect(shadowText(element)).toContain('is not a recognized timezone');
+    });
+
+    it('shows no inline error for a valid zone or for the empty (UTC) value', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', default_timezone: '' });
+      element = await createComponent(createFetchHandler(config));
+
+      expect(shadowText(element)).not.toContain('is not a recognized timezone');
+
+      emitTimezoneChange(element, 'Asia/Tokyo');
+      await (element as any).updateComplete;
+      expect(shadowText(element)).not.toContain('is not a recognized timezone');
+    });
+  });
+
   // ── Criterion 8: Structured errors ──
 
   describe('Criterion 8 — Structured error handling', () => {
@@ -695,6 +862,75 @@ describe('scion-page-admin-server-config', () => {
 
       expect(shadowText(element)).toContain('Something went terribly wrong');
     });
+
+    // handleSaveError's default case must handle more than a flat
+    // {error: "<string>", ...} shape. The real Go writeError() helper
+    // (pkg/hub/errors.go), used by
+    // every plain field-validation 400/422 on this page — including
+    // default_timezone's — responds with {error: {code, message, details}}.
+    // Before the fix, body.error being an object meant the switch never
+    // matched a case, body.message was undefined (nested at
+    // body.error.message instead), and the real message was replaced by the
+    // generic fallback. This is the shape the handler actually sends, unlike
+    // the idealized flat-string shapes the other Criterion 8 tests above use
+    // for validation_failed/revision_conflict/layer0_rejected.
+    it('a real writeError()-shaped 422 (nested error.message) renders its message, not the generic fallback', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 422,
+            body: {
+              error: {
+                code: 'validation_error',
+                message:
+                  'invalid default_timezone "Not/A/Timezone": unknown time zone Not/A/Timezone',
+              },
+            },
+          }),
+        })
+      );
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      const text = shadowText(element);
+      expect(text).toContain('invalid default_timezone "Not/A/Timezone"');
+      expect(text).not.toContain('An unexpected error occurred');
+    });
+
+    // A JSON error body that is not an object (null, a bare string, an
+    // array) has no error code or message to read; handleSaveError must
+    // treat it like a non-JSON body instead of dereferencing it.
+    for (const [label, errBody] of [
+      ['null', null],
+      ['a bare string', 'upstream proxy error'],
+      ['an array', ['boom']],
+    ] as const) {
+      it(`a non-object JSON error body (${label}) shows the save-failed message`, async () => {
+        const config = makeBaseConfig({ settings_tier: 'db' });
+
+        element = await createComponent(
+          createFetchHandler(config, {
+            putHandler: () => ({ status: 502, body: errBody }),
+          })
+        );
+
+        const buttons = queryAll(element, 'sl-button[variant="primary"]');
+        const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+        (saveBtn as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await (element as any).updateComplete;
+
+        const text = shadowText(element);
+        expect(text).toContain('Failed to save settings');
+        expect(text).not.toContain('An unexpected error occurred');
+      });
+    }
   });
 
   // ── Schema fallback ──
@@ -915,6 +1151,171 @@ describe('scion-page-admin-server-config', () => {
       expect(shadowText(element)).not.toContain(
         'Role assigned to new users who are not in the admin emails list.'
       );
+    });
+  });
+
+  // ── Agent Secrets card (design ptone/scion#2291 §8, §10 test 10) ──
+
+  describe('Agent Secrets card', () => {
+    function agentSecretsSwitch(el: HTMLElement): HTMLElement | undefined {
+      return queryAll(el, 'sl-switch').find((s) =>
+        (s.textContent ?? '').includes('Restrict agent-written secrets to profile scope')
+      ) as HTMLElement | undefined;
+    }
+
+    it('shows the card with its explanatory hint', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      expect(shadowText(element)).toContain('Agent Secrets');
+      expect(shadowText(element)).toContain(
+        'Project-scope writes from agents are rejected. Existing project secrets are'
+      );
+      expect(shadowText(element)).toContain('not removed. Users can still manage project secrets.');
+    });
+
+    it('switch loads unchecked when agent_secrets is absent', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      const sw = agentSecretsSwitch(element);
+      expect(sw).not.toBeUndefined();
+      expect(sw!.hasAttribute('checked')).toBe(false);
+    });
+
+    it('switch loads checked when agent_secrets.user_scope_only is true', async () => {
+      const config = makeBaseConfig({ agent_secrets: { user_scope_only: true } });
+      element = await createComponent(createFetchHandler(config));
+
+      const sw = agentSecretsSwitch(element);
+      expect(sw).not.toBeUndefined();
+      expect(sw!.hasAttribute('checked')).toBe(true);
+    });
+
+    // Round-1 review R2: parameterised over both settings tiers, since
+    // 'file' alone only exercises buildFilePayload() — settingsTier === 'db'
+    // is what routes save through the separate buildLayer1Payload() builder
+    // (admin-server-config.ts's handleSave: `this.settingsTier === 'db' ?
+    // this.buildLayer1Payload() : this.buildFilePayload()`).
+    it.each(['file', 'db'] as const)(
+      'both payload builders send agent_secrets.user_scope_only on save (settings_tier=%s)',
+      async (settingsTier) => {
+        let capturedPayload: Record<string, unknown> | null = null;
+        const config = makeBaseConfig({
+          settings_tier: settingsTier,
+          agent_secrets: { user_scope_only: true },
+        });
+
+        element = await createComponent(
+          createFetchHandler(config, {
+            putHandler: (body) => {
+              capturedPayload = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          })
+        );
+
+        const buttons = queryAll(element, 'sl-button[variant="primary"]');
+        const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+        (saveBtn as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+
+        expect(capturedPayload).not.toBeNull();
+        const agentSecrets = capturedPayload!.agent_secrets as Record<string, unknown> | undefined;
+        expect(agentSecrets?.user_scope_only).toBe(true);
+      }
+    );
+
+    it('env-overridden agent_secrets.user_scope_only renders read-only with env badge', async () => {
+      const config = makeBaseConfig({
+        settings_tier: 'file',
+        agent_secrets: { user_scope_only: true },
+        env_overrides: ['agent_secrets.user_scope_only'],
+      });
+      element = await createComponent(createFetchHandler(config));
+
+      const badges = queryAll(element, '.read-only-badge');
+      const badgeTexts = badges.map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('environment variable'))).toBe(true);
+
+      // The switch itself must not render while the field is env-pinned.
+      expect(agentSecretsSwitch(element)).toBeUndefined();
+    });
+  });
+
+  // ── Experiments tab (ptone/scion#2217) ──
+
+  describe('Experiments tab', () => {
+    function showTab(el: HTMLElement, name: string): void {
+      const tabGroup = query(el, 'sl-tab-group');
+      tabGroup?.dispatchEvent(new CustomEvent('sl-tab-show', { detail: { name } }));
+    }
+
+    // The top-level Save & Reload / Reset bar is a direct child of the
+    // shadow root; the GitHub App tab has its own unrelated ".actions" div
+    // nested inside its (always-rendered, visibility-toggled) panel, so a
+    // plain `.actions` query would match both.
+    function topLevelActions(el: HTMLElement): Element | null {
+      const candidates = el.shadowRoot?.querySelectorAll('.actions') ?? [];
+      return Array.from(candidates).find((c) => c.parentNode === el.shadowRoot) ?? null;
+    }
+
+    it('appears last in the tab nav', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+      // Scope to the outer tab group's direct children — the Runtimes &
+      // Profiles panel nests its own sl-tab-group for agent-defaults, whose
+      // tabs also carry slot="nav" but belong to a different tab group.
+      const outerTabGroup = query(element, 'sl-tab-group');
+      const tabs = Array.from(outerTabGroup?.querySelectorAll(':scope > sl-tab[slot="nav"]') ?? []);
+      expect(tabs[tabs.length - 1].getAttribute('panel')).toBe('experiments');
+    });
+
+    it('renders <scion-admin-experiments> in its panel', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+      expect(
+        query(element, 'sl-tab-panel[name="experiments"] scion-admin-experiments')
+      ).not.toBeNull();
+    });
+
+    it('hides the actions bar and the harness-config error message while the Experiments tab is active', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      // Force the harness-config error message's condition on, as if the
+      // Runtimes & Profiles tab had an invalid JSON entry, so we can prove
+      // it is specifically hidden on the Experiments tab, not just absent.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (element as any).harnessConfigErrors = { profileA: 'invalid json' };
+      element.requestUpdate();
+      await element.updateComplete;
+
+      expect(topLevelActions(element)).not.toBeNull();
+      expect(shadowText(element)).toContain('Cannot save');
+
+      showTab(element, 'experiments');
+      await element.updateComplete;
+
+      expect(topLevelActions(element)).toBeNull();
+      expect(shadowText(element)).not.toContain('Cannot save');
+
+      showTab(element, 'general');
+      await element.updateComplete;
+
+      expect(topLevelActions(element)).not.toBeNull();
+      expect(shadowText(element)).toContain('Cannot save');
+    });
+
+    it('sets .active on <scion-admin-experiments> only while its tab is shown', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+      const experimentsEl = query(element, 'scion-admin-experiments') as HTMLElement & {
+        active: boolean;
+      };
+      expect(experimentsEl.active).toBe(false);
+
+      showTab(element, 'experiments');
+      await element.updateComplete;
+      expect(experimentsEl.active).toBe(true);
+
+      showTab(element, 'general');
+      await element.updateComplete;
+      expect(experimentsEl.active).toBe(false);
     });
   });
 });

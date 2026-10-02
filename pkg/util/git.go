@@ -345,6 +345,173 @@ func FindWorktreeByBranch(branchName string) (string, error) {
 	return "", nil
 }
 
+// IsRegisteredWorktree reports whether path is one of the worktrees git
+// itself has registered for the repository at repoRoot, via
+// `git -C repoRoot worktree list --porcelain`. Matching is by resolved
+// (symlink-free) equality against each registered worktree path — not a
+// path-prefix guess — because `git worktree add` accepts any destination
+// the caller names and there is no fixed location every worktree must live
+// under. `git worktree list`'s first entry is always the repository's main
+// worktree, but that is not necessarily repoRoot itself: repoRoot may be a
+// linked worktree of the same repository (a project can live in one), in
+// which case the main worktree's own path never equals repoRoot even though
+// both share the same repository. The main worktree is instead recognized
+// structurally, the same way a linked one is: its .git is a directory (not
+// a linked worktree's gitdir-pointer file), and that directory, resolved,
+// is the repository's own common git directory.
+//
+// A failure listing worktrees (repoRoot is not a git repository, git is
+// unavailable, and so on) returns (false, err). Callers must treat that as
+// "membership could not be verified," never as "verified true" — this
+// function does not fail open.
+// splitPorcelainRecords splits git porcelain-format output into its
+// blank-line-separated records, normalizing CRLF line endings to LF first.
+// A "\r\n\r\n" blank-line separator contains no "\n\n" substring (the two
+// newlines have a "\r" between them), so splitting on "\n\n" without this
+// normalization would silently fail to separate records at all when git's
+// output uses CRLF, and a surviving "\r" on a "worktree <path>" line would
+// end up as a trailing byte on the parsed path.
+func splitPorcelainRecords(output string) []string {
+	normalized := strings.ReplaceAll(output, "\r\n", "\n")
+	return strings.Split(normalized, "\n\n")
+}
+
+func IsRegisteredWorktree(repoRoot, path string) (bool, error) {
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false, fmt.Errorf("resolve %s: %w", path, err)
+	}
+	commonDir, err := GetCommonGitDir(repoRoot)
+	if err != nil {
+		return false, fmt.Errorf("git common dir for %s: %w", repoRoot, err)
+	}
+	resolvedCommonDir, err := filepath.EvalSymlinks(commonDir)
+	if err != nil {
+		return false, fmt.Errorf("resolve %s: %w", commonDir, err)
+	}
+	worktreesDir := filepath.Join(resolvedCommonDir, "worktrees")
+
+	cmd := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain")
+	output, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("git worktree list: %w", err)
+	}
+
+	// Porcelain records are separated by a blank line; each holds a
+	// "worktree <path>" line and, for one that git considers a candidate
+	// for `git worktree prune`, a "prunable ..." line.
+	for _, record := range splitPorcelainRecords(string(output)) {
+		var wtPath string
+		prunable := false
+		for _, line := range strings.Split(record, "\n") {
+			switch {
+			case strings.HasPrefix(line, "worktree "):
+				wtPath = strings.TrimPrefix(line, "worktree ")
+				if strings.HasPrefix(wtPath, "\"") {
+					if unquoted, uerr := strconv.Unquote(wtPath); uerr == nil {
+						wtPath = unquoted
+					}
+				}
+			case strings.HasPrefix(line, "prunable"):
+				prunable = true
+			}
+		}
+		if wtPath == "" || prunable {
+			// A prunable record — git itself considers the registration
+			// stale (its gitdir pointer no longer resolves) — is not
+			// membership: a plain directory later created at the same path
+			// must not inherit the identity of a worktree that no longer
+			// really exists there.
+			//
+			// This specific prunable reason (gitdir file points to a
+			// non-existent location) cannot be exercised independently of
+			// isLinkedWorktreeOf's own check in a real git-backed test:
+			// both read the existence of the exact same file (wtPath's own
+			// .git), so recreating that file with content valid enough for
+			// isLinkedWorktreeOf to accept also, as an unavoidable side
+			// effect, clears this prunable reason in git's own listing
+			// before IsRegisteredWorktree ever sees it. Confirmed
+			// empirically against a real git repository.
+			continue
+		}
+
+		resolvedWt, err := filepath.EvalSymlinks(wtPath)
+		if err != nil || resolvedWt != resolvedPath {
+			continue
+		}
+
+		if isMainWorktreeOf(wtPath, resolvedCommonDir) {
+			return true, nil
+		}
+		if isLinkedWorktreeOf(wtPath, worktreesDir) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// isMainWorktreeOf reports whether wtPath is the repository's main
+// worktree, identified structurally rather than by comparing it against a
+// caller-supplied repoRoot: wtPath's .git is a directory (not a linked
+// worktree's gitdir-pointer file), and that directory, resolved, is the
+// repository's own common git directory (resolvedCommonDir). This still
+// works when repoRoot itself names a linked worktree of the same
+// repository, a shape where wtPath (the real main worktree) never equals
+// repoRoot even though both belong to the same repository.
+//
+// This checks wtPath's .git at the time of the call; the caller acts on the
+// result afterward. A change to wtPath's .git between this check and that
+// later use is out of scope here, the same validate-then-act model the rest
+// of this package's path checks use.
+func isMainWorktreeOf(wtPath, resolvedCommonDir string) bool {
+	gitFile := filepath.Join(wtPath, ".git")
+	info, err := os.Lstat(gitFile)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	resolvedGitDir, err := filepath.EvalSymlinks(gitFile)
+	if err != nil {
+		return false
+	}
+	return resolvedGitDir == resolvedCommonDir
+}
+
+// isLinkedWorktreeOf reports whether wtPath's .git file points into
+// worktreesDir — the repository's own worktrees/ administrative directory —
+// confirming wtPath is a linked worktree git itself created for this
+// repository, not merely a directory whose path happens to match a
+// registration (matching path alone is exactly what a stale-then-recreated
+// directory can satisfy without being a real worktree).
+func isLinkedWorktreeOf(wtPath, worktreesDir string) bool {
+	gitFile := filepath.Join(wtPath, ".git")
+	info, err := os.Lstat(gitFile)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	content, err := os.ReadFile(gitFile)
+	if err != nil {
+		return false
+	}
+	line := strings.TrimSpace(string(content))
+	const prefix = "gitdir: "
+	if !strings.HasPrefix(line, prefix) {
+		return false
+	}
+	target := strings.TrimPrefix(line, prefix)
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(wtPath, target)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return false
+	}
+	// A real linked worktree's gitdir always names a specific entry under
+	// worktrees/, never the worktrees directory itself -- there is no
+	// registration that is the whole administrative directory, so a gitdir
+	// resolving to exactly worktreesDir is not a match.
+	return strings.HasPrefix(resolvedTarget, worktreesDir+string(filepath.Separator))
+}
+
 // BranchExists returns true if the branch exists in the repository.
 func BranchExists(branchName string) bool {
 	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branchName)

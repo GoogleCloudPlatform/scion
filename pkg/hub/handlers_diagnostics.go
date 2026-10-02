@@ -29,7 +29,7 @@ import (
 // Authorization: enforced by routeGuard via hub.diagnostics.read permission.
 func (s *Server) handleDiagnosticsLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -109,7 +109,7 @@ func (s *Server) handleDiagnosticsLogs(w http.ResponseWriter, r *http.Request) {
 // Authorization: enforced by routeGuard via hub.diagnostics.read permission.
 func (s *Server) handleDiagnosticsLogsStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

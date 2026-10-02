@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -677,3 +678,59 @@ func TestDeleteAgentFiles_SharedWorktree_SoleSharer_DeleteRemoves(t *testing.T) 
 }
 
 func intPtr(i int) *int { return &i }
+
+// TestDeleteAgentFiles_GlobalProject_DeletesOnlyTargetWorkspace is the
+// global-project counterpart to
+// TestDeleteAgentFiles_WorktreePerAgent_DeletesOnlyTargetWorktree: each
+// global-project agent gets its own workspace subdirectory under
+// ~/.scion/workspace/<agentName> (ProvisionAgent's Case 3), which
+// DeleteAgentFiles must remove on that agent's own deletion without
+// touching a sibling global agent's own subdirectory.
+func TestDeleteAgentFiles_GlobalProject_DeletesOnlyTargetWorkspace(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mockRuntimeForTest(t)
+
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+	_ = os.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	if err := config.InitGlobal(getTestHarnesses()); err != nil {
+		t.Fatalf("InitGlobal: %v", err)
+	}
+	globalScionDir, err := config.GetGlobalDir()
+	if err != nil {
+		t.Fatalf("GetGlobalDir: %v", err)
+	}
+
+	for _, name := range []string{"global-agent-a", "global-agent-b"} {
+		if _, _, _, err := ProvisionAgent(context.Background(), name, "default", "", "", globalScionDir, "", "", "", ""); err != nil {
+			t.Fatalf("ProvisionAgent(%s): %v", name, err)
+		}
+	}
+
+	workspaceRoot := filepath.Join(globalScionDir, "workspace")
+	wsA := filepath.Join(workspaceRoot, "global-agent-a")
+	wsB := filepath.Join(workspaceRoot, "global-agent-b")
+
+	for _, p := range []string{wsA, wsB} {
+		if info, err := os.Stat(p); err != nil || !info.IsDir() {
+			t.Fatalf("setup: expected %s to exist as a directory: %v", p, err)
+		}
+	}
+
+	if _, err := DeleteAgentFiles("global-agent-b", globalScionDir, false); err != nil {
+		t.Fatalf("DeleteAgentFiles(global-agent-b): %v", err)
+	}
+
+	if _, err := os.Stat(wsB); !os.IsNotExist(err) {
+		t.Errorf("global-agent-b's own workspace directory should be removed, stat err=%v", err)
+	}
+	if info, err := os.Stat(wsA); err != nil || !info.IsDir() {
+		t.Errorf("sibling global-agent-a's workspace directory should survive: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(globalScionDir, "agents", "global-agent-b")); !os.IsNotExist(err) {
+		t.Errorf("global-agent-b config dir should be removed, stat err=%v", err)
+	}
+}

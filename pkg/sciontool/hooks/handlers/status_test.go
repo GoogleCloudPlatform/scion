@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
@@ -769,4 +771,177 @@ func TestStatusHandler_SetMessage(t *testing.T) {
 	info = readAgentInfoMap(t, statusPath)
 	_, hasDetail := info["detail"]
 	assert.False(t, hasDetail, "detail should be removed when message is cleared")
+}
+
+// TestStatusHandler_FifoAtStatusPathDoesNotHangUpdate proves a FIFO planted
+// at agent-info.json (something the workload can always do, since it owns
+// the containing directory) is refused immediately rather than blocking the
+// caller. StatusHandler runs in root's own PID-1 process throughout the
+// workload's lifetime, so a hang here would stall every root-side
+// lifecycle control (heartbeat, shutdown, limits enforcement) — this test
+// fails if the read is ever reverted to a plain os.ReadFile, or if the
+// FIFO/non-regular-file refusal is dropped so the code proceeds to a
+// blocking read.
+func TestStatusHandler_FifoAtStatusPathDoesNotHangUpdate(t *testing.T) {
+	tmpDir := t.TempDir()
+	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	if err := syscall.Mkfifo(statusPath, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+
+	h := &StatusHandler{StatusPath: statusPath}
+
+	done := make(chan error, 1)
+	go func() { done <- h.UpdateActivity(state.ActivityThinking, "") }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err, "UpdateActivity should treat a FIFO as absent state, not fail")
+	case <-time.After(5 * time.Second):
+		t.Fatal("UpdateActivity blocked reading a FIFO planted at StatusPath")
+	}
+}
+
+// TestStatusHandler_SymlinkAtStatusPathIsRefusedNotFollowed proves a
+// symlink swapped in at agent-info.json — here pointing at a large file
+// standing in for /dev/zero — is refused outright (the O_NOFOLLOW open
+// itself fails on the symlink) rather than followed. This fails if the
+// O_NOFOLLOW refusal is dropped (root would follow the symlink and, only
+// then, run into whatever bound applies to the target).
+func TestStatusHandler_SymlinkAtStatusPathIsRefusedNotFollowed(t *testing.T) {
+	tmpDir := t.TempDir()
+	big := filepath.Join(tmpDir, "huge")
+	// One byte over agentInfoMaxBytes: enough to prove the bound is
+	// enforced without actually allocating megabytes on every test run.
+	if err := os.WriteFile(big, make([]byte, agentInfoMaxBytes+1), 0o600); err != nil {
+		t.Fatalf("write huge file: %v", err)
+	}
+	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	if err := os.Symlink(big, statusPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	h := &StatusHandler{StatusPath: statusPath}
+
+	// A refusal to read a hostile StatusPath must not stop the handler from
+	// working: it falls back to an empty prior-state map and still writes
+	// its own update through the normal (non-symlink) path.
+	err := h.UpdateActivity(state.ActivityThinking, "")
+	require.NoError(t, err)
+
+	// The symlink must not have been followed for the write either — the
+	// huge file's content must be untouched, and a fresh regular file must
+	// now sit at statusPath.
+	hugeData, err := os.ReadFile(big)
+	require.NoError(t, err)
+	assert.Len(t, hugeData, agentInfoMaxBytes+1, "the huge file should be untouched")
+
+	fi, err := os.Lstat(statusPath)
+	require.NoError(t, err)
+	assert.Zero(t, fi.Mode()&os.ModeSymlink, "statusPath should no longer be a symlink after a write")
+}
+
+// wantAgentInfoMaxBytes is this test's OWN, independently hardcoded copy of
+// the size bound status.go documents for agentInfoMaxBytes (1 MiB) — not a
+// reference to that constant. A test that sized its fixture as
+// agentInfoMaxBytes+1 would track any future change to that constant
+// automatically, including a regression that widens it: the fixture and the
+// cap it's supposed to test would drift together, and the "one byte over"
+// fixture would always be refused no matter how wide the cap became,
+// silently proving nothing. Anchoring to an independent, hardcoded
+// expectation of what the cap SHOULD be is what lets this test actually
+// notice if agentInfoMaxBytes is ever widened.
+const wantAgentInfoMaxBytes = 1 << 20
+
+// jsonObjectOfSize returns a syntactically valid JSON object of exactly n
+// bytes: {"k":"aaa...a"}, with the "a" run padded to make up the difference.
+// n must be at least 8 (the length of `{"k":""}`).
+func jsonObjectOfSize(n int) []byte {
+	const prefix, suffix = `{"k":"`, `"}`
+	pad := n - len(prefix) - len(suffix)
+	if pad < 0 {
+		pad = 0
+	}
+	buf := make([]byte, 0, n)
+	buf = append(buf, prefix...)
+	for i := 0; i < pad; i++ {
+		buf = append(buf, 'a')
+	}
+	buf = append(buf, suffix...)
+	return buf
+}
+
+// TestStatusHandler_OversizeRegularStatusPathReturnsEmptyMap proves the size
+// bound is enforced on an actual regular file (not a symlink to one): an
+// agent-info.json one byte over agentInfoMaxBytes is refused, falling back
+// to the same empty-map state a missing file already produces. The fixture
+// is syntactically valid JSON that would unmarshal to a non-empty map if the
+// cap did not refuse it first — a fixture built purely from NUL bytes would
+// fail json.Unmarshal regardless of the cap, so it would pass this test even
+// with the cap removed or widened to any size; this fixture only passes
+// because the SIZE bound is what refuses it. A symlink to an oversize file
+// (see the refusal test above) never even reaches the size check, since
+// O_NOFOLLOW refuses it first.
+func TestStatusHandler_OversizeRegularStatusPathReturnsEmptyMap(t *testing.T) {
+	tmpDir := t.TempDir()
+	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	if err := os.WriteFile(statusPath, jsonObjectOfSize(wantAgentInfoMaxBytes+1), 0o600); err != nil {
+		t.Fatalf("write oversize agent-info.json: %v", err)
+	}
+
+	h := &StatusHandler{StatusPath: statusPath}
+	info := h.readAgentInfoMap()
+	assert.Empty(t, info, "an oversize regular StatusPath should read back as empty state, not error out")
+}
+
+// TestStatusHandler_AtCapRegularStatusPathIsRead is
+// OversizeRegularStatusPathReturnsEmptyMap's companion: the same valid-JSON
+// shape at exactly agentInfoMaxBytes (not one byte over) is read and parsed
+// successfully, proving the boundary sits exactly at the documented cap and
+// that jsonObjectOfSize itself produces parseable content.
+func TestStatusHandler_AtCapRegularStatusPathIsRead(t *testing.T) {
+	tmpDir := t.TempDir()
+	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	if err := os.WriteFile(statusPath, jsonObjectOfSize(wantAgentInfoMaxBytes), 0o600); err != nil {
+		t.Fatalf("write at-cap agent-info.json: %v", err)
+	}
+
+	h := &StatusHandler{StatusPath: statusPath}
+	info := h.readAgentInfoMap()
+	if got, ok := info["k"]; !ok || len(got.(string)) == 0 {
+		t.Errorf("readAgentInfoMap() = %v, want the at-cap file's own \"k\" value parsed back", info)
+	}
+}
+
+// TestStatusHandler_NonRegularStatusPathReturnsEmptyMap proves that reading
+// a non-regular agent-info.json (a FIFO, standing in for "anything that
+// isn't a plain file") produces the same safe empty-map fallback a missing
+// file already produces, rather than an error that could propagate and
+// disrupt the lifecycle handler calling it.
+func TestStatusHandler_NonRegularStatusPathReturnsEmptyMap(t *testing.T) {
+	tmpDir := t.TempDir()
+	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	if err := syscall.Mkfifo(statusPath, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+
+	h := &StatusHandler{StatusPath: statusPath}
+	info := h.readAgentInfoMap()
+	assert.Empty(t, info, "a non-regular StatusPath should read back as empty state, not error out")
+}
+
+// TestStatusHandler_WriteUsesMode0644 proves the agent-info.json write still
+// widens the file to mode 0644 (the broker reads it after the container
+// exits, potentially as a different uid) now that the widening happens via
+// fchmod on the temp file's fd instead of a path-based os.Chmod.
+func TestStatusHandler_WriteUsesMode0644(t *testing.T) {
+	tmpDir := t.TempDir()
+	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	h := &StatusHandler{StatusPath: statusPath}
+
+	require.NoError(t, h.UpdateActivity(state.ActivityThinking, ""))
+
+	fi, err := os.Stat(statusPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0644), fi.Mode().Perm())
 }

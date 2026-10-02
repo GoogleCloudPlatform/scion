@@ -82,6 +82,14 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 		return Decision{Allowed: false, Reason: "missing actor"}
 	}
 
+	// A delivery credential cannot delegate any permission. The check keys
+	// on the concrete type and comes before every allow path below,
+	// including the AgentRoleNone allow for an agent delegation with no
+	// scopes.
+	if _, ok := actor.(*hubDeliveryIdentity); ok {
+		return Decision{Allowed: false, Reason: "delivery credential cannot delegate"}
+	}
+
 	// Scoped credentials (UAT) can only delegate within their credential scope.
 	if scoped, ok := actor.(*ScopedUserIdentity); ok {
 		if denied := a.enforceUATDelegation(scoped, grant); denied != nil {
@@ -337,13 +345,19 @@ func (a *AuthzService) canDelegateAgent(ctx context.Context, actor Identity, gra
 
 // canAgentDelegateToAgent checks that an agent creating a sub-agent holds
 // at least the scopes being delegated.
+//
+// Compares against effectiveAgentScopes(agentActor), not agentActor.Scopes()
+// directly, so a verified legacy token (isLegacyPreSplitAgentJWT,
+// ptone/scion#2339) is judged by the same effective scopes the synthetic
+// grant and the credential-scope restriction use, rather than its literal,
+// pre-split scope list.
 func (a *AuthzService) canAgentDelegateToAgent(agentActor AgentIdentity, grant GrantDescriptor) Decision {
 	// Resolve the requested role to scopes.
 	requestedRole := AgentRole(grant.AgentRole)
 	requestedScopes := ScopesForRole(requestedRole)
 	requestedScopes = append(requestedScopes, grant.AgentScopes...)
 
-	actorScopes := agentActor.Scopes()
+	actorScopes := effectiveAgentScopes(agentActor)
 	actorScopeSet := make(map[AgentTokenScope]bool, len(actorScopes))
 	for _, s := range actorScopes {
 		actorScopeSet[s] = true
@@ -450,7 +464,13 @@ func (a *AuthzService) intersectCredentialCaveats(actor Identity, perms []string
 			restriction = &r
 		}
 	case AgentIdentity:
-		r := agentScopeRestriction(v)
+		// Zero Resource: CanDelegate reasons about a target-agnostic
+		// permission set, never one resource instance, so the
+		// gcp_service_account.use per-SA match (agentScopeRestriction's one
+		// resource-aware exception) can never engage here, so
+		// gcp_service_account.use is always filtered out of an agent's
+		// delegable set.
+		r := agentScopeRestriction(v, Resource{})
 		restriction = &r
 	}
 

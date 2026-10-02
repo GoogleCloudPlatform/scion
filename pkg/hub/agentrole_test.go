@@ -52,7 +52,7 @@ func TestScopesForRole_Baseline(t *testing.T) {
 
 func TestScopesForRole_Full(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleFull)
-	require.Len(t, scopes, 10)
+	require.Len(t, scopes, 11)
 
 	// Must include everything in baseline
 	assert.Contains(t, scopes, ScopeProjectRead)
@@ -63,6 +63,10 @@ func TestScopesForRole_Full(t *testing.T) {
 
 	// Plus elevated scopes
 	assert.Contains(t, scopes, ScopeAgentCreate)
+	// ptone/scion#2339: gcp_service_account.assign has its own agent scope,
+	// distinct from ScopeAgentCreate. AgentRoleFull carries both, so role=full
+	// keeps authorizing both agent creation and service-account assignment.
+	assert.Contains(t, scopes, ScopeAgentSAAssign)
 	assert.Contains(t, scopes, ScopeAgentLifecycle)
 	assert.Contains(t, scopes, ScopeProjectSecretRead)
 	assert.Contains(t, scopes, ScopeProjectTemplateWrite)
