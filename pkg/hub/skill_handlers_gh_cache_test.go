@@ -399,6 +399,112 @@ func TestResolveGitHubSkill_ConcurrentMissesCoalesce(t *testing.T) {
 		"%d concurrent resolutions of the same ref must make exactly one contents lookup", n)
 }
 
+// TestResolveGitHubSkill_CancelledRequestStartsNoNewFlights is the permanent
+// regression test for the refSHAMemo data race: a per-request memo shared
+// across every gh:// URI in one handleSkillsResolve call must never be
+// touched by two flights at once. The race arose when a request's context
+// ended while its first URI's flight was still running (detached), and
+// handleSkillsResolve's loop moved on to the next URI on the same,
+// now-cancelled context and memo, starting a *second* detached flight that
+// wrote the same plain map concurrently with the first — in production, an
+// unsynchronised concurrent map write is a fatal error recover() cannot
+// catch, so this could crash the hub outright.
+//
+// Fixed two ways, both exercised here: resolveGitHubSkill now refuses to
+// start a new flight once its own ctx is already done (so URI b below starts
+// no flight and reaches GitHub zero times), and refSHAMemo (*ghSHAMemo) is
+// mutex-guarded regardless, as defense in depth against any future call site
+// that might not have that guard. Run with -race.
+func TestResolveGitHubSkill_CancelledRequestStartsNoNewFlights(t *testing.T) {
+	const (
+		owner = "acme"
+		repo  = "memo-repo"
+		sha   = "abababababababababababababababababababab"
+	)
+
+	srv, _, _, _, _ := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+
+	var commitCalls atomic.Int64
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	proceed := make(chan struct{})
+	var proceedOnce sync.Once
+	closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		commitCalls.Add(1)
+		enterOnce.Do(func() { close(entered) })
+		select {
+		case <-proceed:
+			_, _ = w.Write([]byte(sha))
+		case <-r.Context().Done():
+		}
+	})
+	for _, p := range []string{"skills/a", "skills/b"} {
+		p := p
+		mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+p, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + p + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+		})
+	}
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	// Registered after gh's own Close, so this runs first (cleanups run in
+	// reverse order): see the identical comment on the cancelled-leader test
+	// above for why that order matters.
+	t.Cleanup(closeProceed)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	memo := newGHSHAMemo() // one request's memo, as in handleSkillsResolve
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := srv.resolveGitHubSkill(ctx, "gh://"+owner+"/"+repo+"/a@main", "", memo)
+		doneA <- err
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("URI a's fetch never started")
+	}
+
+	cancel()
+
+	select {
+	case err := <-doneA:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled for URI a, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancelled request for URI a did not return promptly")
+	}
+
+	// The handler loop (handleSkillsResolve) continues to the next URI on the
+	// same, now-cancelled ctx and the same memo — this must start no new
+	// flight at all, and so must never reach GitHub.
+	_, errB := srv.resolveGitHubSkill(ctx, "gh://"+owner+"/"+repo+"/b@main", "", memo)
+	if !errors.Is(errB, context.Canceled) {
+		t.Fatalf("expected a request for URI b on an already-cancelled context to return context.Canceled without starting a flight, got %v", errB)
+	}
+
+	closeProceed()
+	// Join URI a's (still-running, detached) flight so it fully completes
+	// before the httptest server's cleanup tries to close it.
+	ghRefA, err := agent.ParseGitHubSkillURI("gh://" + owner + "/" + repo + "/a@main")
+	require.NoError(t, err)
+	cacheKeyA := computeCacheKey(ghRefA.Owner, ghRefA.Repo, ghRefA.SkillPath, ghRefA.Ref, "public")
+	_, _, _ = srv.ghResolveFlight.Do(cacheKeyA, func() (interface{}, error) { return nil, nil })
+
+	assert.Equal(t, int64(1), commitCalls.Load(),
+		"URI b must never reach GitHub once its request context is already done")
+}
+
 // TestResolveGitHubSkill_CancelledLeaderDoesNotFailWaiters is the acceptance
 // test for the hub-side single-flight leader needing its own detached,
 // bounded context: the synchronous flight's leader has its own request
@@ -406,6 +512,18 @@ func TestResolveGitHubSkill_ConcurrentMissesCoalesce(t *testing.T) {
 // promptly, but the flight must keep running — the other waiter must still
 // succeed, and the cache write must still happen (not be skipped because the
 // leader walked away).
+//
+// It uses ghFlightJoinHook to know, deterministically and without sleeping or
+// polling, that the waiter has actually reached the point of joining the
+// leader's still-in-flight call before the leader is cancelled — otherwise a
+// race (the leader's flight already failing and being removed before the
+// waiter calls DoChan) could let the waiter start a fresh flight of its own
+// and still pass, without the test ever having exercised the "does not fail
+// the flight" property it claims to. The commits-endpoint call count is
+// asserted to be exactly 1 for the same reason: under the mutation this test
+// targets (the flight running on the leader's own ctx instead of a detached
+// one), the waiter either fails too or ends up making its own second commit
+// call.
 func TestResolveGitHubSkill_CancelledLeaderDoesNotFailWaiters(t *testing.T) {
 	const (
 		owner     = "acme"
@@ -418,15 +536,22 @@ func TestResolveGitHubSkill_CancelledLeaderDoesNotFailWaiters(t *testing.T) {
 	srv, _, _, _, project := setupSkillAuthzTest(t)
 	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
 
+	var commitCalls atomic.Int64
 	entered := make(chan struct{})
 	var enterOnce sync.Once
 	proceed := make(chan struct{})
+	var proceedOnce sync.Once
+	closeProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		commitCalls.Add(1)
 		enterOnce.Do(func() { close(entered) })
-		<-proceed
-		_, _ = w.Write([]byte(commitSHA))
+		select {
+		case <-proceed:
+			_, _ = w.Write([]byte(commitSHA))
+		case <-r.Context().Done():
+		}
 	})
 	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -434,31 +559,68 @@ func TestResolveGitHubSkill_CancelledLeaderDoesNotFailWaiters(t *testing.T) {
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
+	// Registered after gh's own Close, so this runs first (cleanups run in
+	// reverse order): releasing any blocked handler before the server tries
+	// to close keeps a regression (the waiter starting its own flight on a
+	// context that never cancels) from turning Close() into a hang instead
+	// of a clean test failure.
+	t.Cleanup(closeProceed)
 	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
 	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
 
+	ghRef, err := agent.ParseGitHubSkillURI(uri)
+	require.NoError(t, err)
+	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+
+	var joinCount int32
+	waiterJoined := make(chan struct{})
+	ghFlightJoinHook = func(key string) {
+		if key != cacheKey {
+			return
+		}
+		if atomic.AddInt32(&joinCount, 1) == 2 {
+			close(waiterJoined)
+		}
+	}
+	t.Cleanup(func() { ghFlightJoinHook = nil })
+
 	ctxLeader, cancelLeader := context.WithCancel(context.Background())
+	defer cancelLeader()
 	ctxWaiter := context.Background()
 
 	var respLeader, respWaiter *ResolvedSkillResponse
 	var errLeader, errWaiter error
 	doneLeader := make(chan struct{})
-	doneWaiter := make(chan struct{})
-
 	go func() {
 		respLeader, errLeader = srv.resolveGitHubSkill(ctxLeader, uri, project.ID, nil)
 		close(doneLeader)
 	}()
 
-	<-entered // the leader's fetch has started and is blocked on proceed
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("leader's fetch never started")
+	}
 
+	doneWaiter := make(chan struct{})
 	go func() {
 		respWaiter, errWaiter = srv.resolveGitHubSkill(ctxWaiter, uri, project.ID, nil)
 		close(doneWaiter)
 	}()
 
+	select {
+	case <-waiterJoined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter never reached the flight join point")
+	}
+
 	cancelLeader()
-	<-doneLeader // must return promptly: the flight is still blocked on proceed below
+
+	select {
+	case <-doneLeader:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled leader did not return promptly")
+	}
 	if !errors.Is(errLeader, context.Canceled) {
 		t.Fatalf("expected the cancelled leader to get context.Canceled, got %v", errLeader)
 	}
@@ -468,20 +630,24 @@ func TestResolveGitHubSkill_CancelledLeaderDoesNotFailWaiters(t *testing.T) {
 
 	select {
 	case <-doneWaiter:
-		t.Fatal("the uncancelled waiter returned before the flight was released — it should still be blocked on proceed")
+		t.Fatal("the waiter returned before the flight was released — it should still be blocked on proceed")
 	default:
 	}
 
-	close(proceed) // let the still-running flight finish for the waiter
-	<-doneWaiter
+	closeProceed() // let the still-running flight finish for the waiter
+
+	select {
+	case <-doneWaiter:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter did not complete after the flight was released")
+	}
 
 	require.NoError(t, errWaiter)
 	require.NotNil(t, respWaiter)
 	assert.Equal(t, safeShortSHA(commitSHA), respWaiter.ResolvedVersion)
+	assert.Equal(t, int64(1), commitCalls.Load(),
+		"the waiter must join the leader's flight, not make its own commit call")
 
-	ghRef, err := agent.ParseGitHubSkillURI(uri)
-	require.NoError(t, err)
-	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
 	_, hit, err := srv.ghResolutionStore.Get(context.Background(), cacheKey)
 	require.NoError(t, err)
 	assert.True(t, hit, "the flight's cache write must not be skipped because the leader was cancelled")

@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
@@ -1440,7 +1441,7 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 	// Per-request memo for (owner,repo,ref,tokenScope) → commitSHA.
 	// URIs sharing the same tuple — the common case for a skill bundle in one
 	// repo — perform a single ref→SHA lookup instead of one per URI.
-	refSHAMemo := make(map[string]string)
+	refSHAMemo := newGHSHAMemo()
 
 	for _, skillRef := range req.Skills {
 		// GitHub skill resolution: gh:// URIs are handled by the Hub's GitHub resolution cache
@@ -1776,6 +1777,69 @@ func (s *Server) clearGHRefreshFailure(cacheKey string) {
 	delete(s.ghLastRefreshFailure, cacheKey)
 }
 
+// ghSHAMemo is a mutex-guarded (owner,repo,ref,tokenScope) → commitSHA memo,
+// shared across every gh:// URI in one handleSkillsResolve call (see
+// resolveGitHubSkill and fetchAndCacheGitHubSkill) to avoid redundant
+// commits/{ref} lookups for URIs that share the same tuple.
+//
+// It must tolerate concurrent access even though handleSkillsResolve's loop
+// itself calls resolveGitHubSkill one URI at a time: a flight is detached
+// (see fetchAndCacheGitHubSkill's caller) and so can still be running on its
+// own goroutine after its own caller's ctx has ended and resolveGitHubSkill
+// has already moved on — at which point resolveGitHubSkill's own ctx.Err()
+// guard stops any *new* flight for that request from starting, but it cannot
+// retroactively stop one that is already in flight from finishing. A plain
+// map here would then be one flight's in-progress write racing nothing
+// *else* under correct code, but a mutex costs nothing on the hot path and
+// removes any dependence on that guard alone being sufficient — including
+// against a future change that calls resolveGitHubSkill for several URIs in
+// parallel.
+//
+// A nil *ghSHAMemo is valid and disables memoisation (treated as always-miss
+// on get, and set is a no-op), exactly like a nil map did before.
+type ghSHAMemo struct {
+	mu sync.Mutex
+	m  map[string]string
+}
+
+func newGHSHAMemo() *ghSHAMemo {
+	return &ghSHAMemo{m: make(map[string]string)}
+}
+
+func (g *ghSHAMemo) get(key string) (string, bool) {
+	if g == nil {
+		return "", false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	v, ok := g.m[key]
+	return v, ok
+}
+
+func (g *ghSHAMemo) set(key, value string) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.m[key] = value
+}
+
+// ghFlightJoinHook, when non-nil, is called immediately before every caller —
+// leader and followers alike — calls ghResolveFlight.DoChan for cacheKey.
+// Tests use it to know precisely when a second (or later) caller has reached
+// the point of joining an in-flight resolution, without polling or sleeping:
+// the first invocation for a key is the caller that will become the flight
+// leader; any later invocation for the same key, made while that leader's
+// call is still outstanding, is a caller that will join it as a follower.
+var ghFlightJoinHook func(cacheKey string)
+
+func injectGHFlightJoin(cacheKey string) {
+	if ghFlightJoinHook != nil {
+		ghFlightJoinHook(cacheKey)
+	}
+}
+
 // resolveGitHubSkill resolves a gh:// skill URI via the Hub's GitHub resolution cache.
 // This method is called by handleSkillsResolve for gh:// URIs. It:
 //  1. Parses the gh:// URI
@@ -1788,11 +1852,23 @@ func (s *Server) clearGHRefreshFailure(cacheKey string) {
 //     coalescing concurrent callers for the same cache key into one call
 //  6. Stores the result in the cache and returns it
 //
-// refSHAMemo is a per-request memo map keyed by "(owner)/(repo)@(ref):(tokenScope)"
+// refSHAMemo is a per-request memo keyed by "(owner)/(repo)@(ref):(tokenScope)"
 // that is shared across all URIs in one handleSkillsResolve call. It prevents
-// redundant commits/{ref} API lookups for URIs that share the same tuple. Pass a
-// non-nil map to enable memoisation; nil disables it (treated as always-miss).
-func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID string, refSHAMemo map[string]string) (*ResolvedSkillResponse, error) {
+// redundant commits/{ref} API lookups for URIs that share the same tuple. Pass
+// a non-nil *ghSHAMemo to enable memoisation; nil disables it (treated as
+// always-miss).
+func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID string, refSHAMemo *ghSHAMemo) (*ResolvedSkillResponse, error) {
+	// A caller whose context has already ended must not start a new flight:
+	// handleSkillsResolve's loop keeps going to the next gh:// URI after a
+	// per-URI error (including this one), on the same ctx and the same
+	// refSHAMemo, regardless of why the previous URI failed. Without this
+	// check, a request cancelled partway through a batch could start a fresh
+	// detached flight — up to the full ceiling — for every URI still left in
+	// the batch, for a caller that has already gone.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// 1. Parse gh:// URI
 	ghRef, err := agent.ParseGitHubSkillURI(rawURI)
 	if err != nil {
@@ -1867,9 +1943,10 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 	// ctx.Err() immediately rather than blocking for the whole flight. The
 	// flight itself runs on a context detached from any one caller's
 	// cancellation (so the leader's own context ending does not fail the
-	// others, or skip the cache write), but bounded by
-	// boundedHubFlightTimeout, derived from the leader's own remaining
-	// deadline where it has one.
+	// others, or skip the cache write), bounded only by the fixed
+	// hubGitHubRefreshTimeout ceiling — see the comment at that bound below
+	// for why it is not derived from any one caller's deadline.
+	injectGHFlightJoin(cacheKey)
 	resultCh := s.ghResolveFlight.DoChan(cacheKey, func() (result interface{}, ferr error) {
 		// DoChan always runs this function in a goroutine it spawns itself,
 		// never the calling goroutine (see golang.org/x/sync/singleflight) —
@@ -1893,7 +1970,15 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 			}
 		}
 
-		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), boundedHubFlightTimeout(ctx, hubGitHubRefreshTimeout))
+		// Bounded by the fixed ceiling only, not by the leader's own
+		// deadline: every waiter (including the leader) already returns on
+		// its own ctx.Done() via the select below, so no caller can wait
+		// past its own deadline regardless of this bound. Deriving the bound
+		// from the leader's deadline instead would fail every waiter with
+		// that leader's own "context deadline exceeded" the moment it
+		// expired — including waiters with no deadline, or a later one — the
+		// exact starvation this flight exists to prevent.
+		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hubGitHubRefreshTimeout)
 		defer cancel()
 		return s.fetchAndCacheGitHubSkill(flightCtx, cacheKey, rawURI, ghRef, token, installID, isBranchRef, refSHAMemo)
 	})
@@ -1907,23 +1992,6 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-}
-
-// boundedHubFlightTimeout returns the timeout to use for a detached flight
-// derived from ctx: the leader's own remaining deadline when it has one and
-// it is shorter than ceiling, otherwise ceiling. A flight must be detached
-// from its leader's cancellation (so one cancelled leader does not fail every
-// waiter or skip the cache write), but discarding the leader's deadline
-// entirely would hand a tight broker create-deadline an unbounded ceiling
-// instead. A leader with no deadline, or a generous one, still gets a sane
-// upper bound.
-func boundedHubFlightTimeout(ctx context.Context, ceiling time.Duration) time.Duration {
-	if dl, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(dl); remaining > 0 && remaining < ceiling {
-			return remaining
-		}
-	}
-	return ceiling
 }
 
 // refreshGitHubSkillInBackground re-resolves ghRef and updates the cache on
@@ -1978,15 +2046,19 @@ func (s *Server) refreshGitHubSkillInBackground(cacheKey, rawURI string, ghRef *
 // overwrite an existing row's TokenScope with an empty value.
 //
 // Called from within s.ghResolveFlight.DoChan, so concurrent callers sharing
-// cacheKey share one execution — refSHAMemo is only touched by whichever
-// caller's goroutine actually becomes the flight leader.
+// cacheKey share one execution — but refSHAMemo is also shared by every
+// flight in one handleSkillsResolve batch (one per distinct cacheKey), and a
+// detached flight can still be running after its own caller's ctx has ended
+// and resolveGitHubSkill has moved on to the next URI, so refSHAMemo must
+// tolerate concurrent access from more than one flight's goroutine — see
+// ghSHAMemo.
 func (s *Server) fetchAndCacheGitHubSkill(
 	ctx context.Context,
 	cacheKey, rawURI string,
 	ghRef *agent.GitHubSkillRef,
 	token, installID string,
 	isBranchRef bool,
-	refSHAMemo map[string]string,
+	refSHAMemo *ghSHAMemo,
 ) (*ResolvedSkillResponse, error) {
 	apiBase := githubAPIBase
 	if s.config.GitHubAppConfig.APIBaseURL != "" {
@@ -2004,19 +2076,14 @@ func (s *Server) fetchAndCacheGitHubSkill(
 	// installID suffix is the same for every URI in one request (shared
 	// projectID → shared installation) but is included for forward-safety.
 	memoKey := strings.ToLower(ghRef.Owner) + "/" + strings.ToLower(ghRef.Repo) + "@" + ghRef.Ref + ":" + installID
-	commitSHA, seen := "", false
-	if refSHAMemo != nil {
-		commitSHA, seen = refSHAMemo[memoKey]
-	}
+	commitSHA, seen := refSHAMemo.get(memoKey)
 	if !seen {
 		var err error
 		commitSHA, err = ghResolveCommitSHA(ctx, apiBase, ghRef.Owner, ghRef.Repo, ghRef.Ref, token)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve commit SHA: %w", err)
 		}
-		if refSHAMemo != nil {
-			refSHAMemo[memoKey] = commitSHA
-		}
+		refSHAMemo.set(memoKey, commitSHA)
 	}
 
 	fileEntries, err := ghListContents(ctx, apiBase, rawBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
