@@ -172,7 +172,7 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, creatorName string, 
 		ac.InlineConfig = req.Config
 	}
 
-	if ac.HarnessAuth == "none" {
+	if harness.IsNoAuthType(ac.HarnessAuth) {
 		ac.NoAuth = true
 	}
 
@@ -570,7 +570,7 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 					s.agentLifecycleLog.Error("Failed to check auth credentials for fallback", "agent_id", agent.ID, "error", err)
 				} else if !hasCreds {
 					agent.AppliedConfig.NoAuth = true
-					agent.AppliedConfig.HarnessAuth = "none"
+					agent.AppliedConfig.HarnessAuth = harness.AuthTypeNone
 					s.agentLifecycleLog.Info("Auto no-auth fallback: harness supports drop-to-shell and no credentials found",
 						"agent_id", agent.ID, "harness", hc.Harness)
 				}

@@ -267,7 +267,8 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 
 	// Pass through non-secret discovery values so the script and broker can
 	// use them. SCION_HARNESS_AUTH_CANDIDATES is a manifest-style hint.
-	if auth.SelectedType != "" {
+	// The no-auth sentinel is not an auth type; never forward it.
+	if auth.SelectedType != "" && !IsNoAuthType(auth.SelectedType) {
 		resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"] = auth.SelectedType
 	}
 
@@ -587,8 +588,14 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 	// (the run.go backfill incorrectly wrote resolved.Method instead of
 	// the auth type). These are never valid auth types and would crash
 	// the container-side provisioner.
+	//
+	// The no-auth sentinel "none" is rejected from both sources for the
+	// same reason: the provisioner does not accept it as an auth type.
 	explicitType := c.entry.AuthSelectedType
-	if st := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; st != "" && !IsHarnessImplementationName(st) {
+	if IsNoAuthType(explicitType) {
+		explicitType = ""
+	}
+	if st := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; st != "" && !IsHarnessImplementationName(st) && !IsNoAuthType(st) {
 		explicitType = st
 	}
 

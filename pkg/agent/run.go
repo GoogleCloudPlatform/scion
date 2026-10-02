@@ -615,6 +615,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// standing up a full agent; see resolveAuthEnvOverlay.
 	authEnvOverlay, droppedBrokerEnvVars := resolveAuthEnvOverlay(&opts, settings, profileName, harnessConfigName)
 
+	// Agents created in no-auth mode persist auth_selectedType "none". The
+	// start, restart, resume and wake paths may reach here without NoAuth
+	// set, so treat "none" as a request for no-auth mode instead of an auth
+	// type. An explicit opts.HarnessAuth other than "none" still wins over
+	// the persisted value.
+	if isNoAuthSelection(opts.HarnessAuth, finalScionCfg) {
+		opts.NoAuth = true
+	}
+
 	canFallbackToNoAuth := func() bool {
 		return opts.HarnessAuth == "" && noAuthConfig != nil &&
 			(noAuthConfig.Behavior == "drop-to-shell" || noAuthConfig.Behavior == "allow")
@@ -1939,6 +1948,17 @@ func buildAuthEnvOverlay(baseEnv map[string]string, secrets []api.ResolvedSecret
 		}
 	}
 	return overlay
+}
+
+// isNoAuthSelection reports whether the effective auth selection for a
+// start is the no-auth sentinel. A valid explicit harnessAuth decides on
+// its own; otherwise the auth_selectedType persisted in scion-agent.json
+// (cfg) is used. Harness implementation names are ignored as corrupted.
+func isNoAuthSelection(harnessAuth string, cfg *api.ScionConfig) bool {
+	if harnessAuth != "" && !harness.IsHarnessImplementationName(harnessAuth) {
+		return harness.IsNoAuthType(harnessAuth)
+	}
+	return cfg != nil && harness.IsNoAuthType(cfg.AuthSelectedType)
 }
 
 // autoDetectAuthSelectedType sets auth.SelectedType when nothing explicit has
