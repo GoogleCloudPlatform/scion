@@ -1246,6 +1246,9 @@ func TestAsyncCreate_ClaimLocallyCancelled_SendsNoTerminal(t *testing.T) {
 func TestCreateAgent_SyncGCSDownloadFailure_PinsOriginalErrorText(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, _ := newAsyncTestServer(t, mgr)
+	// A real WorktreeBase, so the workspace directory passes validation and
+	// the download reaches the (unconfigured) storage bucket check.
+	srv.config.WorktreeBase = t.TempDir()
 
 	w := postCreate(t, srv, map[string]any{
 		"name": "agent-sync-gcs", "workspaceStoragePath": "some/path",
@@ -1263,6 +1266,35 @@ func TestCreateAgent_SyncGCSDownloadFailure_PinsOriginalErrorText(t *testing.T) 
 	}
 }
 
+// TestCreateAgent_SyncGCSDownloadInvalidWorkspaceDir_Returns400 covers the
+// synchronous path rejecting a GCS-bootstrap workspace directory that fails
+// workspace-source validation as a client error (400), before anything is
+// created or downloaded. The test server's WorktreeBase is empty, so the
+// joined workspace directory is not an allowed workspace path.
+func TestCreateAgent_SyncGCSDownloadInvalidWorkspaceDir_Returns400(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, _ := newAsyncTestServer(t, mgr)
+	srv.config.WorktreeBase = ""
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-sync-gcs-invalid", "workspaceStoragePath": "some/path",
+		"config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var errResp ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if !strings.HasPrefix(errResp.Error.Message, "Invalid workspace directory: ") {
+		t.Fatalf("message = %q, want the \"Invalid workspace directory: \" text", errResp.Error.Message)
+	}
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called for an invalid workspace directory, got %d calls", n)
+	}
+}
+
 // TestAsyncCreate_GCSDownloadRunsOnlyOnceInRunLaunch covers the GCS download
 // running only inside runLaunch for an accepted async create, never
 // synchronously during admission. The test server has no storage bucket
@@ -1271,6 +1303,9 @@ func TestCreateAgent_SyncGCSDownloadFailure_PinsOriginalErrorText(t *testing.T) 
 func TestAsyncCreate_GCSDownloadRunsOnlyOnceInRunLaunch(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, rtb := newAsyncTestServer(t, mgr)
+	// A real WorktreeBase, so runLaunch's download passes workspace
+	// directory validation and fails at the storage bucket check.
+	srv.config.WorktreeBase = t.TempDir()
 
 	var mu sync.Mutex
 	var failedMessage string
