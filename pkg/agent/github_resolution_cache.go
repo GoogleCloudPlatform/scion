@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -500,6 +501,17 @@ func (c *GitHubResolutionCache) coalesceFetch(
 		}
 		return res.Val.(ResolvedSkill), nil
 	case <-ctx.Done():
+		// A waiter whose own deadline (e.g. the resolve budget) expires
+		// before the shared flight finishes is a timeout, so classify it as
+		// one; plain cancellation stays unclassified. Both errors are wrapped
+		// so errors.As finds the code and errors.Is still matches the
+		// context error. logRef only: no credential-derived material.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return ResolvedSkill{}, fmt.Errorf("%w: %w", &githubResolveError{
+				code: SkillErrCodeTimeout,
+				msg:  fmt.Sprintf("timed out waiting for GitHub skill resolution of %s", logRef),
+			}, ctx.Err())
+		}
 		return ResolvedSkill{}, ctx.Err()
 	}
 }

@@ -3222,3 +3222,49 @@ func TestCredentialFingerprint_FullWidth(t *testing.T) {
 		t.Fatalf("expected a %d-character full hex-encoded SHA-256 digest, got %d characters: %q", wantLen, len(got), got)
 	}
 }
+
+// TestGitHubSkillResolver_CachedWaiterDeadline_ClassifiedAsTimeout proves that
+// when the shared (coalesced) fetch outlives a caller's resolve budget, the
+// caller's own deadline maps to SkillErrCodeTimeout rather than an
+// unclassified resolve_failed, and that the message names only the
+// credential-free logRef.
+func TestGitHubSkillResolver_CachedWaiterDeadline_ClassifiedAsTimeout(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+
+	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+	resolver := newTestGitHubResolver(server)
+	resolver.resolutionCache = cache
+	resolver.resolveBudget = 200 * time.Millisecond
+
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(result.Errors))
+	}
+	got := result.Errors[0]
+	if got.Code != SkillErrCodeTimeout {
+		t.Errorf("expected code %s, got %s (message: %s)", SkillErrCodeTimeout, got.Code, got.Message)
+	}
+	if !strings.Contains(got.Message, "gh://owner/repo/my-skill@main (default)") {
+		t.Errorf("expected message to name the logRef, got %s", got.Message)
+	}
+	if strings.Contains(got.Message, credentialFingerprint("test-token")) || strings.Contains(got.Message, "test-token") {
+		t.Errorf("message must not carry credential-derived material, got %s", got.Message)
+	}
+}
