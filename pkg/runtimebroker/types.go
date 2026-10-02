@@ -155,6 +155,11 @@ type AgentResponse struct {
 	Labels                map[string]string `json:"labels,omitempty"`
 	CreatedAt             time.Time         `json:"createdAt,omitempty"`
 	UpdatedAt             time.Time         `json:"updatedAt,omitempty"`
+	// Warnings carries only the hub-only env drop warnings (a broker-local
+	// TZ value ignored for a hub-dispatched agent), so the hub can relay
+	// them in its own create and start responses. Other broker-local start
+	// warnings are deliberately not included.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // AgentConfig contains agent configuration details.
@@ -591,6 +596,9 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Labels:                info.Labels,
 		CreatedAt:             info.Created,
 		Ready:                 phase == string(state.PhaseRunning),
+	}
+	if len(info.HubOnlyEnvWarnings) > 0 {
+		resp.Warnings = append([]string(nil), info.HubOnlyEnvWarnings...)
 	}
 
 	if info.Template != "" || info.Image != "" {

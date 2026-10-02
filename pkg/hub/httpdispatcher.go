@@ -1135,10 +1135,16 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	return info
 }
 
-// applyBrokerResponse updates agent fields from the broker's response.
+// applyBrokerResponse updates agent fields from the broker's response and
+// relays the broker's hub-only env warnings to the dispatch warnings
+// collector on ctx, if the caller attached one.
 func (d *HTTPAgentDispatcher) applyBrokerResponse(ctx context.Context, agent *store.Agent, resp *RemoteAgentResponse) {
 	d.forgetRuntimeTarget(ctx, agent)
+	if resp == nil {
+		return
+	}
 	if resp.Agent != nil {
+		addDispatchWarnings(ctx, resp.Agent.Warnings...)
 		if d.debug {
 			d.log.Debug("applyBrokerResponse: applying broker phase",
 				"agentName", agent.Name,

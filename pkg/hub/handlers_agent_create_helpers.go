@@ -537,6 +537,9 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	if hcName == "" && resolvedTemplate != nil {
 		hcName = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
 	}
+	// resolvedHC is the hub harness config resolved below, if any; the
+	// timezone capture at the end of this function reads its env.
+	var resolvedHC *store.HarnessConfig
 	if hcName != "" && agent.AppliedConfig.HarnessConfigID == "" {
 		var hc *store.HarnessConfig
 		if project != nil {
@@ -554,6 +557,7 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 			}
 		}
 		if hc != nil {
+			resolvedHC = hc
 			agent.AppliedConfig.HarnessConfigID = hc.ID
 			agent.AppliedConfig.HarnessConfigHash = hc.ContentHash
 
@@ -755,6 +759,14 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// Merge injected skills from hub/user/project scopes into InlineConfig.Skills
 	// so the provisioner's existing Step 3b handles them.
 	s.mergeInjectedSkills(ctx, agent, project)
+
+	// Writer (a) of ExplicitTimezone, run unconditionally and last so that
+	// creates with or without a template or harness config are covered: a
+	// create-time TZ (request config.env, else the hub template merged
+	// above, else the hub harness config) becomes the agent's pin, and TZ
+	// leaves the env records. Every create entry point (HTTP create,
+	// scheduled spawn and reincarnate) reaches this via deriveAgentConfig.
+	s.captureCreateTimezone(ctx, agent, resolvedHC)
 }
 
 // mergeInjectedSkills fetches injected-skills refs from hub, user, and project
