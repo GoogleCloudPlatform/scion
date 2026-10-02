@@ -17,7 +17,10 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -221,5 +224,62 @@ func TestExplicitTimezone_StoreRoundTrip(t *testing.T) {
 	}
 	if got.AppliedConfig.ExplicitTimezone != "Asia/Kathmandu" || !got.AppliedConfig.ExplicitTimezoneLegacy || !got.AppliedConfig.ExplicitTimezoneUnpinned {
 		t.Fatalf("read back %+v; want the three timezone fields preserved", got.AppliedConfig)
+	}
+}
+
+// TestResolveAgentTZ_ProfileIsNotARung checks a runtime-profile timezone
+// never reaches the resolver, even with a profile provider set on the
+// dispatcher. Task 13 (profile retirement) deletes this case together with
+// SetProfileTimezoneProvider.
+func TestResolveAgentTZ_ProfileIsNotARung(t *testing.T) {
+	d, _ := tzTestDispatcher(t, "")
+	d.SetProfileTimezoneProvider(func(string) string { return "Europe/Rome" })
+	agent := envScopeTestAgent()
+	agent.AppliedConfig = &store.AgentAppliedConfig{Profile: "default"}
+
+	if got, want := d.resolveAgentTZ(context.Background(), agent, false), (agentTZ{TZ: "", Source: TZSourceNone}); got != want {
+		t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, want)
+	}
+}
+
+// TestResolveAgentTZ_UnadoptedLegacyEnvTZ checks a TZ still sitting in the
+// agent's env records is not a rung, and that resolving it unadopted logs a
+// warning.
+func TestResolveAgentTZ_UnadoptedLegacyEnvTZ(t *testing.T) {
+	tests := []struct {
+		name string
+		ac   *store.AgentAppliedConfig
+	}{
+		{name: "env", ac: &store.AgentAppliedConfig{Env: map[string]string{"TZ": "Europe/Paris"}}},
+		{name: "inline config env only", ac: &store.AgentAppliedConfig{InlineConfig: &api.ScionConfig{Env: map[string]string{"TZ": "Europe/Paris"}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, _ := tzTestDispatcher(t, "Asia/Tokyo")
+			var buf bytes.Buffer
+			d.log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			agent := envScopeTestAgent()
+			agent.AppliedConfig = tt.ac
+
+			if got, want := d.resolveAgentTZ(context.Background(), agent, false), (agentTZ{TZ: "Asia/Tokyo", Source: TZSourceHubDefault}); got != want {
+				t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, want)
+			}
+			if !strings.Contains(buf.String(), "unadopted legacy TZ") {
+				t.Fatalf("expected an unadopted legacy TZ warning, got log %q", buf.String())
+			}
+		})
+	}
+
+	// An adopted (pinned) agent logs nothing.
+	d, _ := tzTestDispatcher(t, "")
+	var buf bytes.Buffer
+	d.log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	agent := envScopeTestAgent()
+	agent.AppliedConfig = &store.AgentAppliedConfig{ExplicitTimezone: "Europe/Paris", ExplicitTimezoneLegacy: true}
+	if got, want := d.resolveAgentTZ(context.Background(), agent, false), (agentTZ{TZ: "Europe/Paris", Source: TZSourceLegacy}); got != want {
+		t.Fatalf("pinned: resolveAgentTZ() = %+v, want %+v", got, want)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("pinned agent logged %q", buf.String())
 	}
 }

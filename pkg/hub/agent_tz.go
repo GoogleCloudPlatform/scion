@@ -114,12 +114,36 @@ func (d *HTTPAgentDispatcher) resolveAgentTZ(ctx context.Context, agent *store.A
 		// Rung 1 wins outright; skip the storage and settings reads.
 		return chooseAgentTZ(ac, agentTZ{}, "", forGatherAnswer)
 	}
+	if legacy := legacyEnvTZ(ac); legacy != "" && d.log != nil {
+		// Every caller must adopt a legacy env TZ first. The result is
+		// unchanged (the agent's Env is not a rung); the log makes a missed
+		// adoption visible instead of silently dropping the agent's zone.
+		d.log.Warn("unadopted legacy TZ in agent env; adoptLegacyTZ must run before resolveAgentTZ",
+			"agentID", agent.ID, "tz", legacy)
+	}
 	storage := d.resolveStorageTZ(ctx, agent)
 	hubDefault := ""
 	if storage.TZ == "" && d.hubAgentDefaultsProvider != nil {
 		hubDefault = d.hubAgentDefaultsProvider().DefaultTimezone
 	}
 	return chooseAgentTZ(ac, storage, hubDefault, forGatherAnswer)
+}
+
+// legacyEnvTZ returns the TZ an older hub persisted in the agent's env
+// records (AppliedConfig.Env first, then InlineConfig.Env), or "".
+func legacyEnvTZ(ac *store.AgentAppliedConfig) string {
+	if ac == nil {
+		return ""
+	}
+	if v := ac.Env[agentTZEnvKey]; v != "" {
+		return v
+	}
+	if ac.InlineConfig != nil {
+		if v := ac.InlineConfig.Env[agentTZEnvKey]; v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // resolveStorageTZ returns the winning hub env-var storage TZ for the agent

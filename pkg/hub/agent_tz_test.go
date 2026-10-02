@@ -109,12 +109,6 @@ func TestChooseAgentTZ_Chain(t *testing.T) {
 			hubDefault: "Asia/Tokyo",
 			want:       agentTZ{TZ: "Asia/Tokyo", Source: TZSourceHubDefault},
 		},
-		{
-			name:       "profile is not a rung",
-			ac:         &store.AgentAppliedConfig{Profile: "default"},
-			hubDefault: "",
-			want:       agentTZ{TZ: "", Source: TZSourceNone},
-		},
 	}
 
 	for _, tt := range tests {

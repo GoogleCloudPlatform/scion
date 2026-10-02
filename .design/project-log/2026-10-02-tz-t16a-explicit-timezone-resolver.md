@@ -24,6 +24,26 @@
 - No runtime-profile rung (decision D3). No caller yet: part (b) wires it
   into `buildCreateRequest`, `buildStartEnv`, the writer table and the PATCH.
 
+## Deviation from design
+
+Design §3 A (c) specifies `resolveAgentTZ(ctx, agent, storageEnv) (tz,
+source string)`. The implementation is `resolveAgentTZ(ctx, agent,
+forGatherAnswer bool) agentTZ{TZ, Source}`:
+
+- `forGatherAnswer` is needed by I4 (answering an old broker's `TZ` gather
+  need with `UTC` when no rung supplies one).
+- The `storageEnv` parameter was dropped. The map `resolveEnvFromStorage`
+  builds carries no scope, so it cannot yield the `user|project|hub|broker|
+  progeny` source label, and it lets an empty higher-scope value win, which
+  the TZ chain must not do (first non-empty wins).
+- Cost: the resolver reads storage itself, at most 5 indexed, `Key`-filtered
+  queries per dispatch (4 scopes plus progeny), and none when the agent is
+  pinned.
+
+`resolveAgentTZ` also logs a warning when it meets an unadopted legacy `TZ`
+in the agent's `Env`/`InlineConfig.Env`; the result is unchanged. Part (b)
+must run `adoptLegacyTZ` at every entry point before resolving.
+
 ## Why
 
 Design §3 A (c): one resolver is the only source of the agent container
@@ -39,4 +59,7 @@ empty skipping, progeny, live hub default, SQLite round trip). Run under
 
 ## Follow-ups
 
-Part (b) on `scion/tz-t16b`.
+- Part (b) on `scion/tz-t16b`.
+- The winning progeny `TZ` across two ancestors is not deterministic
+  (`ListProgenyEnvVars` orders by key only). This is pre-existing and shared
+  with `resolveEnvFromStorage`; it is tracked as a follow-up issue.
