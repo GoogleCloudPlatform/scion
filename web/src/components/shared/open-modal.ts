@@ -45,10 +45,16 @@ export function isOpenModalElement(el: Element): boolean {
  * skipped entirely, since composedPath()-based exclusion does not work here:
  * the caller's own dialog lives inside `exclude`'s shadow root, and
  * `Element.contains()` does not cross shadow boundaries.
+ *
+ * Hidden subtrees are skipped too: an element with the `hidden` attribute,
+ * its light-DOM descendants and its shadow tree. A dialog left open inside
+ * one (such as a retained terminal pane that is off screen) is not visible,
+ * so it does not count as an open modal.
  */
 export function hasOpenModalDescendant(root: ParentNode, exclude: Element | null): boolean {
   for (const el of Array.from(root.querySelectorAll('*'))) {
     if (exclude && el === exclude) continue;
+    if (el.closest('[hidden]')) continue;
     if (isOpenModalElement(el)) return true;
     if (el.shadowRoot && hasOpenModalDescendant(el.shadowRoot, exclude)) {
       return true;

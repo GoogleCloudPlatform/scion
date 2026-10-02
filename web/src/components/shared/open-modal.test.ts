@@ -90,6 +90,35 @@ describe('hasOpenModalDescendant', () => {
     expect(hasOpenModalDescendant(document, null)).toBe(true);
   });
 
+  it("skips an open modal inside a hidden host's shadow root", () => {
+    const host = shadowHost(shoelace('sl-dialog', true));
+    host.hidden = true;
+    document.body.append(host);
+    expect(hasOpenModalDescendant(document, null)).toBe(false);
+
+    host.hidden = false;
+    expect(hasOpenModalDescendant(document, null)).toBe(true);
+  });
+
+  it('skips an open modal under a hidden light-DOM ancestor', () => {
+    const wrapper = document.createElement('div');
+    wrapper.hidden = true;
+    wrapper.append(document.createElement('div'));
+    wrapper.firstElementChild!.append(nativeDialog(true), shadowHost(shoelace('sl-drawer', true)));
+    document.body.append(wrapper);
+    expect(hasOpenModalDescendant(document, null)).toBe(false);
+
+    wrapper.hidden = false;
+    expect(hasOpenModalDescendant(document, null)).toBe(true);
+  });
+
+  it('still finds a visible open modal beside a hidden one', () => {
+    const hiddenHost = shadowHost(shoelace('sl-dialog', true));
+    hiddenHost.hidden = true;
+    document.body.append(hiddenHost, shadowHost(shoelace('sl-dialog', true)));
+    expect(hasOpenModalDescendant(document, null)).toBe(true);
+  });
+
   it('skips the excluded host and everything in its shadow tree', () => {
     const own = shadowHost(shoelace('sl-dialog', true));
     document.body.append(own);
