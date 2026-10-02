@@ -2288,13 +2288,21 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private async handleSaveError(res: Response): Promise<void> {
-    let body: Record<string, unknown>;
+    let parsed: unknown;
     try {
-      body = (await res.json()) as Record<string, unknown>;
+      parsed = await res.json();
     } catch {
       this.error = 'Failed to save settings';
       return;
     }
+    // A JSON body that is not an object (null, a bare string/number, an
+    // array) carries no error code or message to read, so treat it like a
+    // non-JSON body rather than dereferencing it below.
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      this.error = 'Failed to save settings';
+      return;
+    }
+    const body = parsed as Record<string, unknown>;
 
     switch (body.error) {
       case 'validation_failed':

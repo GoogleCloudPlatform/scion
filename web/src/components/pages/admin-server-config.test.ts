@@ -106,7 +106,7 @@ function createFetchHandler(
     schemaResponse?: Record<string, unknown> | null;
     putHandler?: (body: Record<string, unknown>) => {
       status: number;
-      body: Record<string, unknown>;
+      body: unknown;
     };
     messagingResponse?: Record<string, unknown>;
   }
@@ -902,6 +902,35 @@ describe('scion-page-admin-server-config', () => {
       expect(text).toContain('invalid default_timezone "Not/A/Timezone"');
       expect(text).not.toContain('An unexpected error occurred');
     });
+
+    // A JSON error body that is not an object (null, a bare string, an
+    // array) has no error code or message to read; handleSaveError must
+    // treat it like a non-JSON body instead of dereferencing it.
+    for (const [label, errBody] of [
+      ['null', null],
+      ['a bare string', 'upstream proxy error'],
+      ['an array', ['boom']],
+    ] as const) {
+      it(`a non-object JSON error body (${label}) shows the save-failed message`, async () => {
+        const config = makeBaseConfig({ settings_tier: 'db' });
+
+        element = await createComponent(
+          createFetchHandler(config, {
+            putHandler: () => ({ status: 502, body: errBody }),
+          })
+        );
+
+        const buttons = queryAll(element, 'sl-button[variant="primary"]');
+        const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+        (saveBtn as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await (element as any).updateComplete;
+
+        const text = shadowText(element);
+        expect(text).toContain('Failed to save settings');
+        expect(text).not.toContain('An unexpected error occurred');
+      });
+    }
   });
 
   // ── Schema fallback ──
