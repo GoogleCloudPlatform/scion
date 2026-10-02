@@ -481,7 +481,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// without this, an invalid name is written to settings.yaml silently and
 	// never rejected in file mode.
 	if req.DefaultTimezone != nil {
-		tz, _ := raw["default_timezone"].(string)
+		tz := *req.DefaultTimezone
 		if err := validateDefaultTimezone(tz); err != nil {
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
 				fmt.Sprintf("invalid default_timezone %q: %v", tz, err), nil)
