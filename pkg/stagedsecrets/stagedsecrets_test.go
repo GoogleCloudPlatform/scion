@@ -633,22 +633,45 @@ func TestWriteAs_RejectsTrailingSlashTarget(t *testing.T) {
 	}
 }
 
-// TestWriteAs_RejectsDotDotTarget proves a Target whose leaf is ".." is
-// rejected the same way, rather than being resolved by filepath.Clean into
-// some other, surprising location.
-func TestWriteAs_RejectsDotDotTarget(t *testing.T) {
-	homeDir := t.TempDir()
-	targetDir := t.TempDir()
-	target := filepath.Join(targetDir, "secrets", "..")
-
-	staged := &Staged{FileSecrets: []FileSecret{
-		{Name: "SA", Target: target, Value: base64.StdEncoding.EncodeToString([]byte("sa-token"))},
-	}}
-	if err := writeAs(homeDir, staged, os.Getuid(), os.Getgid()); err == nil {
-		t.Fatal("writeAs() = nil error, want a refusal for a target whose leaf is \"..\"")
+// TestWriteAs_RejectsDotAndDotDotTarget proves a Target whose leaf is "."
+// or ".." is rejected, rather than being resolved by filepath.Clean into
+// some other, surprising location — and that nothing is created at the
+// would-be parent either.
+//
+// The targets here are built with plain string concatenation, not
+// filepath.Join or filepath.Clean: both of those collapse a trailing
+// "/x/.." or "/." segment before writeAs ever sees it, which would leave
+// this test exercising nothing but an ordinary, already-covered path.
+func TestWriteAs_RejectsDotAndDotDotTarget(t *testing.T) {
+	tests := []struct {
+		name   string
+		target func(targetDir string) string
+	}{
+		{
+			name:   "dot-dot leaf",
+			target: func(targetDir string) string { return targetDir + "/secrets/x/.." },
+		},
+		{
+			name:   "dot leaf",
+			target: func(targetDir string) string { return targetDir + "/secrets/." },
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			homeDir := t.TempDir()
+			targetDir := t.TempDir()
+			target := tt.target(targetDir)
 
-	if _, err := os.Stat(filepath.Join(targetDir, "secrets")); !os.IsNotExist(err) {
-		t.Errorf("secrets dir exists after a refused \"..\" target (stat err=%v); nothing must be created", err)
+			staged := &Staged{FileSecrets: []FileSecret{
+				{Name: "SA", Target: target, Value: base64.StdEncoding.EncodeToString([]byte("sa-token"))},
+			}}
+			if err := writeAs(homeDir, staged, os.Getuid(), os.Getgid()); err == nil {
+				t.Fatalf("writeAs() = nil error, want a refusal for target %q", target)
+			}
+
+			if _, err := os.Stat(targetDir + "/secrets"); !os.IsNotExist(err) {
+				t.Errorf("secrets dir exists after a refused target %q (stat err=%v); nothing must be created", target, err)
+			}
+		})
 	}
 }
