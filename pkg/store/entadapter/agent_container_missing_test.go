@@ -159,3 +159,57 @@ func TestAgentStore_MarkAgentContainerMissing_GuardsInUpdate(t *testing.T) {
 	}
 	assert.Regexp(t, `deleted_at[`+"`"+`"]? IS NULL`, update, "soft-delete guard must be deleted_at IS NULL")
 }
+
+func TestAgentStore_ClearAgentRuntimeTarget(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	t.Run("clears only the target", func(t *testing.T) {
+		a := makeAgent(projectID, "with-target")
+		a.AppliedConfig = &store.AgentAppliedConfig{
+			Image:         "example/image:1",
+			Profile:       "remote",
+			Env:           map[string]string{"A": "1"},
+			RuntimeTarget: "kubernetes|context=c|namespace=n",
+		}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		before, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+
+		require.NoError(t, s.ClearAgentRuntimeTarget(ctx, a.ID))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.AppliedConfig)
+		assert.Empty(t, got.AppliedConfig.RuntimeTarget)
+		assert.Equal(t, "example/image:1", got.AppliedConfig.Image)
+		assert.Equal(t, "remote", got.AppliedConfig.Profile)
+		assert.Equal(t, map[string]string{"A": "1"}, got.AppliedConfig.Env)
+		assert.Equal(t, before.StateVersion, got.StateVersion, "state_version is not bumped")
+
+		// A stale full update by a holder of the pre-clear version still
+		// succeeds (the clear does not cause version conflicts).
+		before.AppliedConfig.RuntimeTarget = ""
+		require.NoError(t, s.UpdateAgent(ctx, before))
+	})
+
+	t.Run("no target is a no-op", func(t *testing.T) {
+		a := makeAgent(projectID, "no-target")
+		a.AppliedConfig = &store.AgentAppliedConfig{Image: "example/image:1"}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		require.NoError(t, s.ClearAgentRuntimeTarget(ctx, a.ID))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "example/image:1", got.AppliedConfig.Image)
+	})
+
+	t.Run("no applied config is a no-op", func(t *testing.T) {
+		a := makeAgent(projectID, "no-config")
+		a.AppliedConfig = nil
+		require.NoError(t, s.CreateAgent(ctx, a))
+		require.NoError(t, s.ClearAgentRuntimeTarget(ctx, a.ID))
+	})
+
+	t.Run("unknown agent is a no-op", func(t *testing.T) {
+		require.NoError(t, s.ClearAgentRuntimeTarget(ctx, "00000000-0000-0000-0000-00000000abcd"))
+	})
+}

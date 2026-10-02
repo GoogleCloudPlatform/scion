@@ -1113,7 +1113,8 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 }
 
 // applyBrokerResponse updates agent fields from the broker's response.
-func (d *HTTPAgentDispatcher) applyBrokerResponse(agent *store.Agent, resp *RemoteAgentResponse) {
+func (d *HTTPAgentDispatcher) applyBrokerResponse(ctx context.Context, agent *store.Agent, resp *RemoteAgentResponse) {
+	d.forgetRuntimeTarget(ctx, agent)
 	if resp.Agent != nil {
 		if d.debug {
 			d.log.Debug("applyBrokerResponse: applying broker phase",
@@ -1162,6 +1163,26 @@ func (d *HTTPAgentDispatcher) applyBrokerResponse(agent *store.Agent, resp *Remo
 	}
 }
 
+// forgetRuntimeTarget drops the agent's recorded runtime target, in memory
+// and in the store, after a create or start was accepted by the broker. The
+// broker may have placed the agent on a different runtime target than the
+// one last recorded, so the missing-container reconcile must not consider
+// the agent until a heartbeat lists it again and records its target. The
+// store write is targeted (it does not depend on the caller persisting the
+// agent), because the lifecycle start path only writes status fields.
+func (d *HTTPAgentDispatcher) forgetRuntimeTarget(ctx context.Context, agent *store.Agent) {
+	if agent.AppliedConfig != nil {
+		agent.AppliedConfig.RuntimeTarget = ""
+	}
+	if d.store == nil || agent.ID == "" {
+		return
+	}
+	if err := d.store.ClearAgentRuntimeTarget(ctx, agent.ID); err != nil {
+		d.log.Warn("Failed to clear the recorded runtime target after dispatch",
+			"agent_id", agent.ID, "error", err)
+	}
+}
+
 // DispatchAgentCreate creates and starts an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) error {
 	ctx, span := tracer.Start(ctx, "hub.dispatch.create")
@@ -1199,7 +1220,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		return err
 	}
 
-	d.applyBrokerResponse(agent, resp)
+	d.applyBrokerResponse(ctx, agent, resp)
 	return nil
 }
 
@@ -1270,7 +1291,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	} else if err != nil {
 		return err
 	} else if resp != nil {
-		d.applyBrokerResponse(agent, resp)
+		d.applyBrokerResponse(ctx, agent, resp)
 	}
 
 	finalResp := resp
@@ -1311,7 +1332,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 					"agent", agent.Name, "needs", envReqs2.Needs)
 			}
 			if resp2 != nil {
-				d.applyBrokerResponse(agent, resp2)
+				d.applyBrokerResponse(ctx, agent, resp2)
 			}
 			finalResp = resp2
 			finalNeeds = envReqs2
@@ -1423,7 +1444,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	} else if err != nil {
 		return nil, err
 	} else if resp != nil {
-		d.applyBrokerResponse(agent, resp)
+		d.applyBrokerResponse(ctx, agent, resp)
 	}
 
 	// Second pass: if the broker reported needed keys, check whether any can
@@ -1537,7 +1558,7 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 				return &ErrEnvStillMissing{Requirements: envReqs2}
 			}
 			if resp2 != nil {
-				d.applyBrokerResponse(agent, resp2)
+				d.applyBrokerResponse(ctx, agent, resp2)
 			}
 			return nil
 		}
@@ -1545,7 +1566,7 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 	}
 
 	if resp != nil {
-		d.applyBrokerResponse(agent, resp)
+		d.applyBrokerResponse(ctx, agent, resp)
 	}
 	return nil
 }
@@ -2535,7 +2556,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	}
 
 	if resp != nil {
-		d.applyBrokerResponse(agent, resp)
+		d.applyBrokerResponse(ctx, agent, resp)
 	}
 	return nil
 }
@@ -2601,6 +2622,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	err = d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return d.deferredRestart(ctx, agent)
+	}
+	if err == nil {
+		d.forgetRuntimeTarget(ctx, agent)
 	}
 	return err
 }

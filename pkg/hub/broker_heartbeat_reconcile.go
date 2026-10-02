@@ -29,25 +29,37 @@ import (
 // the containers (or Kubernetes pods) that exist. When a container disappears
 // outside of a Scion lifecycle action (a node drain, repair or eviction
 // removing a pod, or a container removed by hand), the agent would otherwise
-// stay in phase running forever. After every heartbeat that carries a
-// complete inventory, the Hub looks for agents assigned to the broker that
-// are in phase running but absent from the report, and once an agent has been
-// continuously absent for the grace period it is moved to phase error with
-// exit reason container_missing.
+// stay in phase running forever. The heartbeat reports, per runtime target
+// (the broker's default runtime and each auxiliary runtime; a Kubernetes
+// target is identified by cluster context and namespace), whether that
+// target was listed completely, and each reported agent carries the target
+// that listed it. The Hub records that target on the agent. After every
+// heartbeat, the Hub looks for agents assigned to the broker that are in
+// phase running, whose recorded target this heartbeat lists as complete, but
+// which are absent from the report. Once such an agent has been continuously
+// absent for the grace period it is moved to phase error with exit reason
+// container_missing.
 //
 // The mechanism is runtime-neutral: it applies to Docker, Podman, Apple
 // container and Kubernetes brokers alike, because it only compares the
 // heartbeat's inventory with the Hub's agent rows.
 //
 // Safety rules (each one keeps a live agent from being caught):
-//   - Only heartbeats with inventory.complete=true count. A broker sets it only
-//     when every runtime listed without error; an older broker never sends it.
+//   - Only an agent whose recorded runtime target is listed as complete in
+//     this heartbeat is considered. A target is complete only when its
+//     listing succeeded, so a forbidden or failed listing (for example a
+//     Kubernetes namespace the broker may not read) never leads to a
+//     conclusion about its agents, while other targets are still reconciled.
+//   - An agent with no recorded target, or whose target is absent from the
+//     heartbeat, is never concluded. The recorded target is cleared whenever
+//     a create or start response is applied, so an agent started anew is
+//     only considered after a heartbeat has listed it again. An older broker
+//     sends no targets, and a filtered (multi-hub) heartbeat claims none.
 //   - The broker must be online and its previous heartbeat must be recent; a
 //     broker returning from an offline or stale period restarts every clock.
 //   - Only phase running is considered. created/provisioning/cloning/starting
 //     are dispatch phases in which the container may legitimately not exist
 //     yet; suspended/stopping/stopped/error are not running.
-//   - The agent's runtime must be one the broker listed.
 //   - Agents with a reincarnation, a queued lifecycle dispatch, or a lifecycle
 //     dispatch in flight on this Hub are skipped.
 //   - The agent must be absent from complete inventories for the whole grace
@@ -73,8 +85,48 @@ const missingAgentMessage = "The runtime broker no longer reports a container fo
 
 // brokerInventory mirrors hubclient.BrokerInventory on the Hub side.
 type brokerInventory struct {
-	Complete bool     `json:"complete"`
-	Runtimes []string `json:"runtimes,omitempty"`
+	Targets []brokerInventoryTarget `json:"targets,omitempty"`
+}
+
+// brokerInventoryTarget mirrors hubclient.InventoryTarget.
+type brokerInventoryTarget struct {
+	ID       string `json:"id"`
+	Runtime  string `json:"runtime,omitempty"`
+	Complete bool   `json:"complete"`
+}
+
+// completeTargets returns the IDs of the targets the heartbeat listed
+// completely. A target reported more than once counts only if every report
+// is complete.
+func (hb *brokerHeartbeatRequest) completeTargets() map[string]bool {
+	if hb.Inventory == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(hb.Inventory.Targets))
+	for _, t := range hb.Inventory.Targets {
+		if t.ID == "" {
+			continue
+		}
+		if prev, seen := out[t.ID]; seen {
+			out[t.ID] = prev && t.Complete
+		} else {
+			out[t.ID] = t.Complete
+		}
+	}
+	for id, ok := range out {
+		if !ok {
+			delete(out, id)
+		}
+	}
+	return out
+}
+
+// agentRuntimeTarget returns the runtime target recorded on an agent, or "".
+func agentRuntimeTarget(a *store.Agent) string {
+	if a.AppliedConfig == nil {
+		return ""
+	}
+	return a.AppliedConfig.RuntimeTarget
 }
 
 // missingAgentTracker records, per broker, when this Hub process first saw
@@ -223,7 +275,7 @@ func newHeartbeatReport() *heartbeatReport {
 // conclude that unreported agents have no container. prev is the broker row
 // as it was before this heartbeat was stored (nil when it could not be read).
 func inventoryAllowsReconcile(prev *store.RuntimeBroker, hb *brokerHeartbeatRequest, now time.Time, grace time.Duration) bool {
-	if hb.Inventory == nil || !hb.Inventory.Complete {
+	if len(hb.completeTargets()) == 0 {
 		return false
 	}
 	if hb.Status != store.BrokerStatusOnline {
@@ -235,21 +287,6 @@ func inventoryAllowsReconcile(prev *store.RuntimeBroker, hb *brokerHeartbeatRequ
 	// A broker whose previous heartbeat is older than the grace period was
 	// stale or offline; start counting again from this heartbeat.
 	return now.Sub(prev.LastHeartbeat) < grace
-}
-
-// runtimeListed reports whether an agent's runtime is covered by the
-// inventory. An agent with no recorded runtime is only covered when the
-// broker listed exactly one runtime, so it cannot belong to an unlisted one.
-func runtimeListed(agentRuntime string, inv *brokerInventory) bool {
-	if agentRuntime == "" {
-		return len(inv.Runtimes) == 1
-	}
-	for _, r := range inv.Runtimes {
-		if r == agentRuntime {
-			return true
-		}
-	}
-	return false
 }
 
 // listRunningBrokerAgents returns every non-deleted agent assigned to
@@ -305,6 +342,7 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 		return
 	}
 
+	complete := hb.completeTargets()
 	agents, err := s.listRunningBrokerAgents(ctx, brokerID)
 	if err != nil {
 		s.agentLifecycleLog.Warn("heartbeat reconcile: failed to list broker agents",
@@ -321,7 +359,7 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 		if reincarnationInFlight(a) || s.lifecycleOps.active(a.ID) {
 			continue
 		}
-		if !runtimeListed(a.Runtime, hb.Inventory) {
+		if target := agentRuntimeTarget(a); target == "" || !complete[target] {
 			continue
 		}
 		missing = append(missing, *a)

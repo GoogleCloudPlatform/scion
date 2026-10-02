@@ -640,9 +640,10 @@ type brokerHeartbeatRequest struct {
 	// which case the store's capabilities are
 	// left exactly as CompleteBrokerJoin last set them.
 	Capabilities *store.BrokerCapabilities `json:"capabilities,omitempty"`
-	// Inventory reports whether Projects is the broker's complete runtime
-	// inventory (see hubclient.BrokerInventory). Omitted by an older broker,
-	// in which case the missing-container reconcile never runs for it.
+	// Inventory reports, per runtime target, whether Projects is that
+	// target's complete inventory (see hubclient.BrokerInventory). Omitted by
+	// an older broker, in which case the missing-container reconcile never
+	// runs for it.
 	Inventory *brokerInventory `json:"inventory,omitempty"`
 }
 
@@ -660,11 +661,12 @@ type brokerAgentHeartbeat struct {
 	Phase           string `json:"phase,omitempty"`
 	Activity        string `json:"activity,omitempty"`
 	ContainerStatus string `json:"containerStatus,omitempty"`
-	Message         string `json:"message,omitempty"`     // Error or status message from agent
-	HarnessAuth     string `json:"harnessAuth,omitempty"` // Resolved auth method from container labels
-	Profile         string `json:"profile,omitempty"`     // Settings profile used
-	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
-	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed" or "limits_exceeded"
+	Message         string `json:"message,omitempty"`       // Error or status message from agent
+	HarnessAuth     string `json:"harnessAuth,omitempty"`   // Resolved auth method from container labels
+	Profile         string `json:"profile,omitempty"`       // Settings profile used
+	ExitCode        *int   `json:"exitCode,omitempty"`      // Structured exit code from runtime (nil = unknown)
+	ExitReason      string `json:"exitReason,omitempty"`    // Terminal reason: "crashed" or "limits_exceeded"
+	RuntimeTarget   string `json:"runtimeTarget,omitempty"` // Inventory target that listed the agent
 }
 
 func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, id string) {
@@ -707,7 +709,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// already online and fresh, or is returning from a stale/offline period.
 	// Only read when the heartbeat could drive a reconcile.
 	var prevBroker *store.RuntimeBroker
-	if heartbeat.Inventory != nil && heartbeat.Inventory.Complete {
+	if len(heartbeat.completeTargets()) > 0 {
 		if b, err := s.store.GetRuntimeBroker(ctx, id); err == nil {
 			prevBroker = b
 		}
@@ -1036,10 +1038,22 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					needsUpdate = true
 				}
 			}
+			// Record the runtime target whose listing reported the agent;
+			// the missing-container reconcile only considers an agent whose
+			// recorded target a heartbeat lists as complete. Written only
+			// when it changes, so a steady heartbeat adds no store write.
+			if agentHB.RuntimeTarget != "" && agentRuntimeTarget(agent) != agentHB.RuntimeTarget {
+				if agent.AppliedConfig == nil {
+					agent.AppliedConfig = &store.AgentAppliedConfig{}
+				}
+				agent.AppliedConfig.RuntimeTarget = agentHB.RuntimeTarget
+				needsUpdate = true
+			}
 			if needsUpdate {
 				if err := s.store.UpdateAgent(ctx, agent); err != nil {
 					slog.Warn("Failed to backfill agent config from heartbeat",
-						"agent_id", agent.ID, "harnessAuth", agentHB.HarnessAuth, "profile", agentHB.Profile, "error", err)
+						"agent_id", agent.ID, "harnessAuth", agentHB.HarnessAuth, "profile", agentHB.Profile,
+						"runtimeTarget", agentHB.RuntimeTarget, "error", err)
 				}
 			}
 

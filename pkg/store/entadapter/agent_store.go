@@ -1496,6 +1496,57 @@ func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID
 	return entAgentToStore(updated), nil
 }
 
+// ClearAgentRuntimeTarget implements store.AgentStore. See the interface for
+// the contract.
+func (s *AgentStore) ClearAgentRuntimeTarget(ctx context.Context, id string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	const attempts = 3
+	for i := 0; i < attempts; i++ {
+		row, err := s.client.Agent.Query().
+			Where(agent.IDEQ(uid), agent.DeletedAtIsNil()).
+			Select(agent.FieldAppliedConfig).
+			Only(ctx)
+		if err != nil {
+			if ent.IsNotFound(err) {
+				return nil
+			}
+			return mapError(err)
+		}
+		if row.AppliedConfig == "" {
+			return nil
+		}
+		// Edit the raw JSON object rather than round-tripping it through
+		// store.AgentAppliedConfig, so every other stored key is kept
+		// exactly as written.
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
+			return fmt.Errorf("clear runtime target for agent %s: %w", id, err)
+		}
+		if _, ok := raw["runtimeTarget"]; !ok {
+			return nil
+		}
+		delete(raw, "runtimeTarget")
+		cleared, err := json.Marshal(raw)
+		if err != nil {
+			return err
+		}
+		n, err := s.client.Agent.Update().
+			Where(agent.IDEQ(uid), agent.DeletedAtIsNil(), agent.AppliedConfigEQ(row.AppliedConfig)).
+			SetAppliedConfig(string(cleared)).
+			Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if n > 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("clear runtime target for agent %s: applied config changed concurrently %d times", id, attempts)
+}
+
 // stalledExcluded lists the activities that disqualify a running agent from
 // being marked "stalled" (terminal, already-stalled, or intentionally waiting).
 var stalledExcluded = []string{"completed", "limits_exceeded", "blocked", "stalled", "offline", "waiting_for_input"}

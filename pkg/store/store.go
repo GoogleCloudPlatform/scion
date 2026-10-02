@@ -346,6 +346,14 @@ type AgentStore interface {
 	// updated record for event publishing.
 	MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*Agent, error)
 
+	// ClearAgentRuntimeTarget removes the runtime target recorded in an
+	// agent's applied config (AgentAppliedConfig.RuntimeTarget) and changes
+	// nothing else; it does not bump state_version. The write is conditional
+	// on the stored applied config being unchanged since it was read, and is
+	// retried when a concurrent write wins. It is a no-op when no target is
+	// recorded or the agent does not exist.
+	ClearAgentRuntimeTarget(ctx context.Context, id string) error
+
 	// FindOrphanedAgents returns agents whose RuntimeBrokerID references a broker
 	// that is offline or does not exist, and who are not in terminal states
 	// (stopped, error). Agents assigned to the given currentBrokerID are excluded.

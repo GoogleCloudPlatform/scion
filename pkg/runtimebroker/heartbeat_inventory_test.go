@@ -19,117 +19,267 @@ import (
 	"errors"
 	"log/slog"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // namedHeartbeatManager is a heartbeatMockManager that reports the name of
-// the runtime it lists, as the real AgentManager does.
+// the runtime it lists, as the real AgentManager does, and optionally a
+// target ID that differs from the name (as a Kubernetes target's does).
 type namedHeartbeatManager struct {
 	heartbeatMockManager
-	name string
+	name     string
+	targetID string
 }
 
-func (m *namedHeartbeatManager) RuntimeName() string { return m.name }
+func (m *namedHeartbeatManager) RuntimeName() string     { return m.name }
+func (m *namedHeartbeatManager) runtimeTargetID() string { return m.targetID }
 
-func inventoryFromHeartbeat(t *testing.T, svc *HeartbeatService, client *mockRuntimeBrokerService) *hubclient.BrokerInventory {
+func lastHeartbeat(t *testing.T, svc *HeartbeatService, client *mockRuntimeBrokerService) *hubclient.BrokerHeartbeat {
 	t.Helper()
 	if err := svc.ForceHeartbeat(context.Background()); err != nil {
 		t.Fatalf("ForceHeartbeat failed: %v", err)
 	}
 	calls := client.getHeartbeatCalls()
-	if len(calls) != 1 {
-		t.Fatalf("expected 1 heartbeat call, got %d", len(calls))
+	if len(calls) == 0 {
+		t.Fatal("expected a heartbeat call")
 	}
-	inv := calls[0].Heartbeat.Inventory
-	if inv == nil {
+	hb := calls[len(calls)-1].Heartbeat
+	if hb.Inventory == nil {
 		t.Fatal("heartbeat has no inventory")
 	}
-	return inv
+	return hb
 }
 
-func TestHeartbeatInventory_CompleteListsRuntimes(t *testing.T) {
-	client := &mockRuntimeBrokerService{}
-	defaultMgr := &namedHeartbeatManager{name: "docker"}
-	auxMgr := &namedHeartbeatManager{
-		heartbeatMockManager: heartbeatMockManager{agents: []api.AgentInfo{
-			{Name: "a1", ProjectID: "p1", Phase: "running"},
-		}},
-		name: "kubernetes",
+func heartbeatAgentTargets(hb *hubclient.BrokerHeartbeat) map[string]string {
+	out := map[string]string{}
+	for _, p := range hb.Projects {
+		for _, a := range p.Agents {
+			out[a.Slug] = a.RuntimeTarget
+		}
 	}
-	svc := NewHeartbeatService(client, "b1", time.Hour, defaultMgr, nil, slog.Default())
-	svc.auxiliaryManagers = func() []agent.Manager { return []agent.Manager{auxMgr} }
-
-	inv := inventoryFromHeartbeat(t, svc, client)
-	if !inv.Complete {
-		t.Fatal("expected a complete inventory when every List succeeds")
-	}
-	if want := []string{"docker", "kubernetes"}; !reflect.DeepEqual(inv.Runtimes, want) {
-		t.Errorf("runtimes = %v, want %v", inv.Runtimes, want)
-	}
+	return out
 }
 
-func TestHeartbeatInventory_AuxiliaryListFailureIncomplete(t *testing.T) {
+const (
+	k8sTargetA = "kubernetes|context=hybval|namespace=default"
+	k8sTargetB = "kubernetes|context=hybval|namespace=scion-agents"
+)
+
+func TestHeartbeatInventory_CompleteTargetsAndAgentTargets(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	defaultMgr := &namedHeartbeatManager{
 		heartbeatMockManager: heartbeatMockManager{agents: []api.AgentInfo{
-			{Name: "a1", ProjectID: "p1", Phase: "running"},
+			{Name: "d1", ProjectID: "p1", Phase: "running"},
 		}},
 		name: "docker",
 	}
 	auxMgr := &namedHeartbeatManager{
-		heartbeatMockManager: heartbeatMockManager{err: errors.New("api unavailable")},
-		name:                 "kubernetes",
+		heartbeatMockManager: heartbeatMockManager{agents: []api.AgentInfo{
+			{Name: "a1", ProjectID: "p1", Phase: "running"},
+		}},
+		name:     "kubernetes",
+		targetID: k8sTargetB,
 	}
 	svc := NewHeartbeatService(client, "b1", time.Hour, defaultMgr, nil, slog.Default())
 	svc.auxiliaryManagers = func() []agent.Manager { return []agent.Manager{auxMgr} }
 
-	inv := inventoryFromHeartbeat(t, svc, client)
-	if inv.Complete {
-		t.Fatal("an auxiliary List failure must mark the inventory incomplete")
+	hb := lastHeartbeat(t, svc, client)
+	want := []hubclient.InventoryTarget{
+		{ID: "docker", Runtime: "docker", Complete: true},
+		{ID: k8sTargetB, Runtime: "kubernetes", Complete: true},
 	}
-	if len(inv.Runtimes) != 0 {
-		t.Errorf("incomplete inventory should not list runtimes, got %v", inv.Runtimes)
+	if !reflect.DeepEqual(hb.Inventory.Targets, want) {
+		t.Errorf("targets = %+v, want %+v", hb.Inventory.Targets, want)
+	}
+	if got, want := heartbeatAgentTargets(hb), map[string]string{"d1": "docker", "a1": k8sTargetB}; !reflect.DeepEqual(got, want) {
+		t.Errorf("agent targets = %v, want %v", got, want)
 	}
 }
 
-func TestHeartbeatInventory_DefaultListFailureIncomplete(t *testing.T) {
+// One forbidden auxiliary listing marks only that target incomplete; the
+// other targets stay complete and their agents are still reported.
+func TestHeartbeatInventory_TwoTargetsOneForbidden(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	defaultMgr := &namedHeartbeatManager{name: "docker"}
+	forbidden := &namedHeartbeatManager{
+		heartbeatMockManager: heartbeatMockManager{err: errors.New("pods is forbidden")},
+		name:                 "kubernetes",
+		targetID:             k8sTargetA,
+	}
+	allowed := &namedHeartbeatManager{
+		heartbeatMockManager: heartbeatMockManager{agents: []api.AgentInfo{
+			{Name: "a1", ProjectID: "p1", Phase: "running"},
+		}},
+		name:     "kubernetes",
+		targetID: k8sTargetB,
+	}
+	svc := NewHeartbeatService(client, "b1", time.Hour, defaultMgr, nil, slog.Default())
+	svc.auxiliaryManagers = func() []agent.Manager { return []agent.Manager{forbidden, allowed} }
+
+	hb := lastHeartbeat(t, svc, client)
+	want := []hubclient.InventoryTarget{
+		{ID: "docker", Runtime: "docker", Complete: true},
+		{ID: k8sTargetA, Runtime: "kubernetes", Complete: false},
+		{ID: k8sTargetB, Runtime: "kubernetes", Complete: true},
+	}
+	if !reflect.DeepEqual(hb.Inventory.Targets, want) {
+		t.Errorf("targets = %+v, want %+v", hb.Inventory.Targets, want)
+	}
+	if got := heartbeatAgentTargets(hb)["a1"]; got != k8sTargetB {
+		t.Errorf("a1 target = %q, want %q", got, k8sTargetB)
+	}
+}
+
+func TestHeartbeatInventory_DefaultListFailureOnlyDefaultIncomplete(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	defaultMgr := &namedHeartbeatManager{
 		heartbeatMockManager: heartbeatMockManager{err: errors.New("runtime unavailable")},
 		name:                 "docker",
 	}
+	auxMgr := &namedHeartbeatManager{name: "kubernetes", targetID: k8sTargetB}
 	svc := NewHeartbeatService(client, "b1", time.Hour, defaultMgr, nil, slog.Default())
+	svc.auxiliaryManagers = func() []agent.Manager { return []agent.Manager{auxMgr} }
 
-	if inv := inventoryFromHeartbeat(t, svc, client); inv.Complete {
-		t.Fatal("a default List failure must mark the inventory incomplete")
+	hb := lastHeartbeat(t, svc, client)
+	want := []hubclient.InventoryTarget{
+		{ID: "docker", Runtime: "docker", Complete: false},
+		{ID: k8sTargetB, Runtime: "kubernetes", Complete: true},
+	}
+	if !reflect.DeepEqual(hb.Inventory.Targets, want) {
+		t.Errorf("targets = %+v, want %+v", hb.Inventory.Targets, want)
 	}
 }
 
-func TestHeartbeatInventory_UnnamedRuntimeIncomplete(t *testing.T) {
+// The same target reported by two managers is complete only when both
+// listings succeeded.
+func TestHeartbeatInventory_DuplicateTargetMerged(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	defaultMgr := &namedHeartbeatManager{name: "kubernetes", targetID: k8sTargetB}
+	auxMgr := &namedHeartbeatManager{
+		heartbeatMockManager: heartbeatMockManager{err: errors.New("timeout")},
+		name:                 "kubernetes",
+		targetID:             k8sTargetB,
+	}
+	svc := NewHeartbeatService(client, "b1", time.Hour, defaultMgr, nil, slog.Default())
+	svc.auxiliaryManagers = func() []agent.Manager { return []agent.Manager{auxMgr} }
+
+	hb := lastHeartbeat(t, svc, client)
+	want := []hubclient.InventoryTarget{{ID: k8sTargetB, Runtime: "kubernetes", Complete: false}}
+	if !reflect.DeepEqual(hb.Inventory.Targets, want) {
+		t.Errorf("targets = %+v, want %+v", hb.Inventory.Targets, want)
+	}
+}
+
+func TestHeartbeatInventory_UnnamedManagerNoTarget(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	// heartbeatMockManager does not report a runtime name.
-	svc := NewHeartbeatService(client, "b1", time.Hour, &heartbeatMockManager{}, nil, slog.Default())
+	mgr := &heartbeatMockManager{agents: []api.AgentInfo{{Name: "d1", ProjectID: "p1", Phase: "running"}}}
+	svc := NewHeartbeatService(client, "b1", time.Hour, mgr, nil, slog.Default())
 
-	if inv := inventoryFromHeartbeat(t, svc, client); inv.Complete {
-		t.Fatal("a manager without a runtime name must mark the inventory incomplete")
+	hb := lastHeartbeat(t, svc, client)
+	if len(hb.Inventory.Targets) != 0 {
+		t.Errorf("an unidentified manager must not be reported as a target, got %+v", hb.Inventory.Targets)
+	}
+	if got := heartbeatAgentTargets(hb)["d1"]; got != "" {
+		t.Errorf("agent from an unidentified manager must carry no target, got %q", got)
 	}
 }
 
-func TestHeartbeatInventory_ProjectFilterIncomplete(t *testing.T) {
+func TestHeartbeatInventory_ProjectFilterClaimsNothing(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	defaultMgr := &namedHeartbeatManager{name: "docker"}
 	svc := NewHeartbeatService(client, "b1", time.Hour, defaultMgr, func(string) bool { return true }, slog.Default())
 
-	if inv := inventoryFromHeartbeat(t, svc, client); inv.Complete {
-		t.Fatal("a filtered (multi-hub) heartbeat must not claim a complete inventory")
+	if hb := lastHeartbeat(t, svc, client); len(hb.Inventory.Targets) != 0 {
+		t.Fatalf("a filtered (multi-hub) heartbeat must claim no target, got %+v", hb.Inventory.Targets)
 	}
 }
 
-// The production manager must report its runtime name, or the inventory is
-// never complete and the hub never reconciles missing agents.
-var _ runtimeNamer = (*agent.AgentManager)(nil)
+// recordingHandler captures log records for assertions.
+type recordingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r)
+	return nil
+}
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *recordingHandler) count(level slog.Level) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, r := range h.records {
+		if r.Level == level {
+			n++
+		}
+	}
+	return n
+}
+
+// A failing listing is logged at Warn once per state change, then at Debug.
+func TestHeartbeatInventory_ListFailureLoggedOncePerStateChange(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	defaultMgr := &namedHeartbeatManager{name: "docker"}
+	auxMgr := &namedHeartbeatManager{
+		heartbeatMockManager: heartbeatMockManager{err: errors.New("pods is forbidden")},
+		name:                 "kubernetes",
+		targetID:             k8sTargetA,
+	}
+	h := &recordingHandler{}
+	svc := NewHeartbeatService(client, "b1", time.Hour, defaultMgr, nil, slog.New(h))
+	svc.auxiliaryManagers = func() []agent.Manager { return []agent.Manager{auxMgr} }
+
+	for i := 0; i < 3; i++ {
+		lastHeartbeat(t, svc, client)
+	}
+	if got := h.count(slog.LevelWarn); got != 1 {
+		t.Fatalf("Warn records after 3 failing heartbeats = %d, want 1", got)
+	}
+	if got := h.count(slog.LevelDebug); got != 2 {
+		t.Errorf("Debug records after 3 failing heartbeats = %d, want 2", got)
+	}
+
+	auxMgr.err = nil
+	lastHeartbeat(t, svc, client)
+	lastHeartbeat(t, svc, client)
+	if got := h.count(slog.LevelInfo); got != 1 {
+		t.Errorf("Info records after recovery = %d, want 1", got)
+	}
+
+	auxMgr.err = errors.New("pods is forbidden")
+	lastHeartbeat(t, svc, client)
+	if got := h.count(slog.LevelWarn); got != 2 {
+		t.Errorf("Warn records after a new failure = %d, want 2", got)
+	}
+}
+
+// The production manager's target ID is the identity the broker keys its
+// auxiliary runtimes by, so a Kubernetes target includes context and
+// namespace.
+func TestHeartbeatTargetOf_AgentManagerUsesRuntimeIdentity(t *testing.T) {
+	rt := &scionrt.KubernetesRuntime{DefaultNamespace: "scion-agents"}
+	id, name := heartbeatTargetOf(agent.NewManager(rt))
+	if id != auxiliaryRuntimeIdentity(rt) || id != "kubernetes|context=|namespace=scion-agents" {
+		t.Errorf("target ID = %q, want %q", id, auxiliaryRuntimeIdentity(rt))
+	}
+	if name != "kubernetes" {
+		t.Errorf("runtime name = %q, want kubernetes", name)
+	}
+	if id, name := heartbeatTargetOf(&agent.AgentManager{}); id != "" || name != "" {
+		t.Errorf("manager without a runtime: got (%q, %q), want empty", id, name)
+	}
+}

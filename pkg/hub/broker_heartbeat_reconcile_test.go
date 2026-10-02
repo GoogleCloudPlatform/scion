@@ -84,6 +84,7 @@ func (f *reconcileFixture) addAgent(slug, phase, activity string, mutate ...func
 		ProjectID:       f.projectID,
 		RuntimeBrokerID: f.brokerID,
 		Runtime:         "docker",
+		AppliedConfig:   &store.AgentAppliedConfig{RuntimeTarget: "docker"},
 		Phase:           phase,
 		Activity:        activity,
 		LastSeen:        time.Now().Add(-time.Hour),
@@ -96,11 +97,17 @@ func (f *reconcileFixture) addAgent(slug, phase, activity string, mutate ...func
 	return a
 }
 
-func completeInventory(runtimes ...string) *brokerInventory {
-	if len(runtimes) == 0 {
-		runtimes = []string{"docker"}
+// completeInventory reports the given targets (default: "docker") as
+// completely listed.
+func completeInventory(targets ...string) *brokerInventory {
+	if len(targets) == 0 {
+		targets = []string{"docker"}
 	}
-	return &brokerInventory{Complete: true, Runtimes: runtimes}
+	inv := &brokerInventory{}
+	for _, id := range targets {
+		inv.Targets = append(inv.Targets, brokerInventoryTarget{ID: id, Complete: true})
+	}
+	return inv
 }
 
 // heartbeat sends an online heartbeat that reports the given slugs as
@@ -109,7 +116,7 @@ func (f *reconcileFixture) heartbeat(inv *brokerInventory, slugs ...string) {
 	f.t.Helper()
 	agents := make([]brokerAgentHeartbeat, 0, len(slugs))
 	for _, slug := range slugs {
-		agents = append(agents, brokerAgentHeartbeat{Slug: slug, Phase: "running", Activity: "working"})
+		agents = append(agents, brokerAgentHeartbeat{Slug: slug, Phase: "running", Activity: "working", RuntimeTarget: "docker"})
 	}
 	f.send(brokerHeartbeatRequest{
 		Status:    store.BrokerStatusOnline,
@@ -311,9 +318,17 @@ func TestReconcileMissing_GateBlocks(t *testing.T) {
 		f := newReconcileFixture(t)
 		a := f.addAgent("omitted", "running", "working")
 		reconcileBlockedCase(t, f, a, func() {
-			f.heartbeat(&brokerInventory{Complete: false})
+			f.heartbeat(&brokerInventory{Targets: []brokerInventoryTarget{{ID: "docker", Complete: false}}})
 		})
 		assert.False(t, f.hasClock(a.ID), "an incomplete inventory resets the clocks")
+	})
+
+	t.Run("filtered heartbeat claims no target", func(t *testing.T) {
+		f := newReconcileFixture(t)
+		a := f.addAgent("omitted", "running", "working")
+		reconcileBlockedCase(t, f, a, func() {
+			f.heartbeat(&brokerInventory{})
+		})
 	})
 
 	t.Run("no inventory (older broker)", func(t *testing.T) {
@@ -364,18 +379,26 @@ func TestReconcileMissing_Exclusions(t *testing.T) {
 		})
 	})
 
-	t.Run("runtime not in inventory", func(t *testing.T) {
+	t.Run("recorded target absent from the heartbeat", func(t *testing.T) {
 		f := newReconcileFixture(t)
-		a := f.addAgent("omitted", "running", "working", func(a *store.Agent) { a.Runtime = "kubernetes" })
+		a := f.addAgent("omitted", "running", "working", withRuntimeTarget(k8sTargetB))
 		f.heartbeat(completeInventory("docker"))
 		assert.False(t, f.hasClock(a.ID))
 		f.assertUntouched(a.ID, "running")
 	})
 
-	t.Run("unrecorded runtime with several listed", func(t *testing.T) {
+	t.Run("no recorded target", func(t *testing.T) {
 		f := newReconcileFixture(t)
-		a := f.addAgent("omitted", "running", "working", func(a *store.Agent) { a.Runtime = "" })
-		f.heartbeat(completeInventory("docker", "kubernetes"))
+		a := f.addAgent("omitted", "running", "working", withRuntimeTarget(""))
+		f.heartbeat(completeInventory("docker"))
+		assert.False(t, f.hasClock(a.ID))
+		f.assertUntouched(a.ID, "running")
+	})
+
+	t.Run("no applied config", func(t *testing.T) {
+		f := newReconcileFixture(t)
+		a := f.addAgent("omitted", "running", "working", func(a *store.Agent) { a.AppliedConfig = nil })
+		f.heartbeat(completeInventory("docker"))
 		assert.False(t, f.hasClock(a.ID))
 	})
 
@@ -393,6 +416,94 @@ func TestReconcileMissing_Exclusions(t *testing.T) {
 			})
 		})
 	})
+}
+
+const (
+	k8sTargetA = "kubernetes|context=hybval|namespace=default"
+	k8sTargetB = "kubernetes|context=hybval|namespace=scion-agents"
+)
+
+func withRuntimeTarget(target string) func(a *store.Agent) {
+	return func(a *store.Agent) {
+		a.AppliedConfig = &store.AgentAppliedConfig{RuntimeTarget: target}
+	}
+}
+
+// TestReconcileMissing_PerTargetCompleteness: the broker has two Kubernetes
+// targets; listing one is forbidden. An agent on the forbidden target is
+// never concluded, while an agent on the listed target is reconciled.
+func TestReconcileMissing_PerTargetCompleteness(t *testing.T) {
+	f := newReconcileFixture(t)
+	onForbidden := f.addAgent("on-forbidden", "running", "working", withRuntimeTarget(k8sTargetA))
+	onListed := f.addAgent("on-listed", "running", "working", withRuntimeTarget(k8sTargetB))
+	onDocker := f.addAgent("on-docker", "running", "working")
+
+	inv := &brokerInventory{Targets: []brokerInventoryTarget{
+		{ID: "docker", Runtime: "docker", Complete: true},
+		{ID: k8sTargetA, Runtime: "kubernetes", Complete: false},
+		{ID: k8sTargetB, Runtime: "kubernetes", Complete: true},
+	}}
+	f.heartbeat(inv, onDocker.Slug)
+	assert.False(t, f.hasClock(onForbidden.ID), "an agent on an incomplete target gets no clock")
+	require.True(t, f.hasClock(onListed.ID))
+	f.expireClock(onListed.ID)
+	f.heartbeat(inv, onDocker.Slug)
+
+	f.assertReconciled(onListed.ID)
+	f.assertUntouched(onForbidden.ID, "running")
+	f.assertUntouched(onDocker.ID, "running")
+}
+
+// TestReconcileMissing_TargetReportedTwice: a target reported both complete
+// and incomplete counts as incomplete.
+func TestReconcileMissing_TargetReportedTwice(t *testing.T) {
+	hb := &brokerHeartbeatRequest{Inventory: &brokerInventory{Targets: []brokerInventoryTarget{
+		{ID: k8sTargetB, Complete: true},
+		{ID: k8sTargetB, Complete: false},
+		{ID: "docker", Complete: true},
+		{ID: "", Complete: true},
+	}}}
+	assert.Equal(t, map[string]bool{"docker": true}, hb.completeTargets())
+}
+
+// TestHeartbeat_RecordsRuntimeTargetOnlyOnChange: the hub records the target
+// that listed an agent, writes the agent row only when that target changes,
+// and leaves it alone on steady heartbeats.
+func TestHeartbeat_RecordsRuntimeTargetOnlyOnChange(t *testing.T) {
+	f := newReconcileFixture(t)
+	a := f.addAgent("listed", "running", "working", withRuntimeTarget(""))
+	report := func(target string) {
+		f.send(brokerHeartbeatRequest{
+			Status:    store.BrokerStatusOnline,
+			Inventory: completeInventory(k8sTargetB),
+			Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+				{Slug: a.Slug, Phase: "running", Activity: "working", RuntimeTarget: target},
+			}}},
+		})
+	}
+
+	v0 := f.get(a.ID).StateVersion
+	report(k8sTargetB)
+	got := f.get(a.ID)
+	require.NotNil(t, got.AppliedConfig)
+	assert.Equal(t, k8sTargetB, got.AppliedConfig.RuntimeTarget, "target backfilled")
+	v1 := got.StateVersion
+	assert.Equal(t, v0+1, v1, "one row write for the backfill")
+
+	for i := 0; i < 3; i++ {
+		report(k8sTargetB)
+	}
+	assert.Equal(t, v1, f.get(a.ID).StateVersion, "no row write while the target is unchanged")
+
+	report(k8sTargetA)
+	got = f.get(a.ID)
+	assert.Equal(t, k8sTargetA, got.AppliedConfig.RuntimeTarget, "target updated on change")
+	assert.Equal(t, v1+1, got.StateVersion)
+
+	report("")
+	got = f.get(a.ID)
+	assert.Equal(t, k8sTargetA, got.AppliedConfig.RuntimeTarget, "a report without a target leaves the record alone")
+	assert.Equal(t, v1+1, got.StateVersion)
 }
 
 // TestReconcileMissing_OtherBrokerUntouched: an agent of another broker is
@@ -451,7 +562,8 @@ func TestInventoryAllowsReconcile(t *testing.T) {
 	assert.False(t, inventoryAllowsReconcile(&store.RuntimeBroker{Status: store.BrokerStatusOnline}, hb, now, grace), "never heard from")
 	assert.False(t, inventoryAllowsReconcile(&store.RuntimeBroker{Status: store.BrokerStatusOffline, LastHeartbeat: now}, hb, now, grace), "was offline")
 	assert.False(t, inventoryAllowsReconcile(online, &brokerHeartbeatRequest{Status: store.BrokerStatusOnline}, now, grace), "no inventory")
-	assert.False(t, inventoryAllowsReconcile(online, &brokerHeartbeatRequest{Status: store.BrokerStatusOnline, Inventory: &brokerInventory{}}, now, grace), "incomplete")
+	assert.False(t, inventoryAllowsReconcile(online, &brokerHeartbeatRequest{Status: store.BrokerStatusOnline, Inventory: &brokerInventory{}}, now, grace), "no targets")
+	assert.False(t, inventoryAllowsReconcile(online, &brokerHeartbeatRequest{Status: store.BrokerStatusOnline, Inventory: &brokerInventory{Targets: []brokerInventoryTarget{{ID: "docker"}}}}, now, grace), "no complete target")
 	assert.False(t, inventoryAllowsReconcile(online, &brokerHeartbeatRequest{Status: store.BrokerStatusDegraded, Inventory: completeInventory()}, now, grace), "not online")
 }
 

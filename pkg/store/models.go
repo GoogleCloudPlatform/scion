@@ -204,13 +204,19 @@ type ExposedPort struct {
 
 // AgentAppliedConfig stores the effective configuration of an agent.
 type AgentAppliedConfig struct {
-	Image         string              `json:"image,omitempty"`
-	HarnessConfig string              `json:"harnessConfig,omitempty"`
-	HarnessAuth   string              `json:"harnessAuth,omitempty"` // Late-binding override for auth_selected_type
-	Env           map[string]string   `json:"env,omitempty"`
-	Model         string              `json:"model,omitempty"`
-	ThinkingLevel *int                `json:"thinkingLevel,omitempty"`
-	Profile       string              `json:"profile,omitempty"`   // Settings profile for the runtime broker
+	Image         string            `json:"image,omitempty"`
+	HarnessConfig string            `json:"harnessConfig,omitempty"`
+	HarnessAuth   string            `json:"harnessAuth,omitempty"` // Late-binding override for auth_selected_type
+	Env           map[string]string `json:"env,omitempty"`
+	Model         string            `json:"model,omitempty"`
+	ThinkingLevel *int              `json:"thinkingLevel,omitempty"`
+	Profile       string            `json:"profile,omitempty"` // Settings profile for the runtime broker
+	// RuntimeTarget is the broker runtime target (runtime name, plus cluster
+	// context and namespace for Kubernetes) whose listing last reported the
+	// agent. Recorded from heartbeats and cleared when a create or start
+	// response is applied; the missing-container reconcile only considers an
+	// agent whose recorded target a heartbeat lists as complete.
+	RuntimeTarget string              `json:"runtimeTarget,omitempty"`
 	Task          string              `json:"task,omitempty"`      // Initial task/prompt for the agent
 	Attach        bool                `json:"attach,omitempty"`    // If true, signals interactive attach mode to the broker/harness
 	Branch        string              `json:"branch,omitempty"`    // Git branch name (defaults to agent slug if empty)
