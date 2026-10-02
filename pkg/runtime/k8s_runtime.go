@@ -2766,11 +2766,20 @@ func (r *KubernetesRuntime) cleanupStartResources(ctx context.Context, namespace
 		fmt.Sprintf("scion-auth-%s", agentName):  true,
 	}
 	spcName := fmt.Sprintf("scion-agent-%s", agentName)
+	removed := 0
 	warn := func(kind, name string, err error) {
 		if err != nil && !k8serrors.IsNotFound(err) && !k8serrors.IsConflict(err) {
 			runtimeLog.Warn("Failed to delete object of an incomplete start",
 				"kind", kind, "name", name, "agent", agentName, "namespace", namespace, "error", err)
 		}
+	}
+	// deleted records the outcome of one delete call.
+	deleted := func(kind, name string, err error) {
+		if err == nil {
+			removed++
+			return
+		}
+		warn(kind, name, err)
 	}
 	uidPrecondition := func(uid types.UID) *metav1.Preconditions {
 		return &metav1.Preconditions{UID: &uid}
@@ -2784,7 +2793,7 @@ func (r *KubernetesRuntime) cleanupStartResources(ctx context.Context, namespace
 			if !secretNames[s.Name] {
 				continue
 			}
-			warn("Secret", s.Name, secrets.Delete(ctx, s.Name, metav1.DeleteOptions{
+			deleted("Secret", s.Name, secrets.Delete(ctx, s.Name, metav1.DeleteOptions{
 				Preconditions: uidPrecondition(s.UID),
 			}))
 		}
@@ -2799,7 +2808,7 @@ func (r *KubernetesRuntime) cleanupStartResources(ctx context.Context, namespace
 				if spc.GetName() != spcName {
 					continue
 				}
-				warn("SecretProviderClass", spcName, spcs.Delete(ctx, spcName, metav1.DeleteOptions{
+				deleted("SecretProviderClass", spcName, spcs.Delete(ctx, spcName, metav1.DeleteOptions{
 					Preconditions: uidPrecondition(spc.GetUID()),
 				}))
 			}
@@ -2816,14 +2825,20 @@ func (r *KubernetesRuntime) cleanupStartResources(ctx context.Context, namespace
 				if p.Name != agentName {
 					continue
 				}
-				warn("Pod", agentName, pods.Delete(ctx, agentName, metav1.DeleteOptions{
+				deleted("Pod", agentName, pods.Delete(ctx, agentName, metav1.DeleteOptions{
 					GracePeriodSeconds: &gracePeriod,
 					Preconditions:      uidPrecondition(p.UID),
 				}))
 			}
 		}
 	}
-	runtimeLog.Info("Removed objects of an incomplete start", "agent", agentName, "namespace", namespace)
+	if removed > 0 {
+		runtimeLog.Info("Removed objects of an incomplete start",
+			"agent", agentName, "namespace", namespace, "count", removed)
+	} else {
+		runtimeLog.Debug("No objects of an incomplete start to remove",
+			"agent", agentName, "namespace", namespace)
+	}
 }
 
 // cleanupStalePod deletes an existing pod with the given name if it exists.

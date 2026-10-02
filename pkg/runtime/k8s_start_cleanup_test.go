@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,9 +25,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	dynfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -111,11 +114,101 @@ var _ kubernetes.Interface = ctxClientset{}
 
 // newStartCleanupRuntime returns a GKE-mode runtime whose typed client
 // honours context cancellation (see ctxClientset).
-func newStartCleanupRuntime(t *testing.T) (*KubernetesRuntime, *k8sfake.Clientset) {
+func newStartCleanupRuntime(t *testing.T) (*KubernetesRuntime, *k8sfake.Clientset, *dynfake.FakeDynamicClient) {
 	t.Helper()
 	rt, clientset, dyn := newGKECleanupTestRuntime(t)
 	rt.Client = k8s.NewTestClient(dyn, ctxClientset{clientset})
-	return rt, clientset
+	return rt, clientset, dyn
+}
+
+// deleteRecorder gives every created object a UID (the fake API server does
+// not) and records the deletes issued after the first pod create, which are
+// the ones made by the start's cleanup rather than by Run's pre-clean. The
+// fake tracker ignores delete preconditions, so the recorded options are
+// what tests check instead.
+type deleteRecorder struct {
+	mu      sync.Mutex
+	armed   bool
+	deletes []recordedDelete
+}
+
+type recordedDelete struct {
+	resource, name string
+	preconditions  *metav1.Preconditions
+}
+
+// expectedUID is the UID deleteRecorder assigns to an object it sees created.
+func expectedUID(resource, name string) types.UID {
+	return types.UID("uid-" + resource + "-" + name)
+}
+
+// recordDeletes installs a deleteRecorder on both fake clients. Install it
+// after any test-specific create reactors so it runs first.
+func recordDeletes(clientset *k8sfake.Clientset, dyn *dynfake.FakeDynamicClient) *deleteRecorder {
+	rec := &deleteRecorder{}
+	assignUID := func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		obj, err := meta.Accessor(action.(k8stesting.CreateAction).GetObject())
+		if err == nil && obj.GetUID() == "" {
+			obj.SetUID(expectedUID(action.GetResource().Resource, obj.GetName()))
+		}
+		if action.GetResource().Resource == "pods" {
+			rec.mu.Lock()
+			rec.armed = true
+			rec.mu.Unlock()
+		}
+		return false, nil, nil
+	}
+	record := func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		del := action.(k8stesting.DeleteAction)
+		rec.mu.Lock()
+		if rec.armed {
+			rec.deletes = append(rec.deletes, recordedDelete{
+				resource:      del.GetResource().Resource,
+				name:          del.GetName(),
+				preconditions: del.GetDeleteOptions().Preconditions,
+			})
+		}
+		rec.mu.Unlock()
+		return false, nil, nil
+	}
+	clientset.PrependReactor("create", "*", assignUID)
+	clientset.PrependReactor("delete", "*", record)
+	dyn.PrependReactor("create", "*", assignUID)
+	dyn.PrependReactor("delete", "*", record)
+	return rec
+}
+
+// assertUIDPreconditions checks that the cleanup issued a delete for the pod,
+// both Secrets and the SecretProviderClass, each carrying a UID
+// precondition equal to the UID of the object it listed.
+func (r *deleteRecorder) assertUIDPreconditions(t *testing.T) {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	want := map[string]bool{
+		"pods/" + startCleanupAgent:                              false,
+		"secrets/scion-agent-" + startCleanupAgent:               false,
+		"secrets/scion-auth-" + startCleanupAgent:                false,
+		"secretproviderclasses/scion-agent-" + startCleanupAgent: false,
+	}
+	for _, d := range r.deletes {
+		key := d.resource + "/" + d.name
+		if d.preconditions == nil || d.preconditions.UID == nil {
+			t.Errorf("delete of %s has no UID precondition", key)
+			continue
+		}
+		if got, exp := *d.preconditions.UID, expectedUID(d.resource, d.name); got != exp {
+			t.Errorf("delete of %s has UID precondition %q, want %q", key, got, exp)
+		}
+		if _, ok := want[key]; ok {
+			want[key] = true
+		}
+	}
+	for key, seen := range want {
+		if !seen {
+			t.Errorf("cleanup issued no delete for %s", key)
+		}
+	}
 }
 
 // startCleanupConfig returns a RunConfig that makes Run create the agent
@@ -216,8 +309,9 @@ func assertAllGone(t *testing.T, rt *KubernetesRuntime, cs *k8sfake.Clientset) {
 // while its pod is still Pending (the broker cancels the in-flight start).
 // Run must remove the pod, both Secrets and the SecretProviderClass.
 func TestRun_CancelledWhilePending_RemovesPodAndSecrets(t *testing.T) {
-	rt, clientset := newStartCleanupRuntime(t)
+	rt, clientset, dyn := newStartCleanupRuntime(t)
 	created := notifyOnPodCreate(clientset)
+	deletes := recordDeletes(clientset, dyn)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -236,6 +330,7 @@ func TestRun_CancelledWhilePending_RemovesPodAndSecrets(t *testing.T) {
 		t.Fatal("expected Run to fail after cancellation")
 	}
 	assertAllGone(t, rt, clientset)
+	deletes.assertUIDPreconditions(t)
 }
 
 // TestRun_CancelledDuringPodCreate_RemovesPodThatAppeared: the delete lands
@@ -244,7 +339,7 @@ func TestRun_CancelledWhilePending_RemovesPodAndSecrets(t *testing.T) {
 // the delete looked for it. Run must still find (by its start ID) and remove
 // that pod and the Secrets.
 func TestRun_CancelledDuringPodCreate_RemovesPodThatAppeared(t *testing.T) {
-	rt, clientset := newStartCleanupRuntime(t)
+	rt, clientset, dyn := newStartCleanupRuntime(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -256,12 +351,14 @@ func TestRun_CancelledDuringPodCreate_RemovesPodThatAppeared(t *testing.T) {
 		cancel()
 		return true, nil, context.Canceled
 	})
+	deletes := recordDeletes(clientset, dyn)
 
 	err := waitRun(t, runAsync(ctx, rt, startCleanupConfig()))
 	if err == nil {
 		t.Fatal("expected Run to fail")
 	}
 	assertAllGone(t, rt, clientset)
+	deletes.assertUIDPreconditions(t)
 }
 
 // TestRun_CancelledStart_LeavesNewerSameNamedAgent: while an old start is
@@ -270,7 +367,7 @@ func TestRun_CancelledDuringPodCreate_RemovesPodThatAppeared(t *testing.T) {
 // different start). When the old start is then cancelled, its cleanup must
 // not remove any of the newer agent's objects.
 func TestRun_CancelledStart_LeavesNewerSameNamedAgent(t *testing.T) {
-	rt, clientset := newStartCleanupRuntime(t)
+	rt, clientset, _ := newStartCleanupRuntime(t)
 	created := notifyOnPodCreate(clientset)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -316,16 +413,25 @@ func TestRun_CancelledStart_LeavesNewerSameNamedAgent(t *testing.T) {
 
 // TestRun_FailureBeforePod_RemovesOnlyThisStartsSecrets: a start that fails
 // before creating its pod removes the Secrets it created, matched by start
-// ID rather than by name alone.
+// ID rather than by name alone. Here the auth Secret create fails because a
+// concurrent start of the same agent name has just created that Secret; it
+// carries the same agent labels and a different start ID, and must survive.
 func TestRun_FailureBeforePod_RemovesOnlyThisStartsSecrets(t *testing.T) {
 	rt, clientset, _ := newTestK8sRuntime()
-	// The auth Secret create fails after the agent Secret was created.
+	authName := "scion-auth-" + startCleanupAgent
+	other := productionAgentLabels("agent", "proj1")
+	other[labelStartID] = "other-start"
 	clientset.PrependReactor("create", "secrets", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
 		s := action.(k8stesting.CreateAction).GetObject().(*corev1.Secret)
-		if s.Name == "scion-auth-"+startCleanupAgent {
-			return true, nil, fmt.Errorf("simulated quota rejection")
+		if s.Name != authName {
+			return false, nil, nil
 		}
-		return false, nil, nil
+		if err := clientset.Tracker().Create(corev1.SchemeGroupVersion.WithResource("secrets"), &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: authName, Namespace: s.Namespace, Labels: other, UID: "other-auth-uid"},
+		}, s.Namespace); err != nil {
+			return true, nil, err
+		}
+		return true, nil, fmt.Errorf("simulated quota rejection")
 	})
 	config := startCleanupConfig()
 	config.ResolvedSecrets[0].Ref = ""
@@ -333,7 +439,13 @@ func TestRun_FailureBeforePod_RemovesOnlyThisStartsSecrets(t *testing.T) {
 	if _, err := rt.Run(context.Background(), config); err == nil {
 		t.Fatal("expected Run to fail")
 	}
-	if _, err := clientset.CoreV1().Secrets("default").Get(context.Background(), "scion-agent-"+startCleanupAgent, metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
+	bg := context.Background()
+	if _, err := clientset.CoreV1().Secrets("default").Get(bg, "scion-agent-"+startCleanupAgent, metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
 		t.Errorf("agent Secret created before the failure should be removed, got err=%v", err)
+	}
+	if s, err := clientset.CoreV1().Secrets("default").Get(bg, authName, metav1.GetOptions{}); err != nil {
+		t.Errorf("Secret of the other start should survive, got err=%v", err)
+	} else if s.Labels[labelStartID] != "other-start" {
+		t.Errorf("Secret %s was replaced: start ID %q", authName, s.Labels[labelStartID])
 	}
 }

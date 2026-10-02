@@ -3121,14 +3121,17 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		}
 	}
 
-	// Phase-aware delete: an agent still in the "created" phase has not
-	// reported back from its broker. A start may still have been dispatched
-	// (for example when the creating request timed out before the broker
-	// answered), so the broker can hold a pod, Secrets or workspace files
-	// for it. Dispatch the delete on a best-effort basis: only when the
-	// broker looks reachable, and a dispatch error does not block removing
-	// the hub record. This keeps a stale broker from blocking the delete of
-	// an agent that never left the creation phase.
+	// Phase-aware delete: an agent in the "created" phase can still have
+	// state on its broker, in two cases:
+	//   - provision-only create: the broker provisioned it (worktree and
+	//     branch) and the agent stays in "created" until it is started;
+	//   - a start in flight: the creating request timed out before the
+	//     broker answered, and the broker may hold a pod, Secrets or
+	//     workspace files for it.
+	// Dispatch the delete on a best-effort basis, so both are removed: only
+	// when the broker looks reachable, and a dispatch error does not block
+	// removing the hub record. This keeps a stale broker from blocking the
+	// delete of an agent that never left the creation phase.
 	createdPhase := agent.Phase == string(state.PhaseCreated)
 	skipBrokerDispatch := createdPhase && !s.brokerReachable(ctx, agent)
 
