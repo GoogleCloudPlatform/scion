@@ -634,3 +634,64 @@ func TestStopAllAgents_MembershipStoreError_InternalError(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "injected store fault")
 	assertStopAllAgentPhase(t, s, state.PhaseRunning, bob)
 }
+
+func TestStopAllAgents_MemberWithScopedToken(t *testing.T) {
+	ctx := context.Background()
+
+	// setup makes bob a project member of the demo project and a project
+	// admin of a second project, with one running agent owned by bob in
+	// the demo project.
+	setup := func(t *testing.T) (*Server, store.Store, *store.User, *store.Project, *store.Project) {
+		srv, s, alice, bob, project := setupDemoPolicyTest(t)
+		addProjectMemberViaAPI(t, srv, s, alice, project.ID, store.RoleBindingPrincipalUser, bob.ID, store.ProjectRoleMember)
+		other := &store.Project{
+			ID: tid("project-other"), Name: "Other Project", Slug: "other-project",
+			OwnerID: alice.ID, CreatedBy: alice.ID,
+		}
+		require.NoError(t, s.CreateProject(ctx, other))
+		rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+		require.NoError(t, err)
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rd.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      bob.ID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          other.ID,
+			CreatedBy:        alice.ID,
+		})
+		require.NoError(t, err)
+		seedStopAllAgents(t, s, project.ID, bob)
+		return srv, s, bob, project, other
+	}
+
+	stopAgentPath := func(project *store.Project, bob *store.User) string {
+		return "/api/v1/projects/" + project.ID + "/agents/" + tid(bob.ID+"-agent") + "/stop"
+	}
+
+	t.Run("read-only token", func(t *testing.T) {
+		srv, s, bob, project, _ := setup(t)
+		key := mintScopedUAT(t, srv, bob.ID, project.ID, []string{"project:read"})
+
+		// The per-agent route refuses this token.
+		rec := doRequestWithUAT(t, srv, key, http.MethodPost, stopAgentPath(project, bob), nil)
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+		rec = doRequestWithUAT(t, srv, key, http.MethodPost,
+			"/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertStopAllAgentPhase(t, s, state.PhaseRunning, bob)
+	})
+
+	t.Run("token for another project", func(t *testing.T) {
+		srv, s, bob, project, other := setup(t)
+		key := mintScopedUAT(t, srv, bob.ID, other.ID, []string{"agent:lifecycle"})
+
+		rec := doRequestWithUAT(t, srv, key, http.MethodPost, stopAgentPath(project, bob), nil)
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+		rec = doRequestWithUAT(t, srv, key, http.MethodPost,
+			"/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertStopAllAgentPhase(t, s, state.PhaseRunning, bob)
+	})
+}

@@ -608,6 +608,22 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 	}
 
 	agents := result.Items
+	if scope == "own" && len(agents) > 0 {
+		// Members stop the agents the per-agent lifecycle rule allows.
+		identity := GetIdentityFromContext(ctx)
+		allowed := make([]store.Agent, 0, len(agents))
+		for i := range agents {
+			if s.agentLifecycleAllowed(ctx, identity, &agents[i]) {
+				allowed = append(allowed, agents[i])
+			}
+		}
+		if len(allowed) == 0 {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Not authorized to stop these agents", nil)
+			return
+		}
+		agents = allowed
+	}
 	if len(agents) == 0 {
 		writeJSON(w, http.StatusOK, StopAllAgentsResponse{
 			Scope:   scope,
