@@ -232,8 +232,7 @@ summary here:
   tz-em instructed. Every SHA on the branch changed as a result; old → new
   for the commits referenced elsewhere in this log: `7e57894` → `588f4ec`,
   `fb3fe12` → `326ab83`, `f4b0bd8` → `4d7e0f9`, `35c9516` → `613e488`,
-  `262f4c0` had no further descendants to rebase (its tree is now
-  `2383671`'s parent chain).
+  `262f4c0` → `50c19aa`.
 - **R1-5 (Nit):** this log's `utcTimeHook` reference (above) corrected
   to `entc.UTCTimeHook`; the PR body's inaccurate claim that "modernc's
   `_timezone` option only ever adjusts a value that isn't already

@@ -139,7 +139,7 @@ func withUTCTimezone(dsn string) string {
 //   - time.Time values embedded inside a JSON field (e.g.
 //     PolicyConditions.ValidFrom/ValidUntil, ExposedPort.ExposedAt) — out of
 //     reach of a field-level hook; normalised at the ingest call site
-//     instead (tz-refactor task #4).
+//     instead (tz-refactor task 4).
 func UTCTimeHook(next ent.Mutator) ent.Mutator {
 	return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
 		for _, name := range m.Fields() {

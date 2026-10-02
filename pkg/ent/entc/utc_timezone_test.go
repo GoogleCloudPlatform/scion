@@ -189,14 +189,14 @@ func TestOpenSQLite_BindsCanonicalUTC(t *testing.T) {
 	assert.Equal(t, "2026-06-01 00:00:00 +0000 UTC", lastLoginText)
 }
 
-// TestOpenSQLite_LegacyRowReadBack asserts AC2 of tz-refactor task #2: a
+// TestOpenSQLite_LegacyRowReadBack asserts AC2 of tz-refactor task 2: a
 // legacy row written with a non-UTC zone suffix (the Time.String() text a
 // pre-fix process would have bound) reads back through ent as the correct
 // UTC instant once the client is opened with the "_timezone=UTC" DSN option.
 // The legacy text is inserted with a raw string bind that bypasses both the
 // DSN option (which only canonicalises time.Time binds) and the mutation
 // hook (which never sees raw SQL), so this is a faithful simulation of a
-// pre-task-#2 row regardless of the host's TZ.
+// row from before this task's fix, regardless of the host's TZ.
 func TestOpenSQLite_LegacyRowReadBack(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -282,7 +282,7 @@ func TestOpenSQLite_ThresholdBindMatchesCanonicalCount(t *testing.T) {
 // TestHubSetting_HookCoversCreateAndUpdate exercises the mutation hook on
 // both the create and the update path for a schema with an
 // UpdateDefault(time.Now) field (HubSetting.update_time), which is the path
-// task #2 is defending on Postgres (field.Time maps to timestamptz there,
+// tz-refactor task 2 is defending on Postgres (field.Time maps to timestamptz there,
 // so the hook's only observable effect is the echoed-back value;
 // tz-refactor design §2.1.2).
 func TestHubSetting_HookCoversCreateAndUpdate(t *testing.T) {
