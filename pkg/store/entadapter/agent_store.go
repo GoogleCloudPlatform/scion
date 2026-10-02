@@ -261,7 +261,7 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 		SetRuntime(a.Runtime).
 		SetRuntimeBrokerID(a.RuntimeBrokerID).
 		SetWebPtyEnabled(a.WebPTYEnabled).
-		SetExposedPorts(a.ExposedPorts).
+		SetExposedPorts(utcExposedPorts(a.ExposedPorts)).
 		SetTaskSummary(a.TaskSummary).
 		SetMessage(a.Message).
 		SetCreated(now).
@@ -1363,7 +1363,7 @@ func (s *AgentStore) UpdateAgentExposedPorts(ctx context.Context, id string, por
 
 	affected, err := s.client.Agent.Update().
 		Where(agent.IDEQ(uid)).
-		SetExposedPorts(ports).
+		SetExposedPorts(utcExposedPorts(ports)).
 		SetUpdated(time.Now()).
 		Save(ctx)
 	if err != nil {
@@ -1373,6 +1373,22 @@ func (s *AgentStore) UpdateAgentExposedPorts(ctx context.Context, id string, por
 		return store.ErrNotFound
 	}
 	return nil
+}
+
+// utcExposedPorts returns a copy of ports with every ExposedAt converted to
+// UTC. agents.exposed_ports is a JSON column, so the field-level UTC mutation
+// hook cannot reach the embedded times; normalising here covers every writer.
+// The caller's slice is not modified. A nil slice stays nil.
+func utcExposedPorts(ports []store.ExposedPort) []store.ExposedPort {
+	if ports == nil {
+		return nil
+	}
+	out := make([]store.ExposedPort, len(ports))
+	for i, p := range ports {
+		p.ExposedAt = p.ExposedAt.UTC()
+		out[i] = p
+	}
+	return out
 }
 
 // PurgeDeletedAgents permanently removes soft-deleted agents older than cutoff.

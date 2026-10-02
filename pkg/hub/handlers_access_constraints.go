@@ -177,6 +177,23 @@ type constraintConditionReq struct {
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
+// utcWindow returns the request's time window converted to UTC. Clients may
+// send any RFC 3339 offset; the window is stored and returned in UTC so every
+// consumer sees the same canonical "Z" form. Nil bounds stay nil.
+func (c *constraintConditionReq) utcWindow() (notBefore, expiresAt *time.Time) {
+	return utcTimePtr(c.NotBefore), utcTimePtr(c.ExpiresAt)
+}
+
+// utcTimePtr returns a pointer to a UTC copy of *t, or nil when t is nil.
+// It never modifies *t.
+func utcTimePtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	u := t.UTC()
+	return &u
+}
+
 // ---------------------------------------------------------------------------
 // Preview request types
 // ---------------------------------------------------------------------------
@@ -952,8 +969,7 @@ func (s *Server) createAccessConstraint(w http.ResponseWriter, r *http.Request, 
 
 	// Set time window (appliesWhen).
 	if req.AppliesWhen != nil {
-		draft.NotBefore = req.AppliesWhen.NotBefore
-		draft.ExpiresAt = req.AppliesWhen.ExpiresAt
+		draft.NotBefore, draft.ExpiresAt = req.AppliesWhen.utcWindow()
 	}
 
 	// Commit through governance service.
@@ -1105,8 +1121,7 @@ func (s *Server) updateAccessConstraint(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if req.AppliesWhen != nil {
-		draft.NotBefore = req.AppliesWhen.NotBefore
-		draft.ExpiresAt = req.AppliesWhen.ExpiresAt
+		draft.NotBefore, draft.ExpiresAt = req.AppliesWhen.utcWindow()
 	}
 
 	actor := PrincipalContext{
@@ -1815,8 +1830,7 @@ func (s *Server) draftToStoreConstraint(draft *previewDraftRequest, user UserIde
 	}
 
 	if draft.AppliesWhen != nil {
-		sc.NotBefore = draft.AppliesWhen.NotBefore
-		sc.ExpiresAt = draft.AppliesWhen.ExpiresAt
+		sc.NotBefore, sc.ExpiresAt = draft.AppliesWhen.utcWindow()
 	}
 
 	return sc, nil
