@@ -118,3 +118,21 @@ because dependencies were absent. `npm ci` installed the lockfile-pinned tree;
 no package or lockfile changed. Its audit summary reported three pre-existing
 dependency findings (one low, two high); dependency remediation is outside this
 unit and no dependency was added or upgraded.
+
+Post-checkpoint verification at `c1f908c5`:
+
+- `go test -count=1 -p 2 ./pkg/hub -run '^(TestConstraintAuditHistory_|TestUnifiedConstraintAudit|TestConstraintAuditAuth|TestConstraintAuditValidCredentials|TestConstraintAuditBrokerAuth_)'` — PASS (package 8.414s). This covers the endpoint/cursor/create identity suite plus missing, malformed, expired, valid, neighboring-route, broker-HMAC, and on-behalf-of exact-route authentication behavior.
+- `go test -count=1 -p 2 ./pkg/store/entadapter -run '^TestConstraintHistory_(PrunesDeterministicallyPerConstraint|CascadesWithLiveConstraint|SurvivesRestartAndSecondStoreInstance)$'` — PASS (package 1.067s).
+- Focused web tests above rerun — PASS, 4 files / 68 tests.
+- `npm run typecheck` — PASS.
+- Production-file `npx eslint` for the three changed source files — PASS with 28 pre-existing explicit-return-type warnings and zero errors. Typed ESLint cannot parse any `*.test.ts` because the repository `tsconfig.json` excludes tests; the four changed test files are covered by Vitest and TypeScript instead.
+- `npm run build` — PASS (481 modules transformed; production assets copied).
+- `go vet -p 2 ./pkg/hub` — PASS.
+- `go build -buildvcs=false -p 2 ./pkg/hub` — PASS.
+- `timeout 10m env GOGC=40 golangci-lint run --new-from-rev=b4b2d7bb27de6bf3a8cd75ef21cb3e47fd070fbd --concurrency=1 ./pkg/hub/...` — environment-limited: exited 124 at the required ten-minute bound with no diagnostics emitted.
+- Go formatting, focused Prettier formatting, and `git diff --check` — clean.
+
+The approved shared-auth review already supplied a focused race pass at exact
+dependency head `b4b2d7bb`. The resumed delta changes no production Go or auth
+code, so that accepted race evidence was not repeated. `make ci` and
+`make ci-full` remain prohibited by the campaign workload rule.
