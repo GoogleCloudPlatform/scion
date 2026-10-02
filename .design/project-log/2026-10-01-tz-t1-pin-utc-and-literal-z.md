@@ -38,27 +38,37 @@ it reports the **wrong instant**. See the tz-refactor design (ptone/scion#2457)
    `cmd/sciontool/main.go` so `time.LoadLocation` works in a scratch image
    with no `/usr/share/zoneinfo`. Verified with `go list -deps` and
    `go tool nm` (see Testing).
-4. **Literal-`Z`/missing-`.UTC()` fixes** (the "wrong instant" bug class):
-   - `pkg/hub/events.go:491,502,534` — agent event fields
-     (`lastActivityEvent`, `startedAt`, `created`) now call `.UTC()` before
-     `.Format("2006-01-02T15:04:05Z07:00")`.
-   - `pkg/hub/events.go:725` — the chat SSE `createdAt` now uses
-     `.UTC().Format(time.RFC3339Nano)` instead of
-     `.Format("2006-01-02T15:04:05.000Z")` with no `.UTC()`. This also drops
-     the fixed `.000Z` suffix in favor of a variable number of fraction
-     digits (still valid RFC 3339, still parses the same).
-   - `pkg/hub/handlers_github_app_webhook.go:808` — GitHub token
-     `expiresAt`: `token.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z")`.
-   - `pkg/hub/admin_invites.go:177` — invite audit-log `expires_at`:
-     `invite.ExpiresAt.UTC().Format(time.RFC3339)`.
-   - These last two are inline at the call site (review round 1 removed an
-     intermediate `formatUTCTimestamp` helper — see below).
+4. **Literal-`Z` and missing-`.UTC()` fixes.** Two different bug classes:
+   - **Wrong instant** (a literal `Z` layout applied to local wall-clock
+     digits, so the printed value names a different instant than the one
+     stored):
+     - `pkg/hub/events.go:725` — the chat SSE `createdAt` now uses
+       `.UTC().Format(time.RFC3339Nano)` instead of
+       `.Format("2006-01-02T15:04:05.000Z")` with no `.UTC()`. This also
+       drops the fixed `.000Z` suffix in favor of a variable number of
+       fraction digits (still valid RFC 3339, still parses the same).
+     - `pkg/hub/handlers_github_app_webhook.go:808` — GitHub token
+       `expiresAt` used `.Format("2006-01-02T15:04:05Z")` with no `.UTC()`;
+       now `token.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z")`.
+   - **Wire-contract (offset) violation**, not a wrong instant: the layout
+     already included `Z07:00` (an offset element), so the printed value
+     was the correct instant, just not normalized to UTC as design §2.2
+     requires:
+     - `pkg/hub/events.go:491,502,534` — agent event fields
+       (`lastActivityEvent`, `startedAt`, `created`) now call `.UTC()`
+       before `.Format("2006-01-02T15:04:05Z07:00")`.
+     - `pkg/hub/admin_invites.go:177` — invite audit-log `expires_at` used
+       `.Format(time.RFC3339)` (RFC 3339 includes the offset); now
+       `invite.ExpiresAt.UTC().Format(time.RFC3339)`.
+   - The GitHub token and invite sites are inline at the call site (review
+     round 1 removed an intermediate `formatUTCTimestamp` helper — see
+     below).
 
 ## Review round 1
 
-Review (`gs://scion-xproject-exchange/tz-refactor/out/t1/review-1.md`) found
-1 High, 2 Medium, 4 Low and 1 Nit. All are fixed; full disposition is in
-`review-1-response.md` (same GCS prefix). Summary of the code changes:
+Review round 1 found 1 High, 2 Medium, 4 Low and 1 Nit. All are fixed; full
+disposition is in the round-1 review response (sent to tz-em). Summary of
+the code changes:
 
 - **R1-3 (High), R1-2 (Medium): one seam, an AST placement test, no more
   `cmd` data race.** The previous round used two ad hoc seam vars
@@ -145,13 +155,58 @@ Review (`gs://scion-xproject-exchange/tz-refactor/out/t1/review-1.md`) found
   subject was reworded in the same pass to say "tz-refactor task 1", not
   "tz task #1".
 
+## Review round 2
+
+Round 2 verified every round-1 fix (including via targeted mutations of the
+production code and of the AST test's allow-list) and found 3 further Low
+findings, all in tests and documentation, none in production behavior:
+
+- **R2-1 (Low): the invite audit-log site test passed vacuously under
+  `TZ=UTC`, which is what CI uses.** `admin_invites.go:143`'s
+  `time.Now().Add(duration)` is non-UTC only when the process's `TZ` is
+  non-UTC, so `TestAdminInvitesCreate_AuditLogExpiresAtIsUTC` (R1-1) gave no
+  real regression protection in CI: dropping `.UTC()` at `:177` passed under
+  `TZ=UTC` and only failed under a manual `TZ=Asia/Tokyo` run. Fixed by
+  re-executing the test in a child process pinned to `TZ=Asia/Tokyo`
+  (`os/exec`, filtered to just this test by name), with a
+  `time.Local == time.UTC` sanity check in the child so a silent `TZ`
+  lookup failure fails loudly instead of passing vacuously again. This adds
+  no write to `time.Local` in the shared test binary, so it does not
+  reintroduce the R1-3 race class. `TZ=Asia/Kathmandu` is not used for the
+  re-exec: `newTestStore`'s migration hits the known pre-existing baseline
+  (tz-refactor task 2) before the handler under test ever runs. Verified
+  with the same mutation as before (drop `.UTC()` at `:177`): the test now
+  fails even when the outer process is `TZ=UTC`.
+- **R2-2 (Low): code comments cited review-round IDs and out-of-repo
+  artifacts, and narrated earlier revisions' history.** Reworded comments
+  in `cmd/hub_secret_migrate.go`, `cmd/hub_secret_migrate_names.go`,
+  `cmd/server_foreground.go`, `cmd/main_test.go`, `cmd/pin_process_utc_test.go`,
+  `pkg/hub/admin_invites_audit_utc_test.go` and `pkg/hub/events_utc_test.go`
+  to state the invariant and its reason directly, without citing "review
+  round 1, R1-N" or `dsn/findings` (a scratch file, not in the repo), and
+  without describing code from an earlier revision that never reached
+  `main` (e.g. the deleted `TestFormatUTCTimestamp`/`formatUTCTimestamp`,
+  the deleted ordering test).
+- **R2-3 (Low): this log and the PR body had stale or inaccurate
+  statements.** Fixed in this revision of the log (see Changes item 4 above
+  for the corrected literal-`Z` vs. wire-contract-violation labeling) and in
+  the PR body: dropped the `dev-common.md` and `gs://` citations (said
+  "review round 1" / "the known Kathmandu `createTestStore` baseline"
+  instead); corrected the stale "two commits ahead of upstream/main" count
+  (it was never meant to be a fixed number — reworded to not assert one).
+
 ## Rebase onto upstream main
 
-Rebased `scion/tz-t1` onto `GoogleCloudPlatform/scion` main
+Round 1: rebased `scion/tz-t1` onto `GoogleCloudPlatform/scion` main
 (`b44fcf25`, pulling in tz-refactor task 10, `GoogleCloudPlatform/scion#2241`,
 and task 14, `GoogleCloudPlatform/scion#2218`). No conflicts: neither task
-touches the files this branch changes. Only this branch's two commits remain
-ahead of `upstream/main` after the rebase.
+touches the files this branch changes.
+
+Round 2: rebased again onto `GoogleCloudPlatform/scion` main at `ef9c0b65`
+(fork CI's unrelated `pkg/agent` failure, `5ff96b98`, had merged by then, so
+`Build & Test`/`Full Test Suite` are expected to go green). No conflicts.
+`git log upstream/main..HEAD` shows only this branch's own commits at each
+point — none of upstream's commits are replayed.
 
 ## Testing
 
@@ -196,9 +251,9 @@ ahead of `upstream/main` after the rebase.
   Scan error on column index 6, name "create_time": unsupported Scan,
   storing driver.Value type string into type *time.Time`) — reproduced
   identically against `GoogleCloudPlatform/scion@b44fcf25` for the
-  pre-existing test. This is the `createTestStore`-backed-test baseline
-  documented in `dev-common.md` (tz-refactor task 2 / U2a territory, not
-  this task's bug), not a regression from this branch.
+  pre-existing test. This is the known Kathmandu `createTestStore` baseline
+  (tz-refactor task 2 / U2a territory, not this task's bug), not a
+  regression from this branch.
 - tzdata: `go list -deps ./cmd/scion ./cmd/sciontool | grep -x time/tzdata`
   — present for both. `go tool nm` on binaries built from this head shows 3
   `time/tzdata` symbols in each (R1-7).
@@ -224,6 +279,31 @@ ahead of `upstream/main` after the rebase.
   `kr-t1-p1b1`) that don't touch this code either. This looks like a
   fork-wide CI environment issue (CI-only, not reproducible locally),
   flagged to tz-em; not fixed here (out of scope, shared infrastructure).
+
+### Round 2
+
+- `go build -buildvcs=false -p 2 ./cmd/... ./pkg/hub/... ./pkg/util/...`:
+  clean. `gofmt -l cmd pkg/hub pkg/util .design`: clean.
+- `TZ=Asia/Tokyo` and `TZ=Asia/Kathmandu go test -buildvcs=false -p 2
+  -run 'TestPinProcessUTC_' -v ./cmd/...`: `PASS` / `PASS` (unaffected by
+  the R2-2 comment-only changes).
+- `TZ=Asia/Tokyo go test -buildvcs=false -p 2 -count=1 -run
+  'TestChannelEventPublisher_|TestAdminInvitesCreate_' -v ./pkg/hub/`: all
+  pass, including the re-exec'd `TestAdminInvitesCreate_AuditLogExpiresAtIsUTC`.
+- `TZ=Asia/Kathmandu go test -buildvcs=false -p 2 -count=1 -run
+  'TestChannelEventPublisher_|TestAdminInvitesCreate_' -v ./pkg/hub/`: the
+  events tests and the re-exec'd invite-audit test pass (the re-exec always
+  runs its child under `TZ=Asia/Tokyo` regardless of the outer `TZ`, so it
+  is unaffected by the Kathmandu `createTestStore` baseline). The
+  pre-existing `TestAdminInvitesCreate_UsesHubEndpointNotAgentEndpoint`
+  fails with the same known baseline error as before (not this test, not
+  this branch).
+- R2-1 mutation, under `TZ=UTC` (CI's actual `TZ`): reverting
+  `admin_invites.go:177`'s `.UTC()` now fails
+  `TestAdminInvitesCreate_AuditLogExpiresAtIsUTC` (`expires_at =
+  "...+09:00", want a Z-suffixed (UTC) RFC3339 timestamp`, from inside the
+  `TZ=Asia/Tokyo` child) -- previously this mutation passed under `TZ=UTC`.
+  Reverted after confirming.
 
 ## Deliberately out of scope (per the issue)
 
