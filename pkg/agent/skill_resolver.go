@@ -61,7 +61,10 @@ type ResolveResult struct {
 }
 
 // ResolveError represents a single skill that failed resolution.
-// RetryAfter mirrors SkillResolutionError.RetryAfter (see its doc).
+// RetryAfter is a delay in whole seconds, as text, when one is known: for
+// SkillErrCodeRateLimited, the time left on the credential's cooldown; for
+// other causes, the upstream Retry-After header, if any. ProvisionAgent
+// copies it to SkillResolutionError.RetryAfter.
 type ResolveError struct {
 	URI        string
 	Code       string
@@ -90,9 +93,11 @@ const (
 // (see the SkillErrCode* constants) alongside the human-readable Message, so
 // the HTTP boundary (runtimebroker) can map it to the right status — naming
 // the ref and the cause — instead of folding it into a generic 500/502.
-// RetryAfter carries the server's Retry-After value (raw header text, usually
-// an integer count of seconds) when the cause is SkillErrCodeRateLimited and
-// the upstream response named one; empty otherwise.
+// RetryAfter is a delay in whole seconds, as text, when one is known: for
+// SkillErrCodeRateLimited, the time left on the credential's cooldown (see
+// GitHubCooldown); for other causes, the upstream Retry-After header, if
+// any. It is empty otherwise. The broker sends it as a Retry-After header
+// only for SkillErrCodeRateLimited.
 type SkillResolutionError struct {
 	URI        string
 	Code       string

@@ -2381,10 +2381,12 @@ func TestProvisionAgent_RequiredGHSkillWithResolver_Provisions(t *testing.T) {
 // exercises provision.go's SkillResolutionError construction through the
 // actual ProvisionAgent entry point with a real GitHubSkillResolver, rather
 // than injecting the error directly into a runtimebroker mock as the broker
-// tests do (#2546 O3). The test server returns a 429 with a Retry-After far
-// larger than the backoff cap, and ctx carries a 2-minute deadline. The
-// rate-limit cooldown ends the call at that first response, without retrying.
-// A watchdog cancels ctx if it does not, so a regression fails in seconds.
+// tests do (#2546 O3). The test server returns a 429 with Retry-After: 120,
+// and ctx carries a 2-minute deadline. The rate-limit cooldown ends the call
+// at that first response, without retrying. A watchdog cancels ctx if it
+// does not, so a regression fails in seconds. The test also pins RetryAfter
+// end to end: cooldown -> cooldownRetryAfter -> ResolveError ->
+// SkillResolutionError.
 func TestProvisionAgent_RequiredGHSkillRateLimited_YieldsSkillResolutionError(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -2417,7 +2419,7 @@ func TestProvisionAgent_RequiredGHSkillRateLimited_YieldsSkillResolutionError(t 
 
 	server, mux := newTestGitHubServer(t)
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Retry-After", "120") // far larger than githubMaxBackoff
+		w.Header().Set("Retry-After", "120") // starts a 120s cooldown
 		w.WriteHeader(http.StatusTooManyRequests)
 	})
 	resolver := newTestGitHubResolver(server)
@@ -2441,6 +2443,11 @@ func TestProvisionAgent_RequiredGHSkillRateLimited_YieldsSkillResolutionError(t 
 	}
 	if skillErr.URI != "gh://owner/repo/my-skill@main" {
 		t.Errorf("expected URI to name the ref, got %s", skillErr.URI)
+	}
+	// The cooldown runs on the real clock, so allow one second of slip
+	// between the 429 and cooldownRetryAfter reading the time left.
+	if skillErr.RetryAfter != "120" && skillErr.RetryAfter != "119" {
+		t.Errorf("expected RetryAfter 120 (or 119), got %q", skillErr.RetryAfter)
 	}
 }
 

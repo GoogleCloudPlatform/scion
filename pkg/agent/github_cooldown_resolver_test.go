@@ -424,3 +424,25 @@ func TestGitHubSkillResolver_CooldownDuringBackoffFailsWithoutSleeping(t *testin
 		t.Errorf("expected no backoff sleep, took %s", elapsed)
 	}
 }
+
+// TestGitHubSkillResolver_CooldownRetryAfterRoundsUpWithFloor pins how
+// cooldownRetryAfter renders the time left on a cooldown: a fraction of a
+// second rounds up, and the result is never below 1, even when RetryAt has
+// already passed by the tracker's clock.
+func TestGitHubSkillResolver_CooldownRetryAfterRoundsUpWithFloor(t *testing.T) {
+	clock := newFakeClock()
+	r := &GitHubSkillResolver{cooldown: NewGitHubCooldown(clock.Now)}
+	now := clock.Now()
+	for _, tc := range []struct {
+		left time.Duration
+		want string
+	}{
+		{30*time.Second + 200*time.Millisecond, "31"},
+		{100 * time.Millisecond, "1"},
+		{-time.Second, "1"},
+	} {
+		if got := r.cooldownRetryAfter(&GitHubRateLimitError{RetryAt: now.Add(tc.left)}); got != tc.want {
+			t.Errorf("RetryAt = now + (%v): got %q, want %q", tc.left, got, tc.want)
+		}
+	}
+}

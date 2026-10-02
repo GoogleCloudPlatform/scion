@@ -672,7 +672,10 @@ func TestGitHubSkillResolver_ConnectionRefused_ClassifiedUnreachable(t *testing.
 
 	// Resolve flattens the error to a code and message, so check the chain
 	// one level down, on a real request path: the typed error must carry
-	// the transport failure as its cause, reachable through Unwrap.
+	// the transport failure as its cause, reachable through Unwrap. With a
+	// 1s ctx, the 1s first backoff does not fit, so this pins the budget
+	// fail-fast path, not retries-exhausted (see
+	// TestGitHubSkillResolver_NetworkErrorOnFinalAttempt_KeepsCause).
 	ghRef, err := ParseGitHubSkillURI("gh://owner/repo/my-skill@main")
 	if err != nil {
 		t.Fatalf("ParseGitHubSkillURI: %v", err)
@@ -691,6 +694,51 @@ func TestGitHubSkillResolver_ConnectionRefused_ClassifiedUnreachable(t *testing.
 	var opErr *net.OpError
 	if !errors.As(err, &opErr) || opErr.Op != "dial" {
 		t.Errorf("expected a dial *net.OpError in the chain, got %v", err)
+	}
+}
+
+// TestGitHubSkillResolver_NetworkErrorOnFinalAttempt_KeepsCause pins the
+// retries-exhausted path after doWithRetry's loop: the first attempts get a
+// 503 with Retry-After: 0, so every backoff is zero, and the final attempt's
+// connection is closed without a response. The typed error must be
+// classified from that network error and carry it as its cause.
+func TestGitHubSkillResolver_NetworkErrorOnFinalAttempt_KeepsCause(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	var attempts int32
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&attempts, 1) <= githubMaxRetries {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		_ = conn.Close()
+	})
+
+	resolver := newTestGitHubResolver(server)
+	ghRef, err := ParseGitHubSkillURI("gh://owner/repo/my-skill@main")
+	if err != nil {
+		t.Fatalf("ParseGitHubSkillURI: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, err = resolver.resolveCommitSHA(ctx, ghRef, "")
+
+	if got := atomic.LoadInt32(&attempts); got < githubMaxRetries+1 {
+		t.Fatalf("expected at least %d attempts (retries exhausted), got %d", githubMaxRetries+1, got)
+	}
+	var rerr *githubResolveError
+	if !errors.As(err, &rerr) || rerr.code != SkillErrCodeUnreachable {
+		t.Fatalf("expected a githubResolveError with code %s, got %T: %v", SkillErrCodeUnreachable, err, err)
+	}
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		t.Errorf("expected the *url.Error cause to be reachable through Unwrap, got %v", err)
 	}
 }
 
