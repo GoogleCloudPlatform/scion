@@ -316,18 +316,23 @@ export class ScionPageChat extends LitElement {
   /**
    * Coalescing gate for {@link loadHubMembers}. `loadHubMembers` has several
    * call sites — a route parse, `initV2`'s no-conversation branch, a
-   * rail-data re-parse, `handleResetView`, and the fallback poll — that can
-   * all fire within the same synchronous turn on a cold `/chat` mount, plus
-   * later, genuinely independent triggers while a walk is still in flight.
+   * rail-data re-parse, `handleResetView`, and the fallback poll — that fire
+   * at different points during a cold `/chat` mount and afterward, not
+   * necessarily in the same synchronous turn. Calls that land before the
+   * scheduled walk's microtask runs batch into that one walk, since they're
+   * indistinguishable from each other (nothing could have changed between
+   * them); calls that land once the walk's requests are already in flight
+   * join it instead of starting a second one — see below for the two kinds.
    *
-   * `_hubMembersScheduled` batches every call that arrives before the
-   * scheduled walk actually starts: those calls are indistinguishable from
-   * each other (same turn, nothing could have changed between them), so they
-   * collapse into the single `queueMicrotask`-deferred walk with zero extra
+   * `_hubMembersScheduled` is true from the first call that schedules the
+   * walk until its `queueMicrotask` callback actually starts it; every call
+   * in that window collapses into the single scheduled walk with zero extra
    * requests.
    *
    * `_hubMembersInFlight` is true only once that walk's network requests are
-   * actually in flight. A call arriving then is one of two kinds:
+   * actually in flight, and `_hubMembersInFlightGeneration` records which
+   * {@link _hubMembersGeneration} owns it. A call arriving while a walk is in
+   * flight for the caller's *current* generation is one of two kinds:
    *
    * - A "join" call (the default — route/view re-parses, which re-derive the
    *   same hub-wide view rather than reacting to anything that could have
@@ -339,9 +344,17 @@ export class ScionPageChat extends LitElement {
    *   exactly one trailing walk once the current one settles. Further calls
    *   during that trailing walk re-set the same flag (or simply join it, if
    *   they're join calls) rather than queuing a second one.
+   *
+   * A call arriving while a walk is in flight for a *stale* generation (the
+   * element disconnected and reconnected while that walk was still running)
+   * does not join it — that walk's result is for a view that no longer
+   * exists and may never publish anything the caller's view can see, so the
+   * caller schedules a fresh walk for its own generation instead of waiting.
    */
   private _hubMembersScheduled = false;
   private _hubMembersInFlight = false;
+  /** The {@link _hubMembersGeneration} that owns the current in-flight walk; meaningless while `_hubMembersInFlight` is false. */
+  private _hubMembersInFlightGeneration = 0;
   private _hubMembersReloadQueued = false;
   /**
    * Bumped on `disconnectedCallback`, same pattern as `_unreadDMRequestId`
@@ -2271,7 +2284,9 @@ export class ScionPageChat extends LitElement {
    * walk when one is already running.
    */
   private loadHubMembers(options?: { refresh?: boolean }): void {
-    if (this._hubMembersInFlight) {
+    const inFlightForThisGeneration =
+      this._hubMembersInFlight && this._hubMembersInFlightGeneration === this._hubMembersGeneration;
+    if (inFlightForThisGeneration) {
       if (options?.refresh) this._hubMembersReloadQueued = true;
       return;
     }
@@ -2293,22 +2308,30 @@ export class ScionPageChat extends LitElement {
    * (a project or DM) is open, or once the element has been disconnected —
    * in both cases, the hub-wide view this walk is for is no longer on
    * screen, so a trailing walk would have nothing valid to publish into.
+   *
+   * Records itself as the owner of `_hubMembersInFlight` for its generation,
+   * and only clears that flag in `finally` if it is still the owner — a walk
+   * that outlives a disconnect-then-reconnect must not clear the flag out
+   * from under the fresh walk the reconnect started.
    */
   private async _runHubMembersLoad(): Promise<void> {
     const generation = this._hubMembersGeneration;
     this._hubMembersScheduled = false;
     this._hubMembersInFlight = true;
+    this._hubMembersInFlightGeneration = generation;
     try {
       do {
         this._hubMembersReloadQueued = false;
-        await this._fetchHubMembersOnce();
+        await this._fetchHubMembersOnce(generation);
       } while (
         this._hubMembersReloadQueued &&
         generation === this._hubMembersGeneration &&
         !this.v2Conversation
       );
     } finally {
-      this._hubMembersInFlight = false;
+      if (this._hubMembersInFlightGeneration === generation) {
+        this._hubMembersInFlight = false;
+      }
     }
   }
 
@@ -2329,21 +2352,34 @@ export class ScionPageChat extends LitElement {
    * list, or the shared `v2Members` roster, with every user and agent in the
    * hub just because it happened to land after the user navigated away or
    * left the page.
+   *
+   * Also stops requesting further pages, rather than merely discarding the
+   * result, once either of those becomes true mid-walk: `shouldContinue`
+   * below is checked by `paginateAll` before every page of both walks, so a
+   * stale walk stops hitting the server as soon as the view it was for is
+   * gone instead of running to completion for no reason.
+   *
+   * `generation` is passed in by {@link _runHubMembersLoad} rather than
+   * re-read from `_hubMembersGeneration` here, so both always agree on which
+   * walk this is.
    */
-  private async _fetchHubMembersOnce(): Promise<void> {
-    const generation = this._hubMembersGeneration;
+  private async _fetchHubMembersOnce(generation: number): Promise<void> {
+    const shouldContinue = (): boolean =>
+      !this.v2Conversation && generation === this._hubMembersGeneration;
     const [usersResult, agentsResult] = await Promise.allSettled([
       paginateAll({
         path: '/api/v1/users',
         pageSize: HUB_MEMBERS_PAGE_SIZE,
         parsePage: parseHubUsersPage,
         label: 'users list',
+        shouldContinue,
       }),
       paginateAll({
         path: '/api/v1/agents',
         pageSize: HUB_MEMBERS_PAGE_SIZE,
         parsePage: parseHubAgentsPage,
         label: 'agents list',
+        shouldContinue,
       }),
     ]);
 

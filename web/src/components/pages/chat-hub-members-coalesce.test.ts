@@ -297,11 +297,11 @@ describe('loadHubMembers coalescing gate', () => {
     );
 
     const page = document.createElement('scion-page-chat') as any;
-    document.body.appendChild(page);
-    // A genuinely later trigger than connectedCallback's own `initV2` call —
-    // the router handing the page its data, exactly as it does on a real
-    // cold mount, before `initV2`'s lazy rail/members imports resolve.
+    // The router sets pageData before inserting the page into the shell (see
+    // main.ts's route rendering) — match that order here, before
+    // `initV2`'s lazy rail/members imports have resolved.
     page.pageData = { user: { id: 'user-me' } };
+    document.body.appendChild(page);
 
     // Let everything that can fire in this window actually fire: updated()'s
     // pageData branch, initV2's lazy imports and no-conversation branch, all
@@ -509,5 +509,121 @@ describe('loadHubMembers error handling', () => {
     // Users list is unchanged from before the failed walk; agents updated.
     expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u1']);
     expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a2']);
+  });
+});
+
+describe('loadHubMembers reconnect handling', () => {
+  it('a disconnect-then-reconnect while a walk is in flight starts a fresh walk, and the stale walk publishing later does not overwrite it', async () => {
+    window.history.pushState({}, '', '/chat');
+
+    let resolveStaleUsers!: (r: Response) => void;
+    const staleUsers = new Promise<Response>((resolve) => {
+      resolveStaleUsers = resolve;
+    });
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => staleUsers,
+        () => agentsPage(['a-stale'])
+      )
+    );
+
+    const page = document.createElement('scion-page-chat') as any;
+    page.pageData = { user: { id: 'user-me' } };
+    document.body.appendChild(page);
+    // Let the cold-mount walk start; its users request is left unresolved.
+    await flush();
+
+    // The element disconnects and reconnects (e.g. moved within the DOM)
+    // while that walk's users request is still pending.
+    document.body.removeChild(page);
+    document.body.appendChild(page);
+
+    // The reconnected view's own walk gets fresh responses.
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => usersPage(['u-fresh']),
+        () => agentsPage(['a-fresh'])
+      )
+    );
+    await flush();
+
+    // The stale walk, started before the reconnect, finally resolves.
+    resolveStaleUsers(usersPage(['u-stale']));
+    await flush();
+
+    try {
+      expect(page.v2HumanMembers.map((m: any) => m.id)).toEqual(['u-fresh']);
+      expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a-fresh']);
+    } finally {
+      document.body.removeChild(page);
+    }
+  });
+});
+
+describe('loadHubMembers walk cancellation', () => {
+  it('stops requesting further pages once the element disconnects mid-walk', async () => {
+    let userCall = 0;
+    let resolvePage2!: (r: Response) => void;
+    const page2 = new Promise<Response>((resolve) => {
+      resolvePage2 = resolve;
+    });
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => {
+          userCall++;
+          if (userCall === 1) return usersPage(['u1'], 'u-cursor');
+          return page2;
+        },
+        () => agentsPage(['a1'])
+      )
+    );
+    const page = createPage();
+
+    page.loadHubMembers();
+    await flush();
+    // First page landed with a cursor; the second page's request has gone
+    // out and is unresolved.
+    expect(userCall).toBe(2);
+
+    // Disconnect while that second page's request is still in flight.
+    page.disconnectedCallback();
+
+    // The pending request resolves with yet another cursor — if the walk
+    // kept going, it would fetch a third page.
+    resolvePage2(usersPage(['u2'], 'u2-cursor'));
+    await flush();
+
+    expect(userCall).toBe(2);
+  });
+
+  it('stops requesting further pages once a conversation opens mid-walk', async () => {
+    let userCall = 0;
+    let resolvePage2!: (r: Response) => void;
+    const page2 = new Promise<Response>((resolve) => {
+      resolvePage2 = resolve;
+    });
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => {
+          userCall++;
+          if (userCall === 1) return usersPage(['u1'], 'u-cursor');
+          return page2;
+        },
+        () => agentsPage(['a1'])
+      )
+    );
+    const page = createPage();
+
+    page.loadHubMembers();
+    await flush();
+    expect(userCall).toBe(2);
+
+    // The user opens a project before the second page resolves.
+    page.v2Conversation = { projectId: 'p1' };
+
+    resolvePage2(usersPage(['u2'], 'u2-cursor'));
+    await flush();
+
+    expect(userCall).toBe(2);
   });
 });

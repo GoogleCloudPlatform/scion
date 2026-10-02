@@ -100,7 +100,7 @@ rejection from the `queueMicrotask`-scheduled call.
 - No change to SSE handling or shared-state semantics beyond what
   `loadHubMembers` already seeded.
 
-## Review round 1 follow-up (2026-10-01)
+## Cold-mount duplicate walks and the view-change race (2026-10-01)
 
 A connected-element repro showed a real cold `/chat` mount still ran two full
 users/agents walks, not one, and a trailing walk could land after the user had
@@ -145,3 +145,66 @@ every user and agent in the hub. Fixes, each with a new test:
   this is the brief's intended behavior, not a regression, and progressive
   first-page publication is a possible future follow-up if that latency
   becomes a problem in practice.
+
+## Reconnect handling, mid-walk cancellation, and consistency fixes (2026-10-02)
+
+Two further gaps found after the walk above landed:
+
+- **Stale walk on reconnect.** If the chat page disconnects and reconnects
+  while a hub-members walk is still in flight, the reconnected view's own
+  `loadHubMembers` call used to just join the in-flight walk rather than
+  starting its own — but that walk belongs to the old generation and fails
+  its own generation check on completion without publishing anything,
+  leaving the sidebar empty until the next fallback poll (latent today, since
+  nothing currently reconnects the element, but reachable and worth closing).
+  `_hubMembersInFlight` now has a paired `_hubMembersInFlightGeneration`: a
+  caller only joins an in-flight walk if it belongs to the caller's current
+  generation, otherwise it starts a fresh one. A walk only clears
+  `_hubMembersInFlight` in its `finally` block if it is still the generation
+  that owns it, so a stale walk settling after a reconnect can't clear the
+  flag out from under the walk the reconnect started.
+- **Unbounded walk after navigating away.** A walk whose view had already
+  gone away (disconnect, or a project/DM opened) still fetched every
+  remaining page before its result was discarded at publish time — a full
+  `/api/v1/agents` walk alone is on the order of 18 seconds of server time,
+  bounded only by the page-count safety net. `paginateAll` now takes an
+  optional `shouldContinue` callback, checked before every page including the
+  first; `chat.ts` passes one that mirrors the existing publish-time check
+  (no open conversation, same generation), so a stale walk stops requesting
+  further pages as soon as the view it was for is gone, instead of running to
+  completion for no reason. (A `signal`/abort option was removed from
+  `paginate-all.ts` in the previous pass as unused; this reintroduces an
+  equivalent `shouldContinue` option now that there is a real caller for it.)
+
+Also, as consistency/hygiene fixes: `_fetchHubMembersOnce` now takes its
+generation as a parameter from `_runHubMembersLoad` instead of re-reading
+`_hubMembersGeneration` separately, so both always agree on which walk they
+belong to; the coalescing-gate doc comment was reworded to describe the join
+path rather than implying every call site fires in the same synchronous
+turn; and the cold-mount test now sets `pageData` before appending the
+element, matching the router's own order (`main.ts`'s route rendering sets
+`pageData` before inserting the page into the shell).
+
+**Known limitation, tracked separately:** `loadV2Members` (the per-project/DM
+member load) has no equivalent view guard — a late-arriving project walk can
+still overwrite a different, newer view. This already exists on `main` and is
+tracked as ptone/scion#2564; out of scope here.
+
+### Files changed (this pass)
+
+| File | Change |
+| --- | --- |
+| `web/src/client/paginate-all.ts` | Added a `shouldContinue` option, checked before every page. |
+| `web/src/client/paginate-all.test.ts` | New tests for `shouldContinue`. |
+| `web/src/components/pages/chat.ts` | Generation-owned in-flight tracking for reconnect; `shouldContinue` wired into both pagination walks; `_fetchHubMembersOnce` takes `generation` as a parameter; doc-comment reword. |
+| `web/src/components/pages/chat-hub-members-coalesce.test.ts` | New reconnect and mid-walk-cancellation tests; cold-mount test reordered to match the router's `pageData` timing. |
+
+### Scenarios covered (tests, this pass)
+
+- Reconnecting while a walk is in flight starts a fresh walk for the new view;
+  the stale walk completing afterward does not publish over it.
+- A walk stops requesting further pages once the element disconnects
+  mid-walk.
+- A walk stops requesting further pages once a conversation opens mid-walk.
+- `paginateAll` stops before fetching a page once `shouldContinue` returns
+  false, returning what it already fetched rather than throwing.

@@ -49,6 +49,15 @@ export interface PaginateAllOptions<T> {
   maxPages?: number;
   /** A human-readable name for this list, used only in thrown error messages. Defaults to `path`. */
   label?: string;
+  /**
+   * Checked before every page fetch, including the first. Once it returns
+   * false, the walk stops and resolves with whatever it has accumulated so
+   * far, instead of throwing or fetching another page — for a caller whose
+   * result will be discarded if the thing it was walking for (a view, a
+   * connected element) is gone before the walk finishes, so there is no
+   * point paying for the remaining pages.
+   */
+  shouldContinue?: () => boolean;
 }
 
 const DEFAULT_MAX_PAGES = 500;
@@ -69,7 +78,7 @@ export class PaginationError extends Error {
  * partial results.
  */
 export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[]> {
-  const { path, pageSize, parsePage } = options;
+  const { path, pageSize, parsePage, shouldContinue } = options;
   const maxPages = options.maxPages ?? DEFAULT_MAX_PAGES;
   const label = options.label ?? path;
 
@@ -79,6 +88,7 @@ export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[
   let pages = 0;
 
   do {
+    if (shouldContinue && !shouldContinue()) break;
     const separator = path.includes('?') ? '&' : '?';
     const url = cursor
       ? `${path}${separator}limit=${pageSize}&cursor=${encodeURIComponent(cursor)}`

@@ -121,6 +121,36 @@ describe('paginateAll', () => {
     expect(apiFetch).toHaveBeenCalledTimes(2);
   });
 
+  it('stops before fetching another page once shouldContinue returns false, without throwing', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'a' }], nextCursor: 'c1' }))
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'b' }], nextCursor: 'c2' }))
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'c' }] }));
+
+    let pagesAllowed = 1;
+    const items = await paginateAll({
+      path: '/api/v1/things',
+      pageSize: 100,
+      parsePage,
+      shouldContinue: () => pagesAllowed-- > 0,
+    });
+
+    expect(items).toEqual([{ id: 'a' }]);
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('fetches nothing when shouldContinue is already false before the first page', async () => {
+    const items = await paginateAll({
+      path: '/api/v1/things',
+      pageSize: 100,
+      parsePage,
+      shouldContinue: () => false,
+    });
+
+    expect(items).toEqual([]);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
   it('throws PaginationError once the page safety bound is reached', async () => {
     let n = 0;
     vi.mocked(apiFetch).mockImplementation(() => {
