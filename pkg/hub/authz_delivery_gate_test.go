@@ -514,9 +514,99 @@ func TestDeliveryGate_Part2ValidInternalDeliveryAdmitted(t *testing.T) {
 // Credential.Kind names the delivery kind while the identity is not a
 // delivery credential is denied.
 func TestDeliveryGate_Part2KindBoundToCredentialType(t *testing.T) {
-	t.Skip("depends on the internal delivery credential kind, ptone/scion#2228 part 2: " +
-		"assert an interactive, UAT, agent JWT or federated identity with Credential.Kind set to the delivery kind " +
-		"is denied every deliver permission; the kind comes from the credential type, not the request field")
+	f := newGoldenFixture(t)
+	withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+
+	owner := NewAuthenticatedUser(f.projectOwnerID, "owner@golden.test", "Owner", "member", "web")
+	identities := map[string]Identity{
+		"interactive": owner,
+		"uat":         NewScopedUserIdentity(owner, f.projectBeta.ID, []string{"secret.deliver", "env_var.deliver", "skill_injection.deliver"}),
+		"agent_jwt":   progenyPairAgent(tid("dg-kind-agent"), f.projectBeta.ID, []string{f.projectOwnerID}, allRegisteredAgentScopes()),
+		"federated": NewFederatedAgentIdentity("https://peer.example", tid("dg-kind-fed"), f.projectBeta.ID,
+			"fed", f.projectOwnerID, []string{f.projectOwnerID}, allRegisteredAgentScopes()),
+	}
+	targets := map[string]Resource{
+		"secret.deliver":          {Type: "secret", ID: f.secretID},
+		"env_var.deliver":         {Type: "env_var", ID: f.envVarID},
+		"skill_injection.deliver": {Type: "skill_injection", ID: f.skillInjectionID},
+	}
+	for idName, identity := range identities {
+		for perm, res := range targets {
+			t.Run(idName+"/"+perm, func(t *testing.T) {
+				d := f.authz.Decide(context.Background(), deliveryGateRequest(identity, CredentialKindHubDelivery, res, perm))
+				assert.False(t, d.Allowed, "reason %q", d.Reason)
+				assert.Equal(t, "credential kind does not match identity", d.Reason)
+			})
+		}
+	}
+}
+
+// TestDeliveryGate_F2bBrokerLayers pins which layer answers a deliver
+// request at each broker-related boundary: a broker identity presenting its
+// own credential is refused by the unsupported-principal switch; a user
+// request carrying the broker credential kind without a broker
+// on-behalf-of context is refused by the entry block; and a user request
+// carrying the broker kind with a valid on-behalf-of context passes the
+// entry block and is refused by the Step 0 delivery gate.
+func TestDeliveryGate_F2bBrokerLayers(t *testing.T) {
+	f := newGoldenFixture(t)
+	secret := Resource{Type: "secret", ID: f.secretID}
+	broker := NewBrokerIdentity(tid("dg-f2b-broker"))
+	user := NewAuthenticatedUser(f.projectOwnerID, "owner@golden.test", "Owner", "member", "web")
+	brokerCredential := CredentialContext{Kind: CredentialKindBroker, ID: broker.ID(), Type: "broker"}
+
+	t.Run("broker_identity_own_credential", func(t *testing.T) {
+		req := deliveryGateRequest(broker, derivedCredentialKind(t, broker), secret, "secret.deliver")
+		d := f.authz.Decide(context.Background(), req)
+		assert.False(t, d.Allowed, "reason %q", d.Reason)
+		assert.Equal(t, "broker identities are not supported by authorization", d.Reason)
+	})
+
+	t.Run("user_broker_kind_without_on_behalf_of", func(t *testing.T) {
+		req := deliveryGateRequest(user, CredentialKindBroker, secret, "secret.deliver")
+		req.Credential = brokerCredential
+		d := f.authz.Decide(contextWithIdentity(context.Background(), user), req)
+		assert.False(t, d.Allowed, "reason %q", d.Reason)
+		assert.Equal(t, "credential kind does not match identity", d.Reason)
+	})
+
+	t.Run("user_broker_kind_with_on_behalf_of", func(t *testing.T) {
+		ctx := contextWithIdentity(context.Background(), user)
+		ctx = contextWithBrokerIdentity(ctx, broker)
+		ctx = contextWithBrokerOnBehalfOf(ctx, BrokerOnBehalfOf{Broker: broker, BrokerID: broker.ID()})
+		req := deliveryGateRequest(user, CredentialKindBroker, secret, "secret.deliver")
+		req.Credential = brokerCredential
+		assertDeliveryGateDenied(t, f.authz.Decide(ctx, req), "broker on-behalf-of")
+	})
+}
+
+// TestDeliveryGate_UnknownKindEntryReason pins that a supplied credential
+// kind outside the recognized set is refused by the entry block with its
+// own reason, ahead of the Step 0 delivery gate.
+func TestDeliveryGate_UnknownKindEntryReason(t *testing.T) {
+	f := newGoldenFixture(t)
+	admin := NewAuthenticatedUser(f.superAdminID, "superadmin@golden.test", "Super Admin", "admin", "api")
+	req := deliveryGateRequest(admin, CredentialKind("unrecognized"), Resource{Type: "secret", ID: f.secretID}, "secret.deliver")
+	d := f.authz.Decide(context.Background(), req)
+	assert.False(t, d.Allowed, "reason %q", d.Reason)
+	assert.Equal(t, "unrecognized credential kind", d.Reason)
+}
+
+// TestDeliveryGate_DevIdentityGateReason pins that a development identity
+// presenting its own derived credential kind reaches the Step 0 delivery
+// gate and is refused there with the gate's reason.
+func TestDeliveryGate_DevIdentityGateReason(t *testing.T) {
+	f := newGoldenFixture(t)
+	dev := NewDevUser(DevUserConfig{Username: "dev", DisplayName: "Dev User", Email: "dev@golden.test"})
+	req := deliveryGateRequest(dev, derivedCredentialKind(t, dev), Resource{Type: "secret", ID: f.secretID}, "secret.deliver")
+	assertDeliveryGateDenied(t, f.authz.Decide(context.Background(), req), "dev user")
+}
+
+// derivedCredentialKind returns the credential kind Decide derives for
+// identity, so a request can present the identity's own kind.
+func derivedCredentialKind(t *testing.T, identity Identity) CredentialKind {
+	t.Helper()
+	return credentialContextForIdentity(identity).Kind
 }
 
 // A progeny deliver pair admitted by the gate is bounded by the F design

@@ -26,9 +26,15 @@ package hub
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -372,51 +378,369 @@ func TestHubDelivery_ProgenyCandidatePassesStage5WithRoleBinding(t *testing.T) {
 }
 
 // TestHubDelivery_EntryBlockRows is table-driven over Decide's entry-block
-// treatment of a hub_delivery identity, keyed by subtest name so a later
-// phase can add further rows (for example the unrecognized-kind and
-// non-matching-identity denies) without restructuring this test.
+// treatment of the hub_delivery credential kind, keyed by subtest name so
+// further rows can be added without restructuring this test. Every row
+// except the override row is denied by the entry block itself, before the
+// unsupported-principal switch and the Step 0 gate, so each asserts the
+// entry block's exact reason with deliveryCredentialKinds left empty.
 //
 // override_ignores_supplied_credential pins the forced derived-credential
 // override (authz.go, immediately after the entry block): a caller-supplied
 // CredentialContext whose Kind matches the identity's own derived kind is
 // accepted by the entry-block compatibility check, like any other kind, but
 // for hub_delivery it is then replaced by the derived credential, so the
-// caller's ID, Type and Scopes travel no further and change nothing about
-// the outcome.
+// caller's ID, Type, Scopes and Ceiling travel no further and change nothing
+// about the outcome.
 func TestHubDelivery_EntryBlockRows(t *testing.T) {
-	t.Run("override_ignores_supplied_credential", func(t *testing.T) {
-		f := newGoldenFixture(t)
-		ctx := context.Background()
+	f := newGoldenFixture(t)
+	ctx := context.Background()
 
-		agentC := tid("hd-entry-override-agent")
-		newHubDeliveryTestAgent(t, f.store, agentC, f.projectAlpha.ID, f.projectOwnerID)
-		h, err := f.authz.newHubDeliveryIdentity(ctx, agentC)
-		require.NoError(t, err)
+	agentC := tid("hd-entry-agent")
+	newHubDeliveryTestAgent(t, f.store, agentC, f.projectAlpha.ID, f.projectOwnerID)
+	h, err := f.authz.newHubDeliveryIdentity(ctx, agentC)
+	require.NoError(t, err)
+
+	owner := NewAuthenticatedUser(f.projectOwnerID, "owner@golden.test", "Owner", "member", "web")
+	uat := NewScopedUserIdentity(owner, f.projectAlpha.ID, []string{"secret.deliver", "secret.read"})
+	agentJWT := progenyPairAgent(tid("hd-entry-jwt-agent"), f.projectAlpha.ID, []string{f.projectOwnerID}, allRegisteredAgentScopes())
+	fed := NewFederatedAgentIdentity("https://peer.example", tid("hd-entry-fed"), f.projectAlpha.ID,
+		"fed", f.projectOwnerID, []string{f.projectOwnerID}, allRegisteredAgentScopes())
+	dev := NewDevUser(DevUserConfig{Username: "dev", DisplayName: "Dev User", Email: "dev@golden.test"})
+	broker := NewBrokerIdentity(tid("hd-entry-broker"))
+
+	secret := Resource{Type: "secret", ID: f.secretID}
+	suppliedHubDelivery := func(id Identity) AuthzRequest {
+		return deliveryGateRequest(id, CredentialKindHubDelivery, secret, "secret.deliver")
+	}
+
+	const kindMismatch = "credential kind does not match identity"
+	rows := []struct {
+		name       string
+		request    AuthzRequest
+		wantReason string
+	}{
+		{
+			name:       "hub_delivery_identity_supplied_agent_jwt",
+			request:    deliveryGateRequest(h, CredentialKindAgentJWT, secret, "secret.deliver"),
+			wantReason: kindMismatch,
+		},
+		{name: "agent_jwt_identity_supplied_hub_delivery", request: suppliedHubDelivery(agentJWT), wantReason: kindMismatch},
+		{name: "interactive_identity_supplied_hub_delivery", request: suppliedHubDelivery(owner), wantReason: kindMismatch},
+		{name: "uat_identity_supplied_hub_delivery", request: suppliedHubDelivery(uat), wantReason: kindMismatch},
+		{name: "federated_identity_supplied_hub_delivery", request: suppliedHubDelivery(fed), wantReason: kindMismatch},
+		{name: "dev_user_supplied_hub_delivery", request: suppliedHubDelivery(dev), wantReason: kindMismatch},
+		{
+			// The entry block denies the broker principal before the
+			// unsupported-principal switch would.
+			name:       "broker_identity_supplied_hub_delivery",
+			request:    suppliedHubDelivery(broker),
+			wantReason: kindMismatch,
+		},
+		{
+			name: "hub_delivery_identity_principal_kind_user",
+			request: AuthzRequest{
+				Principal:  PrincipalContext{Kind: PrincipalKindUser, ID: h.ID(), Identity: h},
+				Credential: CredentialContext{Kind: CredentialKindHubDelivery},
+				Resource:   secret, Action: ActionDeliver, Permission: "secret.deliver", Explain: true,
+			},
+			wantReason: "principal kind does not match identity",
+		},
+		{
+			name: "hub_delivery_identity_principal_id_differs",
+			request: AuthzRequest{
+				Principal:  PrincipalContext{Kind: PrincipalKindAgent, ID: tid("hd-entry-other-agent"), Identity: h},
+				Credential: CredentialContext{Kind: CredentialKindHubDelivery},
+				Resource:   secret, Action: ActionDeliver, Permission: "secret.deliver", Explain: true,
+			},
+			wantReason: "principal id does not match identity",
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			d := f.authz.Decide(ctx, row.request)
+			assert.False(t, d.Allowed, "reason %q", d.Reason)
+			assert.Equal(t, row.wantReason, d.Reason)
+		})
+	}
+
+	t.Run("override_ignores_supplied_credential", func(t *testing.T) {
+		// The request reaches the relationship stage, so a supplied Scopes
+		// or Ceiling that travelled with the credential could change the
+		// stage-5 restriction outcome.
+		withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
 
 		baseReq := AuthzRequest{
 			Principal:  principalContextForIdentity(h),
-			Resource:   Resource{Type: "secret", ID: f.secretID},
+			Resource:   secret,
 			Action:     ActionDeliver,
 			Permission: "secret.deliver",
 			Explain:    true,
 		}
+		derivedOnly := baseReq
+		want := f.authz.Decide(ctx, derivedOnly)
+		wantProgeny := relationshipResult(t, want, RelationshipRuleProgeny)
+		require.True(t, wantProgeny.Accepted, "the derived-only request must reach and pass stage 5: %+v", wantProgeny)
 
-		withoutSupplied := baseReq
-		withoutSupplied.Credential = CredentialContext{}
-		wantDecision := f.authz.Decide(ctx, withoutSupplied)
-
-		withSupplied := baseReq
-		withSupplied.Credential = CredentialContext{
-			Kind:   CredentialKindHubDelivery,
-			ID:     "x",
-			Type:   "x",
-			Scopes: []string{"secret.read", "env_var.read"},
+		supplied := map[string]CredentialContext{
+			"narrowing": {
+				Kind: CredentialKindHubDelivery, ID: "x", Type: "x",
+				Scopes:  []string{"secret.read", "env_var.read"},
+				Ceiling: permissions.FrozenPermissionCeiling{PermissionIDs: []string{"secret.read"}},
+			},
+			"widening": {
+				Kind: CredentialKindHubDelivery, ID: "x", Type: "x",
+				Scopes:  []string{"secret.deliver", "env_var.deliver", "skill_injection.deliver", "agent.create"},
+				Ceiling: permissions.FrozenPermissionCeiling{PermissionIDs: []string{"secret.deliver", "agent.create"}},
+			},
 		}
-		gotDecision := f.authz.Decide(ctx, withSupplied)
+		for name, cred := range supplied {
+			t.Run(name, func(t *testing.T) {
+				req := baseReq
+				req.Credential = cred
+				got := f.authz.Decide(ctx, req)
 
-		assert.Empty(t, gotDecision.CredentialID, "no caller-supplied ID travels with the derived credential")
-		assert.Empty(t, gotDecision.CredentialType, "no caller-supplied Type travels with the derived credential")
-		assert.Equal(t, wantDecision.Allowed, gotDecision.Allowed, "a supplied Scopes/ID/Type must not change the outcome")
-		assert.Equal(t, wantDecision.Reason, gotDecision.Reason, "a supplied Scopes/ID/Type must not change the outcome")
+				assert.Equal(t, string(CredentialKindHubDelivery), got.CredentialKind)
+				assert.Empty(t, got.CredentialID, "no caller-supplied ID travels with the derived credential")
+				assert.Empty(t, got.CredentialType, "no caller-supplied Type travels with the derived credential")
+				assert.Equal(t, want.Allowed, got.Allowed, "a supplied credential must not change the outcome")
+				assert.Equal(t, want.Reason, got.Reason, "a supplied credential must not change the outcome")
+				assert.Equal(t, want.DenyCause, got.DenyCause)
+				gotProgeny := relationshipResult(t, got, RelationshipRuleProgeny)
+				assert.Equal(t, wantProgeny.Accepted, gotProgeny.Accepted)
+				assert.Equal(t, wantProgeny.RejectedBy, gotProgeny.RejectedBy)
+			})
+		}
 	})
+}
+
+// assertStep0bDenied asserts that Decide denied the request at Step 0b with
+// reason: the explain provenance holds only that reason, and neither role
+// binding nor relationship evaluation ran.
+func assertStep0bDenied(t *testing.T, d Decision, reason, perm string) {
+	t.Helper()
+	assert.False(t, d.Allowed, "reason %q", d.Reason)
+	assert.Equal(t, reason, d.Reason)
+	assert.Equal(t, string(CredentialKindHubDelivery), d.CredentialKind)
+	require.NotNil(t, d.Provenance)
+	assert.Equal(t, []string{reason}, d.Provenance.DenyReasons)
+	assert.Equal(t, perm, d.Provenance.Permission)
+	assert.Empty(t, d.Provenance.Grants, "Step 0b precedes role binding evaluation")
+	assert.Empty(t, d.Provenance.Relationships, "Step 0b precedes relationship evaluation")
+}
+
+// TestHubDelivery_Step0bDeniesNonDeliverRequests pins Step 0b's action and
+// permission conjunction through Decide: with hub_delivery in the delivery
+// set, so the Step 0 gate admits a deliver permission, a hub_delivery
+// request for a deliver permission under any action other than
+// ActionDeliver, or for any permission outside hubDeliveryPermissionIDs
+// under any action including ActionDeliver, is denied at Step 0b. The fixture is a progeny child, so a request that got
+// past Step 0b would reach relationship evaluation.
+func TestHubDelivery_Step0bDeniesNonDeliverRequests(t *testing.T) {
+	f := newGoldenFixture(t)
+	withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+
+	agentC := tid("hd-step0b-agent")
+	newHubDeliveryTestAgent(t, f.store, agentC, f.projectAlpha.ID, f.projectOwnerID)
+	h, err := f.authz.newHubDeliveryIdentity(context.Background(), agentC)
+	require.NoError(t, err)
+
+	secret := Resource{Type: "secret", ID: f.secretID}
+	cases := []struct {
+		name   string
+		perm   string
+		action Action
+		res    Resource
+	}{
+		{"secret.deliver/action_read", "secret.deliver", ActionRead, secret},
+		{"secret.deliver/action_use", "secret.deliver", ActionUse, secret},
+		{"env_var.deliver/action_read", "env_var.deliver", ActionRead, Resource{Type: "env_var", ID: f.envVarID}},
+		{"secret.read", "secret.read", ActionRead, secret},
+		{"secret.use", "secret.use", ActionUse, secret},
+		{"agent.create", "agent.create", ActionCreate, Resource{Type: "agent", ParentType: "project", ParentID: f.projectAlpha.ID}},
+		// A non-deliver permission requested under ActionDeliver isolates
+		// the permission arm from the action arm.
+		{"secret.read/action_deliver", "secret.read", ActionDeliver, secret},
+		{"agent.create/action_deliver", "agent.create", ActionDeliver, Resource{Type: "agent", ParentType: "project", ParentID: f.projectAlpha.ID}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := decidePerm(f.authz, h, tc.res, tc.action, tc.perm, true)
+			assertStep0bDenied(t, d, "delivery credential is limited to deliver permissions", tc.perm)
+		})
+	}
+}
+
+// TestHubDelivery_AgentSyntheticBindingsSkipped pins the Step 5b and 5b2
+// skips for a hub_delivery principal. 5b2 is reachable: a
+// skill_injection.deliver request naming a hub-wide skill resource passes
+// Step 0b and reaches it, and without the skip the agent skill-catalog
+// binding would appear among the kernel's granting bindings. 5b adds nothing
+// for this type either way, because Scopes() is always nil; the direct
+// buildAgentSyntheticBindings assertion pins that property, which is what
+// makes the 5b skip a statement of the rule rather than a change in
+// outcome.
+func TestHubDelivery_AgentSyntheticBindingsSkipped(t *testing.T) {
+	f := newGoldenFixture(t)
+	withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+
+	agentC := tid("hd-synthetic-skip-agent")
+	newHubDeliveryTestAgent(t, f.store, agentC, f.projectAlpha.ID, f.projectOwnerID)
+	h, err := f.authz.newHubDeliveryIdentity(context.Background(), agentC)
+	require.NoError(t, err)
+
+	cands, roles := f.authz.buildAgentSyntheticBindings(h)
+	assert.Empty(t, cands, "a hub_delivery principal has no JWT scopes to synthesize a binding from")
+	assert.Empty(t, roles)
+
+	d := decidePerm(f.authz, h, Resource{Type: "skill", ID: tid("hd-synthetic-skip-skill"), ScopeKind: store.SkillScopeGlobal},
+		ActionDeliver, "skill_injection.deliver", true)
+	assert.False(t, d.Allowed, "reason %q", d.Reason)
+	require.NotNil(t, d.Provenance)
+	for _, g := range append(append([]GrantDetail{}, d.Provenance.Grants...), d.Provenance.InactiveGrants...) {
+		assert.False(t, strings.HasPrefix(g.BindingID, "synthetic:"),
+			"no synthetic agent binding may be built for a hub_delivery principal: %+v", g)
+	}
+}
+
+// TestHubDelivery_PermissionSetMatchesDeliverRegistry pins that the fixed
+// hub_delivery permission set equals the registry-derived deliver set. A
+// new registry *.deliver permission fails this test, so it is admitted
+// under hub_delivery only through a deliberate edit of
+// hubDeliveryPermissionIDs.
+func TestHubDelivery_PermissionSetMatchesDeliverRegistry(t *testing.T) {
+	assert.Equal(t, deliverPermissionIDs, hubDeliveryPermissionIDs)
+}
+
+// hubPackageSyntax parses every Go file in this package directory, without
+// comments, keyed by file base name.
+func hubPackageSyntax(t *testing.T) map[string]*ast.File {
+	t.Helper()
+	names, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	require.NotEmpty(t, names)
+	fset := token.NewFileSet()
+	files := make(map[string]*ast.File, len(names))
+	for _, name := range names {
+		file, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		require.NoError(t, err, name)
+		files[name] = file
+	}
+	return files
+}
+
+// calledName returns the bare function or method name a call expression
+// invokes, and its package or receiver qualifier when it has one.
+func calledName(call *ast.CallExpr) (qualifier, name string) {
+	switch fn := call.Fun.(type) {
+	case *ast.Ident:
+		return "", fn.Name
+	case *ast.SelectorExpr:
+		if x, ok := fn.X.(*ast.Ident); ok {
+			return x.Name, fn.Sel.Name
+		}
+		return "", fn.Sel.Name
+	}
+	return "", ""
+}
+
+// referencesIdent reports whether node mentions an identifier named one of
+// names.
+func referencesIdent(node ast.Node, names ...string) bool {
+	found := false
+	ast.Inspect(node, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok {
+			for _, name := range names {
+				found = found || id.Name == name
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// TestHubDelivery_ConstructorCallSites pins, by AST scan, where a
+// hubDeliveryIdentity can be produced: newHubDeliveryIdentity is called only
+// from authz_delivery_credential.go and its test, and no other production
+// file builds the type as a composite literal or with new.
+func TestHubDelivery_ConstructorCallSites(t *testing.T) {
+	allowedCallers := map[string]bool{
+		"authz_delivery_credential.go":      true,
+		"authz_delivery_credential_test.go": true,
+	}
+	calls := 0
+	for name, file := range hubPackageSyntax(t) {
+		isTest := strings.HasSuffix(name, "_test.go")
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.CallExpr:
+				_, fn := calledName(n)
+				if fn == "newHubDeliveryIdentity" {
+					calls++
+					assert.True(t, allowedCallers[name], "newHubDeliveryIdentity is called from %s", name)
+				}
+				if fn == "new" && len(n.Args) == 1 && !isTest && name != "authz_delivery_credential.go" {
+					assert.False(t, referencesIdent(n.Args[0], "hubDeliveryIdentity"), "new(hubDeliveryIdentity) in %s", name)
+				}
+			case *ast.CompositeLit:
+				if !isTest && name != "authz_delivery_credential.go" && n.Type != nil {
+					assert.False(t, referencesIdent(n.Type, "hubDeliveryIdentity"), "hubDeliveryIdentity literal in %s", name)
+				}
+			}
+			return true
+		})
+	}
+	assert.Positive(t, calls, "the scan must find the test call sites, or it is not scanning this package")
+}
+
+// TestHubDelivery_NotInRequestContext pins, by AST scan of the production
+// files, that a hubDeliveryIdentity never enters a request context: no
+// function that mentions the type or its constructor passes a value to a
+// context setter (context.WithValue, or a contextWith* setter given any
+// argument besides the parent context), the file holding the constructor
+// passes no value to a context setter at all, and no *FromContext
+// extractor mentions the type. A setter that takes only the parent
+// context, such as contextWithDelegationCeilingCache, stores nothing the
+// caller supplies and is not counted. Together with
+// TestHubDelivery_ConstructorCallSites, the request-context identity
+// extractors can never return one.
+func TestHubDelivery_NotInRequestContext(t *testing.T) {
+	isContextSetter := func(call *ast.CallExpr) bool {
+		qualifier, fn := calledName(call)
+		if qualifier == "context" && fn == "WithValue" {
+			return true
+		}
+		return strings.HasPrefix(fn, "contextWith") && len(call.Args) > 1
+	}
+	typeNames := []string{"hubDeliveryIdentity", "newHubDeliveryIdentity"}
+	mentioning := 0
+	for name, file := range hubPackageSyntax(t) {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		if name == "authz_delivery_credential.go" {
+			ast.Inspect(file, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					assert.False(t, isContextSetter(call), "%s stores a value in a context", name)
+				}
+				return true
+			})
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || !referencesIdent(fn.Body, typeNames...) {
+				continue
+			}
+			mentioning++
+			assert.False(t, strings.HasSuffix(fn.Name.Name, "FromContext"),
+				"%s: request-context extractor %s mentions hubDeliveryIdentity", name, fn.Name.Name)
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					assert.False(t, isContextSetter(call),
+						"%s: %s mentions hubDeliveryIdentity and stores a value in a context", name, fn.Name.Name)
+				}
+				return true
+			})
+		}
+	}
+	assert.Positive(t, mentioning, "the scan must find the functions that handle the type")
 }
