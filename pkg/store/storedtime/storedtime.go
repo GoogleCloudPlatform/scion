@@ -12,7 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+// Package storedtime parses timestamps as SQLite stores them: Go's
+// time.Time.String() text (what the driver writes for a bound time.Time) and
+// the RFC 3339 and legacy layouts the raw webchat tables hold. It is the one
+// parser shared by the webchat store readers and the utc-timestamp-normalize
+// maintenance operation.
+//
+package storedtime
 
 import (
 	"fmt"
@@ -20,13 +26,12 @@ import (
 	"time"
 )
 
-// goTimeStringLayout is time.Time.String()'s layout without its trailing
+// goStringLayout is time.Time.String()'s layout without its trailing
 // zone-abbreviation token.
-const goTimeStringLayout = "2006-01-02 15:04:05.999999999 -0700"
+const goStringLayout = "2006-01-02 15:04:05.999999999 -0700"
 
-// parseGoTimeString parses text written by Go's time.Time.String(), which is
-// what the SQLite driver stores for a bound time.Time, and returns the
-// instant in UTC.
+// ParseGoString parses text written by Go's time.Time.String() and returns
+// the instant in UTC.
 //
 // It accepts any zone abbreviation, alphabetic ("JST", "UTC") or numeric
 // ("-03", "+0545", or the "+0300" a nameless time.FixedZone prints), and an
@@ -40,7 +45,7 @@ const goTimeStringLayout = "2006-01-02 15:04:05.999999999 -0700"
 //	2026-10-01 04:00:00 +0000 UTC
 //	2026-10-01 14:43:43.309458928 +0900 JST m=+0.088686566
 //	2026-10-01 09:45:00 +0545 +0545
-func parseGoTimeString(s string) (time.Time, error) {
+func ParseGoString(s string) (time.Time, error) {
 	text := strings.TrimSpace(s)
 	if i := strings.Index(text, " m="); i >= 0 {
 		text = text[:i]
@@ -54,9 +59,30 @@ func parseGoTimeString(s string) (time.Time, error) {
 	default:
 		return time.Time{}, fmt.Errorf("parse Go time string %q: want date, time, offset and zone abbreviation", s)
 	}
-	t, err := time.Parse(goTimeStringLayout, strings.Join(fields, " "))
+	t, err := time.Parse(goStringLayout, strings.Join(fields, " "))
 	if err != nil {
 		return time.Time{}, fmt.Errorf("parse Go time string %q: %w", s, err)
 	}
 	return t.UTC(), nil
+}
+
+// Parse parses a stored timestamp in any layout SQLite rows can hold and
+// returns it in UTC: RFC 3339 with any offset (the canonical webchat form),
+// the two legacy webchat layouts ("2006-01-02 15:04:05.999999999-07:00" and
+// the zoneless "2006-01-02 15:04:05.999999999", read as UTC), and
+// time.Time.String() text (the ent column form, see ParseGoString).
+func Parse(s string) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, fmt.Errorf("parse stored time: empty")
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return parsed.UTC(), nil
+	}
+	if parsed, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", s); err == nil {
+		return parsed.UTC(), nil
+	}
+	if parsed, err := time.Parse("2006-01-02 15:04:05.999999999", s); err == nil {
+		return parsed.UTC(), nil
+	}
+	return ParseGoString(s)
 }
