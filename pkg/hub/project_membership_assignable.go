@@ -112,8 +112,11 @@ func (svc *ProjectMembershipService) AssignableRoles(ctx context.Context, actor 
 			RoleKind:    projectRoleKind(rd.Name),
 			Grantable:   true,
 		}
-		// Every check, for this one role, exactly as the PUT runs it when
-		// the role is newly created for a principal.
+		// Every check, for this one role, using the same per-check logic
+		// and refusal constructors the PUT uses when the role is newly
+		// created for a principal. The order is memberRoleDecision's; the
+		// PUT's own stage order lives in SetMemberRoles and is pinned
+		// against this by TestAssignableRoles_ConsistentWithPut.
 		if d, _ := svc.memberRoleDecision(ctx, actor, projectID, authority, planChange{op: MembershipOpAdd, roleName: rd.Name}, rd, memberRoleCheckAll); d != nil {
 			item.Grantable = false
 			item.Reason = d.Reason

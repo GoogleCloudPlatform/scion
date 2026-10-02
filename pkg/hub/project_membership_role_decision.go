@@ -24,21 +24,30 @@ import (
 // The shared per-role membership decision (ptone/scion#2646 item 2).
 //
 // The members PUT (SetMemberRoles) and GET …/members/assignable-roles
-// (AssignableRoles) decide each role through memberRoleDecision, so the two
-// cannot drift: the same checks, in the same order, built from the same
-// helpers and refusal constructors. The order is
+// (AssignableRoles) share the per-check logic and the refusal constructors
+// through memberRoleDecision and its helpers. What is shared is how each
+// individual check decides and how its refusal is built, not the order in
+// which a request runs them. The fixed order inside memberRoleDecision,
 //
 //	credential → structural role_binding.* refusal → actor authority
 //	(no project role and no hub role_binding.*) → governance (built-in
-//	matrix or custom-role authority) → CanDelegate.
+//	matrix or custom-role authority) → CanDelegate,
 //
-// AssignableRoles runs every check for one role at a time. SetMemberRoles
-// runs the same function one check at a time across the whole plan (every
-// created role through the structural check, then every change through
-// governance, then every created role that needs it through CanDelegate),
-// because which role's refusal a multi-role PUT reports first is part of
-// its contract. SetMemberRoles' credential gate, principal eligibility and
-// actor-authority refusal are plan-level and run outside the per-role loops.
+// binds only AssignableRoles, the one caller that selects more than one
+// check per call (memberRoleCheckAll, one role at a time). It is also the
+// only caller that selects memberRoleCheckCredential and
+// memberRoleCheckActorAuthority.
+//
+// SetMemberRoles selects exactly one check per call and runs each across the
+// whole plan (every created role through the structural check, then every
+// change through governance, then every created role that needs it through
+// CanDelegate), because which role's refusal a multi-role PUT reports first
+// is part of its contract. Its stage order is therefore defined by the
+// sequence of loops in SetMemberRoles, not by this function: its credential
+// gate, principal eligibility and actor-authority refusal are plan-level
+// code outside the per-role loops. Nothing here stops that order drifting
+// from assignable-roles; TestAssignableRoles_ConsistentWithPut is what pins
+// the two against each other.
 //
 // The actor-side input (memberActorAuthority) is computed once per request.
 // Custom-role authority is gathered through customRoleAuthorities, which is

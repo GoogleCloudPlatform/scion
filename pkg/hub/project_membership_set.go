@@ -991,7 +991,7 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 				}
 				return fmt.Errorf("custom role authority (%s) under lock: %w", op, caErr.err)
 			}
-			return err
+			return err // defensive: customRoleAuthorities only returns *customRoleAuthorityError today
 		}
 		authTx := &memberActorAuthority{role: actorRole, isDirectOwner: isDirectOwner, hubOverride: hubOverride, customAuth: customAuthTx}
 
