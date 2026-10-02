@@ -1845,6 +1845,88 @@ func TestRequirePrivilegeDropOrFail_EnforcedRefusesRootUIDWithNonRootGID(t *test
 	}
 }
 
+// TestGitCloneWorkspace_FailedCloneKeepsWorkspaceDir covers a workspace
+// that is the root of a mount, as on Kubernetes where /workspace is a
+// volume mount: the directory itself cannot be removed or replaced. A
+// failed clone must clean up only the directory's contents, leaving the
+// same directory (same inode) and anything that was already in it, so a
+// retry clones into it again.
+func TestGitCloneWorkspace_FailedCloneKeepsWorkspaceDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	originDir := t.TempDir()
+	runGitForTest(t, originDir, "init", "-b", "main")
+	runGitForTest(t, originDir, "config", "user.email", "test@example.com")
+	runGitForTest(t, originDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(originDir, "README.md"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, originDir, "add", "README.md")
+	runGitForTest(t, originDir, "commit", "-m", "init")
+
+	// The workspace directory exists before the clone, with a marker
+	// directory in it, as the mount and the runtime leave it.
+	workspacePath := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(filepath.Join(workspacePath, ".scion-volumes"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the directory open, so a removed directory's inode stays in use
+	// and cannot be handed to a new directory at the same path.
+	handle, err := os.Open(workspacePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = handle.Close() })
+	before, err := handle.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("SCION_GIT_CLONE_URL", "file://"+originDir)
+	t.Setenv("SCION_GIT_BRANCH", "main")
+	t.Setenv("SCION_GIT_DEPTH", "")
+	t.Setenv("SCION_AGENT_NAME", "test-agent")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("SCION_WORKSPACE_PATH", workspacePath)
+	t.Setenv("SCION_AGENT_BRANCH", "")
+
+	badAgentHome := filepath.Join(t.TempDir(), "does-not-exist", "nested")
+	if err := gitCloneWorkspace(0, 0, badAgentHome, false); err == nil {
+		t.Fatal("expected gitCloneWorkspace to fail")
+	}
+
+	after, err := os.Stat(workspacePath)
+	if err != nil {
+		t.Fatalf("workspace directory removed by the cleanup: %v", err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("workspace directory was replaced by the cleanup, want the same directory")
+	}
+	entries, err := os.ReadDir(workspacePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != ".scion-volumes" {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Fatalf("want only the pre-existing .scion-volumes after cleanup, found: %v", names)
+	}
+
+	if err := gitCloneWorkspace(0, 0, t.TempDir(), false); err != nil {
+		t.Fatalf("retry after cleanup failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspacePath, "README.md")); err != nil {
+		t.Fatalf("expected README.md after the retry: %v", err)
+	}
+	retried, err := os.Stat(workspacePath)
+	if err != nil || !os.SameFile(before, retried) {
+		t.Fatalf("retry replaced the workspace directory (err %v)", err)
+	}
+}
+
 // TestPostPreStartOwnershipFixup_ForwardsRequirePrivilegeDrop proves that,
 // with euid stubbed to 0, the body of postPreStartOwnershipFixup forwards its own
 // requirePrivilegeDrop, unchanged, to chownTreeRootOwned for every directory
