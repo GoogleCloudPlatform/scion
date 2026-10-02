@@ -59,6 +59,15 @@ import {
   GCS_BINARY_NOTFOUND_MSG,
   GCS_TRAILING_PAREN_MSG,
   GCS_FENCED_BLOCK_MSG,
+  GCS_IMAGE_PNG_MSG,
+  GCS_IMAGE_JPEG_MSG,
+  GCS_IMAGE_GIF_MSG,
+  GCS_IMAGE_WEBP_MSG,
+  GCS_SVG_MSG,
+  GCS_HTML_AS_PNG_MSG,
+  GCS_OCTET_STREAM_MSG,
+  GCS_TOO_LARGE_INLINE_MSG,
+  GCS_413_MSG,
 } from './data.js';
 
 async function gotoGcsThread(page: Page): Promise<TrackedRequest[]> {
@@ -489,4 +498,106 @@ test('a raw "&quot;" entity directly after the object: the client links the obje
   const link = msg.locator('.gcs-link');
   await expect(link).toHaveCount(1);
   await expect(link).toHaveAttribute('data-gcs-uri', `gs://${GCS_BUCKET}/a`);
+});
+
+// ---------------------------------------------------------------------------
+// Image sniffing, SVG-as-source, octet-stream, the Content-Length
+// preview-size abort, 413 and an HTML-bodied object's download.
+// ---------------------------------------------------------------------------
+
+for (const [msg, ext] of [
+  [GCS_IMAGE_PNG_MSG, 'png'],
+  [GCS_IMAGE_JPEG_MSG, 'jpg'],
+  [GCS_IMAGE_GIF_MSG, 'gif'],
+  [GCS_IMAGE_WEBP_MSG, 'webp'],
+] as const) {
+  test(`a .${ext} object renders as a real, decoded <img>`, async ({ page }) => {
+    await gotoGcsThread(page);
+    await messageLocator(page, msg.id).locator('.gcs-link').click();
+
+    const dialog = previewDialog(page);
+    await expect(dialog).toBeVisible();
+    const img = dialog.locator('img.file-preview-image');
+    await expect(img).toBeVisible();
+    await expect(img).toHaveAttribute('src', /^blob:/);
+    await expect(dialog.locator('scion-code-editor')).toHaveCount(0);
+
+    // Proves the browser actually decoded real image bytes, not just that an
+    // <img> tag with some src exists — a broken image would report 0.
+    const naturalWidth = await img.evaluate((el) => (el as HTMLImageElement).naturalWidth);
+    expect(naturalWidth).toBeGreaterThan(0);
+  });
+}
+
+test('a .svg object shows as source text, never as <img>', async ({ page }) => {
+  await gotoGcsThread(page);
+  await messageLocator(page, GCS_SVG_MSG.id).locator('.gcs-link').click();
+
+  const dialog = previewDialog(page);
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('img.file-preview-image')).toHaveCount(0);
+  await expect(dialog.locator('scion-code-editor')).toBeVisible();
+  await expect(dialog).toContainText('<svg');
+});
+
+test('a .png object whose bytes are HTML is not rendered as an image, and Download forces a file download rather than a rendered page', async ({
+  page,
+}) => {
+  await gotoGcsThread(page);
+  await messageLocator(page, GCS_HTML_AS_PNG_MSG.id).locator('.gcs-link').click();
+
+  const dialog = previewDialog(page);
+  await expect(dialog).toBeVisible();
+  // Served as text, never as an image and never as rendered HTML — shown as
+  // source/code text, with the literal tags visible rather than executed.
+  await expect(dialog.locator('img.file-preview-image')).toHaveCount(0);
+  await expect(dialog.locator('scion-code-editor')).toBeVisible();
+  await expect(dialog).toContainText('<html>');
+
+  const downloadButton = dialog.locator('sl-button', { hasText: 'Download' });
+  const [download] = await Promise.all([page.waitForEvent('download'), downloadButton.click()]);
+  expect(download.suggestedFilename()).toBe('fake.png');
+  // The page itself must never have navigated to/rendered the HTML body —
+  // if it had, this heading would be present in the live DOM.
+  await expect(page.locator('h1', { hasText: 'not a png' })).toHaveCount(0);
+});
+
+test('an octet-stream object shows "can\'t be previewed" with Download, not the generic placeholder', async ({
+  page,
+}) => {
+  await gotoGcsThread(page);
+  await messageLocator(page, GCS_OCTET_STREAM_MSG.id).locator('.gcs-link').click();
+
+  const dialog = previewDialog(page);
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("This file can't be previewed.");
+  await expect(dialog.locator('img.file-preview-image')).toHaveCount(0);
+  await expect(dialog.locator('scion-code-editor')).toHaveCount(0);
+  await expect(dialog.locator('sl-button', { hasText: 'Download' })).toBeVisible();
+});
+
+test('text over the 512 KB Content-Length threshold shows the too-large-inline message with Download', async ({
+  page,
+}) => {
+  await gotoGcsThread(page);
+  await messageLocator(page, GCS_TOO_LARGE_INLINE_MSG.id).locator('.gcs-link').click();
+
+  const dialog = previewDialog(page);
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('too large to preview inline');
+  await expect(dialog.locator('scion-code-editor')).toHaveCount(0);
+  await expect(dialog.locator('sl-button', { hasText: 'Download' })).toBeVisible();
+});
+
+test('a 413 shows the size-limit message with the Cloud Console fallback and NO Download', async ({
+  page,
+}) => {
+  await gotoGcsThread(page);
+  await messageLocator(page, GCS_413_MSG.id).locator('.gcs-link').click();
+
+  const dialog = previewDialog(page);
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('too large to open here (12.0 MB, limit 10.0 MB)');
+  await expect(dialog.locator('a.console-fallback-link')).toBeVisible();
+  await expect(dialog.locator('sl-button', { hasText: 'Download' })).toHaveCount(0);
 });

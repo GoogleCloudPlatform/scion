@@ -17,6 +17,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { TEXT_PREVIEW_MAX_BYTES } from '../../../utils/chat-file-links.js';
 
 vi.mock('../code-editor.js', () => ({
   getLanguageFromPath: (path: string) => (path.endsWith('.go') ? 'go' : 'plaintext'),
@@ -1077,7 +1078,12 @@ describe('scion-chat-file-preview gcs target', () => {
     ).toBe(false);
   });
 
-  it('never classifies a gcs target as an image, even with an image-like extension', async () => {
+  it('does not classify an image-like extension as an image when the response Content-Type is not image/*', async () => {
+    // The response here carries no Content-Type header at all (gcsTextResponse
+    // only ever reports Content-Length) — the extension alone must never be
+    // enough. See the "renders as an image" cases below for the positive
+    // control: the identical extension DOES render as an image once the
+    // response Content-Type agrees.
     apiFetchMock.mockResolvedValue(gcsTextResponse('not actually png bytes'));
     const el = await mount();
     el.target = { ...GCS_JSON_TARGET, name: 'diagram.png', object: 'diagram.png' };
@@ -1088,6 +1094,7 @@ describe('scion-chat-file-preview gcs target', () => {
       expect.anything()
     );
     expect(dialog(el)?.querySelector('img.file-preview-image')).toBeNull();
+    expect(dialog(el)?.querySelector('scion-code-editor')).not.toBeNull();
   });
 
   for (const status of [403, 404]) {
@@ -1205,5 +1212,362 @@ describe('scion-chat-file-preview gcs target', () => {
 
     const editor = dialog(el)?.querySelector('scion-code-editor');
     expect((editor as unknown as { content: string })?.content).toBe('recovered');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// gcs classification: image sniffing, SVG-as-source, octet-stream, and the
+// Content-Length preview-size abort.
+// ---------------------------------------------------------------------------
+
+/**
+ * A gcs response with an explicit Content-Type and Content-Length, plus
+ * spies on text()/blob() so a test can assert the body was (or was never)
+ * read — the abort-before-read requirement can't be proven just by
+ * inspecting the final rendered state.
+ */
+function gcsTypedResponse(opts: {
+  contentType: string;
+  contentLength?: number;
+  body?: string;
+  textResult?: Promise<string>;
+  blobResult?: Promise<Blob>;
+}): {
+  res: unknown;
+  textSpy: ReturnType<typeof vi.fn>;
+  blobSpy: ReturnType<typeof vi.fn>;
+} {
+  const body = opts.body ?? '';
+  const textSpy = vi.fn(() => opts.textResult ?? Promise.resolve(body));
+  const blobSpy = vi.fn(
+    () => opts.blobResult ?? Promise.resolve(new Blob([body], { type: opts.contentType }))
+  );
+  return {
+    res: {
+      ok: true,
+      status: 200,
+      headers: {
+        get: (name: string) => {
+          const n = name.toLowerCase();
+          if (n === 'content-type') return opts.contentType;
+          if (n === 'content-length') {
+            return opts.contentLength === undefined ? null : String(opts.contentLength);
+          }
+          return null;
+        },
+      },
+      text: textSpy,
+      blob: blobSpy,
+      json: () => Promise.resolve({}),
+    },
+    textSpy,
+    blobSpy,
+  };
+}
+
+/** The AbortSignal passed to the most recent apiFetch call. */
+function lastFetchSignal(): AbortSignal {
+  const init = apiFetchMock.mock.calls.at(-1)?.[1] as RequestInit | undefined;
+  const signal = init?.signal;
+  if (!signal) throw new Error('apiFetch was called without an AbortSignal');
+  return signal;
+}
+
+describe('scion-chat-file-preview gcs image/octet-stream/too-large classification', () => {
+  beforeEach(() => {
+    apiFetchMock.mockReset();
+    document.body.innerHTML = '';
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  const imageCases: Array<{ ext: string; contentType: string }> = [
+    { ext: 'png', contentType: 'image/png' },
+    { ext: 'jpg', contentType: 'image/jpeg' },
+    { ext: 'jpeg', contentType: 'image/jpeg' },
+    { ext: 'gif', contentType: 'image/gif' },
+    { ext: 'webp', contentType: 'image/webp' },
+  ];
+  for (const { ext, contentType } of imageCases) {
+    it(`renders a .${ext} gcs object as an image when the response Content-Type is ${contentType}`, async () => {
+      const { res, textSpy } = gcsTypedResponse({ contentType, contentLength: 3 });
+      apiFetchMock.mockResolvedValue(res);
+      const el = await mount();
+      el.target = { ...GCS_JSON_TARGET, name: `pic.${ext}`, object: `pic.${ext}` };
+      await settle(el);
+
+      const img = dialog(el)?.querySelector('img.file-preview-image');
+      expect(img?.getAttribute('src')).toMatch(/^blob:/);
+      expect(dialog(el)?.querySelector('scion-code-editor')).toBeNull();
+      expect(textSpy).not.toHaveBeenCalled();
+    });
+  }
+
+  it('never renders a .svg gcs object as an image or as text when the response Content-Type is image-like', async () => {
+    // The hub's sniffer never actually reports an image/* type for SVG bytes
+    // (http.DetectContentType has no SVG signature), but the client-side
+    // extension gate is independent of that: GCS_IMAGE_EXTENSIONS excludes
+    // .svg outright, so even a hypothetical image/svg+xml response never
+    // reaches the <img> branch, and an image/* body is never decoded as text.
+    const { res, textSpy, blobSpy } = gcsTypedResponse({
+      contentType: 'image/svg+xml',
+      contentLength: 40,
+    });
+    apiFetchMock.mockResolvedValue(res);
+    const el = await mount();
+    el.target = { ...GCS_JSON_TARGET, name: 'pic.svg', object: 'pic.svg' };
+    await settle(el);
+
+    expect(dialog(el)?.querySelector('img.file-preview-image')).toBeNull();
+    expect(dialog(el)?.querySelector('scion-code-editor')).toBeNull();
+    expect(dialog(el)?.textContent).toContain("This file can't be previewed.");
+    expect(textSpy).not.toHaveBeenCalled();
+    expect(blobSpy).not.toHaveBeenCalled();
+  });
+
+  it('shows "This file can\'t be previewed." without reading the body for a .png name whose response Content-Type is image/bmp', async () => {
+    const { res, textSpy, blobSpy } = gcsTypedResponse({
+      contentType: 'image/bmp',
+      contentLength: 24,
+    });
+    apiFetchMock.mockResolvedValue(res);
+    const el = await mount();
+    el.target = { ...GCS_JSON_TARGET, name: 'pic.png', object: 'pic.png' };
+    await settle(el);
+
+    expect(dialog(el)?.textContent).toContain("This file can't be previewed.");
+    expect(dialog(el)?.querySelector('img.file-preview-image')).toBeNull();
+    expect(dialog(el)?.querySelector('scion-code-editor')).toBeNull();
+    expect(textSpy).not.toHaveBeenCalled();
+    expect(blobSpy).not.toHaveBeenCalled();
+    expect(lastFetchSignal().aborted).toBe(true);
+  });
+
+  it('shows "This file can\'t be previewed." with Download, aborting the request without reading the body, for an image/* response on a non-image name', async () => {
+    const { res, textSpy, blobSpy } = gcsTypedResponse({
+      contentType: 'image/png',
+      contentLength: 24,
+    });
+    apiFetchMock.mockResolvedValue(res);
+    const el = await mount();
+    el.target = { ...GCS_JSON_TARGET, name: 'report.bin', object: 'report.bin' };
+    await settle(el);
+
+    expect(dialog(el)?.textContent).toContain("This file can't be previewed.");
+    expect(dialog(el)?.querySelector('img.file-preview-image')).toBeNull();
+    expect(dialog(el)?.querySelector('scion-code-editor')).toBeNull();
+    expect(
+      Array.from(dialog(el)?.querySelectorAll('sl-button') ?? []).some((b) =>
+        b.textContent?.includes('Download')
+      )
+    ).toBe(true);
+    expect(textSpy).not.toHaveBeenCalled();
+    expect(blobSpy).not.toHaveBeenCalled();
+    expect(lastFetchSignal().aborted).toBe(true);
+  });
+
+  it('renders a .svg gcs object as source text for its real (text/plain) Content-Type', async () => {
+    const { res } = gcsTypedResponse({
+      contentType: 'text/plain; charset=utf-8',
+      contentLength: 5,
+      body: '<svg/>',
+    });
+    apiFetchMock.mockResolvedValue(res);
+    const el = await mount();
+    el.target = { ...GCS_JSON_TARGET, name: 'pic.svg', object: 'pic.svg' };
+    await settle(el);
+
+    const editor = dialog(el)?.querySelector('scion-code-editor');
+    expect((editor as unknown as { content: string })?.content).toBe('<svg/>');
+  });
+
+  it('shows "This file can\'t be previewed." with Download, aborting the request without reading the body, for application/octet-stream', async () => {
+    const { res, textSpy, blobSpy } = gcsTypedResponse({
+      contentType: 'application/octet-stream',
+      contentLength: 4,
+    });
+    apiFetchMock.mockResolvedValue(res);
+    const el = await mount();
+    el.target = { ...GCS_JSON_TARGET, name: 'report.pdf', object: 'report.pdf' };
+    await settle(el);
+
+    expect(dialog(el)?.textContent).toContain("This file can't be previewed.");
+    expect(
+      Array.from(dialog(el)?.querySelectorAll('sl-button') ?? []).some((b) =>
+        b.textContent?.includes('Download')
+      )
+    ).toBe(true);
+    expect(textSpy).not.toHaveBeenCalled();
+    expect(blobSpy).not.toHaveBeenCalled();
+    expect(lastFetchSignal().aborted).toBe(true);
+  });
+
+  it('pins the 512 KB threshold: exactly at the limit still previews inline as text, without aborting the request', async () => {
+    expect(TEXT_PREVIEW_MAX_BYTES).toBe(524288);
+    const body = 'x'.repeat(10);
+    const { res, textSpy } = gcsTypedResponse({
+      contentType: 'text/plain; charset=utf-8',
+      contentLength: TEXT_PREVIEW_MAX_BYTES,
+      body,
+    });
+    apiFetchMock.mockResolvedValue(res);
+    const el = await mount();
+    el.target = { ...GCS_JSON_TARGET, name: 'big.txt', object: 'big.txt' };
+    await settle(el);
+
+    const editor = dialog(el)?.querySelector('scion-code-editor');
+    expect((editor as unknown as { content: string })?.content).toBe(body);
+    expect(textSpy).toHaveBeenCalled();
+    expect(lastFetchSignal().aborted).toBe(false);
+  });
+
+  it('pins the 512 KB threshold: one byte over aborts before reading the body and shows the too-large-inline message with Download', async () => {
+    const { res, textSpy } = gcsTypedResponse({
+      contentType: 'text/plain; charset=utf-8',
+      contentLength: TEXT_PREVIEW_MAX_BYTES + 1,
+      body: 'x'.repeat(10),
+    });
+    apiFetchMock.mockResolvedValue(res);
+    const el = await mount();
+    el.target = { ...GCS_JSON_TARGET, name: 'big.txt', object: 'big.txt' };
+    await settle(el);
+
+    expect(dialog(el)?.textContent).toContain('too large to preview inline');
+    expect(dialog(el)?.querySelector('scion-code-editor')).toBeNull();
+    expect(
+      Array.from(dialog(el)?.querySelectorAll('sl-button') ?? []).some((b) =>
+        b.textContent?.includes('Download')
+      )
+    ).toBe(true);
+    expect(textSpy).not.toHaveBeenCalled();
+    expect(lastFetchSignal().aborted).toBe(true);
+  });
+
+  function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
+
+  it('a slow gcs image blob read for a superseded load does not clobber the newer target', async () => {
+    const firstBlob = deferred<Blob>();
+    const first = gcsTypedResponse({
+      contentType: 'image/png',
+      contentLength: 3,
+      blobResult: firstBlob.promise,
+    });
+    const second = gcsTypedResponse({
+      contentType: 'text/plain; charset=utf-8',
+      contentLength: 14,
+      body: 'second content',
+    });
+    apiFetchMock.mockResolvedValueOnce(first.res);
+    apiFetchMock.mockResolvedValueOnce(second.res);
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL');
+
+    try {
+      const el = await mount();
+      el.target = { ...GCS_JSON_TARGET, name: 'pic.png', object: 'pic.png' };
+      await settle(el);
+      expect(first.blobSpy).toHaveBeenCalled();
+      el.target = GCS_JSON_TARGET;
+      await settle(el);
+      const editor = dialog(el)?.querySelector('scion-code-editor');
+      expect((editor as unknown as { content: string })?.content).toBe('second content');
+
+      firstBlob.resolve(new Blob(['x'], { type: 'image/png' }));
+      await settle(el);
+
+      const editorAfter = dialog(el)?.querySelector('scion-code-editor');
+      expect((editorAfter as unknown as { content: string })?.content).toBe('second content');
+      expect(dialog(el)?.querySelector('img.file-preview-image')).toBeNull();
+      expect(createObjectURL).not.toHaveBeenCalled();
+    } finally {
+      createObjectURL.mockRestore();
+    }
+  });
+
+  it('a slow gcs text body read for a superseded load does not clobber the newer target', async () => {
+    const firstText = deferred<string>();
+    const first = gcsTypedResponse({
+      contentType: 'text/plain; charset=utf-8',
+      contentLength: 13,
+      textResult: firstText.promise,
+    });
+    const second = gcsTypedResponse({
+      contentType: 'text/plain; charset=utf-8',
+      contentLength: 14,
+      body: 'second content',
+    });
+    apiFetchMock.mockResolvedValueOnce(first.res);
+    apiFetchMock.mockResolvedValueOnce(second.res);
+
+    const el = await mount();
+    el.target = { ...GCS_JSON_TARGET, name: 'first.txt', object: 'first.txt' };
+    await settle(el);
+    expect(first.textSpy).toHaveBeenCalled();
+    el.target = GCS_JSON_TARGET;
+    await settle(el);
+    const editor = dialog(el)?.querySelector('scion-code-editor');
+    expect((editor as unknown as { content: string })?.content).toBe('second content');
+
+    firstText.resolve('first content — should never be shown');
+    await settle(el);
+
+    const editorAfter = dialog(el)?.querySelector('scion-code-editor');
+    expect((editorAfter as unknown as { content: string })?.content).toBe('second content');
+  });
+
+  it('shows the too-large-inline message with Download for a body over the limit when the response has no Content-Length', async () => {
+    const { res, textSpy } = gcsTypedResponse({
+      contentType: 'text/plain; charset=utf-8',
+      body: 'x'.repeat(TEXT_PREVIEW_MAX_BYTES + 1),
+    });
+    apiFetchMock.mockResolvedValue(res);
+    const el = await mount();
+    el.target = { ...GCS_JSON_TARGET, name: 'big.txt', object: 'big.txt' };
+    await settle(el);
+
+    expect(textSpy).toHaveBeenCalled();
+    expect(dialog(el)?.textContent).toContain('too large to preview inline');
+    expect(dialog(el)?.querySelector('scion-code-editor')).toBeNull();
+    expect(
+      Array.from(dialog(el)?.querySelectorAll('sl-button') ?? []).some((b) =>
+        b.textContent?.includes('Download')
+      )
+    ).toBe(true);
+  });
+
+  it('previews a body of exactly the limit inline when the response has no Content-Length', async () => {
+    const body = 'x'.repeat(TEXT_PREVIEW_MAX_BYTES);
+    const { res } = gcsTypedResponse({ contentType: 'text/plain; charset=utf-8', body });
+    apiFetchMock.mockResolvedValue(res);
+    const el = await mount();
+    el.target = { ...GCS_JSON_TARGET, name: 'big.txt', object: 'big.txt' };
+    await settle(el);
+
+    const editor = dialog(el)?.querySelector('scion-code-editor');
+    expect((editor as unknown as { content: string })?.content).toBe(body);
+  });
+
+  it('does not show a Source toggle for an over-threshold .md object (no content was ever loaded)', async () => {
+    const { res, textSpy } = gcsTypedResponse({
+      contentType: 'text/plain; charset=utf-8',
+      contentLength: TEXT_PREVIEW_MAX_BYTES + 1,
+    });
+    apiFetchMock.mockResolvedValue(res);
+    const el = await mount();
+    el.target = { ...GCS_MD_TARGET, name: 'huge.md', object: 'huge.md' };
+    await settle(el);
+
+    const sourceButton = Array.from(dialog(el)?.querySelectorAll('sl-button') ?? []).find((b) =>
+      b.textContent?.includes('Source')
+    );
+    expect(sourceButton).toBeUndefined();
+    expect(textSpy).not.toHaveBeenCalled();
   });
 });
