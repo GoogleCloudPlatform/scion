@@ -17,6 +17,8 @@ package runtimebroker
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http/httptest"
 	"os"
@@ -34,6 +36,15 @@ import (
 )
 
 func newTestServerForStartContext(t *testing.T, cfg ServerConfig) *Server {
+	t.Helper()
+	return newTestServerForStartContextRuntime(t, cfg, "mock")
+}
+
+// newTestServerForStartContextRuntime is newTestServerForStartContext with a
+// caller-chosen runtime name, so tests can exercise runtime-conditional
+// behavior in buildStartContext (which reads s.runtime.Name()) without a real
+// Kubernetes or Docker runtime.
+func newTestServerForStartContextRuntime(t *testing.T, cfg ServerConfig, runtimeName string) *Server {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 
@@ -53,15 +64,21 @@ func newTestServerForStartContext(t *testing.T, cfg ServerConfig) *Server {
 	if err := os.Mkdir(dotScion, 0755); err != nil {
 		t.Fatal(err)
 	}
-	settingsYAML := `schema_version: "1"
+	// The active profile's runtime type matches runtimeName, and
+	// cfg.ForceRuntime below is set to the same value: resolveManagerForOpts
+	// (handlers.go) then short-circuits on its ForceRuntime-equals-default
+	// check for the no-explicit-profile case, exactly as it does outside
+	// tests, rather than falling through to settings resolution and finding
+	// a mismatched type.
+	settingsYAML := fmt.Sprintf(`schema_version: "1"
 active_profile: local
 profiles:
     local:
-        runtime: mock
+        runtime: %s
 runtimes:
-    mock:
-        type: mock
-`
+    %s:
+        type: %s
+`, runtimeName, runtimeName, runtimeName)
 	if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -78,10 +95,112 @@ runtimes:
 		t.Fatal(err)
 	}
 
-	cfg.ForceRuntime = "mock"
+	cfg.ForceRuntime = runtimeName
 	mgr := &envCapturingManager{}
-	rt := &runtime.MockRuntime{}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return runtimeName }}
 	return New(cfg, mgr, rt)
+}
+
+// newTestServerForStartContextMultiProfile is newTestServerForStartContextRuntime
+// with a second, differently-typed profile registered alongside the active
+// one, so tests can exercise a dispatch whose Config.Profile (or saved
+// profile) names a runtime other than the broker's default — the scenario
+// resolveManagerForOpts exists to get right (ptone/scion#2328). The
+// broker's default runtime is defaultRuntimeName (used when no profile is
+// named, matching newTestServerForStartContextRuntime's setup); the second
+// profile is named otherProfile and resolves to otherRuntimeName.
+func newTestServerForStartContextMultiProfile(t *testing.T, cfg ServerConfig, defaultRuntimeName, otherProfile, otherRuntimeName string) (*Server, string) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpDir := t.TempDir()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(origWd)
+	})
+
+	dotScion := filepath.Join(tmpDir, ".scion")
+	if err := os.Mkdir(dotScion, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settingsYAML := fmt.Sprintf(`schema_version: "1"
+active_profile: local
+profiles:
+    local:
+        runtime: %s
+    %s:
+        runtime: %s
+runtimes:
+    %s:
+        type: %s
+    %s:
+        type: %s
+`, defaultRuntimeName, otherProfile, otherRuntimeName, defaultRuntimeName, defaultRuntimeName, otherRuntimeName, otherRuntimeName)
+	if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	templatesDir := filepath.Join(dotScion, "templates")
+	if err := os.MkdirAll(templatesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(templatesDir, "default"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(templatesDir, "claude"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Deliberately no cfg.ForceRuntime here (unlike
+	// newTestServerForStartContextRuntime): ForceRuntime short-circuits
+	// resolveManagerForOpts before it ever consults settings.yaml, which
+	// would defeat the entire point of this helper — exercising a dispatch
+	// whose profile names a different runtime than the broker's default.
+	mgr := &envCapturingManager{}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return defaultRuntimeName }}
+	srv := New(cfg, mgr, rt)
+	// Once settings resolve the dispatch's profile to otherRuntimeName
+	// (differing from defaultRuntimeName), resolveManagerForOpts falls
+	// through to this resolver to construct it. A real "kubernetes" runtime
+	// fails to construct in a test sandbox with no cluster available — unlike
+	// "docker", whose construction defers failure to actual use — so this
+	// returns a mock instead, the same pattern
+	// newTestServerForSavedProfileRemap (hub_default_passthrough_downgrade_test.go)
+	// uses for the identical problem. This helper only ever registers one
+	// non-default profile (otherProfile -> otherRuntimeName), so the
+	// resolver can report otherRuntimeName unconditionally rather than
+	// inspecting profileFlag.
+	srv.runtimeResolver = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+		return &runtime.MockRuntime{NameFunc: func() string { return otherRuntimeName }}
+	}
+	return srv, dotScion
+}
+
+// writeSavedAgentProfile writes an agent-info.json recording profile as the
+// agent's saved profile, the on-disk source agent.GetSavedProfile reads from
+// on start/restart dispatch (see pkg/agent/provision.go). dotScionDir is the
+// project's .scion directory (as returned alongside projectPath from the
+// test's own project setup), matching what config.GetAgentHomePath expects.
+func writeSavedAgentProfile(t *testing.T, dotScionDir, agentName, profile string) {
+	t.Helper()
+	agentHome := config.GetAgentHomePath(dotScionDir, agentName)
+	if err := os.MkdirAll(agentHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	info := api.AgentInfo{Name: agentName, Profile: profile}
+	data, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestBuildStartContext_BasicFields(t *testing.T) {
@@ -2093,6 +2212,269 @@ func TestBuildStartContext_GCPMetadataExplicitBlock(t *testing.T) {
 	}
 }
 
+// TestBuildStartContext_GCPMetadataBlockRejectedOnKubernetes covers the phase
+// 1 rule from ptone/scion#2328: "block" is not offered on the Kubernetes
+// runtime. The broker is the enforcement point here because it is the one
+// place that knows the concrete runtime with certainty at dispatch time. Both
+// spellings the codebase accepts for the Kubernetes runtime name ("kubernetes"
+// and "k8s") must be covered.
+func TestBuildStartContext_GCPMetadataBlockRejectedOnKubernetes(t *testing.T) {
+	for _, runtimeName := range []string{"kubernetes", "k8s"} {
+		t.Run(runtimeName, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContextRuntime(t, cfg, runtimeName)
+
+			r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name: "agent-k8s-block",
+				Config: &CreateAgentConfig{
+					GCPIdentity: &GCPIdentityConfig{
+						MetadataMode: "block",
+					},
+				},
+				HTTPRequest: r,
+				Operation:   opCreate,
+			})
+			if err == nil {
+				t.Fatalf("expected an error for block mode on runtime %q, got nil (env: %v)", runtimeName, sc.Opts.Env)
+			}
+			// Nothing must proceed: no partial pod/env context is returned
+			// alongside the rejection.
+			if sc != nil {
+				t.Errorf("expected nil startContext alongside the error, got %+v", sc)
+			}
+			if !strings.Contains(err.Error(), "Kubernetes") {
+				t.Errorf("expected the error to name the Kubernetes runtime, got %q", err.Error())
+			}
+			if !strings.Contains(err.Error(), "assign") || !strings.Contains(err.Error(), "passthrough") {
+				t.Errorf("expected the error to name assign/passthrough as alternatives, got %q", err.Error())
+			}
+			if !strings.Contains(err.Error(), "project or hub default") {
+				t.Errorf("expected the error to mention changing the project or hub default, got %q", err.Error())
+			}
+		})
+	}
+}
+
+// TestBuildStartContext_GCPMetadataNoIdentityInputOnKubernetesDefaultsToPassthrough
+// covers the no-input fallback case: when the caller supplies no GCP identity
+// information at all (no Config.GCPIdentity, no resolvedEnv
+// SCION_METADATA_MODE), buildStartContext's own secure default is
+// runtime-aware. On Kubernetes it resolves to "passthrough", not "block" —
+// Kubernetes does not support "block" (ptone/scion#2328 phase 1), and the
+// Hub's own resolution ladder deliberately leaves the mode unset for exactly
+// this "nothing configured" case (as opposed to an explicit project or hub
+// default of "block", which the Hub still threads through explicitly and
+// which is rejected — see
+// TestBuildStartContext_GCPMetadataBlockRejectedOnKubernetesFromResolvedEnv)
+// so this runtime-appropriate default can apply.
+func TestBuildStartContext_GCPMetadataNoIdentityInputOnKubernetesDefaultsToPassthrough(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-k8s-no-identity-input",
+		HTTPRequest: r,
+		Operation:   opCreate,
+	})
+	if err != nil {
+		t.Fatalf("expected no GCP identity input on Kubernetes to be accepted, got %v", err)
+	}
+	if sc.Opts.Env["SCION_METADATA_MODE"] != "passthrough" {
+		t.Errorf("expected the Kubernetes-specific default 'passthrough', got %q", sc.Opts.Env["SCION_METADATA_MODE"])
+	}
+	if sc.Opts.Env["GCE_METADATA_HOST"] != "" {
+		t.Errorf("expected no GCE_METADATA_HOST for the passthrough default, got %q", sc.Opts.Env["GCE_METADATA_HOST"])
+	}
+}
+
+// TestBuildStartContext_GCPMetadataNoIdentityInputOnDockerDefaultsToBlock is
+// the docker-side half of the same guard: the runtime-aware default must not
+// change anything for every runtime except Kubernetes. Docker keeps exactly
+// its pre-existing "block" default when the caller supplies no GCP identity
+// information at all.
+func TestBuildStartContext_GCPMetadataNoIdentityInputOnDockerDefaultsToBlock(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContextRuntime(t, cfg, "docker")
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-docker-no-identity-input",
+		HTTPRequest: r,
+		Operation:   opCreate,
+	})
+	if err != nil {
+		t.Fatalf("expected no GCP identity input on docker to be accepted, got %v", err)
+	}
+	if sc.Opts.Env["SCION_METADATA_MODE"] != "block" {
+		t.Errorf("expected the unchanged default 'block', got %q", sc.Opts.Env["SCION_METADATA_MODE"])
+	}
+	if sc.Opts.Env["GCE_METADATA_HOST"] != "localhost:18380" {
+		t.Errorf("expected GCE_METADATA_HOST='localhost:18380' for the block default, got %q", sc.Opts.Env["GCE_METADATA_HOST"])
+	}
+}
+
+// TestBuildStartContext_GCPMetadataBlockRejectedOnKubernetesFromResolvedEnv
+// covers block arriving via a project or hub default, which reaches the
+// broker as hub-supplied resolvedEnv (the start path) rather than an explicit
+// Config.GCPIdentity. Stored block defaults are not migrated; they simply
+// fail a Kubernetes dispatch with the same actionable error.
+func TestBuildStartContext_GCPMetadataBlockRejectedOnKubernetesFromResolvedEnv(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-k8s-default-block",
+		ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "block"},
+		HTTPRequest: r,
+		Operation:   opCreate,
+	})
+	if err == nil {
+		t.Fatalf("expected an error for a resolved-env block default on Kubernetes, got nil (env: %v)", sc.Opts.Env)
+	}
+	if !strings.Contains(err.Error(), "Kubernetes") {
+		t.Errorf("expected the error to name the Kubernetes runtime, got %q", err.Error())
+	}
+}
+
+// TestBuildStartContext_GCPMetadataBlockRejectedAfterProjectDirResolution
+// pins the ordering of the Kubernetes/"block" rejection relative to
+// buildStartContext's own project-directory resolution (WriteProjectMarker,
+// MkdirAll): the rejection runs after that resolution, not before it.
+// Settings and the saved profile the rejection's runtime resolution depends
+// on must be read from the final, post-update location; a fresh hub-managed
+// project (the
+// ProjectSlug+ProjectID-with-no-existing-ProjectPath shape used below) or a
+// stale-marker rewrite would otherwise resolve against the pre-update
+// location. The rejection still runs before any pod or env is built, which
+// is covered by every other GCPMetadataBlockRejectedOnKubernetes* test
+// rejecting before Opts is ever populated; this test instead pins that the
+// project directory and marker now do exist by the time the rejection
+// happens.
+func TestBuildStartContext_GCPMetadataBlockRejectedAfterProjectDirResolution(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
+
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		t.Fatalf("GetGlobalDir: %v", err)
+	}
+	const slug = "hub-managed-project-block-test"
+	projectDir := filepath.Join(globalDir, "projects", slug)
+	t.Cleanup(func() { _ = os.RemoveAll(projectDir) })
+	if _, statErr := os.Stat(projectDir); !os.IsNotExist(statErr) {
+		t.Fatalf("precondition failed: %s already exists", projectDir)
+	}
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-k8s-block-no-side-effects",
+		ProjectSlug: slug,
+		ProjectID:   "project-id-for-side-effect-check",
+		Config: &CreateAgentConfig{
+			GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"},
+		},
+		HTTPRequest: r,
+		Operation:   opCreate,
+	})
+	if err == nil {
+		t.Fatalf("expected the dispatch to be rejected, got nil (env: %v)", sc.Opts.Env)
+	}
+	if _, statErr := os.Stat(projectDir); os.IsNotExist(statErr) {
+		t.Errorf("expected the project directory/marker to already exist by the time the rejection runs, but %s does not exist", projectDir)
+	}
+}
+
+// TestBuildStartContext_GCPMetadataAssignAndPassthroughUnchangedOnKubernetes
+// guards the inversion against over-reach: only "block" is rejected on
+// Kubernetes; "assign" and "passthrough" must behave exactly as on any other
+// runtime.
+func TestBuildStartContext_GCPMetadataAssignAndPassthroughUnchangedOnKubernetes(t *testing.T) {
+	tests := []struct {
+		mode     string
+		saEmail  string
+		wantHost string
+	}{
+		{mode: "assign", saEmail: "sa@proj.iam.gserviceaccount.com", wantHost: "localhost:18380"},
+		{mode: "passthrough", wantHost: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
+
+			r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+			gcpIdentity := &GCPIdentityConfig{MetadataMode: tt.mode}
+			if tt.saEmail != "" {
+				gcpIdentity.SAEmail = tt.saEmail
+			}
+
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name: "agent-k8s-" + tt.mode,
+				Config: &CreateAgentConfig{
+					GCPIdentity: gcpIdentity,
+				},
+				HTTPRequest: r,
+				Operation:   opCreate,
+			})
+			if err != nil {
+				t.Fatalf("expected mode %q to be accepted on Kubernetes, got %v", tt.mode, err)
+			}
+			if sc.Opts.Env["SCION_METADATA_MODE"] != tt.mode {
+				t.Errorf("expected SCION_METADATA_MODE=%q, got %q", tt.mode, sc.Opts.Env["SCION_METADATA_MODE"])
+			}
+			if sc.Opts.Env["GCE_METADATA_HOST"] != tt.wantHost {
+				t.Errorf("expected GCE_METADATA_HOST=%q, got %q", tt.wantHost, sc.Opts.Env["GCE_METADATA_HOST"])
+			}
+		})
+	}
+}
+
+// TestBuildStartContext_GCPMetadataBlockUnchangedOnDocker guards the
+// inversion from the other direction: "block" must remain valid on Docker
+// (and, by extension, any non-Kubernetes runtime).
+func TestBuildStartContext_GCPMetadataBlockUnchangedOnDocker(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContextRuntime(t, cfg, "docker")
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name: "agent-docker-block",
+		Config: &CreateAgentConfig{
+			GCPIdentity: &GCPIdentityConfig{
+				MetadataMode: "block",
+			},
+		},
+		HTTPRequest: r,
+		Operation:   opCreate,
+	})
+	if err != nil {
+		t.Fatalf("expected block mode to be accepted on docker, got %v", err)
+	}
+	if sc.Opts.Env["SCION_METADATA_MODE"] != "block" {
+		t.Errorf("expected SCION_METADATA_MODE='block', got %q", sc.Opts.Env["SCION_METADATA_MODE"])
+	}
+	if sc.Opts.Env["GCE_METADATA_HOST"] != "localhost:18380" {
+		t.Errorf("expected GCE_METADATA_HOST='localhost:18380', got %q", sc.Opts.Env["GCE_METADATA_HOST"])
+	}
+}
+
 // TestBuildStartContext_GCPMetadataUnknownModeRejected covers the fail-open case
 // the allow-list exists to close. Before the inversion an unrecognised mode was
 // treated as a no-op: no SCION_METADATA_MODE, no GCE_METADATA_HOST redirect, and
@@ -2422,6 +2804,266 @@ func TestBuildStartContext_GCPMetadataBothVarsAlwaysMatch(t *testing.T) {
 	root := sc.Opts.Env["GCE_METADATA_ROOT"]
 	if host != root {
 		t.Errorf("GCE_METADATA_HOST=%q GCE_METADATA_ROOT=%q — must match", host, root)
+	}
+}
+
+// gcpIdentityDispatchProfileCases is the shared table for
+// TestBuildStartContext_GCPIdentityUsesDispatchProfile_{Create,Start,Restart}:
+// a broker can register more than one profile (e.g. both a "docker" and a
+// "kubernetes" profile), and a dispatch's profile selects which one it runs
+// on (ptone/scion#2328). The GCP identity check must follow the runtime the
+// profile THIS dispatch names resolves to, not the broker's default runtime
+// — covering both directions catches a fix that only handles one.
+var gcpIdentityDispatchProfileCases = []struct {
+	name                      string
+	defaultRuntime            string
+	profileRuntime            string
+	wantDefaultMode           string // resolved mode when no GCP identity is configured
+	wantExplicitBlockRejected bool
+}{
+	{
+		name:                      "docker-default broker, kubernetes profile",
+		defaultRuntime:            "docker",
+		profileRuntime:            "kubernetes",
+		wantDefaultMode:           "passthrough",
+		wantExplicitBlockRejected: true,
+	},
+	{
+		name:                      "kubernetes-default broker, docker profile",
+		defaultRuntime:            "kubernetes",
+		profileRuntime:            "docker",
+		wantDefaultMode:           "block",
+		wantExplicitBlockRejected: false,
+	},
+}
+
+const gcpIdentityDispatchOtherProfile = "other-profile"
+
+// assertGCPIdentityDefaultMode calls buildStartContext with makeInputs (which
+// must configure no GCP identity at all) and checks the resolved
+// SCION_METADATA_MODE matches wantMode.
+func assertGCPIdentityDefaultMode(t *testing.T, srv *Server, wantMode string, makeInputs func() startContextInputs) {
+	t.Helper()
+	sc, err := srv.buildStartContext(context.Background(), makeInputs())
+	if err != nil {
+		t.Fatalf("expected no GCP identity input to be accepted, got %v", err)
+	}
+	if got := sc.Opts.Env["SCION_METADATA_MODE"]; got != wantMode {
+		t.Errorf("expected SCION_METADATA_MODE=%q, got %q", wantMode, got)
+	}
+}
+
+// assertGCPIdentityExplicitBlock calls buildStartContext with makeInputs
+// (which must configure an explicit "block") and checks it is rejected or
+// accepted per wantRejected.
+func assertGCPIdentityExplicitBlock(t *testing.T, srv *Server, wantRejected bool, makeInputs func() startContextInputs) {
+	t.Helper()
+	sc, err := srv.buildStartContext(context.Background(), makeInputs())
+	if wantRejected {
+		if err == nil {
+			t.Fatalf("expected explicit block to be rejected, got nil (env: %v)", sc.Opts.Env)
+		}
+		if !strings.Contains(err.Error(), "Kubernetes") {
+			t.Errorf("expected the error to name the Kubernetes runtime, got %q", err.Error())
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("expected explicit block to be accepted, got %v", err)
+	}
+	if got := sc.Opts.Env["SCION_METADATA_MODE"]; got != "block" {
+		t.Errorf("expected SCION_METADATA_MODE='block', got %q", got)
+	}
+}
+
+// TestBuildStartContext_GCPIdentityUsesDispatchProfile_Create covers the
+// create path, where the profile comes from the request's Config.Profile.
+func TestBuildStartContext_GCPIdentityUsesDispatchProfile_Create(t *testing.T) {
+	for _, tt := range gcpIdentityDispatchProfileCases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Run("no identity configured", func(t *testing.T) {
+				cfg := DefaultServerConfig()
+				cfg.StateDir = t.TempDir()
+				srv, _ := newTestServerForStartContextMultiProfile(t, cfg, tt.defaultRuntime, gcpIdentityDispatchOtherProfile, tt.profileRuntime)
+				r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+				assertGCPIdentityDefaultMode(t, srv, tt.wantDefaultMode, func() startContextInputs {
+					return startContextInputs{
+						Name:        "agent-profile-default",
+						Config:      &CreateAgentConfig{Profile: gcpIdentityDispatchOtherProfile},
+						HTTPRequest: r,
+						Operation:   opCreate,
+					}
+				})
+			})
+
+			t.Run("explicit block", func(t *testing.T) {
+				cfg := DefaultServerConfig()
+				cfg.StateDir = t.TempDir()
+				srv, _ := newTestServerForStartContextMultiProfile(t, cfg, tt.defaultRuntime, gcpIdentityDispatchOtherProfile, tt.profileRuntime)
+				r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+				assertGCPIdentityExplicitBlock(t, srv, tt.wantExplicitBlockRejected, func() startContextInputs {
+					return startContextInputs{
+						Name: "agent-profile-block",
+						Config: &CreateAgentConfig{
+							Profile:     gcpIdentityDispatchOtherProfile,
+							GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"},
+						},
+						HTTPRequest: r,
+						Operation:   opCreate,
+					}
+				})
+			})
+		})
+	}
+}
+
+// TestBuildStartContext_GCPIdentityCreateIgnoresSavedProfile pins that a
+// create dispatch resolves its runtime and GCP identity classification from
+// Config.Profile (falling back to the project's active profile when empty,
+// inside resolveManagerForOpts itself) — never from the agent's own saved
+// profile, even when one exists on disk for this agent name (e.g. a
+// re-create after a crash, or a preserved directory from a prior run).
+// opts.Profile (what ProvisionAgent, image resolution, and the saved profile
+// written back by provision.go all use) is always in.Config.Profile on
+// create, with no saved-profile fallback; the manager and GCP classification
+// resolved here must agree with that, or a single create could run on one
+// runtime while everything else about it is configured for another. Only
+// start/restart fall back to the saved profile — see
+// TestBuildStartContext_GCPIdentityUsesDispatchProfile_Start/_Restart below.
+func TestBuildStartContext_GCPIdentityCreateIgnoresSavedProfile(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	// defaultRuntime (the project's active profile) is docker; the
+	// non-default profile resolves to kubernetes.
+	srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, "docker", gcpIdentityDispatchOtherProfile, "kubernetes")
+	// This agent's own saved profile is the kubernetes one — different from
+	// both the active profile and the (empty) Config.Profile the create
+	// request below sends.
+	writeSavedAgentProfile(t, dotScion, "agent-create-saved-profile-differs", gcpIdentityDispatchOtherProfile)
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+	assertGCPIdentityDefaultMode(t, srv, "block", func() startContextInputs {
+		return startContextInputs{
+			Name: "agent-create-saved-profile-differs",
+			// No Config.Profile: must resolve against the active profile
+			// (docker, "block"), not the saved one (kubernetes, would be
+			// "passthrough").
+			Config:      &CreateAgentConfig{},
+			HTTPRequest: r,
+			Operation:   opCreate,
+		}
+	})
+}
+
+// TestBuildStartContext_GCPIdentityUsesDispatchProfile_Start covers the HTTP
+// start path, where there is no Config.Profile — the profile comes from the
+// agent's own saved profile (agent.GetSavedProfile), the same source
+// handlers.go's startAgent already uses for manager resolution.
+func TestBuildStartContext_GCPIdentityUsesDispatchProfile_Start(t *testing.T) {
+	for _, tt := range gcpIdentityDispatchProfileCases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Run("no identity configured", func(t *testing.T) {
+				cfg := DefaultServerConfig()
+				cfg.StateDir = t.TempDir()
+				srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, tt.defaultRuntime, gcpIdentityDispatchOtherProfile, tt.profileRuntime)
+				writeSavedAgentProfile(t, dotScion, "agent-saved-default", gcpIdentityDispatchOtherProfile)
+				r := httptest.NewRequest("POST", "/api/v1/agents/agent-saved-default/start", nil)
+				assertGCPIdentityDefaultMode(t, srv, tt.wantDefaultMode, func() startContextInputs {
+					return startContextInputs{
+						Name:        "agent-saved-default",
+						HTTPRequest: r,
+						Operation:   opHTTPStart,
+					}
+				})
+			})
+
+			t.Run("explicit block via resolvedEnv", func(t *testing.T) {
+				cfg := DefaultServerConfig()
+				cfg.StateDir = t.TempDir()
+				srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, tt.defaultRuntime, gcpIdentityDispatchOtherProfile, tt.profileRuntime)
+				writeSavedAgentProfile(t, dotScion, "agent-saved-block", gcpIdentityDispatchOtherProfile)
+				r := httptest.NewRequest("POST", "/api/v1/agents/agent-saved-block/start", nil)
+				assertGCPIdentityExplicitBlock(t, srv, tt.wantExplicitBlockRejected, func() startContextInputs {
+					return startContextInputs{
+						Name:        "agent-saved-block",
+						ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "block"},
+						HTTPRequest: r,
+						Operation:   opHTTPStart,
+					}
+				})
+			})
+		})
+	}
+}
+
+// TestBuildStartContext_GCPIdentityUsesDispatchProfile_Restart is the
+// restart-path twin of the start-path test above.
+func TestBuildStartContext_GCPIdentityUsesDispatchProfile_Restart(t *testing.T) {
+	for _, tt := range gcpIdentityDispatchProfileCases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Run("no identity configured", func(t *testing.T) {
+				cfg := DefaultServerConfig()
+				cfg.StateDir = t.TempDir()
+				srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, tt.defaultRuntime, gcpIdentityDispatchOtherProfile, tt.profileRuntime)
+				writeSavedAgentProfile(t, dotScion, "agent-saved-restart-default", gcpIdentityDispatchOtherProfile)
+				r := httptest.NewRequest("POST", "/api/v1/agents/agent-saved-restart-default/restart", nil)
+				assertGCPIdentityDefaultMode(t, srv, tt.wantDefaultMode, func() startContextInputs {
+					return startContextInputs{
+						Name:        "agent-saved-restart-default",
+						HTTPRequest: r,
+						Operation:   opHTTPRestart,
+					}
+				})
+			})
+
+			t.Run("explicit block via resolvedEnv", func(t *testing.T) {
+				cfg := DefaultServerConfig()
+				cfg.StateDir = t.TempDir()
+				srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, tt.defaultRuntime, gcpIdentityDispatchOtherProfile, tt.profileRuntime)
+				writeSavedAgentProfile(t, dotScion, "agent-saved-restart-block", gcpIdentityDispatchOtherProfile)
+				r := httptest.NewRequest("POST", "/api/v1/agents/agent-saved-restart-block/restart", nil)
+				assertGCPIdentityExplicitBlock(t, srv, tt.wantExplicitBlockRejected, func() startContextInputs {
+					return startContextInputs{
+						Name:        "agent-saved-restart-block",
+						ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "block"},
+						HTTPRequest: r,
+						Operation:   opHTTPRestart,
+					}
+				})
+			})
+		})
+	}
+}
+
+// TestBuildStartContext_GCPIdentityForceRuntimeOverridesProfile pins that
+// ForceRuntime takes priority over a dispatch's profile, exactly as
+// resolveManagerForOpts's own ForceRuntime branch (handlers.go) does: a
+// profile naming a different runtime than an operator's forced runtime must
+// not be able to work around it.
+func TestBuildStartContext_GCPIdentityForceRuntimeOverridesProfile(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	const otherProfile = "other-profile"
+	// Settings declare a "docker" default and a "kubernetes" other profile,
+	// but ForceRuntime below pins the broker to "docker" regardless.
+	srv, _ := newTestServerForStartContextMultiProfile(t, cfg, "docker", otherProfile, "kubernetes")
+	srv.config.ForceRuntime = "docker"
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name: "agent-force-runtime",
+		Config: &CreateAgentConfig{
+			Profile:     otherProfile, // would resolve to kubernetes via settings alone
+			GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"},
+		},
+		HTTPRequest: r,
+		Operation:   opCreate,
+	})
+	if err != nil {
+		t.Fatalf("expected block to be accepted since ForceRuntime pins docker regardless of the kubernetes profile, got %v", err)
+	}
+	if sc.Opts.Env["SCION_METADATA_MODE"] != "block" {
+		t.Errorf("expected SCION_METADATA_MODE='block', got %q", sc.Opts.Env["SCION_METADATA_MODE"])
 	}
 }
 
