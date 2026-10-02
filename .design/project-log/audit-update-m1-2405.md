@@ -70,3 +70,13 @@ Residual work after that dependency is approved:
 `make ci` and `make ci-full` were not run because the campaign broker-workload
 rule explicitly prohibits them. Broader targeted route-metadata, vet/build, and
 lint gates are deferred until after the required implementation checkpoint push.
+
+After checkpoint `387a8c5d` was pushed, the first route reconciliation run
+correctly failed because the new exact route was not yet represented in the
+authorization-operation catalog (`186/187` routes covered). A narrow
+authentication-only entry-point exemption now records that this read is guarded
+by the handler's live-resource-scoped `hub.audit.read` decision; this is the
+authorization-operation route registry, not the frozen audit-event catalog.
+The corrected targeted run passed:
+
+- `go test -count=1 -p 2 ./pkg/hub ./pkg/hub/authzop -run '^(TestConstraintAuditHistory_|TestB7_GetConstraintAudit|TestB7_RouteMetadata_ReadPermission|TestEntryPointsCoverRouteMetadata|TestStaleExemptionDetection)$'` — PASS.

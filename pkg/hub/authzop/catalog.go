@@ -2778,6 +2778,7 @@ var EntryPointExemptions = []EntryPointExemption{
 	// Access constraint preview endpoints — hub-admin, access_constraint.admin permission
 	{Pattern: "/api/v1/admin/access-constraint-previews", Kind: ExemptionHubAdmin, Reason: "Access constraint previews, hub-admin with access_constraint.admin; PR #1445 B5 governance", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/admin/access-constraint-previews/", Kind: ExemptionHubAdmin, Reason: "Access constraint preview by ID, hub-admin with access_constraint.admin; PR #1445 B5 governance", Owner: "route_metadata.go"},
+	{Pattern: "GET /api/v1/admin/access-constraints/{id}/audit", Kind: ExemptionAuthenticationOnly, Reason: "Live access-constraint history, inline resource-scoped hub.audit.read check with privacy-preserving not-found denial", Owner: "handlers_access_constraints.go"},
 	{Pattern: "/api/v1/admin/effective-access", Kind: ExemptionAuthenticationOnly, Reason: "Admin effective-access composition, inline hub.audit.read check", Owner: "route_metadata.go"},
 }
 
