@@ -48,7 +48,13 @@ func testServer(t *testing.T) (*Server, store.Store) {
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
+	return testServerWithStore(t, s)
+}
 
+// testServerWithStore is testServer on a store the caller opened. The store is
+// closed when the test ends.
+func testServerWithStore(t *testing.T, s store.Store) (*Server, store.Store) {
+	t.Helper()
 	if err := s.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
