@@ -131,6 +131,17 @@ func (f *fakeSubstrateControlClient) CreateActorTemplate(ctx context.Context, in
 func (f *fakeSubstrateControlClient) CreateActor(ctx context.Context, in *ateapipb.CreateActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	key := in.GetActor().GetMetadata().GetAtespace() + "/" + in.GetActor().GetMetadata().GetName()
+	// A real ateapi CreateActor refuses a second call for the same
+	// atespace/name with AlreadyExists, rather than overwriting — this
+	// matters because SubstrateRuntime.Run's restart path depends on
+	// exactly that error to detect "this actor already exists" (see
+	// substrate_runtime.go's codes.AlreadyExists handling). Overwriting
+	// here instead would make it impossible for any test using this fake
+	// to ever exercise that mapping.
+	if _, exists := f.actors[key]; exists {
+		return nil, status.Error(codes.AlreadyExists, "actor already exists")
+	}
 	actor := &ateapipb.Actor{
 		Metadata: &ateapipb.ResourceMetadata{
 			Atespace: in.GetActor().GetMetadata().GetAtespace(),
@@ -139,7 +150,7 @@ func (f *fakeSubstrateControlClient) CreateActor(ctx context.Context, in *ateapi
 		},
 		Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
 	}
-	f.actors[actor.GetMetadata().GetAtespace()+"/"+actor.GetMetadata().GetName()] = actor
+	f.actors[key] = actor
 	return actor, nil
 }
 
