@@ -453,6 +453,62 @@ func resetSubstrateAgentStateForTest(t *testing.T) {
 	})
 }
 
+// TestEnsureActorTemplate_FailedGoldenSnapshotIsCleanedUp is the regression
+// test for a failed golden-snapshot build leaving a sticky, broken
+// template behind: templateName is content-addressed (substrateTemplateName
+// hashes the image/config/resources shape), so without cleanup, every
+// future call for the same shape would find the SAME broken template via
+// GetActorTemplate and never attempt CreateActorTemplate again.
+// ensureActorTemplate must call DeleteActorTemplate (best-effort) before
+// returning the golden-snapshot-failed error.
+func TestEnsureActorTemplate_FailedGoldenSnapshotIsCleanedUp(t *testing.T) {
+	rec := &callRecorder{}
+	fc := newFakeControlClient(rec)
+
+	const atespace, templateName = "scion-proj", "tmpl-abc123"
+	var getCalls int
+	var getMu sync.Mutex
+	fc.getActorTemplate = func(*ateapipb.GetActorTemplateRequest) (*ateapipb.ActorTemplate, error) {
+		// Not ready yet (no golden tag), and no error message either, on
+		// the FIRST call only — this is the initial GetActorTemplate
+		// ensureActorTemplate makes before entering its poll loop. The
+		// poll loop's own GetActorTemplate call is distinguished by the
+		// call count below.
+		getMu.Lock()
+		defer getMu.Unlock()
+		getCalls++
+		if getCalls == 1 {
+			return &ateapipb.ActorTemplate{Status: &ateapipb.ActorTemplateStatus{}}, nil
+		}
+		// The poll: the golden snapshot build failed.
+		return &ateapipb.ActorTemplate{
+			Status: &ateapipb.ActorTemplateStatus{
+				GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{
+					ErrorMessage: "simulated golden snapshot build failure",
+				},
+			},
+		}, nil
+	}
+
+	err := ensureActorTemplate(context.Background(), fc, atespace, templateName,
+		&ateapipb.ActorTemplate{Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: templateName}},
+		time.Second, func(time.Duration) {})
+	if err == nil || !strings.Contains(err.Error(), "golden snapshot failed") {
+		t.Fatalf("ensureActorTemplate() error = %v, want a golden-snapshot-failed error", err)
+	}
+
+	calls := rec.list()
+	found := false
+	for _, c := range calls {
+		if c == "DeleteActorTemplate" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("call trace = %v, want it to include a DeleteActorTemplate cleanup call", calls)
+	}
+}
+
 // -----------------------------------------------------------------------
 // Run: happy path
 // -----------------------------------------------------------------------

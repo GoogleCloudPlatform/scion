@@ -400,6 +400,22 @@ func ensureActorTemplate(ctx context.Context, client ateapipb.ControlClient, ate
 			return nil
 		}
 		if msg := templateErrorMessage(existing); msg != "" {
+			// templateName is deterministic (substrateTemplateName hashes
+			// the image/config/resources shape), so leaving the failed
+			// template in place would make every future Run for this same
+			// shape find the SAME broken template via GetActorTemplate
+			// above and never attempt CreateActorTemplate again — sticky
+			// until an operator manually intervenes. Best-effort cleanup:
+			// a failed delete here doesn't change the outcome (Run already
+			// fails either way), and the next Run's own GetActorTemplate
+			// will simply find the same broken template again and retry
+			// this same cleanup.
+			if _, delErr := client.DeleteActorTemplate(ctx, &ateapipb.DeleteActorTemplateRequest{
+				ActorTemplate: &ateapipb.ObjectRef{Atespace: atespace, Name: templateName},
+			}); delErr != nil && status.Code(delErr) != codes.NotFound {
+				runtimeLog.Warn("substrate: failed to clean up a failed golden-snapshot template",
+					"atespace", atespace, "template", templateName, "error", delErr)
+			}
 			return fmt.Errorf("substrate: actor template %s/%s golden snapshot failed: %s", atespace, templateName, msg)
 		}
 	}
