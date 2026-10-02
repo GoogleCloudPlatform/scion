@@ -264,19 +264,31 @@ func trustedAncestorSymlinkAt(dirFd int, name string) (bool, error) {
 	if err := unix.Fstatat(dirFd, name, &linkSt, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return false, fmt.Errorf("stat %s: %w", name, err)
 	}
-	if int(linkSt.Uid) != trustedAncestorOwnerUID {
-		return false, nil
-	}
 
 	var dirSt unix.Stat_t
 	if err := unix.Fstat(dirFd, &dirSt); err != nil {
 		return false, fmt.Errorf("stat containing directory of %s: %w", name, err)
 	}
-	if int(dirSt.Uid) != trustedAncestorOwnerUID {
-		return false, nil
-	}
-	if dirSt.Mode&(unix.S_IWGRP|unix.S_IWOTH) != 0 {
-		return false, nil
-	}
-	return true, nil
+
+	return symlinkTrustedByStat(linkSt.Uid, dirSt.Uid, uint32(dirSt.Mode), trustedAncestorOwnerUID), nil
+}
+
+// symlinkTrustedByStat is trustedAncestorSymlinkAt's decision, as a pure
+// function of already-fetched stat fields: true only when linkUID and
+// dirUID (the symlink's own owner, and the owner of the directory
+// containing it) are BOTH equal to trusted, AND dirMode carries neither
+// the group- nor the other-write bit. Every one of these three conditions
+// is independently load-bearing — dropping any one of them, or checking
+// only one of the two write bits, would accept a symlink a workload could
+// have planted or redirected — which is exactly what
+// TestSymlinkTrustedByStat's table pins row by row, each row changing
+// only the one field its own guard depends on.
+//
+// Kept as a pure function of values, not one that stats anything itself,
+// so it can be exercised by a table test with fabricated ownership/mode
+// values, the same way rootowned.go's chainIsTrusted is tested, without
+// requiring the test process itself to be root or to own a real root-owned
+// directory.
+func symlinkTrustedByStat(linkUID, dirUID uint32, dirMode uint32, trusted int) bool {
+	return int(linkUID) == trusted && int(dirUID) == trusted && dirMode&(unix.S_IWGRP|unix.S_IWOTH) == 0
 }

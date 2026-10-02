@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // TestEnsureDirTrustedAncestorFollow_FollowsTrustedSymlink proves the
@@ -56,9 +58,14 @@ func TestEnsureDirTrustedAncestorFollow_FollowsTrustedSymlink(t *testing.T) {
 // outright, and nothing is created past it — not even the ordinary file a
 // caller would have gone on to write at the resolved destination.
 func TestEnsureDirTrustedAncestorFollow_RefusesUntrustedOwner(t *testing.T) {
-	// trustedAncestorOwnerUID stays at its default (0). The test's own
-	// fixtures are owned by the test process's real, non-root uid in this
-	// sandbox, so the symlink below is never trusted.
+	// The seam is set to a uid that can never equal the fixtures' real
+	// owner (os.Getuid()), rather than left at its default (0): relying on
+	// the default would make this test pass for the wrong reason — and
+	// silently stop testing anything — if the suite ever ran as root,
+	// where os.Getuid() == 0 == the default trusted uid.
+	restore := SetTrustedAncestorOwnerUIDForTest(os.Getuid() + 1)
+	defer restore()
+
 	parent := t.TempDir()
 	real := filepath.Join(parent, "run")
 	if err := os.Mkdir(real, 0755); err != nil {
@@ -238,5 +245,91 @@ func TestEnsureDirTrustedAncestorFollow_RefusesSymlinkLoop(t *testing.T) {
 	}
 	if !errors.Is(err, ErrTooManyTrustedAncestorSymlinks) {
 		t.Errorf("error = %v, want errors.Is(..., ErrTooManyTrustedAncestorSymlinks)", err)
+	}
+}
+
+// TestSymlinkTrustedByStat is a table test for symlinkTrustedByStat's
+// three independent conditions, each pinned on its own: link uid ==
+// trusted, containing-dir uid == trusted, and the containing directory
+// carries neither the group- nor the other-write bit. Each row below
+// isolates exactly ONE of those conditions as the thing that decides it,
+// so deleting any single guard (or masking only one of S_IWGRP/S_IWOTH
+// instead of both) flips that row's expected result and fails the test —
+// unlike the end-to-end dirfd/stagedsecrets tests, whose fixtures happen
+// to fail every condition at once and so cannot tell the guards apart.
+func TestSymlinkTrustedByStat(t *testing.T) {
+	const trusted = 5
+	tests := []struct {
+		name    string
+		linkUID uint32
+		dirUID  uint32
+		dirMode uint32
+		want    bool
+	}{
+		{
+			name:    "all conditions satisfied",
+			linkUID: trusted, dirUID: trusted, dirMode: 0755,
+			want: true,
+		},
+		{
+			// Only the link's own uid is wrong; the containing dir's uid
+			// and mode are both otherwise trustworthy. Deleting the
+			// linkUID == trusted check entirely would make this row
+			// incorrectly true.
+			name:    "link uid wrong, everything else trustworthy",
+			linkUID: trusted + 1, dirUID: trusted, dirMode: 0755,
+			want: false,
+		},
+		{
+			// Only the containing directory's uid is wrong. Deleting the
+			// dirUID == trusted check entirely would make this row
+			// incorrectly true.
+			name:    "containing-dir uid wrong, everything else trustworthy",
+			linkUID: trusted, dirUID: trusted + 1, dirMode: 0755,
+			want: false,
+		},
+		{
+			// dirMode carries ONLY the group-write bit (no other-write, no
+			// read/exec bits at all). A mask that checked only S_IWOTH
+			// (dropping S_IWGRP) would miss this and return true.
+			name:    "containing dir group-writable only",
+			linkUID: trusted, dirUID: trusted, dirMode: unix.S_IWGRP,
+			want: false,
+		},
+		{
+			// dirMode carries ONLY the other-write bit. A mask that
+			// checked only S_IWGRP (dropping S_IWOTH) would miss this and
+			// return true.
+			name:    "containing dir other-writable only",
+			linkUID: trusted, dirUID: trusted, dirMode: unix.S_IWOTH,
+			want: false,
+		},
+		{
+			// Sticky bit plus full group/other write: still refused, and
+			// for the write-bit reason, not the sticky bit — proves the
+			// mask isn't accidentally narrower (or broader) because of an
+			// unrelated bit sharing the same mode word.
+			name:    "sticky bit with group and other write",
+			linkUID: trusted, dirUID: trusted, dirMode: 01777,
+			want: false,
+		},
+		{
+			// Sticky bit ALONE, no group/other write at all: must still
+			// be trusted. Proves the sticky bit itself plays no part in
+			// the decision — a mask that (wrongly) folded the sticky bit
+			// in would refuse this and return false.
+			name:    "sticky bit alone does not defeat trust",
+			linkUID: trusted, dirUID: trusted, dirMode: 01755,
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := symlinkTrustedByStat(tt.linkUID, tt.dirUID, tt.dirMode, trusted)
+			if got != tt.want {
+				t.Errorf("symlinkTrustedByStat(linkUID=%d, dirUID=%d, dirMode=%#o, trusted=%d) = %v, want %v",
+					tt.linkUID, tt.dirUID, tt.dirMode, trusted, got, tt.want)
+			}
+		})
 	}
 }

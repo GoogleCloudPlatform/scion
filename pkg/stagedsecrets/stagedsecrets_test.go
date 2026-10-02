@@ -500,9 +500,14 @@ func TestWriteAs_OutsideHomeTrustedSymlinkedAncestorSucceeds(t *testing.T) {
 // destination — writing a secret to an unintended, workload-influenceable
 // location is worse than not starting.
 func TestWriteAs_OutsideHomeUntrustedSymlinkedAncestorFails(t *testing.T) {
-	// trustedAncestorOwnerUID stays at its default (0); this test's own
-	// fixtures are owned by its real, non-root uid, so the symlink below is
-	// never trusted.
+	// The seam is set to a uid that can never equal the fixtures' real
+	// owner (os.Getuid()), rather than left at its default (0): relying on
+	// the default would make this test pass for the wrong reason — and
+	// silently stop testing anything — if the suite ever ran as root,
+	// where os.Getuid() == 0 == the default trusted uid.
+	restore := dirfd.SetTrustedAncestorOwnerUIDForTest(os.Getuid() + 1)
+	defer restore()
+
 	homeDir := t.TempDir()
 	parent := t.TempDir()
 	run := filepath.Join(parent, "run")
