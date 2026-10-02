@@ -669,3 +669,32 @@ func TestExecMountChecker_Root_Mounts(t *testing.T) {
 		t.Fatalf("MountPrivilegeError as root = %v", err)
 	}
 }
+
+// TestCheckNFSForDispatch_RequestCtxBoundsMount verifies that the dispatch
+// gate passes the request context down to the mount, so a hung mount ends
+// when the request does.
+func TestCheckNFSForDispatch_RequestCtxBoundsMount(t *testing.T) {
+	srv, mc := gateTestServer(t, true, "docker")
+	mc.mu.Lock()
+	mc.mountErr = nil
+	mc.block = make(chan struct{})
+	mc.mu.Unlock()
+	release := sync.OnceFunc(func() { close(mc.block) })
+	t.Cleanup(release)
+	projectPath := writeSettings(t, t.TempDir(), "schema_version: \"1\"\n")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.checkNFSForDispatch(ctx, "agent-1", filepath.Join(projectPath, ".scion"), "", "")
+	}()
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("checkNFSForDispatch = nil, want an error after the request ctx ended")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dispatch gate kept waiting on the mount after the request ctx ended")
+	}
+}
