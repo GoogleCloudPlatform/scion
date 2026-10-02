@@ -133,20 +133,28 @@ func bypassAgentsSetup(t *testing.T) *bypassAgentsFixture {
 	require.NoError(t, s.CreateUser(ctx, f.owner))
 
 	f.proj = &store.Project{
-		ID:      tid("bypass-p1"),
-		Name:    "Bypass P1",
-		Slug:    "bypass-p1",
-		OwnerID: f.owner.ID,
+		ID:        tid("bypass-p1"),
+		Name:      "Bypass P1",
+		Slug:      "bypass-p1",
+		OwnerID:   f.owner.ID,
+		CreatedBy: f.owner.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, f.proj))
+	// Project authority comes from the project-owner binding, not OwnerID
+	// (ptone/scion#2586).
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
 
 	f.other = &store.Project{
-		ID:      tid("bypass-p2"),
-		Name:    "Bypass P2",
-		Slug:    "bypass-p2",
-		OwnerID: f.owner.ID,
+		ID:        tid("bypass-p2"),
+		Name:      "Bypass P2",
+		Slug:      "bypass-p2",
+		OwnerID:   f.owner.ID,
+		CreatedBy: f.owner.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, f.other))
+	// Project authority comes from the project-owner binding, not OwnerID
+	// (ptone/scion#2586).
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, f.other.ID, f.owner.ID))
 
 	// An auto-provide broker, so that agent creation can resolve a broker and
 	// the create tests exercise the authorization gate rather than dying at

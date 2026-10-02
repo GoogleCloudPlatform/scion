@@ -22,9 +22,12 @@ package hub
 // transfer (OwnerID still names them) has no project access.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,6 +146,14 @@ func projectSecretReadAllowed(srv *Server, user *store.User, project *store.Proj
 	})
 }
 
+// TestProjectOwnerID_RemovedCreatorWithoutTransferHasNoAccess runs its
+// subtests against one shared fixture, so they share state and their order
+// matters on a regression. With the owner relationship grant restored, the
+// "GET project" subtest succeeds and getProject/createProjectMembersGroup
+// re-grant the creator, after which later subtests see that re-granted
+// access. "PUT messaging policy" and "list and scope=mine" are guards: run in
+// isolation they pass even on a revert, and they only fail in the full run
+// because of that earlier re-grant.
 func TestProjectOwnerID_RemovedCreatorWithoutTransferHasNoAccess(t *testing.T) {
 	f := setupStaleOwnerFixture(t)
 	base := "/api/v1/projects/" + f.project.ID
@@ -216,9 +227,13 @@ func TestProjectOwnerID_CurrentOwnerWithBindingUnaffected(t *testing.T) {
 	d := projectSecretReadAllowed(f.srv, f.coOwner, f.project)
 	assert.True(t, d.Allowed, "reason %q", d.Reason)
 
+	rec = doRequestAsUser(t, f.srv, f.coOwner, http.MethodGet, base+"/messaging-policy", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var policy ProjectMessagingPolicyResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&policy))
 	rec = doRequestAsUser(t, f.srv, f.coOwner, http.MethodPut, base+"/messaging-policy",
-		ProjectMessagingPolicyUpdateRequest{CrossProjectInbound: "members"})
-	assert.NotEqual(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		ProjectMessagingPolicyUpdateRequest{CrossProjectInbound: "members", ExpectedRevision: policy.Revision})
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	assert.Contains(t, listProjectIDs(t, f.srv, f.coOwner, "/api/v1/projects"), f.project.ID)
 	assert.Contains(t, listProjectIDs(t, f.srv, f.coOwner, "/api/v1/projects?scope=mine"), f.project.ID)
@@ -257,4 +272,35 @@ func TestProjectOwnerID_LegacyProjectAccessComesFromBackfill(t *testing.T) {
 	rec = doRequestAsUser(t, srv, creator, http.MethodPatch, base, map[string]string{"name": "Legacy Renamed"})
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Contains(t, listProjectIDs(t, srv, creator, "/api/v1/projects?scope=mine"), project.ID)
+}
+
+// TestProjectOwnerID_BackfillWarnsOnOwnerOnlyLegacyProject pins that the
+// startup backfill does not grant to OwnerID: a project with OwnerID set,
+// no CreatedBy and no owner binding stays ownerless and is logged once.
+func TestProjectOwnerID_BackfillWarnsOnOwnerOnlyLegacyProject(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	owner := createStaleOwnerUser(t, s, tid("owner-only-legacy-user"), "owner-only@test.com")
+	project := &store.Project{
+		ID:      tid("owner-only-legacy-project"),
+		Name:    "Owner Only Legacy",
+		Slug:    "owner-only-legacy-project",
+		OwnerID: owner.ID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	require.NoError(t, backfillProjectOwnerRoleBindings(ctx, s))
+
+	assert.Nil(t, projectOwnerBindingFor(t, s, owner.ID, project.ID), "backfill must not grant to OwnerID")
+	assert.Equal(t, 1, strings.Count(buf.String(), "project_id="+project.ID),
+		"exactly one warning for the owner-only project: %s", buf.String())
+	assert.Contains(t, buf.String(), "no project-owner binding")
 }

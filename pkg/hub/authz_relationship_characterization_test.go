@@ -262,7 +262,8 @@ func TestRelationshipCharacterization_OwnerProjectGrantsNothing(t *testing.T) {
 		t.Run(p.ID, func(t *testing.T) {
 			d := decideExplicit(t, authz, owner, project, p)
 			assert.False(t, d.Allowed, "OwnerID-only %s: reason %q", p.ID, d.Reason)
-			assert.NotEqual(t, "relationship grant: resource owner", d.Reason)
+			assert.NotEqual(t, "owner", d.MatchedGrant, "no owner relationship grant may match")
+			assert.NotEqual(t, ScopeTypeRelationship, d.Scope, "no relationship rule may decide")
 		})
 	}
 }
