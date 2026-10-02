@@ -561,25 +561,6 @@ func isSingleCleanPathElement(name string) bool {
 	return filepath.Clean(name) == name
 }
 
-// writeStartContextError writes the HTTP response for an error from
-// buildStartContext (or anything constructing the same *startContextError
-// shape, such as createAgent's own preflight template hydration): a
-// Hub-connectivity error maps to 503 hub_unreachable (retryable), any other
-// hub-side error maps to 500 template_error, and anything else falls back to
-// a generic runtime error. Shared so the real dispatch path and the
-// env-gather preflight report a hydration failure identically.
-func writeStartContextError(w http.ResponseWriter, err error) {
-	if sce, ok := err.(*startContextError); ok && sce.IsHubError {
-		if templatecache.IsHubConnectivityError(sce.OriginalErr) {
-			HubUnreachableError(w, sce.OriginalErr.Error())
-			return
-		}
-		TemplateError(w, err.Error())
-		return
-	}
-	RuntimeError(w, err.Error())
-}
-
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	createStart := time.Now()
@@ -996,9 +977,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		Operation:          opCreate,
 	})
 	if err != nil {
-		markAttemptFailed(http.StatusInternalServerError, err.Error())
 		span.SetStatus(codes.Error, err.Error())
-		writeStartContextError(w, err)
+		status := writeStartContextError(w, err)
+		markAttemptFailed(status, err.Error())
 		return
 	}
 	opts := sc.Opts
@@ -1864,7 +1845,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		RuntimeError(w, err.Error())
+		writeStartContextError(w, err)
 		return
 	}
 	opts := sc.Opts
@@ -1902,14 +1883,28 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		}
 	}
 
+	// Resolve saved profile for runtime selection, and re-resolve the
+	// manager against it. This resolution is the authoritative one for what
+	// actually starts, so the hub-default passthrough re-check runs again
+	// here (recheckHubDefaultPassthrough), and so does the Kubernetes/"block"
+	// rejection (rejectKubernetesBlock, start_context.go, ptone/scion#2328):
+	// a saved profile buildStartContext could not see may resolve to
+	// Kubernetes only at this later point. This runs before any side effect
+	// below (applyInlineConfigUpdate's scion-agent.json write), so a
+	// rejection here does not leave a partial update applied.
+	if opts.ProjectPath != "" {
+		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
+	}
+	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
+	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
+	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
+		writeStartContextError(w, sce)
+		return
+	}
+
 	// Apply updated InlineConfig to scion-agent.json before starting.
 	if startReq.InlineConfig != nil && opts.ProjectPath != "" {
 		s.applyInlineConfigUpdate(id, opts.ProjectPath, startReq.InlineConfig, startReq.SharedWorkspace)
-	}
-
-	// Resolve saved profile for runtime selection
-	if opts.ProjectPath != "" {
-		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
 	}
 
 	// The hub is the source of truth for resume intent: when it sets
@@ -1925,11 +1920,6 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		}
 	}
 
-	// Re-resolve manager after profile update. This resolution is the
-	// authoritative one for what actually starts, so the hub-default
-	// passthrough re-check runs again here. See recheckHubDefaultPassthrough.
-	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
-	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
 	agentInfo, err := mgr.Start(ctx, opts)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -2207,13 +2197,26 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		Operation:          opHTTPRestart,
 	})
 	if err != nil {
-		RuntimeError(w, err.Error())
+		writeStartContextError(w, err)
 		return
 	}
 	opts := sc.Opts
 
 	if opts.ProjectPath != "" {
 		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
+	}
+
+	// Re-resolve manager after the profile update above, and re-run the
+	// hub-default-passthrough downgrade and the Kubernetes/block rejection
+	// against this later, authoritative resolution — before the stop below,
+	// a real side effect. A rejection here must leave the agent exactly as
+	// it was; running this after the stop would return 400 with the agent
+	// already stopped. See the identical re-check and comment in startAgent.
+	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
+	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
+	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
+		writeStartContextError(w, sce)
+		return
 	}
 
 	// Stop then start — tolerate stop errors since the container may already
@@ -2247,10 +2250,6 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		}
 	}
 
-	// Re-resolve manager after profile update. See the identical re-check
-	// and comment in startAgent (recheckHubDefaultPassthrough).
-	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
-	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
 	agentInfo, err := mgr.Start(ctx, opts)
 	if err != nil {
 		s.agentLifecycleLog.Error("Agent restart failed",
@@ -3239,8 +3238,41 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		// Determine if GCP credentials are available via identity config.
 		// Both "assign" (broker-managed SA) and "passthrough" (ambient GCE
 		// metadata) provide credentials, so either satisfies GCP auth needs.
-		gcpSAAssigned := req.Config != nil && req.Config.GCPIdentity != nil &&
-			(req.Config.GCPIdentity.MetadataMode == store.GCPMetadataModeAssign || req.Config.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough)
+		// This includes Kubernetes' own runtime-aware default of passthrough
+		// when nothing is configured (ptone/scion#2328) — resolved the same
+		// way buildStartContext resolves it at actual dispatch time
+		// (resolveRuntimeNameForOpts mirrors resolveManagerForOpts,
+		// effectiveGCPMetadataMode in start_context.go), so this preflight
+		// and the dispatch agree on whether GCP credentials will be
+		// available. Without this, an unconfigured Kubernetes agent using
+		// ADC or vertex-ai could fail this preflight, or auto-detect the
+		// wrong auth type, despite ADC actually being available once
+		// dispatched.
+		//
+		// This preflight only ever runs on create (req is a
+		// CreateAgentRequest), so, like buildStartContext's own early
+		// resolution for a create dispatch, the profile here is
+		// req.Config.Profile with no saved-profile fallback — there is
+		// nothing to fall back to differently than buildStartContext would.
+		//
+		// resolveRuntimeNameForOpts, not resolveManagerForOpts: this only
+		// needs the resolved runtime's name, not a manager to dispatch
+		// through, and resolveManagerForOpts's settings-differs branch
+		// builds and caches a real client (a Kubernetes or Cloud Run client,
+		// for example) to get one. Calling that here would build the client
+		// a second time (buildStartContext builds its own later) and
+		// overwrite the auxiliary-runtime cache entry with a throwaway one.
+		preflightProfile := ""
+		if req.Config != nil {
+			preflightProfile = req.Config.Profile
+		}
+		dispatchRuntimeName := s.resolveRuntimeNameForOpts(api.StartOptions{
+			Name:        req.Name,
+			ProjectPath: req.ProjectPath,
+			Profile:     preflightProfile,
+		})
+		effectiveGCPMode := effectiveGCPMetadataMode(isKubernetesRuntimeName(dispatchRuntimeName), req.Config, req.ResolvedEnv)
+		gcpSAAssigned := effectiveGCPMode == store.GCPMetadataModeAssign || effectiveGCPMode == store.GCPMetadataModePassthrough
 
 		// When auth type is unset (auto-detect), check if resolved file secrets
 		// or a GCP service account can satisfy an alternative auth method before
@@ -3872,6 +3904,72 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID strin
 	return runtime
 }
 
+// resolveRuntimeNameForOpts returns the settings-declared runtime type opts
+// would resolve to (e.g. "docker", "kubernetes", "remote"), without
+// resolveManagerForOpts's side effects when the resolved runtime differs
+// from the broker's default: building a real runtime client (a Kubernetes or
+// Cloud Run client, for example, via runtimeResolver) and caching it in
+// auxiliaryRuntimes. Callers that only need the name — currently just the
+// auth preflight (extractRequiredEnvKeys) — use this instead, so a create to
+// a non-default runtime does not build and cache a throwaway client purely
+// to read its name; buildStartContext's own later, authoritative resolution
+// (via resolveManagerForOpts) builds the real one.
+//
+// This mirrors resolveManagerForOpts's own ForceRuntime-then-settings logic
+// rather than sharing it, specifically so resolveManagerForOpts itself can
+// stay identical to its upstream counterpart. Keep the two in sync by hand:
+// a change to one of ForceRuntime handling, the settings load, or
+// vs.ResolveRuntime's call here should be mirrored in the other.
+//
+// Unlike resolveManagerForOpts, this never calls runtime.GetRuntime
+// (factory.go), so it returns settings.yaml's raw type rather than
+// GetRuntime's normalized or auto-detected name. The two names can differ —
+// "remote"/"k8s" where GetRuntime would normalize to "kubernetes",
+// "local"/"auto" where GetRuntime would auto-detect a concrete runtime, a
+// Cloud Run override of a "docker" profile, or an unrecognized type string —
+// but isKubernetesRuntimeName classifies all of these identically either
+// way. The one case where the classification itself can differ is a
+// Kubernetes-type profile whose client fails to build: GetRuntime then
+// returns the sentinel type "error" (not Kubernetes), while this function
+// still returns the original Kubernetes-type string, so the preflight sees
+// Kubernetes (passthrough) where the real dispatch would not. This is
+// harmless: that dispatch fails on the unusable "error" runtime regardless,
+// so the caller never runs with credentials the preflight shouldn't have
+// promised — it only turns a would-be preflight message into a later
+// runtime-error message instead.
+func (s *Server) resolveRuntimeNameForOpts(opts api.StartOptions) string {
+	if s.config.ForceRuntime != "" {
+		if s.config.ForceRuntime == s.runtime.Name() {
+			return s.runtime.Name()
+		}
+		s.auxiliaryRuntimesMu.RLock()
+		aux, ok := s.auxiliaryRuntimes[s.config.ForceRuntime]
+		s.auxiliaryRuntimesMu.RUnlock()
+		if ok {
+			return aux.Runtime.Name()
+		}
+		s.agentLifecycleLog.Warn("ForceRuntime does not match default runtime, falling back to settings resolution", "force", s.config.ForceRuntime, "default", s.runtime.Name())
+	}
+
+	projectDir, _ := config.GetResolvedProjectDir(opts.ProjectPath)
+	vs, _, err := config.LoadEffectiveSettings(projectDir)
+	if err != nil {
+		s.agentLifecycleLog.Warn("failed to load project settings for runtime resolution; using broker default runtime",
+			"projectDir", projectDir, "error", err)
+	}
+	if vs == nil {
+		return s.runtime.Name()
+	}
+
+	// ResolveRuntime("") uses vs.ActiveProfile as the fallback.
+	_, runtimeType, err := vs.ResolveRuntime(opts.Profile)
+	if err != nil {
+		// Profile or its runtime not found in settings; use default
+		return s.runtime.Name()
+	}
+	return runtimeType
+}
+
 // resolveManagerForOpts returns the appropriate agent.Manager for the given
 // start options, along with the name of the runtime type it resolved to
 // (e.g. "docker", "kubernetes" — the same string runtime.Runtime.Name()
@@ -3879,6 +3977,19 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID strin
 // runtime. If the resolved runtime differs from the broker's default, a
 // temporary manager is created and cached. Otherwise the broker's shared
 // manager is returned.
+//
+// The resolved runtime-type string is also the single source of truth for
+// every runtime-conditional decision made elsewhere for the same dispatch
+// (e.g. buildStartContext's Kubernetes/GCP-identity-mode check,
+// start_context.go, ptone/scion#2328). A broker can register more than one
+// profile (e.g. a "docker" and a "kubernetes" profile on the same broker),
+// so the profile this specific dispatch names — not the broker's default
+// runtime — decides which one is actually used. buildStartContext itself
+// calls this once and reuses the result for both the GCP-identity check and
+// the manager it returns; start/restart call it again after their own,
+// later saved-profile resolution (handlers.go), since that can resolve
+// differently from buildStartContext's own earlier call. The auth preflight
+// needs only the name, not a manager — see resolveRuntimeNameForOpts, above.
 //
 // When opts.Profile is empty, the project's active profile (from settings.yaml)
 // is used. This ensures the broker respects the project's configured runtime

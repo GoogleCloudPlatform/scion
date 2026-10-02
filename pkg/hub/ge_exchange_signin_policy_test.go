@@ -157,6 +157,9 @@ func (l *recordingAuditLogger) LogBrokerAuthEvent(context.Context, *BrokerAuthEv
 	return nil
 }
 func (l *recordingAuditLogger) LogGCPTokenEvent(context.Context, *GCPTokenEvent) error { return nil }
+func (l *recordingAuditLogger) LogGCSLinkFetchEvent(context.Context, *GCSLinkFetchEvent) error {
+	return nil
+}
 func (l *recordingAuditLogger) LogInviteAuditEvent(_ context.Context, event *InviteAuditEvent) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

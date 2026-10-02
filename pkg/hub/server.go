@@ -1119,6 +1119,28 @@ type Server struct {
 	// GCP token metrics tracker (nil = disabled)
 	gcpTokenMetrics GCPTokenMetricsRecorder
 
+	// gs:// link fetch endpoint (/api/v1/gcs/object; no per-SA client cache —
+	// a fresh token and client are minted/built per request).
+	// gcsLinkBaseTransport is the one shared, credential-free base transport
+	// every per-request client's oauth2.Transport wraps.
+	// gcsLinkRateLimiter enforces the per-viewer rate limit; gcsLinkSem is
+	// the process-wide concurrency semaphore. gcsLinkSourceFactory overrides
+	// gcsObjectSourceFor in tests (nil in production).
+	// gcsLinkRequestDeadlineOverride shortens the whole-request deadline
+	// (gcsLinkRequestDeadline, which also bounds the mint and the response
+	// write — see handleGCSObject steps 10 and 13) in tests; zero in
+	// production, meaning "use the constant". gcsLinkEndpointOverride points
+	// gcsObjectSourceFor's *storage.Client at a fake GCS server in tests;
+	// empty in production, meaning "use the real GCS endpoint". The feature
+	// itself is gated on both the web.gcs_links experiment and
+	// gcpTokenGenerator != nil (step 1).
+	gcsLinkBaseTransport           *http.Transport
+	gcsLinkRateLimiter             *GCPTokenRateLimiter
+	gcsLinkSem                     chan struct{}
+	gcsLinkSourceFactory           gcsSourceFactory
+	gcsLinkRequestDeadlineOverride time.Duration
+	gcsLinkEndpointOverride        string
+
 	// Database connection-pool / notify metrics recorder (P0-5). Defaults to a
 	// disabled no-op recorder; SetDBMetrics wires a real exporter. Drives the
 	// connection-pool sampler started in StartBackgroundServices.
@@ -1377,6 +1399,18 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize GCP token metrics
 	srv.gcpTokenMetrics = NewGCPTokenMetrics()
+
+	// Initialize gs:// link fetch endpoint support (shared base transport,
+	// per-viewer rate limiter, global concurrency semaphore). The feature's
+	// own availability gate (step 1 of handleGCSObject) checks the
+	// web.gcs_links experiment and gcpTokenGenerator directly at request
+	// time, so these are safe to build unconditionally even when no
+	// generator is configured yet — exactly like the pre-existing GCP token
+	// rate limiter below, which is likewise built regardless and simply goes
+	// unused until SetGCPTokenGenerator is called.
+	srv.gcsLinkBaseTransport = newGCSLinkBaseTransport()
+	srv.gcsLinkRateLimiter = NewGCPTokenRateLimiter(float64(gcsLinkRateLimitPerMinute)/60.0, gcsLinkRateLimitPerMinute)
+	srv.gcsLinkSem = make(chan struct{}, gcsLinkGlobalConcurrency)
 
 	// Initialize quota enforcement service (Permissions Phase 2B).
 	// limitOverride wires in the ptone/scion#2061 P2 per-broker settings
@@ -3941,10 +3975,16 @@ func (s *Server) scheduledCreatorIdentity(ctx context.Context, createdBy string)
 // The hub-default rung mirrors the project-default rung's existing choice
 // here; it does not introduce a new principal.
 //
-// When neither the project nor the hub has a default GCP identity mode (or
-// either is explicitly "block"), the applied config is left untouched (nil),
-// preserving the scheduler path's prior behaviour (#1797): unlike the create
-// path, this floor of the ladder does not write an explicit "block" record.
+// When neither the project nor the hub has a default GCP identity mode
+// configured at all, the applied config is left untouched (nil): unlike the
+// create path's floor, this rung does not write an explicit "block" record
+// for the "nothing configured" case, so the broker can apply its own
+// runtime-aware default ("block" everywhere except Kubernetes, "passthrough"
+// on Kubernetes — ptone/scion#2328 phase 1, since Kubernetes does not support
+// "block"). An explicit "block" — at the project rung, or as the hub's own
+// configured default — is different from "nothing configured" and always
+// writes an explicit record, exactly as the create path does: an explicit
+// choice must not be silently turned into a runtime-dependent default.
 func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, agent *store.Agent, project *store.Project) error {
 	if agent.AppliedConfig == nil {
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
@@ -3976,9 +4016,17 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 	case store.GCPMetadataModeBlock:
 		// Project explicitly set "block" — stop the ladder here, matching the
 		// create path's rule that explicit block does not fall through to
-		// the hub default (handlers_agents_core.go). No case previously
-		// matched "block" on this path, so nothing was written to
-		// AppliedConfig.GCPIdentity; that is unchanged here.
+		// the hub default (handlers_agents_core.go). Written as an explicit
+		// record (not left nil): an explicit project choice must be rejected
+		// on the Kubernetes runtime, the same as an explicit per-agent
+		// request or hub default, rather than silently becoming
+		// "passthrough" now that nil means "apply the runtime-aware
+		// default" (ptone/scion#2328 phase 1). Previously this arm left
+		// AppliedConfig.GCPIdentity nil, which was indistinguishable from
+		// "nothing configured" — see TestScheduledDispatch_ProjectBlockNotOverriddenByHubDefault.
+		agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+			MetadataMode: store.GCPMetadataModeBlock,
+		}
 	default:
 		// No project default configured (empty string) — fall back to the
 		// hub-level operational default, one rung down the ladder, mirroring
@@ -3990,10 +4038,14 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 			// exactly as on the create path; see hubDefaultPassthroughAllowed.
 			// Effective profile and pin-back mirror the create path; see
 			// effectiveRuntimeProfileName.
-			mode := store.GCPMetadataModeBlock
 			effectiveProfile := effectiveRuntimeProfileName(agent.AppliedConfig.Profile, project)
+			// Only write an explicit record when the grant is allowed. When
+			// denied, leave AppliedConfig.GCPIdentity unset instead of an
+			// explicit "block" record (ptone/scion#2328) — see the create
+			// path's equivalent arm (handlers_agents_core.go) for the full
+			// rationale: the operator chose "passthrough", not "block", so a
+			// denial here is treated like no default at all.
 			if allowed, resolvedProfile := s.hubDefaultPassthroughAllowed(ctx, agent.RuntimeBrokerID, agent.ProjectID, agent.Name, effectiveProfile); allowed {
-				mode = store.GCPMetadataModePassthrough
 				// Pin the resolved profile onto both AppliedConfig.Profile
 				// and CreateInputs.Profile — the latter is what scion
 				// reincarnate replays (design §3.3 Amendment A1), and
@@ -4005,17 +4057,18 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 				if agent.AppliedConfig.CreateInputs != nil && agent.AppliedConfig.CreateInputs.Profile == "" {
 					agent.AppliedConfig.CreateInputs.Profile = resolvedProfile
 				}
-			}
-			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
-				MetadataMode: mode,
-				// RequireLocalRuntime: see the create path's twin in
-				// handlers_agents_core.go. Only ever set here, since mode is
-				// passthrough only when hubDefaultPassthroughAllowed granted it.
-				RequireLocalRuntime: mode == store.GCPMetadataModePassthrough,
-			}
-			if mode == store.GCPMetadataModePassthrough && agent.RuntimeBrokerID != "" {
-				if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
-					return fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
+				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+					MetadataMode: store.GCPMetadataModePassthrough,
+					// RequireLocalRuntime: see the create path's twin in
+					// handlers_agents_core.go. Only ever set here, since this
+					// whole block only runs when hubDefaultPassthroughAllowed
+					// granted it.
+					RequireLocalRuntime: true,
+				}
+				if agent.RuntimeBrokerID != "" {
+					if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
+						return fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
+					}
 				}
 			}
 		case store.GCPMetadataModeAssign:
@@ -4031,13 +4084,25 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 				return err
 			}
 			agent.AppliedConfig.GCPIdentity = cfg
+		case store.GCPMetadataModeBlock:
+			// Hub explicitly configured "block" as its own default — an
+			// explicit choice, kept as an explicit record (rejected on the
+			// Kubernetes runtime by the broker, ptone/scion#2328 phase 1),
+			// mirroring the create path's equivalent case
+			// (handlers_agents_core.go).
+			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+				MetadataMode: store.GCPMetadataModeBlock,
+			}
 		default:
-			// No hub default either (or the hub default is itself "block") —
-			// preserve the scheduler path's prior behaviour when nothing at
-			// all is configured: leave AppliedConfig.GCPIdentity untouched
-			// (nil) rather than writing an explicit "block" record, unlike
-			// the create path's floor. Pinned by
-			// TestScheduledDispatch_NoProjectDefaultLeavesGCPIdentityUnchanged.
+			// No hub default configured at all (empty) — preserve the
+			// scheduler path's prior behaviour when nothing at all is
+			// configured: leave AppliedConfig.GCPIdentity untouched (nil)
+			// rather than writing an explicit "block" record, unlike the
+			// store.GCPMetadataModeBlock case above. Pinned by
+			// TestScheduledDispatch_NoProjectDefaultLeavesGCPIdentityUnchanged
+			// and TestScheduledDispatch_NoHubDefaultLeavesGCPIdentityUnchanged.
+			// This nil now also signals the broker to apply its own
+			// runtime-aware default (ptone/scion#2328 phase 1).
 		}
 	}
 	return nil
@@ -4624,6 +4689,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if s.gcpTokenRateLimiter != nil {
 		s.gcpTokenRateLimiter.StartCleanup(ctx)
 	}
+	if s.gcsLinkRateLimiter != nil {
+		s.gcsLinkRateLimiter.StartCleanup(ctx)
+	}
 	if s.oidcTokenRateLimiter != nil {
 		s.oidcTokenRateLimiter.StartCleanup(ctx)
 	}
@@ -4994,6 +5062,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/gcp-service-accounts", s.guarded("/api/v1/gcp-service-accounts", s.handleGCPServiceAccounts))
 	s.mux.HandleFunc("/api/v1/gcp-service-accounts/mint", s.guarded("/api/v1/gcp-service-accounts/mint", s.handleGCPServiceAccountsMint))
 	s.mux.HandleFunc("/api/v1/gcp-service-accounts/", s.guarded("/api/v1/gcp-service-accounts/", s.handleGCPServiceAccountByID))
+
+	s.mux.HandleFunc("/api/v1/gcs/object", s.guarded("/api/v1/gcs/object", s.handleGCSObject))
 
 	s.mux.HandleFunc("/api/v1/skills", s.guarded("/api/v1/skills", s.handleSkills))
 	s.mux.HandleFunc("/api/v1/skills/", s.guarded("/api/v1/skills/", s.handleSkillByID))
@@ -5465,6 +5535,13 @@ func (rw *responseWriter) Flush() {
 	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Unwrap lets http.NewResponseController reach the underlying
+// ResponseWriter's own optional interfaces (e.g. SetWriteDeadline), through
+// this wrapper rather than stopping at it.
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
 }
 
 // logOAuthProviders logs which OAuth providers are configured for a client type.
