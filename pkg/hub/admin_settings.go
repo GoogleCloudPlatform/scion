@@ -389,12 +389,11 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 //
 // Delegates to validateIANATimezone (timezone_validate.go), shared with the
 // per-user display-timezone preference validator (handlers_users_core.go's
-// validateUserTimezone), so the two can't drift (tz-refactor task 12 review
-// round 2, R2-1). Unlike validateUserTimezone, this one adds no wrapping of
-// its own (review round 3, R3-3): errNonPortableTimezone's own text ("not an
-// IANA time zone name") already says everything "default_timezone" needs —
-// there is no "Auto" concept to mention here, which is the only reason
-// validateUserTimezone's wording has to differ from the sentinel's.
+// validateUserTimezone), so the two can't drift. Unlike validateUserTimezone,
+// this one adds no wrapping of its own: errNonPortableTimezone's own text
+// ("not an IANA time zone name") already says everything "default_timezone"
+// needs — there is no "Auto" concept to mention here, which is the only
+// reason validateUserTimezone's wording has to differ from the sentinel's.
 func validateDefaultTimezone(tz string) error {
 	if tz == "" {
 		return nil

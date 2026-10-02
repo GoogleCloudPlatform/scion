@@ -323,10 +323,10 @@ func decodeStringPref(key string, rv json.RawMessage) (string, error) {
 //
 // Delegates the actual check to validateIANATimezone (timezone_validate.go),
 // shared with the hub-wide agent_defaults.default_timezone validator
-// (admin_settings.go's validateDefaultTimezone), so the two can't drift
-// (tz-refactor task 12 review round 2, R2-1). Each validator keeps its own
-// wrapping here, because the right message differs: this one points users at
-// "" for Auto, which means nothing for the hub-wide default.
+// (admin_settings.go's validateDefaultTimezone), so the two can't drift.
+// Each validator keeps its own wrapping here, because the right message
+// differs: this one points users at "" for Auto, which means nothing for
+// the hub-wide default.
 func validateUserTimezone(tz string) error {
 	if tz == "" {
 		return nil

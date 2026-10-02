@@ -27,14 +27,11 @@ import (
 // geographic zones), and "Factory" is tzdata's explicit
 // "deliberately uninformative" placeholder.
 //
-// Shared by every timezone-name validator in this package — originally the
-// hub-wide agent_defaults.default_timezone validator
-// (admin_settings.go/admin_settings_db.go) and the per-user display-timezone
-// preference validator (handlers_users_core.go) each declared their own
-// identical copy, which built fine independently but broke the package once
-// both landed (tz-refactor task 12 review round 2, R2-1: duplicate
-// package-level declaration). One list, used by both, so they cannot drift
-// again.
+// Shared by every timezone-name validator in this package: the hub-wide
+// agent_defaults.default_timezone validator (admin_settings.go/
+// admin_settings_db.go) and the per-user display-timezone preference
+// validator (handlers_users_core.go) both use this one list, so they
+// cannot drift apart from each other.
 var nonPortableTimezoneNames = map[string]bool{
 	"Local":      true,
 	"localtime":  true,
@@ -60,10 +57,9 @@ var errNonPortableTimezone = errors.New("not an IANA time zone name")
 // not zone names themselves, and whether they resolve is host-dependent:
 // time.LoadLocation reads the host's zoneinfo directory, so
 // LoadLocation("right/Asia/Tokyo") or LoadLocation("posix/Asia/Tokyo")
-// succeeds wherever that tree exists (review round 4, R4-2) and fails
-// where it doesn't — the same non-portability "Local" and "posixrules" are
-// already rejected for. "Asia/Tokyo" without the prefix is unaffected and
-// still accepted.
+// succeeds wherever that tree exists and fails where it doesn't — the same
+// non-portability "Local" and "posixrules" are already rejected for.
+// "Asia/Tokyo" without the prefix is unaffected and still accepted.
 //
 // Does not special-case the empty string: whether "" is valid, and what it
 // means (Auto for the per-user display preference, UTC for the hub-wide

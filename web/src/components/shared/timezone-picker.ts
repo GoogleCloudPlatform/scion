@@ -49,8 +49,8 @@ const MAX_VISIBLE_RESULTS = 50;
  * Search aids for a handful of common city/country names that Intl's
  * canonical zone list (`listTimeZones()`) does not contain under that
  * spelling, because ICU's canonical pick for that zone is a different
- * historical name (tz-refactor task 12 review round 1, R1-4). A plain
- * substring match against the candidate list alone finds nothing for these
+ * historical name. A plain substring match against the candidate list
+ * alone finds nothing for these
  * — e.g. "asia/katmandu".includes("kathmandu") is false — so typing one of
  * these terms also surfaces the zone it names.
  *
@@ -110,29 +110,27 @@ export class ScionTimezonePicker extends LitElement {
     // the same update cycle instead of scheduling a second one.
     //
     // Gate on whether `value` actually differs from what the input
-    // currently means (`valueFor(searchQuery)`), not on `selectedViaDropdown`
-    // (tz-refactor task 12 review round 2, R2-3 — a regression from R1-7's
-    // fix): gating on the flag made every resync after a dropdown selection
-    // a no-op until the user typed or cleared, including resyncs for
-    // completely unrelated *later* external value changes, so an external
-    // `.value` set after a selection was silently ignored. Comparing values
-    // keeps the round-trip-the-same-value case a no-op without that
-    // collateral damage. `selectedViaDropdown` is still reset here, since a
-    // real resync means whatever it was gating is now stale; it otherwise
-    // stays as set by selectZone()/handleSearchInput()/sl-clear, which is
-    // where it still matters — gating the blur handler's commitTyped() call
-    // below, so a dropdown mousedown selection followed by a blur event
-    // doesn't re-emit the same value a second time.
+    // currently means (`valueFor(searchQuery)`), not on `selectedViaDropdown`:
+    // gating on the flag alone would make every resync after a dropdown
+    // selection a no-op until the user typed or cleared, including resyncs
+    // for completely unrelated *later* external value changes, so an
+    // external `.value` set after a selection would be silently ignored.
+    // Comparing values keeps the round-trip-the-same-value case a no-op
+    // without that collateral damage. `selectedViaDropdown` is still reset
+    // here, since a real resync means whatever it was gating is now stale;
+    // it otherwise stays as set by selectZone()/handleSearchInput()/
+    // sl-clear, which is where it still matters — gating the blur handler's
+    // commitTyped() call below, so a dropdown mousedown selection followed
+    // by a blur event doesn't re-emit the same value a second time.
     //
     // Also resync unconditionally on the very first update
     // (`!this.hasUpdated`, true throughout willUpdate on that first call —
     // Lit flips it only after update() commits), and whenever `emptyLabel`
-    // itself changes (tz-refactor task 12 review round 3, R3-2 — a
-    // regression from the R2-3 fix above): on the first render, `value`
-    // defaults to `''` and `searchQuery` also starts `''`, so
-    // `valueFor('') === ''` trivially matches `this.value` and the
-    // value-comparison guard alone never fires — the empty-label row
-    // ("UTC", "Auto", ...) silently never appeared.
+    // itself changes: on the first render, `value` defaults to `''` and
+    // `searchQuery` also starts `''`, so `valueFor('') === ''` trivially
+    // matches `this.value` and the value-comparison guard alone never fires
+    // — the empty-label row ("UTC", "Auto", ...) would otherwise never
+    // appear.
     if (
       (changed.has('value') || changed.has('emptyLabel')) &&
       (!this.hasUpdated || this.value !== this.valueFor(this.searchQuery.trim()))
@@ -150,7 +148,7 @@ export class ScionTimezonePicker extends LitElement {
     // De-duplicate: if emptyLabel collides with a real zone name already in
     // allZones (e.g. the admin default's empty-label="UTC", and
     // listTimeZones() always includes the real "UTC"), drop that zone from
-    // the plain list so there is one row, not two (R1-5).
+    // the plain list so there is one row, not two.
     const base = this.emptyLabel
       ? this.allZones.filter((z) => z !== this.emptyLabel)
       : this.allZones;
@@ -159,7 +157,7 @@ export class ScionTimezonePicker extends LitElement {
     // Intl's canonical list omits (e.g. a stored "Asia/Kathmandu" when the
     // canonical list only has "Asia/Katmandu" — see isValidTimeZone's
     // doc comment), so a persisted alias is listed instead of looking
-    // "not found" on focus (R1-4).
+    // "not found" on focus.
     const extras: string[] = [];
     if (this.emptyLabel) extras.push(this.emptyLabel);
     if (this.value && this.value !== this.emptyLabel && !base.includes(this.value)) {
@@ -176,7 +174,7 @@ export class ScionTimezonePicker extends LitElement {
 
     let matches = candidates.filter((z) => z.toLowerCase().includes(query));
 
-    // Alias search aid (R1-4): surface the canonical zone for a handful of
+    // Alias search aid: surface the canonical zone for a handful of
     // common alternate names a plain substring match can't find (see
     // SEARCH_ALIAS_HINTS's doc comment).
     for (const [term, zone] of SEARCH_ALIAS_HINTS) {
@@ -188,7 +186,7 @@ export class ScionTimezonePicker extends LitElement {
     // If the typed text is itself a full, valid zone name or alias not
     // already offered (e.g. "Asia/Kolkata", a valid Intl alias absent from
     // supportedValuesOf — see isValidTimeZone), surface it directly so it
-    // can be selected (R1-4).
+    // can be selected.
     if (isValidTimeZone(trimmed) && !matches.includes(trimmed)) {
       matches = [trimmed, ...matches];
     }
