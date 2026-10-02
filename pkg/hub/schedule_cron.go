@@ -69,38 +69,59 @@ func parseScheduleCron(expr string) (cron.Schedule, error) {
 	return sched, nil
 }
 
-// zonePrefixPassPageSize is the page size used by pauseZonePrefixedSchedules.
-// It equals the store's maximum list limit.
-const zonePrefixPassPageSize = 200
+// zonePrefixPassBatchSize is the number of rows pauseZonePrefixedSchedules
+// fetches per batch. It is a variable so tests can force several batches.
+var zonePrefixPassBatchSize = 200
 
 // pauseZonePrefixedSchedules pauses every active schedule whose cron
 // expression carries a zone prefix (CRON_TZ=, TZ=). Such expressions are no
 // longer supported; pausing makes the change visible and reversible (the user
 // edits the expression to UTC and resumes it) instead of silently shifting
-// the fire time. It runs once per process at scheduler start, pages through
-// all active schedules across all projects to the end, and logs one warning
-// per paused schedule. It is idempotent: a second run finds no active
-// prefixed rows. Errors are logged, not returned; the evaluator backstop in
+// the fire time. It runs once per process before the scheduler starts and
+// logs one warning per paused schedule. It is idempotent: a second run finds
+// no active prefixed rows.
+//
+// The pass does not page through ListSchedules: that keyset is on created,
+// and on SQLite legacy timestamps written in a non-UTC zone can make it skip
+// rows or stop advancing. Instead it repeatedly fetches a batch of active
+// prefixed rows and pauses them, which removes them from the next fetch.
+// Rows that are fetched but not paused (the pause failed, or the store's
+// prefix match was looser than hasCronZonePrefix) are excluded from later
+// fetches, so every batch shrinks the candidate set and the loop always
+// terminates. Errors are logged, not returned; the evaluator backstop in
 // executeSchedule covers any row this pass misses.
 func (s *Server) pauseZonePrefixedSchedules(ctx context.Context) {
 	log := slog.With("subsystem", "scheduler")
-	filter := store.ScheduleFilter{Status: store.ScheduleStatusActive}
-	cursor := ""
-	paused := 0
+	excluded := make(map[string]struct{})
+	var excludeIDs []string
+	paused, failed := 0, 0
 	for {
-		page, err := s.store.ListSchedules(ctx, filter, store.ListOptions{Limit: zonePrefixPassPageSize, Cursor: cursor})
+		batch, err := s.store.ListActiveZonePrefixedSchedules(ctx, zonePrefixPassBatchSize, excludeIDs)
 		if err != nil {
 			log.Error("schedule zone-prefix check: failed to list active schedules", "error", err)
 			return
 		}
-		for _, sched := range page.Items {
+		if len(batch) == 0 {
+			break
+		}
+		progressed := false
+		for _, sched := range batch {
+			if _, seen := excluded[sched.ID]; seen {
+				continue
+			}
+			progressed = true
 			if !hasCronZonePrefix(sched.CronExpr) {
+				excluded[sched.ID] = struct{}{}
+				excludeIDs = append(excludeIDs, sched.ID)
 				continue
 			}
 			if err := s.store.UpdateScheduleStatus(ctx, sched.ID, store.ScheduleStatusPaused); err != nil {
 				log.Error("schedule zone-prefix check: failed to pause schedule",
 					"schedule_id", sched.ID, "project_id", sched.ProjectID,
 					"cron_expr", sched.CronExpr, "error", err)
+				failed++
+				excluded[sched.ID] = struct{}{}
+				excludeIDs = append(excludeIDs, sched.ID)
 				continue
 			}
 			paused++
@@ -108,14 +129,29 @@ func (s *Server) pauseZonePrefixedSchedules(ctx context.Context) {
 				"schedule_id", sched.ID, "project_id", sched.ProjectID,
 				"cron_expr", sched.CronExpr)
 		}
-		if page.NextCursor == "" {
+		if !progressed {
+			// The store returned only rows already handled. This should
+			// not happen; stop rather than spin at startup.
+			log.Error("schedule zone-prefix check: stopped, the store returned no new rows; "+
+				"check store health, and on a SQLite hub upgraded from a non-UTC zone run the "+
+				"utc-timestamp-normalize maintenance operation", "paused", paused)
 			break
 		}
-		cursor = page.NextCursor
 	}
 	if paused > 0 {
 		log.Warn("schedule zone-prefix check: paused schedules with unsupported zone prefixes", "count", paused)
 	}
+	if failed > 0 {
+		log.Error("schedule zone-prefix check: some prefixed schedules could not be paused; "+
+			"the evaluator pauses them when they next fall due", "count", failed)
+	}
+}
+
+// startScheduler pauses zone-prefixed schedules and then starts the
+// scheduler, so the evaluator's first tick never sees an active prefixed row.
+func (s *Server) startScheduler(ctx context.Context) {
+	s.pauseZonePrefixedSchedules(ctx)
+	s.scheduler.Start(ctx)
 }
 
 // writeCronParseError writes the 400 response for a cron expression that
