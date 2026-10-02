@@ -264,6 +264,20 @@ the message is now `invalid default_timezone "Local": not an IANA time
 zone name`. `validateUserTimezone` keeps its own wrapping, because its
 `"Auto"` wording genuinely differs.
 
+**CI-discovered fix (not a review finding): the R3-1 `/usr/share/zoneinfo`
+scan test failed on fork CI's `ubuntu-latest` runner.** This dev container's
+`tzdata` package is slim (no `right/`/`posix/` trees, matching round 3's own
+measurement note); GitHub's runner ships the fuller package, which includes
+those two whole-tree duplicates (`right/` with leap seconds baked in,
+`posix/` without) under a path prefix that isn't itself part of any IANA
+zone name — `"right/Africa/Abidjan"` isn't a name `time.LoadLocation`
+accepts either. The scan correctly walked into them and found 596 "false
+rejects" that were not actually false: `isValidTimeZone` was right to
+reject a string that isn't a real zone name. Fixed by excluding the `right`
+and `posix` top-level directory names from the scan. Verified against a
+throwaway directory tree mimicking the structure, since this container
+can't reproduce it directly.
+
 ### Note on ICU canonicalization
 
 Node's ICU build (and browsers using the same CLDR data) returns
@@ -379,6 +393,16 @@ fixer's new commits land on top of it).
   every non-`createTestStore` test passes; the `createTestStore`-backed
   tests fail with the same documented baseline error, pre-existing,
   tz-refactor task 2's scope.
+- **Rebased onto `scion/tz-t10`'s updated head (`f3bd9a5` → `21360ff`,
+  an upstream-review fix touching `handlers_users_core.go`'s preferences
+  PATCH and a nil-cap guard) at tz-em's request.** Clean rebase, no
+  conflicts; rebuilt and re-ran the targeted selection above afterward —
+  unchanged results.
+- **Fork CI then caught a real gap this container can't exercise**: the
+  R3-1 zoneinfo scan test failed on `ubuntu-latest`'s fuller `tzdata`
+  package (see "CI-discovered fix" above). Fixed, pushed, and the full web
+  suite re-run locally (118 files / 3431 tests, all passing) plus the Go
+  build/vet/lint selection above, all re-confirmed clean after the fix.
 
 ## Deferred / out of scope
 
