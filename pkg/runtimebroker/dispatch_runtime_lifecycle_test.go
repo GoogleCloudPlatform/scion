@@ -542,3 +542,63 @@ func TestTryProvisionWorktree_RecoveredProjectPathNotUsedAsRoot(t *testing.T) {
 		t.Errorf(".scion directory entries changed: before %v, after %v", before, after)
 	}
 }
+
+// TestStartAgent_RecoversPathFromEntryWithoutContainerID: a listed entry
+// that matches but carries no container identifier still supplies the
+// agent's project path, so the start runs on the runtime of the agent's
+// saved profile.
+func TestStartAgent_RecoversPathFromEntryWithoutContainerID(t *testing.T) {
+	f := newLifecycleFixture(t)
+	const name = "no-ctr-agent"
+	writeSavedAgentProfile(t, f.projectPath, name, lifecycleK8sProfile)
+	listed := lifecycleAgent(name, f.projectPath, "")
+	listed.ID = ""
+	listed.ContainerID = ""
+	f.registerK8sAgents(listed)
+
+	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/start", map[string]any{
+		"hubEndpoint": lifecycleHubEndpoint,
+	})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	if runs, _ := f.k8sRun(); runs != 1 {
+		t.Fatalf("kubernetes runtime runs = %d, want 1", runs)
+	}
+	if f.defaultMgr.StartCalls() != 0 {
+		t.Errorf("default runtime Start calls = %d, want 0", f.defaultMgr.StartCalls())
+	}
+}
+
+// TestStartAgent_AmbiguousMatchRecoversNoPath: when two distinct containers
+// of the same name and project are listed, neither is taken as the agent's
+// project; the start proceeds with the default resolution instead of
+// failing.
+func TestStartAgent_AmbiguousMatchRecoversNoPath(t *testing.T) {
+	f := newLifecycleFixture(t)
+	const (
+		name      = "dup-agent"
+		projectID = "cccccccc-0000-0000-0000-000000000003"
+	)
+	// Were either entry's path recovered, its saved kubernetes profile would
+	// send the start to kubernetes.
+	writeSavedAgentProfile(t, f.projectPath, name, lifecycleK8sProfile)
+	first := lifecycleAgent(name, f.projectPath, projectID)
+	second := lifecycleAgent(name, f.projectPath, projectID)
+	second.ID = name + "-2"
+	second.ContainerID = "ctr-" + name + "-2"
+	f.defaultMgr.agents = []api.AgentInfo{first, second}
+
+	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/start?projectId="+projectID, map[string]any{
+		"hubEndpoint": lifecycleHubEndpoint,
+	})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	if f.defaultMgr.StartCalls() != 1 {
+		t.Errorf("default runtime Start calls = %d, want 1", f.defaultMgr.StartCalls())
+	}
+	if runs, _ := f.k8sRun(); runs != 0 {
+		t.Errorf("kubernetes runtime runs = %d, want 0", runs)
+	}
+}
