@@ -172,9 +172,10 @@ func TestProject_Update(t *testing.T) {
 	assert.Equal(t, int64(424242), *got.GitHubInstallationID)
 }
 
-// SetProjectOwnerID must change only OwnerID. A stale in-memory copy of the
-// project written afterwards by a full-row update is exactly the clobber the
-// narrow method exists to avoid, so check the other columns survive.
+// TestProject_SetProjectOwnerID pins that SetProjectOwnerID writes only
+// owner_id (name, git remote and labels are left untouched) and returns
+// ErrNotFound for a missing project. It does not model a concurrent stale
+// writer; that interleaving is guarded by review at the call site.
 func TestProject_SetProjectOwnerID(t *testing.T) {
 	ps := newTestProjectStore(t)
 	ctx := context.Background()
@@ -183,7 +184,7 @@ func TestProject_SetProjectOwnerID(t *testing.T) {
 	p.OwnerID = uuid.NewString()
 	require.NoError(t, ps.CreateProject(ctx, p))
 
-	// A concurrent writer renames the project and sets a git remote.
+	// Give the project non-default name and git remote values to check below.
 	p.Name = "Renamed"
 	p.GitRemote = "https://github.com/acme/renamed.git"
 	require.NoError(t, ps.UpdateProject(ctx, p))
