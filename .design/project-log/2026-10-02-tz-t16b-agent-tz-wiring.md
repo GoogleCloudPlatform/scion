@@ -32,8 +32,8 @@
   resolver's source for `TZ`.
 - **PATCH response.** Every agent PATCH returns `resolvedTimezone`,
   `timezoneSource` and `warnings` (the `config.env` ignore warning, and the
-  next-start warning, only when the pin changes under a live container:
-  cloning, starting or running).
+  next-start warning, only when the edit changes the resolved zone while a
+  container is live: cloning, starting or running).
 - **Broker warnings.** `api.AgentInfo.HubOnlyEnvWarnings` (the hub-only env
   `TZ` drop warnings) is copied to `runtimebroker.AgentResponse.Warnings`
   (omitempty). The hub relays these warnings, together with its own

@@ -385,29 +385,49 @@ func TestPatchAgent_ExplicitTimezone(t *testing.T) {
 		assert.Empty(t, resp.Warnings, "re-PATCHing the same zone gives no warning")
 	})
 
-	t.Run("next-start warning only under a live container", func(t *testing.T) {
+	t.Run("next-start warning only when the zone changes under a live container", func(t *testing.T) {
+		legacyParis := func(a *store.Agent) {
+			a.AppliedConfig.ExplicitTimezone = "Europe/Paris"
+			a.AppliedConfig.ExplicitTimezoneLegacy = true
+		}
+		pinnedTokyo := func(a *store.Agent) { a.AppliedConfig.ExplicitTimezone = "Asia/Tokyo" }
 		for _, tc := range []struct {
-			phase state.Phase
-			warn  bool
+			name   string
+			phase  state.Phase
+			mutate func(a *store.Agent)
+			value  string
+			warn   bool
 		}{
-			{state.PhaseRunning, true},
-			{state.PhaseStarting, true},
-			{state.PhaseCloning, true},
-			{state.PhaseCreated, false},
-			{state.PhaseProvisioning, false},
-			{state.PhaseSuspended, false},
-			{state.PhaseStopping, false},
-			{state.PhaseStopped, false},
-			{state.PhaseError, false},
+			{name: "running", phase: state.PhaseRunning, value: "Europe/Paris", warn: true},
+			{name: "starting", phase: state.PhaseStarting, value: "Europe/Paris", warn: true},
+			{name: "cloning", phase: state.PhaseCloning, value: "Europe/Paris", warn: true},
+			{name: "created", phase: state.PhaseCreated, value: "Europe/Paris"},
+			{name: "provisioning", phase: state.PhaseProvisioning, value: "Europe/Paris"},
+			{name: "suspended", phase: state.PhaseSuspended, value: "Europe/Paris"},
+			{name: "stopping", phase: state.PhaseStopping, value: "Europe/Paris"},
+			{name: "stopped", phase: state.PhaseStopped, value: "Europe/Paris"},
+			{name: "error", phase: state.PhaseError, value: "Europe/Paris"},
+			// Clears the legacy label only; the container zone is unchanged.
+			{name: "running, same zone over a legacy pin", phase: state.PhaseRunning, mutate: legacyParis, value: "Europe/Paris"},
+			{name: "running, new zone over a legacy pin", phase: state.PhaseRunning, mutate: legacyParis, value: "Asia/Kathmandu", warn: true},
+			// The hub default is Asia/Tokyo, so unpinning Tokyo resolves the same zone.
+			{name: "running, unpin to the same hub default zone", phase: state.PhaseRunning, mutate: pinnedTokyo, value: ""},
+			{name: "running, pin equal to the hub default", phase: state.PhaseRunning, value: "Asia/Tokyo"},
 		} {
-			srv, _, agent := tzPatchServer(t, string(tc.phase), nil)
-			code, resp := patchAgentTZ(t, srv, agent.ID, map[string]interface{}{"explicitTimezone": "Europe/Paris"})
-			require.Equal(t, http.StatusOK, code, tc.phase)
-			if tc.warn {
-				assert.Equal(t, []string{explicitTimezoneNextStartWarning}, resp.Warnings, tc.phase)
-			} else {
-				assert.Empty(t, resp.Warnings, tc.phase)
-			}
+			t.Run(tc.name, func(t *testing.T) {
+				srv, s, agent := tzPatchServer(t, string(tc.phase), tc.mutate)
+				code, resp := patchAgentTZ(t, srv, agent.ID, map[string]interface{}{"explicitTimezone": tc.value})
+				require.Equal(t, http.StatusOK, code)
+				if tc.warn {
+					assert.Equal(t, []string{explicitTimezoneNextStartWarning}, resp.Warnings)
+				} else {
+					assert.Empty(t, resp.Warnings)
+				}
+				got, err := s.GetAgent(ctx, agent.ID)
+				require.NoError(t, err)
+				assert.Equal(t, tc.value, got.AppliedConfig.ExplicitTimezone, "the edit is saved either way")
+				assert.False(t, got.AppliedConfig.ExplicitTimezoneLegacy)
+			})
 		}
 	})
 

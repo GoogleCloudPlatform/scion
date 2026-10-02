@@ -3063,14 +3063,22 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		if agent.AppliedConfig == nil {
 			agent.AppliedConfig = &store.AgentAppliedConfig{}
 		}
+		// Warn only when the edit changes the zone the agent resolves to
+		// while a container is live; any other phase picks the zone up at
+		// its next start anyway. A same-zone re-pin that only clears the
+		// legacy label, or an unpin that falls back to the same zone, leaves
+		// the container as it is.
+		live := phaseHasLiveContainer(agent.Phase)
+		var zoneBefore string
+		if live {
+			zoneBefore = s.agentTZ(ctx, agent).TZ
+		}
 		changed, err := applyExplicitTimezoneEdit(agent.AppliedConfig, *updates.ExplicitTimezone)
 		if err != nil {
 			ValidationError(w, err.Error(), map[string]interface{}{"field": "explicitTimezone"})
 			return
 		}
-		// Warn only when the pin actually changed under a live container;
-		// any other phase picks the new zone up at its next start anyway.
-		if changed && phaseHasLiveContainer(agent.Phase) {
+		if live && changed && s.agentTZ(ctx, agent).TZ != zoneBefore {
 			warnings = append(warnings, explicitTimezoneNextStartWarning)
 		}
 	}
