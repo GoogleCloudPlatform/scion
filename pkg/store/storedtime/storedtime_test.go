@@ -119,3 +119,16 @@ func TestParse_Layouts(t *testing.T) {
 		assert.Equal(t, time.UTC, got.Location(), in)
 	}
 }
+
+// TestParse_ErrorOmitsValue pins that a parse error never carries the input,
+// so callers may log it without leaking a stored value.
+func TestParse_ErrorOmitsValue(t *testing.T) {
+	const secretish = "not-a-time-4f2a9c"
+	for _, fn := range []func(string) (time.Time, error){Parse, ParseGoString} {
+		_, err := fn(secretish)
+		require.ErrorIs(t, err, ErrUnparseable)
+		assert.NotContains(t, err.Error(), secretish)
+	}
+	_, err := Parse("")
+	assert.ErrorIs(t, err, ErrUnparseable)
+}

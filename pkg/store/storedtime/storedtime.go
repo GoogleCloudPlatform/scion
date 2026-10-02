@@ -18,10 +18,12 @@
 // parser shared by the webchat store readers and the utc-timestamp-normalize
 // maintenance operation.
 //
+// Errors never include the input text, so callers can log them without
+// leaking stored values.
 package storedtime
 
 import (
-	"fmt"
+	"errors"
 	"strings"
 	"time"
 )
@@ -29,6 +31,9 @@ import (
 // goStringLayout is time.Time.String()'s layout without its trailing
 // zone-abbreviation token.
 const goStringLayout = "2006-01-02 15:04:05.999999999 -0700"
+
+// ErrUnparseable is returned when no supported layout matches.
+var ErrUnparseable = errors.New("unparseable stored timestamp")
 
 // ParseGoString parses text written by Go's time.Time.String() and returns
 // the instant in UTC.
@@ -57,11 +62,11 @@ func ParseGoString(s string) (time.Time, error) {
 	case 4:
 		fields = fields[:3]
 	default:
-		return time.Time{}, fmt.Errorf("parse Go time string %q: want date, time, offset and zone abbreviation", s)
+		return time.Time{}, ErrUnparseable
 	}
 	t, err := time.Parse(goStringLayout, strings.Join(fields, " "))
 	if err != nil {
-		return time.Time{}, fmt.Errorf("parse Go time string %q: %w", s, err)
+		return time.Time{}, ErrUnparseable
 	}
 	return t.UTC(), nil
 }
@@ -73,7 +78,7 @@ func ParseGoString(s string) (time.Time, error) {
 // time.Time.String() text (the ent column form, see ParseGoString).
 func Parse(s string) (time.Time, error) {
 	if s == "" {
-		return time.Time{}, fmt.Errorf("parse stored time: empty")
+		return time.Time{}, ErrUnparseable
 	}
 	if parsed, err := time.Parse(time.RFC3339Nano, s); err == nil {
 		return parsed.UTC(), nil
