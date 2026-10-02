@@ -765,6 +765,24 @@ func TestNewGitHubHTTPClient_KeepsDefaultTransportSettings(t *testing.T) {
 	}
 }
 
+// TestGitHubSkillResolver_StallBound_ReadsTransport proves the budget-fit
+// reservation comes from the transport's ResponseHeaderTimeout, the real
+// stall bound, rather than a separately configured field (#2546 N1).
+func TestGitHubSkillResolver_StallBound_ReadsTransport(t *testing.T) {
+	r := &GitHubSkillResolver{
+		httpClient:     newGitHubHTTPClient(250 * time.Millisecond),
+		requestTimeout: 7 * time.Second,
+	}
+	if got := r.stallBound(); got != 250*time.Millisecond {
+		t.Errorf("expected stall bound from transport (250ms), got %s", got)
+	}
+
+	r.httpClient = http.DefaultClient
+	if got := r.stallBound(); got != 7*time.Second {
+		t.Errorf("expected fallback to requestTimeout (7s) without ResponseHeaderTimeout, got %s", got)
+	}
+}
+
 // TestGitHubSkillResolver_TransientThenSuccess_FitsWithinBudget proves the
 // budget-fit check does not interfere with a retry that legitimately fits:
 // a single transient 5xx followed by success still succeeds inside a
@@ -2341,5 +2359,57 @@ func TestGitHubSkillResolver_RetryAfterAboveCap_FailsFastWithoutBudgetPressure(t
 	}
 	if e.RetryAfter != "60" {
 		t.Errorf("expected RetryAfter 60, got %q", e.RetryAfter)
+	}
+}
+
+// TestGitHubSkillResolver_RawDownloadBodyTimeout_ClassifiedAsTimeout proves
+// that a raw download cut off mid-body by the resolve budget is reported as
+// a timeout naming the file, not as an unclassified resolve_failed (#2546 O1).
+func TestGitHubSkillResolver_RawDownloadBodyTimeout_ClassifiedAsTimeout(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 1024},
+		})
+	})
+	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, r *http.Request) {
+		// Send headers and a first byte promptly, then trickle the rest
+		// slower than the budget allows.
+		w.Header().Set("Content-Length", "1024")
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < 1024; i++ {
+			if _, err := w.Write([]byte("x")); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	})
+
+	resolver := newTestGitHubResolver(server)
+	resolver.resolveBudget = 300 * time.Millisecond
+
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(result.Errors))
+	}
+	if result.Errors[0].Code != SkillErrCodeTimeout {
+		t.Errorf("expected code %s, got %s (message: %s)", SkillErrCodeTimeout, result.Errors[0].Code, result.Errors[0].Message)
+	}
+	if !strings.Contains(result.Errors[0].Message, "skills/my-skill/SKILL.md") {
+		t.Errorf("expected error to name the file path, got %s", result.Errors[0].Message)
 	}
 }

@@ -125,6 +125,21 @@ func newGitHubHTTPClient(stall time.Duration) *http.Client {
 	return &http.Client{Timeout: githubAPITimeout, Transport: tr}
 }
 
+// stallBound is how long an attempt may go without any response before it
+// fails: the transport's ResponseHeaderTimeout, as set by
+// newGitHubHTTPClient. Reading it from the transport keeps doWithRetry's
+// budget reservation in step with the real bound (#2546 N1). Clients
+// without one (e.g. test servers' clients) fall back to the metadata
+// attempt timeout, which then bounds a stall instead.
+func (r *GitHubSkillResolver) stallBound() time.Duration {
+	if r.httpClient != nil {
+		if tr, ok := r.httpClient.Transport.(*http.Transport); ok && tr.ResponseHeaderTimeout > 0 {
+			return tr.ResponseHeaderTimeout
+		}
+	}
+	return durationOr(r.requestTimeout, githubRequestTimeout)
+}
+
 // NewGitHubSkillResolver creates a resolver for gh:// and GitHub URL skills.
 // Reads GITHUB_TOKEN from environment for authenticated API access.
 // If a resolution cache directory is available, cached resolution results
@@ -558,6 +573,16 @@ func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHub
 
 	content, err := io.ReadAll(io.LimitReader(resp.Body, int64(githubMaxFileSize)+1))
 	if err != nil {
+		// A transfer cut off by the per-attempt or resolve-budget deadline is
+		// a timeout, so classify it as such (mapping to 504/408) rather than
+		// leaving it as an unclassified resolve_failed; other read errors
+		// stay unclassified (#2546 O1).
+		if classifyNetworkError(err) == SkillErrCodeTimeout {
+			return nil, &githubResolveError{
+				code: SkillErrCodeTimeout,
+				msg:  fmt.Sprintf("failed to read %s: %v", filePath, err),
+			}
+		}
 		return nil, fmt.Errorf("failed to read file content: %w", err)
 	}
 	if int64(len(content)) > int64(githubMaxFileSize) {
@@ -751,7 +776,7 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 			// attempt timeout equals the default budget, and a transfer still
 			// in progress is bounded by ctx itself (#2546 RQ1).
 			if dl, ok := ctx.Deadline(); ok {
-				stall := durationOr(r.requestTimeout, githubRequestTimeout)
+				stall := r.stallBound()
 				if remaining := time.Until(dl); delay+stall >= remaining {
 					slog.Warn("github: skill resolution out of budget before backoff, failing fast",
 						"method", req.Method, "path", req.URL.Path,
@@ -765,8 +790,8 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 				}
 			}
 
-			slog.Warn("github: retrying GitHub API request after backoff",
-				"method", req.Method, "path", req.URL.Path,
+			slog.Warn("github: retrying request after backoff",
+				"kind", noun, "method", req.Method, "path", req.URL.Path,
 				"status", status, "retry_after", retryAfterHeader,
 				"backoff", delay, "attempt", attempt, "max_attempts", githubMaxRetries)
 
