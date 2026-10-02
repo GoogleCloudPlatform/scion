@@ -4,8 +4,8 @@ Branch `perf/2385-sse-consumers`, base `origin/main` 7ca2edd599128241ecf12ab064e
 Touches `web/src/client/state.ts`, `web/src/client/agent-merge.ts` (new),
 `web/src/components/pages/project-detail.ts`, `web/src/components/pages/agents.ts`,
 plus four test files (two new, two touched). Includes one post-dev-report
-follow-up fix (the tombstone-race fix below), ruled by the EM, and one
-review round's required fixes (see "Review round 1" below).
+follow-up fix (the tombstone-race fix below), ruled by the EM, plus the
+follow-up fixes described later in this log.
 
 ## What
 
@@ -244,10 +244,10 @@ warnings), unchanged from the prior commit's baseline; `npx prettier
   stays at its pre-delta count
   across every SSE delta.
 
-## Review round 1 (requested changes; every finding closed)
+## Follow-up: capability carry-forward, pending-buffer timer and tombstone filtering
 
-Required fixes, each landed with a regression test that was verified to
-fail against the pre-fix code and pass after:
+Fixes, each landed with a regression test that was verified to fail
+against the pre-fix code and pass after:
 
 - **An SSE-created agent lost its inherited scope capabilities on its next
   status delta (a regression vs `main`):** `mergeChanged`'s existing-member
@@ -281,7 +281,8 @@ fail against the pre-fix code and pass after:
   `fetchAgentsPage`). Test: a paged-state test confirming an SSE-deleted
   agent's count stays dropped across a stats-bearing refetch — later
   extended with an assertion covering `fetchAgentsPage`'s own stats
-  filtering specifically (see "Review round 2" below).
+  filtering specifically (see "Stats filtering test and comment
+  consolidation" below).
 
 Optional and nit items, all closed:
 
@@ -344,23 +345,22 @@ Disposition of the non-blocking findings:
 - `npx vitest run` on the reviewer's five targeted files
   (`agent-merge.test.ts`, `state-seed-epoch.test.ts`,
   `state-coalescing.test.ts`, `agents-live-updates.test.ts`,
-  `project-detail-agent-window.test.ts`): 125/125 passing (117 before this
-  round + 8 new: 3 for the capability-preservation fix, 1 for the
+  `project-detail-agent-window.test.ts`): 125/125 passing (117 before
+  this follow-up + 8 new: 3 for the capability-preservation fix, 1 for the
   stale-timer fix, 1 for the paged-stats fix, 3 for the tombstone-site
   test-gap closures).
 - Full targeted suite (the same 13 files tracked throughout this phase):
   216/216 passing.
 - `npx eslint` on the four non-test files: 160 problems (52 errors, 108
-  warnings), unchanged from every prior round's baseline — zero new issues.
+  warnings), unchanged from the prior baseline — zero new issues.
 - `npx prettier --check`: pass on every touched file.
 - Each new regression test (7 total, each paired with a specific fix) was
   verified to fail when its corresponding fix was reverted locally, then
   to pass again once restored.
 
-## Review round 2 (approve; one optional item and one nit closed, plus a doc cleanup)
+## Follow-up: stats filtering test and comment consolidation
 
-Approved, with everything already closed from round 1 confirmed. Two more
-items closed:
+Three items closed:
 
 - **A stats-filtering call site had no dedicated assertion:** the window's
   own page-fetcher test (the one covering `fetchAgentsPage`'s row
@@ -376,10 +376,10 @@ items closed:
   about why a stale timer must not survive into the known phase. Kept the
   full reasoning in one place (the buffering function's doc comment) and
   reduced the other three to one-line pointers at it.
-- **This log's own review-round write-up used bare finding labels and an
-  internal document's filename:** rewritten throughout to describe the
-  underlying behavior instead of leading with a label, keeping issue
-  numbers such as `ptone/scion#2560` and section references.
+- **This log's own write-up used bare finding labels and an internal
+  document's filename:** rewritten throughout to describe the underlying
+  behavior instead of leading with a label, keeping issue numbers such as
+  `ptone/scion#2560` and section references.
 
 ### Commands and results
 
@@ -388,7 +388,7 @@ items closed:
   with one new assertion added to an existing test (no new test count
   change).
 - `npx eslint` on the four non-test files: unchanged from the prior
-  round's baseline — zero new issues.
+  baseline — zero new issues.
 - The new assertion was verified to fail when its corresponding call
   site's filtering was reverted (that site alone, via a scripted
   single-line edit), then to pass again once restored.
