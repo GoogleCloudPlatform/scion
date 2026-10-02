@@ -444,7 +444,8 @@ func TestGitHubSkillResolver_MarksContentlessCacheHit(t *testing.T) {
 		provisionCredentials: map[string]string{"NAMED": credential},
 		resolutionCache:      cache,
 	}
-	res, err := r.Resolve(context.Background(), []api.SkillReference{{URI: uri}}, ResolveOpts{})
+	ctx := r.WithInstallCredentials(context.Background(), "")
+	res, err := r.Resolve(ctx, []api.SkillReference{{URI: uri}}, ResolveOpts{})
 	if err != nil || len(res.Errors) != 0 || len(res.Resolved) != 1 {
 		t.Fatalf("Resolve: err=%v result=%+v", err, res)
 	}
@@ -461,7 +462,7 @@ func TestGitHubSkillResolver_MarksContentlessCacheHit(t *testing.T) {
 
 	// An entry that still has its content is not marked.
 	cache.putEntry(key, ResolvedSkill{Name: "s", URI: uri, Files: []ResolvedFile{{Path: "SKILL.md", Content: []byte("x")}}}, true)
-	res, err = r.Resolve(context.Background(), []api.SkillReference{{URI: uri}}, ResolveOpts{})
+	res, err = r.Resolve(ctx, []api.SkillReference{{URI: uri}}, ResolveOpts{})
 	if err != nil || len(res.Resolved) != 1 {
 		t.Fatalf("Resolve: err=%v result=%+v", err, res)
 	}

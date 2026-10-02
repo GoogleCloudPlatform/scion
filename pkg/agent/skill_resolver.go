@@ -219,13 +219,20 @@ func ContextWithGitHubCredentialLookup(ctx context.Context, lookup GitHubCredent
 // downloadSkillFile only ever sends either to GitHub hosts.
 func gitHubDownloadToken(ctx context.Context, skill ResolvedSkill) string {
 	if skill.githubCredentialRef != "" {
-		if lookup, ok := ctx.Value(gitHubCredentialLookupKey{}).(GitHubCredentialLookup); ok && lookup != nil {
-			if tok := lookup(skill.githubCredentialRef); tok != "" {
-				return tok
-			}
+		if tok := credentialLookupFromContext(ctx)(skill.githubCredentialRef); tok != "" {
+			return tok
 		}
 	}
 	return GitHubTokenFromContext(ctx)
+}
+
+// credentialLookupFromContext returns the GitHub credential lookup carried
+// by ctx, or a lookup that always returns "" if there is none.
+func credentialLookupFromContext(ctx context.Context) GitHubCredentialLookup {
+	if lookup, ok := ctx.Value(gitHubCredentialLookupKey{}).(GitHubCredentialLookup); ok && lookup != nil {
+		return lookup
+	}
+	return func(string) string { return "" }
 }
 
 // GitHubTokenFromContext retrieves the GitHub token for the install phase,

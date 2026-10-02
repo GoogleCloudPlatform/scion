@@ -239,6 +239,39 @@ func (r *GitHubSkillResolver) CredentialForURI(uri string) string {
 	return token
 }
 
+// WithInstallCredentials returns ctx with what the install step needs to
+// download files of gh:// skills: this resolver's CredentialForURI as the
+// GitHub credential lookup, and defaultToken (when non-empty) as the default
+// GitHub token for skills resolved elsewhere, such as by the Hub. Callers
+// pass the context returned here to provisioning, which also resolves skills
+// with it.
+func (r *GitHubSkillResolver) WithInstallCredentials(ctx context.Context, defaultToken string) context.Context {
+	if defaultToken != "" {
+		ctx = ContextWithGitHubToken(ctx, defaultToken)
+	}
+	return ContextWithGitHubCredentialLookup(ctx, r.CredentialForURI)
+}
+
+// FlushCache writes any resolution cache entries still waiting for their
+// delayed write (see GitHubResolutionCache.Flush). Short-lived processes
+// call it before exiting so persistence does not depend on the delay.
+func (r *GitHubSkillResolver) FlushCache() {
+	if r.resolutionCache != nil {
+		r.resolutionCache.Flush()
+	}
+}
+
+// hasAllFileContent reports whether every file of skill carries its
+// content, i.e. install needs no download for it.
+func hasAllFileContent(skill ResolvedSkill) bool {
+	for _, f := range skill.Files {
+		if f.Content == nil {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *GitHubSkillResolver) ResolverName() string { return "github" }
 
 // PreferFallback implements agent.RouteFilter. It reports whether ref needs a
@@ -338,7 +371,22 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 		}
 		logRef := ghRef.Raw + " (" + sourceKind + ")"
 
-		skill, err := r.resolutionCache.ResolveWithFetch(ctx, cacheKey, flightKey, credID, logRef, isBranchRef, fetch)
+		// A cached entry loaded from disk has no file content, so install
+		// downloads its files using the credential the install context's
+		// lookup returns for this URI (see gitHubDownloadToken). When this
+		// request was resolved with a credential and that lookup cannot
+		// return the same one, such an entry is not used: the ref is
+		// resolved again, with content, so install never downloads a
+		// credential-scoped skill with a different credential or none.
+		var accept func(ResolvedSkill) bool
+		if token != "" && credentialLookupFromContext(ctx)(ghRef.Raw) != token {
+			accept = hasAllFileContent
+			// Keep these callers out of flights started by callers that
+			// accept a content-less entry (see coalesceFetchAccept).
+			flightKey += "|with-content"
+		}
+
+		skill, err := r.resolutionCache.resolveWithFetchAccept(ctx, cacheKey, flightKey, credID, logRef, isBranchRef, accept, fetch)
 		if err != nil {
 			return nil, err
 		}
@@ -361,11 +409,8 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 	// use, never its value) so install looks up the same credential for
 	// those downloads (see gitHubDownloadToken).
 	resolved.githubCredentialRef = ""
-	for _, f := range resolved.Files {
-		if f.Content == nil {
-			resolved.githubCredentialRef = ghRef.Raw
-			break
-		}
+	if !hasAllFileContent(resolved) {
+		resolved.githubCredentialRef = ghRef.Raw
 	}
 	return &resolved, nil
 }

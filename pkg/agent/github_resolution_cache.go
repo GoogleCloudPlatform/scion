@@ -216,7 +216,9 @@ func NewGitHubResolutionCache(dir string, ttl time.Duration) (*GitHubResolutionC
 	// MkdirAll leaves an existing directory as it is, and a new one is
 	// subject to the umask, so set the mode explicitly in both cases.
 	if err := tightenMode(dir, resolutionCacheDirMode); err != nil {
-		return nil, err
+		// For example a directory owned by another user. The cache still
+		// works; only its permissions are not what this process would set.
+		fmt.Fprintf(os.Stderr, "github: WARNING: cannot set mode of resolution cache directory: %v\n", err)
 	}
 	c := &GitHubResolutionCache{
 		dir:       dir,
@@ -242,8 +244,12 @@ func tightenMode(path string, mode os.FileMode) error {
 	if info.Mode().Perm()&^mode == 0 {
 		return nil
 	}
-	return os.Chmod(path, mode)
+	return chmod(path, mode)
 }
+
+// chmod is os.Chmod, replaceable by tests to simulate a path the process
+// cannot change.
+var chmod = os.Chmod
 
 // Get returns a cached ResolvedSkill for the given URI if it exists
 // and has not expired. The returned value is a deep copy safe for
@@ -277,8 +283,11 @@ func (c *GitHubResolutionCache) Get(uri string) (ResolvedSkill, bool) {
 // not written to disk (json:"-"), so an entry loaded after a restart has no
 // file bytes. GitHubSkillResolver handles that case by passing the
 // credential it resolved with to the install step for that skill's
-// downloads (see ResolvedSkill.downloadToken), so a private repo read with a
-// named credential is not downloaded with a different one.
+// downloads (see ResolvedSkill.githubCredentialRef and gitHubDownloadToken),
+// so a private repo read with a named credential is not downloaded with a
+// different one. When the request cannot supply that credential at install,
+// the resolver does not use a content-less entry at all and resolves the ref
+// again (see GitHubSkillResolver.resolveOne).
 func (c *GitHubResolutionCache) putEntry(uri string, skill ResolvedSkill, isBranchRef bool) {
 	c.mu.Lock()
 	now := time.Now()
@@ -648,6 +657,20 @@ func (c *GitHubResolutionCache) coalesceFetch(
 	isBranchRef bool,
 	fetch func(context.Context) (ResolvedSkill, error),
 ) (ResolvedSkill, error) {
+	return c.coalesceFetchAccept(ctx, flightKey, credentialID, cacheKey, logRef, isBranchRef, nil, fetch)
+}
+
+// coalesceFetchAccept is coalesceFetch with accept applied to the in-flight
+// re-check of the cache (see resolveWithFetchAccept). Callers passing a
+// non-nil accept must use a flightKey distinct from callers that do not, so
+// they never join a flight whose result accept would reject.
+func (c *GitHubResolutionCache) coalesceFetchAccept(
+	ctx context.Context,
+	flightKey, credentialID, cacheKey, logRef string,
+	isBranchRef bool,
+	accept func(ResolvedSkill) bool,
+	fetch func(context.Context) (ResolvedSkill, error),
+) (ResolvedSkill, error) {
 	injectFlightJoin(flightKey)
 	resultCh := c.flight.DoChan(flightKey, func() (result interface{}, ferr error) {
 		// DoChan always runs this function in a goroutine it spawns itself
@@ -671,7 +694,7 @@ func (c *GitHubResolutionCache) coalesceFetch(
 		// Re-check: another caller may have already populated cacheKey while
 		// this call waited to become the flight leader — a concurrent flight
 		// for this exact key that finished just before this one got to run.
-		if skill, ok := c.Get(cacheKey); ok {
+		if skill, ok := c.Get(cacheKey); ok && (accept == nil || accept(skill)) {
 			return skill, nil
 		}
 
@@ -740,12 +763,29 @@ func (c *GitHubResolutionCache) ResolveWithFetch(
 	isBranchRef bool,
 	fetch func(context.Context) (ResolvedSkill, error),
 ) (ResolvedSkill, error) {
-	if skill, ok := c.Get(cacheKey); ok {
+	return c.resolveWithFetchAccept(ctx, cacheKey, flightKey, credentialID, logRef, isBranchRef, nil, fetch)
+}
+
+// resolveWithFetchAccept is ResolveWithFetch, except that a cached value
+// (fresh or stale) is only used if accept is nil or returns true for it;
+// otherwise the ref is fetched synchronously, as on a miss. A fetched value
+// is always returned, and stored as usual. See coalesceFetchAccept for the
+// flightKey requirement.
+func (c *GitHubResolutionCache) resolveWithFetchAccept(
+	ctx context.Context,
+	cacheKey, flightKey, credentialID, logRef string,
+	isBranchRef bool,
+	accept func(ResolvedSkill) bool,
+	fetch func(context.Context) (ResolvedSkill, error),
+) (ResolvedSkill, error) {
+	acceptable := func(skill ResolvedSkill) bool { return accept == nil || accept(skill) }
+
+	if skill, ok := c.Get(cacheKey); ok && acceptable(skill) {
 		return skill, nil
 	}
 
 	if isBranchRef {
-		if skill, ok := c.getStale(cacheKey); ok {
+		if skill, ok := c.getStale(cacheKey); ok && acceptable(skill) {
 			if c.recentRefreshFailure(flightKey) {
 				fmt.Fprintf(os.Stderr, "github: WARNING: serving stale entry for %s; skipping refresh after a recent failure\n", logRef)
 			} else {
@@ -753,7 +793,7 @@ func (c *GitHubResolutionCache) ResolveWithFetch(
 				// closure (see its comment), so this goroutine itself cannot
 				// panic from that; no recover needed at this level.
 				go func() {
-					_, ferr := c.coalesceFetch(context.Background(), flightKey, credentialID, cacheKey, logRef, isBranchRef, fetch)
+					_, ferr := c.coalesceFetchAccept(context.Background(), flightKey, credentialID, cacheKey, logRef, isBranchRef, accept, fetch)
 					if ferr != nil {
 						c.recordRefreshFailure(flightKey)
 					} else {
@@ -765,7 +805,7 @@ func (c *GitHubResolutionCache) ResolveWithFetch(
 		}
 	}
 
-	return c.coalesceFetch(ctx, flightKey, credentialID, cacheKey, logRef, isBranchRef, fetch)
+	return c.coalesceFetchAccept(ctx, flightKey, credentialID, cacheKey, logRef, isBranchRef, accept, fetch)
 }
 
 // GitHubResolutionCacheDir returns the directory for storing GitHub
