@@ -138,7 +138,7 @@ The Hub's project file handlers serve project workspaces and shared directories.
 
 ### 3.6 Workspace Host-Path Validation
 
-Before a Runtime Broker bind-mounts, syncs (for example to GCS), uploads, or recursively `chown`s a workspace or agent-home host path, it resolves the path through any symlinks and validates the result. The check runs on every runtime and fails closed: a path that cannot be resolved, including when the home directory cannot be determined, is refused. The broker then acts on the resolved path, not the original one. The following are always refused:
+Before a Runtime Broker bind-mounts, syncs (for example, to GCS), uploads, or recursively `chown`s a workspace or agent-home host path, it resolves the path through any symlinks and validates the result. The check runs on every runtime and fails closed: a path that cannot be resolved, including when the home directory cannot be determined, is refused. The Runtime Broker then acts on the resolved path, not the original one. The following are always refused:
 
 - The filesystem root (`/`, or a Windows volume root).
 - Critical system directories.
@@ -192,7 +192,7 @@ For headless environments (CI/CD, automation), Scion supports **user access toke
 - Tokens are prefixed with `scion_pat_` (a legacy artifact of the older "personal access token" name).
 - Only the SHA-256 hash of the token is stored in the database; the original value is never persisted.
 - Tokens can be scoped to specific permissions and projects, and revoked instantly via the dashboard or CLI.
-- Each token row records an explicit boundary (`boundary_kind`, default `project`). A project-boundary token must carry a `project_id`, and a database CHECK constraint enforces the pairing. At startup the Hub logs the IDs (never the token or project) of any rows that break this rule, and such tokens are rejected when used, while valid tokens keep working. On SQLite, a hand-edited row whose `project_id` is not a UUID fails the schema migration, so correct or delete it before upgrading.
+- Each token row records an explicit boundary (`boundary_kind`, default `project`). A project-boundary token must carry a `project_id`, and a database CHECK constraint enforces the pairing. At startup, the Hub logs the IDs (never the token or project) of any rows that break this rule, and such tokens are rejected when used, while valid tokens keep working. On SQLite, a hand-edited row whose `project_id` is not a UUID fails the schema migration, so correct or delete it before upgrading.
 
 ### 4.5 Credentials Propagation
 
