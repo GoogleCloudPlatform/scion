@@ -151,7 +151,9 @@ func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedCon
 
 	// Env, per key: nil means the request didn't touch env at all (same
 	// guard as the live write, which skips the whole map in that case). A
-	// key added or changed against the live old.Env is set. A key the live
+	// key added or changed against the PAGE-VISIBLE baseline (see
+	// diffExplicitEnvKeys: old.Env, falling back to old.InlineConfig.Env for
+	// a key old.Env lacks -- ptone/scion#2493 R5-1) is set. A key the live
 	// old.Env had that the request's Env no longer has is deleted -- UNLESS
 	// canAttachEnv is false: the GET response withholds Env entirely from a
 	// viewer without attach-equivalent access (canViewAgentEnv,
@@ -162,8 +164,18 @@ func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedCon
 	// into a permanent one in CreateInputs. Additions are unaffected by this
 	// gate: those can only come from someone typing a new key/value, which
 	// is unambiguous regardless of what the viewer can see.
+	//
+	// The "removed" half stays old.Env-only (never falls back to
+	// old.InlineConfig.Env): old.Env is the one live map every removal
+	// candidate must already be absent from to count as removed at all, and
+	// widening that check would change the R1-3/GITHUB_TOKEN behavior this
+	// block does not otherwise touch.
 	if cfg.Env != nil {
-		added, removed := diffExplicitEnvKeys(old.Env, cfg.Env)
+		var oldInlineEnv map[string]string
+		if old.InlineConfig != nil {
+			oldInlineEnv = old.InlineConfig.Env
+		}
+		added, removed := diffExplicitEnvKeys(old.Env, oldInlineEnv, cfg.Env)
 		if !canAttachEnv {
 			removed = nil
 		}
@@ -205,30 +217,63 @@ func thinkingLevelEqual(a, b *int) bool {
 }
 
 // diffExplicitEnvKeys compares a request's env map against the live env it
-// would replace, per §5 of ptone/scion#2493's options.md: added returns
-// every key in newEnv that is missing from oldEnv or whose value differs;
+// would replace, per §5 of ptone/scion#2493's options.md, as refined by
+// review round 5 (R5-1): added returns every key in newEnv that is missing
+// from, or whose value differs from, the PAGE-VISIBLE baseline for that key
+// -- oldEnv[k] (AppliedConfig.Env) when present there, else
+// oldInlineEnv[k] (AppliedConfig.InlineConfig.Env) when oldEnv lacks it.
+//
+// The fallback to oldInlineEnv exists because some env keys are stamped by
+// resolveDerivedConfig into InlineConfig.Env ONLY -- never mirrored into
+// AppliedConfig.Env -- most notably the project/hub SCION_AUTO_EXPOSE_PORTS
+// default (handlers_agent_create_helpers.go). agent-configure.ts's
+// populateForm reads the auto-expose controls from a per-key merge of both
+// maps (R4-2) specifically so the page can display that stamp, and
+// buildConfig re-sends it verbatim whenever env is sent for any other
+// reason (R2-1's "re-send the loaded auto-expose keys" rule). Comparing that
+// echo against oldEnv alone -- which never had the key -- misread it as an
+// "added" key and froze a project/hub default into CreateInputs as if the
+// user had typed it (R5-1). The rule of thumb: this function's baseline
+// must always equal whatever the page actually read the value from.
+//
 // removed returns every key oldEnv has that newEnv does not, EXCEPT
 // GITHUB_TOKEN, which is never reported as removed: store.AgentAppliedConfig's
 // MarshalJSON strips it from every API response unconditionally, even for an
 // attach-capable viewer (see ResponseView's doc comment), so no caller's
 // client can ever legitimately echo it back -- its absence from a request is
 // therefore never evidence that the user removed it, only that the response
-// never contained it to begin with. A key present in both with an unchanged
-// value appears in neither return.
+// never contained it to begin with. removed is deliberately NOT given the
+// oldInlineEnv fallback: every removal candidate must already be absent from
+// oldEnv to be considered at all, and oldEnv is also the map the live write
+// (`agent.AppliedConfig.Env = cfg.Env`) actually replaces, so it is already
+// the correct single baseline for "did the user delete this".
+//
+// A key present in both with an unchanged value (by either baseline)
+// appears in neither return.
 //
 // Deliberately separate from reincarnate_config.go's diffEnvKeys, which
 // compares key names only (never values, since it feeds a user-facing plan
 // and env values may be secrets) and returns a different shape (KeyDiff).
 // This one needs values, to tell an unchanged echoed key apart from an
 // edited one.
-func diffExplicitEnvKeys(oldEnv, newEnv map[string]string) (added map[string]string, removed []string) {
+func diffExplicitEnvKeys(oldEnv, oldInlineEnv, newEnv map[string]string) (added map[string]string, removed []string) {
 	for k, v := range newEnv {
-		if oldV, ok := oldEnv[k]; !ok || oldV != v {
-			if added == nil {
-				added = make(map[string]string)
+		if oldV, ok := oldEnv[k]; ok {
+			if oldV != v {
+				if added == nil {
+					added = make(map[string]string)
+				}
+				added[k] = v
 			}
-			added[k] = v
+			continue
 		}
+		if oldInlineV, ok := oldInlineEnv[k]; ok && oldInlineV == v {
+			continue // page-visible via InlineConfig.Env only; echoed verbatim, not an edit
+		}
+		if added == nil {
+			added = make(map[string]string)
+		}
+		added[k] = v
 	}
 	for k := range oldEnv {
 		if k == "GITHUB_TOKEN" {
