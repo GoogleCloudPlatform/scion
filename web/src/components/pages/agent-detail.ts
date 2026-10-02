@@ -703,11 +703,13 @@ export class ScionPageAgentDetail extends LitElement {
    * `isConnected` alone cannot distinguish "visible" from "hidden behind
    * another route". An `endsWith` check (rather than importing
    * `stripBasePath` from main.ts, which is out of scope for this fix)
-   * tolerates a reverse-proxy base path.
+   * tolerates a reverse-proxy base path. Trailing slashes are stripped
+   * first so `/agents/<id>/` still counts as this agent's route.
    */
   private isOnThisAgentRoute(): boolean {
     if (!this.isConnected || typeof window === 'undefined') return false;
-    return window.location.pathname.endsWith(`/agents/${this.agentId}`);
+    const pathname = window.location.pathname.replace(/\/+$/, '');
+    return pathname.endsWith(`/agents/${this.agentId}`);
   }
 
   /**

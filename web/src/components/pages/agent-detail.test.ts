@@ -299,6 +299,25 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     expect(navClicks).toEqual([{ path: '/agents' }]);
   });
 
+  it('SPA-redirects after delete when the current path has a trailing slash', async () => {
+    const tracker = stubLocation();
+    tracker.pathname = `/agents/${AGENT_ID}/`;
+    const el = await mount(makeAgent());
+    const internals = el as unknown as {
+      handleAction(action: string, event?: MouseEvent): Promise<void>;
+    };
+
+    apiFetch.mockImplementationOnce(() => Promise.resolve(noContent()));
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    await internals.handleAction('delete');
+    vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS);
+    await Promise.resolve();
+
+    expect(tracker.assignedHref).toBeUndefined();
+    expect(navClicks).toEqual([{ path: '/agents' }]);
+  });
+
   it('shows the deleted state before the SPA redirect fires (fake timers)', async () => {
     stubLocation();
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
