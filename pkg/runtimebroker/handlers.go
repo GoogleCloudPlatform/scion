@@ -1962,6 +1962,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		GitClone      *api.GitCloneConfig `json:"gitClone,omitempty"`
 		Branch        string              `json:"branch,omitempty"`
 		WorkspaceMode string              `json:"workspaceMode,omitempty"`
+		// HubAgentDefaults carries the hub defaults a start applies at its
+		// lowest tier (today the auto-expose default, for buildAgentEnv).
+		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
@@ -1979,6 +1982,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		ProjectID:            projectID,
 		UserID:               startReq.UserID,
 	})
+	ctx = withStartHubAgentDefaults(ctx, startReq.HubAgentDefaults)
 
 	s.agentLifecycleLog.Debug("startAgent called", "agent_id", id, "task", startReq.Task, "projectPath", startReq.ProjectPath, "projectSlug", startReq.ProjectSlug, "harnessConfig", startReq.HarnessConfig, "resolvedEnvCount", len(startReq.ResolvedEnv))
 
@@ -2378,6 +2382,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		UserID               string                           `json:"userId,omitempty"`
 		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
 		PreResolvedSkills    *hubclient.ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
+		// HubAgentDefaults mirrors the same field on the start path.
+		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
@@ -2395,6 +2401,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		ProjectID:            projectID,
 		UserID:               restartReq.UserID,
 	})
+	ctx = withStartHubAgentDefaults(ctx, restartReq.HubAgentDefaults)
 
 	// Look up the agent with the same project-scoped search across every
 	// runtime this broker has that the stop below uses, and read its name

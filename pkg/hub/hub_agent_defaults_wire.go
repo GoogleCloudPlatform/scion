@@ -34,15 +34,21 @@ import "github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 // snapshot is empty in file mode, this returns nil there, the wire field is
 // omitted, and the broker-side rung never fires — no file-mode branch needed
 // anywhere. That is rejected alternative A7.
-func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings) *RemoteHubAgentDefaults {
+//
+// autoExposePorts is the hub's auto-expose-ports default. Unlike the four
+// limit/resource fields it is sent in file mode too: no broker reads it from
+// its own settings.yaml, so the hub is its only source, and it lands at the
+// broker's lowest env tier (buildAgentEnv's defaultEnv) in every mode.
+func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts *bool) *RemoteHubAgentDefaults {
 	if d.DefaultMaxTurns == 0 && d.DefaultMaxModelCalls == 0 &&
-		d.DefaultMaxDuration == "" && d.DefaultResources == nil {
+		d.DefaultMaxDuration == "" && d.DefaultResources == nil && autoExposePorts == nil {
 		return nil
 	}
 	out := &RemoteHubAgentDefaults{
-		MaxTurns:      d.DefaultMaxTurns,
-		MaxModelCalls: d.DefaultMaxModelCalls,
-		MaxDuration:   d.DefaultMaxDuration,
+		MaxTurns:        d.DefaultMaxTurns,
+		MaxModelCalls:   d.DefaultMaxModelCalls,
+		MaxDuration:     d.DefaultMaxDuration,
+		AutoExposePorts: copyBoolPtr(autoExposePorts),
 	}
 	if d.DefaultResources != nil {
 		// Copy the pointee: hubAgentDefaults() already returns a deep copy, but
@@ -52,4 +58,23 @@ func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings) *RemoteHubAgentD
 		out.Resources = &rs
 	}
 	return out
+}
+
+// startHubAgentDefaults is the hub-defaults wire value for a start or restart
+// dispatch: the auto-expose default only, or nil when the hub has none. The
+// limit/resource fields stay create/provision-only, so a start never changes
+// which tier supplies them.
+func startHubAgentDefaults(autoExposePorts *bool) *RemoteHubAgentDefaults {
+	if autoExposePorts == nil {
+		return nil
+	}
+	return &RemoteHubAgentDefaults{AutoExposePorts: copyBoolPtr(autoExposePorts)}
+}
+
+func copyBoolPtr(b *bool) *bool {
+	if b == nil {
+		return nil
+	}
+	v := *b
+	return &v
 }
