@@ -281,10 +281,10 @@ func TestStopAllAgents_Global_NonAdmin_Forbidden(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
-func TestStopAllAgents_ScopeCapabilities_ProjectMember(t *testing.T) {
+func TestStopAllAgents_ScopeCapabilities_ProjectOwner(t *testing.T) {
 	srv, _, alice, bob, project := setupDemoPolicyTest(t)
 
-	// Alice (project member) should see stop_all in project-scoped capabilities
+	// Alice (project owner) should see stop_all in project-scoped capabilities
 	rec := doRequestAsUser(t, srv, alice, http.MethodGet,
 		"/api/v1/projects/"+project.ID+"/agents", nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -295,7 +295,7 @@ func TestStopAllAgents_ScopeCapabilities_ProjectMember(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.NotNil(t, resp.Capabilities)
 	assert.Contains(t, resp.Capabilities.Actions, "stop_all",
-		"project member should have stop_all in scope capabilities")
+		"project owner should have stop_all in scope capabilities")
 
 	// Bob (non-member) should not reach this endpoint at all: listProjectAgents
 	// now requires agent.list on the project (fix-1908 F1 -- this route used
@@ -357,6 +357,16 @@ func TestStopAllAgents_ProjectAdminViaMembersAPI_StopsAllAgents(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, string(state.PhaseStopped), a.Phase, id)
 	}
+
+	// The project agent list advertises stop_all to the admin.
+	assert.Contains(t, projectAgentListActions(t, srv, bob, project.ID), "stop_all",
+		"project admin should have stop_all in scope capabilities")
+
+	// A plain project member is not advertised stop_all.
+	carol := createStopAllTestUser(t, s, "user-carol")
+	addProjectMemberViaAPI(t, srv, s, alice, project.ID, carol.ID, store.ProjectRoleMember)
+	assert.NotContains(t, projectAgentListActions(t, srv, carol, project.ID), "stop_all",
+		"project member should not have stop_all in scope capabilities")
 }
 
 func TestStopAllAgents_MembersGroupOnly_Forbidden(t *testing.T) {
@@ -392,4 +402,121 @@ func TestStopAllAgents_MembersGroupOnly_Forbidden(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, string(state.PhaseRunning), a.Phase, id)
 	}
+}
+
+// projectAgentListActions returns the scope capability actions that
+// GET /api/v1/projects/{id}/agents reports for user.
+func projectAgentListActions(t *testing.T, srv *Server, user *store.User, projectID string) []string {
+	t.Helper()
+	rec := doRequestAsUser(t, srv, user, http.MethodGet,
+		"/api/v1/projects/"+projectID+"/agents", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp struct {
+		Capabilities *Capabilities `json:"_capabilities"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Capabilities)
+	return resp.Capabilities.Actions
+}
+
+// createStopAllTestUser creates an active hub member with the given ID suffix.
+func createStopAllTestUser(t *testing.T, s store.Store, name string) *store.User {
+	t.Helper()
+	ctx := context.Background()
+	u := &store.User{
+		ID:          tid(name),
+		Email:       name + "@test.com",
+		DisplayName: name,
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, u))
+	ensureHubMembership(ctx, s, u.ID)
+	return u
+}
+
+func TestStopAllAgents_GroupProjectMember_StopsOnlyOwnAgents(t *testing.T) {
+	srv, s, alice, bob, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	// Bob belongs to a group that holds project-member on the project; he
+	// has no direct binding.
+	groupID := tid("stopall-team")
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: groupID, Slug: "stopall-team", Name: "Stop-all Team",
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    groupID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   bob.ID,
+		Role:       store.GroupMemberRoleMember,
+	}))
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/members",
+		addProjectMemberRequest{
+			RoleDefinitionID: rd.ID,
+			PrincipalType:    store.RoleBindingPrincipalGroup,
+			PrincipalID:      groupID,
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, "add group member: %s", rec.Body.String())
+
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: tid("alice-agent"), Slug: tid("alice-agent"), Name: "Alice Agent",
+		ProjectID: project.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: tid("bob-agent"), Slug: tid("bob-agent"), Name: "Bob Agent",
+		ProjectID: project.ID, OwnerID: bob.ID, Phase: string(state.PhaseRunning),
+	}))
+
+	rec = doRequestAsUser(t, srv, bob, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp StopAllAgentsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "own", resp.Scope)
+	assert.Equal(t, 1, resp.Stopped)
+
+	b, err := s.GetAgent(ctx, tid("bob-agent"))
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), b.Phase)
+	a, err := s.GetAgent(ctx, tid("alice-agent"))
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), a.Phase)
+}
+
+func TestStopAllAgents_InactiveMemberBinding_Forbidden(t *testing.T) {
+	srv, s, alice, bob, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	// Bob's direct project-member binding is not active until tomorrow.
+	notBefore := time.Now().Add(24 * time.Hour)
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/members",
+		addProjectMemberRequest{
+			RoleDefinitionID: rd.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      bob.ID,
+			NotBefore:        &notBefore,
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, "add member: %s", rec.Body.String())
+
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: tid("bob-agent"), Slug: tid("bob-agent"), Name: "Bob Agent",
+		ProjectID: project.ID, OwnerID: bob.ID, Phase: string(state.PhaseRunning),
+	}))
+
+	rec = doRequestAsUser(t, srv, bob, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	a, err := s.GetAgent(ctx, tid("bob-agent"))
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), a.Phase)
 }

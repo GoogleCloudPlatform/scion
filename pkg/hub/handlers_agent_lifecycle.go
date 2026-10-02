@@ -523,8 +523,9 @@ type StopAllAgentsResponse struct {
 
 // handleStopAllAgents stops all running agents, optionally scoped to a project.
 // Global (projectID=="") requires agent.stop_all on the hub. Project-scoped
-// allows any project member by role binding: holders of agent.stop_all on the
-// project (owners/admins) stop all agents, other members stop only their own.
+// allows any project member: holders of agent.stop_all on the project
+// (owners/admins) stop all agents; other members, by active direct or
+// group-derived role binding, stop only their own.
 func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -568,8 +569,14 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 				"Only admins can stop all agents", nil)
 			return
 		}
-		// Other project members (by role binding) stop only their own agents.
-		if !s.isActiveMember(ctx, userIdent.ID(), projectID) {
+		// Other project members stop only their own agents. Membership is the
+		// effective project role: direct or group-derived role bindings that
+		// are currently active.
+		role := ""
+		if s.membershipService != nil {
+			role = s.membershipService.projectEffectiveRole(ctx, userIdent.ID(), projectID)
+		}
+		if role == "" {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"You are not a member of this project", nil)
 			return
