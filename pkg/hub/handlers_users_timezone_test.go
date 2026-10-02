@@ -134,6 +134,86 @@ func TestUpdateUser_Preferences_TopLevelNullIsNoop(t *testing.T) {
 	assert.Equal(t, "Asia/Tokyo", updated.Preferences.Timezone, "top-level preferences:null must not clear timezone")
 }
 
+// TestUpdateUser_Preferences_EmptyObjectIsNoop verifies that
+// PATCH {"preferences": {}} is a true no-op: it must not create an empty
+// store.UserPreferences record for a user that had none (Gemini review on
+// GoogleCloudPlatform/scion#2241, G1 second half).
+func TestUpdateUser_Preferences_EmptyObjectIsNoop(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	devUser := getDevUser(t, srv, s)
+	require.Nil(t, devUser.Preferences, "test setup: dev user must start with no preferences")
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+devUser.ID,
+		map[string]any{"preferences": map[string]any{}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetUser(ctx, devUser.ID)
+	require.NoError(t, err)
+	assert.Nil(t, updated.Preferences, "an empty preferences object must not initialize a preferences record")
+}
+
+// TestUpdateUser_Preferences_UnknownKeysOnlyIsNoop verifies that a
+// preferences PATCH containing only unrecognized keys (e.g. a casing typo)
+// is a true no-op: the unknown key is silently ignored (contract, see the
+// PR body), and the ignoring must not create an empty preferences record
+// (Gemini review on GoogleCloudPlatform/scion#2241, G1 second half).
+func TestUpdateUser_Preferences_UnknownKeysOnlyIsNoop(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	devUser := getDevUser(t, srv, s)
+	require.Nil(t, devUser.Preferences, "test setup: dev user must start with no preferences")
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+devUser.ID,
+		map[string]any{"preferences": map[string]any{"timeZone": "Asia/Tokyo"}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetUser(ctx, devUser.ID)
+	require.NoError(t, err)
+	assert.Nil(t, updated.Preferences, "an all-unknown-key preferences object must not initialize a preferences record")
+}
+
+// TestUpdateUser_Preferences_EmptyObjectCrossUserNoAuthzRequired verifies
+// that because {"preferences": {}} is a true no-op, a cross-user PATCH of it
+// does not require user.update permission: it returns 200, not 403, and
+// does not touch the target's stored preferences. This documents that the
+// G1 no-op fix does not change cross-user authorization for an actual
+// preference change (TestUpdateUser_Preferences_CrossUserPatchForbidden
+// above still asserts 403 for a real value).
+func TestUpdateUser_Preferences_EmptyObjectCrossUserNoAuthzRequired(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	actor := &store.User{
+		ID:          tid("prefs-noop-actor"),
+		Email:       "prefs-noop-actor@example.com",
+		DisplayName: "Prefs Noop Actor",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, actor))
+
+	target := &store.User{
+		ID:          tid("prefs-noop-target"),
+		Email:       "prefs-noop-target@example.com",
+		DisplayName: "Prefs Noop Target",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Preferences: &store.UserPreferences{Timezone: "Asia/Tokyo"},
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+
+	rec := doRequestAsUser(t, srv, actor, http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]any{"preferences": map[string]any{}})
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated.Preferences)
+	assert.Equal(t, "Asia/Tokyo", updated.Preferences.Timezone,
+		"a no-op preferences PATCH must not change the target's stored value")
+}
+
 // TestUpdateUser_Preferences_InvalidTimezoneRejected verifies that an
 // unparseable IANA zone name is rejected with 400 and not persisted.
 func TestUpdateUser_Preferences_InvalidTimezoneRejected(t *testing.T) {
@@ -273,6 +353,32 @@ func TestGetUser_PreferencesVisibility(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	require.NotNil(t, got.Preferences, "admin must see another member's preferences")
 	assert.Equal(t, "Europe/Paris", got.Preferences.Timezone)
+}
+
+// TestStripPreferencesForViewer_NilCapDoesNotPanic is a direct unit test of
+// stripPreferencesForViewer with cap == nil (Gemini review on
+// GoogleCloudPlatform/scion#2241, G2). Over HTTP, every route that reaches
+// listUsers/getUser requires authentication (an unauthenticated request
+// gets 401 from the auth middleware before the handler runs — see
+// auth.go's "missing authorization header" gate), and
+// ComputeCapabilities/ComputeCapabilitiesBatch never return a nil element
+// for a non-nil identity, so a nil cap cannot reach this function on any
+// currently live HTTP path. It is tested directly anyway: this codebase has
+// a known history of a typed-nil identity slipping through context (see
+// identity_typed_nil_test.go and commit "auth: treat a typed-nil identity
+// as missing at classification and entry"), and the guard is a one-line,
+// zero-risk defense against that same bug class reappearing here.
+func TestStripPreferencesForViewer_NilCapDoesNotPanic(t *testing.T) {
+	ctx := context.Background()
+	u := &store.User{
+		ID:          "prefs-nilcap-user",
+		Preferences: &store.UserPreferences{Timezone: "Europe/Paris"},
+	}
+
+	require.NotPanics(t, func() {
+		stripPreferencesForViewer(ctx, u, nil)
+	})
+	assert.Nil(t, u.Preferences, "a nil cap and no identity in context must strip preferences, not panic")
 }
 
 // TestUpdateUser_Preferences_CrossUserPatchForbidden verifies the write side

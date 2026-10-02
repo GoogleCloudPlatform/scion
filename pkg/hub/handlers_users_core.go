@@ -216,7 +216,10 @@ func stripPreferencesForViewer(ctx context.Context, u *store.User, cap *Capabili
 	if userIdentity, ok := GetIdentityFromContext(ctx).(UserIdentity); ok && userIdentity.ID() == u.ID {
 		return
 	}
-	if capabilityAllows(cap, ActionUpdate) {
+	// capabilityAllows already treats a nil cap as "no actions allowed", so
+	// this is a redundant, zero-risk guard, not a behavior change (Gemini
+	// review on GoogleCloudPlatform/scion#2241, G2).
+	if cap != nil && capabilityAllows(cap, ActionUpdate) {
 		return
 	}
 	u.Preferences = nil
@@ -414,7 +417,16 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 				BadRequest(w, "invalid preferences: "+err.Error())
 				return
 			}
+			// hasFields tracks whether rawPrefs contained at least one
+			// recognized key. An empty object, a top-level null (which
+			// decodes to a nil rawPrefs and an empty loop below) and a body
+			// containing only unknown keys must all be true no-ops: they
+			// must not set prefsPatch, so they neither force a DB write nor
+			// initialize an empty store.UserPreferences record for a user
+			// that had none (Gemini review on
+			// GoogleCloudPlatform/scion#2241, G1).
 			patch := &userPreferencesPatch{}
+			var hasFields bool
 			for key, rv := range rawPrefs {
 				switch key {
 				case "defaultTemplate":
@@ -424,6 +436,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 						return
 					}
 					patch.DefaultTemplate = &v
+					hasFields = true
 				case "defaultProfile":
 					v, err := decodeStringPref(key, rv)
 					if err != nil {
@@ -431,6 +444,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 						return
 					}
 					patch.DefaultProfile = &v
+					hasFields = true
 				case "theme":
 					v, err := decodeStringPref(key, rv)
 					if err != nil {
@@ -438,6 +452,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 						return
 					}
 					patch.Theme = &v
+					hasFields = true
 				case "timezone":
 					v, err := decodeStringPref(key, rv)
 					if err != nil {
@@ -449,9 +464,18 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 						return
 					}
 					patch.Timezone = &v
+					hasFields = true
+				default:
+					// Unknown preferences keys are silently ignored (200, no
+					// change); see the PR body contract. This keeps older
+					// hubs and newer clients compatible, unlike the
+					// top-level field switch above, which rejects unknown
+					// fields outright.
 				}
 			}
-			prefsPatch = patch
+			if hasFields {
+				prefsPatch = patch
+			}
 		}
 	}
 
