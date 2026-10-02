@@ -4739,6 +4739,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler = NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
 	s.registerSchedulerHandlers()
 
+	// Report non-canonical stored timestamps (SQLite) before the scheduler
+	// starts reading tables they may make unreadable.
+	s.checkNonCanonicalTimestamps(ctx)
+
 	// Pause schedules whose cron expression carries an unsupported zone
 	// prefix before the evaluator's first tick, so it never runs them.
 	s.startScheduler(ctx)

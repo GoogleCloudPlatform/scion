@@ -63,6 +63,12 @@ var defaultSeedOperations = []store.MaintenanceOperation{
 		Category:    store.MaintenanceCategoryMigration,
 	},
 	{
+		Key:         UTCTimestampNormalizeKey,
+		Title:       "UTC Timestamp Normalize",
+		Description: `Rewrites stored timestamps to UTC so that ordering and paging are exact: on SQLite, every ent time column, every webchat time column and the times embedded in JSON fields; on Postgres, the JSON-embedded times. Also makes rows written in a numeric-abbreviation zone (for example Asia/Kathmandu) readable again. Back up the database first. Run it only on this release or later. Safe to re-run; canonical values are left untouched and values are never logged.`,
+		Category:    store.MaintenanceCategoryMigration,
+	},
+	{
 		Key:         "pull-images",
 		Title:       "Pull Container Images",
 		Description: "Pulls the latest container images for all configured harnesses from the image registry.",

@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
@@ -267,6 +268,8 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		}, nil
 	case "applied-config-tz-cleanup":
 		return &AppliedConfigTZCleanupExecutor{Store: s.store}, nil
+	case entadapter.UTCTimestampNormalizeKey:
+		return &UTCTimestampNormalizeExecutor{DB: s.storeDB()}, nil
 	case "pull-images":
 		log.Debug("Resolved pull-images executor",
 			"runtime_bin", mc.RuntimeBin, "registry", mc.ImageRegistry,
