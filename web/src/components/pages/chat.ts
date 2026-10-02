@@ -62,6 +62,7 @@ import type { RecentFile, RecentFilesSnapshot } from '../../client/chat-recent-f
 import { paginateAll, PaginationStoppedError } from '../../client/paginate-all.js';
 import { isProjectChimeEnabled, setProjectChimeEnabled } from '../../utils/audio.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-terminal.js';
+import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal.js';
 import '../shared/chat/chat-thread.js';
 import '../shared/chat/chat-file-preview.js';
 import type { PreviewTarget } from '../shared/chat/chat-file-preview.js';
@@ -106,7 +107,7 @@ const MEMBERS_WIDTH_KEY = 'scion.chat.membersWidth';
 // Lazy-load the search component only when v2 is active
 const loadChatSearch = () => import('../shared/chat/chat-search.js');
 // Lazy-load the quick switcher component on first Cmd+K press
-const loadChatSwitcher = () => import('../shared/chat/chat-switcher.js');
+const loadQuickPalette = () => import('../shared/palette/quick-palette.js');
 
 /**
  * How long a successfully-loaded palette group stays fresh across a
@@ -459,7 +460,7 @@ export class ScionPageChat extends LitElement {
    * Whether the quick command palette component has been lazy-loaded.
    * `@state` (not a plain field) so togglePalette's `await
    * this.updateComplete` after setting it actually waits for a real,
-   * separate render: mount `<scion-chat-switcher>` with open=false first, so
+   * separate render: mount `<scion-quick-palette>` with open=false first, so
    * the following `v2PaletteOpen = true` is a genuine false->true transition
    * on an existing element rather than both happening in the same render
    * pass (which is indistinguishable from "born open" to Shoelace's dialog —
@@ -472,7 +473,7 @@ export class ScionPageChat extends LitElement {
    * True while an open is in flight but hasn't set `v2PaletteOpen` yet —
    * synchronous (set before the first `await`, unlike `v2PaletteOpen`) so a
    * second Ctrl+K press arriving during the first-open lazy import
-   * (`loadChatSwitcher()`) can be detected before that import resolves.
+   * (`loadQuickPalette()`) can be detected before that import resolves.
    * Without this, that second press would re-enter `togglePalette` while
    * `v2PaletteOpen` is still false and would either open a second time or
    * re-capture the invoker focus.
@@ -655,7 +656,7 @@ export class ScionPageChat extends LitElement {
   /** Bound handler: close the open palette if a route change navigates away from /chat. */
   private _onPopState = this._handlePopStateForPalette.bind(this);
   /** The mounted switcher/palette element, if any — excluded from the modal guard's live query. */
-  @query('scion-chat-switcher') private _switcherEl?: Element;
+  @query('scion-quick-palette') private _switcherEl?: Element;
   /** Whether the search panel is visible. */
   @state() private v2SearchActive = false;
   /** Whether the search component has been lazy-loaded. */
@@ -728,6 +729,14 @@ export class ScionPageChat extends LitElement {
       --chat-fs-6xl: 2rem;
       --chat-fs-7xl: 2.5rem;
       --chat-lh-tight: 1.25rem;
+    }
+
+    /* The quick palette follows this page's density. */
+    scion-quick-palette {
+      --palette-fs-xs: var(--chat-fs-xs);
+      --palette-fs-sm: var(--chat-fs-sm);
+      --palette-fs-base: var(--chat-fs-base);
+      --palette-fs-xl: var(--chat-fs-xl);
     }
 
     :host([data-density='comfy']) {
@@ -3388,52 +3397,7 @@ export class ScionPageChat extends LitElement {
    * actually open and connected right now.
    */
   private _isUnrelatedModalActive(): boolean {
-    return this._hasOpenModalDescendant(document, this._switcherEl ?? null);
-  }
-
-  /**
-   * Recursively walks `root`'s descendants — including into every open
-   * shadow root, not just the light-DOM tree `querySelectorAll` alone would
-   * reach — looking for an open `sl-dialog`, `sl-drawer` or native `dialog`.
-   * `exclude` (our own switcher/palette host) and everything inside its
-   * shadow tree is skipped entirely, since composedPath()-based exclusion
-   * does not work here: our own dialog lives inside `exclude`'s shadow root,
-   * and `Element.contains()` does not cross shadow boundaries.
-   */
-  private _hasOpenModalDescendant(root: ParentNode, exclude: Element | null): boolean {
-    for (const el of Array.from(root.querySelectorAll('*'))) {
-      if (exclude && el === exclude) continue;
-      if (this._isOpenModalElement(el)) return true;
-      if (el.shadowRoot && this._hasOpenModalDescendant(el.shadowRoot, exclude)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /**
-   * Is `el` a currently-open *modal* surface — an `sl-dialog`, a non-
-   * `contained` `sl-drawer` (a `contained` drawer renders inside its own
-   * container rather than as a page-blocking overlay, per Shoelace), or a
-   * native `<dialog open>`? Shared between the live modal query above and
-   * `_handleDocumentModalShow` below, since both need exactly this
-   * definition of "modal" — not every Shoelace element that happens to fire
-   * `sl-show` (toasts/`sl-alert`, `sl-tooltip`, `sl-dropdown`, `sl-details`,
-   * `sl-select` all do, and none of them are modal).
-   */
-  private _isOpenModalElement(el: Element): boolean {
-    const tag = el.tagName;
-    if (tag === 'SL-DIALOG') {
-      return Boolean((el as unknown as { open?: boolean }).open);
-    }
-    if (tag === 'SL-DRAWER') {
-      if (el.hasAttribute('contained')) return false;
-      return Boolean((el as unknown as { open?: boolean }).open);
-    }
-    if (tag === 'DIALOG') {
-      return el.hasAttribute('open');
-    }
-    return false;
+    return hasOpenModalDescendant(document, this._switcherEl ?? null);
   }
 
   /**
@@ -3450,7 +3414,7 @@ export class ScionPageChat extends LitElement {
     const path = e.composedPath();
     if (this._switcherEl && path.includes(this._switcherEl)) return; // our own dialog opening
     const origin = path[0];
-    if (!(origin instanceof Element) || !this._isOpenModalElement(origin)) return;
+    if (!(origin instanceof Element) || !isOpenModalElement(origin)) return;
     this._closePaletteWithoutFocusRestore();
   }
 
@@ -3574,9 +3538,9 @@ export class ScionPageChat extends LitElement {
     try {
       if (!options.skipInvokerCapture) this._capturePaletteInvokerFocus();
       if (!this.v2SwitcherLoaded) {
-        await loadChatSwitcher();
+        await loadQuickPalette();
         this.v2SwitcherLoaded = true;
-        // Let <scion-chat-switcher> mount and render with open=false first.
+        // Let <scion-quick-palette> mount and render with open=false first.
         // Shoelace's dialog reacts to `open` transitioning false -> true to
         // run its show animation and fire sl-initial-focus/sl-show; created
         // already-open, it skips that lifecycle entirely — a real Shoelace
@@ -4100,7 +4064,9 @@ export class ScionPageChat extends LitElement {
   private _handlePaletteSelect(e: CustomEvent<{ target: PaletteTarget }>): void {
     const target = e.detail?.target;
     this._closePaletteAndCancelLoad();
-    if (!target) return;
+    // Chat builds no `agent` candidates (its agent rows open a DM), so an
+    // `agent` target can only be stale or foreign UI state.
+    if (!target || target.kind === 'agent') return;
     if (target.kind === 'dm') {
       const group = target.peerKind === 'agent' ? 'agents' : 'people';
       const stillPresent = (this.v2PaletteGroups[group]?.candidates ?? []).some(
@@ -4172,7 +4138,7 @@ export class ScionPageChat extends LitElement {
    */
   private _handlePaletteAfterHide(e: Event): void {
     // Focus/close handlers must be filtered to the owned dialog, not nested
-    // bubbling events. This listener sits on <scion-chat-switcher> itself,
+    // bubbling events. This listener sits on <scion-quick-palette> itself,
     // one shadow-root boundary away from the actual sl-dialog that emits
     // sl-after-hide — any *other* Shoelace modal a future change nests
     // inside the switcher would otherwise bubble through here and wrongly
@@ -4517,14 +4483,16 @@ export class ScionPageChat extends LitElement {
     return html`
       ${this.v2SwitcherLoaded
         ? html`
-            <scion-chat-switcher
+            <scion-quick-palette
+              label="Quick switcher"
+              placeholder="Search agents, threads, people, documents…"
               .open=${this.v2PaletteOpen}
               .groups=${this.v2PaletteGroups}
               @palette-select=${this._handlePaletteSelect}
               @palette-retry=${this._handlePaletteRetry}
               @palette-dismiss=${this._handlePaletteDismiss}
               @sl-after-hide=${this._onPaletteAfterHide}
-            ></scion-chat-switcher>
+            ></scion-quick-palette>
           `
         : nothing}
       <scion-chat-file-preview

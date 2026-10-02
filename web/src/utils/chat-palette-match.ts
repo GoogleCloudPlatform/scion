@@ -37,7 +37,7 @@ export interface HighlightRange {
 /**
  * Stable reading order for palette groups, derived from the single shared
  * {@link PALETTE_GROUP_ORDER} constant so this comparator and the palette's
- * own Tab/Shift+Tab group cycling (`chat-switcher.ts`) can never disagree
+ * own Tab/Shift+Tab group cycling (`quick-palette.ts`) can never disagree
  * about group order. Unknown groups (there are none today) sort last.
  */
 function groupRank(group: string): number {

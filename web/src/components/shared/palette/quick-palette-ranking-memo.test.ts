@@ -21,7 +21,7 @@
  * `renderPaletteGroup` — plus once per arrow-key press. This mocks
  * `rankCandidates` itself (wrapping the real implementation, so behavior is
  * unchanged) purely to count calls; a separate file from
- * chat-switcher-palette.test.ts so that mock doesn't affect any other test.
+ * quick-palette.test.ts so that mock doesn't affect any other test.
  */
 
 // @vitest-environment happy-dom
@@ -36,8 +36,8 @@ vi.mock('../../../utils/chat-palette-match.js', async (importOriginal) => {
 import { rankCandidates } from '../../../utils/chat-palette-match.js';
 const rankCandidatesMock = vi.mocked(rankCandidates);
 
-await import('./chat-switcher.js');
-type ScionChatSwitcher = import('./chat-switcher.js').ScionChatSwitcher;
+await import('./quick-palette.js');
+type ScionQuickPalette = import('./quick-palette.js').ScionQuickPalette;
 import type { GroupState } from '../../../client/chat-palette-types.js';
 import { dmCandidateId } from '../../../client/chat-palette-types.js';
 
@@ -60,8 +60,8 @@ function agentsGroup(
   };
 }
 
-async function mountPalette(groups: Record<'agents', GroupState>): Promise<ScionChatSwitcher> {
-  const el = document.createElement('scion-chat-switcher') as ScionChatSwitcher;
+async function mountPalette(groups: Record<'agents', GroupState>): Promise<ScionQuickPalette> {
+  const el = document.createElement('scion-quick-palette');
   el.open = true;
   el.groups = groups;
   document.body.appendChild(el);

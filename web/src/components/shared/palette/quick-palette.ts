@@ -15,13 +15,21 @@
  */
 
 /**
- * Chat quick command palette component (Cmd/Ctrl-K).
+ * Surface-neutral quick command palette component (Cmd/Ctrl-K and friends).
  *
- * Renders a labeled sl-dialog with a combobox query input and four grouped
- * result regions (Agents, Threads, People, Documents), one global keyboard
- * model across all four, and typed selection/dismiss/retry events. It makes
- * no API calls and does not navigate itself — the page supplies `groups` and
- * reacts to its events.
+ * Renders a labeled sl-dialog with a combobox query input and up to four
+ * grouped result regions (Agents, Threads, People, Documents) — only the
+ * groups a caller actually supplies via `groups` are rendered, so a host
+ * that only ever populates `agents` gets a single-group palette for free —
+ * one global keyboard model across every rendered group, and typed
+ * selection/dismiss/retry events. It makes no API calls and does not
+ * navigate itself — the host supplies `groups` (and, for its own copy,
+ * `label`/`placeholder`) and reacts to its events.
+ *
+ * Shared by every host that needs a quick-jump palette (chat's full
+ * Agents/Threads/People/Documents switcher today; an agents-only "Jump to
+ * agent" palette in the terminal view) — do not fork or copy this
+ * component for a new surface; configure it instead.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -62,10 +70,20 @@ const PALETTE_GROUP_NOUN: Record<PaletteGroup, { singular: string; plural: strin
   documents: { singular: 'document', plural: 'documents' },
 };
 
-@customElement('scion-chat-switcher')
-export class ScionChatSwitcher extends LitElement {
+@customElement('scion-quick-palette')
+export class ScionQuickPalette extends LitElement {
   /** Whether the palette dialog is open. */
   @property({ type: Boolean }) open = false;
+
+  /**
+   * The dialog's own accessible label (Shoelace `sl-dialog`'s `label`),
+   * read by assistive tech when the palette opens. Each host passes copy
+   * that names what its palette finds.
+   */
+  @property({ type: String }) label = 'Quick switcher';
+
+  /** Placeholder text for the query input. Each host passes copy that names what it searches. */
+  @property({ type: String }) placeholder = 'Search…';
 
   /** Per-group load state, keyed by {@link PaletteGroup}. */
   @property({ attribute: false })
@@ -112,6 +130,13 @@ export class ScionChatSwitcher extends LitElement {
            property rather than a bare number in the max-height rule below,
            so a future chrome change has one place to update. */
         --palette-chrome-height: 9rem;
+
+        /* Type scale: a dense default. A host with its own type scale
+           sets these on the element to scale the palette with its page. */
+        --palette-fs-xs: 0.625rem;
+        --palette-fs-sm: 0.6875rem;
+        --palette-fs-base: 0.75rem;
+        --palette-fs-xl: 0.9375rem;
       }
 
       .palette-dialog::part(panel) {
@@ -134,7 +159,7 @@ export class ScionChatSwitcher extends LitElement {
         flex: 1;
         border: none;
         outline: none;
-        font-size: var(--chat-fs-xl);
+        font-size: var(--palette-fs-xl);
         background: transparent;
         color: var(--scion-text, #1e293b);
         padding: 0.25rem 0;
@@ -161,6 +186,12 @@ export class ScionChatSwitcher extends LitElement {
         display: grid;
         grid-template-columns: 1fr 1fr;
         gap: 0 0.75rem;
+      }
+
+      /* A single group (e.g. an agents-only host) gets the full width
+       * instead of the left column of an otherwise empty grid. */
+      .palette-results.single-group {
+        grid-template-columns: 1fr;
       }
 
       @media (max-width: 768px) {
@@ -227,7 +258,7 @@ export class ScionChatSwitcher extends LitElement {
       }
 
       .palette-group-heading {
-        font-size: var(--chat-fs-sm);
+        font-size: var(--palette-fs-sm);
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.04em;
@@ -271,7 +302,7 @@ export class ScionChatSwitcher extends LitElement {
       }
 
       .palette-secondary {
-        font-size: var(--chat-fs-base);
+        font-size: var(--palette-fs-base);
         /* Not --scion-text-muted: that token (neutral-500 in light mode)
            fails WCAG AA (4.34:1) against the selected row's
            --scion-bg-subtle background. --scion-text-secondary is a
@@ -290,7 +321,7 @@ export class ScionChatSwitcher extends LitElement {
       .palette-group-incomplete {
         padding: 0.5rem 1rem 0.75rem;
         color: var(--scion-text-muted, #94a3b8);
-        font-size: var(--chat-fs-base);
+        font-size: var(--palette-fs-base);
       }
 
       .palette-group-error sl-button,
@@ -304,7 +335,7 @@ export class ScionChatSwitcher extends LitElement {
 
       .palette-help {
         padding: 0.375rem 1rem;
-        font-size: var(--chat-fs-sm);
+        font-size: var(--palette-fs-sm);
         color: var(--scion-text-muted, #94a3b8);
         border-top: 1px solid var(--scion-border, #e2e8f0);
         display: flex;
@@ -317,7 +348,7 @@ export class ScionChatSwitcher extends LitElement {
         border: 1px solid var(--scion-border, #e2e8f0);
         border-radius: 0.125rem;
         font-family: inherit;
-        font-size: var(--chat-fs-xs);
+        font-size: var(--palette-fs-xs);
         background: var(--scion-bg-subtle, #f1f5f9);
         /* Not the surrounding .palette-help's inherited --scion-text-muted:
            that token fails WCAG AA against this chip's own
@@ -418,7 +449,7 @@ export class ScionChatSwitcher extends LitElement {
     this.setActiveId(ranked[0]?.candidate.id ?? null);
   }
 
-  override willUpdate(changed: PropertyValues<ScionChatSwitcher>): void {
+  override willUpdate(changed: PropertyValues<ScionQuickPalette>): void {
     // `queryText` is a private @state field: TypeScript's `keyof` on a class
     // omits private/protected member names, so PropertyValues<T>'s generic
     // `has<K extends keyof T>` rejects the literal even though the field is
@@ -905,11 +936,13 @@ export class ScionChatSwitcher extends LitElement {
 
   private renderPalette() {
     const activeDomId = this.activeId ? this.domIdFor(this.activeId) : undefined;
+    const presentGroupCount = PALETTE_GROUP_ORDER.filter((g) => this.groups[g]).length;
+    const singleGroup = presentGroupCount === 1;
 
     return html`
       <sl-dialog
         class="palette-dialog"
-        label="Quick switcher"
+        label=${this.label}
         ?open=${this.open}
         @sl-initial-focus=${this.handlePaletteInitialFocus}
         @sl-request-close=${this.handlePaletteRequestClose}
@@ -925,7 +958,7 @@ export class ScionChatSwitcher extends LitElement {
             aria-controls="palette-result-list"
             aria-activedescendant=${activeDomId ?? nothing}
             aria-describedby=${this.touchPrimary.isTouch ? nothing : 'palette-keyboard-help'}
-            placeholder="Search agents, threads, people, documents…"
+            placeholder=${this.placeholder}
             .value=${this.queryText}
             autocomplete="off"
             @input=${this.handlePaletteQueryInput}
@@ -940,7 +973,7 @@ export class ScionChatSwitcher extends LitElement {
           aria-label="Results"
           aria-owns=${this.paletteListboxOwnedIds()}
         ></div>
-        <div class="palette-results">
+        <div class="palette-results ${singleGroup ? 'single-group' : ''}">
           ${this.renderPaletteGroup('agents')} ${this.renderPaletteGroup('threads')}
           ${this.renderPaletteGroup('people')} ${this.renderPaletteGroup('documents')}
           ${this.paletteHasNoResultsAnywhere()
@@ -959,7 +992,7 @@ export class ScionChatSwitcher extends LitElement {
           ? nothing
           : html`
               <div id="palette-keyboard-help" class="palette-help">
-                <span><kbd>Tab</kbd> next group</span>
+                ${presentGroupCount > 1 ? html`<span><kbd>Tab</kbd> next group</span>` : nothing}
                 <span><kbd>↑↓</kbd> navigate</span>
                 <span><kbd>↵</kbd> open</span>
                 <span><kbd>esc</kbd> close</span>
@@ -979,6 +1012,6 @@ export class ScionChatSwitcher extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'scion-chat-switcher': ScionChatSwitcher;
+    'scion-quick-palette': ScionQuickPalette;
   }
 }

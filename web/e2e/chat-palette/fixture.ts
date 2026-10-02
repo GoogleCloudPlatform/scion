@@ -1,7 +1,7 @@
 /**
  * Isolated fixture for the native chat quick command palette. Mounts the
  * real `scion-page-chat` (which lazy-loads the
- * real `scion-chat-switcher`) and, on demand, a real `scion-terminal-pane`
+ * real `scion-quick-palette`) and, on demand, a real `scion-terminal-pane`
  * with a real xterm — network/SSE/clipboard boundaries are supplied by
  * Playwright's request interception, not by a production mock mode.
  *
@@ -122,7 +122,7 @@ page.pageData = pageData;
 const useShell = params.get('shell') === '1';
 let chatShell: ScionChatShell | null = null;
 if (useShell) {
-  chatShell = document.createElement('scion-chat-shell') as ScionChatShell;
+  chatShell = document.createElement('scion-chat-shell');
   chatShell.user = pageData.user ?? null;
   chatShell.currentPath = window.location.pathname;
   chatShell.appendChild(page);
@@ -244,7 +244,7 @@ const fixture = {
   setPaletteDialogHideDuration(ms: number): void {
     const dialog = document
       .querySelector('scion-page-chat')
-      ?.shadowRoot?.querySelector('scion-chat-switcher')
+      ?.shadowRoot?.querySelector('scion-quick-palette')
       ?.shadowRoot?.querySelector('sl-dialog.palette-dialog');
     if (!(dialog instanceof HTMLElement)) {
       throw new Error(
