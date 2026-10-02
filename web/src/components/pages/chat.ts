@@ -314,6 +314,24 @@ export class ScionPageChat extends LitElement {
   private _onConversationMarkedUnread = this._handleConversationMarkedUnread.bind(this);
   private _unreadDMRequestId = 0;
   /**
+   * Which view (a project, or the hub) last claimed the members sidebar, for
+   * the two loaders that don't go through the hub walk's own guards.
+   * Bumped by every call to loadV2Members (which replaces the arrays with
+   * one project's members) and by every call to loadHubMembers (which
+   * claims the sidebar for the hub view, whether it starts a walk or joins
+   * one). loadV2Members and refreshHubMemberPresence capture it before
+   * their network await and bail, after their last await, if it has moved
+   * on — a newer view has claimed the sidebar and their response is stale.
+   * refreshHubMemberPresence only merges fields into the existing arrays
+   * rather than replacing them, so it captures this token without bumping
+   * it.
+   *
+   * The hub walk itself doesn't check this token: its own `v2Conversation`
+   * and {@link _hubMembersGeneration} checks keep it from publishing over a
+   * project view.
+   */
+  private _membersViewSeq = 0;
+  /**
    * Coalescing gate for {@link loadHubMembers}. `loadHubMembers` has several
    * call sites — a route parse, `initV2`'s no-conversation branch, a
    * rail-data re-parse, `handleResetView`, and the fallback poll — that fire
@@ -2336,6 +2354,10 @@ export class ScionPageChat extends LitElement {
    * lazy imports, so it cannot land in that window as the code stands.
    */
   private loadHubMembers(options?: { refresh?: boolean }): void {
+    // Claim the sidebar for the hub view before any early return below, so a
+    // project or presence response still in flight from the view the user
+    // just left is discarded even when this call only joins a walk.
+    ++this._membersViewSeq;
     const inFlightForThisGeneration =
       this._hubMembersInFlight && this._hubMembersInFlightGeneration === this._hubMembersGeneration;
     if (inFlightForThisGeneration) {
@@ -2581,12 +2603,21 @@ export class ScionPageChat extends LitElement {
    */
   private async refreshHubMemberPresence(projectId: string): Promise<void> {
     if (!projectId) return;
+    // Captured, not bumped: this only merges presence fields into whatever
+    // loadHubMembers/loadV2Members last populated, it doesn't replace that
+    // view's arrays. If the view has since moved on, bail instead of
+    // merging hub presence onto another view's members.
+    const seq = this._membersViewSeq;
     try {
       const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/members`);
       if (!res.ok) return;
       const data = (await res.json()) as {
         humans?: Array<{ id: string; presenceState?: 'active' | 'idle' | '' }>;
       };
+      // Check after the last await, immediately before the first write —
+      // a newer load could otherwise land in the window between the body
+      // resolving and this check.
+      if (seq !== this._membersViewSeq) return;
       if (!data.humans?.length) return;
 
       // Build a lookup of userId → presenceState. Members present in the
@@ -2667,6 +2698,7 @@ export class ScionPageChat extends LitElement {
 
   private async loadV2Members(projectId: string): Promise<void> {
     if (!projectId) return;
+    const seq = ++this._membersViewSeq;
     try {
       const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/members`);
       if (res.ok) {
@@ -2695,6 +2727,12 @@ export class ScionPageChat extends LitElement {
           }>;
           members?: SpaceMember[];
         };
+        // The view may have moved on while this was in flight — to another
+        // project, or to the hub — so a later loadV2Members/loadHubMembers
+        // call has already claimed the sidebar. Check after the last await,
+        // immediately before the first write, so applying this response
+        // can't overwrite that current view with stale data.
+        if (seq !== this._membersViewSeq) return;
         // Populate the sidebar member arrays
         this.v2HumanMembers = (data.humans || []).map((h) => ({
           id: h.id,
