@@ -387,24 +387,19 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 // nonPortableTimezoneNames is rejected even though time.LoadLocation accepts
 // those names. An empty string means UTC and is always valid.
 //
-// Delegates the actual check to validateIANATimezone (timezone_validate.go),
-// shared with the per-user display-timezone preference validator
-// (handlers_users_core.go's validateUserTimezone), so the two can't drift
-// (tz-refactor task 12 review round 2, R2-1). Each validator keeps its own
-// wrapping here, because the right message differs: this one names
-// "default_timezone" and never mentions "Auto", which means nothing for a
-// hub-wide default.
+// Delegates to validateIANATimezone (timezone_validate.go), shared with the
+// per-user display-timezone preference validator (handlers_users_core.go's
+// validateUserTimezone), so the two can't drift (tz-refactor task 12 review
+// round 2, R2-1). Unlike validateUserTimezone, this one adds no wrapping of
+// its own (review round 3, R3-3): errNonPortableTimezone's own text ("not an
+// IANA time zone name") already says everything "default_timezone" needs —
+// there is no "Auto" concept to mention here, which is the only reason
+// validateUserTimezone's wording has to differ from the sentinel's.
 func validateDefaultTimezone(tz string) error {
 	if tz == "" {
 		return nil
 	}
-	if err := validateIANATimezone(tz); err != nil {
-		if errors.Is(err, errNonPortableTimezone) {
-			return fmt.Errorf("%q is not an IANA time zone name", tz)
-		}
-		return err
-	}
-	return nil
+	return validateIANATimezone(tz)
 }
 
 // handlePutServerConfig updates the global settings.yaml.
