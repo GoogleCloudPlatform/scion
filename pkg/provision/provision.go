@@ -2516,11 +2516,15 @@ func IsValidJoinWorktree(base, candidate string) error {
 // PENDING: whether a JOIN discovery path that fails this check should fall
 // through to try the next discovery source and ultimately create a fresh
 // worktree (this function's current behavior, matching this stack's
-// original design and tests), or hard-refuse the whole dispatch (main's
-// independently-added ensureWorktree validation and its own tests) is an
-// open design question pending resolution of the overlap with main's
-// ensureWorktree validation. Do not change this function's
-// fallback-vs-refuse behavior without checking that resolution first.
+// original design and tests), or hard-refuse the whole dispatch, is an open
+// design question pending resolution, for the local (non-MountedWorktree)
+// path. For MountedWorktree, the sharer-registry JOIN check above (the one
+// candidate check that does not route through this function) refuses an
+// invalid candidate outright instead of falling through, matching the
+// behavior it is layered on top of; that outcome is settled, not part of
+// this open question. Do not change this function's fallback-vs-refuse
+// behavior, or the registry site's MountedWorktree refusal, without
+// checking that resolution first.
 func validateJoinCandidate(base, path, agentID, branchName, source string) bool {
 	if err := IsValidJoinWorktree(base, path); err != nil {
 		slog.Warn("ProvisionShared: join candidate failed worktree relationship validation, refusing to join",
@@ -2745,24 +2749,42 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 		return worktreeOutcome{}, fmt.Errorf("ProvisionShared: list sharers for branch %q: %w", branchName, err)
 	}
 	if len(sharers) > 0 && existingWtPath != "" {
-		if valErr := IsValidJoinWorktree(base, existingWtPath); valErr == nil {
-			switch {
-			case in.MountedWorktree && currentBranch(ctx, existingWtPath) != branchName:
-				// The agent there has switched to another branch since it
-				// was registered: the git worktree list below decides.
-				slog.Info("ProvisionShared: the registered worktree for this branch is on another branch now",
-					"agent_id", in.AgentID, "branch", branchName, "path", existingWtPath)
-			case in.MountedWorktree:
-				return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, existingWtPath)
-			default:
-				slog.Info("ProvisionShared: joining existing worktree (registry)",
-					"agent_id", in.AgentID, "branch", branchName, "path", existingWtPath,
-					"existing_sharers", sharers)
-				return registered(existingWtPath)
+		if _, statErr := os.Lstat(existingWtPath); statErr == nil {
+			if valErr := IsValidJoinWorktree(base, existingWtPath); valErr == nil {
+				switch {
+				case in.MountedWorktree && currentBranch(ctx, existingWtPath) != branchName:
+					// The agent there has switched to another branch since it
+					// was registered: the git worktree list below decides.
+					slog.Info("ProvisionShared: the registered worktree for this branch is on another branch now",
+						"agent_id", in.AgentID, "branch", branchName, "path", existingWtPath)
+				case in.MountedWorktree:
+					return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, existingWtPath)
+				default:
+					slog.Info("ProvisionShared: joining existing worktree (registry)",
+						"agent_id", in.AgentID, "branch", branchName, "path", existingWtPath,
+						"existing_sharers", sharers)
+					return registered(existingWtPath)
+				}
+			} else if in.MountedWorktree {
+				// Unlike the local path below, MountedWorktree refuses an
+				// invalid registry candidate outright instead of falling
+				// through to create a fresh worktree: the pod mounts a single,
+				// pre-selected directory for this agent, so silently creating
+				// a second worktree elsewhere would never actually reach it.
+				return worktreeOutcome{}, fmt.Errorf("ProvisionShared: the sharer registry for branch %q names %s, which is not a direct worktree of this checkout; refusing to join it", branchName, existingWtPath)
+			} else {
+				slog.Warn("ProvisionShared: registry worktree path failed relationship validation, will create new worktree",
+					"agent_id", in.AgentID, "branch", branchName, "stale_path", existingWtPath, "error", valErr)
 			}
 		} else {
-			slog.Warn("ProvisionShared: registry worktree path failed relationship validation, will create new worktree",
-				"agent_id", in.AgentID, "branch", branchName, "stale_path", existingWtPath, "error", valErr)
+			// A registry entry naming a path that does not exist at all is
+			// ordinary stale state (for example, this agent's own worktree
+			// was just moved aside by the admin-link self-heal above) for
+			// both the local and MountedWorktree paths alike — not evidence
+			// of an unexpected shape, so this falls through to create a
+			// fresh worktree either way rather than refusing.
+			slog.Warn("ProvisionShared: registry points to missing path, will create new worktree",
+				"agent_id", in.AgentID, "branch", branchName, "stale_path", existingWtPath)
 		}
 	}
 
