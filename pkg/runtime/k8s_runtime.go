@@ -2561,7 +2561,7 @@ func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podN
 // is present. Callers should only use the result once the pod has actually
 // reached a terminal phase, or is already committed to termination (a
 // non-nil DeletionTimestamp alongside a live DisruptionTarget condition).
-func k8sDisruptionExitReason(pod corev1.Pod) string {
+func k8sDisruptionExitReason(pod *corev1.Pod) string {
 	if pod.Status.Reason == "Evicted" {
 		return string(state.ExitReasonEvicted)
 	}
@@ -2661,7 +2661,7 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 		// unless it is already committed to termination (deletionTimestamp),
 		// which the branch below covers.
 		if agentStatus == string(state.PhaseStopped) || agentStatus == string(state.PhaseError) {
-			if reason := k8sDisruptionExitReason(p); reason != "" {
+			if reason := k8sDisruptionExitReason(&p); reason != "" {
 				exitReason = reason
 			}
 		} else if p.DeletionTimestamp != nil {
@@ -2673,7 +2673,7 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			// termination, so report the reason now, ahead of it actually
 			// stopping. agentStatus (the reported Phase) is deliberately
 			// left alone — this pod has not stopped yet.
-			if reason := k8sDisruptionExitReason(p); reason != "" {
+			if reason := k8sDisruptionExitReason(&p); reason != "" {
 				exitReason = reason
 			}
 		}

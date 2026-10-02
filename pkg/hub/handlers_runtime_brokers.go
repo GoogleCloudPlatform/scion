@@ -847,7 +847,19 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						statusUpdate.ExitReason = agentHB.ExitReason
 						statusUpdate.ExitCode = agentHB.ExitCode
 						if isGenericStopMessage(agent.Message) {
-							statusUpdate.Message = exitStatusMessage(hbExitReason, agentHB.ExitCode)
+							// The heartbeat's own ExitCode may be nil (for example
+							// a disruption observed after the agent container
+							// never started), while the agent already has one on
+							// record from an earlier update — the store update
+							// above leaves that stored value untouched when
+							// statusUpdate.ExitCode is nil, so fall back to it
+							// here too, or the message would undersell what is
+							// actually going to be stored.
+							exitCode := agentHB.ExitCode
+							if exitCode == nil {
+								exitCode = agent.ExitCode
+							}
+							statusUpdate.Message = exitStatusMessage(hbExitReason, exitCode)
 						}
 					}
 				} else {
@@ -1289,22 +1301,20 @@ func isValidExitReason(reason string) bool {
 	return state.ExitReason(reason).IsValid()
 }
 
-// genericStopMessages holds the stored agent.Message values that carry no
-// information beyond "the agent reported a plain stop": empty (nothing
-// recorded yet), or one of the fixed strings sciontool/the hook handlers
-// send for an ordinary graceful shutdown. A disruption reason learned later
-// from a heartbeat is strictly more informative than any of these and may
-// replace them; any other stored message is assumed to already carry
-// meaningful, possibly user-relevant text and is left alone.
-var genericStopMessages = map[string]bool{
-	"":              true,
-	"Agent stopped": true,
-	"Session ended": true,
-}
-
-// isGenericStopMessage reports whether msg is one of genericStopMessages.
+// isGenericStopMessage reports whether msg is one of the stored agent.Message
+// values that carry no information beyond "the agent reported a plain stop":
+// empty (nothing recorded yet), or one of the fixed strings sciontool/the
+// hook handlers send for an ordinary graceful shutdown. A disruption reason
+// learned later from a heartbeat is strictly more informative than any of
+// these and may replace them; any other stored message is assumed to already
+// carry meaningful, possibly user-relevant text and is left alone.
 func isGenericStopMessage(msg string) bool {
-	return genericStopMessages[msg]
+	switch msg {
+	case "", "Agent stopped", "Session ended":
+		return true
+	default:
+		return false
+	}
 }
 
 // exitStatusMessage returns the default human-readable status Message for a

@@ -555,6 +555,36 @@ func TestHeartbeatExitCode_GracefulPreemptionAfterPlainStop(t *testing.T) {
 		assert.Equal(t, "crashed", got.ExitReason, "a stored reason must win over a later heartbeat's reason")
 		assert.Equal(t, "Agent crashed with exit code 1", got.Message)
 	})
+
+	t.Run("a nil heartbeat ExitCode falls back to the stored one in the message", func(t *testing.T) {
+		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+		agent := getAgentState(t, s, agentSlug, projectID)
+		agent.Phase = "stopped"
+		agent.Message = "Agent stopped"
+		storedCode := 137
+		agent.ExitCode = &storedCode
+		require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+		// The heartbeat carries the disruption reason but no structured exit
+		// code (for example the pod never got far enough to report one).
+		// statusUpdate.ExitCode = nil leaves the already-stored code
+		// untouched, so the message should reflect that stored code rather
+		// than reading as if no exit code were known at all.
+		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+			Slug:       agentSlug,
+			Phase:      "stopped",
+			ExitCode:   nil,
+			ExitReason: "preempted",
+		})
+		assert.Equal(t, http.StatusOK, code)
+
+		got := getAgentState(t, s, agentSlug, projectID)
+		assert.Equal(t, "preempted", got.ExitReason)
+		require.NotNil(t, got.ExitCode, "the previously stored exit code must survive a nil heartbeat ExitCode")
+		assert.Equal(t, 137, *got.ExitCode)
+		assert.Equal(t, "Agent pod was preempted, exit code 137", got.Message, "the message must use the stored exit code, not read as if none were known")
+	})
 }
 
 // TestHeartbeatExitCode_LegacyFallback verifies that when ExitCode is nil
