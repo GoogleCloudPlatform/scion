@@ -58,13 +58,17 @@ writes, and no new authority path is added.
   a custom-role authority refusal, and `details.roleDefinitionId` on
   ceiling and structural refusals), so the UI keys off structured fields
   rather than reason text. Both are omitted when the role is grantable.
-- **The decision is principal-agnostic, for op=add.** The PUT governs a
-  built-in change on an existing member as op=update of both the old and
-  new role, and runs CanDelegate only on an increase. That decision depends
-  on the target principal, so this view does not model it. The decision is
-  the same, but the wording differs ("cannot update" rather than "cannot
-  add"). Principal-type eligibility (owner is user-only, and so on) is also
-  left to the client.
+- **The decision is principal-agnostic, for op=add.** `grantable`
+  answers "may newly grant this role". For an existing member's built-in
+  change, the PUT can differ in both directions:
+  - it also governs the old role, so an admin cannot move an owner-held
+    principal down to member even though `member` shows grantable;
+  - it skips CanDelegate on a decrease, so the hub-override owner→member
+    demotion is accepted even though `member` shows not grantable.
+
+  That decision depends on the target principal, so this view does not
+  model it. Principal-type eligibility (owner is user-only, and so on) is
+  also left to the client.
 - **A plain hub admin gets 403** from assignable-roles. This is the same
   project.manage gate as every other members endpoint, because hub-admin
   does not hold project.manage. The hub-override answer is reachable over
@@ -148,3 +152,90 @@ transcript is held with the review artifacts, not in this file.
   against drift.
 - **Duplicate role-name list.** `validProjectRoles` in the members handler
   duplicates `store.BuiltInProjectMembershipRoles`.
+
+## Review round 1 fixes
+
+All seven deviations were accepted. These fixes close the Medium finding
+and every Low and Nit finding. The deviation bullet on op=add above was
+reworded under R1-8.
+
+- **R1-1 (Medium):** `TestAssignableRoles_ConsistentWithPut` has a
+  fourth actor. It holds only a custom `{project.read, project.manage}`
+  role, with no built-in project role and no hub `role_binding.*`, and the
+  PUT refuses it with "actor has no project role".
+  - `asgHubOverrideActor` is now a thin wrapper over
+    `asgManagerActor(…, hubAdmin bool)`.
+  - `TestAssignableRoles_CustomManagerWithNoProjectRole` pins that actor's
+    decisions directly.
+  - In a throwaway detached worktree, two mutations now fail both tests.
+    One drops the no-project-role check (M1). The other moves it above the
+    structural `role_binding.*` check (M2). Both previously survived.
+- **R1-2:** `noProjectRoleDecision` and `canDelegateRefusal` in
+  `project_membership_set.go` are the single constructors for those two
+  refusals, in SetMemberRoles Phase P and in AssignableRoles. Phase P was
+  not otherwise refactored.
+- **R1-3:** `buildProjectMemberGroup` is the one group builder for the
+  grouped GET and the PUT principal endpoint.
+  - It takes a per-request `projectMemberEnricher` cache of role names and
+    display names.
+  - It picks the group's built-in role by `projectRoleLevel`, with the
+    highest winning.
+  - `projectMemberGroupTier` is gone; the grouped sort compares
+    `projectRoleLevel` in descending order.
+  - The PUT JSON is unchanged: the P1 tests pass unmodified.
+  - `TestProjectMembersGrouped_MatchesPutResponseGroup` asserts that both
+    endpoints render the same group.
+- **R1-4:** the grouped page end is computed without `offset+limit`, so a
+  huge `limit` no longer overflows. Covered by
+  `TestProjectMembersGrouped_HugeLimitDoesNotOverflow`, which fails against
+  the old computation.
+- **R1-5:** `TestAssignableRoles_RoutingKeepsMemberAddressing` pins the
+  routing:
+  - a group whose slug is literally `assignable-roles`, and
+    `members/principals/user/assignable-roles`, both still reach the
+    principal handler;
+  - ID addressing still works;
+  - PATCH and DELETE on `members/assignable-roles` return 405
+    (`Allow: GET`) and write nothing;
+  - `members/assignable-roles/x` and real binding IDs still reach the
+    binding-ID handler.
+- **R1-6:** the consistency table compares `details` with the PUT's error
+  details, after JSON-normalising both.
+- **R1-7:** a non-user identity, such as an agent token, gets
+  `403 credential_insufficient` with the PUT's message.
+  - The check now runs before `authorize(project.manage)`, in the same
+    position as on the PUT. Otherwise an agent would never reach it.
+  - Covered by `TestAssignableRoles_AgentTokenGetsCredentialInsufficient`.
+- **R1-8:** the op=add deviation text above was reworded.
+
+### Gates run (round 1)
+
+All of these were run against the round-1 head:
+
+- `gofmt -l pkg/hub/`: clean.
+- `go vet -buildvcs=false ./pkg/hub/`: pass.
+- The targeted `go test -p 2 ./pkg/hub/ -run 'Assignable|Grouped|Capabilit|SetMemberRoles|ProjectMember|RS|D002|PM1|Catalog|Classif|AST|Rout'`,
+  with `SCION_PROJECT` unset: pass.
+- `go test ./pkg/hub/authzop/`: pass.
+- `golangci-lint --new-from-rev=<P1 head> ./pkg/hub/...`: 0 issues.
+- `go build -buildvcs=false ./...`: pass.
+
+Not run, per the task's resource limits: `make ci` and the full
+`make test-hub-sqlite`.
+
+### Adjacent issues noticed in round 1, not fixed
+
+- **Bad user principal ID returns 500.** A members PUT to
+  `principals/user/<id>`, where the ID is neither a UUID nor an email,
+  gets 500 `internal_error`, because the store rejects the principal_id.
+  It should be a 4xx. This is pre-existing P1 behaviour, and the routing
+  test does not pin the status.
+- **Flat-list pagination overflow.** The flat members list still computes
+  `offset+limit` and can overflow on a huge `limit`. This is pre-existing,
+  and the same fix applies.
+- **Remaining copies of the refusal strings.** `project_membership_service.go`
+  still builds its own "actor has no project role" and CanDelegate refusals
+  for the legacy POST/PATCH member paths. They could use the new shared
+  constructors.
+- **Flat-list enrichment.** The flat list still enriches bindings by hand
+  rather than through `projectMemberEnricher`.
