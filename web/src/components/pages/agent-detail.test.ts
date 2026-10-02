@@ -109,7 +109,7 @@ vi.mock('../shared/confirm-dialog.js', () => ({
 // showToast() creates a real `sl-alert` and calls its `.toast()` method,
 // which only exists once Shoelace's element definition is registered. This
 // file never loads that definition (it would pull in the real component
-// tree), so the N1 failed-delete/declined-force-delete tests — which hit
+// tree), so the failed-delete/declined-force-delete tests — which hit
 // the error path — mock the util instead, the same way api.js is mocked.
 vi.mock('../../utils/toast.js', () => ({
   showToast: vi.fn(),
@@ -223,7 +223,7 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     document.removeEventListener('nav-click', navClickListener);
     document.body.innerHTML = '';
     vi.useRealTimers();
-    // N2: restore window.location rather than leaving the stub in place.
+    // Restore window.location rather than leaving the stub in place.
     if (originalLocationDescriptor) {
       Object.defineProperty(window, 'location', originalLocationDescriptor);
       originalLocationDescriptor = undefined;
@@ -332,9 +332,9 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     expect(navClicks).toEqual([{ path: '/agents' }]);
   });
 
-  // --- R1: absence from stateManager is not the same as "deleted" ---------
+  // --- absence from stateManager is not the same as "deleted" -------------
 
-  it('R1: an agents-updated flush during page load (project fetch held) does not show the deleted state', async () => {
+  it('an agents-updated flush during page load (project fetch held) does not show the deleted state', async () => {
     let resolveProject!: (value: Response) => void;
     const heldProject = new Promise<Response>((resolve) => {
       resolveProject = resolve;
@@ -382,7 +382,7 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     });
   });
 
-  it('R1: an unrelated prune (removeAgent without a tombstone) does not show the deleted state', async () => {
+  it('an unrelated prune (removeAgent without a tombstone) does not show the deleted state', async () => {
     const el = await mount(makeAgent());
     fakeStateManager.setAgent({ id: AGENT_ID });
 
@@ -395,9 +395,9 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     expect(navClicks).toEqual([]);
   });
 
-  // --- R2: the redirect must not fire off-route or while hidden -----------
+  // --- the redirect must not fire off-route or while hidden ---------------
 
-  it('R2: an SSE delete while hidden behind /terminals does not pull the user out of the terminal workspace', async () => {
+  it('an SSE delete while hidden behind /terminals does not pull the user out of the terminal workspace', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const tracker = stubLocation();
     const el = await mount(makeAgent());
@@ -422,7 +422,7 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     expect(el.shadowRoot?.querySelector('[data-testid="agent-deleted-link"]')).not.toBeNull();
   });
 
-  it('R2: opening /terminals within the 1s delete-redirect window suppresses the redirect', async () => {
+  it('opening /terminals within the 1s delete-redirect window suppresses the redirect', async () => {
     const tracker = stubLocation();
     const el = await mount(makeAgent());
     const internals = el as unknown as {
@@ -444,9 +444,9 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     expect(navClicks).toEqual([]);
   });
 
-  // --- N1: guards that already existed, now pinned by a test --------------
+  // --- guards that already existed, now pinned by a test ------------------
 
-  it('N1: a failed delete (non-502/503) does not enter the deleted state', async () => {
+  it('a failed delete (non-502/503) does not enter the deleted state', async () => {
     stubLocation();
     const el = await mount(makeAgent());
     const internals = el as unknown as {
@@ -467,7 +467,7 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     expect(navClicks).toEqual([]);
   });
 
-  it('N1: a declined force-delete does not enter the deleted state', async () => {
+  it('a declined force-delete does not enter the deleted state', async () => {
     stubLocation();
     const el = await mount(makeAgent());
     const internals = el as unknown as {
@@ -490,7 +490,7 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     expect(navClicks).toEqual([]);
   });
 
-  it('N1: a local delete success followed by an SSE delete produces exactly one nav-click', async () => {
+  it('a local delete success followed by an SSE delete produces exactly one nav-click', async () => {
     stubLocation();
     const el = await mount(makeAgent());
     const internals = el as unknown as {
@@ -513,7 +513,7 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     expect(navClicks).toEqual([{ path: '/agents' }]);
   });
 
-  it('N1: removing the element during the delay produces no nav-click', async () => {
+  it('removing the element during the delay produces no nav-click', async () => {
     stubLocation();
     const el = await mount(makeAgent());
     const internals = el as unknown as {
@@ -533,7 +533,7 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
   });
 
   it(
-    'N1: after a skipped redirect (hidden behind /terminals, then back) shows no ' +
+    'after a skipped redirect (hidden behind /terminals, then back) shows no ' +
       '"Redirecting" text and still shows the link',
     async () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
@@ -569,9 +569,9 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     }
   );
 
-  // --- N3: reconnecting while deleted must not strand the page -----------
+  // --- reconnecting while deleted must not strand the page ---------------
 
-  it('N3: disconnecting and reconnecting while deleted leaves a way out, with no stray timer', async () => {
+  it('disconnecting and reconnecting while deleted leaves a way out, with no stray timer', async () => {
     stubLocation();
     const el = await mount(makeAgent());
     const internals = el as unknown as {
