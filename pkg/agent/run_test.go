@@ -3480,11 +3480,14 @@ func TestStartKubernetesNFSWorktreeDispatch(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 
 	// run drives one dispatch and returns the outcomes to check. When
-	// withCtxSignal is true, the provisioned-worktree ctx signal is set to
-	// the base path itself once it is known — not a genuine worktree-to-root
-	// pair (the workspace IS the root, not a descendant of it), so this
-	// names a signal that looks plausible but must still fail the
-	// persistence gate's own validation.
+	// withCtxSignal is true, the provisioned-worktree ctx signal is set to a
+	// symlink alias of the base path once it is known: a value distinct from
+	// base itself, so that RepoRoot would visibly differ (become the alias)
+	// if the re-validation wrongly accepted it, rather than coincidentally
+	// matching the correct detectRepoRoot fallback value either way. Still
+	// not a genuine worktree-to-root pair (the workspace IS the root, not a
+	// descendant of it, even resolved through the alias), so this must still
+	// fail the re-validation and the persistence gate's own validation.
 	run := func(t *testing.T, withCtxSignal bool) (capturedConfig runtime.RunConfig, agentDir, base string) {
 		tmpDir := t.TempDir()
 		projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
@@ -3542,7 +3545,11 @@ profiles:
 
 		ctx := context.Background()
 		if withCtxSignal {
-			ctx = api.ContextWithProvisionedWorktreeRepoRoot(ctx, base)
+			aliasBase := filepath.Join(tmpDir, "alias-base")
+			if err := os.Symlink(base, aliasBase); err != nil {
+				t.Fatalf("failed to create alias symlink: %v", err)
+			}
+			ctx = api.ContextWithProvisionedWorktreeRepoRoot(ctx, aliasBase)
 		}
 		if _, err := mgr.Start(ctx, api.StartOptions{
 			Name:        "agent-a",
@@ -3575,10 +3582,9 @@ profiles:
 			t.Fatalf("ContainerWorkspace = %q, want %q", capturedConfig.ContainerWorkspace, want)
 		}
 		// The detectRepoRoot fallback resolves effectiveWorkspace (the real
-		// git base) to a non-empty RepoRoot: harmless, since the Kubernetes
-		// runtime builds its mounts from ContainerWorkspace and the NFS*
-		// fields, never from RepoRoot — see the comment on the backend
-		// re-validation in run.go.
+		// git base) to a non-empty RepoRoot. The Kubernetes runtime builds
+		// its mounts from ContainerWorkspace and the NFS* fields, not
+		// RepoRoot — see the comment on the backend re-validation in run.go.
 		if capturedConfig.RepoRoot != base {
 			t.Fatalf("RepoRoot = %q, want %q (the detectRepoRoot fallback)", capturedConfig.RepoRoot, base)
 		}
