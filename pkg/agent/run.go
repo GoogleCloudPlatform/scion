@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -86,6 +87,7 @@ func sortedEnvVarKeys(envVars map[string]string) []string {
 }
 
 func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	startEntry := time.Now()
 	// Resolve project name early so we can scope the container lookup below.
 	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
 	if err != nil {
@@ -1394,6 +1396,8 @@ authDone:
 		}(),
 		Annotations: projectkeys.ProjectPathLabels(projectDir),
 	}
+	slog.Info("agent start: pre-runtime provisioning complete", "agent", opts.Name,
+		"elapsed_ms", time.Since(startEntry).Milliseconds())
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
 		// Provisioning writes agent-info.json in "created" state before the
@@ -1405,6 +1409,8 @@ authDone:
 		}
 		return nil, classifyLaunchRuntimeError(err, resolvedImage)
 	}
+	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
+		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
 
 	status := "running"
 	if opts.Resume {

@@ -20,10 +20,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -160,4 +163,131 @@ func TestUpdateAgentStatus_ReincarnationInFlight_PostedMessageDiscarded(t *testi
 	assert.Equal(t, "migrating to generation 2", final.Message,
 		"Guard 0b must block the status POST's Message from landing while a reincarnation is in flight")
 	assert.Equal(t, "starting", final.Phase, "Phase must also stay blocked")
+}
+
+// TestUpdateAgentStatus_DispatchReadyAndHarnessReadyTiming is a table-driven
+// regression test for the two real sources of activity=working, plus the
+// adjacent startup_ms metadata parsing (see ptone/scion#2519). A no-auth /
+// drop-to-shell agent never runs a harness session, so the SessionStart hook
+// never fires and "Session started" never reaches this handler — the only
+// phase=running/activity=working report such an agent ever sends is
+// sciontool init's own "Agent started" status, carrying
+// Metadata["startup_ms"] (see cmd/sciontool/commands/init.go). The cases
+// cover both message sources, plus malformed and absent startup_ms, so a
+// broken match or an unparseable value reaching the log fails the test.
+func TestUpdateAgentStatus_DispatchReadyAndHarnessReadyTiming(t *testing.T) {
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	defer slog.SetDefault(prevLogger)
+
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	newAgent := func(t *testing.T, suffix string) *store.Agent {
+		t.Helper()
+		project := &store.Project{
+			ID: tid("project-dr-" + suffix), Name: "Dispatch Ready Project " + suffix,
+			Slug: "dispatch-ready-project-" + suffix,
+		}
+		require.NoError(t, s.CreateProject(ctx, project))
+		agent := &store.Agent{
+			ID: tid("agent-dr-" + suffix), Slug: "agent-dr-slug-" + suffix,
+			Name: "Agent Dispatch Ready " + suffix, ProjectID: project.ID,
+			Phase: string(state.PhaseStarting),
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+		return agent
+	}
+
+	post := func(t *testing.T, agentID string, status store.AgentStatusUpdate) {
+		t.Helper()
+		body, err := json.Marshal(status)
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentID+"/status", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+testDevToken)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	t.Run("Agent started with valid startup_ms logs dispatch-ready and startup timing", func(t *testing.T) {
+		logBuf.Reset()
+		agent := newAgent(t, "started")
+
+		// Real wire shape of sciontool init's initial running report,
+		// confirmed against the live hybval int2 journal.
+		post(t, agent.ID, store.AgentStatusUpdate{
+			Phase:    string(state.PhaseRunning),
+			Activity: string(state.ActivityWorking),
+			Message:  "Agent started",
+			Metadata: map[string]string{"startup_ms": "358"},
+		})
+
+		logged := logBuf.String()
+		assert.Contains(t, logged, "agent reported startup timing", "startup_ms line must fire")
+		assert.Contains(t, logged, "startup_ms=358")
+		assert.Contains(t, logged, "dispatch ready: Agent started status received",
+			"the dispatch-ready since_create_ms line must fire on the Agent started report")
+		assert.Contains(t, logged, "since_create_ms=")
+		assert.NotContains(t, logged, "harness ready",
+			"the harness-ready (SessionStart) line must not fire for an Agent started report")
+	})
+
+	t.Run("Session started logs harness-ready, not dispatch-ready", func(t *testing.T) {
+		logBuf.Reset()
+		agent := newAgent(t, "session")
+
+		// Real wire shape of the harness SessionStart hook (see
+		// TestHubHandler_SessionStart_WirePayloadShape in
+		// pkg/sciontool/hooks/handlers/hub_test.go for the sending side).
+		post(t, agent.ID, store.AgentStatusUpdate{
+			Phase:    string(state.PhaseRunning),
+			Activity: string(state.ActivityWorking),
+			Message:  "Session started",
+		})
+
+		logged := logBuf.String()
+		assert.Contains(t, logged, "harness ready: SessionStart status received",
+			"the harness-ready since_create_ms line must fire on a Session started report")
+		assert.Contains(t, logged, "since_create_ms=")
+		assert.NotContains(t, logged, "dispatch ready",
+			"the dispatch-ready (Agent started) line must not fire for a Session started report")
+		assert.NotContains(t, logged, "agent reported startup timing")
+	})
+
+	for i, malformed := range []string{"abc", "", "12x"} {
+		t.Run(fmt.Sprintf("malformed startup_ms %q never logs the raw value", malformed), func(t *testing.T) {
+			logBuf.Reset()
+			agent := newAgent(t, fmt.Sprintf("malformed-%d", i))
+
+			post(t, agent.ID, store.AgentStatusUpdate{
+				Metadata: map[string]string{"startup_ms": malformed},
+			})
+
+			logged := logBuf.String()
+			assert.NotContains(t, logged, "agent reported startup timing",
+				"an unparseable startup_ms must never produce a startup-timing line")
+			if malformed != "" {
+				assert.NotContains(t, logged, malformed,
+					"the unparseable raw startup_ms value must never be logged")
+			}
+		})
+	}
+
+	t.Run("absent metadata logs nothing startup- or dispatch-related", func(t *testing.T) {
+		logBuf.Reset()
+		agent := newAgent(t, "nometa")
+
+		post(t, agent.ID, store.AgentStatusUpdate{
+			Phase:    string(state.PhaseRunning),
+			Activity: string(state.ActivityWorking),
+		})
+
+		logged := logBuf.String()
+		assert.NotContains(t, logged, "agent reported startup timing")
+		assert.NotContains(t, logged, "dispatch ready")
+		assert.NotContains(t, logged, "harness ready")
+	})
 }
