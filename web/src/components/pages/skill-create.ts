@@ -227,6 +227,16 @@ export class ScionPageSkillCreate extends LitElement {
       --sl-input-font-size-medium: 0.8125rem;
     }
 
+    /* This local override replaces the app-wide --sl-input-font-size-*
+       variable with a fixed value, which would otherwise defeat the
+       pointer:coarse 16px floor (see pkg/hub/web.go / web/index.html) on
+       touch — re-floor it here too, desktop unchanged. */
+    @media (pointer: coarse) {
+      .skillmd-textarea {
+        --sl-input-font-size-medium: max(16px, 0.8125rem);
+      }
+    }
+
     .upload-row {
       display: flex;
       align-items: center;
