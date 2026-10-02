@@ -8,15 +8,20 @@
 //     a time layout, must have a receiver R that is provably UTC: a call to
 //     .UTC() (or .AsTime(), which protobuf timestamps define to return UTC),
 //     an Add/AddDate/Truncate/Round of such a value, or a local variable
-//     whose every assignment in the enclosing function is one of those.
+//     whose every assignment in the enclosing function is one of those. A
+//     value-less var t time.Time counts as UTC (the zero value is UTC) unless
+//     it is also written through its address (&t, as in row.Scan(&t) or
+//     json.Unmarshal(b, &t)) or by a pointer-receiver decoder method
+//     (Scan, UnmarshalText/JSON/Binary, GobDecode).
 //  2. ent-bind-formatted: no raw SQL statement that names an ent table binds
 //     a formatted time string, and no ent dialect predicate compares against
 //     one: EQ/NEQ/LT/LTE/GT/GTE/In/NotIn, their Field* variants, ExprP/Expr,
-//     and Builder.Arg/Args on a *Builder parameter of a closure (the
-//     sql.P(func(b *sql.Builder){...}) form). The ent dialect package is
-//     matched by its import path, entgo.io/ent/dialect/sql, under whatever
-//     name the file imports it (usually entsql). Ent time columns store
-//     time.Time values; a formatted string sorts differently from them.
+//     and Builder.Arg/Args on a function or closure parameter declared as a
+//     Builder (as in the sql.P(func(b *sql.Builder){...}) form). The ent
+//     dialect package is matched by its import path, entgo.io/ent/dialect/sql,
+//     under whatever name the file imports it (usually entsql). Ent time
+//     columns store time.Time values; a formatted string sorts differently
+//     from them.
 //  3. webchat-bind-time: no raw SQL statement that names a webchat_* table
 //     binds a time.Time value in the SQLite store. Those columns are TEXT
 //     holding RFC3339Nano UTC strings; modernc would store Time.String()
@@ -28,20 +33,26 @@
 // a time value or a formatted string. Known limits, documented so that a green
 // run is not over-read:
 //   - A layout held in a function parameter or a struct field is not
-//     recognised; layouts are time.<Const>, string literals containing Go
-//     layout tokens, and package-level constants with such values.
+//     recognised. Layouts are time.<Const>, string literals containing Go
+//     layout tokens, and package or local constants and variables assigned
+//     either of those (const wire = time.RFC3339Nano, layout := time.RFC3339).
 //   - fmt verbs (%s/%v) and Time.String() are not checked.
 //   - SQL text is resolved only from string literals, constants, fmt.Sprintf
 //     formats, + concatenation and local variables built from those. A local
 //     variable is resolved at the call: the latest = / := that must have run
 //     (it is in a block enclosing the call), every assignment after it in a
 //     branch that may have run, and the += fragments in between; all of them
-//     are checked together. Not modelled: assignments later in a loop body
+//     are checked together. A declaration shadows the variable only inside
+//     its own scope: a block, an if/for/switch init, range variables, and
+//     function parameters. Not modelled: assignments later in a loop body
 //     that reach an earlier call on the next iteration, goto, pointers,
 //     strings.Builder, and statements returned from helper functions. A
 //     variable whose latest assignment is not resolvable is skipped.
-//   - Builder.Arg/Args is checked only on a closure parameter declared as
-//     <entsql>.Builder or *<entsql>.Builder, and on chains rooted at it.
+//   - Builder.Arg/Args is checked only on a function or closure parameter
+//     declared as <entsql>.Builder or *<entsql>.Builder, and on method chains
+//     rooted at it; a Builder obtained any other way is not tracked.
+//   - The address-taken test for a zero time.Time is name-based within the
+//     function and flow-insensitive: any &t anywhere in it drops kUTC.
 //   - A struct field counts as a time value when any struct in the scanned
 //     packages declares a field of that name with type time.Time.
 //
@@ -401,6 +412,11 @@ func literalString(e ast.Expr, consts map[string]string) (string, bool) {
 		}
 	case *ast.ParenExpr:
 		return literalString(v.X, consts)
+	case *ast.SelectorExpr:
+		if isPkgIdent(v.X, "time") {
+			s, ok := layoutConsts[v.Sel.Name]
+			return s, ok
+		}
 	case *ast.BinaryExpr:
 		if v.Op == token.ADD {
 			a, ok1 := literalString(v.X, consts)
@@ -413,17 +429,33 @@ func literalString(e ast.Expr, consts map[string]string) (string, bool) {
 	return "", false
 }
 
-var layoutConsts = map[string]bool{
-	"Layout": true, "ANSIC": true, "UnixDate": true, "RubyDate": true,
-	"RFC822": true, "RFC822Z": true, "RFC850": true, "RFC1123": true,
-	"RFC1123Z": true, "RFC3339": true, "RFC3339Nano": true, "Kitchen": true,
-	"Stamp": true, "StampMilli": true, "StampMicro": true, "StampNano": true,
-	"DateTime": true, "DateOnly": true, "TimeOnly": true,
+// layoutConsts maps the time package's layout constants to their values, so
+// that an alias such as const wire = time.RFC3339Nano is recognised.
+var layoutConsts = map[string]string{
+	"Layout":      "01/02 03:04:05PM '06 -0700",
+	"ANSIC":       "Mon Jan _2 15:04:05 2006",
+	"UnixDate":    "Mon Jan _2 15:04:05 MST 2006",
+	"RubyDate":    "Mon Jan 02 15:04:05 -0700 2006",
+	"RFC822":      "02 Jan 06 15:04 MST",
+	"RFC822Z":     "02 Jan 06 15:04 -0700",
+	"RFC850":      "Monday, 02-Jan-06 15:04:05 MST",
+	"RFC1123":     "Mon, 02 Jan 2006 15:04:05 MST",
+	"RFC1123Z":    "Mon, 02 Jan 2006 15:04:05 -0700",
+	"RFC3339":     "2006-01-02T15:04:05Z07:00",
+	"RFC3339Nano": "2006-01-02T15:04:05.999999999Z07:00",
+	"Kitchen":     "3:04PM",
+	"Stamp":       "Jan _2 15:04:05",
+	"StampMilli":  "Jan _2 15:04:05.000",
+	"StampMicro":  "Jan _2 15:04:05.000000",
+	"StampNano":   "Jan _2 15:04:05.000000000",
+	"DateTime":    "2006-01-02 15:04:05",
+	"DateOnly":    "2006-01-02",
+	"TimeOnly":    "15:04:05",
 }
 
 // layoutTokenRE matches the Go reference-time tokens that make a string a
 // time layout rather than ordinary text.
-var layoutTokenRE = regexp.MustCompile(`2006|15:04|Z07|-07:?00`)
+var layoutTokenRE = regexp.MustCompile(`2006|15:04|3:04PM|Z07|-07:?00`)
 
 // Kind of value a local variable holds, as far as the checker can tell.
 type kind uint8
@@ -454,6 +486,7 @@ type checker struct {
 	slice    map[string][]ast.Expr // local name -> elements appended to an args slice
 	local    map[string]string     // local string consts within the function
 	stack    []ast.Node            // pass-1 ancestors of the node being visited
+	addr     map[string]bool       // locals written through their address (&x, x.Scan(...))
 }
 
 // strEvent is one assignment to a local variable, recorded so that the SQL
@@ -461,6 +494,7 @@ type checker struct {
 type strEvent struct {
 	pos    token.Pos
 	append bool     // += rather than = / :=
+	define bool     // declares a new variable scoped to block (:=, var, range, parameter)
 	text   string   // the string assigned, when known
 	ok     bool     // text is known
 	block  ast.Node // innermost block enclosing the assignment (nil at package level)
@@ -485,7 +519,7 @@ func (c *checker) file(f *ast.File) {
 				continue
 			}
 			c.begin(funcName(v))
-			c.params(v.Type)
+			c.params(v.Type, v.Body)
 			c.body(v.Body)
 		case *ast.GenDecl:
 			if v.Tok == token.VAR {
@@ -525,9 +559,13 @@ func (c *checker) begin(fn string) {
 	c.local = map[string]string{}
 	c.slice = map[string][]ast.Expr{}
 	c.stack = nil
+	c.addr = map[string]bool{}
 }
 
-func (c *checker) params(ft *ast.FuncType) {
+// params classifies the parameters and named results of a function. Each
+// name is also recorded as an unknown declaration scoped to the body, so an
+// outer SQL variable it shadows is not consulted inside it.
+func (c *checker) params(ft *ast.FuncType, body *ast.BlockStmt) {
 	lists := []*ast.FieldList{ft.Params, ft.Results}
 	for _, l := range lists {
 		if l == nil {
@@ -541,6 +579,9 @@ func (c *checker) params(ft *ast.FuncType) {
 			builder := c.isEntBuilderType(fld.Type)
 			for _, nm := range fld.Names {
 				c.vars[nm.Name] |= k
+				if body != nil {
+					c.strs[nm.Name] = append(c.strs[nm.Name], strEvent{pos: ft.Pos(), define: true, block: body})
+				}
 				if builder {
 					c.builders[nm.Name] = true
 				}
@@ -570,7 +611,17 @@ func (c *checker) body(n ast.Node) {
 		c.stack = append(c.stack, n)
 		switch v := n.(type) {
 		case *ast.FuncLit:
-			c.params(v.Type)
+			c.params(v.Type, v.Body)
+		case *ast.UnaryExpr:
+			if id, ok := unparen(v.X).(*ast.Ident); ok && v.Op == token.AND {
+				c.addr[id.Name] = true
+			}
+		case *ast.CallExpr:
+			if name, recv := methodName(v); timeMutators[name] {
+				if id, ok := unparen(recv).(*ast.Ident); ok {
+					c.addr[id.Name] = true
+				}
+			}
 		case *ast.GenDecl:
 			if v.Tok == token.CONST {
 				for _, sp := range v.Specs {
@@ -588,14 +639,15 @@ func (c *checker) body(n ast.Node) {
 			if len(v.Lhs) == len(v.Rhs) {
 				for i := range v.Lhs {
 					if id, ok := v.Lhs[i].(*ast.Ident); ok {
-						c.assign(id.Name, v.Rhs[i], v.Tok, v.Pos())
+						// A single := always declares; with several names some may be reused.
+						c.assign(id.Name, v.Rhs[i], v.Tok, v.Pos(), v.Tok == token.DEFINE && len(v.Lhs) == 1)
 					}
 				}
 			} else {
 				for _, l := range v.Lhs {
 					if id, ok := l.(*ast.Ident); ok {
 						c.vars[id.Name] |= c.multiKind(v.Rhs)
-						c.record(id.Name, v.Pos(), false, "", false)
+						c.record(id.Name, v.Pos(), false, "", false, false)
 					}
 				}
 			}
@@ -603,9 +655,11 @@ func (c *checker) body(n ast.Node) {
 			for i, nm := range v.Names {
 				switch {
 				case i < len(v.Values):
-					c.assign(nm.Name, v.Values[i], token.DEFINE, v.Pos())
+					c.assign(nm.Name, v.Values[i], token.DEFINE, v.Pos(), true)
 				case v.Type != nil && isTimeTimeType(v.Type):
-					// The zero time.Time is in UTC; a *time.Time is unknown.
+					// The zero time.Time is in UTC; a *time.Time is unknown. A
+					// variable later written through its address loses kUTC
+					// after pass 1 (see addr).
 					if _, ptr := v.Type.(*ast.StarExpr); ptr {
 						c.vars[nm.Name] |= kTime
 					} else {
@@ -614,19 +668,28 @@ func (c *checker) body(n ast.Node) {
 				default:
 					c.vars[nm.Name] |= kUnknown
 					// var s string starts as "", so later += fragments resolve.
-					c.record(nm.Name, v.Pos(), false, "", true)
+					c.record(nm.Name, v.Pos(), false, "", true, true)
 				}
 			}
 		case *ast.RangeStmt:
 			for _, e := range []ast.Expr{v.Key, v.Value} {
 				if id, ok := e.(*ast.Ident); ok {
 					c.vars[id.Name] |= kUnknown
-					c.record(id.Name, v.Pos(), false, "", false)
+					// The loop variables are assigned per iteration, which may
+					// be never: scope them to the range statement either way.
+					c.strs[id.Name] = append(c.strs[id.Name], strEvent{pos: v.Pos(), define: v.Tok == token.DEFINE, block: v})
 				}
 			}
 		}
 		return true
 	})
+	// A time written through its address (row.Scan(&t), json.Unmarshal(b, &t),
+	// t.UnmarshalText(...)) holds whatever zone was decoded.
+	for name := range c.addr {
+		if c.vars[name]&(kUTC|kTime) != 0 {
+			c.vars[name] |= kTime
+		}
+	}
 	ast.Inspect(n, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
 			c.call(call)
@@ -648,37 +711,59 @@ func (c *checker) multiKind(rhs []ast.Expr) kind {
 	return kUnknown
 }
 
-// record notes an assignment to a local variable for later SQL resolution.
-func (c *checker) record(name string, pos token.Pos, isAppend bool, text string, ok bool) {
-	var block ast.Node
-	for i := len(c.stack) - 1; i >= 0; i-- {
-		switch c.stack[i].(type) {
-		case *ast.BlockStmt, *ast.CaseClause, *ast.CommClause:
-			block = c.stack[i]
-		}
-		if block != nil {
-			break
-		}
-	}
-	c.strs[name] = append(c.strs[name], strEvent{pos: pos, append: isAppend, text: text, ok: ok, block: block})
+// timeMutators are time.Time methods with a pointer receiver that overwrite
+// the value.
+var timeMutators = map[string]bool{
+	"Scan": true, "UnmarshalText": true, "UnmarshalJSON": true, "UnmarshalBinary": true, "GobDecode": true,
 }
 
-func (c *checker) assign(name string, rhs ast.Expr, tok token.Token, pos token.Pos) {
+// record notes an assignment to a local variable for later SQL resolution.
+func (c *checker) record(name string, pos token.Pos, isAppend bool, text string, ok, define bool) {
+	c.strs[name] = append(c.strs[name], strEvent{pos: pos, append: isAppend, define: define, text: text, ok: ok, block: c.scope(define)})
+}
+
+// scope returns the innermost scope of the node on top of the pass-1 stack:
+// the enclosing block or case clause, or, for a declaration in the init
+// statement of an if/for/switch, that statement. Nil at package level.
+func (c *checker) scope(define bool) ast.Node {
+	for i := len(c.stack) - 1; i >= 0; i-- {
+		n := c.stack[i]
+		var init ast.Stmt
+		switch v := n.(type) {
+		case *ast.BlockStmt, *ast.CaseClause, *ast.CommClause:
+			return n
+		case *ast.IfStmt:
+			init = v.Init
+		case *ast.ForStmt:
+			init = v.Init
+		case *ast.SwitchStmt:
+			init = v.Init
+		case *ast.TypeSwitchStmt:
+			init = v.Init
+		}
+		if define && init != nil && i+1 < len(c.stack) && c.stack[i+1] == ast.Node(init) {
+			return n
+		}
+	}
+	return nil
+}
+
+func (c *checker) assign(name string, rhs ast.Expr, tok token.Token, pos token.Pos, define bool) {
 	if elems, ok := sliceElems(rhs, name); ok {
 		c.slice[name] = append(c.slice[name], elems...)
 		c.vars[name] |= kUnknown
-		c.record(name, pos, false, "", false)
+		c.record(name, pos, false, "", false, define)
 		return
 	}
-	if s, ok := literalString(rhs, c.mergedConsts()); ok && tok != token.ADD_ASSIGN && layoutTokenRE.MatchString(s) {
+	if tok != token.ADD_ASSIGN && c.isLayout(rhs) {
 		c.layouts[name] = true
 	}
 	if s, ok := c.sqlText(rhs, pos); ok {
-		c.record(name, pos, tok == token.ADD_ASSIGN, s, true)
+		c.record(name, pos, tok == token.ADD_ASSIGN, s, true, define)
 		c.vars[name] |= kSQL
 		return
 	}
-	c.record(name, pos, tok == token.ADD_ASSIGN, "", false)
+	c.record(name, pos, tok == token.ADD_ASSIGN, "", false, define)
 	if tok == token.ADD_ASSIGN {
 		return
 	}
@@ -797,7 +882,8 @@ func isPkgIdent(e ast.Expr, name string) bool {
 func (c *checker) isLayout(e ast.Expr) bool {
 	e = unparen(e)
 	if sel, ok := e.(*ast.SelectorExpr); ok {
-		return isPkgIdent(sel.X, "time") && layoutConsts[sel.Sel.Name]
+		_, ok := layoutConsts[sel.Sel.Name]
+		return ok && isPkgIdent(sel.X, "time")
 	}
 	if id, ok := e.(*ast.Ident); ok && c.layouts[id.Name] {
 		return true
@@ -1004,30 +1090,47 @@ func (c *checker) sqlText(e ast.Expr, pos token.Pos) (string, bool) {
 // assignment after it in a branch that may have run, and the += fragments in
 // between. All candidates are joined, so a statement is checked against
 // every table it might name.
+//
+// A declaration whose scope does not contain pos declares a different
+// variable that shadows this one inside that scope: it is skipped, together
+// with the later assignments inside its scope, which refer to it.
 func resolveAt(evs []strEvent, pos token.Pos) (string, bool) {
-	var parts []string
-	ok := false
+	var got []strEvent
 	for i := len(evs) - 1; i >= 0; i-- {
 		ev := evs[i]
 		if ev.pos >= pos {
 			continue
 		}
-		if ev.ok {
-			ok = true
-			parts = append(parts, ev.text)
+		if ev.define && ev.block != nil && !contains(ev.block, pos) {
+			kept := got[:0]
+			for _, g := range got {
+				if !contains(ev.block, g.pos) {
+					kept = append(kept, g)
+				}
+			}
+			got = kept
+			continue
 		}
+		got = append(got, ev)
 		if ev.append {
 			continue
 		}
-		if ev.block == nil || (ev.block.Pos() <= pos && pos < ev.block.End()) {
+		if ev.block == nil || contains(ev.block, pos) {
 			break
 		}
 	}
-	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
-		parts[i], parts[j] = parts[j], parts[i]
+	var parts []string
+	ok := false
+	for i := len(got) - 1; i >= 0; i-- {
+		if got[i].ok {
+			ok = true
+			parts = append(parts, got[i].text)
+		}
 	}
 	return strings.Join(parts, "\n"), ok
 }
+
+func contains(n ast.Node, pos token.Pos) bool { return n.Pos() <= pos && pos < n.End() }
 
 func (c *checker) report(n ast.Node, rule, msg string) {
 	c.findings = append(c.findings, Finding{

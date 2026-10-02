@@ -63,6 +63,23 @@ These checks were run against the gate binary:
 - None of the fixed rules finds anything new in the tree; the allowlist is still empty. The
   revert count above was corrected from 13 to 9, which matches the old checker too.
 
+## Review round 2
+
+- A value-less `var t time.Time` loses its UTC status when it is also written through its
+  address (`row.Scan(&t)`, `json.Unmarshal(b, &t)`) or by a decoder method
+  (`t.UnmarshalText(...)`). Before this, the R1-3 change had hidden those. The hubsync
+  `lastSyncedAt` cleanup stays valid, because that variable is only assigned `parsed.UTC()`.
+- Aliases of `time.<Layout>` are now layouts: package or local `const` and `var`, `:=`, and
+  copies of these. The header now matches what the checker does.
+- SQL variables respect shadowing. A declaration in an if/for/switch init, a range variable, a
+  function parameter or a nested block applies only inside its own scope. Assignments to the
+  inner variable no longer leak into calls on the outer one.
+- The header says Builder.Arg/Args is checked on function and closure parameters. A fixture
+  covers the plain-function case.
+- New fixtures: `layouts.go` and `scanned.go`, plus scoping cases in `sqlvars.go`. Each new
+  positive case is missed by the round-1 checker, and each new negative case is a false positive
+  in it. The tree is still clean, and the allowlist is still empty.
+
 ## Tests
 
 - `hack/checktimeliterals/main_test.go`: fixtures under `testdata/src` carry `// want <rule>`

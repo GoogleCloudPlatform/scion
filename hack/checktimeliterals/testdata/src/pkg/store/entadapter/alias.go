@@ -23,3 +23,9 @@ func aliased(now time.Time, s *entsql.Selector) []*entsql.Predicate {
 		entsql.In("id", "a", "b"),
 	}
 }
+
+// A Builder passed to a plain function is checked too.
+func builderParam(b *entsql.Builder, now time.Time) {
+	b.Arg(now.UTC())
+	b.Arg(now.UTC().Format(time.RFC3339Nano)) // want ent-bind-formatted
+}

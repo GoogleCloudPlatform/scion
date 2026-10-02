@@ -49,6 +49,40 @@ func (s *store) sqlVars(ctx context.Context, id string, cond bool) {
 
 func (s *store) build() string { return "" }
 
+// Names declared in an if/for/switch init, as range variables or as
+// parameters shadow the outer variable only inside their own scope.
+func (s *store) shadowed(ctx context.Context, id string, c bool, qs []string) {
+	q := `UPDATE conversations SET updated_at = ? WHERE id = ?`
+	if q := `UPDATE webchat_topic SET updated_at = ? WHERE id = ?`; c {
+		_, _ = s.db.ExecContext(ctx, q, time.Now(), id) // want webchat-bind-time
+		_, _ = s.db.ExecContext(ctx, q, time.Now().UTC().Format(time.RFC3339Nano), id)
+	}
+	_, _ = s.db.ExecContext(ctx, q, time.Now().UTC().Format(time.RFC3339Nano), id) // want ent-bind-formatted
+	_, _ = s.db.ExecContext(ctx, q, time.Now().UTC(), id)
+
+	w := `UPDATE webchat_topic SET updated_at = ? WHERE id = ?`
+	for _, w := range qs {
+		_, _ = s.db.ExecContext(ctx, w, time.Now(), id) // unknown text: skipped
+	}
+	for w := 0; w < 1; w++ {
+	}
+	_, _ = s.db.ExecContext(ctx, w, time.Now(), id) // want webchat-bind-time
+
+	cq := `UPDATE webchat_topic SET updated_at = ? WHERE id = ?`
+	run := func(cq string) {
+		_, _ = s.db.ExecContext(ctx, cq, time.Now(), id) // the parameter, not the outer cq: skipped
+	}
+	run(cq)
+
+	// A plain block redeclaration, with += on the inner variable.
+	{
+		w := "UPDATE conversations "
+		w += "SET updated_at = ? WHERE id = ?"
+		_, _ = s.db.ExecContext(ctx, w, time.Now().UTC().Format(time.RFC3339Nano), id) // want ent-bind-formatted
+	}
+	_, _ = s.db.ExecContext(ctx, w, time.Now().UTC().Format(time.RFC3339Nano), id)
+}
+
 // A zero time.Time is UTC, so formatting it needs no conversion.
 func zeroTime(raw string) string {
 	var last time.Time
