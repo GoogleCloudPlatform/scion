@@ -51,4 +51,23 @@ The create-path governance integration passed these targeted gates:
 - `GOGC=40 golangci-lint run --new-from-rev=c610586d9f25f34a768529808b93bed53c2af90c --concurrency=1 ./pkg/hub/...` — `0 issues`.
 - `git diff --check` — exit 0.
 
+## Complete-integration review round 1
+
+Review round 1 found two required integration defects at `4372ae9343cd2cf1c0cc3810f4edda5475f10e00`, both fixed at implementation checkpoint `fa9c217`:
+
+1. A system-scoped constraint with a non-empty `ScopeID` could be written inside the create transaction before audit scope mapping silently omitted that ID. `accessConstraintAuditScope` now rejects this contradictory pair with a typed, stable `invalid_request` governance error that never echoes the rejected value. The project-scope mirror still requires a non-empty project ID, and unsupported scope types now also return a bounded typed error rather than reflecting the input. The regression observes the attempted live-row ID inside `Store.WithTx`, proves the error escapes the callback, and then proves the live row and history row are both absent and no envelope survives for sink dispatch.
+2. Post-commit sink-failure telemetry previously attached the raw sink `error`, which could call and serialize unrestricted `Error()` text. The failure path now emits only stable `failure_code=audit_sink_emit_failed` plus the already-safe event and constraint IDs. A capture-handler regression injects a unique secret canary in the sink error and proves it is absent from every captured message, attribute key/value, and JSON-rendered record while the bounded failure code is present. The sink is called once, the command still succeeds, and exactly one live row and matching history row remain committed.
+
+Round-1 targeted verification:
+
+- `go test -p 2 ./pkg/hub -run '^(TestGovernanceCreateAudit_RejectsContradictorySystemScope|TestGovernanceCreateAudit_SinkFailurePreservesCommit)$' -count=1` — PASS (package 1.002s).
+- `go test -p 2 ./pkg/hub -run '^TestGovernanceCreateAudit_' -count=1` — PASS (package 2.726s).
+- `go test -race -p 2 ./pkg/hub -run '^TestGovernanceCreateAudit_' -count=1` — PASS (tests 60.557s).
+- `go vet -p 2 ./pkg/hub` — exit 0.
+- `go build -buildvcs=false -p 2 ./pkg/hub` — exit 0.
+- `GOGC=40 golangci-lint run --new-from-rev=4372ae9343cd2cf1c0cc3810f4edda5475f10e00 --concurrency=1 ./pkg/hub/...` — `0 issues`.
+- `gofmt` and `git diff --check` — clean.
+
+Store/schema/cap code was unchanged, so the accepted focused store and PostgreSQL 16.15 evidence above was not rerun. #2405 remains gated and untouched.
+
 Local `make ci` and `make ci-full` were not run because the campaign broker-workload rule prohibits them.
