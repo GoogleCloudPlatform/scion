@@ -239,6 +239,14 @@ var spaShellTemplate = `<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
     <title>Scion</title>
 
+    <!-- app-icons:start -- kept identical to web/index.html; see TestSPAShellAppIconTags. -->
+    <link rel="icon" href="/favicon.ico" sizes="32x32" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#1e293b" />
+    <!-- app-icons:end -->
+
     <!-- Preconnect to CDNs for faster loading -->
     <link rel="preconnect" href="https://cdn.jsdelivr.net">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1006,6 +1014,12 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 		fileServer = http.FileServer(http.FS(ws.assets))
 	}
 
+	// Go's built-in MIME table has no entry for these, and the system
+	// table (if any) varies by host, so set them explicitly.
+	if ct, ok := staticContentTypes[strings.ToLower(filepath.Ext(r.URL.Path))]; ok {
+		w.Header().Set("Content-Type", ct)
+	}
+
 	// Set cache headers based on whether the filename contains a hash.
 	// Vite hashed assets (e.g., chunk-abc123.js) get long-lived caching.
 	// Non-hashed entry points (e.g., main.js) get revalidation.
@@ -1015,6 +1029,13 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 	}
 	fileServer.ServeHTTP(w, r)
+}
+
+// staticContentTypes maps file extensions missing from Go's built-in MIME
+// table to the Content-Type served for them.
+var staticContentTypes = map[string]string{
+	".ico":         "image/x-icon",
+	".webmanifest": "application/manifest+json",
 }
 
 // isHashedAsset checks if a path looks like it contains a content hash.
