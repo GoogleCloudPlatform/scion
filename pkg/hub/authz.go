@@ -139,6 +139,13 @@ const (
 	CredentialKindFederation  CredentialKind = "federation"
 	CredentialKindBroker      CredentialKind = "broker"
 	CredentialKindDev         CredentialKind = "dev"
+
+	// CredentialKindHubDelivery is the internal credential a hub-side
+	// material delivery caller presents (ptone/scion#2228 part 2). It is
+	// produced only by the unexported newHubDeliveryIdentity constructor
+	// (authz_delivery_credential.go); no request context, token or header
+	// can carry it.
+	CredentialKindHubDelivery CredentialKind = "hub_delivery"
 )
 
 // PrincipalContext identifies the authenticated actor for an authorization request.
@@ -543,6 +550,16 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	if credential.Kind == "" {
 		credential = derivedCredential
 	}
+	// A hub_delivery identity always uses its own derived credential, even
+	// when the caller supplied one of the same kind: the lines above keep a
+	// caller-supplied CredentialContext whenever its kind was admitted, but
+	// for hub_delivery that context is replaced by the derived one here, so
+	// no caller-supplied Scopes, Ceiling or ID travels with it. The
+	// credential's authority is fixed by the constructor, not by request
+	// data.
+	if derivedCredential.Kind == CredentialKindHubDelivery {
+		credential = derivedCredential
+	}
 
 	// Unsupported principal kinds — fail closed.
 	switch principal.Kind {
@@ -597,6 +614,47 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 			}
 		}
 		return decorateDecision(d, request, principal, credential, auditPermissionID(request))
+	}
+
+	// ── Step 0b: Delivery credential bound-agent and permission gate
+	// (ptone/scion#2228 part 2) ────────────────────────────────────────
+	// A hub_delivery principal may only ever request its own three deliver
+	// permissions (hubDeliveryPermissionIDs), for the agent it is bound to.
+	// This runs once, here, for every request that reaches it; the step-10
+	// gate arm (authz_delegation_ceiling.go, checkHubDeliveryCeiling)
+	// enforces the same two rules again on its own, independently of this
+	// step, because a direct checkDelegationCeiling call (as in
+	// TestHubDelivery_Step10ArmDeniesWithoutStep0b) never reaches Decide's
+	// entry block at all.
+	if credential.Kind == CredentialKindHubDelivery {
+		h, _ := principal.Identity.(*hubDeliveryIdentity)
+		var reason string
+		switch {
+		case h == nil:
+			reason = "delivery credential is missing"
+		case request.Action != ActionDeliver:
+			reason = "delivery credential is limited to deliver permissions"
+		default:
+			if _, ok := hubDeliveryPermissionIDs[permissionID]; !ok {
+				reason = "delivery credential is limited to deliver permissions"
+			} else if h.boundAgentID == "" || h.boundAgentID != principal.ID {
+				reason = "delivery credential is bound to a different agent"
+			}
+		}
+		if reason != "" {
+			d := Decision{Allowed: false, Reason: reason}
+			if request.Explain {
+				d.Provenance = &DecisionProvenance{
+					Permission:      permissionID,
+					DenyReasons:     []string{reason},
+					Grants:          []GrantDetail{},
+					InactiveGrants:  []GrantDetail{},
+					Restrictions:    []RestrictionProvenance{},
+					MembershipPaths: []MembershipPathDetail{},
+				}
+			}
+			return decorateDecision(d, request, principal, credential, auditPermissionID(request))
+		}
 	}
 
 	// ── Step 1: UAT project constraint (pre-kernel gate) ──────────────
@@ -727,12 +785,20 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// this function already carves out brokers outside the kernel rather
 	// than inside it, so the exception cannot leak into an unrelated
 	// resource type's evaluation.
+	// A hub_delivery principal is skipped here, before the AgentIdentity
+	// assertion: its Scopes() is always nil, so buildAgentSyntheticBindings
+	// would add nothing — Step 0b already restricts it to ActionDeliver on
+	// the three deliver permissions, which this synthetic-binding step never
+	// grants. The skip states the rule explicitly rather than relying on
+	// nil scopes producing no candidates.
 	if isAgentPrincipal(principal.Kind) {
-		if agent, ok := principal.Identity.(AgentIdentity); ok && agent.ProjectID() != "" {
-			synthCandidates, synthRoles := a.buildAgentSyntheticBindings(agent)
-			candidates = append(candidates, synthCandidates...)
-			for k, v := range synthRoles {
-				roleDefs[k] = v
+		if _, ok := principal.Identity.(*hubDeliveryIdentity); !ok {
+			if agent, ok := principal.Identity.(AgentIdentity); ok && agent.ProjectID() != "" {
+				synthCandidates, synthRoles := a.buildAgentSyntheticBindings(agent)
+				candidates = append(candidates, synthCandidates...)
+				for k, v := range synthRoles {
+					roleDefs[k] = v
+				}
 			}
 		}
 	}
@@ -744,11 +810,17 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// synthetic system-scoped skill.read/skill.list binding. Step 5c strips
 	// it again for any skill that is not global/core, and the agent JWT
 	// restriction (7b) and delegation ceiling (10) still apply.
+	// A hub_delivery principal is skipped here too, before the AgentIdentity
+	// assertion: Step 0b already restricts it to ActionDeliver, so a
+	// skill.read/skill.list synthetic binding could never be exercised by
+	// this type.
 	if request.Resource.Type == "skill" && isAgentPrincipal(principal.Kind) {
-		if agent, ok := principal.Identity.(AgentIdentity); ok {
-			cb, role := agentSkillCatalogBinding(agent)
-			candidates = append(candidates, cb)
-			roleDefs[cb.RoleDefinitionID] = role
+		if _, ok := principal.Identity.(*hubDeliveryIdentity); !ok {
+			if agent, ok := principal.Identity.(AgentIdentity); ok {
+				cb, role := agentSkillCatalogBinding(agent)
+				candidates = append(candidates, cb)
+				roleDefs[cb.RoleDefinitionID] = role
+			}
 		}
 	}
 
@@ -798,9 +870,16 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		restrictions = append(restrictions, ceilingRestriction(credential.Ceiling))
 	}
 
-	// 7b. Agent JWT scope restriction.
+	// 7b. Agent JWT scope restriction. A hub_delivery principal gets the
+	// delivery_credential restriction instead, checked before the
+	// AgentIdentity assertion: hubDeliveryIdentity.Scopes() is always nil,
+	// and agentScopeRestriction denies everything when scopes are empty, but
+	// the delivery credential's authority is hubDeliveryPermissionIDs, not a
+	// JWT scope grant.
 	if isAgentPrincipal(principal.Kind) {
-		if agent, ok := principal.Identity.(AgentIdentity); ok {
+		if _, ok := principal.Identity.(*hubDeliveryIdentity); ok {
+			restrictions = append(restrictions, deliveryCredentialRestriction())
+		} else if agent, ok := principal.Identity.(AgentIdentity); ok {
 			restrictions = append(restrictions, agentScopeRestriction(agent, request.Resource))
 		}
 	}
@@ -836,6 +915,22 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 	kernelResult := Evaluate(kernelReq)
 
+	// ── Step 8b: delivery_item_grant ──────────────────────────────────
+	// A kernel grant never satisfies a deliver request on its own: the
+	// association, progeny or skill-default grant for the selected item is
+	// required instead. This runs for every credential kind, not only the
+	// internal delivery credential, and it is not a Restriction:
+	// Restriction.Check sees only the permission ID and cannot tell a role
+	// grant from a relationship grant, and the same restrictions are
+	// re-applied to relationship candidates at stage 5, where excluding the
+	// permission outright would also reject the progeny candidate.
+	decision := kernelDecisionToDecision(kernelResult, permissionID)
+	kernelAdmits := kernelResult.Allowed
+	if kernelAdmits && isDeliverRequest(permissionID, request.Action) {
+		excludeKernelGrantForDeliver(&decision)
+		kernelAdmits = false
+	}
+
 	// ── Step 9: Relationship candidates ───────────────────────────────
 	// On a kernel deny, named relationships (owner, ancestor, progeny,
 	// hub-member assign) are evaluated as typed candidates through the
@@ -844,10 +939,9 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// activity, and the same restrictions the kernel applied (7a/7b/7c).
 	// With Explain, candidates are also evaluated on a kernel allow so the
 	// provenance lists them.
-	decision := kernelDecisionToDecision(kernelResult, permissionID)
-	if !kernelResult.Allowed || request.Explain {
+	if !kernelAdmits || request.Explain {
 		rel := a.evaluateRelationshipCandidates(ctx, principal, request.Resource, request.Action, permissionID, restrictions, !request.Explain)
-		if !kernelResult.Allowed {
+		if !kernelAdmits {
 			if rel.accepted != nil {
 				kernelProvenance := decision.Provenance
 				decision = *rel.accepted
@@ -1760,7 +1854,8 @@ func isRecognizedPrincipalKind(kind PrincipalKind) bool {
 func isRecognizedCredentialKind(kind CredentialKind) bool {
 	switch kind {
 	case CredentialKindInteractive, CredentialKindUAT, CredentialKindAgentJWT,
-		CredentialKindFederation, CredentialKindBroker, CredentialKindDev:
+		CredentialKindFederation, CredentialKindBroker, CredentialKindDev,
+		CredentialKindHubDelivery:
 		return true
 	default:
 		return false
@@ -1788,7 +1883,9 @@ func isRecognizedCredentialKind(kind CredentialKind) bool {
 //
 // Nothing else passes: dev is not in the UAT/broker exception (a used UAT or
 // broker-on-behalf-of grant represents its local user owner, not dev's
-// token-issuing power), and an unrecognized derived identity never reaches
+// token-issuing power), CredentialKindHubDelivery is compatible by equality
+// only (case 1) — it is not in the user/interactive UAT overlay and not in
+// broker on-behalf-of — and an unrecognized derived identity never reaches
 // this predicate — it denies earlier, on the unrecognized-kind check. This
 // consumes ctx provenance for case 3, not just the two kinds, so a caller
 // cannot admit the broker exception by supplying CredentialKindBroker alone.
@@ -1877,7 +1974,7 @@ func principalContextForIdentity(identity Identity) PrincipalContext {
 		principal.Kind = PrincipalKindUser
 	case *DevUser:
 		principal.Kind = PrincipalKindDev
-	case *agentIdentityWrapper, *storedAgentIdentity, *peerAgentIdentity, *explainAgentIdentity:
+	case *agentIdentityWrapper, *storedAgentIdentity, *peerAgentIdentity, *explainAgentIdentity, *hubDeliveryIdentity:
 		principal.Kind = PrincipalKindAgent
 	case *FederatedUserIdentity:
 		principal.Kind = PrincipalKindFederatedUser
@@ -1950,6 +2047,9 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 		return credential
 	case *storedAgentIdentity, *peerAgentIdentity, *explainAgentIdentity:
 		return CredentialContext{Kind: CredentialKindAgentJWT}
+	case *hubDeliveryIdentity:
+		// No ID: a delivery credential carries no JTI.
+		return CredentialContext{Kind: CredentialKindHubDelivery}
 	case *FederatedUserIdentity, *FederatedAgentIdentity, *FederatedServiceIdentity:
 		return CredentialContext{Kind: CredentialKindFederation, Type: identity.Type()}
 	case *brokerIdentityImpl:
