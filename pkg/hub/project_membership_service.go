@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -595,12 +596,7 @@ func (svc *ProjectMembershipService) checkGovernance(ctx context.Context, req Me
 		if svc.actorHasHubRoleBindingAuthority(ctx, req.Actor.ID(), req.Op) {
 			return MembershipDecision{Allowed: true}
 		}
-		return MembershipDecision{
-			Allowed:    false,
-			DenialCode: ErrCodeRoleAssignmentForbidden,
-			Reason:     "actor has no project role",
-			HTTPStatus: 403,
-		}
+		return *noProjectRoleDecision()
 	}
 
 	// The governance matrix from CT1 D5:
@@ -795,12 +791,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			ScopeID:          req.ProjectID,
 		})
 		if !delDecision.Allowed {
-			return nil, &MembershipDecision{
-				Allowed:    false,
-				DenialCode: ErrCodeTargetRoleProtected,
-				Reason:     "actor cannot delegate the requested role: " + delDecision.Reason,
-				HTTPStatus: 403,
-			}
+			return nil, canDelegateRefusal(roleDef, delDecision.Reason)
 		}
 	}
 
@@ -849,7 +840,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			if hasHubAuth {
 				hubOverride = true
 			} else {
-				return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+				return asGovernanceDenial(*noProjectRoleUnderLockDecision())
 			}
 		}
 		if !hubOverride {
@@ -987,6 +978,11 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		if isLastOwnerError(txErr) {
 			return nil, lastOwnerDenial()
 		}
+		var gdErr *governanceDenialError
+		if errors.As(txErr, &gdErr) {
+			d := gdErr.decision
+			return nil, &d
+		}
 		if govDenial := isGovernanceError(txErr); govDenial != nil {
 			return nil, govDenial
 		}
@@ -1069,12 +1065,7 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 				ScopeID:          req.ProjectID,
 			})
 			if !delDecision.Allowed {
-				return nil, &MembershipDecision{
-					Allowed:    false,
-					DenialCode: ErrCodeTargetRoleProtected,
-					Reason:     "actor cannot delegate the new role: " + delDecision.Reason,
-					HTTPStatus: 403,
-				}
+				return nil, canDelegateRefusalFor(newRoleDef, "the new role", delDecision.Reason)
 			}
 		}
 	}
@@ -1108,7 +1099,7 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 			if hasHubAuth {
 				hubOverride = true
 			} else {
-				return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+				return asGovernanceDenial(*noProjectRoleUnderLockDecision())
 			}
 		}
 
@@ -1193,6 +1184,11 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 	if txErr != nil {
 		if isLastOwnerError(txErr) {
 			return nil, lastOwnerDenial()
+		}
+		var gdErr *governanceDenialError
+		if errors.As(txErr, &gdErr) {
+			d := gdErr.decision
+			return nil, &d
 		}
 		if govDenial := isGovernanceError(txErr); govDenial != nil {
 			return nil, govDenial

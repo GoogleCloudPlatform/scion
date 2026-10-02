@@ -510,10 +510,7 @@ func (svc *ProjectMembershipService) reevaluateActorTx(ctx context.Context, tx s
 			return "", false, false, fmt.Errorf("hub authority revalidation failed (fail-closed): %w", hErr)
 		}
 		if !ok {
-			return "", false, false, asGovernanceDenial(MembershipDecision{
-				Allowed: false, DenialCode: ErrCodeRoleAssignmentForbidden,
-				Reason: "actor has no project role (re-evaluated under lock)", HTTPStatus: 403,
-			})
+			return "", false, false, asGovernanceDenial(*noProjectRoleUnderLockDecision())
 		}
 	}
 	if needDelete {
@@ -522,10 +519,7 @@ func (svc *ProjectMembershipService) reevaluateActorTx(ctx context.Context, tx s
 			return "", false, false, fmt.Errorf("hub authority revalidation failed (fail-closed): %w", hErr)
 		}
 		if !ok {
-			return "", false, false, asGovernanceDenial(MembershipDecision{
-				Allowed: false, DenialCode: ErrCodeRoleAssignmentForbidden,
-				Reason: "actor has no project role (re-evaluated under lock)", HTTPStatus: 403,
-			})
+			return "", false, false, asGovernanceDenial(*noProjectRoleUnderLockDecision())
 		}
 	}
 	return "", false, true, nil
@@ -1219,18 +1213,40 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 
 // noProjectRoleDecision is the refusal for an actor with no project role and
 // no hub role_binding.* authority for the requested operation. Shared by
-// SetMemberRoles and AssignableRoles so both report it identically.
+// SetMemberRoles, AssignableRoles and the legacy single-binding paths
+// (checkGovernance, used by AddMember/UpdateMemberRole/RemoveMember) so all
+// report it identically (ptone/scion#2600).
 func noProjectRoleDecision() *MembershipDecision {
 	return &MembershipDecision{Allowed: false, DenialCode: ErrCodeRoleAssignmentForbidden, Reason: "actor has no project role", HTTPStatus: 403}
 }
 
+// noProjectRoleUnderLockDecision is noProjectRoleDecision's in-transaction
+// twin: the actor's project role and hub role_binding.* authority were
+// re-evaluated under the project lock and neither holds any more. Shared by
+// reevaluateActorTx (SetMemberRoles Phase T) and the legacy AddMember /
+// UpdateMemberRole transactions (ptone/scion#2600).
+func noProjectRoleUnderLockDecision() *MembershipDecision {
+	return &MembershipDecision{Allowed: false, DenialCode: ErrCodeRoleAssignmentForbidden, Reason: "actor has no project role (re-evaluated under lock)", HTTPStatus: 403}
+}
+
 // canDelegateRefusal is the refusal for a created binding of rd that
-// CanDelegate denied with reason. Shared by SetMemberRoles and
-// AssignableRoles so both report the same code, reason and details.
+// CanDelegate denied with reason. Shared by SetMemberRoles, AssignableRoles
+// and the legacy AddMember so all report the same code, reason and details.
 func canDelegateRefusal(rd *store.RoleDefinition, reason string) *MembershipDecision {
+	return canDelegateRefusalFor(rd, "the requested role", reason)
+}
+
+// canDelegateRefusalFor is canDelegateRefusal with the role named by subject
+// in the message ("actor cannot delegate <subject>: <reason>"). Only the
+// legacy UpdateMemberRole uses a subject other than "the requested role"
+// ("the new role"), which its PATCH response has always carried; the code,
+// status and details are the same for every caller (ptone/scion#2600). The
+// legacy POST/PATCH handlers do not render Details, so their response bodies
+// are unchanged by carrying them.
+func canDelegateRefusalFor(rd *store.RoleDefinition, subject, reason string) *MembershipDecision {
 	return &MembershipDecision{
 		Allowed: false, DenialCode: ErrCodeTargetRoleProtected,
-		Reason:     "actor cannot delegate the requested role: " + reason,
+		Reason:     "actor cannot delegate " + subject + ": " + reason,
 		HTTPStatus: 403,
 		Details:    map[string]interface{}{"roleDefinitionId": rd.ID, "roleName": rd.Name, "reason": reason},
 	}
