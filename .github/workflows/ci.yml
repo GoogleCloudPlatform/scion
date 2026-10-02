@@ -273,6 +273,11 @@ jobs:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-launch-store-postgres
 
+      - name: Run timestamp contract test (SQLite and Postgres)
+        env:
+          SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+        run: make test-tz-contract
+
   test-full-suite:
     name: Full Test Suite (reporting only)
     runs-on: ubuntu-latest
