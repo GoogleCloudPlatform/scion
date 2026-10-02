@@ -19,23 +19,27 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // sortedListFixture builds a project with an owner (full capabilities) and a
 // plain member (read-only: the design's read-pass and race tests need a
-// caller for whom some agents are unreadable), for the P1b sorted-mode
-// project list tests.
+// caller for whom some agents are unreadable), for the sorted-mode project
+// list tests.
 type sortedListFixture struct {
 	srv     *Server
 	store   store.Store
@@ -148,8 +152,8 @@ func TestListProjectAgentsSorted_InvalidParams(t *testing.T) {
 		query string
 	}{
 		{"invalid sort value", "sort=bogus"},
-		{"sort=created not yet supported in P1b", "sort=created"},
 		{"invalid dir", "sort=updated&dir=sideways"},
+		{"invalid dir with sort=created", "sort=created&dir=sideways"},
 		{"fit with cursor", "sort=updated&fit=10&cursor=AAAA"},
 		{"fit too large", "sort=updated&fit=501"},
 		{"fit zero", "sort=updated&fit=0"},
@@ -163,6 +167,52 @@ func TestListProjectAgentsSorted_InvalidParams(t *testing.T) {
 			assert.Equal(t, http.StatusBadRequest, rec.Code, "query=%q body=%s", tc.query, rec.Body.String())
 		})
 	}
+}
+
+// TestListProjectAgentsSorted_CreatedSort pins sort=created end to end on
+// the project endpoint: paging walks the agentsort "created" total order,
+// and a cursor minted under sort=created binds to it.
+func TestListProjectAgentsSorted_CreatedSort(t *testing.T) {
+	f := sortedListSetup(t)
+	var created []*store.Agent
+	for i := 0; i < 5; i++ {
+		created = append(created, f.createAgent(t, fmt.Sprintf("created-%d", i), string(state.PhaseStopped), nil))
+	}
+
+	// Ground truth from the agentsort reference over each agent's own
+	// Created/ID, not an assumption about CreateAgent's real-clock timing
+	// (two calls can land in the same clock tick).
+	rows := make([]agentsort.Row, len(created))
+	for i, a := range created {
+		rows[i] = agentsort.KeyFor(agentsort.Created, a.ID, a.Created, a.Updated, a.LastActivityEvent)
+	}
+	agentsort.SortRows(agentsort.Desc, rows)
+	want := make([]string, len(rows))
+	for i, row := range rows {
+		want[i] = row.ID
+	}
+
+	var walked []string
+	cursor := ""
+	for i := 0; i < 10; i++ {
+		q := "sort=created&dir=desc&limit=2"
+		if cursor != "" {
+			q += "&cursor=" + url.QueryEscape(cursor)
+		}
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath(q), nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		resp := mustDecodeListAgentsResponse(t, rec.Body)
+		assert.Equal(t, "created", resp.Sort)
+		assert.Equal(t, "desc", resp.Dir)
+		for _, a := range resp.Agents {
+			walked = append(walked, a.ID)
+		}
+		if resp.NextCursor == "" {
+			break
+		}
+		cursor = resp.NextCursor
+	}
+	assert.Equal(t, want, walked)
 }
 
 // TestListProjectAgentsSorted_CursorWrongSortOrDirRejected pins that a
@@ -221,36 +271,6 @@ func TestListProjectAgentsSorted_CursorPhaseReplayRejected(t *testing.T) {
 	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodGet,
 		f.listPath("sort=updated&dir=desc&limit=1&phase=stopped&cursor="+url.QueryEscape(resp.NextCursor)), nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-}
-
-// TestListProjectAgentsSorted_AgentJWT400BeforeSQL is the P1b agent-JWT gate
-// (design 5.3 "P1b build") and a hard-gate check: exactly the stated
-// message, no decisions beyond what routing itself costs.
-func TestListProjectAgentsSorted_AgentJWT400BeforeSQL(t *testing.T) {
-	f := sortedListSetup(t)
-	agent := f.createAgent(t, "self", string(state.PhaseStopped), nil)
-
-	svc := f.srv.GetAgentTokenService()
-	require.NotNil(t, svc)
-	tok, err := svc.GenerateAgentToken(agent.ID, f.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-	require.NoError(t, err)
-
-	emitter := &recordingDecisionAuditEmitter{}
-	f.srv.authzService.SetDecisionAuditEmitter(emitter)
-
-	rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, f.listPath("sort=updated"), nil, tok)
-	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-
-	var body struct {
-		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, agentJWTSortedModeMessage, body.Error.Message)
-	assert.Equal(t, ErrCodeInvalidRequest, body.Error.Code)
-	assert.Empty(t, emitter.records, "no decision should be made before the agent-JWT sorted-mode gate")
 }
 
 // --- candidate ceiling (hard gate) -----------------------------------
@@ -535,7 +555,8 @@ func TestListProjectAgentsSorted_Stats(t *testing.T) {
 	require.NotNil(t, resp.Stats)
 	assert.Equal(t, 3, resp.Stats.Total)
 	assert.Equal(t, 2, resp.Stats.Running)
-	assert.Len(t, resp.Stats.Agents, 3)
+	require.NotNil(t, resp.Stats.Agents)
+	assert.Len(t, *resp.Stats.Agents, 3)
 
 	// This response happens to be complete (n=3 <= fit=500), so per design
 	// 4.3/5.3 the page itself is the whole unphased set, not narrowed to
@@ -860,4 +881,79 @@ func (r *reprojectingListAgentsStore) ListAgents(ctx context.Context, filter sto
 		}
 	}
 	return result, nil
+}
+
+// fullRowReadRecorder records the full-row reads loadFullRowsForPage could
+// issue and answers them with no rows. Every other store method panics via
+// the nil embedded Store, so any unexpected read fails the test too.
+type fullRowReadRecorder struct {
+	store.Store
+	listAgentsCalls int
+	getByIDsCalls   int
+}
+
+func (r *fullRowReadRecorder) ListAgents(_ context.Context, _ store.AgentFilter, _ store.ListOptions) (*store.ListResult[store.Agent], error) {
+	r.listAgentsCalls++
+	return &store.ListResult[store.Agent]{}, nil
+}
+
+func (r *fullRowReadRecorder) GetAgentsByIDs(_ context.Context, _ []string) (map[string]*store.Agent, error) {
+	r.getByIDsCalls++
+	return map[string]*store.Agent{}, nil
+}
+
+// TestLoadFullRowsForPage_OverBoundFailsBeforeRead: the store clamps a
+// ListAgents read to its page cap, so more than maxSortedLimit ids could
+// come back short without an error. loadFullRowsForPage must refuse such a
+// request with an internal (non-validation) error before touching the
+// store, while a request at the bound still reads.
+func TestLoadFullRowsForPage_OverBoundFailsBeforeRead(t *testing.T) {
+	ids := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("00000000-0000-4000-8000-%012d", i)
+		}
+		return out
+	}
+
+	rec := &fullRowReadRecorder{}
+	srv := &Server{store: rec}
+	rows, err := srv.loadFullRowsForPage(context.Background(), ids(maxSortedLimit+1), false)
+	require.Error(t, err)
+	assert.Nil(t, rows)
+	assert.False(t, errors.Is(err, store.ErrInvalidInput), "an over-bound read is an internal error, not caller input")
+	assert.False(t, errors.Is(err, store.ErrNotFound))
+	assert.Equal(t, 0, rec.listAgentsCalls, "no full-row read may run once the bound is exceeded")
+	assert.Equal(t, 0, rec.getByIDsCalls, "no full-row read may run once the bound is exceeded")
+
+	w := httptest.NewRecorder()
+	writeErrorFromErr(w, err, "")
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	// The client gets only the generic internal error: no id count, no
+	// bound value and no guard text.
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body), w.Body.String())
+	assert.Equal(t, "internal_error", body.Error.Code)
+	assert.Equal(t, "Internal server error", body.Error.Message)
+	for _, leak := range []string{
+		fmt.Sprint(maxSortedLimit + 1),
+		fmt.Sprint(maxSortedLimit),
+		"501",
+		"500",
+		"bound",
+	} {
+		assert.NotContains(t, strings.ToLower(w.Body.String()), leak, "error body must not reveal %q", leak)
+	}
+
+	// At the bound the read runs, and a short (here empty) result is not an
+	// error: it is the race-drop signal handled by the callers.
+	rows, err = srv.loadFullRowsForPage(context.Background(), ids(maxSortedLimit), false)
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+	assert.Equal(t, 1, rec.listAgentsCalls)
 }
