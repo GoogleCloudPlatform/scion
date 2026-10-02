@@ -1298,6 +1298,18 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetExitReason("")
 	}
 
+	// ClearExit covers the case the phase-transition clear above does not:
+	// a lifecycle start/restart dispatched while the CURRENT phase is
+	// already running (or anything else). A disruption reason can now be
+	// recorded on a still-running agent ahead of its pod actually stopping
+	// (state.ExitReasonPreempted/ExitReasonEvicted); without this, that
+	// reason describes the old pod and would otherwise survive into the
+	// new generation a start/restart brings up.
+	if su.ClearExit {
+		upd.ClearExitCode()
+		upd.SetExitReason("")
+	}
+
 	// T1 async agent create (design t1-async-create-v11.md §3.3): a write of
 	// phase=running always clears launch_error (T3) — once an agent has run,
 	// it must never again match the incomplete-create predicate, whatever

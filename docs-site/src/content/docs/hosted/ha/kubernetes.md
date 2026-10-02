@@ -152,7 +152,7 @@ Scion also distinguishes a Kubernetes-initiated disruption from a plain stop or 
 | `DisruptionTarget` condition, reason `TerminationByKubelet` or `EvictionByEvictionAPI` | `evicted` |
 | `DisruptionTarget` condition, any other reason (for example a taint-manager or pod-GC removal) | `evicted` |
 
-This is reported only once the pod has actually reached a terminal state — a `DisruptionTarget` condition can appear while a pod is still finishing its grace period, and that pod has not stopped yet. It depends on the runtime observing the pod in that terminal state before the pod object is removed from the API server; if the pod disappears entirely between polls, the agent may instead be reported through a different, more generic terminal path rather than as preempted/evicted. Docker and other non-Kubernetes runtimes are unaffected.
+This is reported as soon as either signal is observed: a pod still `Running` but already committed to termination (it has a `deletionTimestamp` and a live `DisruptionTarget` condition — most of what preemption and the Eviction API delete this way), or a pod that has actually reached a terminal state (`Failed`/`Succeeded`) while still carrying the signal. A `DisruptionTarget` condition with no `deletionTimestamp` yet is not reported — that pod is still finishing its grace period and has not stopped. It depends on the runtime observing one of these two states before the pod object is removed from the API server entirely; if the pod disappears between polls without either ever being observed, the agent may instead be reported through a different, more generic terminal path rather than as preempted/evicted. Docker and other non-Kubernetes runtimes are unaffected.
 
 ## Architecture & Security
 

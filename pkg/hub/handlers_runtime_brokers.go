@@ -995,6 +995,20 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						}
 					}
 				}
+				// A non-terminal pod's structured Phase is "" by design (see
+				// List()'s committed-disruption branch in k8s_runtime.go,
+				// which reports a preempted/evicted reason while a pod is
+				// still Running), so that heartbeat lands in this legacy
+				// branch too whenever the broker's own phase tracking has
+				// nothing more specific to report. Record the reason the
+				// same way as the structured non-terminal branch above: only
+				// when nothing more specific is stored yet, without
+				// touching the phase or message derived from ContainerStatus.
+				hbExitReason := state.ExitReason(agentHB.ExitReason)
+				isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
+				if isDisruption && agent.ExitReason == "" {
+					statusUpdate.ExitReason = agentHB.ExitReason
+				}
 			}
 
 			// If the broker didn't send a ContainerStatus but we have structured

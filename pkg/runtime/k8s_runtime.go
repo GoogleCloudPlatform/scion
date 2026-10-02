@@ -2559,7 +2559,8 @@ func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podN
 // crash: the pod-level status reason "Evicted" (kubelet node-pressure
 // eviction), or a DisruptionTarget condition. Returns "" when neither signal
 // is present. Callers should only use the result once the pod has actually
-// reached a terminal phase.
+// reached a terminal phase, or is already committed to termination (a
+// non-nil DeletionTimestamp alongside a live DisruptionTarget condition).
 func k8sDisruptionExitReason(pod corev1.Pod) string {
 	if pod.Status.Reason == "Evicted" {
 		return string(state.ExitReasonEvicted)
@@ -2655,9 +2656,10 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 		// Kubernetes-initiated disruption rather than a normal stop or a
 		// container crash. Check only once the pod is terminal (agentStatus
 		// is stopped or error): a DisruptionTarget condition can appear on a
-		// pod that is still running out its grace period, and that pod has
-		// not stopped yet, so it must not be reported as preempted/evicted
-		// before it actually is.
+		// pod that is still running out its grace period, and that pod must
+		// not be reported as preempted/evicted before it actually is —
+		// unless it is already committed to termination (deletionTimestamp),
+		// which the branch below covers.
 		if agentStatus == string(state.PhaseStopped) || agentStatus == string(state.PhaseError) {
 			if reason := k8sDisruptionExitReason(p); reason != "" {
 				exitReason = reason

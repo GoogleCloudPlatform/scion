@@ -1085,6 +1085,12 @@ func (s *Server) handleExistingAgent(
 		if existingAgent.Phase == string(state.PhaseSuspended) {
 			existingAgent.Phase = string(state.PhaseRunning)
 		}
+		// Clear any exit reason/code left from the prior generation —
+		// including a disruption reason recorded while the agent was still
+		// running (state.ExitReasonPreempted/ExitReasonEvicted) ahead of its
+		// pod actually stopping, which describes the old pod, not this one.
+		existingAgent.ExitReason = ""
+		existingAgent.ExitCode = nil
 		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
 			s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 		}
@@ -1156,6 +1162,13 @@ func (s *Server) handleExistingAgent(
 			}
 
 			existingAgent.Phase = string(state.PhaseRunning)
+			// Clear any exit reason/code left from the prior generation —
+			// including a disruption reason recorded while the agent was
+			// still running (state.ExitReasonPreempted/ExitReasonEvicted)
+			// ahead of its pod actually stopping, which describes the old
+			// pod, not this one.
+			existingAgent.ExitReason = ""
+			existingAgent.ExitCode = nil
 			if err := s.updateAgentAfterDispatch(ctx, existingAgent); err != nil {
 				s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 			}
@@ -1255,6 +1268,10 @@ func (s *Server) handleExistingAgent(
 			existingAgent.Phase == string(state.PhaseProvisioning) {
 			existingAgent.Phase = string(state.PhaseRunning)
 		}
+		// Clear any exit reason/code left from the prior generation — see
+		// the equivalent clear in the resume branches above.
+		existingAgent.ExitReason = ""
+		existingAgent.ExitCode = nil
 		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
 			// Log but continue — agent was started.
 			s.agentLifecycleLog.Warn("Failed to update agent status after start", "agent_id", existingAgent.ID, "error", err)

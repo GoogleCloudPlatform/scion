@@ -615,6 +615,14 @@ type AgentStatusUpdate struct {
 	// Exit tracking
 	ExitCode   *int   `json:"exitCode,omitempty"`
 	ExitReason string `json:"exitReason,omitempty"`
+	// ClearExit, when true, clears ExitCode and ExitReason on this update —
+	// independent of any phase-transition-gated clear, since a lifecycle
+	// start/restart dispatch is a fresh generation of the agent regardless
+	// of its current phase (a running agent with a disruption reason
+	// recorded ahead of its pod actually stopping, see state.ExitReasonPreempted/
+	// ExitReasonEvicted, is the case this exists for: that reason describes
+	// the old pod, not the one the start/restart is bringing up).
+	ClearExit bool `json:"clearExit,omitempty"`
 }
 
 // ProjectStore defines project-related persistence operations.

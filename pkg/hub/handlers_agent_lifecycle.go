@@ -487,9 +487,17 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		zero := 0
 		statusUpdate.ExitCode = &zero
 	}
-	// When starting or restarting, propagate container status from broker response
-	if (action == api.AgentActionStart || action == api.AgentActionRestart) && agent.ContainerStatus != "" {
-		statusUpdate.ContainerStatus = agent.ContainerStatus
+	// When starting or restarting, propagate container status from broker
+	// response, and clear any exit reason/code from the prior generation —
+	// including a disruption reason recorded while the agent was still
+	// running (state.ExitReasonPreempted/ExitReasonEvicted), which the
+	// phase-transition clear in UpdateAgentStatus does not catch when the
+	// agent was already running (not stopped/error) at dispatch time.
+	if action == api.AgentActionStart || action == api.AgentActionRestart {
+		if agent.ContainerStatus != "" {
+			statusUpdate.ContainerStatus = agent.ContainerStatus
+		}
+		statusUpdate.ClearExit = true
 	}
 	if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
 		writeErrorFromErr(w, err, "")

@@ -22,6 +22,10 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/dynamic/fake"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
 func TestGetRuntime(t *testing.T) {
@@ -384,6 +388,50 @@ func TestApplyKubernetesRuntimeConfig(t *testing.T) {
 		}
 		if !rt.GKEAutoDetected {
 			t.Error("expected GKEAutoDetected true when isGKE is true and GKE was not explicitly set")
+		}
+	})
+}
+
+// serverVersionCallCount counts how many "get version" actions the fake
+// clientset's discovery client recorded — IsGKE()'s only network call.
+func serverVersionCallCount(cs *k8sfake.Clientset) int {
+	count := 0
+	for _, a := range cs.Actions() {
+		if a.GetVerb() == "get" && a.GetResource().Resource == "version" {
+			count++
+		}
+	}
+	return count
+}
+
+func TestKubernetesIsGKE(t *testing.T) {
+	newFakeClient := func() (*k8s.Client, *k8sfake.Clientset) {
+		cs := k8sfake.NewClientset()
+		scheme := k8sruntime.NewScheme()
+		dyn := fake.NewSimpleDynamicClient(scheme)
+		return k8s.NewTestClient(dyn, cs), cs
+	}
+
+	t.Run("explicit gke true skips the discovery call entirely", func(t *testing.T) {
+		client, cs := newFakeClient()
+
+		got := kubernetesIsGKE(config.V1RuntimeConfig{GKE: true}, client)
+
+		if got {
+			t.Error("expected kubernetesIsGKE to return false when GKE is already explicit")
+		}
+		if n := serverVersionCallCount(cs); n != 0 {
+			t.Errorf("expected 0 ServerVersion calls when GKE is already explicit, got %d", n)
+		}
+	})
+
+	t.Run("unset GKE probes the cluster exactly once", func(t *testing.T) {
+		client, cs := newFakeClient()
+
+		_ = kubernetesIsGKE(config.V1RuntimeConfig{}, client)
+
+		if n := serverVersionCallCount(cs); n != 1 {
+			t.Errorf("expected exactly 1 ServerVersion call when GKE is unset, got %d", n)
 		}
 	})
 }

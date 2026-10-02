@@ -198,12 +198,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			return &ErrorRuntime{Err: err}
 		}
 		rt := NewKubernetesRuntime(k8sClient)
-		// Skip the discovery round trip when GKE mode is already explicit:
-		// IsGKE() calls Discovery().ServerVersion(), a network call that
-		// applyKubernetesRuntimeConfig only needs for auto-detection, not
-		// when rtConfig.GKE already decides the outcome.
-		isGKE := !rtConfig.GKE && k8sClient.IsGKE()
-		applyKubernetesRuntimeConfig(rt, rtConfig, isGKE)
+		applyKubernetesRuntimeConfig(rt, rtConfig, kubernetesIsGKE(rtConfig, k8sClient))
 		return rt
 	case "cloudrun":
 		cfg := rtConfig.CloudRun
@@ -245,6 +240,17 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 
 	// Fallback should not be reached if logic is correct, but default to Docker
 	return NewDockerRuntime()
+}
+
+// kubernetesIsGKE reports whether client.IsGKE() auto-detection should run:
+// skipped when rtConfig.GKE already decides the outcome explicitly, since
+// IsGKE() calls Discovery().ServerVersion(), a network round trip that
+// serves no purpose once the config has already made the call. Extracted
+// from the GetRuntime kubernetes case so the short-circuit can be
+// unit-tested against a fake client without constructing a real cluster
+// connection.
+func kubernetesIsGKE(rtConfig config.V1RuntimeConfig, client *k8s.Client) bool {
+	return !rtConfig.GKE && client.IsGKE()
 }
 
 // applyKubernetesRuntimeConfig applies rtConfig's Kubernetes-specific fields
