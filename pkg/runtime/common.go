@@ -720,7 +720,7 @@ func narrowGitAdminMounts(registerMount func(string, string, bool, bool), repoRo
 //
 // pkg/provision's read/JOIN/teardown boundary validation (sharers.go's
 // readMarker and worktree_validate.go's ValidateWorktreeForBase) is the
-// primary, base-type-independent control: it already makes a poisoned
+// primary, base-type-independent control: it already makes an invalid
 // marker or a rewritten back-link harmless regardless of whether this mount
 // narrowing applies. This function is defense-in-depth on top of that — it
 // prevents the write from inside a container in the first place.
