@@ -325,7 +325,8 @@ var errAbortedByKeepalive = errors.New("launch report: a keepalive answer ended 
 // "the keepalive stops when the terminal's first attempt starts; from then
 // on only the terminal's answer decides cleanup" -- so SendTerminal must
 // keep retrying on its own TTL-bounded ctx regardless of abortCh, never
-// handing a terminal's outcome to a keepalive answer that raced it.
+// handing a terminal's outcome to a keepalive answer that arrived
+// concurrently with it.
 func (s *launchSender) sendReportBlocking(ctx context.Context, report *hubclient.AgentLaunchReport, minBackoff, maxBackoff, attemptTimeout time.Duration, abortable bool) (*hubclient.AgentLaunchReportResult, error) {
 	for {
 		if abortable {

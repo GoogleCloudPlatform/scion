@@ -137,6 +137,12 @@ type launchCtx struct {
 	// a real GCS bucket, e.g. to land a concurrent keepalive answer inside
 	// the download's window.
 	downloadWorkspaceFromGCS func(ctx context.Context, req CreateAgentRequest, opts api.StartOptions) (api.StartOptions, string, string, error)
+	// afterStartSelected, when set, is called with the launch's sender right
+	// after runLaunch's select has taken Manager.Start's result. Always nil
+	// in production (beginAsyncLaunch never sets it); tests use it to record
+	// a keepalive abort at exactly that point, which a real keepalive can
+	// only hit by chance.
+	afterStartSelected func(*launchSender)
 }
 
 // runLaunch is the async-create launch goroutine (design §3.8.2 step 5). It
@@ -203,6 +209,10 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		s.handleKeepaliveAbort(sender, rec, lc)
 		return
 	}
+	// The claim has been applied: any failure from here on is reported
+	// under the launching step (design §3.9), including a ctx' deadline
+	// reached while still waiting on a superseded launch below.
+	currentStep = "launching"
 
 	// Step 2, F5: wait for a superseded record's cleanup before writing the
 	// shared marker, then write it (create launches only).
@@ -224,7 +234,6 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			return
 		}
 	}
-	currentStep = "launching"
 	if rec.Kind == store.LaunchKindCreate && lc.opts.ProjectPath != "" {
 		if err := writeLaunchMarker(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID); err != nil {
 			// A marker write failure silently disables file cleanup for this
@@ -250,6 +259,11 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	}
 	opts, _, _, dlErr := download(ctx, lc.req, lc.opts)
 	if dlErr != nil {
+		if locallyCancelled(ctx) {
+			// Same rule as Start's local-cancel case below: keyed on ctx',
+			// not on the error the download returned.
+			return
+		}
 		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", dlErr.Error())
 		return
 	}
@@ -277,6 +291,9 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	select {
 	case sr = <-startCh:
 		// Start returned on its own below.
+		if lc.afterStartSelected != nil {
+			lc.afterStartSelected(sender)
+		}
 	case <-sender.KeepaliveAborted():
 		rec.cancel() // unblocks Start, which honours ctx' cancellation
 		<-startCh    // let it unwind before deciding what to do
@@ -297,14 +314,17 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	}
 
 	if sr.err != nil {
-		if errors.Is(sr.err, context.Canceled) {
+		if locallyCancelled(ctx) {
 			// A local stop/delete (launchRegistry.CancelLocal) woke Start
 			// via ctx' cancellation, not a real deadline (the
 			// launch_timeout case is context.DeadlineExceeded, handled by
 			// classifyStartError below). Same rule as the claim's and
 			// WaitSuperseded's local-cancel cases: the Hub already knows,
 			// or will independently learn, this launch is over, so no
-			// terminal.
+			// terminal. Keyed on ctx' rather than on sr.err: the
+			// exec-based runtimes (docker, podman, apple) return the killed
+			// CLI's *exec.ExitError, not context.Canceled, when ctx' is
+			// cancelled under them.
 			return
 		}
 		code, message := classifyStartError(ctx, sr.err)
@@ -355,6 +375,15 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		return
 	}
 	s.forceHeartbeatAll("create", rec.AgentID)
+}
+
+// locallyCancelled reports whether ctx' was cancelled rather than having
+// reached its deadline. Once the keepalive-abort paths have returned, the only
+// remaining source of that cancellation is a local stop/delete
+// (launchRegistry.CancelLocal): runLaunch itself cancels ctx' only on the
+// KeepaliveAborted branch, which returns, and in its deferred cleanup.
+func locallyCancelled(ctx context.Context) bool {
+	return errors.Is(ctx.Err(), context.Canceled)
 }
 
 // handleKeepaliveAbort acts on the outcome a keepalive answer recorded
