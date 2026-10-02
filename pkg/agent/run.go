@@ -1090,6 +1090,14 @@ authDone:
 	// is honored only if it re-validates against that workspace, so it
 	// otherwise falls through to detectRepoRoot and stays "".
 	//
+	// candidateRepoRoot and effectiveWorkspace can each independently arrive
+	// here already resolved or not — one dispatch's stored state and a later
+	// dispatch's freshly recovered value do not always agree on which. Compare
+	// each pair's parent directories resolved, with each one's own final path
+	// element left exactly as given: this way the comparison tolerates either
+	// side reaching this point through a different ancestor spelling, while
+	// still telling two differently-named final elements apart.
+	//
 	// This first pass validates against the pre-workspace-backend
 	// effectiveWorkspace, only because containerWorkspace (computed below)
 	// needs a repoRoot to feed the NFS/cloudrun/gke backend resolution that
@@ -1106,7 +1114,7 @@ authDone:
 		candidateRepoRoot = persistedRepoRoot
 	}
 	preValidationWorkspace := effectiveWorkspace
-	repoRoot := validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
+	repoRoot := validatedWorktreeRepoRoot(resolveParentDir(candidateRepoRoot), resolveParentDir(effectiveWorkspace))
 	if repoRoot == "" {
 		repoRoot = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
 	}
@@ -1811,6 +1819,28 @@ func validatedWorktreeRepoRoot(candidateRoot, effectiveWorkspace string) string 
 		return ""
 	}
 	return candidateRoot
+}
+
+// resolveParentDir resolves p's parent directory, leaving p's own final path
+// element exactly as given. Two paths that reach a comparison through
+// different ancestor spellings — one following a symlinked ancestor
+// directory, one already in its resolved form — still compare equal after
+// this once both are passed through it, since only the shared ancestor
+// portion is normalized. The final path element is never resolved, so two
+// paths whose final elements are not themselves the same name (one of them
+// is, for example, its own symlink to a different final element) still
+// compare as different. Returns p unchanged if its parent cannot be
+// resolved (including when p is empty).
+func resolveParentDir(p string) string {
+	if p == "" {
+		return p
+	}
+	parent := filepath.Dir(p)
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return p
+	}
+	return filepath.Join(resolvedParent, filepath.Base(p))
 }
 
 // extractWorkspaceFromVolumes finds a volume mounted to /workspace and returns its source path.

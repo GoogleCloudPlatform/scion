@@ -3910,6 +3910,210 @@ func TestStartDoesNotPersistWhenRepoRootStaysEmpty(t *testing.T) {
 	}
 }
 
+// TestStartResolvesRepoRootWhenPersistedRootIsSymlinkedAndWorkspaceIsResolved
+// and the test following it cover run.go's own RunConfig.RepoRoot comparison
+// (distinct from persistProvisionedWorktreeRepoRootIfValid's, covered above):
+// the persisted repo root and the dispatch's own workspace value can each
+// independently arrive already resolved or not, and a resolve-parent-only
+// comparison must accept the pair either way while still telling apart a
+// workspace leaf whose own final path element names something else.
+// setPersistedWorkspaceVolumeSource rewrites the Source of agentDir's
+// persisted /workspace volume mount in scion-agent.json, so a later Start
+// dispatch's extractWorkspaceFromVolumes recovers exactly newSource rather
+// than whatever spelling an earlier dispatch recorded.
+func setPersistedWorkspaceVolumeSource(t *testing.T, agentDir, newSource string) {
+	t.Helper()
+	cfgPath := filepath.Join(agentDir, "scion-agent.json")
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", cfgPath, err)
+	}
+	var cfg api.ScionConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal %s: %v", cfgPath, err)
+	}
+	found := false
+	for i := range cfg.Volumes {
+		if cfg.Volumes[i].Target == "/workspace" {
+			cfg.Volumes[i].Source = newSource
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no /workspace volume found in %s to rewrite", cfgPath)
+	}
+	newData, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal updated config: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, newData, 0644); err != nil {
+		t.Fatalf("write %s: %v", cfgPath, err)
+	}
+}
+
+func TestStartResolvesRepoRootWhenPersistedRootIsSymlinkedAndWorkspaceIsResolved(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+
+	realParent := t.TempDir()
+	linkParent := t.TempDir()
+	linkDir := filepath.Join(linkParent, "link")
+	if err := os.Symlink(realParent, linkDir); err != nil {
+		t.Fatal(err)
+	}
+	sharedBase := filepath.Join(linkDir, "shared-base")
+	if err := os.MkdirAll(sharedBase, 0755); err != nil {
+		t.Fatalf("failed to create shared base dir: %v", err)
+	}
+	setupGitRepo(t, sharedBase)
+	worktreesDir := filepath.Join(sharedBase, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatalf("failed to create worktrees dir: %v", err)
+	}
+	userWorkspace := filepath.Join(worktreesDir, "agent-a")
+	if err := util.CreateWorktree(userWorkspace, "agent-a"); err != nil {
+		t.Fatalf("failed to create real worktree: %v", err)
+	}
+	resolvedWorkspace, err := filepath.EvalSymlinks(userWorkspace)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(userWorkspace): %v", err)
+	}
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+	env := map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"}
+
+	// Materialize the agent directory, then set the persisted repo root
+	// directly in its symlinked, as-given form, independent of whichever
+	// path a prior dispatch would have used to get it there.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: userWorkspace, Env: env,
+	}); err != nil {
+		t.Fatalf("initial Start failed: %v", err)
+	}
+	agentDir := config.GetAgentDir(projectScionDir, "agent-a", false)
+	if err := writeProvisionedWorktreeRepoRoot(agentDir, sharedBase); err != nil {
+		t.Fatalf("writeProvisionedWorktreeRepoRoot: %v", err)
+	}
+	// An explicit-workspace agent recovers its workspace on every later
+	// dispatch from the persisted /workspace volume, not from opts.Workspace
+	// again — rewrite that persisted volume's source directly to the
+	// resolved form, to arrange the "workspace already resolved" side of
+	// this test independent of the initial dispatch's own spelling.
+	setPersistedWorkspaceVolumeSource(t, agentDir, resolvedWorkspace)
+
+	// This dispatch recovers the persisted, symlinked repo root with no
+	// fresh ctx signal, and its own recovered workspace value is already
+	// resolved.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Env: env,
+	}); err != nil {
+		t.Fatalf("second Start failed: %v", err)
+	}
+
+	if capturedConfig.RepoRoot == "" {
+		t.Fatal("RunConfig.RepoRoot is empty")
+	}
+	gotRoot, err := filepath.EvalSymlinks(capturedConfig.RepoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(RepoRoot): %v", err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(sharedBase)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(sharedBase): %v", err)
+	}
+	if gotRoot != wantRoot {
+		t.Fatalf("RunConfig.RepoRoot resolves to %q, want %q", gotRoot, wantRoot)
+	}
+}
+
+// TestStartResolvesRepoRootWhenPersistedRootIsResolvedAndWorkspaceIsSymlinked
+// is the other order: the persisted repo root already arrives resolved,
+// while this dispatch's own workspace value is symlinked.
+func TestStartResolvesRepoRootWhenPersistedRootIsResolvedAndWorkspaceIsSymlinked(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+
+	realParent := t.TempDir()
+	linkParent := t.TempDir()
+	linkDir := filepath.Join(linkParent, "link")
+	if err := os.Symlink(realParent, linkDir); err != nil {
+		t.Fatal(err)
+	}
+	sharedBase := filepath.Join(linkDir, "shared-base")
+	if err := os.MkdirAll(sharedBase, 0755); err != nil {
+		t.Fatalf("failed to create shared base dir: %v", err)
+	}
+	setupGitRepo(t, sharedBase)
+	worktreesDir := filepath.Join(sharedBase, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatalf("failed to create worktrees dir: %v", err)
+	}
+	userWorkspace := filepath.Join(worktreesDir, "agent-a")
+	if err := util.CreateWorktree(userWorkspace, "agent-a"); err != nil {
+		t.Fatalf("failed to create real worktree: %v", err)
+	}
+	resolvedBase, err := filepath.EvalSymlinks(sharedBase)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(sharedBase): %v", err)
+	}
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+	env := map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"}
+
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: userWorkspace, Env: env,
+	}); err != nil {
+		t.Fatalf("initial Start failed: %v", err)
+	}
+	agentDir := config.GetAgentDir(projectScionDir, "agent-a", false)
+	// Set the persisted repo root directly in its resolved form, independent
+	// of whichever path a prior dispatch would have used to get it there.
+	if err := writeProvisionedWorktreeRepoRoot(agentDir, resolvedBase); err != nil {
+		t.Fatalf("writeProvisionedWorktreeRepoRoot: %v", err)
+	}
+
+	// This dispatch recovers the persisted, resolved repo root with no fresh
+	// ctx signal, but its own workspace value is symlinked.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: userWorkspace, Env: env,
+	}); err != nil {
+		t.Fatalf("second Start failed: %v", err)
+	}
+
+	if capturedConfig.RepoRoot == "" {
+		t.Fatal("RunConfig.RepoRoot is empty")
+	}
+	gotRoot, err := filepath.EvalSymlinks(capturedConfig.RepoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(RepoRoot): %v", err)
+	}
+	if gotRoot != resolvedBase {
+		t.Fatalf("RunConfig.RepoRoot resolves to %q, want %q", gotRoot, resolvedBase)
+	}
+}
+
 // TestStartResumeDoesNotAdoptRepoRootFromAgentInfoFile is a regression test
 // for the storage boundary that keeps the persisted repo root out of
 // container-writable storage: a user --workspace agent on a directory shaped
