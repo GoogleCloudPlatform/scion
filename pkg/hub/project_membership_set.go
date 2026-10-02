@@ -881,7 +881,7 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			authorized = false
 		}
 		if !authorized {
-			return nil, &MembershipDecision{Allowed: false, DenialCode: ErrCodeRoleAssignmentForbidden, Reason: "actor has no project role", HTTPStatus: 403}
+			return nil, noProjectRoleDecision()
 		}
 		hubOverridePre = true
 	}
@@ -937,12 +937,7 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 				ScopeID:          req.ProjectID,
 			})
 			if !delDecision.Allowed {
-				return nil, &MembershipDecision{
-					Allowed: false, DenialCode: ErrCodeTargetRoleProtected,
-					Reason:     "actor cannot delegate the requested role: " + delDecision.Reason,
-					HTTPStatus: 403,
-					Details:    map[string]interface{}{"roleDefinitionId": d.ID, "roleName": d.Name, "reason": delDecision.Reason},
-				}
+				return nil, canDelegateRefusal(d, delDecision.Reason)
 			}
 			canDelegateReasons[d.ID] = delDecision.Reason
 		}
@@ -1210,4 +1205,23 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		"actor", req.Actor.Email(), "created", result.Created)
 
 	return &result, nil
+}
+
+// noProjectRoleDecision is the refusal for an actor with no project role and
+// no hub role_binding.* authority for the requested operation. Shared by
+// SetMemberRoles and AssignableRoles so both report it identically.
+func noProjectRoleDecision() *MembershipDecision {
+	return &MembershipDecision{Allowed: false, DenialCode: ErrCodeRoleAssignmentForbidden, Reason: "actor has no project role", HTTPStatus: 403}
+}
+
+// canDelegateRefusal is the refusal for a created binding of rd that
+// CanDelegate denied with reason. Shared by SetMemberRoles and
+// AssignableRoles so both report the same code, reason and details.
+func canDelegateRefusal(rd *store.RoleDefinition, reason string) *MembershipDecision {
+	return &MembershipDecision{
+		Allowed: false, DenialCode: ErrCodeTargetRoleProtected,
+		Reason:     "actor cannot delegate the requested role: " + reason,
+		HTTPStatus: 403,
+		Details:    map[string]interface{}{"roleDefinitionId": rd.ID, "roleName": rd.Name, "reason": reason},
+	}
 }

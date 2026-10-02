@@ -152,7 +152,7 @@ func (svc *ProjectMembershipService) assignableActorAuthority(ctx context.Contex
 	a.role = svc.projectEffectiveRole(ctx, actor.ID(), projectID)
 	if a.role == "" {
 		if !svc.actorHasHubRoleBindingAuthority(ctx, actor.ID(), MembershipOpAdd) {
-			a.authorityDenial = &MembershipDecision{Allowed: false, DenialCode: ErrCodeRoleAssignmentForbidden, Reason: "actor has no project role", HTTPStatus: 403}
+			a.authorityDenial = noProjectRoleDecision()
 			return a, nil
 		}
 		a.hubOverride = true
@@ -205,12 +205,7 @@ func (svc *ProjectMembershipService) assignableRoleDecision(ctx context.Context,
 		ScopeID:          projectID,
 	})
 	if !delDecision.Allowed {
-		return &MembershipDecision{
-			Allowed: false, DenialCode: ErrCodeTargetRoleProtected,
-			Reason:     "actor cannot delegate the requested role: " + delDecision.Reason,
-			HTTPStatus: 403,
-			Details:    map[string]interface{}{"roleDefinitionId": rd.ID, "roleName": rd.Name, "reason": delDecision.Reason},
-		}
+		return canDelegateRefusal(rd, delDecision.Reason)
 	}
 	return nil
 }
