@@ -367,6 +367,72 @@ func TestProjectClone_GitRemoteOverride(t *testing.T) {
 	assert.Equal(t, "github.com/other-org/other-repo", clone.GitRemote)
 }
 
+// TestProjectClone_GitRemoteOverride_RederivesSourceLabels guards the OQ-1 bug
+// (ptone/scion#2702): the template's scion.dev/clone-url label takes precedence
+// over GitRemote, so a copied clone-url made a gitRemote override ineffective
+// — agents still cloned the template's repository.
+func TestProjectClone_GitRemoteOverride_RederivesSourceLabels(t *testing.T) {
+	srv, s := testServer(t)
+	src := createSourceProject(t, srv, s)
+	ctx := context.Background()
+
+	// Make the template's source labels clearly template-specific.
+	src.Labels[store.LabelSourceURL] = "git@github.com:test/repo.git"
+	src.Labels[store.LabelDefaultBranch] = "develop"
+	require.NoError(t, s.UpdateProject(ctx, src))
+
+	overrideURL := "git@github.com:other-org/other-repo.git"
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+		map[string]interface{}{"name": "Override Labels", "gitRemote": overrideURL})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var clone store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+
+	assert.Equal(t, "github.com/other-org/other-repo", clone.GitRemote)
+	assert.Equal(t, "https://github.com/other-org/other-repo.git", clone.Labels[store.LabelCloneURL])
+	assert.Equal(t, overrideURL, clone.Labels[store.LabelSourceURL])
+	assert.Equal(t, "main", clone.Labels[store.LabelDefaultBranch])
+	// Unrelated labels are still copied.
+	assert.Equal(t, "backend", clone.Labels["team"])
+
+	// The persisted row matches the response.
+	stored, err := s.GetProject(ctx, clone.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/other-org/other-repo.git", stored.Labels[store.LabelCloneURL])
+
+	// Agent create resolves the overridden repository, not the template's.
+	agent := &store.Agent{ID: api.NewUUID(), AppliedConfig: &store.AgentAppliedConfig{}}
+	srv.populateAgentConfig(ctx, agent, stored, nil)
+	require.NotNil(t, agent.AppliedConfig.GitClone)
+	assert.Equal(t, "https://github.com/other-org/other-repo.git", agent.AppliedConfig.GitClone.URL)
+	assert.Equal(t, "main", agent.AppliedConfig.GitClone.Branch)
+}
+
+// TestProjectClone_GitRemoteOverride_SameRemoteKeepsLabels checks that an
+// "override" naming the template's own repository (in any URL form) is not
+// treated as a change: the template's clone-url and branch are kept.
+func TestProjectClone_GitRemoteOverride_SameRemoteKeepsLabels(t *testing.T) {
+	srv, s := testServer(t)
+	src := createSourceProject(t, srv, s)
+	ctx := context.Background()
+
+	src.Labels[store.LabelDefaultBranch] = "develop"
+	require.NoError(t, s.UpdateProject(ctx, src))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+		map[string]interface{}{"name": "Same Remote", "gitRemote": "git@github.com:test/repo.git"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var clone store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+
+	assert.Equal(t, "https://github.com/test/repo.git", clone.Labels[store.LabelCloneURL])
+	assert.Equal(t, "develop", clone.Labels[store.LabelDefaultBranch])
+	_, hasSource := clone.Labels[store.LabelSourceURL]
+	assert.False(t, hasSource, "source-url must not be invented when the remote is unchanged")
+}
+
 func TestProjectClone_NoGitRemoteOverride(t *testing.T) {
 	srv, s := testServer(t)
 	src := createSourceProject(t, srv, s)

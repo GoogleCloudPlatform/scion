@@ -133,8 +133,11 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 
 	// Allow callers to override the git remote (e.g. creating from a template
 	// with a different repository).
-	if req.GitRemote != "" {
-		clone.GitRemote = util.NormalizeGitRemote(req.GitRemote)
+	overrideRemote := strings.TrimSpace(req.GitRemote)
+	remoteOverridden := false
+	if overrideRemote != "" {
+		clone.GitRemote = util.NormalizeGitRemote(overrideRemote)
+		remoteOverridden = clone.GitRemote != util.NormalizeGitRemote(src.GitRemote)
 	}
 
 	// Copy annotations: only keys in projectSettingKeys, preserving null semantics
@@ -164,11 +167,28 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			if k == store.LabelWorkspaceMode {
 				continue // re-derived, not copied raw
 			}
+			if remoteOverridden && isGitSourceLabel(k) {
+				continue // describe the template's repo; re-derived below
+			}
 			clone.Labels[k] = v
 		}
 		if len(clone.Labels) == 0 {
 			clone.Labels = nil
 		}
+	}
+
+	// When the git remote is overridden, the template's clone-url/source-url/
+	// default-branch labels describe the wrong repository. clone-url takes
+	// precedence over GitRemote at agent create and shared-workspace init
+	// (resolveCloneURL), so leaving it would silently clone the template's
+	// repo. Re-derive them from the override the way the web create form does.
+	if remoteOverridden {
+		if clone.Labels == nil {
+			clone.Labels = make(map[string]string)
+		}
+		clone.Labels[store.LabelCloneURL] = util.ToHTTPSCloneURL(overrideRemote)
+		clone.Labels[store.LabelSourceURL] = overrideRemote
+		clone.Labels[store.LabelDefaultBranch] = "main"
 	}
 
 	// Re-derive workspace mode from the source (design #2703 §2.4).
@@ -749,4 +769,14 @@ func (s *Server) cloneProjectPreStartHook(ctx context.Context, srcProjectID, clo
 	}
 
 	return nil
+}
+
+// isGitSourceLabel reports whether k is one of the labels that describe a
+// project's git source repository and must track Project.GitRemote.
+func isGitSourceLabel(k string) bool {
+	switch k {
+	case store.LabelCloneURL, store.LabelSourceURL, store.LabelDefaultBranch:
+		return true
+	}
+	return false
 }

@@ -595,6 +595,16 @@ const (
 	LabelTemplate = "scion.io/template"
 )
 
+// Git source labels for git-anchored projects. LabelCloneURL is the URL agents
+// and shared-workspace init actually clone from (it takes precedence over
+// Project.GitRemote), LabelSourceURL records the remote as the user entered it,
+// and LabelDefaultBranch is the branch to clone.
+const (
+	LabelCloneURL      = "scion.dev/clone-url"
+	LabelSourceURL     = "scion.dev/source-url"
+	LabelDefaultBranch = "scion.dev/default-branch"
+)
+
 // Workspace mode constants for git projects.
 // When a git project has the workspace mode label set to "shared", it uses a
 // single shared clone mounted by all agents instead of per-agent clones.
