@@ -30,15 +30,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
-// corruptSharerMarkerWorktreePath overwrites a sharer marker's WorktreePath
-// directly via the filesystem, bypassing RegisterSharer's write-side
-// protections (see its doc comment on why a real recorded path is immutable
-// there). This matches how a peer with RW access to the shared .git — the
-// threat model these protections exist for — would actually corrupt the
-// registry: by writing bytes to the file, not by calling into scion's own
-// registration logic. branch must need no sanitization (see
-// sanitizeBranchName in pkg/provision/provision.go) for the marker filename
-// to match what the registry itself would use.
+// corruptSharerMarkerWorktreePath writes a sharer marker's WorktreePath field
+// directly to the file, outside RegisterSharer, so the read-side validation
+// can be exercised against values the normal write path would never record.
+// branch must need no sanitization (see sanitizeBranchName in
+// pkg/provision/provision.go) for the marker filename to match what the
+// registry itself would use.
 func corruptSharerMarkerWorktreePath(t *testing.T, base, branch string, sharers []string, worktreePath string) {
 	t.Helper()
 	type sharerMarker struct {
@@ -709,10 +706,9 @@ func TestDeleteAgentFiles_SharedWorktree_SoleSharer_DeleteRemoves(t *testing.T) 
 }
 
 // TestDeleteAgentFiles_OutOfTreeMarker_SoleSharer_LeaksRatherThanDeletes
-// covers acceptance criterion 3 for the sole-sharer case: if the sharer
-// registry is corrupted (WorktreePath overwritten to point outside every
-// scion-created shape, as a peer with RW access to the shared .git could
-// write), DeleteAgentFiles must never touch the out-of-tree path. The read
+// covers acceptance criterion 3 for the sole-sharer case: if the recorded
+// WorktreePath points outside every scion-created shape, DeleteAgentFiles
+// must never touch the out-of-tree path. The read
 // boundary (pkg/provision.readMarker) degrades the marker — keeps the
 // Sharers refcount, blanks only WorktreePath — so the sole sharer
 // is still found and still unregistered; the teardown caller guard then
@@ -758,7 +754,7 @@ func TestDeleteAgentFiles_OutOfTreeMarker_SoleSharer_LeaksRatherThanDeletes(t *t
 		t.Fatalf("setup: worktree should exist at %s: %v", wtPath, err)
 	}
 
-	// Corrupt the registry: overwrite the marker's WorktreePath to point at
+	// Write a marker whose WorktreePath points at an out-of-tree location —
 	// an external directory with real content that must never be touched.
 	outside := t.TempDir()
 	marker := filepath.Join(outside, "keep-me.txt")
@@ -787,8 +783,8 @@ func TestDeleteAgentFiles_OutOfTreeMarker_SoleSharer_LeaksRatherThanDeletes(t *t
 
 // TestDeleteAgentFiles_OutOfTreeMarker_JoinedAgent_FailsClosed covers Phase 2
 // acceptance criterion 3 for a joined (non-creator) sharer: when that agent
-// is the last sharer and the registry is corrupted, there is no independent
-// trusted path to fall back to (a joiner never had its own worktree
+// is the last sharer and the recorded WorktreePath is out-of-tree, there is
+// no independent trusted path to fall back to (a joiner never had its own worktree
 // directory), so DeleteAgentFiles must do nothing rather than guess — the
 // external path is untouched AND the real shared worktree the joiner was
 // sharing is left alone too.
@@ -838,8 +834,8 @@ func TestDeleteAgentFiles_OutOfTreeMarker_JoinedAgent_FailsClosed(t *testing.T) 
 		t.Fatalf("setup: shared worktree should persist while agent-b remains: %v", err)
 	}
 
-	// Corrupt the registry for agent-b (now sole sharer): point WorktreePath
-	// at an external directory with real content.
+	// Write a marker whose WorktreePath points at an out-of-tree location for
+	// agent-b (now sole sharer) — an external directory with real content.
 	outside := t.TempDir()
 	marker := filepath.Join(outside, "keep-me.txt")
 	if err := os.WriteFile(marker, []byte("do not touch"), 0644); err != nil {
