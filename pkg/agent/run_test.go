@@ -3603,8 +3603,8 @@ profiles:
 // user-supplied --workspace (opts.Workspace set with no
 // api.ContextWithProvisionedWorktreeRepoRoot signal on ctx) must still
 // produce an empty RunConfig.RepoRoot, exactly like before the fix — even
-// when the workspace happens to sit inside a git repo, which is the case
-// #642 added the explicit-workspace skip for in the first place.
+// when the workspace happens to sit inside a git repo, the case
+// detectRepoRoot's explicit-workspace skip exists for in the first place.
 func TestStartUserWorkspaceOverrideYieldsEmptyRepoRoot(t *testing.T) {
 	tmpDir := t.TempDir()
 	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
