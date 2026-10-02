@@ -22,7 +22,8 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, query, state } from 'lit/decorators.js';
+import { customElement, state } from 'lit/decorators.js';
+import { keyed } from 'lit/directives/keyed.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import {
@@ -37,7 +38,7 @@ import { isChimeEnabled, setChimeEnabled } from '../../utils/audio.js';
 import { setPreferredTimeZone, browserTimeZone } from '../../utils/time.js';
 import '../shared/subscription-manager.js';
 import '../shared/timezone-picker.js';
-import type { TimezoneChangeDetail, ScionTimezonePicker } from '../shared/timezone-picker.js';
+import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 
 /**
  * Minimal shape of a runtime profile as returned by
@@ -114,14 +115,22 @@ export class ScionPageProfileSettings extends LitElement {
   private _displayTimezoneSaved = false;
 
   /**
-   * Direct ref to the picker, used to force it back to `_displayTimezone`
-   * after a failed PATCH (review R1-5): the picker manages its own typed
-   * text internally, so rebinding `.value` to an *unchanged* `_displayTimezone`
-   * is a no-op for Lit's property-binding diff and never reaches the child.
-   * Setting the DOM property directly always invokes its setter.
+   * Bumped to force the picker to remount after a failed PATCH or the
+   * no-user-id case (review R2-2, replacing R1-5's `@query`-ref approach).
+   *
+   * Task 12's `<scion-timezone-picker>` never mutates its own `value`
+   * property on selection — only its internal, unexported `searchQuery`
+   * text — so even a direct `picker.value = x` write (bypassing Lit's
+   * property-binding diff) changes a property the picker doesn't read back
+   * into what it displays. There is no supported way to ask the picker to
+   * resync from outside without either modifying it (out of bounds for
+   * this PR — task 12 owns that file) or relying on its private internals.
+   * `keyed()` sidesteps both: bumping the key unmounts the stale instance
+   * and mounts a fresh one, which always initializes its display from
+   * `.value` in `willUpdate`'s `!this.hasUpdated` branch.
    */
-  @query('scion-timezone-picker')
-  private _picker?: ScionTimezonePicker;
+  @state()
+  private _pickerRevision = 0;
 
   static override styles = css`
     :host {
@@ -418,8 +427,8 @@ export class ScionPageProfileSettings extends LitElement {
    * applies it to the effective-zone store immediately, with no reload
    * (AC4/AC5). On failure — including when `_userId` hasn't loaded yet —
    * resets the picker's displayed value back to the last-saved preference
-   * (review R1-5), since the picker already updated its own typed/selected
-   * text before this handler ran.
+   * (review R1-5/R2-2), since the picker already updated its own
+   * typed/selected text before this handler ran.
    */
   private async _handleZoneChange(e: CustomEvent<TimezoneChangeDetail>): Promise<void> {
     const value = e.detail.timezone;
@@ -455,17 +464,13 @@ export class ScionPageProfileSettings extends LitElement {
   }
 
   /**
-   * Forces the picker's displayed value back to the last-saved
-   * `_displayTimezone`, bypassing Lit's property-binding diff (review
-   * R1-5): the picker already updated its own text from the user's
-   * selection before `_handleZoneChange` ran, and since `_displayTimezone`
-   * itself didn't change, re-rendering with `.value=${this._displayTimezone}`
-   * would be a no-op and never reach the child.
+   * Forces the picker to remount (review R2-2) so it re-displays the
+   * last-saved `_displayTimezone` instead of whatever the user just typed
+   * or selected — see `_pickerRevision`'s doc comment for why a property
+   * write alone can't do this for task 12's picker.
    */
   private _resetPickerDisplay(): void {
-    if (this._picker) {
-      this._picker.value = this._displayTimezone;
-    }
+    this._pickerRevision++;
   }
 
   private _initNotificationState(): void {
@@ -617,15 +622,20 @@ export class ScionPageProfileSettings extends LitElement {
             </p>
           </div>
           <div class="setting-control">
-            <scion-timezone-picker
-              empty-label="Auto"
-              label="Display timezone"
-              .value=${this._displayTimezone}
-              ?disabled=${this._displayTimezoneSaving}
-              @timezone-change=${(e: CustomEvent<TimezoneChangeDetail>): void => {
-                void this._handleZoneChange(e);
-              }}
-            ></scion-timezone-picker>
+            ${keyed(
+              this._pickerRevision,
+              html`
+                <scion-timezone-picker
+                  empty-label="Auto"
+                  label="Display timezone"
+                  .value=${this._displayTimezone}
+                  ?disabled=${this._displayTimezoneSaving}
+                  @timezone-change=${(e: CustomEvent<TimezoneChangeDetail>): void => {
+                    void this._handleZoneChange(e);
+                  }}
+                ></scion-timezone-picker>
+              `
+            )}
           </div>
         </div>
 

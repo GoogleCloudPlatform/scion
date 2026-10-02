@@ -39,6 +39,7 @@ import {
   zoneLabel,
   DISPLAY_TIMEZONE_CHANGED_EVENT,
   formatInstant,
+  formatInstantWithZone,
   formatRelative,
   formatRelativeTime,
   parseWallClock,
@@ -433,6 +434,28 @@ describe('formatInstant', () => {
   });
 });
 
+describe('formatInstantWithZone (review R2-4)', () => {
+  afterEach(() => setPreferredTimeZone(''));
+
+  it('appends the effective zone in parentheses, defaulting to datetime-full', () => {
+    setPreferredTimeZone('Asia/Tokyo');
+    expect(formatInstantWithZone('2026-09-23T14:15:00Z')).toBe('Sep 23, 2026, 23:15 (Asia/Tokyo)');
+  });
+
+  it('honours an explicit style', () => {
+    setPreferredTimeZone('UTC');
+    expect(formatInstantWithZone('2026-09-23T14:15:00Z', 'time')).toBe('14:15 (UTC)');
+  });
+
+  it('falls back to the browser zone label when no preference is set', () => {
+    expect(formatInstantWithZone('2026-01-15T03:04:00Z', 'time')).toBe('03:04 (UTC)');
+  });
+
+  it('returns "" for an unparsable instant', () => {
+    expect(formatInstantWithZone('not-a-date')).toBe('');
+  });
+});
+
 describe('formatRelativeTime (past-only, many existing call sites)', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
@@ -514,6 +537,15 @@ describe('parseWallClock / toWallClockInput', () => {
   // `Date.UTC`/`new Date(y, ...)` does for 0 <= y <= 99.
   it('does not remap a two-digit year into 19xx (review R1-7)', () => {
     expect(parseWallClock('0050-01-01T00:00', 'UTC')).toBe('0050-01-01T00:00:00.000Z');
+  });
+
+  // Review R2-5: year: 'numeric' prints a year below 1000 without leading
+  // zeros ("50"), which both parseWallClock's \d{4} regex and a real
+  // datetime-local input reject — toWallClockInput must pad it.
+  it('round-trips a year below 1000 through toWallClockInput (review R2-5)', () => {
+    const input = toWallClockInput('0050-06-01T12:00:00Z', 'UTC');
+    expect(input).toBe('0050-06-01T12:00');
+    expect(parseWallClock(input, 'UTC')).toBe('0050-06-01T12:00:00.000Z');
   });
 
   it('seconds in a datetime-local value are preserved', () => {

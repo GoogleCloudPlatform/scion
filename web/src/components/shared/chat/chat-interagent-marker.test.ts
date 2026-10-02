@@ -5,6 +5,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { setPreferredTimeZone } from '../../../utils/time.js';
 
 vi.mock('../../../utils/markdown.js', () => ({
   getMarkdownRenderer: () =>
@@ -193,5 +194,25 @@ describe('scion-chat-interagent-marker', () => {
     const time = el.shadowRoot?.querySelector('.ia-time');
     expect(time).toBeTruthy();
     expect(time?.textContent).toBe('');
+  });
+
+  // AC4, review R2-3: the expanded row's time carries a title with the
+  // full instant and zone label.
+  it('titles the time label with the full instant and zone (AC4, review R2-3)', async () => {
+    setPreferredTimeZone('Asia/Tokyo');
+    try {
+      const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
+      el.messageCount = 1;
+      el.messages = [makeMessage({ createdAt: '2026-09-23T15:00:00Z' })]; // -> 2026-09-24T00:00 JST
+      el.expanded = true;
+      document.body.appendChild(el);
+      await el.updateComplete;
+
+      const time = el.shadowRoot?.querySelector('.ia-time');
+      expect(time?.textContent).toBe('00:00');
+      expect(time?.getAttribute('title')).toBe('Sep 24, 2026, 00:00 (Asia/Tokyo)');
+    } finally {
+      setPreferredTimeZone('');
+    }
   });
 });

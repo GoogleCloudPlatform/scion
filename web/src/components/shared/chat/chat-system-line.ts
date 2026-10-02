@@ -23,10 +23,17 @@
 
 import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
-import { formatInstant, zoneLabel } from '../../../utils/time.js';
+import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
+import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 
 @customElement('scion-chat-system-line')
 export class ScionChatSystemLine extends LitElement {
+  /**
+   * Re-renders this line when the effective display zone changes (review
+   * R2-1).
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   /** The system message text. */
   @property()
   message = '';
@@ -108,8 +115,7 @@ export class ScionChatSystemLine extends LitElement {
   /** Full instant plus zone label for the `.system-time` tooltip (review R1-3, AC4). */
   private formatTimeTitle(): string {
     if (!this.timestamp) return '';
-    const full = formatInstant(this.timestamp, 'datetime-full');
-    return full ? `${full} (${zoneLabel()})` : '';
+    return formatInstantWithZone(this.timestamp);
   }
 }
 

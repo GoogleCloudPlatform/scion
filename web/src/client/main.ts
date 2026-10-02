@@ -786,6 +786,7 @@ async function init(): Promise<void> {
   const featureFlagsReady = applyServerFeatureFlags();
 
   // Fetch current user from session if not provided by SSR
+  let tzReady: Promise<void> = Promise.resolve();
   if (!currentUser) {
     currentUser = await fetchCurrentUser();
     if (currentUser) {
@@ -793,8 +794,15 @@ async function init(): Promise<void> {
     }
   } else {
     // SSR supplied the user without `preferences` (never cached on the
-    // session); refresh it from the live endpoint, non-blocking.
-    void loadPreferredTimeZone();
+    // session); refresh it from the live endpoint. Awaited below alongside
+    // featureFlagsReady, not fire-and-forget (review R2-1): a chat thread
+    // already in the DOM at first render would otherwise show at least its
+    // first messages in the browser zone instead of the preference, with
+    // nothing to correct it until some unrelated re-render (the
+    // DISPLAY_TIMEZONE_CHANGED_EVENT a late-arriving preference dispatches
+    // only helps a component that is listening for it, which a component
+    // not yet mounted cannot be).
+    tzReady = loadPreferredTimeZone();
   }
 
   // Fetch admin status early so the route guard can use the cached result
@@ -849,7 +857,9 @@ async function init(): Promise<void> {
   // Render the initial page based on current URL (strip proxy prefix for route
   // matching). Feature flags must be settled first — renderRoute gates /chat on
   // them, and rendering early would flash a page the server has disabled.
-  await featureFlagsReady;
+  // tzReady is awaited alongside it (review R2-1); both fetches started
+  // above and overlap, so this adds no latency beyond the slower of the two.
+  await Promise.all([featureFlagsReady, tzReady]);
   terminalWorkspaceEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
   ensureRoots();
 

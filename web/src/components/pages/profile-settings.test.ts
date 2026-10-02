@@ -248,11 +248,66 @@ describe('scion-page-profile-settings — display timezone', () => {
     ) as Array<[unknown, RequestInit]>;
   }
 
-  /** Dispatches task 12's real `timezone-change` event on the picker element. */
-  function selectZone(picker: AnyEl, timezone: string): void {
-    picker.dispatchEvent(
-      new CustomEvent('timezone-change', { detail: { timezone }, bubbles: true, composed: true })
+  /**
+   * Drives task 12's real picker UI — focus, type, click the matching
+   * dropdown option — instead of dispatching a synthetic `timezone-change`
+   * event on the element. Exercises the picker's own `selectZone()`/
+   * `emitChange()`, so a mismatch between what the picker actually emits
+   * and what this page listens for would fail these tests (review R2-2:
+   * a hand-built `CustomEvent` can't catch that, because it's the page's
+   * own assumption about the contract, not the picker's real behaviour).
+   * Never modifies the picker itself — task 12 owns that file.
+   */
+  async function selectViaPicker(picker: AnyEl, displayText: string): Promise<void> {
+    const input = picker.shadowRoot.querySelector('sl-input');
+    input.dispatchEvent(new Event('sl-focus'));
+    await picker.updateComplete;
+    input.value = displayText;
+    input.dispatchEvent(new Event('sl-input'));
+    await picker.updateComplete;
+    const options = [...picker.shadowRoot.querySelectorAll('.timezone-search-option')] as AnyEl[];
+    const option = options.find((o) => o.textContent.trim() === displayText);
+    if (!option) {
+      throw new Error(`selectViaPicker: no option rendered for "${displayText}"`);
+    }
+    option.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+  }
+
+  /**
+   * Types `text` into the picker and commits it with Enter, without
+   * selecting a rendered dropdown option — the path for a value that may
+   * not be a recognized zone (the picker itself never validates typed
+   * input; callers validate with `isValidTimeZone`), so it has no matching
+   * option for `selectViaPicker` to click.
+   */
+  async function commitTypedViaPicker(picker: AnyEl, text: string): Promise<void> {
+    const input = picker.shadowRoot.querySelector('sl-input');
+    input.dispatchEvent(new Event('sl-focus'));
+    await picker.updateComplete;
+    input.value = text;
+    input.dispatchEvent(new Event('sl-input'));
+    await picker.updateComplete;
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
     );
+  }
+
+  /**
+   * The text currently displayed in the picker's own search input.
+   * Re-queries the element (the R2-2 fix remounts the picker via `keyed()`
+   * on revert, so the old reference is stale) and awaits its own
+   * `updateComplete`, since a freshly mounted custom element's first
+   * render is a separate microtask from the parent's. Reads the
+   * `value` *attribute*, not a `.value` property: task 12's picker
+   * template binds its inner `sl-input`'s value with `value=${...}`
+   * (an attribute binding), not `.value=${...}`, and `sl-input` is never
+   * upgraded to the real Shoelace element in this test environment, so no
+   * `.value` property exists to reflect it.
+   */
+  async function pickerDisplayText(element: AnyEl): Promise<string> {
+    const picker = element.shadowRoot.querySelector('scion-timezone-picker');
+    await picker.updateComplete;
+    return picker.shadowRoot.querySelector('sl-input').getAttribute('value');
   }
 
   it('is visible to every signed-in user, independent of the Agent timezone section', async () => {
@@ -278,16 +333,16 @@ describe('scion-page-profile-settings — display timezone', () => {
     expect(picker.value).toBe('Asia/Tokyo');
   });
 
-  // Review R1-2: the picker's event contract is `timezone-change` /
+  // Review R1-2/R2-2: the picker's event contract is `timezone-change` /
   // `{ timezone }` (task 12's), not the `zone-change` / `{ value }` this
   // page used before the task-11-onto-task-12 rebase. This test pins the
-  // binding by dispatching the picker's *real* event on the actual DOM
-  // element the template renders, through the component's own
-  // `@timezone-change` listener — not by calling `_handleZoneChange`
-  // directly — so a future rename of either the event or the handler's
-  // read of `e.detail` breaks a test instead of only failing silently at
-  // runtime (`tsc` cannot catch a mismatched Lit event-binding string).
-  it('is wired to the picker\'s real timezone-change event with e.detail.timezone (review R1-2)', async () => {
+  // binding by driving the picker's *real* UI (focus, type, click the
+  // rendered option) so it emits its own genuine event — not a hand-built
+  // `CustomEvent('timezone-change', ...)` that only proves the page's own
+  // assumption about the contract, which is exactly what round 2 found
+  // wasn't enough (R2-2): a mismatch on the picker's side wouldn't fail a
+  // test built from a synthetic event.
+  it('is wired to the picker\'s real timezone-change event with e.detail.timezone (review R1-2/R2-2)', async () => {
     let captured: Record<string, unknown> | null = null;
     element = await createComponent(
       createFetchHandler({}, undefined, { body: makeAuthMe() }, (body) => {
@@ -297,7 +352,7 @@ describe('scion-page-profile-settings — display timezone', () => {
     );
 
     const picker = element.shadowRoot.querySelector('scion-timezone-picker');
-    selectZone(picker, 'Asia/Kathmandu');
+    await selectViaPicker(picker, 'Asia/Kathmandu');
     await settle(element);
 
     expect(captured).toEqual({ preferences: { timezone: 'Asia/Kathmandu' } });
@@ -312,10 +367,9 @@ describe('scion-page-profile-settings — display timezone', () => {
       })
     );
 
-    await element._handleZoneChange(
-      new CustomEvent('timezone-change', { detail: { timezone: 'Asia/Kathmandu' } })
-    );
-    await element.updateComplete;
+    const picker = element.shadowRoot.querySelector('scion-timezone-picker');
+    await selectViaPicker(picker, 'Asia/Kathmandu');
+    await settle(element);
 
     expect(captured).toEqual({ preferences: { timezone: 'Asia/Kathmandu' } });
     expect(getPreferredTimeZone()).toBe('Asia/Kathmandu');
@@ -331,17 +385,22 @@ describe('scion-page-profile-settings — display timezone', () => {
       })
     );
 
-    await element._handleZoneChange(
-      new CustomEvent('timezone-change', { detail: { timezone: '' } })
-    );
-    await element.updateComplete;
+    const picker = element.shadowRoot.querySelector('scion-timezone-picker');
+    await selectViaPicker(picker, 'Auto');
+    await settle(element);
 
     expect(captured).toEqual({ preferences: { timezone: '' } });
     expect(getPreferredTimeZone()).toBe('');
   });
 
-  // Review R1-5: a failed PATCH must not leave the picker displaying the
-  // rejected zone next to the error banner.
+  // Review R1-5/R2-2: a failed PATCH must not leave the picker displaying
+  // the rejected zone next to the error banner. R2-2 found the original
+  // fix (`picker.value = this._displayTimezone`) was a no-op against task
+  // 12's picker, and the original test couldn't catch that because it
+  // dispatched a synthetic event instead of driving the picker's own typed
+  // text — so this asserts on the picker's actual displayed text
+  // (its inner `sl-input`'s `value`) after a *real* selection, through a
+  // freshly re-queried element (the fix remounts the picker via `keyed()`).
   it('reverts the picker display on a failed PATCH and does not update the store', async () => {
     element = await createComponent(
       createFetchHandler({}, undefined, { body: makeAuthMe() }, () => ({
@@ -351,22 +410,22 @@ describe('scion-page-profile-settings — display timezone', () => {
     );
 
     const picker = element.shadowRoot.querySelector('scion-timezone-picker');
-    selectZone(picker, 'Not/AZone');
+    await commitTypedViaPicker(picker, 'Not/AZone');
     await settle(element);
 
     expect(shadowText(element)).toContain('invalid timezone');
     expect(getPreferredTimeZone()).toBe('');
-    expect(picker.value).toBe('');
+    expect(await pickerDisplayText(element)).toBe('Auto');
   });
 
   it('reverts the picker display when the user id has not loaded yet, and does not PATCH', async () => {
     element = await createComponent(createFetchHandler({}, undefined, { status: 500, body: {} }));
 
     const picker = element.shadowRoot.querySelector('scion-timezone-picker');
-    selectZone(picker, 'Asia/Tokyo');
+    await selectViaPicker(picker, 'Asia/Tokyo');
     await settle(element);
 
     expect(userPatchCalls()).toHaveLength(0);
-    expect(picker.value).toBe('');
+    expect(await pickerDisplayText(element)).toBe('Auto');
   });
 });

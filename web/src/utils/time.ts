@@ -276,6 +276,20 @@ export function formatInstant(iso: string, style: InstantStyle = 'datetime'): st
   return instantFormatter(style, effectiveTimeZone()).format(date);
 }
 
+/**
+ * The canonical labelled form for an absolute time (review R2-4): formats
+ * `iso` with `formatInstant` and appends the effective zone in parentheses,
+ * e.g. `"Sep 24, 2026, 00:00 (Asia/Tokyo)"`. Tasks 19 and 20's AC ("a zone
+ * label where absolute") should use this instead of composing
+ * `formatInstant`/`zoneLabel` themselves, so every P3 surface uses the same
+ * format — this PR's own native-chat migration open-coded this three times
+ * before extracting it here. Returns `''` on an unparsable `iso`.
+ */
+export function formatInstantWithZone(iso: string, style: InstantStyle = 'datetime-full'): string {
+  const formatted = formatInstant(iso, style);
+  return formatted ? `${formatted} (${zoneLabel()})` : '';
+}
+
 // ---------------------------------------------------------------------------
 // Relative-time formatting
 // ---------------------------------------------------------------------------
@@ -533,5 +547,9 @@ export function toWallClockInput(iso: string, zone: string): string {
   }).formatToParts(date);
   const get = (type: Intl.DateTimeFormatPartTypes): string =>
     parts.find((p) => p.type === type)?.value ?? '00';
-  return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
+  // `year: 'numeric'` prints a year below 1000 without leading zeros (e.g.
+  // "50"), which parseWallClock's \d{4} regex — and a real `datetime-local`
+  // input — both reject. Pad so the round trip holds (review R2-5).
+  const year = get('year').padStart(4, '0');
+  return `${year}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
 }

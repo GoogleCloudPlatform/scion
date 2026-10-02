@@ -30,11 +30,18 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
 import { formatChatDate, renderDateDivider, chatDateDividerStyles } from './chat-date-divider.js';
-import { formatInstant, zoneLabel } from '../../../utils/time.js';
+import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
+import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import type { Message } from '../../../shared/types.js';
 
 @customElement('scion-chat-interagent-marker')
 export class ScionChatInteragentMarker extends LitElement {
+  /**
+   * Re-renders this marker when the effective display zone changes
+   * (review R2-1).
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   /** Number of messages in this group. */
   @property({ type: Number })
   messageCount = 0;
@@ -382,8 +389,7 @@ export class ScionChatInteragentMarker extends LitElement {
 
   /** Full instant plus zone label for the `.ia-time` tooltip (review R1-3, AC4). */
   private formatTimeTitle(iso: string): string {
-    const full = formatInstant(iso, 'datetime-full');
-    return full ? `${full} (${zoneLabel()})` : '';
+    return formatInstantWithZone(iso);
   }
 
   /** Render a single expanded inter-agent message row (header + body). */

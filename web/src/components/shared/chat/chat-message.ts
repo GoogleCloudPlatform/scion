@@ -32,7 +32,8 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
-import { formatInstant, zoneLabel } from '../../../utils/time.js';
+import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
+import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import { getLanguageFromPath } from '../code-editor.js';
 import { hashColor, getInitials } from './chat-avatar.js';
 import {
@@ -518,6 +519,13 @@ function styleMentions(htmlStr: string): string {
 
 @customElement('scion-chat-message')
 export class ScionChatMessage extends LitElement {
+  /**
+   * Re-renders this message when the effective display zone changes
+   * (review R2-1), so a thread already on screen when the preference
+   * loads or changes doesn't stay stuck in the browser zone.
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   /** The message body text. */
   @property()
   body = '';
@@ -2446,8 +2454,7 @@ export class ScionChatMessage extends LitElement {
    */
   private formatTimeTitle(): string {
     if (!this.timestamp) return '';
-    const full = formatInstant(this.timestamp, 'datetime-full');
-    return full ? `${full} (${zoneLabel()})` : '';
+    return formatInstantWithZone(this.timestamp);
   }
 
   /** Deterministic colour from the sender ID (preferred) or slug/name fallback. */
