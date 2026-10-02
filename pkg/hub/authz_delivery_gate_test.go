@@ -540,14 +540,14 @@ func TestDeliveryGate_Part2KindBoundToCredentialType(t *testing.T) {
 	}
 }
 
-// TestDeliveryGate_F2bBrokerLayers pins which layer answers a deliver
+// TestDeliveryGate_BrokerCredentialLayers pins which layer answers a deliver
 // request at each broker-related boundary: a broker identity presenting its
 // own credential is refused by the unsupported-principal switch; a user
 // request carrying the broker credential kind without a broker
 // on-behalf-of context is refused by the entry block; and a user request
 // carrying the broker kind with a valid on-behalf-of context passes the
 // entry block and is refused by the Step 0 delivery gate.
-func TestDeliveryGate_F2bBrokerLayers(t *testing.T) {
+func TestDeliveryGate_BrokerCredentialLayers(t *testing.T) {
 	f := newGoldenFixture(t)
 	secret := Resource{Type: "secret", ID: f.secretID}
 	broker := NewBrokerIdentity(tid("dg-f2b-broker"))
