@@ -1,15 +1,14 @@
-# slow-list P4 — agents-changed consumers on project-detail and agents (#2385)
+# Agent-list live-update consumers: project-detail and agents pages (#2385)
 
 Branch `perf/2385-sse-consumers`, base `origin/main` 7ca2edd599128241ecf12ab064eff6a0a831a6e.
 Touches `web/src/client/state.ts`, `web/src/client/agent-merge.ts` (new),
 `web/src/components/pages/project-detail.ts`, `web/src/components/pages/agents.ts`,
-plus four test files (two new, two touched). Includes one post-dev-report
-follow-up fix (the tombstone-race fix below), ruled by the EM, plus the
-follow-up fixes described later in this log.
+plus four test files (two new, two touched). Includes a tombstone-race fix
+(described below) plus further follow-up fixes described later in this log.
 
 ## What
 
-Implemented the P4 slice of the agent-list live-updates design (§7/§11;
+Implemented this slice of the agent-list live-updates design (§7/§11;
 sections 4.3, 6.1-6.4, 7, 9, 11, 13 read before coding):
 
 - **`web/src/client/agent-merge.ts` (new):** `mergeChanged(held, change, options)`
@@ -27,14 +26,16 @@ sections 4.3, 6.1-6.4, 7, 9, 11, 13 read before coding):
   member-index concern.
 - **`project-detail.ts`:** removed `onAgentsUpdated` (the per-event full
   rebuild listening on `agents-updated`) and its listener registration.
-  `boundOnAgentsChanged` now does both halves of design §11's P4 row: calls
-  `agentWindow.applyChanges` unconditionally (already wired in P1c, a no-op
-  outside `'paged'`), then, when the window is not `'paged'`, calls the new
+  `boundOnAgentsChanged` now does both halves of design §11's row for this
+  work: calls `agentWindow.applyChanges` unconditionally (already wired by
+  the earlier window work, a no-op outside `'paged'`), then, when the
+  window is not `'paged'`, calls the new
   `mergeAgentsChanged` method, which merges through `mergeChanged` with
   `shouldAdd: (agent) => agent.projectId === this.projectId` (today's project
   add rule) and the page's `agentScopeCapabilities` (including its existing
   lazy-derive-from-held-agents fallback, preserved as-is). No other
-  project-detail diff: the window/REST-load functions (P1c) are untouched.
+  project-detail diff: the window/REST-load functions (already landed) are
+  untouched.
   Searched for `repeat(` in the agent grid and list render functions per the
   brief — none is used (both render through plain `.map()`); nothing to
   change there (noted as a deviation below).
@@ -42,9 +43,9 @@ sections 4.3, 6.1-6.4, 7, 9, 11, 13 read before coding):
   listener, added `onAgentsChanged` wired to `agents-changed`, merging through
   `mergeChanged` with `shouldAdd: () => this.agentScope === 'all'` (today's
   global add rule: scope `all` only) and `this.scopeCapabilities`. No
-  `agent-list-window`/paging on this page yet (P5 scope per §11); this is a
-  straight swap of the live-update mechanism only.
-- **`state.ts` (TTL/seed-epoch fix carried into P4):** `bufferAgentDelta`'s
+  `agent-list-window`/paging on this page yet (left for a later phase per
+  §11); this is a straight swap of the live-update mechanism only.
+- **`state.ts` (TTL/seed-epoch fix carried into this slice):** `bufferAgentDelta`'s
   30s expiry timer now also deletes the expiring ID's entry from every
   currently-open seed epoch's `deltas` map, not just from `pendingAgentDeltas`.
   Before this, a status delta for an unknown ID recorded into an open epoch
@@ -55,17 +56,17 @@ sections 4.3, 6.1-6.4, 7, 9, 11, 13 read before coding):
   expiry; a later delta for the same ID still starts both fresh via the
   existing fold-or-create paths.
 - Neither `markAgentSetComplete` nor `isAgentSetComplete` gained a caller in
-  this phase (P5). `home.ts`, `agent-graph.ts` and `debug-log.ts` are
+  this phase (left for later). `home.ts`, `agent-graph.ts` and `debug-log.ts` are
   untouched and stay on `agents-updated`, which `state.ts` still emits once
-  per flush (P1a).
+  per flush (already landed).
 
 ## Why
 
 The agent-list live-updates design (binding errata applied), §7
 ("`agents-changed` consumers ... through `mergeChanged` ... or
-`window.applyChanges`. No per-event full rebuild remains") and §11's P4 row.
-The TTL/epoch fix closes a correctness gap in the already-merged state.ts
-slice that P4's brief carried forward as an explicit requirement, with its
+`window.applyChanges`. No per-event full rebuild remains") and §11's row
+for this work. The TTL/epoch fix closes a correctness gap in the already-merged state.ts
+slice that this brief carried forward as an explicit requirement, with its
 own test.
 
 ## Tests
@@ -156,13 +157,13 @@ own test.
   and remove any identity-defeating keying there. Neither render path in
   either file uses the `repeat()` directive at all (both use plain
   `.map()`); the only `repeat(` hit in `project-detail.ts` is an unrelated
-  CSS `grid-template-columns: repeat(auto-fill, ...)`. P1c evidently
-  implemented the grid/list render with `.map()` rather than the design
-  doc's `repeat(items, a => a.id, ...)` proposal. Flagged for the EM;
-  **ruling: accepted, no change in P4** — keyed rendering of window items
-  belongs to P5, which rebuilds grid and list from the window.
+  CSS `grid-template-columns: repeat(auto-fill, ...)`. The earlier window
+  work evidently implemented the grid/list render with `.map()` rather than the design
+  doc's `repeat(items, a => a.id, ...)` proposal. Raised during development;
+  **decision: accepted, no change here** — keyed rendering of window items
+  belongs to the later phase that rebuilds grid and list from the window.
 
-## Follow-up: tombstone-race fix (EM ruling)
+## Follow-up: tombstone-race fix
 
 Flagged as a second deviation: `onAgentsUpdated`'s old deleted-agent handling
 scanned the *entire* persistent `stateManager.getDeletedAgentIds()` set on
@@ -173,19 +174,19 @@ already been processed in an earlier flush. `mergeChanged`-based merging
 only inspects the current flush's `change.deleted`, so that race was no
 longer self-healed by an unrelated later flush.
 
-**Ruling: fix it in P4** — removing the old per-flush rebuild removes its
-incidental scrubbing too, so without a replacement P4 reintroduces the
+**Decision: fix it now** — removing the old per-flush rebuild removes its
+incidental scrubbing too, so without a replacement this work reintroduces the
 stale-deleted-agent case. Fixed with a new `dropTombstoned(agents,
 deletedIds)` in `agent-merge.ts` (returns the same array reference when
 nothing needs dropping, so it adds no churn on the common case), applied at
 every point a REST response is assigned into page-level state:
 `project-detail.ts`'s `loadAgentsForViewImpl` (both the `complete` and
 paged branches) and `loadLegacyAgentsImpl`, its paged window page fetcher
-`fetchAgentsPage` (the EM's "if the paged window's server pages need the
-same filter, apply it there too" — applied), and `agents.ts`'s
-`fetchAndMergeAgents`. No request added anywhere.
+`fetchAgentsPage` too, since a mid-race delete can land on any page fetch,
+not only the first, and `agents.ts`'s `fetchAndMergeAgents`. No request
+added anywhere.
 
-Tests added per the EM's instruction: one end-to-end test per page (SSE
+Tests added for this: one end-to-end test per page (SSE
 delete processed, then a REST response still listing that ID lands, agent
 not shown) — `project-detail-agent-window.test.ts` > "small state: live
 updates" > "a REST response landing after an SSE delete does not resurrect
@@ -203,7 +204,7 @@ warnings), unchanged from the prior commit's baseline; `npx prettier
 --check` pass; targeted `npx vitest run` across the same 13 files —
 208 tests, all passing (202 before this commit + 6 new).
 
-## Design mapping (P4 bullets to file:function)
+## Design mapping (brief items to file:function)
 
 1. `agent-merge.ts:mergeChanged` — new helper, identity-preserving merge,
    scope-capability inheritance moved here (applies to new IDs only).
@@ -217,7 +218,7 @@ warnings), unchanged from the prior commit's baseline; `npx prettier
 5. `state.ts:bufferAgentDelta`'s expiry timer — epoch/buffer TTL agreement
    fix, with `state-seed-epoch.test.ts`'s new test for the exact cited
    sequence.
-6. (Follow-up, EM ruling.) `agent-merge.ts:dropTombstoned` — applied at
+6. (Follow-up.) `agent-merge.ts:dropTombstoned` — applied at
    `project-detail.ts:loadAgentsForViewImpl` (both branches),
    `loadLegacyAgentsImpl`, `fetchAgentsPage`, and `agents.ts:fetchAndMergeAgents`.
 
@@ -237,7 +238,7 @@ warnings), unchanged from the prior commit's baseline; `npx prettier
   delta is not replayed by a later seed" > "matches live state once the
   buffer entry it was recorded from has expired".
 - **W10 (request counts, rows 1-18 unchanged):** `project-detail-agent-window.test.ts`'s
-  existing P1-subset-gate test ("page load issues exactly one agents
+  existing request-count gate test ("page load issues exactly one agents
   request...") and every other request-count assertion in that file, rerun
   unchanged and still passing (zero added); `agents-live-updates.test.ts`'s
   tests each assert `requests.length` (or an equivalent fetch-call count)
@@ -269,7 +270,7 @@ against the pre-fix code and pass after:
   now clears the pending buffer and its timer for every seeded ID, tokened
   or not (previously only when a recorded epoch delta was found); the
   timer callback also guards its epoch purge with `state.agents.has(id)`,
-  as defense in depth. Test: the reviewer's stale-timer sequence,
+  as defense in depth. Test: a stale-timer sequence that reproduces the bug,
   reproduced and confirmed to fail pre-fix.
 - **Tombstones were not applied to paged stats:** `dropTombstoned` filtered
   page rows but not a paged response's `stats.agents`, so a deleted agent
@@ -284,7 +285,7 @@ against the pre-fix code and pass after:
   filtering specifically (see "Stats filtering test and comment
   consolidation" below).
 
-Optional and nit items, all closed:
+Smaller fixes, also closed:
 
 - **Closed a test gap in tombstone-drop coverage:** mutation testing had
   shown 3 of 5 `dropTombstoned` call sites untested (the paged branch of
@@ -306,15 +307,15 @@ Optional and nit items, all closed:
   `mergeAgentsChanged` doc said it was a no-op while paged; it is actually
   never called while paged (the caller gates it). Corrected.
 
-Disposition of the non-blocking findings:
+Other items considered:
 
 - **A created event landing mid-load has a weaker self-heal than `main`
   had:** accepted as a known limitation, deferred to a later phase. A
   created event that lands while a page's own REST load is already in
   flight is added by `mergeChanged` and then overwritten by that load's
   REST assignment if the snapshot predates the create; it now heals only
-  on that one agent's own next delta, instead of on any agent's next
-  refresh as `main`'s full rebuild happened to provide. The seed-epoch
+  on that one agent's own next delta, instead of at any agent's next live
+  update (flush) as `main`'s full rebuild happened to provide. The seed-epoch
   machinery already used for drains is the natural fix once these load
   paths adopt it. Not blocking: the design explicitly removes full
   rebuilds. **Decided by ptone (2026-10-01 23:05Z): postponed to the
@@ -342,7 +343,7 @@ Disposition of the non-blocking findings:
 ### Commands and results
 
 - `npm run typecheck`: pass, no output.
-- `npx vitest run` on the reviewer's five targeted files
+- `npx vitest run` on five targeted files
   (`agent-merge.test.ts`, `state-seed-epoch.test.ts`,
   `state-coalescing.test.ts`, `agents-live-updates.test.ts`,
   `project-detail-agent-window.test.ts`): 125/125 passing (117 before
@@ -384,7 +385,7 @@ Three items closed:
 ### Commands and results
 
 - `npm run typecheck`: pass, no output.
-- `npx vitest run` on the reviewer's five targeted files: all passing,
+- `npx vitest run` on the same five targeted files: all passing,
   with one new assertion added to an existing test (no new test count
   change).
 - `npx eslint` on the four non-test files: unchanged from the prior
@@ -392,3 +393,37 @@ Three items closed:
 - The new assertion was verified to fail when its corresponding call
   site's filtering was reverted (that site alone, via a scripted
   single-line edit), then to pass again once restored.
+
+## Follow-up: paged-gate and project add-rule test coverage
+
+Two more call sites had no dedicated test:
+
+- **The paged/small-state gate itself was untested:** `boundOnAgentsChanged`
+  only calls `mergeAgentsChanged` when the window is not `'paged'`, but no
+  test exercised an SSE create and status delta while genuinely paged and
+  checked that `this.agents` stayed empty throughout. Added a test to the
+  paged-state live-updates suite: mount paged, emit an SSE create for a
+  project agent plus a status delta for an existing one, and assert
+  `this.agents` stays at length 0 while `agentStats` (the member index)
+  reflects both — 5 original members plus the new create. Verified it
+  fails when the gate is forced to always run (replacing the condition
+  with an unconditional branch), then passes once restored.
+- **The project page's add rule was untested for a foreign project:** the
+  rule that gates adding a *new* ID (`agent.projectId === this.projectId`)
+  had no test for an agent whose own `projectId` field names a different
+  project. Added a test: an SSE create arrives on this project's own
+  subject, but the payload's `projectId` names another project; the agent
+  must not be added. Verified it fails when the rule is replaced with one
+  that always allows new IDs, then passes once restored.
+
+### Commands and results
+
+- `npm run typecheck`: pass, no output.
+- `npx vitest run` on the same five targeted files: all passing, with 2
+  new tests (127 total, up from 125).
+- `npx eslint` on the four non-test files: unchanged from the prior
+  baseline — zero new issues.
+- `npx prettier --check`: pass on the changed file.
+- Both new tests were verified to fail under their respective mutants
+  (scripted single-line edits, not committed), then to pass again once
+  restored.
