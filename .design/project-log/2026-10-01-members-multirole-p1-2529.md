@@ -1,12 +1,13 @@
 # members-multirole P1 — atomic set/remove-all (ptone/scion#2529)
 
 **Branch**: `scion/members-multirole-p1`
-**Base**: `GoogleCloudPlatform/scion` main @ `e761178`
-**Scope**: design.md §12 P1 only (backend vertical slice), as amended by two
-mid-flight rulings from ptone: D1 blocks custom roles on agent principals
-(400 `principal_ineligible`), and D3 = authority model (c) from
-`design-d3-addendum.md` (owner-or-hub-override today, factored behind one
-seam for a later permission-based model).
+**Base**: based on `GoogleCloudPlatform/scion` main (see PR for the exact SHA
+at merge time; this branch is rebased, so a fixed SHA here would go stale).
+**Scope**: the P1 backend vertical slice (ptone/scion#2529) only, as amended
+by two mid-flight rulings from ptone: D1 blocks custom roles on agent
+principals (400 `principal_ineligible`), and D3 = authority model (c)
+(owner-or-hub-override today, factored behind one seam for a later
+permission-based model).
 
 ## What was built
 
@@ -32,7 +33,7 @@ the existing per-binding `POST`/`PATCH`/`DELETE /members[/{bindingID}]` API
     owner OR system-scope `role_binding.create`/`.delete`, the latter gated
     on the actor holding no project role of their own — review r1 F2),
     callable pre-transaction with the outer store and in-transaction with
-    `tx`. No other call site makes this decision (design-d3-addendum.md A1).
+    `tx`. No other call site makes this decision (acceptance A1).
     Built-in governance (`checkBuiltInChangeGovernance`, `reevaluateActorTx`)
     stays on the existing system-scope-only hub override, deliberately kept
     separate so a principal holding only a custom role — even one carrying
@@ -88,7 +89,7 @@ in the code and tests, not just noted for later:
    400 `principal_ineligible`, for every actor including hub override.
    Keeping a custom role an agent already holds (seeded directly) is
    unaffected — eligibility only gates `plan.Create`, never `plan.Keep`.
-2. **D3 = authority model (c)** (`design-d3-addendum.md`): one
+2. **D3 = authority model (c)**: one
    store-parameterised `customRoleAuthorityFromStore`, asked for `create`
    and `delete` separately even though both resolve to the same check today
    (owner-or-hub-override) — a later permission-based model (seeding
@@ -129,7 +130,7 @@ Escalation tests (ptone's list, verbatim names):
 
 Attribution: `TestSetMemberRoles_Ported_*` and the fixture pattern they share
 port miller79/scion PR #127's `handlers_roles_owner_custom_test.go`,
-re-targeted to the new PUT endpoint per design.md §7. Commits carrying that
+re-targeted to the new PUT endpoint. Commits carrying that
 ported code carry the trailer
 `Co-authored-by: Anthony Lofton <6901313+miller79@users.noreply.github.com>`.
 
@@ -138,8 +139,9 @@ ported code carry the trailer
 ## Deviations from the design, with reasons
 
 - **Named `builtInRoleChange` type instead of an anonymous struct** for
-  `rolePlan.BuiltInChange` (design.md shows `*struct{ Old ...; New ... }`
-  inline). Same shape, easier to construct/assert in tests.
+  `rolePlan.BuiltInChange` (the design sketched an inline
+  `*struct{ Old ...; New ... }`). Same shape, easier to construct/assert in
+  tests.
 - **`MembershipDecision` gained a `Details map[string]interface{}` field.**
   Needed to carry `roleDefinitionId`/`requiredPermission`/
   `currentRoleDefinitionIds` out of the service; nil by default, so every
@@ -166,13 +168,13 @@ ported code carry the trailer
     real `project.membership.set` operation ID.
 - **Hub-override tests call `ProjectMembershipService.SetMemberRoles`
   directly** instead of through HTTP PUT. The PUT/DELETE entry gate is
-  `project.manage` (per design.md §3.1), and hub-admin does not hold
+  `project.manage`, and hub-admin does not hold
   `project.manage` (`seed.go` `hubAdminPermissionIDs`) — exactly like the
   existing `AddMember`/`RemoveMember` hub override, whose own tests
   (`rs5_global_admin_governance_test.go`, `rs5_r2_hardening_test.go`) also
   call the service directly rather than through the equally-gated `/members`
   HTTP endpoints. In production, `/api/v1/admin/role-bindings` (unchanged in
-  P1; design.md §7 explicitly did not port miller79/scion PR #127's
+  P1; this slice deliberately did not port miller79/scion PR #127's
   relaxation of it) has no `project.manage` gate, so it is one way to reach
   the hub override. It is not the only way: review r1 raised, and r2
   confirmed, that this PUT/DELETE endpoint's own `project.manage` gate can
@@ -208,11 +210,11 @@ this upstream-bound file.
 
 ## Adjacent cleanup noticed, not implemented
 
-Per design.md §11: the `/admin/role-bindings` custom-project-role path still
-has no `LockProjectForMembership`, no mutation audit, and no credential gate
+The `/admin/role-bindings` custom-project-role path still has no
+`LockProjectForMembership`, no mutation audit, and no credential gate
 (`handlers_roles.go`). `SetMemberRoles` would be the natural destination for
-it, but design.md explicitly reserves that reroute as optional P4/P1b
-cleanup, out of scope here.
+it, but rerouting it is reserved as optional P4/P1b cleanup, out of scope
+here.
 
 ## Review round 1 fixes
 
@@ -293,9 +295,10 @@ closed, and no new High/Medium/Critical surfaced). No declines:
   original grant authority when the code (and the test) can only observe
   the *remover's* authority. Both comments were corrected to describe only
   what the assertions actually show.
-- **R2-4** (Nit): a bare `#127` issue reference, introduced ironically in
-  the commit that fixed the previous round's bare-reference finding (N2).
-  Reworded on this round's final history rewrite.
+- **R2-4** (Nit): an unqualified `miller79/scion PR #127`-style issue
+  reference, introduced ironically in the commit that fixed the previous
+  round's bare-reference finding (N2). Reworded on this round's final
+  history rewrite.
 - **R2-5** (Nit): four stale or inaccurate statements in this file (the
   base SHA, the RS1 AST guard being "extended" when only the catalog was,
   `principalEligibleForRole`'s default-branch description after review r1's
@@ -305,7 +308,7 @@ closed, and no new High/Medium/Critical surfaced). No declines:
   `mmrServiceCtx`.
 - **R2-6** (Nit): `roleKindBuiltIn`/`roleKindCustom` constants were added
   next to `projectRoleKind` and used at every remaining
-  `"builtin"`/`"custom"` comparison and default-value site (5 places across
+  `"builtin"`/`"custom"` comparison and default-value site (7 sites across
   `project_membership_set.go` and `handlers_project_members.go`), closing
   the gap N1 (review r1) left when it centralised the derivation but not
   every call site's literal.
@@ -327,3 +330,63 @@ PM1|ProjectMember|Catalog|Classif|AST'`, `go test ./pkg/hub/authzop/...`,
 rebased onto a fresh `upstream-main` afterward. Per the P1 broker throttle,
 the full `make test-hub-sqlite`/`make ci` were not run locally for this
 round either; they run in the PR's GitHub CI.
+
+## Review round 3 fixes
+
+Closed every open finding from the third review round (0 Critical, 0 High,
+0 Medium, 2 Low, 4 Nit — every round-1 and round-2 finding was independently
+re-verified closed, and no new High/Medium/Critical surfaced, and no
+escalation-guard mutation probe found a gap). No declines:
+
+- **R3-1** (Low): the R2-2 in-tx guard reused `membershipChangedError`'s
+  "the principal's project roles changed" reason for a case where the
+  *actor's* authority changed, not the principal's — which would mislead a
+  P3 Add-mode client into reporting "already a member". Added a distinct
+  `actorAuthorityChangedError`/`actorAuthorityChangedDecision` with an
+  accurate reason and `details.cause: "actor_authority_changed"`; the two
+  genuine principal-roles-changed paths now set
+  `details.cause: "principal_roles_changed"`. Both are still 409
+  `membership_changed`, per the disposition.
+- **R3-2** (Low): roughly 50 code/test/catalog comments, plus this file,
+  cited `design.md`, `design-d3-addendum.md` or `findings.md` — scratchpad
+  documents not present in this repo. Every comment already stated the rule
+  or rationale inline; only the dangling citation was removed (optionally
+  replaced with `(ptone/scion#2529)`). No design doc was added to `.design/`
+  for this change, per the disposition.
+- **R3-3** (Nit): part of the R2-2 check (the `hubOverride` comparison and
+  the `Via` loop) is unreachable today given role equality, and was not
+  independently tested. Extracted `actorAuthorityChanged(pre, post)`,
+  documented why each sub-check is unreachable today and why it is kept as
+  defence in depth, and added a table-driven unit test
+  (`TestActorAuthorityChanged`) that drives each component independently.
+- **R3-4** (Nit): the concurrent-PUT test's assertion message said "exactly
+  one of the two conflicting PUTs must succeed" but the assertion itself
+  checks "at least one" (both can legitimately return 200 under full
+  serialization, per §12 P1). Fixed the message to match the assertion.
+- **R3-5** (Nit): this file's base SHA had gone stale again after the
+  round-2 rebase; rephrased as "based on upstream main (see PR)" so a future
+  rebase cannot make it stale again. The R2-6 bullet said "5 places"; the
+  closure table and code show 7 sites — corrected. The R2-4 bullet quoted a
+  bare `` `#127` `` to describe the finding it was closing, which itself
+  violated the qualified-refs-only rule; reworded to
+  "`miller79/scion PR #127`-style issue reference".
+- **R3-6** (Nit): the catalog exemption reasons for `applyRolePlanTx`, and
+  its doc comment, said "credential gate, governance/custom-role authority
+  and CanDelegate run before this call inside WithTx", which reads as if
+  all three run inside `WithTx`. Only governance/custom-role authority (the
+  role_binding.* guard and the new actor-authority-change check) are
+  re-evaluated inside `WithTx` immediately before the call; the credential
+  gate and `CanDelegate` run pre-transaction only. Reworded both the catalog
+  entries and the doc comment.
+
+A finding-by-finding closure table (ID → commit/file:line → how closed) was
+produced for this round and shared with the reviewing agents; it is not
+duplicated here. The same throttled gate set as rounds 1 and 2 (`go test
+./pkg/hub/ -run 'SetMemberRoles|RoleSet|Escalation|OwnerCustom|RS|D002|
+PM1|ProjectMember|Catalog|Classif|AST'`, `go test ./pkg/hub/authzop/...`,
+`gofmt -l`, `go vet`, and a scoped `golangci-lint run
+--new-from-rev=upstream-main` on `./pkg/hub/...` and
+`./pkg/hub/authzop/...`) all pass on the fixed head, which was rebased onto
+a fresh `upstream-main` afterward. Per the P1 broker throttle, the full
+`make test-hub-sqlite`/`make ci` were not run locally for this round either;
+they run in the PR's GitHub CI.
