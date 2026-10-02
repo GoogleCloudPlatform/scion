@@ -271,12 +271,25 @@ func TestActorAuthorityChanged(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "perm asked pre but not post is skipped (plan1 == plan0 by construction)",
+			// Review r1 A-R2: an asked-set mismatch is treated as changed
+			// (fail closed), even though plan1 == plan0 by construction
+			// (current1 == current0) means this case is unreached in
+			// production today.
+			name: "perm asked pre but not post fails closed (plan1 == plan0 by construction; unreached in production)",
 			pre: actorAuthoritySnapshot{role: store.ProjectRoleOwner, hubOverride: false,
 				customAuth: map[string]customRoleAuthority{PermRoleBindingCreate: owner}},
 			post: actorAuthoritySnapshot{role: store.ProjectRoleOwner, hubOverride: false,
 				customAuth: map[string]customRoleAuthority{}},
-			want: false,
+			want: true,
+		},
+		{
+			// Mirror of the above: asked post but not pre.
+			name: "perm asked post but not pre fails closed (plan1 == plan0 by construction; unreached in production)",
+			pre: actorAuthoritySnapshot{role: store.ProjectRoleOwner, hubOverride: false,
+				customAuth: map[string]customRoleAuthority{}},
+			post: actorAuthoritySnapshot{role: store.ProjectRoleOwner, hubOverride: false,
+				customAuth: map[string]customRoleAuthority{PermRoleBindingCreate: owner}},
+			want: true,
 		},
 		{
 			name: "two perms asked, only the second's Via changed",

@@ -601,6 +601,13 @@ type actorAuthoritySnapshot struct {
 //     pre-Via would already have returned 403 in Phase P. So equal roles
 //     imply equal Via for every perm actually asked.
 //
+// A perm asked in one phase's customAuth but not the other's is also treated
+// as changed (fail closed), even though plan1 == plan0 by construction
+// (current1 == current0) means this is unreached today: an asked-set
+// mismatch is exactly the kind of unexpected divergence this guard exists to
+// catch, and treating it as "unchanged" would defeat that purpose (review
+// r1 R2).
+//
 // Each sub-check is kept, rather than collapsed to "role != role", in case a
 // future authority source (e.g. a group-mediated hub override) decouples
 // hubOverride or Via from role — see TestActorAuthorityChanged
@@ -618,7 +625,11 @@ func actorAuthorityChanged(pre, post actorAuthoritySnapshot) bool {
 		preAuth, preAsked := pre.customAuth[perm]
 		postAuth, postAsked := post.customAuth[perm]
 		if preAsked != postAsked {
-			continue // plan1 == plan0 by construction (current1 == current0)
+			// An asked-set mismatch means the plan diverged between phases;
+			// refuse. plan1 == plan0 by construction (current1 == current0)
+			// means this is unreached today, but failing open here would
+			// silently drop the one case the mismatch itself signals.
+			return true
 		}
 		if preAsked && preAuth.Via != postAuth.Via {
 			return true
