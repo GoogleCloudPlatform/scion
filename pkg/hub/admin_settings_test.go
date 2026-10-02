@@ -881,3 +881,66 @@ func TestHandlePutServerConfig_DefaultTimezone_ValidPersisted(t *testing.T) {
 		})
 	}
 }
+
+// TestApplySettingsUpdates_ClearTopLevelStrings covers ptone/scion#2535: an
+// explicit "" for a top-level string setting must delete the key from
+// settings.yaml (not persist an empty string), and a nil pointer must leave
+// the stored value unchanged.
+func TestApplySettingsUpdates_ClearTopLevelStrings(t *testing.T) {
+	keys := []string{
+		"active_profile",
+		"default_template",
+		"default_harness_config",
+		"image_registry",
+		"workspace_path",
+		"default_max_agent_role",
+		"default_agent_role",
+		"default_runtime_broker",
+	}
+	newRaw := func() map[string]interface{} {
+		raw := map[string]interface{}{"schema_version": "1"}
+		for _, k := range keys {
+			raw[k] = "old-" + k
+		}
+		return raw
+	}
+	empty := func() *string { s := ""; return &s }
+
+	t.Run("empty string deletes", func(t *testing.T) {
+		raw := newRaw()
+		applySettingsUpdates(raw, &ServerConfigUpdateRequest{
+			ActiveProfile:        empty(),
+			DefaultTemplate:      empty(),
+			DefaultHarnessConfig: empty(),
+			ImageRegistry:        empty(),
+			WorkspacePath:        empty(),
+			DefaultMaxAgentRole:  empty(),
+			DefaultAgentRole:     empty(),
+			DefaultRuntimeBroker: empty(),
+		})
+		for _, k := range keys {
+			if v, ok := raw[k]; ok {
+				t.Errorf("expected %s to be deleted, got %q", k, v)
+			}
+		}
+	})
+
+	t.Run("nil leaves unchanged", func(t *testing.T) {
+		raw := newRaw()
+		applySettingsUpdates(raw, &ServerConfigUpdateRequest{})
+		for _, k := range keys {
+			if raw[k] != "old-"+k {
+				t.Errorf("expected %s unchanged, got %v", k, raw[k])
+			}
+		}
+	})
+
+	t.Run("non-empty sets", func(t *testing.T) {
+		raw := newRaw()
+		v := "new"
+		applySettingsUpdates(raw, &ServerConfigUpdateRequest{ActiveProfile: &v, WorkspacePath: &v})
+		if raw["active_profile"] != "new" || raw["workspace_path"] != "new" {
+			t.Errorf("expected values set, got %v / %v", raw["active_profile"], raw["workspace_path"])
+		}
+	})
+}

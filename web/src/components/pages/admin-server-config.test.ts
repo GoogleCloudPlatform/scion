@@ -998,6 +998,48 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  describe('Regression ptone/scion#2535 — clearing string fields in file mode', () => {
+    const clearable: Array<[string, string]> = [
+      ['active_profile', 'activeProfile'],
+      ['default_template', 'defaultTemplate'],
+      ['default_harness_auth', 'defaultHarnessAuth'],
+      ['image_registry', 'imageRegistry'],
+      ['workspace_path', 'workspacePath'],
+      ['default_max_agent_role', 'defaultMaxAgentRole'],
+      ['default_agent_role', 'defaultAgentRole'],
+      ['default_runtime_broker', 'defaultRuntimeBroker'],
+    ];
+
+    it('buildFilePayload sends cleared string fields as "" (not omitted)', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      for (const [, prop] of clearable) el[prop] = '';
+      el.harnessConfigSelection = '';
+      el.customHarnessConfig = '';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      for (const [key] of clearable) {
+        expect(payload, key).toHaveProperty(key, '');
+      }
+      expect(payload).toHaveProperty('default_harness_config', '');
+    });
+
+    it('buildFilePayload still sends non-empty string values', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      for (const [, prop] of clearable) el[prop] = `v-${prop}`;
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      for (const [key, prop] of clearable) {
+        expect(payload, key).toHaveProperty(key, `v-${prop}`);
+      }
+    });
+  });
+
   // ── Cross-project messaging (D1) ──
 
   describe('Cross-project messaging section', () => {
