@@ -146,26 +146,30 @@ func projectSecretReadAllowed(srv *Server, user *store.User, project *store.Proj
 	})
 }
 
-// TestProjectOwnerID_RemovedCreatorWithoutTransferHasNoAccess runs its
-// subtests against one shared fixture, so they share state and their order
-// matters on a regression. With the owner relationship grant restored, the
-// "GET project" subtest succeeds and getProject/createProjectMembersGroup
-// re-grant the creator, after which later subtests see that re-granted
-// access. "PUT messaging policy" and "list and scope=mine" are guards: run in
-// isolation they pass even on a revert, and they only fail in the full run
-// because of that earlier re-grant.
+// TestProjectOwnerID_RemovedCreatorWithoutTransferHasNoAccess builds a fresh
+// stale-owner fixture in every subtest, so each guard stands on its own and
+// none depends on state left by an earlier subtest. (With one shared fixture
+// and the owner relationship grant restored, a successful "GET project" ran
+// getProject -> createProjectMembersGroup and re-granted the creator a
+// binding that later subtests then saw.) "PUT messaging policy" and "list and
+// scope=mine" are authorized by bindings, not by the owner relationship rule,
+// so they are positive guards of those binding-based paths rather than locks
+// on the rule: they pass even with the rule restored.
 func TestProjectOwnerID_RemovedCreatorWithoutTransferHasNoAccess(t *testing.T) {
-	f := setupStaleOwnerFixture(t)
-	base := "/api/v1/projects/" + f.project.ID
+	baseOf := func(f staleOwnerFixture) string { return "/api/v1/projects/" + f.project.ID }
 
 	t.Run("GET project", func(t *testing.T) {
+		f := setupStaleOwnerFixture(t)
+		base := baseOf(f)
 		rec := doRequestAsUser(t, f.srv, f.creator, http.MethodGet, base, nil)
 		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	})
 
 	t.Run("PATCH project", func(t *testing.T) {
+		f := setupStaleOwnerFixture(t)
+		base := baseOf(f)
 		rec := doRequestAsUser(t, f.srv, f.creator, http.MethodPatch, base,
-			map[string]string{"name": "Hijacked"})
+			map[string]string{"name": "Renamed By Removed Creator"})
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		stored, err := f.s.GetProject(context.Background(), f.project.ID)
 		require.NoError(t, err)
@@ -173,39 +177,50 @@ func TestProjectOwnerID_RemovedCreatorWithoutTransferHasNoAccess(t *testing.T) {
 	})
 
 	t.Run("GET project secrets", func(t *testing.T) {
+		f := setupStaleOwnerFixture(t)
+		base := baseOf(f)
 		rec := doRequestAsUser(t, f.srv, f.creator, http.MethodGet, base+"/secrets", nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	})
 
 	t.Run("project.secret_read decision", func(t *testing.T) {
+		f := setupStaleOwnerFixture(t)
 		d := projectSecretReadAllowed(f.srv, f.creator, f.project)
 		assert.False(t, d.Allowed, "reason %q", d.Reason)
 	})
 
 	t.Run("GET messaging policy", func(t *testing.T) {
+		f := setupStaleOwnerFixture(t)
+		base := baseOf(f)
 		rec := doRequestAsUser(t, f.srv, f.creator, http.MethodGet, base+"/messaging-policy", nil)
 		assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rec.Code, rec.Body.String())
 	})
 
 	t.Run("PUT messaging policy", func(t *testing.T) {
+		f := setupStaleOwnerFixture(t)
+		base := baseOf(f)
 		rec := doRequestAsUser(t, f.srv, f.creator, http.MethodPut, base+"/messaging-policy",
 			ProjectMessagingPolicyUpdateRequest{CrossProjectInbound: "any"})
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	})
 
 	t.Run("register existing project", func(t *testing.T) {
+		f := setupStaleOwnerFixture(t)
 		rec := doRequestAsUser(t, f.srv, f.creator, http.MethodPost, "/api/v1/projects/register",
 			RegisterProjectRequest{ID: f.project.ID, Name: f.project.Name, GitRemote: f.project.GitRemote})
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	})
 
 	t.Run("clone", func(t *testing.T) {
+		f := setupStaleOwnerFixture(t)
+		base := baseOf(f)
 		rec := doRequestAsUser(t, f.srv, f.creator, http.MethodPost, base+"/clone",
-			map[string]string{"name": "Stolen Clone"})
+			map[string]string{"name": "Clone By Removed Creator"})
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	})
 
 	t.Run("list and scope=mine", func(t *testing.T) {
+		f := setupStaleOwnerFixture(t)
 		assert.NotContains(t, listProjectIDs(t, f.srv, f.creator, "/api/v1/projects"), f.project.ID)
 		assert.NotContains(t, listProjectIDs(t, f.srv, f.creator, "/api/v1/projects?scope=mine"), f.project.ID)
 	})
@@ -292,6 +307,8 @@ func TestProjectOwnerID_BackfillWarnsOnOwnerOnlyLegacyProject(t *testing.T) {
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
+	// Do not add t.Parallel(): this test swaps the process-global slog
+	// logger with slog.SetDefault to capture the warning.
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
@@ -307,7 +324,8 @@ func TestProjectOwnerID_BackfillWarnsOnOwnerOnlyLegacyProject(t *testing.T) {
 
 // TestProjectOwnerID_BackfillNoWarningWhenNotOwnerOnly pins the negative
 // cases of the owner-only warning: a project whose OwnerID already holds a
-// project-owner binding, and a project with neither OwnerID nor CreatedBy,
+// project-owner binding (with CreatedBy empty or different), a project whose
+// OwnerID equals CreatedBy, and a project with neither OwnerID nor CreatedBy
 // produce no warning. The owner-only project alongside them still warns once.
 func TestProjectOwnerID_BackfillNoWarningWhenNotOwnerOnly(t *testing.T) {
 	_, s := testServer(t)
@@ -356,6 +374,45 @@ func TestProjectOwnerID_BackfillNoWarningWhenNotOwnerOnly(t *testing.T) {
 	}
 	require.NoError(t, s.CreateProject(ctx, ownerOnly))
 
+	// Do not add t.Parallel(): this test swaps the process-global slog
+	// logger with slog.SetDefault to capture the warning.
+	// OwnerID equals CreatedBy: the backfill grants CreatedBy, no warning.
+	sameUser := createStaleOwnerUser(t, s, tid("same-owner-creator-user"), "same-owner-creator@test.com")
+	sameProject := &store.Project{
+		ID:        tid("same-owner-creator-project"),
+		Name:      "Same Owner Creator",
+		Slug:      "same-owner-creator-project",
+		OwnerID:   sameUser.ID,
+		CreatedBy: sameUser.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, sameProject))
+
+	// OwnerID differs from CreatedBy but OwnerID holds a project-owner
+	// binding: no warning.
+	mismatchCreator := createStaleOwnerUser(t, s, tid("bound-mismatch-creator"), "bound-mismatch-creator@test.com")
+	mismatchOwner := createStaleOwnerUser(t, s, tid("bound-mismatch-owner"), "bound-mismatch-owner@test.com")
+	boundMismatch := &store.Project{
+		ID:        tid("bound-mismatch-project"),
+		Name:      "Bound Mismatch",
+		Slug:      "bound-mismatch-project",
+		OwnerID:   mismatchOwner.ID,
+		CreatedBy: mismatchCreator.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, boundMismatch))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      mismatchOwner.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          boundMismatch.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
@@ -368,8 +425,50 @@ func TestProjectOwnerID_BackfillNoWarningWhenNotOwnerOnly(t *testing.T) {
 		"no warning when OwnerID already holds a project-owner binding: %s", logs)
 	assert.NotContains(t, logs, "project_id="+unowned.ID,
 		"no warning when neither OwnerID nor CreatedBy is set: %s", logs)
+	assert.NotContains(t, logs, "project_id="+sameProject.ID,
+		"no warning when OwnerID equals CreatedBy: %s", logs)
+	assert.NotContains(t, logs, "project_id="+boundMismatch.ID,
+		"no warning when OwnerID differs from CreatedBy but holds a binding: %s", logs)
 	assert.Equal(t, 1, strings.Count(logs, "project_id="+ownerOnly.ID),
 		"exactly one warning for the owner-only project: %s", logs)
 	assert.Equal(t, 1, strings.Count(logs, "no project-owner binding"),
 		"exactly one owner-only warning overall: %s", logs)
+}
+
+// TestProjectOwnerID_BackfillWarnsOnOwnerIDCreatorMismatch pins the second
+// warning shape: OwnerID set, CreatedBy set but different, and OwnerID holds
+// no project-owner binding. The backfill grants CreatedBy as usual, grants
+// nothing to OwnerID, and logs exactly one warning for the project.
+func TestProjectOwnerID_BackfillWarnsOnOwnerIDCreatorMismatch(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	creator := createStaleOwnerUser(t, s, tid("mismatch-creator"), "mismatch-creator@test.com")
+	owner := createStaleOwnerUser(t, s, tid("mismatch-owner"), "mismatch-owner@test.com")
+	project := &store.Project{
+		ID:        tid("mismatch-project"),
+		Name:      "Mismatch Legacy",
+		Slug:      "mismatch-project",
+		OwnerID:   owner.ID,
+		CreatedBy: creator.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Do not add t.Parallel(): this test swaps the process-global slog
+	// logger with slog.SetDefault to capture the warning.
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	require.NoError(t, backfillProjectOwnerRoleBindings(ctx, s))
+
+	assert.Nil(t, projectOwnerBindingFor(t, s, owner.ID, project.ID), "backfill must not grant to OwnerID")
+	assert.NotNil(t, projectOwnerBindingFor(t, s, creator.ID, project.ID), "backfill grants CreatedBy")
+	logs := buf.String()
+	assert.Equal(t, 1, strings.Count(logs, "project_id="+project.ID),
+		"exactly one warning for the mismatch project: %s", logs)
+	assert.Contains(t, logs, "OwnerID differs from CreatedBy")
 }
