@@ -499,13 +499,15 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 		ScopeID: agent.ProjectID,
 	})
 	if listErr != nil {
-		if d.debug {
-			d.log.Warn(callerName+": failed to list project secrets for ProvisionCredentials",
-				"agent_id", agent.ID, "error", listErr)
-		}
+		// Logged regardless of debug: without these credentials a private
+		// gh:// skill silently resolves with the default credential (or none).
+		d.log.Warn(callerName+": failed to list project secrets for ProvisionCredentials",
+			"agent_id", agent.ID, "project_id", agent.ProjectID, "error", listErr)
 		return nil
 	}
 	if len(projectSecrets) == 0 {
+		d.log.Info(callerName+": ProvisionCredentials resolved",
+			"agent_id", agent.ID, "project_id", agent.ProjectID, "count", 0)
 		return nil
 	}
 
@@ -521,10 +523,9 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 		g.Go(func() error {
 			sv, getErr := d.secretBackend.Get(gctx, sm.Name, secret.ScopeProject, agent.ProjectID)
 			if getErr != nil {
-				if d.debug {
-					d.log.Warn(callerName+": failed to get project secret for ProvisionCredentials",
-						"agent_id", agent.ID, "secret", sm.Name, "error", getErr)
-				}
+				// Secret name and project only; never the value.
+				d.log.Warn(callerName+": failed to get project secret for ProvisionCredentials",
+					"agent_id", agent.ID, "project_id", agent.ProjectID, "secret", sm.Name, "error", getErr)
 				return nil // don't fail the group for individual secrets
 			}
 			if sv != nil && sv.Value != "" {
@@ -541,6 +542,8 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 			creds[nv.name] = nv.value
 		}
 	}
+	d.log.Info(callerName+": ProvisionCredentials resolved",
+		"agent_id", agent.ID, "project_id", agent.ProjectID, "count", len(creds))
 	if len(creds) == 0 {
 		return nil
 	}
