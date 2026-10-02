@@ -62,4 +62,4 @@ empty skipping, progeny, live hub default, SQLite round trip). Run under
 - Part (b) on `scion/tz-t16b`.
 - The winning progeny `TZ` across two ancestors is not deterministic
   (`ListProgenyEnvVars` orders by key only). This is pre-existing and shared
-  with `resolveEnvFromStorage`; it is tracked as a follow-up issue.
+  with `resolveEnvFromStorage`; tracked in ptone/scion#2637.
