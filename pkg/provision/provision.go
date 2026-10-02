@@ -38,6 +38,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
@@ -248,6 +249,43 @@ type ProvisionInput struct {
 	// pod that starts for this project (they'd all see the sentinel and skip
 	// provisioning, forever).
 	RequireChownSuccess bool
+
+	// MountedWorktree is set by the Kubernetes provisioning init container
+	// for WorktreePerAgent mode, where the agent container mounts
+	// <workspace>/worktrees/<AgentID> by path. It changes the worktree step
+	// as follows:
+	//   - the branch is AgentName exactly as given (AgentID when empty),
+	//     not sanitized, and must be a valid git branch name;
+	//   - an existing worktree at the agent's path is reused only while
+	//     git's entry for it points back to it, and only on the requested
+	//     branch (or on another branch after the agent switched branches in
+	//     it); a worktree git has no entry for is moved aside;
+	//   - an existing empty directory at the agent's worktree path (created
+	//     by the broker so the pod can mount it) is filled with the worktree;
+	//   - an existing standalone checkout there (a directory with its own
+	//     .git directory, cloned by the agent container of an older image) is
+	//     kept as it is;
+	//   - a shared checkout cloned in this mode has its HEAD detached; one
+	//     provisioned earlier in another mode gets the worktrees/ exclude
+	//     and gc.auto 0, and otherwise keeps its contents and branch;
+	//   - the agent's branch must not already be checked out in another
+	//     directory, since the pod can only mount its own path;
+	//   - with a git too old for relative worktree paths, the agent's
+	//     directory is created empty, so the agent container clones its own
+	//     checkout into it;
+	//   - afterwards, what this step added or rewrote is chowned to
+	//     NFSUID:NFSGID (subject to RequireChownSuccess), since the worktree
+	//     is added after the shared checkout's one-time chown (see
+	//     ensureMountedWorktree).
+	MountedWorktree bool
+
+	// LockWait raises how long ProvisionShared waits for the file lock
+	// (when Locker is nil). Values below the default budget (about 3m40s)
+	// are ignored. The Kubernetes provisioning init container sets it in
+	// worktree-per-agent mode, where every pod of the project takes the
+	// lock: a pod that starts while another one clones the shared checkout
+	// then waits as long as a pod that only waits for the sentinel.
+	LockWait time.Duration
 }
 
 // heldLock represents a successfully acquired provisioning lock — either a
@@ -396,7 +434,14 @@ func ProvisionShared(in ProvisionInput) error {
 		// Already provisioned — skip to worktree setup if needed.
 		slog.Debug("ProvisionShared: workspace already provisioned (sentinel exists)",
 			"project_id", in.ProjectID, "sentinel", sentinelPath)
-		return ensureWorktree(ctx, in)
+		if in.MountedWorktree && in.Mode == store.SharingModeWorktreePerAgent {
+			// The shared checkout may have been provisioned in another mode:
+			// add what worktrees need, leaving its contents and HEAD alone.
+			if err := prepareExistingBaseForWorktrees(ctx, in.Resolved.HostPath); err != nil {
+				return fmt.Errorf("ProvisionShared: prepare base: %w", err)
+			}
+		}
+		return ensureMountedWorktree(ctx, in)
 	}
 
 	// --- Step 3: Provision (mkdir + clone + chown + sentinel) ---
@@ -486,7 +531,291 @@ func ProvisionShared(in ProvisionInput) error {
 		"project_id", in.ProjectID, "host_path", in.Resolved.HostPath)
 
 	// --- Step 4: Worktree setup (if WorktreePerAgent) ---
-	return ensureWorktree(ctx, in)
+	return ensureMountedWorktree(ctx, in)
+}
+
+// ensureMountedWorktree runs the worktree step and, for MountedWorktree,
+// chowns to NFSUID:NFSGID what that step created or rewrote as root: on
+// every start the sharer marker and .git/config (rewritten by git config),
+// plus .git/info/exclude, the worktree's start-branch record and any other
+// sharer marker the step rewrote; and, when a worktree was added, the agent's
+// worktree, its admin directory under .git/worktrees, the branch ref and
+// its reflog (with any directories the branch name adds) and the
+// worktrees/ directories. Everything else in the shared checkout was
+// chowned when it was first provisioned, and a reused worktree is left as
+// it is. The files rewritten on every start are chowned even when the step
+// fails, so a failed start does not leave them owned by root.
+func ensureMountedWorktree(ctx context.Context, in ProvisionInput) error {
+	outcome, stepErr := ensureWorktree(ctx, in)
+	if !in.MountedWorktree || in.Mode != store.SharingModeWorktreePerAgent {
+		return stepErr
+	}
+	base := in.Resolved.HostPath
+	gitDir := filepath.Join(base, ".git")
+	uid, gid := resolveUID(in), resolveGID(in)
+	chown := func(path string, recursive bool) error {
+		if _, err := os.Lstat(path); err != nil {
+			return nil
+		}
+		var err error
+		if recursive {
+			err = chownProjectTree(ctx, path, "", uid, gid)
+		} else {
+			err = lchownFile(path, uid, gid)
+		}
+		if err != nil {
+			if in.RequireChownSuccess {
+				return fmt.Errorf("ProvisionShared: chown %s to %d:%d: %w", path, uid, gid, err)
+			}
+			slog.Warn("ProvisionShared: chown failed (continuing)",
+				"project_id", in.ProjectID, "path", path, "uid", uid, "gid", gid, "error", err)
+		}
+		return nil
+	}
+	// chownChain chowns each existing directory and file from root down to
+	// root/rel, so directories git created for a branch name with slashes
+	// are included.
+	chownChain := func(root, rel string) error {
+		cur := root
+		for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+			cur = filepath.Join(cur, part)
+			if err := chown(cur, false); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	paths := []string{filepath.Join(gitDir, "config"), filepath.Join(gitDir, "info"), filepath.Join(gitDir, "info", "exclude")}
+	if outcome.branch != "" {
+		marker := sharerPath(base, outcome.branch)
+		paths = append(paths, filepath.Dir(marker), marker)
+	}
+	paths = append(paths, outcome.rewritten...)
+	if outcome.added || outcome.emptyDir {
+		paths = append(paths, filepath.Join(base, "worktrees"))
+	}
+	for _, p := range paths {
+		if err := chown(p, false); err != nil && stepErr == nil {
+			return err
+		}
+	}
+	if stepErr != nil {
+		return stepErr
+	}
+	worktreePath := WorktreePath(base, in.AgentID)
+	if outcome.emptyDir {
+		return chown(worktreePath, false)
+	}
+	if !outcome.added {
+		return nil
+	}
+	if err := chown(worktreePath, true); err != nil {
+		return err
+	}
+	if admin, ok := worktreeAdminDir(worktreePath, base); ok {
+		if err := chown(filepath.Dir(admin), false); err != nil {
+			return err
+		}
+		if err := chown(admin, true); err != nil {
+			return err
+		}
+	}
+	if err := chownChain(gitDir, filepath.Join("refs", "heads", outcome.branch)); err != nil {
+		return err
+	}
+	return chownChain(gitDir, filepath.Join("logs", "refs", "heads", outcome.branch))
+}
+
+// ErrSeparateCheckout is returned by RemoveMountedWorktree when the agent's
+// directory holds its own clone (made by the agent container of an older
+// image) instead of a worktree of the shared checkout. The directory is
+// left in place.
+var ErrSeparateCheckout = errors.New("the agent's directory holds a separate clone, not a worktree of the shared checkout")
+
+const (
+	// removedWorktreePrefix names an agent's worktree directory once
+	// RemoveMountedWorktree has moved it aside; PurgeRemovedWorktrees
+	// deletes such directories. A leading dot keeps it apart from agent
+	// slugs.
+	removedWorktreePrefix = ".removing-"
+	// staleWorktreePrefix names an agent's directory that the worktree
+	// step moved aside because git no longer knew the worktree. It is
+	// kept for the user to inspect.
+	staleWorktreePrefix = ".stale-"
+)
+
+// RemoveMountedWorktree removes the worktree of the agent named name from
+// the shared checkout at base (base/worktrees/<name>), as added by
+// ProvisionShared with MountedWorktree. It runs under the same per-project
+// file lock as provisioning, which lives in base itself, so it never runs
+// at the same time as a provisioning init container of the same project.
+// lockWait bounds only the wait for that lock; the steps under the lock
+// run to completion.
+//
+// name must be an agent slug, and base/worktrees must be a plain
+// directory. Only base/worktrees/<name> is touched, and only when it is a
+// worktree of this checkout (or one git no longer has an entry for): it
+// is renamed to a .removing- name inside worktrees/, git worktree prune
+// drops its entry, and the agent is dropped from the sharer registry. The
+// rename is a single step, so a removal that stops partway never leaves a
+// half-deleted worktree at the agent's path. PurgeRemovedWorktrees deletes
+// the renamed directory afterwards. The agent's branch is kept. An empty
+// directory is removed. A missing directory is not an error. A separate
+// clone is left in place (ErrSeparateCheckout), and so is anything else,
+// with an error.
+func RemoveMountedWorktree(ctx context.Context, base, name string, lockWait time.Duration) error {
+	if slug, err := api.ValidateAgentName(name); err != nil || slug != name {
+		return fmt.Errorf("remove worktree: agent name %q is not an agent slug", name)
+	}
+	path := WorktreePath(base, name)
+	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("remove worktree %s: %w", path, err)
+	}
+
+	// lockWait bounds the wait for the lock; the caller's cancellation is
+	// ignored so the steps under the lock always finish.
+	held, err := acquireFileLockWithin(context.WithoutCancel(ctx), base, lockWait)
+	if err != nil {
+		return fmt.Errorf("remove worktree %s: %w", path, err)
+	}
+	defer func() {
+		if releaseErr := held.release(); releaseErr != nil {
+			slog.Warn("remove worktree: failed to release the provisioning lock", "path", base, "error", releaseErr)
+		}
+	}()
+	ctx = held.ctx
+
+	// Check again under the lock.
+	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	worktreesDir := filepath.Join(base, "worktrees")
+	if fi, err := os.Lstat(worktreesDir); err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("remove worktree %s: %s is not a plain directory; left in place", path, worktreesDir)
+	}
+	if !IsRealWorktreeDir(path, base) {
+		switch mountedDirState(path) {
+		case mountedDirEmpty:
+			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("remove worktree %s: %w", path, err)
+			}
+			return nil
+		case mountedDirStandalone:
+			return fmt.Errorf("remove worktree %s: %w; left in place", path, ErrSeparateCheckout)
+		default:
+			return fmt.Errorf("remove worktree %s: not a worktree of the shared checkout at %s; left in place", path, base)
+		}
+	}
+	if linkedWorktreeState(base, path) == linkedWorktreeMismatch {
+		return fmt.Errorf("remove worktree %s: git's entry for this worktree points elsewhere; left in place", path)
+	}
+
+	if _, err := moveWorktreeAside(base, name, removedWorktreePrefix); err != nil {
+		return fmt.Errorf("remove worktree %s: %w", path, err)
+	}
+	pruneCtx, cancel := context.WithTimeout(ctx, removalPruneTimeout)
+	defer cancel()
+	if out, err := gitInSharedCheckout(pruneCtx, base, path, "worktree", "prune"); err != nil {
+		slog.Warn("remove worktree: git worktree prune failed", "path", base, "error", err, "output", out)
+	}
+	if _, err := UnregisterSharerElsewhere(base, name, ""); err != nil {
+		slog.Warn("remove worktree: could not update the sharer registry", "path", base, "error", err)
+	}
+	return nil
+}
+
+// removalPruneTimeout bounds the git worktree prune RemoveMountedWorktree
+// runs under the lock.
+const removalPruneTimeout = 2 * time.Minute
+
+// PurgeRemovedWorktrees deletes the directories RemoveMountedWorktree
+// moved aside under base/worktrees, including any left by an earlier
+// removal that stopped partway. Nothing refers to them any more, so it
+// runs without the provisioning lock and without a deadline. base/worktrees
+// must be a plain directory; the deletes run inside that directory as
+// opened, so they stay there even if the path is replaced meanwhile.
+func PurgeRemovedWorktrees(base string) error {
+	worktreesDir := filepath.Join(base, "worktrees")
+	root, err := os.OpenRoot(worktreesDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	opened, err := root.Stat(".")
+	if err != nil {
+		return err
+	}
+	// Lstat does not follow symlinks, so this holds only when worktrees/
+	// is the plain directory that was opened.
+	if fi, err := os.Lstat(worktreesDir); err != nil || !os.SameFile(fi, opened) {
+		return nil
+	}
+	dir, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), removedWorktreePrefix) {
+			continue
+		}
+		if err := root.RemoveAll(e.Name()); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", filepath.Join(worktreesDir, e.Name()), err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// moveWorktreeAside renames base/worktrees/<name> to a unique
+// <prefix><name>-<suffix> entry in the same directory and returns the new
+// path. The moved directory's .git file is renamed to .git.moved, so the
+// directory is plain files: git no longer treats it as a worktree, and its
+// link cannot reach the git entry of a new worktree with the same name.
+func moveWorktreeAside(base, name, prefix string) (string, error) {
+	from := WorktreePath(base, name)
+	to := filepath.Join(base, "worktrees", prefix+name+"-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+	if err := os.Rename(from, to); err != nil {
+		return "", fmt.Errorf("move %s aside: %w", from, err)
+	}
+	link := filepath.Join(to, ".git")
+	if fi, err := os.Lstat(link); err == nil && !fi.IsDir() {
+		if err := os.Rename(link, link+".moved"); err != nil {
+			if rmErr := os.Remove(link); rmErr != nil {
+				slog.Warn("could not unlink the moved directory from git", "path", to, "rename_error", err, "remove_error", rmErr)
+			}
+		}
+	}
+	return to, nil
+}
+
+// gitInSharedCheckout runs git in the shared checkout at base. The shared
+// checkout and the agent's worktree belong to the agents' user rather than
+// the caller, so both are listed in safe.directory for this command only.
+func gitInSharedCheckout(ctx context.Context, base, worktree string, args ...string) (string, error) {
+	full := append([]string{"-c", "safe.directory=" + base, "-c", "safe.directory=" + worktree, "-C", base}, args...)
+	out, err := exec.CommandContext(ctx, "git", full...).CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// fileLockWait is how long ProvisionShared waits for the file lock:
+// in.LockWait when it is longer than the default budget, otherwise the
+// default.
+func fileLockWait(in ProvisionInput) time.Duration {
+	if def := defaultFileLockWait(); in.LockWait <= def {
+		return def
+	}
+	return in.LockWait
 }
 
 // acquireProvisionLock acquires the per-project advisory lock, retrying briefly
@@ -504,7 +833,7 @@ func ProvisionShared(in ProvisionInput) error {
 // there — see cmd/sciontool/commands/provision.go's ProvisionInput.
 func acquireProvisionLock(ctx context.Context, in ProvisionInput, sentinelDir string) (heldLock, error) {
 	if in.Locker == nil {
-		return acquireFileLock(ctx, sentinelDir)
+		return acquireFileLockWithin(ctx, sentinelDir, fileLockWait(in))
 	}
 
 	objID := store.StableProjectHash(in.ProjectID)
@@ -842,6 +1171,17 @@ var timeNow = time.Now
 // wrinkle, not something a client-side retry loop can fully distinguish
 // from genuine contention; documented here rather than solved.
 func acquireFileLock(ctx context.Context, dir string) (heldLock, error) {
+	return acquireFileLockWithin(ctx, dir, defaultFileLockWait())
+}
+
+// defaultFileLockWait is acquireFileLock's overall wait budget.
+func defaultFileLockWait() time.Duration {
+	return time.Duration(fileLockRetries) * fileLockRetryDelay
+}
+
+// acquireFileLockWithin is acquireFileLock with an explicit overall wait
+// budget instead of defaultFileLockWait().
+func acquireFileLockWithin(ctx context.Context, dir string, wait time.Duration) (heldLock, error) {
 	if err := os.MkdirAll(dir, 0770); err != nil {
 		return heldLock{}, fmt.Errorf("acquireFileLock: mkdir %s: %w", dir, err)
 	}
@@ -852,7 +1192,7 @@ func acquireFileLock(ctx context.Context, dir string) (heldLock, error) {
 
 	lockPath := filepath.Join(dir, provisionFileLockName)
 
-	deadline := time.Now().Add(time.Duration(fileLockRetries) * fileLockRetryDelay)
+	deadline := time.Now().Add(wait)
 	ticker := time.NewTicker(fileLockRetryDelay)
 	defer ticker.Stop()
 
@@ -960,7 +1300,7 @@ func acquireFileLock(ctx context.Context, dir string) (heldLock, error) {
 	}
 
 	return heldLock{}, fmt.Errorf("failed to acquire file lock %s: deadline exceeded after ~%s",
-		lockPath, time.Duration(fileLockRetries)*fileLockRetryDelay)
+		lockPath, wait)
 }
 
 // garbageCollectLockLitter best-effort removes this project's stage/evict
@@ -2117,6 +2457,21 @@ func isDirectChildOfWorktreesDir(base, path string) bool {
 	return resolvedPath != resolvedWorktreesDir && filepath.Dir(resolvedPath) == resolvedWorktreesDir
 }
 
+// worktreeOutcome reports what ensureWorktree did.
+type worktreeOutcome struct {
+	// branch is the branch the agent was registered under in the sharer
+	// registry, or "" when the registry was not written.
+	branch string
+	// added is true when a new worktree was added at the agent's path.
+	added bool
+	// emptyDir is true when the agent's directory was created empty
+	// because git is too old for relative worktree paths.
+	emptyDir bool
+	// rewritten lists other files the step wrote in the shared .git: the
+	// worktree's start-branch record and sharer markers it updated.
+	rewritten []string
+}
+
 // ensureWorktree creates or attaches to a per-agent worktree if the mode is
 // WorktreePerAgent. For SharedPlain mode this is a no-op.
 //
@@ -2129,22 +2484,46 @@ func isDirectChildOfWorktreesDir(base, path string) bool {
 //
 // The worktree add is done under the already-held advisory lock (design §9.2:
 // worktree add/remove touches shared .git metadata).
-func ensureWorktree(ctx context.Context, in ProvisionInput) error {
+//
+// It reports what it did in a worktreeOutcome.
+func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, error) {
 	if in.Mode != store.SharingModeWorktreePerAgent {
-		return nil // SharedPlain: nothing to do
+		return worktreeOutcome{}, nil // SharedPlain: nothing to do
 	}
 
 	if in.AgentID == "" {
-		return fmt.Errorf("ProvisionShared: AgentID is required for WorktreePerAgent mode")
+		return worktreeOutcome{}, fmt.Errorf("ProvisionShared: AgentID is required for WorktreePerAgent mode")
 	}
 
 	base := in.Resolved.HostPath
 	worktreePath := WorktreePath(base, in.AgentID)
 
-	// Derive a branch name from the agent name or ID.
+	// Derive a branch name from the agent name or ID. For MountedWorktree
+	// the branch is used exactly as given, as on the local runtimes, and
+	// must be a valid branch name.
 	branchName := in.AgentID
-	if in.AgentName != "" {
+	if in.MountedWorktree {
+		if in.AgentName != "" {
+			branchName = in.AgentName
+		}
+		if err := checkBranchName(ctx, base, branchName); err != nil {
+			return worktreeOutcome{}, err
+		}
+	} else if in.AgentName != "" {
 		branchName = sanitizeBranchName(in.AgentName)
+	}
+	registered := func(path string) (worktreeOutcome, error) {
+		o := worktreeOutcome{branch: branchName}
+		if in.MountedWorktree {
+			// The agent's own worktree is registered under this branch
+			// only.
+			rewritten, err := UnregisterSharerElsewhere(base, in.AgentID, branchName)
+			o.rewritten = rewritten
+			if err != nil {
+				return o, fmt.Errorf("ProvisionShared: update the sharer registry: %w", err)
+			}
+		}
+		return o, RegisterSharer(base, branchName, path, in.AgentID)
 	}
 
 	// If this agent's own worktree directory already exists, reuse it only
@@ -2152,19 +2531,66 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 	// directory, or a symlink, none of which this checkout created and none
 	// of which are safe to mount or to remove.
 	if _, err := os.Lstat(worktreePath); err == nil {
-		if !IsRealWorktreeDir(worktreePath, base) {
-			return fmt.Errorf("ProvisionShared: %s exists but is not a git worktree of this checkout; refusing to reuse or remove it", worktreePath)
+		reuse := IsRealWorktreeDir(worktreePath, base)
+		if reuse && in.MountedWorktree {
+			// The directory must also be known to git: its admin entry
+			// must exist and point back to it.
+			switch linkedWorktreeState(base, worktreePath) {
+			case linkedWorktreeOK:
+				return reuseMountedWorktree(ctx, in, worktreePath, branchName)
+			case linkedWorktreeNoAdmin:
+				aside, err := moveWorktreeAside(base, in.AgentID, staleWorktreePrefix)
+				if err != nil {
+					return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %w", err)
+				}
+				slog.Warn("ProvisionShared: git has no entry for the agent's worktree any more; moved it aside and adding a new one",
+					"agent_id", in.AgentID, "moved_to", aside)
+				reuse = false
+			default:
+				return worktreeOutcome{}, fmt.Errorf("ProvisionShared: git's entry for the agent's worktree %s points to another directory. "+
+					"Move %s out of the way (or delete the agent with its files) and start the agent again",
+					mountedDisplayPath(in, worktreePath), mountedDisplayPath(in, worktreePath))
+			}
 		}
-		slog.Debug("ProvisionShared: worktree already exists",
-			"agent_id", in.AgentID, "path", worktreePath)
-		return RegisterSharer(base, branchName, worktreePath, in.AgentID)
+		if reuse {
+			slog.Debug("ProvisionShared: worktree already exists",
+				"agent_id", in.AgentID, "path", worktreePath)
+			return registered(worktreePath)
+		}
+	}
+	if _, err := os.Lstat(worktreePath); err == nil {
+		state := mountedDirState(worktreePath)
+		switch {
+		case in.MountedWorktree && state == mountedDirStandalone:
+			slog.Info("ProvisionShared: the agent's directory already holds its own checkout; keeping it",
+				"agent_id", in.AgentID, "path", worktreePath)
+			return worktreeOutcome{}, nil
+		case in.MountedWorktree && state == mountedDirEmpty:
+			// Created empty by the broker so the pod can mount it: add the
+			// worktree into it below.
+		default:
+			return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %s exists but is not a git worktree of this checkout; refusing to reuse or remove it", mountedDisplayPath(in, worktreePath))
+		}
 	}
 
 	// Verify the shared checkout exists (.git dir present).
 	gitDir := filepath.Join(base, ".git")
 	if _, err := os.Stat(gitDir); err != nil {
-		return fmt.Errorf("ProvisionShared: shared checkout .git not found at %s — "+
+		return worktreeOutcome{}, fmt.Errorf("ProvisionShared: shared checkout .git not found at %s — "+
 			"cannot create worktree without a cloned repository", gitDir)
+	}
+
+	// A branch checked out in the shared checkout itself cannot also be
+	// checked out in a worktree.
+	if current := currentBranch(ctx, base); current != "" && current == branchName {
+		if in.MountedWorktree {
+			return worktreeOutcome{}, fmt.Errorf("ProvisionShared: branch %q is checked out in the project's shared checkout (%s), so it cannot also be checked out "+
+				"in this agent's worktree. Switch the shared checkout to another branch or detach it (git switch --detach, run in the shared checkout), "+
+				"or start the agent with a different branch", branchName, mountedWorkspaceName(in))
+		}
+		return worktreeOutcome{}, fmt.Errorf("ProvisionShared: branch %q is checked out in the project's shared checkout (%s), so it cannot also be checked out "+
+			"in this agent's worktree. Switch the shared checkout to another branch or detach it (git -C %s switch --detach), "+
+			"or start the agent with a different branch", branchName, base, base)
 	}
 
 	// --- JOIN check: does a worktree for this branch already exist? ---
@@ -2176,34 +2602,73 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 	// "worktrees" directory.
 	sharers, existingWtPath, err := ListSharers(base, branchName)
 	if err != nil {
-		return fmt.Errorf("ProvisionShared: list sharers for branch %q: %w", branchName, err)
+		return worktreeOutcome{}, fmt.Errorf("ProvisionShared: list sharers for branch %q: %w", branchName, err)
 	}
 	if len(sharers) > 0 && existingWtPath != "" {
 		if _, statErr := os.Lstat(existingWtPath); statErr == nil {
 			if !IsRealWorktreeDir(existingWtPath, base) || !isDirectChildOfWorktreesDir(base, existingWtPath) {
-				return fmt.Errorf("ProvisionShared: the sharer registry for branch %q names %s, which is not a direct worktree of this checkout; refusing to join it", branchName, existingWtPath)
+				return worktreeOutcome{}, fmt.Errorf("ProvisionShared: the sharer registry for branch %q names %s, which is not a direct worktree of this checkout; refusing to join it", branchName, existingWtPath)
 			}
-			slog.Info("ProvisionShared: joining existing worktree (registry)",
-				"agent_id", in.AgentID, "branch", branchName, "path", existingWtPath,
-				"existing_sharers", sharers)
-			return RegisterSharer(base, branchName, existingWtPath, in.AgentID)
+			switch {
+			case in.MountedWorktree && currentBranch(ctx, existingWtPath) != branchName:
+				// The agent there has switched to another branch since it
+				// was registered: the git worktree list below decides.
+				slog.Info("ProvisionShared: the registered worktree for this branch is on another branch now",
+					"agent_id", in.AgentID, "branch", branchName, "path", existingWtPath)
+			case in.MountedWorktree:
+				return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, existingWtPath)
+			default:
+				slog.Info("ProvisionShared: joining existing worktree (registry)",
+					"agent_id", in.AgentID, "branch", branchName, "path", existingWtPath,
+					"existing_sharers", sharers)
+				return registered(existingWtPath)
+			}
+		} else {
+			slog.Warn("ProvisionShared: registry points to missing path, will create new worktree",
+				"agent_id", in.AgentID, "branch", branchName, "stale_path", existingWtPath)
 		}
-		slog.Warn("ProvisionShared: registry points to missing path, will create new worktree",
-			"agent_id", in.AgentID, "branch", branchName, "stale_path", existingWtPath)
 	}
 
 	// 2. Check git worktree list for a prior-run worktree without a registry entry.
 	if existingPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && existingPath != "" && IsRealWorktreeDir(existingPath, base) && isDirectChildOfWorktreesDir(base, existingPath) {
+		if in.MountedWorktree {
+			return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, existingPath)
+		}
 		slog.Info("ProvisionShared: joining pre-existing worktree (git)",
 			"agent_id", in.AgentID, "branch", branchName, "path", existingPath)
-		return RegisterSharer(base, branchName, existingPath, in.AgentID)
+		return registered(existingPath)
 	}
 
 	// --- CREATE: no existing worktree for this branch ---
 
 	worktreesDir := filepath.Join(base, "worktrees")
 	if err := os.MkdirAll(worktreesDir, 0770); err != nil {
-		return fmt.Errorf("ProvisionShared: mkdir worktrees dir: %w", err)
+		return worktreeOutcome{}, fmt.Errorf("ProvisionShared: mkdir worktrees dir: %w", err)
+	}
+
+	if in.MountedWorktree && !gitSupportsRelativeWorktrees() {
+		// The worktree's paths must resolve in the agent container's own
+		// layout, which needs relative worktree paths. Leave the agent's
+		// directory empty instead: the agent container clones its own
+		// checkout into it.
+		slog.Warn("ProvisionShared: git is too old for relative worktree paths (needs 2.48 or later); "+
+			"the agent container will clone its own checkout instead of using a worktree",
+			"agent_id", in.AgentID, "path", worktreePath)
+		if err := os.MkdirAll(worktreePath, 0770); err != nil {
+			return worktreeOutcome{}, err
+		}
+		return worktreeOutcome{emptyDir: true}, nil
+	}
+
+	addedWorktree := func() (worktreeOutcome, error) {
+		if in.MountedWorktree {
+			if _, err := recordStartBranch(base, worktreePath, branchName); err != nil {
+				return worktreeOutcome{added: true}, fmt.Errorf("ProvisionShared: %w", err)
+			}
+		}
+		o, err := registered(worktreePath)
+		o.added = true
+		return o, err
 	}
 
 	slog.Info("ProvisionShared: creating worktree",
@@ -2226,14 +2691,17 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 		if strings.Contains(outputStr, "already checked out") || strings.Contains(outputStr, "already used by worktree") {
 			if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" {
 				if !IsRealWorktreeDir(attachPath, base) || !isDirectChildOfWorktreesDir(base, attachPath) {
-					return fmt.Errorf("git worktree add: branch %q already checked out, but %s is not a direct worktree of this checkout; refusing to join it",
+					return worktreeOutcome{}, fmt.Errorf("git worktree add: branch %q already checked out, but %s is not a direct worktree of this checkout; refusing to join it",
 						branchName, attachPath)
+				}
+				if in.MountedWorktree {
+					return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, attachPath)
 				}
 				slog.Info("ProvisionShared: attaching to existing worktree (git fallback)",
 					"agent_id", in.AgentID, "branch", branchName, "path", attachPath)
-				return RegisterSharer(base, branchName, attachPath, in.AgentID)
+				return registered(attachPath)
 			}
-			return fmt.Errorf("git worktree add: branch %q already checked out but cannot find existing worktree: %s",
+			return worktreeOutcome{}, fmt.Errorf("git worktree add: branch %q already checked out but cannot find existing worktree: %s",
 				branchName, outputStr)
 		}
 
@@ -2247,24 +2715,308 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 				if strings.Contains(reuse, "already checked out") || strings.Contains(reuse, "already used by worktree") {
 					if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" {
 						if !IsRealWorktreeDir(attachPath, base) || !isDirectChildOfWorktreesDir(base, attachPath) {
-							return fmt.Errorf("git worktree add: branch %q already checked out, but %s is not a direct worktree of this checkout; refusing to join it",
+							return worktreeOutcome{}, fmt.Errorf("git worktree add: branch %q already checked out, but %s is not a direct worktree of this checkout; refusing to join it",
 								branchName, attachPath)
+						}
+						if in.MountedWorktree {
+							return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, attachPath)
 						}
 						slog.Info("ProvisionShared: attaching to existing worktree (reuse fallback)",
 							"agent_id", in.AgentID, "branch", branchName, "path", attachPath)
-						return RegisterSharer(base, branchName, attachPath, in.AgentID)
+						return registered(attachPath)
 					}
-					return fmt.Errorf("git worktree add: branch %q already checked out: %s", branchName, reuse)
+					return worktreeOutcome{}, fmt.Errorf("git worktree add: branch %q already checked out: %s", branchName, reuse)
 				}
-				return fmt.Errorf("git worktree add (reuse branch): %s", reuse)
+				return worktreeOutcome{}, fmt.Errorf("git worktree add (reuse branch): %s", reuse)
 			}
-			return RegisterSharer(base, branchName, worktreePath, in.AgentID)
+			return addedWorktree()
 		}
 
-		return fmt.Errorf("git worktree add: %s", outputStr)
+		return worktreeOutcome{}, fmt.Errorf("git worktree add: %s", outputStr)
 	}
 
-	return RegisterSharer(base, branchName, worktreePath, in.AgentID)
+	return addedWorktree()
+}
+
+// mountedDirKind classifies an existing entry at an agent's worktree path
+// that is not a worktree of the shared checkout (see mountedDirState).
+type mountedDirKind int
+
+const (
+	mountedDirOther      mountedDirKind = iota // anything else: never reused
+	mountedDirEmpty                            // a real, empty directory
+	mountedDirStandalone                       // a real directory with its own .git directory
+)
+
+// mountedDirState reports what kind of entry is at path, without following
+// symlinks.
+func mountedDirState(path string) mountedDirKind {
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return mountedDirOther
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return mountedDirOther
+	}
+	if len(entries) == 0 {
+		return mountedDirEmpty
+	}
+	gfi, err := os.Lstat(filepath.Join(path, ".git"))
+	if err == nil && gfi.IsDir() && gfi.Mode()&os.ModeSymlink == 0 {
+		return mountedDirStandalone
+	}
+	return mountedDirOther
+}
+
+// branchInOtherWorktreeError is returned for MountedWorktree when the
+// agent's branch is already checked out in another worktree directory: the
+// agent's pod mounts only its own directory, so it cannot share that one.
+// The paths are shown relative to the shared checkout, since the init
+// container's mount paths exist nowhere else.
+func branchInOtherWorktreeError(in ProvisionInput, branch, path string) error {
+	rel := sharedCheckoutRel(in, path)
+	return fmt.Errorf("ProvisionShared: branch %q is already checked out in %s. "+
+		"Start the agent with a different branch, or delete the agent that uses that worktree together with its files, "+
+		"on a broker that mounts the export (which removes the worktree). "+
+		"If no agent uses it any more, remove it (git worktree remove %s, run in the shared checkout) and start the agent again",
+		branch, mountedDisplayPath(in, path), rel)
+}
+
+// sharedCheckoutRel returns path relative to the shared checkout, or path
+// itself when it is not below it.
+func sharedCheckoutRel(in ProvisionInput, path string) string {
+	rel, err := filepath.Rel(in.Resolved.HostPath, path)
+	if err != nil || !filepath.IsLocal(rel) {
+		return path
+	}
+	return filepath.ToSlash(rel)
+}
+
+// mountedWorkspaceName names the project's shared checkout in messages
+// from the provisioning init container.
+func mountedWorkspaceName(in ProvisionInput) string {
+	if in.ProjectID == "" {
+		return "the project's shared checkout on the NFS export"
+	}
+	return fmt.Sprintf("the shared checkout of project %s (<subpath_root>/%s/workspace on the NFS export)", in.ProjectID, in.ProjectID)
+}
+
+// mountedDisplayPath names path in messages from the provisioning init
+// container: relative to the shared checkout, followed by where that is.
+func mountedDisplayPath(in ProvisionInput, path string) string {
+	return fmt.Sprintf("%s of %s", sharedCheckoutRel(in, path), mountedWorkspaceName(in))
+}
+
+// checkBranchName checks that name is a valid branch name, as git itself
+// would accept it for a new branch, and returns an error naming it if not.
+// It runs in the shared checkout at base. A name git expands to another
+// one there (such as @{-1}) is refused as well. Only git exiting with an
+// error status means the name is invalid; git failing to start or to be
+// waited on is returned as an error running git.
+func checkBranchName(ctx context.Context, base, name string) error {
+	out, err := exec.CommandContext(ctx, "git", "-C", base, "check-ref-format", "--branch", name).Output()
+	var exitErr *exec.ExitError
+	switch {
+	case errors.As(err, &exitErr):
+		return fmt.Errorf("ProvisionShared: %q is not a valid branch name", name)
+	case err != nil:
+		return fmt.Errorf("ProvisionShared: checking branch name %q: running git check-ref-format: %w", name, err)
+	case strings.TrimSpace(string(out)) != name:
+		return fmt.Errorf("ProvisionShared: %q is not a valid branch name", name)
+	}
+	return nil
+}
+
+// linkedWorktreeKind classifies the git admin entry of a worktree directory
+// (see linkedWorktreeState).
+type linkedWorktreeKind int
+
+const (
+	linkedWorktreeOK       linkedWorktreeKind = iota // the admin entry exists and points back to the directory
+	linkedWorktreeNoAdmin                            // the shared .git has no admin entry for the directory
+	linkedWorktreeMismatch                           // the admin entry exists but points somewhere else
+)
+
+// worktreeAdminDir returns the admin directory in the shared .git
+// (.git/worktrees/<id>) named by the .git file of the worktree at path. ok
+// is false unless that directory is a real directory directly inside
+// <base>/.git/worktrees.
+func worktreeAdminDir(path, base string) (dir string, ok bool) {
+	data, err := os.ReadFile(filepath.Join(path, ".git"))
+	if err != nil {
+		return "", false
+	}
+	target, found := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir:")
+	if !found {
+		return "", false
+	}
+	target = strings.TrimSpace(target)
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(path, target)
+	}
+	target = filepath.Clean(target)
+	if filepath.Dir(target) != filepath.Join(base, ".git", "worktrees") {
+		return "", false
+	}
+	fi, err := os.Lstat(target)
+	if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+		return "", false
+	}
+	return target, true
+}
+
+// linkedWorktreeState reports whether the shared .git still knows the
+// worktree at path: its admin directory exists and that directory's gitdir
+// file resolves back to <path>/.git.
+func linkedWorktreeState(base, path string) linkedWorktreeKind {
+	admin, ok := worktreeAdminDir(path, base)
+	if !ok {
+		return linkedWorktreeNoAdmin
+	}
+	data, err := os.ReadFile(filepath.Join(admin, "gitdir"))
+	if err != nil {
+		return linkedWorktreeMismatch
+	}
+	back := strings.TrimSpace(string(data))
+	if !filepath.IsAbs(back) {
+		back = filepath.Join(admin, back)
+	}
+	if filepath.Clean(back) != filepath.Join(path, ".git") {
+		return linkedWorktreeMismatch
+	}
+	return linkedWorktreeOK
+}
+
+// reuseMountedWorktree reuses the agent's existing worktree for
+// MountedWorktree. The worktree must be on the requested branch, or the
+// requested branch must be the one the worktree was started with (the
+// agent switched branches in its own worktree and is restarting). The
+// start branch is recorded in the worktree's admin directory, so it does
+// not depend on the sharer registry. A worktree on another branch is never
+// registered under the requested one.
+func reuseMountedWorktree(ctx context.Context, in ProvisionInput, path, branch string) (worktreeOutcome, error) {
+	base := in.Resolved.HostPath
+	current := currentBranch(ctx, path)
+	if current == branch {
+		slog.Debug("ProvisionShared: worktree already exists", "agent_id", in.AgentID, "path", path)
+		record, err := recordStartBranch(base, path, branch)
+		if err != nil {
+			return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %w", err)
+		}
+		o := worktreeOutcome{branch: branch}
+		rewritten, err := UnregisterSharerElsewhere(base, in.AgentID, branch)
+		o.rewritten = append(rewritten, record...)
+		if err != nil {
+			return o, fmt.Errorf("ProvisionShared: update the sharer registry: %w", err)
+		}
+		return o, RegisterSharer(base, branch, path, in.AgentID)
+	}
+	if startBranch(base, path) == branch {
+		slog.Info("ProvisionShared: reusing the agent's worktree, which is now on another branch",
+			"agent_id", in.AgentID, "path", path, "branch", current, "started_with", branch)
+		// The agent stays listed under its start branch. The registry
+		// check reads the worktree's current branch, so that does not hold
+		// the start branch for another agent.
+		return worktreeOutcome{}, nil
+	}
+	shown := current
+	if shown == "" {
+		shown = "a detached HEAD"
+	} else {
+		shown = fmt.Sprintf("branch %q", shown)
+	}
+	return worktreeOutcome{}, fmt.Errorf("ProvisionShared: the agent's existing worktree %s is on %s, not on the requested branch %q. "+
+		"Start the agent with branch %q, or delete the agent together with its files (on a broker that mounts the export) "+
+		"and create it again with the new branch", mountedDisplayPath(in, path), shown, branch, current)
+}
+
+// startBranchFile is the file in a worktree's admin directory that records
+// the branch the agent's worktree was started with. git worktree prune
+// deletes it together with the admin directory.
+const startBranchFile = "scion-start-branch"
+
+// startBranch returns the branch recorded for the worktree at path, or ""
+// when there is none. Only a regular file is read.
+func startBranch(base, path string) string {
+	admin, ok := worktreeAdminDir(path, base)
+	if !ok {
+		return ""
+	}
+	file := filepath.Join(admin, startBranchFile)
+	if fi, err := os.Lstat(file); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// recordStartBranch records branch as the start branch of the worktree at
+// path. It returns the file when it was written, and nothing when it
+// already held branch. The record is written to a new file in the admin
+// directory and renamed over the old one, so it is replaced as a whole
+// and whatever was at that name is replaced rather than written through.
+func recordStartBranch(base, path, branch string) ([]string, error) {
+	admin, ok := worktreeAdminDir(path, base)
+	if !ok {
+		return nil, fmt.Errorf("record the start branch of %s: git has no entry for it", path)
+	}
+	if startBranch(base, path) == branch {
+		return nil, nil
+	}
+	file := filepath.Join(admin, startBranchFile)
+	if err := writeFileAtomic(file, []byte(branch+"\n"), 0o644); err != nil {
+		return nil, fmt.Errorf("record the start branch of %s: %w", path, err)
+	}
+	return []string{file}, nil
+}
+
+// writeFileAtomic writes data to a new temporary file next to path and
+// renames it over path.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+// currentBranch returns the branch checked out in the repository at
+// repoDir, or "" when HEAD is detached or cannot be read.
+func currentBranch(ctx context.Context, repoDir string) string {
+	out, err := exec.CommandContext(ctx, "git", "-C", repoDir, "symbolic-ref", "--quiet", "--short", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// gitSupportsRelativeWorktrees reports whether the git binary supports
+// "git worktree add --relative-paths" well enough for a checkout shared
+// with other containers (git 2.48 or later). A variable so tests can stand
+// in for an older git.
+var gitSupportsRelativeWorktrees = func() bool {
+	version, _, err := util.GetGitVersion()
+	if err != nil {
+		return false
+	}
+	return util.CompareGitVersion(version, 2, 48) == nil
 }
 
 // findWorktreeForBranch parses 'git worktree list --porcelain' output to find
@@ -2308,6 +3060,23 @@ func prepareBaseForWorktrees(ctx context.Context, hostPath string) error {
 		return fmt.Errorf("git config gc.auto 0: %s", strings.TrimSpace(string(output)))
 	}
 
+	return appendGitExclude(hostPath, "worktrees/")
+}
+
+// prepareExistingBaseForWorktrees adds what worktrees need to a shared
+// checkout that was already provisioned, possibly in another mode: auto-gc
+// off and worktrees/ excluded from untracked files. Unlike
+// prepareBaseForWorktrees it leaves HEAD alone, since agents may be using
+// the checkout as it is. Both steps are idempotent.
+func prepareExistingBaseForWorktrees(ctx context.Context, hostPath string) error {
+	if _, err := os.Stat(filepath.Join(hostPath, ".git")); err != nil {
+		// No checkout: ensureWorktree reports this.
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", hostPath, "config", "gc.auto", "0")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config gc.auto 0: %s", strings.TrimSpace(string(output)))
+	}
 	return appendGitExclude(hostPath, "worktrees/")
 }
 

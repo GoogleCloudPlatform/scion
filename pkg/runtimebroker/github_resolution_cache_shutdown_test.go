@@ -38,7 +38,7 @@ func TestShutdownFlushesGitHubResolutionCache(t *testing.T) {
 	fetch := func(context.Context) (agent.ResolvedSkill, error) {
 		return agent.ResolvedSkill{Name: "s", URI: key}, nil
 	}
-	if _, err := cache.ResolveWithFetch(context.Background(), key, "flight", "cred", "ref", true, fetch); err != nil {
+	if _, err := cache.ResolveWithFetch(context.Background(), key, "flight", "cred", "ref", true, nil, fetch); err != nil {
 		t.Fatal(err)
 	}
 	// The cache's delayed write (2s) is still pending here; Shutdown runs

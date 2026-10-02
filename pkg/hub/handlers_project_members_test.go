@@ -111,6 +111,29 @@ func TestProjectMembers_List_ReturnsProjectScopedBindings(t *testing.T) {
 	assert.True(t, found, "owner binding should be in results with enriched roleName")
 }
 
+// TestProjectMembers_List_NilMembershipServiceOmitsCapabilities proves the
+// members list does not panic when membershipService is nil: capabilities are
+// advisory, so they are omitted and the list still returns 200
+// (GoogleCloudPlatform/scion#2320).
+func TestProjectMembers_List_NilMembershipServiceOmitsCapabilities(t *testing.T) {
+	srv, _, owner, _, project := setupProjectMembersTest(t)
+	srv.membershipService = nil
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodGet,
+		"/api/v1/projects/"+project.ID+"/members", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp listProjectMembersResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.GreaterOrEqual(t, resp.TotalCount, 1)
+	assert.Nil(t, resp.Capabilities, "capabilities must be omitted with a nil membership service")
+
+	// Direct call with a user identity in context also returns nil.
+	ctx := contextWithIdentity(context.Background(),
+		NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, owner.Role, "web"))
+	assert.Nil(t, srv.memberListCapabilities(ctx, project.ID))
+}
+
 func TestProjectMembers_List_NonMemberDenied(t *testing.T) {
 	srv, _, _, other, project := setupProjectMembersTest(t)
 

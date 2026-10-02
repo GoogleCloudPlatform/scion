@@ -1784,6 +1784,13 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		// ptone/scion#2529 P2: read-only assignable-roles view. A literal
+		// segment, so like "principals" it cannot collide with a UUID
+		// binding ID.
+		if memberPath == "assignable-roles" {
+			s.handleProjectAssignableRoles(w, r, projectID)
+			return
+		}
 		if memberPath == "" {
 			s.handleProjectMembers(w, r, projectID)
 		} else {

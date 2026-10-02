@@ -280,7 +280,7 @@ func TestGitHubResolutionCache_StaleBranchServedAfterReload(t *testing.T) {
 		close(refreshed)
 		return ResolvedSkill{Name: "new"}, nil
 	}
-	skill, err := cache.ResolveWithFetch(context.Background(), key, "flight-reload", "cred-reload", "test-ref", true, fetch)
+	skill, err := cache.ResolveWithFetch(context.Background(), key, "flight-reload", "cred-reload", "test-ref", true, nil, fetch)
 	if err != nil {
 		t.Fatal(err)
 	}
