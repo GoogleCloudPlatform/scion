@@ -29,9 +29,16 @@ if [ -z "$chrome" ]; then
   exit 1
 fi
 work="$(mktemp -d)"
+if [ -z "$work" ] || [ "$work" = "/" ] || [ ! -d "$work" ]; then
+  echo "generate-icons: mktemp -d returned an unusable directory: '$work'" >&2
+  exit 1
+fi
 cleanup() {
-  rm -f -- "$work"/page.html "$work"/chrome.log "$work"/favicon-*.png
-  rmdir -- "$work"
+  # Never touch anything outside a real temp directory.
+  if [ -n "$work" ] && [ "$work" != "/" ] && [ -d "$work" ]; then
+    rm -f -- "$work"/page.html "$work"/chrome.log "$work"/favicon-*.png
+    rmdir -- "$work"
+  fi
 }
 trap cleanup EXIT
 

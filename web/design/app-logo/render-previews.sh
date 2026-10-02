@@ -30,14 +30,15 @@ if [ -z "$chrome" ]; then
   exit 1
 fi
 mkdir -p "$out"
+# One Chromium log shared by all renders, removed on any exit.
+log="$(mktemp)"
+trap 'rm -f -- "$log"' EXIT
 
 render() {
   local svg="$1" title="$2"
   local name="${svg%.svg}"
   local query
   query="s=${svg}&t=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$title")"
-  local log
-  log="$(mktemp)"
   rm -f -- "$out/$name.png"
   # Chromium is noisy on stderr even on success; show it only on failure.
   if ! "$chrome" --headless --no-sandbox --disable-gpu --hide-scrollbars \
@@ -45,11 +46,9 @@ render() {
     --screenshot="$out/$name.png" "file://$here/preview-sheet.html?$query" \
     >"$log" 2>&1 || [ ! -s "$out/$name.png" ]; then
     cat "$log" >&2
-    rm -f -- "$log"
     echo "render-previews: render failed: $out/$name.png (CHROME=$chrome)" >&2
     exit 1
   fi
-  rm -f -- "$log"
   echo "$out/$name.png"
 }
 

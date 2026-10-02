@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -1015,8 +1016,9 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Go's built-in MIME table has no entry for these, and the system
-	// table (if any) varies by host, so set them explicitly.
-	if ct, ok := staticContentTypes[strings.ToLower(filepath.Ext(r.URL.Path))]; ok {
+	// table (if any) varies by host, so set them explicitly. URL paths
+	// always use "/", so use path.Ext rather than filepath.Ext.
+	if ct, ok := staticContentTypes[strings.ToLower(path.Ext(r.URL.Path))]; ok {
 		w.Header().Set("Content-Type", ct)
 	}
 
