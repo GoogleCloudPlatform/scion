@@ -42,40 +42,70 @@ type agentLister interface {
 	ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error)
 }
 
-// listAllProjectAgents paginates through all non-deleted agents in a project.
-// It deliberately replaces the earlier fixed 200-agent limit.
-func listAllProjectAgents(ctx context.Context, lister agentLister, projectID string) ([]store.Agent, error) {
+// projectAgentsPageSize is the store page size used when walking a
+// project's agents. It stays under the store's maximum list limit.
+const projectAgentsPageSize = 200
+
+// walkProjectAgentPages walks the store's agent pagination for a project until
+// the cursor is exhausted and returns every agent it saw. It is the single
+// project-agent walker in this package; callers layer their own policy on
+// top of it.
+//
+// maxAgents bounds how many agents are collected; zero or less means no
+// bound. When the bound stops the walk, truncated reports whether any agents
+// were dropped (more were returned than the bound, or the store had another
+// page), and the caller decides how to report that.
+//
+// The walk never asks the store for a total count. It checks ctx before
+// every page and fails if the store hands back a cursor it has already
+// returned, so a cursor cycle of any length is an error rather than an
+// endless loop.
+func walkProjectAgentPages(ctx context.Context, lister agentLister, projectID string, maxAgents int) (agents []store.Agent, truncated bool, err error) {
 	var all []store.Agent
 	cursor := ""
-	prevCursor := ""
+	seen := make(map[string]struct{})
 	for {
-		// Check context before each page fetch to avoid looping after cancellation.
 		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("listing agents for project %s: %w", projectID, err)
+			return nil, false, fmt.Errorf("listing agents for project %s: %w", projectID, err)
 		}
 		page, err := lister.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{
-			Limit:  200,
-			Cursor: cursor,
+			Limit:          projectAgentsPageSize,
+			Cursor:         cursor,
+			SkipTotalCount: true,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("listing agents for project %s: %w", projectID, err)
+			return nil, false, fmt.Errorf("listing agents for project %s: %w", projectID, err)
 		}
-		for i := range page.Items {
-			if page.Items[i].DeletedAt.IsZero() {
-				all = append(all, page.Items[i])
-			}
+		all = append(all, page.Items...)
+		if maxAgents > 0 && len(all) >= maxAgents {
+			return all[:maxAgents], len(all) > maxAgents || page.NextCursor != "", nil
 		}
 		if page.NextCursor == "" {
-			break
+			return all, false, nil
 		}
-		// Guard against a buggy store returning the same cursor indefinitely.
-		if page.NextCursor == prevCursor {
-			return nil, fmt.Errorf("listing agents for project %s: pagination returned repeated cursor %q", projectID, page.NextCursor)
+		if _, ok := seen[page.NextCursor]; ok {
+			return nil, false, fmt.Errorf("listing agents for project %s: pagination returned repeated cursor %q", projectID, page.NextCursor)
 		}
-		prevCursor = cursor
+		seen[page.NextCursor] = struct{}{}
 		cursor = page.NextCursor
 	}
-	return all, nil
+}
+
+// listAllProjectAgents returns every non-deleted agent in a project, with no
+// cap. The store already excludes soft-deleted agents; the DeletedAt filter
+// here only matters for listers that do not.
+func listAllProjectAgents(ctx context.Context, lister agentLister, projectID string) ([]store.Agent, error) {
+	agents, _, err := walkProjectAgentPages(ctx, lister, projectID, 0)
+	if err != nil {
+		return nil, err
+	}
+	var live []store.Agent
+	for i := range agents {
+		if agents[i].DeletedAt.IsZero() {
+			live = append(live, agents[i])
+		}
+	}
+	return live, nil
 }
 
 // resolveRoutingAgents determines the ordered set of agent recipients for a
