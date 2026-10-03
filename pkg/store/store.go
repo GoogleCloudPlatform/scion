@@ -493,6 +493,31 @@ type AgentStore interface {
 	// hold or the agent does not exist. Must not be called from inside
 	// WithTx.
 	UpdateAgentDeletion(ctx context.Context, id string, pred DeletionPredicate, set DeletionFields) (affected int, err error)
+
+	// --- Run intent (see run_intent.go) ---
+	// These, plus BackfillRunIntent, are the only writers of run_intent and
+	// run_intent_at. None of them bumps state_version, and UpdateAgent and
+	// CreateAgent never write either column. Like the launch methods, each
+	// opens its own transaction and must not be called from inside WithTx.
+
+	// SetRunIntent records the desired run state of agentID. The time is read
+	// from the store clock inside the write transaction, under the row lock,
+	// and is max(now, stored run_intent_at + 1µs), so successive writes to a
+	// row are strictly ordered by run_intent_at even if the clock steps
+	// backwards. Returns the stored time. Returns ErrNotFound if the agent
+	// doesn't exist and ErrInvalidInput for an unknown intent.
+	SetRunIntent(ctx context.Context, agentID string, intent RunIntent) (time.Time, error)
+
+	// RevertRunIntent sets run_intent to `to` only if the row still holds
+	// `from` written at exactly fromAt (the value SetRunIntent returned);
+	// run_intent_at is left unchanged. It reports whether the row changed.
+	// Used by system-initiated stops whose dispatch failed.
+	RevertRunIntent(ctx context.Context, agentID string, from RunIntent, fromAt time.Time, to RunIntent) (bool, error)
+
+	// BackfillRunIntent sets run_intent for every agent whose run_intent is
+	// NULL: running for phase running or starting, stopped otherwise. It
+	// returns the number of rows written. Idempotent.
+	BackfillRunIntent(ctx context.Context) (int, error)
 }
 
 // AgentFilter defines criteria for filtering agents.
@@ -502,6 +527,11 @@ type AgentFilter struct {
 	Phase           string
 	OwnerID         string
 	IncludeDeleted  bool // If true, include soft-deleted agents in results
+
+	// OrRunIntent, when non-empty, widens Phase: an agent matches when its
+	// phase equals Phase OR its run_intent equals OrRunIntent. When Phase is
+	// empty it filters on run_intent alone.
+	OrRunIntent string
 
 	// MemberOrOwnerProjectIDs, when non-empty, restricts results to agents
 	// whose project_id is in this set OR whose owner_id matches OwnerID.
