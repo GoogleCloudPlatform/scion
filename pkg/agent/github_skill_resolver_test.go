@@ -3288,8 +3288,8 @@ func TestGitHubSkillResolver_CoalescedCallersKeepOwnAlias(t *testing.T) {
 	r := newTestGitHubResolver(server)
 	r.resolutionCache = cache
 
-	refA := api.SkillReference{URI: "gh://acme/shared/s@main", As: "alias-a"}
-	refB := api.SkillReference{URI: "gh://acme/shared/s@main", As: "alias-b"}
+	refA := api.SkillReference{URI: "gh://acme/shared/s@main", As: "alias-a", Scope: "project"}
+	refB := api.SkillReference{URI: "gh://acme/shared/s@main", As: "alias-b", Scope: "user", Optional: true}
 
 	var joinCount int32
 	bothJoined := make(chan struct{})
@@ -3335,6 +3335,66 @@ func TestGitHubSkillResolver_CoalescedCallersKeepOwnAlias(t *testing.T) {
 	}
 	if len(resB.Resolved) != 1 || resB.Resolved[0].As != "alias-b" {
 		t.Fatalf("caller B: expected As %q, got result %+v (errors: %+v)", "alias-b", resB.Resolved, resB.Errors)
+	}
+	// Scope and Optional are per caller too.
+	if a := resA.Resolved[0]; a.Scope != "project" || a.Optional {
+		t.Errorf("caller A: Scope=%q Optional=%v, want project/false", a.Scope, a.Optional)
+	}
+	if b := resB.Resolved[0]; b.Scope != "user" || !b.Optional {
+		t.Errorf("caller B: Scope=%q Optional=%v, want user/true", b.Scope, b.Optional)
+	}
+}
+
+// TestGitHubSkillResolver_CacheHitKeepsOwnScopeAndOptional checks that refs
+// sharing one URI and credential, served from one cache entry, each keep
+// their own Scope and Optional, both within one Resolve call and across
+// calls.
+func TestGitHubSkillResolver_CacheHitKeepsOwnScopeAndOptional(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+	var commitCalls atomic.Int32
+	mux.HandleFunc("/repos/acme/shared/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		commitCalls.Add(1)
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/acme/shared/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 7},
+		})
+	})
+	mux.HandleFunc("/raw/acme/shared/"+testCommitSHA+"/skills/s/SKILL.md", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("CONTENT"))
+	})
+
+	cache, err := newTestResolutionCache(t.TempDir(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newTestGitHubResolver(server)
+	r.resolutionCache = cache
+
+	const uri = "gh://acme/shared/s@main"
+	// Fill the cache from a ref with yet another Scope and Optional.
+	if res, _ := r.Resolve(context.Background(), []api.SkillReference{{URI: uri, Scope: "global", Optional: true}}, ResolveOpts{}); len(res.Resolved) != 1 {
+		t.Fatalf("first resolve: %+v", res)
+	}
+
+	refs := []api.SkillReference{
+		{URI: uri, As: "p", Scope: "project"},
+		{URI: uri, As: "u", Scope: "user", Optional: true},
+	}
+	res, err := r.Resolve(context.Background(), refs, ResolveOpts{})
+	if err != nil || len(res.Resolved) != 2 {
+		t.Fatalf("Resolve: err=%v result=%+v", err, res)
+	}
+	if n := commitCalls.Load(); n != 1 {
+		t.Fatalf("GitHub commit lookups = %d, want 1 (later refs served from the cache)", n)
+	}
+	for i, got := range res.Resolved {
+		want := refs[i]
+		if got.As != want.As || got.Scope != want.Scope || got.Optional != want.Optional {
+			t.Errorf("result %d: As=%q Scope=%q Optional=%v, want %q/%q/%v",
+				i, got.As, got.Scope, got.Optional, want.As, want.Scope, want.Optional)
+		}
 	}
 }
 

@@ -651,10 +651,14 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 		resolved = skill
 	}
 
-	// Always carry this call's alias over, matching the pre-cache behavior:
-	// a cache or in-flight hit may have been produced for a different ref
-	// sharing this URI and credential, with a different As.
+	// Always carry this call's per-ref fields over: a cache or in-flight hit
+	// may have been produced for a different ref sharing this URI and
+	// credential, with a different As, Scope or Optional. Scope decides
+	// which skill wins a name collision and Optional how a failure is
+	// reported, so neither may come from another caller's ref.
 	resolved.As = ref.As
+	resolved.Scope = ref.Scope
+	resolved.Optional = ref.Optional
 
 	// A skill loaded from the on-disk cache has no file content, so install
 	// downloads its files. Record this call's URI (it names the secret to
