@@ -426,9 +426,36 @@ func TestSyncToResultLines(t *testing.T) {
 			want: []string{"Warning: " + tz, "Sync complete: 1 files uploaded, 10 B transferred", "Skipped 1 unchanged files", "Applied 2 files to agent workspace"}},
 		{name: "uploaded, files ignored", uploaded: 1, skipped: 1, resp: resp(true, 0, ignored),
 			want: []string{"Warning: " + ignored}},
+		{name: "nil finalize response", uploaded: 1, resp: nil,
+			want: []string{"Sync complete: 1 files uploaded, 10 B transferred"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, syncToResultLines(tc.uploaded, 10, tc.skipped, tc.nothingToUpload, tc.resp))
 		})
 	}
+}
+
+func TestSplitFilesIgnoredWarning(t *testing.T) {
+	ignored := api.WarningEmptyPerAgentWorkspaceFilesIgnored
+
+	// Without the warning the input slice is returned as is, not copied.
+	in := []string{"a", "b"}
+	got, rest := splitFilesIgnoredWarning(in)
+	assert.False(t, got)
+	assert.Equal(t, in, rest)
+	assert.Same(t, &in[0], &rest[0])
+
+	got, rest = splitFilesIgnoredWarning(nil)
+	assert.False(t, got)
+	assert.Nil(t, rest)
+
+	in = []string{"a", ignored, "b"}
+	got, rest = splitFilesIgnoredWarning(in)
+	assert.True(t, got)
+	assert.Equal(t, []string{"a", "b"}, rest)
+	assert.Equal(t, []string{"a", ignored, "b"}, in, "input is not modified")
+
+	got, rest = splitFilesIgnoredWarning([]string{ignored})
+	assert.True(t, got)
+	assert.Nil(t, rest)
 }

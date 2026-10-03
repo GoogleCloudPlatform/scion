@@ -588,6 +588,11 @@ func resolveLocalWorkspacePath(agentName string) (string, error) {
 // (empty-per-agent), its warning replaces the "applied" / "Sync complete"
 // lines, which would be misleading. Other hub warnings are always shown.
 func syncToResultLines(uploadedCount int, uploadedBytes int64, skipped int, nothingToUpload bool, resp *hubclient.SyncToFinalizeResponse) []string {
+	if resp == nil {
+		// No finalize body: nothing ignored or applied, but the upload
+		// summary still applies.
+		resp = &hubclient.SyncToFinalizeResponse{}
+	}
 	ignored, rest := splitFilesIgnoredWarning(resp.Warnings)
 	var lines []string
 	if ignored {

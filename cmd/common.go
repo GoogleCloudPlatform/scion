@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -810,14 +811,16 @@ func applyServiceAccountFlag(req *hubclient.CreateAgentRequest, saFlag string) {
 // api.WarningEmptyPerAgentWorkspaceFilesIgnored and returns the other
 // warnings unchanged.
 func splitFilesIgnoredWarning(warnings []string) (ignored bool, rest []string) {
-	for _, w := range warnings {
-		if w == api.WarningEmptyPerAgentWorkspaceFilesIgnored {
-			ignored = true
-			continue
-		}
-		rest = append(rest, w)
+	if !slices.Contains(warnings, api.WarningEmptyPerAgentWorkspaceFilesIgnored) {
+		return false, warnings
 	}
-	return ignored, rest
+	// rest stays nil when the warning was the only entry, as before.
+	for _, w := range warnings {
+		if w != api.WarningEmptyPerAgentWorkspaceFilesIgnored {
+			rest = append(rest, w)
+		}
+	}
+	return true, rest
 }
 
 // workspaceBootstrapNotice returns the status lines to show after an agent

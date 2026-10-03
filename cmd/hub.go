@@ -1659,7 +1659,7 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to validate slug: %w", err)
 		}
-		if len(slugCheck.Projects) > 0 {
+		if slugCheck != nil && len(slugCheck.Projects) > 0 {
 			return fmt.Errorf("slug %q is already in use by project %q (ID: %s)", hubProjectCreateSlug, slugCheck.Projects[0].Name, slugCheck.Projects[0].ID)
 		}
 	}
@@ -1742,7 +1742,7 @@ func runHubProjectCreateHubManaged() error {
 		if err != nil {
 			return fmt.Errorf("failed to validate slug: %w", err)
 		}
-		if len(slugCheck.Projects) > 0 {
+		if slugCheck != nil && len(slugCheck.Projects) > 0 {
 			return fmt.Errorf("slug %q is already in use by project %q (ID: %s)", hubProjectCreateSlug, slugCheck.Projects[0].Name, slugCheck.Projects[0].ID)
 		}
 	}
