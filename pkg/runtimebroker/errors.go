@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel/codes"
@@ -126,6 +127,55 @@ func startAttemptedDetails(runID string) map[string]interface{} {
 		d[api.BrokerErrorDetailRunID] = runID
 	}
 	return d
+}
+
+// startFailureDetails is startAttemptedDetails plus the run the runtime
+// holds for the agent now (api.BrokerErrorDetailCurrentRunID), from one
+// re-list of mgr, the manager the start went to, under the request's ctx.
+// A failed re-list omits the current run, leaving the hub to its fallback.
+func (s *Server) startFailureDetails(ctx context.Context, mgr agent.Manager, id, projectID, runID string) map[string]interface{} {
+	d := startAttemptedDetails(runID)
+	if current, ok := s.currentRunID(ctx, mgr, id, projectID); ok {
+		d[api.BrokerErrorDetailCurrentRunID] = current
+	}
+	return d
+}
+
+// currentRunID reports the scion.run_id of the agent's runtime entry on
+// mgr, scoped to projectID when one is given. It returns "" (with ok) when
+// there is no such entry, when it carries no run label, or when entries of
+// more than one run hold the name: "" makes the hub's next delete resolve
+// by name, as before run IDs, which fails closed (409) on ambiguity.
+// File-only entries (no container) are not runtime entries and are
+// ignored. ok is false only when the List call failed.
+func (s *Server) currentRunID(ctx context.Context, mgr agent.Manager, id, projectID string) (string, bool) {
+	if mgr == nil {
+		return "", false
+	}
+	filter := map[string]string{"scion.agent": "true", "scion.name": id}
+	if projectID != "" {
+		filter[projectkeys.LabelProjectID] = projectID
+	}
+	agents, err := mgr.List(ctx, filter)
+	if err != nil {
+		s.agentLifecycleLog.Warn("Agent start failed: could not re-list the agent to report its current run",
+			"agent_id", id, "project_id", projectID, "error", err)
+		return "", false
+	}
+	current, found := "", false
+	for _, a := range agents {
+		if a.ContainerID == "" || !agentNameMatches(a, id) {
+			continue
+		}
+		if projectID != "" && !agentInProjectStrict(a, projectID) {
+			continue
+		}
+		if found && a.RunID != current {
+			return "", true
+		}
+		current, found = a.RunID, true
+	}
+	return current, true
 }
 
 // NotFound writes a 404 Not Found response.

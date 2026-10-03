@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // Tests for the runId delete filter (ptone/scion#2550 P1): a delete that
@@ -420,6 +422,262 @@ func TestLaunchRegistry_CancelLocalForRun(t *testing.T) {
 			r.CancelLocalForRun(key, tc.deleteRun)
 			if cancelled != tc.wantCancel {
 				t.Errorf("cancelled = %v, want %v", cancelled, tc.wantCancel)
+			}
+		})
+	}
+}
+
+// afterStartManager is a mockManager whose List, once Start has been
+// called, answers with afterStart (or afterErr): the runtime as the
+// failed start left it.
+type afterStartManager struct {
+	*mockManager
+	afterStart []api.AgentInfo
+	afterErr   error
+}
+
+func (m *afterStartManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+	if m.StartCalls() == 0 {
+		return m.mockManager.List(ctx, filter)
+	}
+	m.mu.Lock()
+	m.lastListFilter = filter
+	m.mu.Unlock()
+	if m.afterErr != nil {
+		return nil, m.afterErr
+	}
+	return m.afterStart, nil
+}
+
+func runEntry(name, cid, runID string) api.AgentInfo {
+	e := api.AgentInfo{Name: name, ContainerID: cid, Phase: "stopped",
+		Labels: map[string]string{"scion.agent": "true", "scion.name": name}}
+	if runID != "" {
+		e = withRun(e, runID)
+	}
+	return e
+}
+
+// DN1 (ptone/scion#2550 P1 round 2): a failure inside Manager.Start
+// reports the run the runtime holds afterwards, from one re-list, so the
+// hub records what exists rather than guessing. Start can fail before it
+// removes the previous entry (that entry's run is reported), after
+// creating the new one (the minted run), or with nothing left (""). Several
+// runs, or an unlabelled entry, report "" (by-name delete); a failed
+// re-list omits the detail.
+func TestStartFailure_ReportsCurrentRunID(t *testing.T) {
+	const agentName = "test-agent-1"
+	for _, tc := range []struct {
+		name, op   string
+		after      []api.AgentInfo
+		afterErr   error
+		wantOK     bool
+		wantRunID  string
+		wantStatus int
+	}{
+		{"start fails before removing the previous entry", "start",
+			[]api.AgentInfo{runEntry(agentName, "cid-old", "run-old")}, nil, true, "run-old", http.StatusInternalServerError},
+		{"start fails after creating the new entry", "start",
+			[]api.AgentInfo{runEntry(agentName, "cid-new", "run-x")}, nil, true, "run-x", http.StatusInternalServerError},
+		{"start leaves no entry", "start", nil, nil, true, "", http.StatusInternalServerError},
+		{"start leaves entries of two runs", "start",
+			[]api.AgentInfo{runEntry(agentName, "cid-old", "run-old"), runEntry(agentName, "cid-new", "run-x")}, nil, true, "", http.StatusInternalServerError},
+		{"start leaves a legacy unlabelled entry", "start",
+			[]api.AgentInfo{runEntry(agentName, "cid-legacy", "")}, nil, true, "", http.StatusInternalServerError},
+		{"file-only and other-name entries are ignored", "start",
+			[]api.AgentInfo{runEntry(agentName, "", "run-files"), runEntry("other-agent", "cid-o", "run-o")}, nil, true, "", http.StatusInternalServerError},
+		{"start re-list fails", "start", nil, errors.New("runtime down"), false, "", http.StatusInternalServerError},
+		{"restart fails before removing the previous entry", "restart",
+			[]api.AgentInfo{runEntry(agentName, "cid-old", "run-old")}, nil, true, "run-old", http.StatusInternalServerError},
+		{"restart re-list fails", "restart", nil, errors.New("runtime down"), false, "", http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := newTestServer(t).manager.(*mockManager)
+			base.startErr = errors.New("docker run failed")
+			mgr := &afterStartManager{mockManager: base, afterStart: tc.after, afterErr: tc.afterErr}
+			srv := newTestServerWithManager(t, mgr)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentName+"/"+tc.op, strings.NewReader(`{"runId":"run-x"}`))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status %d, want %d: %s", w.Code, tc.wantStatus, w.Body.String())
+			}
+			var b struct {
+				Error APIError `json:"error"`
+			}
+			if err := json.NewDecoder(w.Body).Decode(&b); err != nil {
+				t.Fatal(err)
+			}
+			if attempted, _ := b.Error.Details[api.BrokerErrorDetailStartAttempted].(bool); !attempted {
+				t.Errorf("startAttempted missing: %v", b.Error.Details)
+			}
+			got, ok := b.Error.Details[api.BrokerErrorDetailCurrentRunID]
+			if ok != tc.wantOK {
+				t.Fatalf("currentRunId present = %v, want %v (details %v)", ok, tc.wantOK, b.Error.Details)
+			}
+			if ok && got != tc.wantRunID {
+				t.Errorf("currentRunId = %v, want %q", got, tc.wantRunID)
+			}
+		})
+	}
+}
+
+// currentRunID scopes the re-list to the request's project: another
+// project's same-name entry is not this agent's run, even from a runtime
+// whose List ignores the project label filter (mockManager honours only
+// scion.name).
+func TestCurrentRunID_ProjectScoped(t *testing.T) {
+	mgr := &mockManager{}
+	srv := newTestServerWithManager(t, mgr)
+	mgr.agents = []api.AgentInfo{
+		withRun(labelled("dev", "cid-a", scopeProjA, ""), "run-a"),
+		withRun(labelled("dev", "cid-b", scopeProjB, ""), "run-b"),
+	}
+	if got, ok := srv.currentRunID(context.Background(), mgr, "dev", scopeProjB); !ok || got != "run-b" {
+		t.Errorf("project B: got %q, %v; want run-b", got, ok)
+	}
+	mgr.agents = mgr.agents[:1]
+	if got, ok := srv.currentRunID(context.Background(), mgr, "dev", scopeProjB); !ok || got != "" {
+		t.Errorf("only project A's entry: got %q, %v; want empty", got, ok)
+	}
+}
+
+// B1 (round 2): when a runtime cannot be listed, a run mismatch on the
+// others is not proof the requested run is gone (the unlisted runtime may
+// hold it), so the delete fails closed instead of answering 404.
+func TestDeleteAgent_RunMismatchWithListErrorFailsClosed(t *testing.T) {
+	mgr := &cleanupRecordingManager{}
+	srv, home := newCleanupTestServer(t, mgr)
+	scionB, infoB := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "cid-new", scopeProjB, scionB), "run-new")}
+	auxMgr := &filteringMockManager{}
+	auxMgr.listErr = errors.New("aux runtime unreachable")
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["substrate-eu"] = auxiliaryRuntime{
+		Runtime: &runtime.MockRuntime{NameFunc: func() string { return "substrate" }},
+		Manager: auxMgr,
+	}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old"+allDeleteParams)
+	if rec.Code == http.StatusNotFound || rec.Code < 400 {
+		t.Fatalf("expected a failure status, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.DeleteCalls() != 0 || auxMgr.DeleteCalls() != 0 {
+		t.Errorf("expected no delete calls, got default=%d aux=%d", mgr.DeleteCalls(), auxMgr.DeleteCalls())
+	}
+	assertCleanupCalls(t, mgr.cleanupCalls())
+	assertUntouched(t, scionB, "dev", infoB)
+}
+
+// registeredRunID reads the run ID of the launch record held for key.
+func registeredRunID(srv *Server, key launchKey) (string, bool) {
+	srv.launchRegistry.mu.Lock()
+	defer srv.launchRegistry.mu.Unlock()
+	rec, ok := srv.launchRegistry.records[key]
+	if !ok {
+		return "", false
+	}
+	return rec.RunID, true
+}
+
+// N1 (round 2): a real synchronous create records the hub's run on its
+// launch record, so a stale-run delete leaves the in-flight start running
+// and a delete of its own run cancels it.
+func TestSyncCreate_LaunchRecordCarriesRunID(t *testing.T) {
+	srv, mgr, projectPath, _ := newSyncStartTestServer(t)
+
+	started := make(chan struct{})
+	ctxErr := make(chan error, 1)
+	mgr.starts <- func(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+		close(started)
+		<-ctx.Done()
+		ctxErr <- ctx.Err()
+		return nil, ctx.Err()
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		body := fmt.Sprintf(`{"id":"agent-a-id","name":"same-name","projectPath":%q,"runId":"run-new","config":{"task":"t"}}`, projectPath)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	waitSignal(t, started, "the create's start")
+
+	if got, ok := registeredRunID(srv, launchKey{Slug: "same-name"}); !ok || got != "run-new" {
+		t.Fatalf("launch record run = %q (registered %v), want run-new", got, ok)
+	}
+	del := func(runID string) {
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/api/v1/agents/same-name?runId="+runID, nil))
+	}
+	del("run-old")
+	select {
+	case err := <-ctxErr:
+		t.Fatalf("a stale-run delete cancelled the start: %v", err)
+	default:
+	}
+	del("run-new")
+	select {
+	case <-ctxErr:
+	case <-time.After(syncStartTestTimeout):
+		t.Fatal("the delete for the start's own run did not cancel it")
+	}
+	<-done
+}
+
+// N1 (round 2): an async admission records the hub's run on its launch
+// record.
+func TestAsyncCreate_LaunchRecordCarriesRunID(t *testing.T) {
+	mgr := newAsyncManager()
+	mgr.startBlock = make(chan struct{})
+	srv, _ := newAsyncTestServer(t, mgr)
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-1", "asyncLaunch": true, "launchId": "L-1", "runId": "run-new",
+		"launchTimeoutSeconds": 300, "config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if got, ok := registeredRunID(srv, launchKey{Slug: "agent-1"}); !ok || got != "run-new" {
+		t.Fatalf("launch record run = %q (registered %v), want run-new", got, ok)
+	}
+}
+
+// n2 (round 2): the cancel after resolution is keyed by the resolved
+// entry's project, which the early cancel cannot know when the delete
+// carries no projectId. It is run-aware too: resolving a legacy entry for
+// a stale run must not cancel another run's in-flight start under that
+// project.
+func TestDeleteAgent_PostResolutionCancelIsRunAware(t *testing.T) {
+	for _, tc := range []struct {
+		name, deleteRun string
+		wantCancel      bool
+	}{
+		{"stale run", "run-old", false},
+		{"launch's own run", "run-new", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := &filteringMockManager{}
+			srv, home := newScopeTestServer(t, mgr)
+			scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+			// A legacy container (no run label) matches any runId by name.
+			mgr.agents = []api.AgentInfo{labelled("dev", "cid-legacy", scopeProjB, scionB)}
+
+			cancels := 0
+			rec := newLaunchRecord("sync-1", "dev", "create", "", time.Time{}, func() { cancels++ })
+			rec.RunID = "run-new"
+			srv.launchRegistry.Begin(launchKey{ProjectID: scopeProjB, Slug: "dev"}, rec)
+
+			if code := doDelete(t, srv, "dev", "runId="+tc.deleteRun).Code; code != http.StatusNoContent {
+				t.Fatalf("delete: expected 204, got %d", code)
+			}
+			if got := cancels > 0; got != tc.wantCancel {
+				t.Errorf("cancelled = %v, want %v", got, tc.wantCancel)
 			}
 		})
 	}

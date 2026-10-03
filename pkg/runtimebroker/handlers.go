@@ -1863,7 +1863,9 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	// Wake any local launch waiting on this agent (design §3.8.1): purely a
 	// local optimisation (the Hub's answer to the launch's next report is
 	// what actually ends it), so a key that doesn't match an in-flight
-	// launch is a harmless no-op.
+	// launch is a harmless no-op. Not redundant with the early cancel: this
+	// key carries the resolved entry's project, which the early one lacks
+	// when the delete names no projectId. Run-aware for the same reason.
 	s.cancelLocalLaunchForRun(launchKey{ProjectID: agentProjectID, Slug: target.name}, runID)
 
 	filesToDelete := deleteFiles
@@ -2250,9 +2252,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		span.SetStatus(codes.Error, err.Error())
 		s.agentLifecycleLog.Error("Agent start failed",
 			"agent_id", id, "error", err)
-		// Manager.Start has acted (it may have removed the previous entry
-		// or created a new one), so mark the failure for the hub.
-		details := startAttemptedDetails(opts.RunID)
+		// Manager.Start may have acted (removed the previous entry or
+		// created a new one), so mark the failure for the hub, and report
+		// the run the runtime holds now.
+		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
 		if errors.Is(err, agent.ErrContainerNameInUse) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), details)
 		} else {
@@ -2701,9 +2704,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	if err != nil {
 		s.agentLifecycleLog.Error("Agent restart failed",
 			"agent_id", id, "error", err)
-		// The stop above and Manager.Start have acted, so mark the
-		// failure for the hub.
-		details := startAttemptedDetails(opts.RunID)
+		// The stop above and Manager.Start may have acted, so mark the
+		// failure for the hub, and report the run the runtime holds now.
+		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
 		if strings.Contains(err.Error(), "not found") {
 			writeError(w, http.StatusNotFound, ErrCodeAgentNotFound, "Agent not found", details)
 			return
@@ -5048,6 +5051,12 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, runID, 
 		var otherRun bool
 		matches, otherRun = filterDeleteCandidatesByRun(matches, runID, func(c candidate) api.AgentInfo { return c.entry })
 		if len(matches) == 0 && otherRun {
+			// A runtime that could not be listed may hold the requested
+			// run's entry. Fail closed (see the listErr case below) rather
+			// than answer 404, which the hub treats as a completed delete.
+			if listErr != nil {
+				return nil, errDeleteTargetUnknown
+			}
 			return nil, errDeleteTargetRunMismatch
 		}
 	}
