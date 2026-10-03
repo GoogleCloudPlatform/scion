@@ -325,8 +325,19 @@ func TestAgentCreateDeliverIDs_MissingParentEdge(t *testing.T) {
 		_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "chain-missing-c")
 		assert.ErrorIs(t, err, store.ErrNotFound, "no agent row")
 
+		assert.Empty(t, agentDelegatorEdges(t, f.store, parent.ID), "the child's edge is deactivated")
+		failed, _, err := f.store.ListMutationAudits(context.Background(),
+			store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
+		require.NoError(t, err)
+		require.Len(t, failed, 1, "the failed create is compensated")
+		sum := assertCompensated(t, f.store, failed[0].TargetID)
+
+		// Reactivate the compensated edge to inspect the ceiling it carried.
+		_, err = f.store.ReactivateDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent,
+			failed[0].TargetID, store.EdgeDeactivationCreateCompensation, sum.OpID)
+		require.NoError(t, err)
 		edges := agentDelegatorEdges(t, f.store, parent.ID)
-		require.Len(t, edges, 1, "the edge written for the child is left in place")
+		require.Len(t, edges, 1)
 		left := edges[0]
 		assert.Equal(t, store.EffectCeilingBounded, left.Kind)
 		assert.Empty(t, deliverOf(left.PermissionIDs), "no delivery permission")
