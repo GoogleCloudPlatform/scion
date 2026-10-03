@@ -209,7 +209,10 @@ func (vs *VersionedSettings) ResolveSharedDirDefaultsWithSource(profileName stri
 // profileName is empty, vs.ActiveProfile is used. A nil vs, an unknown
 // profile, or a profile and runtime entry that both leave the value unset
 // yield the zero value and an empty source, meaning the caller's global
-// value applies.
+// value applies. Because the zero value means "not set", a bool or numeric
+// key cannot express an explicit false or 0 override with T = bool or
+// int; for such keys use a pointer type (for example T = *bool), so nil
+// means unset.
 //
 // Example, for a string key:
 //
@@ -264,9 +267,12 @@ const SharedDirStorageGlobalSource = "server.shared_dir_storage.backend"
 // The returned config is a copy when an override applies; the global
 // block is never modified.
 //
-// Call this only on settings from LoadGlobalSettings: like
-// server.shared_dir_storage itself, the overrides must not be settable
-// from a project's own settings.
+// Call this only on settings from LoadGlobalSettings or
+// LoadGlobalSettingsWithOverlay: like server.shared_dir_storage itself,
+// the overrides must not be settable from a project's own settings.
+//
+// A dispatch-time NFS mount check should choose the backend through this
+// method too, so it agrees with the start path.
 func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V1SharedDirStorageConfig, source string) {
 	if vs == nil {
 		return nil, ""

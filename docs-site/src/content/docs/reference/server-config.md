@@ -342,12 +342,17 @@ server:
           pv_name: scion-shared-pvc
 ```
 
-- **Global-only**: like `server.shared_dir_storage`, the overrides are read from the broker's global settings, never from project settings. On a co-located Hub and broker whose runtimes and profiles are stored in the database, the stored values apply.
+- **Chosen from global settings**: like `server.shared_dir_storage`, the overrides are read from the broker's global settings, never from project settings. On a co-located Hub and broker whose runtimes and profiles are stored in the database, the stored values apply. This picks the backend for an agent's first start; after that, the agent's recorded backend applies (see below).
 - **No restart**: overrides are read again at every agent start, so a change made in `settings.yaml` or through the Hub settings API applies to the next agent start.
-- **Recorded per agent**: an agent records the backend its shared directories were set up with and keeps it on later starts, even if the settings change. If an agent recorded `nfs` and the `nfs` block was later removed, its start fails with an error that says so, before any host path is touched. Agents created before the backend was recorded use the current resolution.
+- **Recorded per agent**: an agent records the backend its shared directories were set up with and keeps it on later starts, even if the settings change.
+  - The record is `shared-dir-storage.json` in the agent's directory on the broker, next to `scion-agent.json`. It is outside the agent's home, so the agent's container does not mount it. Reincarnating the agent keeps it.
+  - If an agent recorded `nfs` and the `nfs` block was later removed, its start fails with an error that says so, before any host path is touched.
+  - An override that later fails validation does not block an agent that recorded a backend, because the agent does not use it. It still fails the first start of a new agent.
+  - A start that could not load the global settings records nothing, so the agent picks up its configured backend once the settings load again.
+  - Agents created before the backend was recorded use the current resolution.
 - **Host mount**: a broker that starts an `nfs`-resolved agent needs the export mounted at `<mount_root>/<share id>`, as with the global `nfs` backend. A missing mount fails only agents that resolve to `nfs`. Agents on the `local` backend, server startup, and health checks are not affected. The startup log has one line per profile whose backend comes from an override.
 - **Hub file browser and attachments**: the Hub's file browser, archive downloads and attachment staging use `server.shared_dir_storage.backend` only, not the per-profile override.
-- **Cleanup on delete**: deleting a project also removes its tree from the export when only an override selects `nfs`. If the export is not mounted on the Hub's host, cleanup logs a warning and the delete still succeeds.
+- **Cleanup on delete**: deleting a project also removes its tree from the export when only an override selects `nfs`. If the export is not mounted on the Hub's host, cleanup logs a warning and the delete still succeeds. A Hub running without a co-located broker reads runtimes and profiles from its settings file only, so it does not see an override stored only in the database, and it skips that cleanup.
 
 ### Scheduler (`server.scheduler`)
 
