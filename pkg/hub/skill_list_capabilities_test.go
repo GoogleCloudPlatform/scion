@@ -17,9 +17,11 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -103,34 +105,117 @@ func TestListSkills_Capabilities_ScopeFilterDenied(t *testing.T) {
 		createSkillStatus(t, srv, alice, "alice-global", store.SkillScopeGlobal, ""))
 }
 
+// newSkillCapProject creates a project owned by ownerID with its member
+// group and owner binding seeded.
+func newSkillCapProject(t *testing.T, srv *Server, s store.Store, name, ownerID string) *store.Project {
+	t.Helper()
+	p := &store.Project{
+		ID: tid(name), Name: name, Slug: name,
+		OwnerID: ownerID, CreatedBy: ownerID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(context.Background(), p))
+	srv.seedProjectCreatorMembership(context.Background(), p)
+	return p
+}
+
 func TestListSkills_Capabilities_MixedProjectSet(t *testing.T) {
-	srv, s, alice, bob, project := setupSkillAuthzTest(t)
+	srv, s, alice, bob, _ := setupSkillAuthzTest(t)
 	ctx := context.Background()
 
-	// Bob is a hub member who owns a second project. Alice is a member of
-	// the first project only, so her project set mixes a project she can
-	// create in with one she cannot see.
-	ensureHubMembership(ctx, s, bob.ID)
-	other := &store.Project{
-		ID:        tid("skill-project-other"),
-		Name:      "Other Skill Project",
-		Slug:      "other-skill-project",
-		OwnerID:   bob.ID,
-		CreatedBy: bob.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
+	// Two projects owned by alice. The caller's candidate projects are
+	// checked in sorted ID order, so "first" is the one whose ID sorts
+	// first.
+	pa := newSkillCapProject(t, srv, s, "skillcap-a", alice.ID)
+	pb := newSkillCapProject(t, srv, s, "skillcap-b", alice.ID)
+	first, second := pa, pb
+	if second.ID < first.ID {
+		first, second = second, first
 	}
-	require.NoError(t, s.CreateProject(ctx, other))
-	srv.seedProjectCreatorMembership(ctx, other)
+
+	// Bob is a plain member of the first project (project.list, but no
+	// skill.create) and an admin of the second (skill.create). His project
+	// set mixes a project he cannot create in with one he can, and the one
+	// he cannot is checked first.
+	ensureHubMembership(ctx, s, bob.ID)
+	addProjectMemberWithRole(t, s, first, bob.ID, store.GroupMemberRoleMember)
+	addProjectMemberWithRole(t, s, second, bob.ID, store.GroupMemberRoleAdmin)
+
+	// Carol is only a plain member of the first project.
+	carol := createNamedTestUser(t, s, "skillcap-carol", store.UserRoleMember)
+	ensureHubMembership(ctx, s, carol.ID)
+	addProjectMemberWithRole(t, s, first, carol.ID, store.GroupMemberRoleMember)
 
 	// Project scope without a scopeId is the union over the caller's projects.
-	assert.Equal(t, []string{"create"}, listSkillCapabilities(t, srv, alice, "scope=project"))
 	assert.Equal(t, []string{"create"}, listSkillCapabilities(t, srv, bob, "scope=project"))
+	assert.Empty(t, listSkillCapabilities(t, srv, carol, "scope=project"))
 
-	// Each user can create only in their own project.
-	assert.Empty(t, listSkillCapabilities(t, srv, alice, "scope=project&scopeId="+other.ID))
-	assert.Empty(t, listSkillCapabilities(t, srv, bob, "scope=project&scopeId="+project.ID))
-	assert.Equal(t, []string{"create"}, listSkillCapabilities(t, srv, bob, "scope=project&scopeId="+other.ID))
+	// Per project, the capability matches what createSkill decides.
+	assert.Empty(t, listSkillCapabilities(t, srv, bob, "scope=project&scopeId="+first.ID))
+	assert.Equal(t, http.StatusForbidden, createSkillStatus(t, srv, bob, "bob-first", store.SkillScopeProject, first.ID))
+	assert.Equal(t, []string{"create"}, listSkillCapabilities(t, srv, bob, "scope=project&scopeId="+second.ID))
+	assert.Equal(t, http.StatusCreated, createSkillStatus(t, srv, bob, "bob-second", store.SkillScopeProject, second.ID))
+	assert.Equal(t, http.StatusForbidden, createSkillStatus(t, srv, carol, "carol-first", store.SkillScopeProject, first.ID))
+}
+
+// agentSkillCapabilities lists skills with an agent token and returns the
+// list-level capability actions.
+func agentSkillCapabilities(t *testing.T, srv *Server, token, query string) []string {
+	t.Helper()
+	path := "/api/v1/skills"
+	if query != "" {
+		path += "?" + query
+	}
+	rec := doAgentTokenRequestSkills(t, srv, path, token)
+	require.Equal(t, http.StatusOK, rec.Code, "got: %s", rec.Body.String())
+	var resp ListSkillsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotNil(t, resp.Capabilities, "list response must carry _capabilities")
+	return resp.Capabilities.Actions
+}
+
+// agentCreateSkillStatus attempts a skill create with an agent token and
+// returns the status.
+func agentCreateSkillStatus(t *testing.T, srv *Server, token, name, scope, scopeID string) int {
+	t.Helper()
+	body, err := json.Marshal(CreateSkillRequest{Name: name, Scope: scope, ScopeID: scopeID})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/skills", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Agent-Token", token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec.Code
+}
+
+func TestListSkills_Capabilities_Agent(t *testing.T) {
+	f := setupAgentSkillFixture(t)
+
+	creator := f.newAgent(t, "skillcap-agent-full", f.p.ID, f.u.ID, ScopesForRole(AgentRoleFull))
+	require.Contains(t, ScopesForRole(AgentRoleFull), ScopeAgentCreate)
+	plain := f.newAgent(t, "skillcap-agent-baseline", f.p.ID, f.u.ID, ScopesForRole(AgentRoleBaseline))
+	require.NotContains(t, ScopesForRole(AgentRoleBaseline), ScopeAgentCreate)
+
+	// An agent holding the create scope can create in its own project only.
+	assert.Equal(t, []string{"create"}, agentSkillCapabilities(t, f.srv, creator, ""))
+	assert.Equal(t, []string{"create"}, agentSkillCapabilities(t, f.srv, creator, "scope=project"))
+	assert.Equal(t, []string{"create"}, agentSkillCapabilities(t, f.srv, creator, "scope=project&scopeId="+f.p.ID))
+	for _, query := range []string{
+		"scope=project&scopeId=" + f.q.ID,
+		"scope=user",
+		"scope=global",
+		"scope=core",
+	} {
+		assert.Empty(t, agentSkillCapabilities(t, f.srv, creator, query), "query %q", query)
+	}
+
+	// Without the create scope an agent can create nowhere.
+	assert.Empty(t, agentSkillCapabilities(t, f.srv, plain, ""))
+	assert.Empty(t, agentSkillCapabilities(t, f.srv, plain, "scope=project&scopeId="+f.p.ID))
+
+	// The capability matches what createSkill decides.
+	assert.Equal(t, http.StatusCreated, agentCreateSkillStatus(t, f.srv, creator, "agent-own", store.SkillScopeProject, f.p.ID))
+	assert.Equal(t, http.StatusForbidden, agentCreateSkillStatus(t, f.srv, creator, "agent-other", store.SkillScopeProject, f.q.ID))
+	assert.Equal(t, http.StatusForbidden, agentCreateSkillStatus(t, f.srv, plain, "agent-plain", store.SkillScopeProject, f.p.ID))
 }
 
 func TestListSkills_Capabilities_ProjectScopeWithoutProjects(t *testing.T) {
