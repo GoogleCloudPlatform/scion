@@ -33,7 +33,10 @@ Stacked on tz-refactor task 3 (GoogleCloudPlatform/scion#2289).
   "(UTC)" labels that tz-refactor task 7 added. Their third site (`AsTime()`) was already UTC.
 - **Verified, not touched:** task 1's `events.go` sites (PublishAgentStatus x2,
   PublishAgentCreated, PublishUserMessage), `mintGitHubAppToken` and
-  `handleAdminInvitesCreate`. Task 3's webchat writers and binds.
+  `handleAdminInvitesCreate` (their `.UTC()` is gate-covered). Task 3's webchat writers and
+  TouchThread/RecordChannel binds (gate-covered). Task 3's `conversations` writes: the gate
+  covers only that they bind a `time.Time` rather than a formatted string. Whether that
+  `time.Time` is UTC is not gate-checked (task 3's tests cover it). This is a documented limit.
 - Nothing was flagged in the files owned by ptone/scion#2476.
 
 ## Revert check (AC14), done by hand
@@ -80,6 +83,21 @@ These checks were run against the gate binary:
   positive case is missed by the round-1 checker, and each new negative case is a false positive
   in it. The tree is still clean, and the allowlist is still empty.
 
+## Review round 3
+
+- Kinds now propagate along copies (`u := t`, `u := t.Add(d)`) to a fixpoint after pass 1.
+  Address-taken locals are collected in a pre-pass. So a copy of a scanned or unmarshalled
+  time, or a loop-carried copy, is no longer counted as UTC.
+- ctx-first APIs are recognised: pgx `Exec(ctx, sql, args...)`, and the ent dialect driver
+  `Exec/Query(ctx, sql, args, v)`, whose binds are read from the `args` slice. The affected
+  call sites (`group_store.go`, `schedule_store.go`, `events_postgres.go`, `command_bus.go`,
+  `admin_signals.go`) bind no times and stay clean.
+- Package const and var chains (`const b = a`) resolve to a fixpoint, whatever the declaration
+  order.
+- The wording on task 3's `conversations` writes is corrected (see above). The header now lists
+  "time.Time binds into ent columns are not checked for UTC" as a limit. The optional
+  SQLite-only rule was not added.
+
 ## Tests
 
 - `hack/checktimeliterals/main_test.go`: fixtures under `testdata/src` carry `// want <rule>`
@@ -90,5 +108,5 @@ These checks were run against the gate binary:
 ## Known limits / follow-ups
 
 - The checker is syntactic. It does not see layouts held in parameters or `%v`/`String()`
-  formatting. Its SQL resolution does not model loop back-edges, `strings.Builder` or SQL
+  formatting. It does not check that `time.Time` binds into ent columns are UTC. Its SQL resolution does not model loop back-edges, `strings.Builder` or SQL
   returned by helpers. All of these are documented in the checker header.

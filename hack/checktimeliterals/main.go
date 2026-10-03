@@ -8,7 +8,8 @@
 //     a time layout, must have a receiver R that is provably UTC: a call to
 //     .UTC() (or .AsTime(), which protobuf timestamps define to return UTC),
 //     an Add/AddDate/Truncate/Round of such a value, or a local variable
-//     whose every assignment in the enclosing function is one of those. A
+//     whose every assignment in the enclosing function is one of those (kinds
+//     propagate along copies such as u := t and u := t.Add(d)). A
 //     value-less var t time.Time counts as UTC (the zero value is UTC) unless
 //     it is also written through its address (&t, as in row.Scan(&t) or
 //     json.Unmarshal(b, &t)) or by a pointer-receiver decoder method
@@ -37,6 +38,12 @@
 //     layout tokens, and package or local constants and variables assigned
 //     either of those (const wire = time.RFC3339Nano, layout := time.RFC3339).
 //   - fmt verbs (%s/%v) and Time.String() are not checked.
+//   - time.Time binds into ent columns are not checked for UTC; only the
+//     formatted-string-versus-time.Time half of ent-bind-formatted is.
+//   - Raw SQL is recognised in Exec/Query/QueryRow (SQL first, or second
+//     after a ctx as in pgx and the ent dialect driver, whose
+//     Exec/Query(ctx, sql, args, v) binds are read from args) and in the
+//     database/sql *Context variants.
 //   - SQL text is resolved only from string literals, constants, fmt.Sprintf
 //     formats, + concatenation and local variables built from those. A local
 //     variable is resolved at the call: the latest = / := that must have run
@@ -313,8 +320,16 @@ func Scan(root string, dirs []string) ([]Finding, int, error) {
 	for _, dir := range order {
 		p := pkgs[dir]
 		consts := map[string]string{}
-		for _, f := range p.files {
-			collectStringConsts(f, consts)
+		// Sweep to a fixpoint so that chains (const b = a) resolve
+		// whatever the file and declaration order.
+		for {
+			n := len(consts)
+			for _, f := range p.files {
+				collectStringConsts(f, consts)
+			}
+			if len(consts) == n {
+				break
+			}
 		}
 		for i, f := range p.files {
 			c := &checker{
@@ -386,7 +401,10 @@ func collectStringConsts(f *ast.File, out map[string]string) {
 			vs := sp.(*ast.ValueSpec)
 			for i, nm := range vs.Names {
 				if i < len(vs.Values) {
-					if s, ok := literalString(vs.Values[i], nil); ok {
+					if _, done := out[nm.Name]; done {
+						continue
+					}
+					if s, ok := literalString(vs.Values[i], out); ok {
 						out[nm.Name] = s
 					}
 				}
@@ -487,6 +505,7 @@ type checker struct {
 	local    map[string]string     // local string consts within the function
 	stack    []ast.Node            // pass-1 ancestors of the node being visited
 	addr     map[string]bool       // locals written through their address (&x, x.Scan(...))
+	deps     map[string][]string   // local -> the locals it was copied from (u := t, u := t.Add(d))
 }
 
 // strEvent is one assignment to a local variable, recorded so that the SQL
@@ -560,6 +579,7 @@ func (c *checker) begin(fn string) {
 	c.slice = map[string][]ast.Expr{}
 	c.stack = nil
 	c.addr = map[string]bool{}
+	c.deps = map[string][]string{}
 }
 
 // params classifies the parameters and named results of a function. Each
@@ -603,15 +623,9 @@ func (c *checker) isEntBuilderType(t ast.Expr) bool {
 // assignment (function literals included, since they share the names), then
 // it checks every call.
 func (c *checker) body(n ast.Node) {
+	// Pre-pass: locals written through their address.
 	ast.Inspect(n, func(n ast.Node) bool {
-		if n == nil {
-			c.stack = c.stack[:len(c.stack)-1]
-			return true
-		}
-		c.stack = append(c.stack, n)
 		switch v := n.(type) {
-		case *ast.FuncLit:
-			c.params(v.Type, v.Body)
 		case *ast.UnaryExpr:
 			if id, ok := unparen(v.X).(*ast.Ident); ok && v.Op == token.AND {
 				c.addr[id.Name] = true
@@ -622,6 +636,18 @@ func (c *checker) body(n ast.Node) {
 					c.addr[id.Name] = true
 				}
 			}
+		}
+		return true
+	})
+	ast.Inspect(n, func(n ast.Node) bool {
+		if n == nil {
+			c.stack = c.stack[:len(c.stack)-1]
+			return true
+		}
+		c.stack = append(c.stack, n)
+		switch v := n.(type) {
+		case *ast.FuncLit:
+			c.params(v.Type, v.Body)
 		case *ast.GenDecl:
 			if v.Tok == token.CONST {
 				for _, sp := range v.Specs {
@@ -688,6 +714,21 @@ func (c *checker) body(n ast.Node) {
 	for name := range c.addr {
 		if c.vars[name]&(kUTC|kTime) != 0 {
 			c.vars[name] |= kTime
+		}
+	}
+	// A copy holds whatever its source may hold at any point in the function
+	// (the source may be reassigned or written through its address later, or
+	// on a previous loop iteration), so propagate kinds along copies to a
+	// fixpoint.
+	for changed := true; changed; {
+		changed = false
+		for name, srcs := range c.deps {
+			for _, src := range srcs {
+				if k := c.vars[name] | c.vars[src]; k != c.vars[name] {
+					c.vars[name] = k
+					changed = true
+				}
+			}
 		}
 	}
 	ast.Inspect(n, func(n ast.Node) bool {
@@ -767,6 +808,9 @@ func (c *checker) assign(name string, rhs ast.Expr, tok token.Token, pos token.P
 	if tok == token.ADD_ASSIGN {
 		return
 	}
+	if src := copySource(rhs); src != "" && src != name {
+		c.deps[name] = append(c.deps[name], src)
+	}
 	switch {
 	case c.isUTC(rhs):
 		c.vars[name] |= kUTC
@@ -776,6 +820,29 @@ func (c *checker) assign(name string, rhs ast.Expr, tok token.Token, pos token.P
 		c.vars[name] |= kTime
 	default:
 		c.vars[name] |= kUnknown
+	}
+}
+
+// copySource returns the local a time value is copied from: x itself, or the
+// root of an Add/AddDate/Truncate/Round chain on x. "" otherwise.
+func copySource(e ast.Expr) string {
+	for {
+		switch v := unparen(e).(type) {
+		case *ast.Ident:
+			return v.Name
+		case *ast.StarExpr:
+			e = v.X
+		case *ast.CallExpr:
+			name, recv := methodName(v)
+			switch name {
+			case "Add", "AddDate", "Truncate", "Round":
+				e = recv
+			default:
+				return ""
+			}
+		default:
+			return ""
+		}
 	}
 }
 
@@ -986,6 +1053,12 @@ func (c *checker) call(call *ast.CallExpr) {
 		return
 	}
 	sqlText, ok := c.sqlText(call.Args[idx], call.Pos())
+	if !ok && idx == 0 && len(call.Args) > 1 {
+		// ctx-first APIs: pgx Exec(ctx, sql, args...) and the ent dialect
+		// driver Exec/Query(ctx, sql, args, v).
+		idx = 1
+		sqlText, ok = c.sqlText(call.Args[1], call.Pos())
+	}
 	if !ok {
 		return
 	}
@@ -1004,7 +1077,9 @@ func (c *checker) call(call *ast.CallExpr) {
 		}
 	}
 	binds := call.Args[idx+1:]
-	if call.Ellipsis != token.NoPos && len(binds) > 0 {
+	if elems, ok := c.entDriverArgs(call, name, idx); ok {
+		binds = elems
+	} else if call.Ellipsis != token.NoPos && len(binds) > 0 {
 		if id, ok := binds[len(binds)-1].(*ast.Ident); ok {
 			binds = append(append([]ast.Expr{}, binds[:len(binds)-1]...), c.slice[id.Name]...)
 		}
@@ -1019,6 +1094,26 @@ func (c *checker) call(call *ast.CallExpr) {
 				fmt.Sprintf("time.Time bound in a statement on SQLite TEXT table(s) %s; bind t.UTC().Format(time.RFC3339Nano)", strings.Join(webchat, ",")))
 		}
 	}
+}
+
+// entDriverArgs returns the binds of an ent dialect driver call,
+// Exec/Query(ctx, sql, args, v), whose third argument is the args slice (a
+// []any literal or a slice built in the function) and whose fourth is the
+// result. A pgx Exec(ctx, sql, a, b) with two scalar binds does not match.
+func (c *checker) entDriverArgs(call *ast.CallExpr, name string, idx int) ([]ast.Expr, bool) {
+	if idx != 1 || len(call.Args) != 4 || call.Ellipsis != token.NoPos || (name != "Exec" && name != "Query") {
+		return nil, false
+	}
+	a := unparen(call.Args[2])
+	if lit, ok := a.(*ast.CompositeLit); ok {
+		return sliceElems(lit, "")
+	}
+	if id, ok := a.(*ast.Ident); ok {
+		if elems, ok := c.slice[id.Name]; ok {
+			return elems, true
+		}
+	}
+	return nil, false
 }
 
 // sqlNonTable lists words the table regexp can pick up that are not tables.

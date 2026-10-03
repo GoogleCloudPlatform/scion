@@ -9,17 +9,24 @@ var varLayout = time.RFC3339
 
 const kitchen = time.Kitchen
 
+// A chain resolves whatever the declaration order.
+const chained = chainBase
+
+const chainBase = time.RFC3339
+
 func aliases(t time.Time) []string {
 	layout := time.RFC3339
 	const inner = time.DateOnly
 	copied := wireLayout
 	return []string{
-		t.Format(wireLayout),       // want format-utc
-		t.Format(varLayout),        // want format-utc
-		t.Format(layout),           // want format-utc
-		t.Format(inner),            // want format-utc
-		t.Format(copied),           // want format-utc
-		t.Format(kitchen),          // want format-utc
+		t.Format(wireLayout), // want format-utc
+		t.Format(varLayout),  // want format-utc
+		t.Format(layout),     // want format-utc
+		t.Format(inner),      // want format-utc
+		t.Format(copied),     // want format-utc
+		t.Format(kitchen),    // want format-utc
+		t.Format(chained),    // want format-utc
+		t.UTC().Format(chained),
 		t.UTC().Format(wireLayout), // converted first: clean
 		t.UTC().Format(layout),
 		t.UTC().Format(inner),
