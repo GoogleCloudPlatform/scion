@@ -2882,7 +2882,9 @@ export class ScionPageAdminServerConfig extends LitElement {
           ${this.scionBuildTime
             ? html`<div class="version-item">
                 <span class="version-label">Build Time</span>
-                <span class="version-value">${this.scionBuildTime}</span>
+                <span class="version-value" title=${this.scionBuildTime}
+                  >${formatInstantWithZone(this.scionBuildTime) || this.scionBuildTime}</span
+                >
               </div>`
             : nothing}
           <div class="version-actions">

@@ -314,6 +314,34 @@ describe('scion-page-admin-server-config', () => {
       }
     });
 
+    it('build time renders in the display zone with the raw value as its title (tz-refactor task 20)', async () => {
+      const buildTime = (el: HTMLElement) =>
+        Array.from(el.shadowRoot?.querySelectorAll('.version-item') ?? [])
+          .find(
+            (item) => item.querySelector('.version-label')?.textContent?.trim() === 'Build Time'
+          )
+          ?.querySelector('.version-value') ?? null;
+      setPreferredTimeZone('Asia/Tokyo');
+      try {
+        // Midnight in Tokyo (UTC+9); the browser zone is pinned to UTC.
+        element = await createComponent(
+          createFetchHandler(makeBaseConfig({ scion_build_time: '2026-07-01T15:00:00Z' }))
+        );
+        const value = buildTime(element);
+        expect(value?.textContent?.trim()).toBe('Jul 2, 2026, 00:00 (Asia/Tokyo)');
+        expect(value?.getAttribute('title')).toBe('2026-07-01T15:00:00Z');
+
+        element.remove();
+        // A value that is not an instant is shown unchanged.
+        element = await createComponent(
+          createFetchHandler(makeBaseConfig({ scion_build_time: 'unknown' }))
+        );
+        expect(buildTime(element)?.textContent?.trim()).toBe('unknown');
+      } finally {
+        setPreferredTimeZone('');
+      }
+    });
+
     it('section metadata renders source:File for file-sourced sections', async () => {
       const config = makeBaseConfig({
         settings_tier: 'db',
