@@ -232,3 +232,29 @@ func TestPublishBroadcastDeliveryFailed_CancelledCtxStillNotifiesSender(t *testi
 		"the notice must use deliveryNoticeTimeout, not the row-CAS budget")
 	assert.LessOrEqual(t, dispatcher.budgets[0], deliveryNoticeTimeout)
 }
+
+// publishDeliveryFailed (the broker path) runs on a dispatch ctx that may
+// already be done. Like the broadcast builder, it must still notify the
+// sender, on the notice budget rather than the 5s row-CAS budget.
+func TestPublishDeliveryFailed_CancelledCtxStillNotifiesSender(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	sender := setupBrokerTestAgent(t, s, projectID, "pdf-1838-sender", "running")
+	dispatcher := &deadlineRecordingDispatcher{}
+	proxy := newNoticeTestProxy(t, s, dispatcher)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	msg := messages.NewInstruction("agent:"+sender.Slug, "agent:pdf-1838-target", "hello")
+	msg.SenderID = sender.ID
+	proxy.publishDeliveryFailed(ctx, projectID, "pdf-1838-target", msg, errors.New("runtime broker returned error 500: boom"))
+
+	notices := dispatcher.noticesTo(sender.Slug)
+	require.Len(t, notices, 1, "agent sender must receive one DELIVERY_FAILED notice despite the cancelled ctx")
+	assert.Contains(t, notices[0].msg, "pdf-1838-target")
+	require.Len(t, dispatcher.budgets, 1)
+	assert.Greater(t, dispatcher.budgets[0], finalizationTimeout,
+		"the notice must use deliveryNoticeTimeout, not the row-CAS budget")
+	assert.LessOrEqual(t, dispatcher.budgets[0], deliveryNoticeTimeout)
+}
