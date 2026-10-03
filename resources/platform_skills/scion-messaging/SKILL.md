@@ -53,7 +53,51 @@ Effective communication requires balancing responsiveness with focus.
 
 ## Message Formatting
 
-The `scion message` CLI delivers the body argument **verbatim** — it performs no escape expansion, and no character substitution. Whatever bytes you pass are exactly what the recipient sees. Markdown is accepted and encouraged and is rendered properly in surfaces.
+The `scion message` CLI delivers the body argument **verbatim** — it performs no escape expansion, and no character substitution. Whatever bytes you pass are exactly what the recipient sees. Markdown is rendered in chat surfaces.
+
+### Use structured markdown
+
+Any message longer than a sentence or two **must** use structured markdown. Dense single paragraphs are hard to scan and act on in a chat surface.
+
+- **Headline first**: start with a short **bold** one-line summary of the message.
+- **Bullets for facts**: put status, findings and blockers in bullets, each starting with a bold label (`**Status:**`, `**Blocker:**`, `**Found:**`).
+- **Choices are always a list**: one option per bulleted or numbered item, each with its trade-off. Mark the recommended option, or add a separate `**Recommendation:**` line. Never write options inline in a paragraph ("A) ... B) ... C) ...").
+- **Ask on its own line**: end with the explicit question or decision needed, set apart from the rest (e.g. `**Ask:** ...`).
+- **Code formatting**: use `code` for identifiers, commands, branch names and paths. Put a command the reader should run in its own fenced block.
+- **Short paragraphs**: one idea per paragraph or bullet.
+
+A one-line reply or acknowledgment needs no structure — "Got it, starting on #42." is fine as is.
+
+Bad — one paragraph, options inline, the ask buried at the end:
+
+```text
+I looked into the flaky TestSync failure and it seems to be caused by the
+shared temp dir between parallel subtests, which I could fix by A) giving
+each subtest its own t.TempDir(), which is the cleanest but touches 12
+tests, B) removing t.Parallel() from the suite, which is a one-line change
+but slows CI by about 40s, or C) adding a mutex around the dir setup, which
+is quick but hides the real problem. Which do you want me to do?
+```
+
+Good — the same content, structured:
+
+```markdown
+**Flaky `TestSync` traced to a shared temp dir**
+
+- **Cause:** parallel subtests share one temp dir in `pkg/sync/sync_test.go`.
+- **Status:** reproduced locally; no fix applied yet.
+
+**Options:**
+1. Give each subtest its own `t.TempDir()`. Cleanest; touches 12 tests.
+2. Remove `t.Parallel()` from the suite. One-line change; CI ~40s slower.
+3. Add a mutex around dir setup. Quick; hides the real problem.
+
+**Recommendation:** option 1.
+
+**Ask:** OK to proceed with option 1?
+```
+
+### Newlines and quoting
 
 To include newlines, use real newlines inside shell quoted strings or heredocs. Do **not** use JSON-encoded bodies or literal backslash-n sequences — those will appear as literal characters in the delivered message.
 
@@ -87,10 +131,10 @@ scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch
 Every message should move work forward. High-signal messages are functional and concrete.
 
 - **Be Functional**: No banter, cheerleading, or "Ready to help!" filler.
-- **Keep tone conversational and short.** Messages should be functional but not robotic — write like a colleague, not a status report.
+- **Keep tone conversational and short.** Messages should be functional but not robotic — write like a colleague. Conversational wording still goes inside the structured layout above.
 - **You are identified as a sender** — the system already shows your identity with every message. Don't open with "Hi, this is agent-X" or restate who you are.
 - **Include Concrete Details**: Reference file paths, branch names, URLs, and specific error messages.
-- **Surface Decisions**: When asking a sender for input, provide 2-3 concrete options, state your recommendation, and include the timing impact of each.
+- **Surface Decisions**: When asking a sender for input, provide 2-3 concrete options as a list, state your recommendation, and include the timing impact of each. See [Use structured markdown](#use-structured-markdown).
 - **Keep it Concise**: Focus on key findings and links rather than lengthy narratives.
 - **Confirm receipt, then report completion.** When you receive a task, respond immediately to confirm you got it. Then report again when the work is done. Don't leave a sender wondering whether their message was received.
 
@@ -209,6 +253,7 @@ When an agent calls `sciontool status ask_user`, the hub dispatches the question
 - **Red Flag**: An agent goes silent for >30 minutes without a milestone update or "blocked" status.
 - **Anti-Pattern**: Sending "I'm still here" or other low-signal filler messages.
 - **Anti-Pattern**: Using `sleep` to wait for something; use `sciontool status blocked` instead. For external processes that emit no notification (CI, builds, deploys), pair `status blocked` with a scheduled self-callback — see the `scion-scheduler` skill → **Waiting on external processes**.
+- **Anti-Pattern**: Sending a multi-sentence message as one dense paragraph, or listing choices inline ("A) ... B) ... Which?") instead of as a list.
 - **Anti-Pattern**: Repeating the entire original brief in a follow-up message (exhausts context).
 - **Anti-Pattern**: JSON-encoding or escaping the message body before passing to `scion message`. The CLI delivers the body verbatim — use real newlines in shell strings or heredocs.
 - **Anti-Pattern**: Replying to a group-conversation message by addressing the
@@ -221,6 +266,7 @@ When an agent calls `sciontool status ask_user`, the hub dispatches the question
 - [ ] Is the preferred `@<agent-name>` form used (rather than legacy `agent:<name>`)?
 - [ ] Is the message functional and free of filler/banter?
 - [ ] Does it include concrete references (paths, IDs, errors)?
-- [ ] If a decision is needed, are concrete options and a recommendation provided?
+- [ ] If the message is more than a sentence or two, does it start with a bold headline and use bullets?
+- [ ] If a decision is needed, are the options a list (one per item) with a marked recommendation, and is the ask on its own line?
 - [ ] For long tasks, has a milestone reporting cadence been established?
 - [ ] If this is a reply to an inbound message, am I using `conv:<id>` from that message's `conversation.id` — not addressing the sender directly?

@@ -97,8 +97,9 @@ The commands are complementary:
 | Read one message | `scion conversation get-message conv:<id> <message-id>` |
 | Inspect or administer a conversation | `scion conversation get`, `participants`, `join`, or `leave` |
 
-Use the `scion-messaging` skill for writing and reply routing. Use this skill
-for reading and conversation administration.
+Use the `scion-messaging` skill for writing and reply routing, including the
+required structured-markdown message format. Use this skill for reading and
+conversation administration.
 
 ## Anti-Patterns
 
