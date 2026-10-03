@@ -17,6 +17,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -404,13 +405,47 @@ func isAgentIdentity(identity Identity) bool {
 	return ok
 }
 
+// readSkillWriteBody decodes a create or update skill request body into v.
+// Skills no longer carry a visibility setting (access follows the skill's
+// scope), so a body that still sends one is rejected with 400 rather than
+// having the field silently dropped. On failure it writes the error response
+// and returns false.
+func readSkillWriteBody(w http.ResponseWriter, r *http.Request, v interface{}) bool {
+	if r.Body == nil {
+		BadRequest(w, "Invalid request body: empty request body")
+		return false
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) == nil {
+		for name := range fields {
+			// encoding/json matches struct fields case-insensitively, so
+			// treat the key the same way.
+			if strings.EqualFold(name, "visibility") {
+				ValidationError(w, "visibility is not supported: access to a skill is determined by its scope",
+					map[string]interface{}{"field": "visibility"})
+				return false
+			}
+		}
+	}
+	// Decode the same way readJSON does so other body handling is unchanged.
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(v); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return false
+	}
+	return true
+}
+
 // createSkill creates a new skill record.
 func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var req CreateSkillRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !readSkillWriteBody(w, r, &req) {
 		return
 	}
 
@@ -579,8 +614,7 @@ func (s *Server) updateSkill(w http.ResponseWriter, r *http.Request, id string) 
 	}
 
 	var updates UpdateSkillRequest
-	if err := readJSON(r, &updates); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !readSkillWriteBody(w, r, &updates) {
 		return
 	}
 
