@@ -2374,16 +2374,16 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// ctx, so a resume whose request lost the mode still recreates its
 	// private directory below instead of a worktree or nothing.
 	if config.ScionAgentConfigExists(agentDir) {
-		if persisted, cfgErr := (&config.Template{Path: agentDir}).LoadConfig(); cfgErr == nil && persisted.EmptyPerAgentWorkspace {
-			ctx = api.ContextWithEmptyPerAgentWorkspace(ctx)
-		}
-	}
-	if agentWorkspace != "" && config.ScionAgentConfigExists(agentDir) {
 		if persisted, cfgErr := (&config.Template{Path: agentDir}).LoadConfig(); cfgErr != nil {
-			util.Debugf("GetAgent: could not load persisted config to check explicit workspace: %v", cfgErr)
-		} else if persisted.ExplicitWorkspace {
-			util.Debugf("GetAgent: explicit-workspace agent %q — skipping managed-worktree recovery", agentName)
-			agentWorkspace = ""
+			util.Debugf("GetAgent: could not load persisted config to check workspace mode: %v", cfgErr)
+		} else {
+			if persisted.EmptyPerAgentWorkspace {
+				ctx = api.ContextWithEmptyPerAgentWorkspace(ctx)
+			}
+			if agentWorkspace != "" && persisted.ExplicitWorkspace {
+				util.Debugf("GetAgent: explicit-workspace agent %q — skipping managed-worktree recovery", agentName)
+				agentWorkspace = ""
+			}
 		}
 	}
 
