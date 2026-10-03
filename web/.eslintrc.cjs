@@ -66,6 +66,8 @@ module.exports = {
                 'src/components/shared/deep-active-element.test.ts',
                 'src/components/terminal/terminal-pane.test.ts',
                 'src/components/shared/header.test.ts',
+                'src/components/shared/group-member-editor-membership.test.ts',
+                'src/components/pages/onboarding.test.ts',
             ],
             parserOptions: { project: './src/components/tsconfig.component-tests.json' },
         },
