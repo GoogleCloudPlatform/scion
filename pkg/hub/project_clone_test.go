@@ -534,6 +534,57 @@ func TestProjectClone_GitRemoteOverride_RejectsNonGitURL(t *testing.T) {
 		"https://x-.example.com/org/repo",
 		"git@-gitserver:org/repo",
 		"-x.example.com/org/repo",
+		// Dot and empty path segments, escaped or not, in every form (r5):
+		// git would clone a different repository than GitRemote names.
+		"https://github.com/org/../evil/repo",
+		"https://github.com/org/%2e%2e/evil/repo",
+		"https://github.com/org/%2E%2E/evil/repo",
+		"https://github.com/./org/repo",
+		"https://github.com//org/repo",
+		"https://github.com/org//repo",
+		"https://github.com/org/repo//",
+		"ssh://git@github.com/org/../evil/repo.git",
+		"git://github.com/org/./repo",
+		"github.com/org/../evil/repo",
+		"github.com/org/%2e%2e/evil/repo",
+		"github.com//org/repo",
+		"github.com/org//repo",
+		"git@github.com:org/../evil/repo",
+		"git@github.com:org/%2e%2e/evil/repo",
+		"git@github.com:org//repo",
+		"git@github.com:./org/repo",
+		// Printable ASCII only (r5): format characters, homoglyphs and
+		// non-ASCII hosts (IDN hosts must be punycode); escaped controls.
+		"https://github.com/org/\u202erepo",
+		"github.com/org/\u202erepo",
+		"git@github.com:org/\u202erepo",
+		"https://github.com/\u043erg/repo",
+		"https://b\u00fccher.example/org/repo",
+		"https://github.com/org/re%0Apo",
+		"https://github.com/org/re%00po",
+		"github.com/org/re%7Fpo",
+		"git@github.com:org/re%1Fpo",
+		// Web parity (#2713 r4 F1): %40 in the path, malformed escapes,
+		// invalid IPv6, userinfo characters net/url rejects.
+		"https://github.com/org/%40evil/repo",
+		"github.com/org/re%40po/x",
+		"git@github.com:org/%40x/repo",
+		"https://github.com/org/re%zzpo",
+		"https://github.com/org/repo%",
+		"github.com/org/re%zpo",
+		"git@github.com:org/repo%",
+		"https://u:SECRET_%zz@github.com/org/repo",
+		"https://[1:2]/org/repo",
+		"https://[:::]/org/repo",
+		"https://[v1.x]/org/repo",
+		"https://[1:2:3:4:5:6:7::8]/org/repo",
+		"https://us\"er@h.example/o/r",
+		"https://h.com\\@evil.com/o/r",
+		// Only ASCII whitespace is trimmed (#2713 r4 F2/F3).
+		"https://github.com/org/repo\u0085",
+		"\ufeffhttps://github.com/org/repo",
+		"https://github.com/org/repo\ufeff",
+		"\u00a0github.com/org/repo",
 	} {
 		t.Run(remote, func(t *testing.T) {
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
@@ -591,6 +642,30 @@ func TestProjectClone_GitRemoteOverride_RejectsSSHPort(t *testing.T) {
 			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 			assert.Contains(t, rec.Body.String(), "ssh URLs with a port are not supported yet; use the https URL")
 			assert.NotContains(t, rec.Body.String(), "pw@")
+		})
+	}
+}
+
+// TestProjectClone_GitRemoteOverride_RejectsTLSPort checks that git:// with
+// any port and http:// with a port other than 80 get a specific 400:
+// ToHTTPSCloneURL keeps the port, so the clone-url would speak TLS to a
+// plain-text port (r5).
+func TestProjectClone_GitRemoteOverride_RejectsTLSPort(t *testing.T) {
+	srv, s := testServer(t)
+	src := createSourceProject(t, srv, s)
+
+	for _, remote := range []string{
+		"git://git.example.com:9418/group/repo.git",
+		"GIT://git.example.com:9419/group/repo",
+		"http://git.example.com:8080/group/repo",
+		"http://u:SECRET_P@git.example.com:443/group/repo",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]interface{}{"name": "TLS Port", "gitRemote": remote})
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "git:// URLs with a port and http:// URLs with a port other than 80 are not supported; use the https URL")
+			assert.NotContains(t, rec.Body.String(), "SECRET_")
 		})
 	}
 }
@@ -663,6 +738,34 @@ func TestProjectClone_GitRemoteOverride_DerivedForms(t *testing.T) {
 			gitRemote: "git.example.com:8443/team/repo",
 			cloneURL:  "https://git.example.com:8443/team/repo.git",
 			sourceURL: "https://git.example.com:8443/team/repo.git",
+		},
+		{
+			name:      "punycode host and dotted names are not dot segments",
+			remote:    "https://xn--bcher-kva.example/org/.github",
+			gitRemote: "xn--bcher-kva.example/org/.github",
+			cloneURL:  "https://xn--bcher-kva.example/org/.github.git",
+			sourceURL: "https://xn--bcher-kva.example/org/.github",
+		},
+		{
+			name:      "dots inside a segment and a trailing slash",
+			remote:    "git@git.example.com:team/my..repo/",
+			gitRemote: "git.example.com/team/my..repo",
+			cloneURL:  "https://git.example.com/team/my..repo.git",
+			sourceURL: "git@git.example.com:team/my..repo/",
+		},
+		{
+			name:      "ASCII whitespace around the remote is trimmed",
+			remote:    " \t git.example.com/team/repo \r\n",
+			gitRemote: "git.example.com/team/repo",
+			cloneURL:  "https://git.example.com/team/repo.git",
+			sourceURL: "git.example.com/team/repo",
+		},
+		{
+			name:      "http with the default port",
+			remote:    "http://git.example.com:80/team/repo",
+			gitRemote: "git.example.com/team/repo",
+			cloneURL:  "https://git.example.com/team/repo.git",
+			sourceURL: "http://git.example.com/team/repo",
 		},
 		{
 			name:      "query and fragment dropped",

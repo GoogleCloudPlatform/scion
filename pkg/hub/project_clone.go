@@ -26,7 +26,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -97,7 +96,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	// clone-url label by ToHTTPSCloneURL. The query string and fragment are
 	// dropped first: git remotes never need them and they can carry tokens
 	// (?access_token=…).
-	overrideRemote := stripQueryAndFragment(strings.TrimSpace(req.GitRemote))
+	overrideRemote := stripQueryAndFragment(trimRemote(req.GitRemote))
 	if overrideRemote != "" {
 		if msg := validateCloneGitRemote(overrideRemote); msg != "" {
 			ValidationError(w, msg, map[string]interface{}{"field": "gitRemote"})
@@ -799,7 +798,58 @@ const (
 	errCloneRemoteInvalid = "gitRemote must be a remote git URL (https://, ssh://, git://, " +
 		"user@host:org/repo or host[:port]/org/repo)"
 	errCloneRemoteSSHPort = "gitRemote: ssh URLs with a port are not supported yet; use the https URL"
+	// errCloneRemoteTLSPort is returned for git:// with any port and http://
+	// with a port other than 80: ToHTTPSCloneURL keeps the port, so the
+	// clone-url would speak TLS to a plain-text port.
+	errCloneRemoteTLSPort = "gitRemote: git:// URLs with a port and http:// URLs with a port other than 80 are not supported; use the https URL"
 )
+
+// trimRemote trims ASCII whitespace only. Unicode spaces such as U+0085 or
+// U+FEFF are left in place, so the printable-ASCII check rejects them
+// (the web create form trims the same set).
+func trimRemote(remote string) string {
+	return strings.Trim(remote, " \t\n\v\f\r")
+}
+
+// isPrintableASCII reports whether s contains only printable, non-space
+// ASCII (0x21-0x7E). This rejects whitespace, control and format characters
+// (e.g. RTL overrides) and non-ASCII homoglyphs; IDN hosts must be given in
+// punycode (xn--...).
+func isPrintableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x21 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// validRemotePath reports whether a decoded remote path (without the leading
+// '/' of a scheme URL) has only non-empty segments that are neither "." nor
+// "..", and no '@' (ambiguous with userinfo) or control characters. A single trailing '/' is allowed. Dot
+// segments would make GitRemote name a different repository than the one
+// git clones (libcurl removes them); empty segments ("org//repo") are junk.
+func validRemotePath(path string) bool {
+	for _, seg := range strings.Split(strings.TrimSuffix(path, "/"), "/") {
+		if seg == "" || seg == "." || seg == ".." || strings.Contains(seg, "@") {
+			return false
+		}
+		for i := 0; i < len(seg); i++ {
+			if seg[i] < 0x20 || seg[i] == 0x7f {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// validEscapedRemotePath is validRemotePath for a path that may still hold
+// percent-escapes (SCP and scheme-less forms). The raw path is checked too,
+// so neither "org/%2e%2e/repo" nor a literal "org/../repo" is accepted.
+func validEscapedRemotePath(path string) bool {
+	decoded, err := url.PathUnescape(path)
+	return err == nil && validRemotePath(path) && validRemotePath(decoded)
+}
 
 // stripQueryAndFragment drops everything from the first '?' or '#'. Git remote
 // URLs never need either, and a query can carry credentials.
@@ -847,9 +897,12 @@ func splitSCPRemote(remote string) (login, host, path string, ok bool) {
 //     create form already accepts.
 //
 // Local paths ("/x", "./x", "~/x"), bare names, bare hosts, drive paths and
-// SCP without a login (host:org/repo) are rejected.
+// SCP without a login (host:org/repo) are rejected, as is, in every form,
+// anything but printable ASCII, a malformed %-escape, or a path with '@'
+// (raw or %40), "." / ".." or empty segments. git:// with a port and
+// http:// with a port other than 80 get errCloneRemoteTLSPort.
 func validateCloneGitRemote(remote string) string {
-	if strings.IndexFunc(remote, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+	if !isPrintableASCII(remote) {
 		return errCloneRemoteInvalid
 	}
 	if strings.Contains(remote, "://") {
@@ -858,7 +911,8 @@ func validateCloneGitRemote(remote string) string {
 
 	if login, host, path, ok := splitSCPRemote(remote); ok {
 		if scpLogin.MatchString(login) && isHostLabels(host) && !strings.Contains(path, "@") &&
-			path != "" && !strings.HasPrefix(path, "/") && strings.Contains(strings.Trim(path, "/"), "/") {
+			path != "" && !strings.HasPrefix(path, "/") && strings.Contains(strings.Trim(path, "/"), "/") &&
+			validEscapedRemotePath(path) {
 			return ""
 		}
 		return errCloneRemoteInvalid
@@ -869,8 +923,9 @@ func validateCloneGitRemote(remote string) string {
 	if !isHostname(host) || (hasPort && !isPort(port)) {
 		return errCloneRemoteInvalid
 	}
-	if !strings.Contains(strings.Trim(path, "/"), "/") || strings.Contains(path, "@") {
-		return errCloneRemoteInvalid // need at least org/repo, and no '@' in the path
+	if !strings.Contains(strings.Trim(path, "/"), "/") || strings.Contains(path, "@") ||
+		!validEscapedRemotePath(path) {
+		return errCloneRemoteInvalid // need at least org/repo, no '@', no dot or empty segments
 	}
 	return ""
 }
@@ -905,6 +960,21 @@ func validateCloneSchemeRemote(remote string) string {
 	}
 	// A port must be 1-65535 without leading zeros; a bare ':' is rejected.
 	if strings.HasSuffix(u.Host, ":") || (u.Port() != "" && !isPort(u.Port())) {
+		return errCloneRemoteInvalid
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "git":
+		if u.Port() != "" {
+			return errCloneRemoteTLSPort
+		}
+	case "http":
+		if u.Port() != "" && u.Port() != "80" {
+			return errCloneRemoteTLSPort
+		}
+	}
+	// Dot and empty segments, checked both escaped and decoded (u.Path).
+	if !validRemotePath(strings.TrimPrefix(u.EscapedPath(), "/")) ||
+		!validRemotePath(strings.TrimPrefix(u.Path, "/")) {
 		return errCloneRemoteInvalid
 	}
 	// '@' in the path would be ambiguous with userinfo (and could make a

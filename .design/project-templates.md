@@ -663,10 +663,18 @@ single-label one such as `git@gitserver:org/repo`; or the scheme-less
 Anything else, such as a local path, gets a 400 with `details.field =
 "gitRemote"`. SCP style without a login (`github.com:org/repo`) is not
 supported, because it cannot be told apart from `host:port/…`; use
-`git@github.com:org/repo` or the https URL. Whitespace and control characters
-are rejected in every form, as is a `@` in the path (it is ambiguous with
-userinfo: `https://github.com/org/repo@github.com/x` must not become
-`github.com/x`). Ports must be 1-65535 without leading zeros (no bare `:`), and
+`git@github.com:org/repo` or the https URL. Only ASCII whitespace is trimmed
+from the ends; after that the remote must be printable ASCII (0x21-0x7E) in
+every form. This rejects whitespace, control and format characters such as an
+RTL override, non-ASCII homoglyphs and Unicode spaces (U+0085, U+FEFF), so an
+IDN host must be given in punycode (`xn--…`). A `@` in the path, raw or as
+`%40`, is rejected too, because it is ambiguous with userinfo:
+`https://github.com/org/repo@github.com/x` must not become `github.com/x`. So
+are `.` and `..` path segments, raw or percent-encoded (git's https transport
+removes them, so `github.com/org/../evil/repo` would clone `github.com/evil/repo`
+while `GitRemote` names something else), empty segments (`org//repo`; one
+trailing `/` is allowed), malformed `%` escapes, and escaped control
+characters such as `%0A`. Ports must be 1-65535 without leading zeros (no bare `:`), and
 DNS labels may not start or end with `-`. A scheme URL is also rejected when
 removing its credentials would change anything but the userinfo (host, port or
 path), which catches a password with an unencoded `/` (`https://u:p/w@host/…`,
@@ -676,6 +684,12 @@ for http) is dropped, so `https://github.com:443/org/repo` names the same
 repository as the template's `github.com/org/repo`. `ssh://` URLs with a port (for example Gerrit's `:29418`) are
 rejected for now with a message pointing to the https URL, because
 `NormalizeGitRemote`/`ToHTTPSCloneURL` would turn the port into a path segment.
+For the same reason, `git://` URLs with any port and `http://` URLs with a
+port other than 80 are rejected with a message pointing to the https URL:
+`ToHTTPSCloneURL` keeps the port, so `clone-url` would speak TLS to a
+plain-text port. The scheme-less `host:port/org/repo` form keeps its port in an
+https `clone-url`, so the port must serve https (`host:22/…` does not work);
+use `git@host:org/repo` for ssh.
 Before anything is compared or stored, the query string and fragment are
 dropped and embedded credentials (`https://user:TOKEN@host/…`) are stripped
 (`util.StripGitURLCredentials`), because `GitRemote` and the labels are
