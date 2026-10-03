@@ -122,35 +122,23 @@ func TestContract_BudgetExhaustion_MonotonicProgress(t *testing.T) {
 		defaultBackfillBudget = originalBudget
 	})
 
-	// Set budget to very small value to force exhaustion after one or two projects.
-	// The budget needs to be enough to complete at least one project but not all.
-	// Using a very small value like 10ms should allow at least one project.
-	defaultBackfillBudget = 10 * time.Millisecond
+	// A 1ns budget is exhausted before every budget check, so each boot runs
+	// exactly the one project it is always allowed and then stops. This
+	// exercises the multi-boot path deterministically. A wall-clock budget
+	// such as 10ms either finished every project in one boot on a fast host
+	// (skipping the path under test) or lapsed before the first project on
+	// a loaded one.
+	defaultBackfillBudget = time.Nanosecond
 
 	// First boot: should complete at least one project.
 	runBootDataMigrations(ctx, s)
 
 	marker1, err := loadBackfillMarker(ctx, s)
 	require.NoError(t, err)
-
-	// The backfill might complete all projects in the first boot if they're very small.
-	// The key is that it makes progress. If it completes all in one go, that's fine -
-	// we'll verify convergence instead.
-	if marker1.CompletedAt != nil {
-		// All projects completed on first boot - verify marker state.
-		require.NotNil(t, marker1.CompletedAt, "completed marker must have CompletedAt")
-		t.Logf("All projects completed in first boot - this is acceptable for small datasets")
-		return
-	}
-
-	require.Greater(t, len(marker1.ProjectsDone), 0,
-		"first boot must complete at least one project if not fully complete")
-	require.LessOrEqual(t, len(marker1.ProjectsDone), len(projectIDs),
-		"first boot must not exceed total projects")
-
-	// If budget is extremely tight, we might only complete 1 project.
-	// But we should NOT have completed all projects (unless timing is very lucky).
-	// Save the count for monotonic comparison.
+	require.Nil(t, marker1.CompletedAt,
+		"a 1ns budget must leave work for later boots; the multi-boot path below is the point of this test")
+	require.Len(t, marker1.ProjectsDone, 1,
+		"a budget-exhausted boot must still complete exactly one project")
 	firstCount := len(marker1.ProjectsDone)
 
 	// Second boot: should make progress (complete more projects or remain stable).
@@ -158,8 +146,8 @@ func TestContract_BudgetExhaustion_MonotonicProgress(t *testing.T) {
 
 	marker2, err := loadBackfillMarker(ctx, s)
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(marker2.ProjectsDone), firstCount,
-		"second boot must maintain or increase project count (monotonic)")
+	require.Equal(t, firstCount+1, len(marker2.ProjectsDone),
+		"second boot must complete one more project (monotonic progress)")
 
 	// Continue booting until all projects are done or we hit a reasonable cap.
 	maxIterations := 10
@@ -168,9 +156,11 @@ func TestContract_BudgetExhaustion_MonotonicProgress(t *testing.T) {
 		require.NoError(t, err)
 
 		if marker.CompletedAt != nil {
-			// Global completion marker set.
-			require.Len(t, marker.ProjectsDone, len(projectIDs),
-				"completed marker must list all projects in ProjectsDone")
+			// Global completion marker set. By design ProjectsDone is
+			// cleared on completion for bounded growth (see
+			// messageBackfillMarker in migration_markers.go).
+			require.Empty(t, marker.ProjectsDone,
+				"completed marker must clear ProjectsDone")
 			// Success: all projects done.
 			return
 		}
