@@ -40,6 +40,10 @@ describe('validateGitRemote', () => {
     'github.com/org/repo',
     'git.example.com:8443/team/repo',
     'https://git.example.com:8443/team/repo.git',
+    'git@gitserver:org/repo',
+    'https://gitserver/org/repo.git',
+    'https://u:p@ss@github.com/org/repo.git',
+    'https://[::1]/org/repo',
   ])('accepts %s', (remote) => {
     expect(validateGitRemote(remote)).toBeNull();
   });
@@ -62,6 +66,13 @@ describe('validateGitRemote', () => {
     'github.com:notaport/org/repo',
     'github.com:8443/repo',
     'localhost:8080/org/repo',
+    'github.com:org/repo',
+    'https://u:SECRET_P/w@github.com/org/repo',
+    'https://u:SECRET_P/w@x@github.com/org/repo.git',
+    'ssh://git:SECRET_P/w@github.com/org/repo.git',
+    'https://github.com/org/x@evil.example/repo',
+    'https://bad_host/org/repo',
+    'https://[::1/org/repo',
   ])('rejects %s', (remote) => {
     expect(validateGitRemote(remote)).toBe(GIT_REMOTE_INVALID);
   });
@@ -86,6 +97,13 @@ describe('stripGitURLCredentials / sanitizeGitRemote', () => {
     ['ssh://:pw@github.com/org/repo.git', 'ssh://github.com/org/repo.git'],
     ['https://github.com/org/repo@v1', 'https://github.com/org/repo@v1'],
     ['git@github.com:org/repo.git', 'git@github.com:org/repo.git'],
+    ['https://u:p/w@github.com/org/repo', 'https://github.com/org/repo'],
+    ['https://u:p/w@x@github.com/org/repo.git', 'https://github.com/org/repo.git'],
+    ['ssh://git:p/w@github.com/org/repo.git', 'ssh://git@github.com/org/repo.git'],
+    ['https://tok@github.com/org/repo@v1', 'https://github.com/org/repo@v1'],
+    ['https://u:t@github.com', 'https://github.com'],
+    ['https://u:t@github.com/org/repo?x=1', 'https://github.com/org/repo?x=1'],
+    ['https://github.com/org/repo?u=a@b', 'https://github.com/org/repo?u=a@b'],
   ])('%s -> %s', (input, want) => {
     expect(stripGitURLCredentials(input)).toBe(want);
   });
@@ -127,6 +145,8 @@ describe('displayGitRemote', () => {
     ['alice@git.example.com:team/repo.git', 'git.example.com/team/repo'],
     ['ssh://git:pw@github.com/acme/repo.git', 'github.com/acme/repo'],
     ['github.com/Acme/Repo', 'github.com/Acme/Repo'],
+    ['https://u:SECRET/w@github.com/acme/repo.git', 'github.com/acme/repo'],
+    ['git@gitserver:org/repo', 'gitserver/org/repo'],
   ])('%s -> %s', (input, want) => {
     expect(displayGitRemote(input)).toBe(want);
   });
