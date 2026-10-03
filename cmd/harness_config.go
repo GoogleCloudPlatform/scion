@@ -543,7 +543,8 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 
 	// Collect local files
 	fmt.Printf("Scanning harness-config files in %s...\n", localPath)
-	files, err := hubclient.CollectFiles(localPath, nil)
+	// Backups and atomic-write temp files are local-only and never uploaded.
+	files, err := hubclient.CollectFiles(localPath, config.HarnessConfigTransientPatterns)
 	if err != nil {
 		return fmt.Errorf("failed to scan harness-config files: %w", err)
 	}

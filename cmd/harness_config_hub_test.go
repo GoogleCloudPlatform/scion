@@ -179,3 +179,26 @@ func TestSyncHarnessConfigToHub_FallsBackToHubFileAPIForLocalStorageURLs(t *test
 	require.NoError(t, err)
 	require.Contains(t, uploadedPaths, "config.yaml")
 }
+
+func TestSyncHarnessConfigToHub_SkipsBackupAndTempFiles(t *testing.T) {
+	localPath := t.TempDir()
+	write := func(name, content string) {
+		require.NoError(t, os.WriteFile(filepath.Join(localPath, name), []byte(content), 0644))
+	}
+	write("config.yaml", "harness: codex\n")
+	write("dialect.yaml", "dialect: codex\n")
+	write("config.yaml.bak.20261003T193320Z", "old\n")
+	write("provision.py.bak.20261003T193320Z", "old\n")
+	write(".provision.py.tmp-123456", "partial\n")
+
+	var uploadedPaths []string
+	server := newMockHubServerForLocalStorageHarnessConfig(t, &uploadedPaths)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex"))
+	require.ElementsMatch(t, []string{"config.yaml", "dialect.yaml"}, uploadedPaths)
+}
