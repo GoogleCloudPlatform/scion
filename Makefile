@@ -371,7 +371,7 @@ proto:
 		--proto_path=proto \
 		--go_out=. --go_opt=module=github.com/GoogleCloudPlatform/scion \
 		--go-grpc_out=. --go-grpc_opt=module=github.com/GoogleCloudPlatform/scion \
-		proto/broker/v1/broker.proto
+		proto/broker/v1/broker.proto proto/conduit/v1/conduit.proto
 	@echo "Proto generation done."
 
 ## proto-check: Verify generated protobuf code is up to date
@@ -382,9 +382,10 @@ proto-check:
 		--proto_path=proto \
 		--go_out=$$TMP --go_opt=module=github.com/GoogleCloudPlatform/scion \
 		--go-grpc_out=$$TMP --go-grpc_opt=module=github.com/GoogleCloudPlatform/scion \
-		proto/broker/v1/broker.proto && \
+		proto/broker/v1/broker.proto proto/conduit/v1/conduit.proto && \
 	diff $$TMP/proto/broker/v1/broker.pb.go proto/broker/v1/broker.pb.go && \
 	diff $$TMP/proto/broker/v1/broker_grpc.pb.go proto/broker/v1/broker_grpc.pb.go && \
+	diff $$TMP/proto/conduit/v1/conduit.pb.go proto/conduit/v1/conduit.pb.go && \
 	rm -rf $$TMP && \
 	echo "Proto generated code is up to date." || \
 	(rm -rf $$TMP; echo "Proto generated code is out of date. Run 'make proto' to regenerate."; exit 1)
