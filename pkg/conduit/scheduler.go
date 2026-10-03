@@ -139,6 +139,15 @@ func (s *scheduler) enqueue(of *outFrame, abort <-chan struct{}, abortErr func()
 			s.mu.Unlock()
 			return ErrSessionClosed
 		}
+		// Re-check abort under s.mu: aborts close the channel before
+		// purging, so a frame is either queued before the purge (and
+		// dropped by it) or refused here. It never outlives the purge.
+		select {
+		case <-abort:
+			s.mu.Unlock()
+			return abortErr()
+		default:
+		}
 		q := s.queuedLocked()
 		if q+of.size <= s.budget || q == 0 {
 			s.pushLocked(of)
