@@ -2275,14 +2275,17 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 
 // dedupeSkillReferences keeps only the final occurrence of each skill
 // reference key (URI plus As) and drops earlier ones, preserving the relative
-// order of the references that remain. Downstream, the skill resolvers and
-// the provision step collapse references that share a URI last-wins, taking
-// As, Scope and Optional from the last one. The last reference for a URI is
-// always the final occurrence of its own key, so it survives and stays last
-// among that URI's references: what gets installed is unchanged. References
-// with the same URI but different As are kept as separate entries, because
-// the dedupe does not merge different install names (resolvers that resolve
-// each reference on its own install both).
+// order of the references that remain. The Hub resolver and the provision
+// step's required-skill check collapse references that share a URI
+// last-wins, taking As, Scope and Optional from the last one. The last
+// reference for a URI is always the final occurrence of its own key, so it
+// survives and stays last among that URI's references, and on that path the
+// installed result is unchanged. Resolvers that resolve each reference on
+// its own (gcp-skill://, and gh:// when the Hub is unavailable) install the
+// same files under the same name; the surviving entry now carries the latest
+// Scope and Optional, matching the Hub path. References with the same URI
+// but different As are kept as separate entries, because the dedupe does not
+// merge different install names (the per-reference resolvers install both).
 func dedupeSkillReferences(refs []api.SkillReference) []api.SkillReference {
 	if len(refs) < 2 {
 		return refs
