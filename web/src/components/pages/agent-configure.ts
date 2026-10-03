@@ -1368,7 +1368,7 @@ export class ScionPageAgentConfigure extends LitElement {
             <sl-icon name="info-circle"></sl-icon>
             <span
               >This agent is in "${this.agent.phase}" phase, so only its timezone can be changed
-              here. Other settings can be edited only while an agent is in "created" phase.</span
+              here. This page edits other settings only while an agent is in "created" phase.</span
             >
           </div>
           ${this.renderTimezoneRow()}

@@ -342,6 +342,27 @@ describe('agent-configure Timezone row', () => {
   });
 });
 
+/**
+ * Outside "created" the page must offer no path that sends config: no form
+ * fields, and no button other than the Timezone row's own (in particular no
+ * Save or Start).
+ */
+function expectTimezoneOnlyView(el: ConfigureEl): void {
+  const root = el.shadowRoot!;
+  expect(root.querySelector('sl-tab-group')).toBeNull();
+  expect(root.querySelector('sl-input, sl-textarea, sl-select, sl-checkbox, sl-switch')).toBeNull();
+  const buttons = Array.from(root.querySelectorAll('sl-button'));
+  expect(buttons.length).toBeGreaterThan(0);
+  for (const button of buttons) {
+    expect(['timezone-pin-open', 'timezone-unpin']).toContain(button.getAttribute('data-testid'));
+  }
+  const labels = buttons.map((b) => b.textContent?.trim() ?? '');
+  expect(labels.some((l) => /\b(Save|Start)\b/.test(l))).toBe(false);
+  expect(q(el, 'phase-notice')?.textContent?.replace(/\s+/g, ' ')).toContain(
+    'This page edits other settings only while an agent is in "created" phase.'
+  );
+}
+
 describe('agent-configure Timezone row on a non-created agent', () => {
   it('a running agent shows the row and "applies on next start", and can pin', async () => {
     const el = await mount(makeAgent('running', { explicitTimezone: 'Europe/Paris' }));
@@ -349,8 +370,8 @@ describe('agent-configure Timezone row on a non-created agent', () => {
     // no error banner, and none of the other form fields render.
     expect(q(el, 'phase-notice')?.textContent).toContain('only its timezone can be changed');
     expect(el.shadowRoot!.querySelector('.error-banner')).toBeNull();
-    expect(el.shadowRoot!.querySelector('sl-tab-group')).toBeNull();
-    expect(el.shadowRoot!.querySelector('sl-input, sl-textarea, sl-select')).toBeNull();
+    expectTimezoneOnlyView(el);
+    expect(q(el, 'timezone-unpin')).not.toBeNull();
     expect(el.shadowRoot!.querySelector('a.back-link')?.getAttribute('href')).toBe(
       '/agents/agent-1'
     );
@@ -399,9 +420,11 @@ describe('agent-configure Timezone row on a non-created agent', () => {
   });
 
   it.each(['stopped', 'starting', 'suspended', 'error'])(
-    'a %s agent shows the row with the phase-neutral next-start hint',
+    'a %s agent shows only the row, with the phase-neutral next-start hint',
     async (phase) => {
       const el = await mount(makeAgent(phase));
+      expectTimezoneOnlyView(el);
+      expect(q(el, 'timezone-pin-open')).not.toBeNull();
       expect(text(el, 'timezone-value')).toBe('Not pinned');
       expect(text(el, 'timezone-next-start')).toBe(
         "A timezone change applies on the agent's next start."

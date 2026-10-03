@@ -16,8 +16,10 @@
   so the row shows the pin (source explicit or legacy) or "Not pinned" with the resolution order.
   The resolved zone of an unpinned agent appears only after a PATCH.
 - **Non-created phases.** The hub accepts `explicitTimezone` in any phase. So outside `created` the
-  page shows a neutral notice ("only its timezone can be changed here") and the Timezone row, with
-  no other form fields, and a back link to the agent. In every non-created phase, or when the PATCH
+  page shows a neutral notice ("only its timezone can be changed here. This page edits other
+  settings only while an agent is in "created" phase.") and the Timezone row, with no other form
+  fields and no Save or Start button, and a back link to the agent. The notice is scoped to this
+  page because the hub also accepts config edits for stopped agents. In every non-created phase, or when the PATCH
   returns the hub's next-start warning, the row says "A timezone change applies on the agent's next
   start."
 - **Entry point.** `agent-detail.ts` now shows the Configure button in every phase when the caller
@@ -40,7 +42,9 @@ progeny = "Inherited TZ environment variable"; hub-default = "Hub default timezo
 round-trip through a mocked PATCH, every source label from the PATCH response, invalid zone, PATCH
 failure, Save response, a response without the resolved fields (pin and unpin), a running agent
 (pin, resolved value and source), a legacy-pinned running agent (unpin), the next-start hint in
-stopped/starting/suspended/error, and the TZ env filter on load and save.
+stopped/starting/suspended/error, and the TZ env filter on load and save. For running, stopped,
+starting, suspended and error it also asserts the view has no form fields and no button other than
+Pin…/Unpin (adding a Save button there fails 5 cases).
 `agent-detail-header.test.ts` checks that Configure shows for running/stopped/suspended/error agents
 with `update` capability and is hidden without it (reverting the condition fails 5 cases). The display
 preference is set to a zone that differs from the browser zone. A mutation check (removing the
