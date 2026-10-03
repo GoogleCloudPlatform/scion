@@ -364,6 +364,9 @@ func TestMintConduitGrant_StreamParamAllowList(t *testing.T) {
 		{"events with a filter", grant.StreamHeader{Kind: grant.StreamKindEvents, Params: map[string]string{"filter": "*"}}, errConduitInvalid},
 		{"pty with tcp params", grant.StreamHeader{Kind: grant.StreamKindPTY, Params: map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: "3000"}}, errConduitInvalid},
 		{"tcp with an extra param", grant.StreamHeader{Kind: grant.StreamKindTCP, Params: map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: "3000", "x": "y"}}, errConduitInvalid},
+		// agent_id is only for broker targets, even when it names this agent.
+		{"logs with agent_id on an agent target", grant.StreamHeader{Kind: grant.StreamKindLogs, Params: map[string]string{grant.ParamAgentID: f.agent.ID}}, errConduitInvalid},
+		{"pty with agent_id on an agent target", grant.StreamHeader{Kind: grant.StreamKindPTY, Params: map[string]string{grant.ParamAgentID: f.agent.ID}}, errConduitInvalid},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, claims, err := f.mint(f.owner, tc.h)
@@ -559,6 +562,104 @@ func TestConduitGrantKeySet_EphemeralWithoutEncryption(t *testing.T) {
 	assert.True(t, ok)
 	_, err = s.GetSecret(ctx, conduitGrantKeySecretName, store.ScopeHub, conduitGrantKeyScopeID)
 	assert.NoError(t, err)
+}
+
+// TestConduitGrantKeySet_EphemeralLogs: the memory-only ring is announced
+// once per server at INFO, with a one-time WARN only where nodes must share
+// signing keys, and no key material in either.
+func TestConduitGrantKeySet_EphemeralLogs(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		stableKeys bool
+		wantWarn   bool
+	}{
+		{"single node", false, false},
+		{"nodes must share keys", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := testServer(t)
+			srv.encryptionKey = nil
+			srv.config.RequireStableSigningKey = tc.stableKeys
+			srv.conduitGrantsOnce = sync.Once{}
+			srv.conduitGrants = nil
+			buf := captureSlogDefault(t)
+
+			ctx := context.Background()
+			for range 3 {
+				_, err := srv.conduitGrantKeySet().signer(ctx)
+				require.NoError(t, err)
+			}
+			logs := buf.String()
+			assert.Equal(t, 1, strings.Count(logs, "Conduit grant key ring is ephemeral"), logs)
+			assert.Contains(t, logs, "level=INFO msg=\"Conduit grant key ring is ephemeral")
+			wantWarns := 0
+			if tc.wantWarn {
+				wantWarns = 1
+			}
+			assert.Equal(t, wantWarns, strings.Count(logs, "level=WARN msg=\"Conduit grant key ring is per node"), logs)
+
+			ring, _, err := srv.conduitGrantKeySet().store.Load(ctx)
+			require.NoError(t, err)
+			assertNoKeyMaterial(t, logs, ring)
+		})
+	}
+}
+
+func assertNoKeyMaterial(t *testing.T, s string, ring *grant.KeyRing) {
+	t.Helper()
+	for _, k := range ring.Keys {
+		for _, enc := range []string{base64.StdEncoding.EncodeToString(k.Seed), base64.RawURLEncoding.EncodeToString(k.Seed), fmt.Sprintf("%x", k.Seed)} {
+			assert.NotContains(t, s, enc)
+		}
+	}
+	assert.NotContains(t, s, "seed")
+}
+
+// TestConduitGrantKeys_UnreadableRingFailsClosedAndLogs: a stored ring this
+// node cannot decrypt (for example a changed shared signing secret) is not
+// replaced; mint fails closed and an actionable ERROR naming the secret is
+// logged at most once per refresh interval.
+func TestConduitGrantKeys_UnreadableRingFailsClosedAndLogs(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+	clock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	writer := newConduitGrantKeys(newTestDBGrantKeyStore(t, s), clock.Now)
+	_, err := writer.signer(ctx)
+	require.NoError(t, err)
+
+	other, err := newDBConduitGrantKeyStore(s, secret.DeriveLocalEncryptionKey("a-different-secret"))
+	require.NoError(t, err)
+	node := newConduitGrantKeys(other, clock.Now)
+	buf := captureSlogDefault(t)
+
+	const logLine = "Conduit grant key ring cannot be read"
+	for range 3 {
+		_, err = node.signer(ctx)
+		require.ErrorIs(t, err, errConduitGrantRingUnreadable)
+	}
+	logs := buf.String()
+	assert.Equal(t, 1, strings.Count(logs, logLine), "logged once per refresh interval")
+	assert.Contains(t, logs, "level=ERROR")
+	assert.Contains(t, logs, "secret_key="+conduitGrantKeySecretName)
+	assert.Contains(t, logs, "scope_id="+conduitGrantKeyScopeID)
+	assert.Contains(t, logs, "Discarding the ring is safe")
+
+	clock.Advance(conduitGrantKeyRefresh - time.Second)
+	_, err = node.publicKeys(ctx)
+	require.ErrorIs(t, err, errConduitGrantRingUnreadable)
+	assert.Equal(t, 1, strings.Count(buf.String(), logLine))
+	clock.Advance(time.Second)
+	_, err = node.publicKeys(ctx)
+	require.ErrorIs(t, err, errConduitGrantRingUnreadable)
+	assert.Equal(t, 2, strings.Count(buf.String(), logLine), "logged again after the refresh interval")
+
+	// Not replaced: the stored ring is still the writer's.
+	ring, _, err := newTestDBGrantKeyStore(t, s).Load(ctx)
+	require.NoError(t, err)
+	wsigner, err := writer.signer(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, wsigner.KeyID, ring.Keys[0].KeyID)
+	assertNoKeyMaterial(t, buf.String(), ring)
 }
 
 // TestConduitGrantKeys_Rotation: rotation by kid propagates to other nodes;

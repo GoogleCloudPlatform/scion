@@ -45,6 +45,23 @@ import (
 // so a restart (or another node) has a different ring. Grants are
 // short-lived, so a restart only invalidates grants that are in flight.
 //
+// Recovery. If the persisted ring cannot be decrypted or decoded (for
+// example the shared signing secret changed, so the encryption key no longer
+// matches), every grant mint and key publication fails closed, and an ERROR
+// naming the secret is logged at most once per conduitGrantKeyRefresh. The
+// ring holds no long-term data: discarding it is always safe and loses only
+// grants in flight. To recover, fix the shared signing secret on every node,
+// or delete the hub-scope secret conduit.grant_key (scope ID "conduit") from
+// the hub database; the next request then creates a new ring. The hub never
+// replaces an unreadable ring by itself, since that would hide a
+// misconfiguration between nodes.
+//
+// Multi-node. A memory-only ring is per node: a grant minted on one node
+// does not verify against another node's keys. A deployment whose nodes must
+// share signing keys (a GCP secret backend or RequireStableSigningKey) gets
+// a one-time WARN when the ring is memory-only; such deployments must set a
+// shared signing secret.
+//
 // Bootstrap. The first node to need the ring creates it; CreateSecret's
 // uniqueness makes a concurrent bootstrap converge on one ring (the loser
 // reloads).
@@ -87,6 +104,10 @@ const (
 )
 
 var (
+	// errConduitGrantRingUnreadable marks a persisted ring that exists but
+	// cannot be decrypted, decoded or validated.
+	errConduitGrantRingUnreadable = errors.New("stored conduit grant key ring is unreadable")
+
 	errConduitDisabled  = errors.New("conduit experiment is disabled")
 	errConduitForbidden = errors.New("conduit stream forbidden")
 	errConduitInvalid   = errors.New("invalid conduit stream request")
@@ -128,14 +149,14 @@ func (d *dbConduitGrantKeyStore) Load(ctx context.Context) (*grant.KeyRing, int,
 	}
 	plain, _, err := secret.DecryptValue(rec.EncryptedValue, d.encryptionKey)
 	if err != nil {
-		return nil, 0, fmt.Errorf("decrypt conduit grant key ring: %w", err)
+		return nil, 0, fmt.Errorf("%w: decrypt: %w", errConduitGrantRingUnreadable, err)
 	}
 	var ring grant.KeyRing
 	if err := json.Unmarshal([]byte(plain), &ring); err != nil {
-		return nil, 0, fmt.Errorf("decode conduit grant key ring: %w", err)
+		return nil, 0, fmt.Errorf("%w: decode: %w", errConduitGrantRingUnreadable, err)
 	}
 	if err := ring.Validate(); err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("%w: %w", errConduitGrantRingUnreadable, err)
 	}
 	return &ring, rec.Version, nil
 }
@@ -222,6 +243,8 @@ type conduitGrantKeys struct {
 	mu       sync.Mutex
 	ring     *grant.KeyRing
 	loadedAt time.Time
+	// unreadableLoggedAt rate-limits the unreadable-ring ERROR.
+	unreadableLoggedAt time.Time
 }
 
 func newConduitGrantKeys(st conduitGrantKeyStore, now func() time.Time) *conduitGrantKeys {
@@ -243,10 +266,30 @@ func (k *conduitGrantKeys) currentLocked(ctx context.Context) (*grant.KeyRing, e
 		ring, err = k.bootstrap(ctx, now)
 	}
 	if err != nil {
+		if errors.Is(err, errConduitGrantRingUnreadable) {
+			k.logUnreadableLocked(now, err)
+		}
 		return nil, fmt.Errorf("conduit grant key ring: %w", err)
 	}
 	k.ring, k.loadedAt = ring, now
 	return ring, nil
+}
+
+// logUnreadableLocked reports an unreadable stored ring at most once per
+// conduitGrantKeyRefresh. Callers must hold k.mu.
+func (k *conduitGrantKeys) logUnreadableLocked(now time.Time, err error) {
+	if !k.unreadableLoggedAt.IsZero() && now.Sub(k.unreadableLoggedAt) < conduitGrantKeyRefresh {
+		return
+	}
+	k.unreadableLoggedAt = now
+	slog.Error("Conduit grant key ring cannot be read; Conduit grants are unavailable. "+
+		"Check that every hub node has the same shared signing secret. "+
+		"Discarding the ring is safe (only in-flight grants are lost): delete the hub-scope secret "+
+		"and the next request creates a new ring.",
+		"secret_key", conduitGrantKeySecretName,
+		"scope", store.ScopeHub,
+		"scope_id", conduitGrantKeyScopeID,
+		"error", err)
 }
 
 // bootstrap creates the ring with one fresh random key, or loads the ring
@@ -347,11 +390,23 @@ func (s *Server) conduitGrantKeySet() *conduitGrantKeys {
 			st = db
 		} else {
 			slog.Info("Conduit grant key ring is ephemeral: no persistence configured; it is held in memory and regenerated on restart")
+			if s.requiresSharedSigningKeys() {
+				slog.Warn("Conduit grant key ring is per node: grants minted on one hub node will not verify " +
+					"against another node's keys until a shared signing secret is configured")
+			}
 			st = &memoryConduitGrantKeyStore{}
 		}
 		s.conduitGrants = newConduitGrantKeys(st, nil)
 	})
 	return s.conduitGrants
+}
+
+// requiresSharedSigningKeys reports whether this deployment's nodes must
+// agree on signing keys: the same signal the hub's other signing keys use
+// (a GCP secret backend or RequireStableSigningKey).
+func (s *Server) requiresSharedSigningKeys() bool {
+	_, isGCPBackend := s.secretBackend.(*secret.GCPBackend)
+	return isGCPBackend || s.config.RequireStableSigningKey
 }
 
 // conduitGrantKeyActivation returns the configured publish-before-sign
