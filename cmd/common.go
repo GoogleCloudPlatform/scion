@@ -1210,13 +1210,15 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		workspaceFinalized = true
 	}
 
-	return finishHubStart(hubCtx, projectID, agentName, resume, resp, workspaceFinalized)
+	return finishHubStart(hubCtx, projectID, agentName, resume, resp, remainingWarnings, workspaceFinalized)
 }
 
 // finishHubStart completes a Hub start after the create (and any workspace
 // finalize): it waits for the launch when needed, reports the result, and
-// attaches with --attach.
-func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume bool, resp *hubclient.CreateAgentResponse, workspaceFinalized bool) error {
+// attaches with --attach. textWarnings are the create warnings still to
+// print in text output (those not already shown as workspace notices); JSON
+// output carries all of resp.Warnings.
+func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume bool, resp *hubclient.CreateAgentResponse, textWarnings []string, workspaceFinalized bool) error {
 	// Decide whether to wait for the agent to reach running:
 	//   - after a workspace finalize, which dispatches the start;
 	//   - when the Hub accepted the create for an asynchronous launch;
@@ -1253,7 +1255,7 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume bool
 			Progress: progress,
 		})
 		if err != nil {
-			for _, w := range remainingWarnings {
+			for _, w := range textWarnings {
 				fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 			}
 			return err
@@ -1332,7 +1334,7 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume bool
 	if launching {
 		statusf("Follow the launch with: scion start %s (waits until it is running)\n", agentName)
 	}
-	for _, w := range remainingWarnings {
+	for _, w := range textWarnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 	}
 
