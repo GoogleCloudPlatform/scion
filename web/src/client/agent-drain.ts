@@ -38,8 +38,9 @@
 
 import type { Agent, Capabilities } from '../shared/types.js';
 import { apiFetch } from './api.js';
-import type { SeedEpochToken, StateManager } from './state.js';
+import type { StateManager } from './state.js';
 import { stateManager } from './state.js';
+import { AgentSeedEpoch } from './agent-seed-epoch.js';
 
 /** Rows requested per drain page (the server's maximum page size). */
 export const DRAIN_PAGE_LIMIT = 500;
@@ -395,13 +396,7 @@ export class AgentDrainRunner {
     const lateConnect = await this.waitForConnection(signal);
     if (gen !== this.generation || scopeGen !== this.state.scopeGeneration) return null;
 
-    const createdIds: string[] = [];
-    const onCreated = (e: Event): void => {
-      const id = (e as CustomEvent<{ data?: { agentId?: string } }>).detail?.data?.agentId;
-      if (id) createdIds.push(id);
-    };
-    this.state.addEventListener('agent-created', onCreated);
-    const token: SeedEpochToken = this.state.beginSeedEpoch();
+    const epoch = new AgentSeedEpoch(this.state);
     try {
       let drained: AgentDrainResult;
       try {
@@ -420,33 +415,13 @@ export class AgentDrainRunner {
       // epoch token): discard it rather than render it.
       if (gen !== this.generation || scopeGen !== this.state.scopeGeneration) return null;
 
-      this.state.seedAgents(drained.agents, {
-        token,
+      const seeded = epoch.seed(drained.agents, {
         partial: options.view === 'compact',
+        ...(options.isMember ? { isMember: options.isMember } : {}),
       });
-
-      const tombstones = this.state.getDeletedAgentIds();
-      const members = new Map<string, Agent>();
-      for (const a of drained.agents) {
-        if (tombstones.has(a.id)) continue;
-        members.set(a.id, this.state.getAgent(a.id) ?? a);
-      }
-      let stale = lateConnect;
-      for (const id of createdIds) {
-        if (members.has(id) || tombstones.has(id)) continue;
-        const agent = this.state.getAgent(id);
-        if (!agent) continue;
-        if (!options.isMember) {
-          stale = true;
-          continue;
-        }
-        if (options.isMember(agent)) members.set(id, agent);
-      }
-
-      return { ...drained, agents: Array.from(members.values()), stale };
+      return { ...drained, agents: seeded.agents, stale: lateConnect || seeded.undecided };
     } finally {
-      this.state.removeEventListener('agent-created', onCreated);
-      this.state.endSeedEpoch(token);
+      epoch.close();
       if (this.controller === controller) this.controller = null;
     }
   }

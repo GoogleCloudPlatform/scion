@@ -128,6 +128,16 @@ export interface PagedPageResult {
   nextCursor?: string | undefined;
   totalCount: number;
   stats?: { total: number; running: number; agents?: Array<[string, string]> } | undefined;
+  /**
+   * IDs upserted live (creates included) while this request was in flight,
+   * already applied to the state store. After adopting the response the
+   * window replays them as an `agents-changed` flush would: an on-page row
+   * is replaced and re-sorted, and an off-page create under the add rule
+   * joins the member index (with the chip if it could land on the page).
+   * Without it, a create the response predates would be lost from the
+   * freshly seeded member index.
+   */
+  liveChanged?: readonly string[] | undefined;
 }
 
 /** Fetches one sorted page for paged navigation. Rejecting sets the window's `error`. */
@@ -440,7 +450,14 @@ export class AgentListWindow extends EventTarget {
     this.committedLabel = committedLabel;
     this.pagedParams = this.serverParamsKey();
     this.seedStats(result.stats);
+    this.replayLiveChanges(result.liveChanged);
     this.notifyChange();
+  }
+
+  /** Replays a response's {@link PagedPageResult.liveChanged} over the adopted page and member index. */
+  private replayLiveChanges(ids: readonly string[] | undefined): void {
+    if (!ids || ids.length === 0) return;
+    this.applyChanges({ upserted: [...ids], deleted: [], unknown: new Map(), generation: 0 });
   }
 
   private seedStats(stats: PagedPageResult['stats']): void {
@@ -657,6 +674,7 @@ export class AgentListWindow extends EventTarget {
       }
       this._updatesAvailable = false;
       this.seedStats(result.stats);
+      this.replayLiveChanges(result.liveChanged);
     } catch (err) {
       if (gen !== this.generation) return;
       this._error = err instanceof Error ? err.message : 'Failed to load agents';
@@ -834,10 +852,11 @@ export class AgentListWindow extends EventTarget {
 
   /**
    * Apply an optimistic local patch (for example a phase change right after
-   * a stop action) while paged: each given agent replaces its on-page row
-   * in place (the row keeps its server position), and an existing member's phase is updated
-   * in the member index. Never adds or removes a row, never adds a member,
-   * never raises the chip and never sends a request. A no-op in the local
+   * a stop action) while paged: each given agent replaces its on-page row,
+   * the page is re-sorted locally in server order (as a live on-page upsert
+   * is), and an existing member's phase is updated in the member index.
+   * Never adds or removes a row, never adds a member, never raises the chip
+   * and never sends a request. A no-op in the local
    * states, where the host merges the patch into H itself.
    */
   applyLocalUpdate(agents: readonly Agent[]): void {
@@ -850,6 +869,11 @@ export class AgentListWindow extends EventTarget {
       changed = true;
       return next;
     });
+    if (changed) {
+      this.pageItems.sort((a, b) =>
+        serverOrderCompare(a, b, this.viewState.sortDir, this.serverSort)
+      );
+    }
     for (const a of agents) {
       if (this.memberIndex.has(a.id)) this.memberIndex.set(a.id, a.phase);
     }

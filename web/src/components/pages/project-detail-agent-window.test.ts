@@ -1726,7 +1726,7 @@ describe('project-detail — agent list window', () => {
   });
 
   describe('a drain that hits its request cap', () => {
-    it('is capped: the tree shows the banner, the list pager shows the capped total, lifecycle refresh is free and Refresh drains again', async () => {
+    it('is capped: the tree and list show the banner, the list pager shows the capped total, lifecycle refresh is free and Refresh drains again', async () => {
       const projectId = 'p-capped';
       localStorage.setItem('scion-view-project-agents', 'graph');
       localStorage.setItem(
@@ -1767,7 +1767,9 @@ describe('project-detail — agent list window', () => {
       await el.updateComplete;
       expect(requests.length - n).toBe(0);
       expect(internals(el).agentWindow.state).toBe('capped');
-      expect(el.shadowRoot!.querySelector('.agent-window-banner')).toBeNull();
+      expect(el.shadowRoot!.querySelector('.agent-window-banner')?.textContent).toContain(
+        '80 loaded (newest 2,000 checked), more exist'
+      );
       const pg = pager(el)!;
       await (pg as unknown as { updateComplete: Promise<boolean> }).updateComplete;
       expect(pg.shadowRoot?.textContent).toContain('80 loaded (newest 2,000 checked), more exist');
@@ -1781,6 +1783,244 @@ describe('project-detail — agent list window', () => {
       await new Promise((r) => setTimeout(r, 20));
       expect(requests.length - n).toBe(4);
       expect(internals(el).agentWindow.state).toBe('capped');
+    });
+  });
+
+  describe('a capped set shows the banner in every view rendered from it', () => {
+    async function mountCapped(
+      projectId: string,
+      view: string,
+      sortField: string
+    ): Promise<{ el: TestEl; requests: AgentsRequest[] }> {
+      localStorage.setItem('scion-view-project-agents', view);
+      localStorage.setItem(
+        `scion-sort-project-agents-${projectId}`,
+        JSON.stringify({ field: sortField, dir: 'asc' })
+      );
+      const agents = Array.from({ length: 100 }, (_, i) =>
+        makeAgent(i, { projectId, labels: { env: 'prod' } })
+      );
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+            legacyTruncated: true,
+          })
+        )
+      );
+      const el = await createComponent(projectId);
+      return { el, requests };
+    }
+
+    const bannerText = (el: TestEl) =>
+      el.shadowRoot!.querySelector('.agent-window-banner')?.textContent ?? '';
+
+    for (const [view, sortField] of [
+      ['grid', 'name'],
+      ['list', 'name'],
+      ['list', 'status'],
+      ['graph', 'updated'],
+    ] as const) {
+      it(`${view} view with ${sortField} sort`, async () => {
+        const { el } = await mountCapped(`p-capped-${view}-${sortField}`, view, sortField);
+        await vi.waitFor(() => expect(internals(el).agentWindow.state).toBe('capped'));
+        await el.updateComplete;
+        expect(bannerText(el)).toContain('80 loaded (newest 2,000 checked), more exist');
+      });
+    }
+
+    it('a bare-key label in the list view with updated sort', async () => {
+      const { el, requests } = await mountCapped('p-capped-bare-key', 'list', 'updated');
+      // Sorted-eligible: the first request is the fit request, and it pages.
+      expect(requests[0].url).toContain('sort=updated');
+      expect(internals(el).agentWindow.state).toBe('paged');
+      expect(bannerText(el)).toBe('');
+
+      const input = labelInput(el)!;
+      input.value = 'env';
+      input.dispatchEvent(new Event('sl-input'));
+      input.dispatchEvent(new Event('sl-change'));
+      await vi.waitFor(() => expect(internals(el).agentWindow.state).toBe('capped'));
+      await el.updateComplete;
+      expect(bannerText(el)).toContain('80 loaded (newest 2,000 checked), more exist');
+    });
+  });
+
+  describe('a live create while a seeding request is in flight is never lost', () => {
+    const emitCreate = (projectId: string, id: string) =>
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.created`,
+        data: {
+          agentId: id,
+          id,
+          name: id,
+          projectId,
+          template: 't',
+          phase: 'running',
+          created: '2026-03-01T00:00:00Z',
+          updated: '2026-03-01T00:00:00Z',
+          messageMode: 'project',
+        },
+      });
+
+    /**
+     * Mounts the page with agents GETs answered by the realistic handler.
+     * The first agents GET (and the next one after each `hold()`) computes
+     * its response at once, so the server snapshot predates any create the
+     * test emits, and returns it only when the test calls `release()`.
+     */
+    async function mountHeld(projectId: string, view: string, sortField: string, count: number) {
+      localStorage.setItem('scion-view-project-agents', view);
+      localStorage.setItem(
+        `scion-sort-project-agents-${projectId}`,
+        JSON.stringify({ field: sortField, dir: 'desc' })
+      );
+      const agents = Array.from({ length: count }, (_, i) => makeAgent(i, { projectId }));
+      const requests: AgentsRequest[] = [];
+      const inner = createRealisticFetchHandler({
+        projectId,
+        projectCaps: { actions: ['read'] },
+        agents,
+        requests,
+      });
+      let armed = true;
+      let held: { url: string; gate: ReturnType<typeof deferred<void>> } | null = null;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+          const url =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const res = await inner(input, init);
+          const isAgentsGet =
+            new URL(url, 'http://localhost').pathname === `/api/v1/projects/${projectId}/agents`;
+          if (armed && isAgentsGet) {
+            armed = false;
+            const gate = deferred<void>();
+            held = { url, gate };
+            await gate.promise;
+          }
+          return res;
+        })
+      );
+      const el = await createComponent(projectId);
+      const waitHeld = async (): Promise<string> => {
+        await vi.waitFor(() => expect(held).not.toBeNull());
+        return held!.url;
+      };
+      const release = async (): Promise<void> => {
+        const h = held!;
+        held = null;
+        h.gate.resolve();
+        await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false));
+        await new Promise((r) => setTimeout(r, 20));
+        await el.updateComplete;
+      };
+      const hold = (): void => {
+        armed = true;
+      };
+      return { el, requests, waitHeld, release, hold };
+    }
+
+    const flushSse = async (el: TestEl) => {
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+    };
+
+    it('the fit request answering complete: the create joins the small set', async () => {
+      const projectId = 'p-live-fit-small';
+      const m = await mountHeld(projectId, 'list', 'updated', 10);
+      expect(await m.waitHeld()).toContain('fit=');
+
+      emitCreate(projectId, 'a-live');
+      await flushSse(m.el);
+      await m.release();
+
+      expect(internals(m.el).agentWindow.state).toBe('small');
+      expect(internals(m.el).agents.map((a) => a.id)).toContain('a-live');
+      expect(internals(m.el).agentWindow.items[0].id).toBe('a-live');
+      expect(internals(m.el).agentStats.total).toBe(11);
+    });
+
+    it('the fit request answering paged: the create joins the member index and raises the chip', async () => {
+      const projectId = 'p-live-fit-paged';
+      const m = await mountHeld(projectId, 'list', 'updated', 60);
+      expect(await m.waitHeld()).toContain('fit=');
+
+      emitCreate(projectId, 'a-live');
+      await flushSse(m.el);
+      await m.release();
+
+      expect(internals(m.el).agentWindow.state).toBe('paged');
+      expect(internals(m.el).agentStats.total).toBe(61);
+      expect(internals(m.el).agentWindow.updatesAvailable).toBe(true);
+      expect(m.requests.length).toBe(1);
+    });
+
+    it('the legacy first request: the create joins the drained set', async () => {
+      const projectId = 'p-live-legacy';
+      const m = await mountHeld(projectId, 'list', 'name', 10);
+      expect(await m.waitHeld()).not.toContain('sort=');
+
+      emitCreate(projectId, 'a-live');
+      await flushSse(m.el);
+      await m.release();
+
+      expect(internals(m.el).agentWindow.state).toBe('small');
+      expect(internals(m.el).agents.map((a) => a.id)).toContain('a-live');
+      expect(internals(m.el).agentStats.total).toBe(11);
+    });
+
+    it('a paged page request with stats: the create survives the member index re-seed', async () => {
+      const projectId = 'p-live-page';
+      const m = await mountHeld(projectId, 'list', 'updated', 60);
+      await m.waitHeld();
+      await m.release();
+      expect(internals(m.el).agentWindow.state).toBe('paged');
+      expect(internals(m.el).agentStats.total).toBe(60);
+
+      // The paged chip refetches page 0 with stats=1.
+      m.hold();
+      const refreshed = internals(m.el).agentWindow.refresh();
+      expect(await m.waitHeld()).toContain('stats=1');
+      emitCreate(projectId, 'a-live');
+      await flushSse(m.el);
+      await m.release();
+      await refreshed;
+      await m.el.updateComplete;
+
+      expect(internals(m.el).agentStats.total).toBe(61);
+      expect(internals(m.el).agentWindow.updatesAvailable).toBe(true);
+    });
+
+    it('a live status change during a paged page request is reflected in the adopted page', async () => {
+      const projectId = 'p-live-page-update';
+      const m = await mountHeld(projectId, 'list', 'updated', 60);
+      await m.waitHeld();
+      await m.release();
+      const last = internals(m.el).agentWindow.items.at(-1)!;
+
+      m.hold();
+      const refreshed = internals(m.el).agentWindow.refresh();
+      await m.waitHeld();
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.status`,
+        data: { agentId: last.id, phase: 'stopped' },
+      });
+      await flushSse(m.el);
+      await m.release();
+      await refreshed;
+
+      const row = internals(m.el).agentWindow.items.find((a) => a.id === last.id);
+      expect(row?.phase).toBe('stopped');
     });
   });
 

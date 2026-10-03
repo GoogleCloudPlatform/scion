@@ -58,6 +58,7 @@ import type {
   PagedPageResult,
 } from '../../client/agent-list-window.js';
 import { AgentDrainRunner } from '../../client/agent-drain.js';
+import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
 import type { SeededDrainResult } from '../../client/agent-drain.js';
 import { mergeChanged, dropTombstoned, dropTombstonedPairs } from '../../client/agent-merge.js';
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
@@ -1599,7 +1600,23 @@ export class ScionPageProjectDetail extends LitElement {
   /** The sorted first request of a sorted-eligible view state: complete (small), paged, or 422 (drain). */
   private async loadFitAgents(trigger: AgentsViewTrigger, label: string): Promise<void> {
     const { gen, signal } = this.beginAgentsLoad();
+    // Opened before the request is sent, so a live create or update that
+    // lands while it is in flight survives the (older) response.
+    const epoch = new AgentSeedEpoch();
+    try {
+      await this.loadFitAgentsInEpoch(trigger, label, gen, signal, epoch);
+    } finally {
+      epoch.close();
+    }
+  }
 
+  private async loadFitAgentsInEpoch(
+    trigger: AgentsViewTrigger,
+    label: string,
+    gen: number,
+    signal: AbortSignal,
+    epoch: AgentSeedEpoch
+  ): Promise<void> {
     const params = new URLSearchParams();
     params.set('sort', this.serverSortField);
     params.set('dir', this.sortDir);
@@ -1626,6 +1643,7 @@ export class ScionPageProjectDetail extends LitElement {
       // Candidate ceiling: remember the refusal for this committed label
       // and drain instead.
       this.agentWindow.recordRefusal(label);
+      epoch.close(); // the drain runs its own epoch.
       await this.drainProjectAgents(trigger, label, gen);
       return;
     }
@@ -1657,26 +1675,20 @@ export class ScionPageProjectDetail extends LitElement {
     const freshAgents = dropTombstoned(data.agents || [], stateManager.getDeletedAgentIds());
 
     if (data.complete) {
-      this.agents = freshAgents;
+      // The complete set: the response plus live creates it predates.
+      this.agents = epoch.seed(freshAgents, {
+        partial: false,
+        isMember: (agent) => this.isProjectMember(agent, label),
+      }).agents;
       if (!this.agentScopeCapabilities) {
         this.agentScopeCapabilities = this.agents.find((a) => a._capabilities)?._capabilities;
       }
-      stateManager.seedAgents(this.agents);
       this.agentWindow.setSmall();
     } else {
       // Paged: `this.agents` stays empty; stats and Stop-all read the
       // member index through `agentStats` instead.
       this.agents = [];
-      stateManager.seedAgents(freshAgents, { partial: true });
-      this.agentWindow.setPaged(
-        {
-          agents: freshAgents,
-          nextCursor: data.nextCursor,
-          totalCount: data.totalCount,
-          stats: this.freshStats(data.stats),
-        },
-        label
-      );
+      this.agentWindow.setPaged(this.seedPage(epoch, freshAgents, data), label);
     }
   }
 
@@ -1815,18 +1827,39 @@ export class ScionPageProjectDetail extends LitElement {
     if (label) qs.set('label', label);
     if (this.phaseFilter) qs.set('phase', this.phaseFilter);
 
-    const response = await apiFetch(`/api/v1/projects/${this.projectId}/agents?${qs.toString()}`);
-    if (!response.ok) {
-      throw new Error(await extractApiError(response, 'Failed to load agents'));
-    }
-    const data = (await response.json()) as SortedAgentsResponse;
-    return {
+    const epoch = new AgentSeedEpoch();
+    try {
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}/agents?${qs.toString()}`);
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, 'Failed to load agents'));
+      }
+      const data = (await response.json()) as SortedAgentsResponse;
       // Same race as the page-load paths above: a server page can still
       // list an ID whose SSE `deleted` this client already processed.
-      agents: dropTombstoned(data.agents || [], stateManager.getDeletedAgentIds()),
+      const fresh = dropTombstoned(data.agents || [], stateManager.getDeletedAgentIds());
+      return this.seedPage(epoch, fresh, data);
+    } finally {
+      epoch.close();
+    }
+  }
+
+  /**
+   * Seed one sorted page under its epoch and build the window's page
+   * result: the page rows as the store's current objects, and the IDs
+   * changed live while the request was in flight for the window to replay.
+   */
+  private seedPage(
+    epoch: AgentSeedEpoch,
+    fresh: Agent[],
+    data: SortedAgentsResponse
+  ): PagedPageResult {
+    const seeded = epoch.seed(fresh, { partial: true });
+    return {
+      agents: seeded.agents,
       nextCursor: data.nextCursor,
       totalCount: data.totalCount,
       stats: this.freshStats(data.stats),
+      liveChanged: epoch.changedIds,
     };
   }
 
@@ -2983,13 +3016,13 @@ export class ScionPageProjectDetail extends LitElement {
 
   /**
    * The window's banner: capped, failed or stale, with a Refresh that is
-   * the chip trigger. The capped text is shown by the pager itself in the
-   * grid and list views, so the banner carries it only in the tree view.
+   * the chip trigger. Shown in every view rendered from a capped set (grid,
+   * list and tree), so an incomplete set is never presented as complete;
+   * the grid and list pagers also carry the capped total.
    */
   private renderAgentWindowBanner() {
     const banner = this.agentWindow.banner;
     if (!banner) return nothing;
-    if (banner.kind === 'capped' && this.viewMode !== 'graph') return nothing;
     return html`<div class="agent-window-banner">
       <span>${banner.text}</span>
       <sl-tag variant="primary" pill @click=${() => this.onAgentWindowRefresh()}>

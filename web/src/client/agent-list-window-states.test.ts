@@ -617,14 +617,46 @@ describe('AgentListWindow states — created sort while paged', () => {
 describe('AgentListWindow states — optimistic local update', () => {
   it('paged: replaces the on-page row and the member phase, with no chip and no request', () => {
     const { win, fetchPage } = setup();
-    win.setPaged(pagedResult([agent('a'), agent('b')], { totalCount: 2 }), '');
-    win.applyLocalUpdate([agent('a', { phase: 'stopping' }), agent('zz', { phase: 'stopping' })]);
+    win.setPaged(
+      pagedResult([agent('a', { updated: '2026-01-02T00:00:00Z' }), agent('b')], {
+        totalCount: 2,
+      }),
+      ''
+    );
+    win.applyLocalUpdate([
+      agent('a', { phase: 'stopping', updated: '2026-01-02T00:00:00Z' }),
+      agent('zz', { phase: 'stopping' }),
+    ]);
     expect(win.items.map((a) => [a.id, a.phase])).toEqual([
       ['a', 'stopping'],
       ['b', 'running'],
     ]);
     expect(win.memberIndex.getPhase('a')).toBe('stopping');
     expect(win.memberIndex.has('zz')).toBe(false);
+    expect(win.updatesAvailable).toBe(false);
+    expect(fetchPage).not.toHaveBeenCalled();
+  });
+
+  it('paged: re-sorts the page locally after replacing a row, as a live on-page upsert does', () => {
+    const { win, fetchPage } = setup();
+    win.setPaged(
+      pagedResult(
+        [
+          agent('a', { updated: '2026-01-03T00:00:00Z' }),
+          agent('b', { updated: '2026-01-02T00:00:00Z' }),
+          agent('c', { updated: '2026-01-01T00:00:00Z' }),
+        ],
+        { totalCount: 3 }
+      ),
+      ''
+    );
+    const onChange = vi.fn();
+    win.addEventListener('change', onChange);
+    // The patched row's activity time moves it to the top of the desc page.
+    win.applyLocalUpdate([agent('c', { phase: 'stopping', updated: '2026-01-04T00:00:00Z' })]);
+    expect(win.items.map((a) => a.id)).toEqual(['c', 'a', 'b']);
+    expect(win.items[0].phase).toBe('stopping');
+    expect(onChange).toHaveBeenCalledTimes(1);
     expect(win.updatesAvailable).toBe(false);
     expect(fetchPage).not.toHaveBeenCalled();
   });
@@ -638,5 +670,57 @@ describe('AgentListWindow states — optimistic local update', () => {
     win.applyLocalUpdate([agent('a', { phase: 'stopping' })]);
     expect(onChange).not.toHaveBeenCalled();
     expect(win.items[0].phase).toBe('running');
+  });
+});
+
+describe('AgentListWindow states — live changes during a paged request', () => {
+  function setupWithStore(
+    store: Map<string, Agent>,
+    fetchPage = vi.fn(async () => pagedResult([]))
+  ) {
+    const win = new AgentListWindow({
+      viewState: viewState(),
+      fetchPage,
+      getAgent: (id) => store.get(id),
+      getProjectId: () => 'p-1',
+      getHeldAgents: () => [],
+    });
+    return { win, fetchPage };
+  }
+
+  it('setPaged replays a live create the response predates into the member index, with the chip on page 0', () => {
+    const created = agent('new', { updated: '2026-02-01T00:00:00Z' });
+    const store = new Map([[created.id, created]]);
+    const { win } = setupWithStore(store);
+    win.setPaged(
+      pagedResult([agent('a'), agent('b')], { totalCount: 2, liveChanged: ['new'] }),
+      ''
+    );
+    expect(win.memberIndex.has('new')).toBe(true);
+    expect(win.stats.total).toBe(3);
+    expect(win.updatesAvailable).toBe(true);
+  });
+
+  it('setPaged ignores a replayed create outside the add rule', () => {
+    const foreign = agent('other', { projectId: 'p-2' });
+    const store = new Map([[foreign.id, foreign]]);
+    const { win } = setupWithStore(store);
+    win.setPaged(pagedResult([agent('a')], { totalCount: 1, liveChanged: ['other'] }), '');
+    expect(win.memberIndex.has('other')).toBe(false);
+    expect(win.updatesAvailable).toBe(false);
+  });
+
+  it('a page fetch replays a live create into the member index after its stats seed', async () => {
+    const created = agent('new', { updated: '2026-02-01T00:00:00Z' });
+    const store = new Map([[created.id, created]]);
+    const fetchPage = vi.fn(async () =>
+      pagedResult([agent('a')], { totalCount: 1, liveChanged: ['new'] })
+    );
+    const { win } = setupWithStore(store, fetchPage);
+    win.setPaged(pagedResult([agent('a')], { totalCount: 1 }), '');
+    await win.refresh();
+    expect(fetchPage).toHaveBeenCalledTimes(1);
+    expect(win.memberIndex.has('new')).toBe(true);
+    expect(win.updatesAvailable).toBe(true);
   });
 });
