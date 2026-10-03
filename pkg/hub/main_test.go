@@ -27,9 +27,14 @@ import (
 // main_integration_test.go, which applies the same isolation alongside the
 // ent test database setup — Go allows only one TestMain per package per
 // build, so the two are kept behind mutually exclusive build tags.
+//
+// It also starts the memory guard (mem_guard_helpers_test.go), which aborts
+// the binary with goroutine stacks if process memory runs away.
 func TestMain(m *testing.M) {
+	stopMemGuard := startMemGuard()
 	teardown := isolateTestHome()
 	code := m.Run()
 	teardown()
+	stopMemGuard()
 	os.Exit(code)
 }
