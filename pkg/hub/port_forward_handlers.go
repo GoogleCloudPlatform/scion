@@ -620,10 +620,16 @@ func hopByHopHeader(k string) bool {
 // stripFromProxyResponse reports whether a header from the proxied agent
 // response must not be relayed onto the hub origin: these are set by the
 // hub itself (or intentionally omitted) so the response is sandboxed and
-// cannot set cookies on the hub origin.
+// cannot set or clear cookies, storage, or cache on the hub origin. CORS
+// response headers are owned by the hub's corsMiddleware; relaying the
+// agent's copies would duplicate them, which browsers reject.
 func stripFromProxyResponse(k string) bool {
 	switch strings.ToLower(k) {
-	case "set-cookie", "content-security-policy", "x-content-type-options":
+	case "set-cookie", "set-cookie2", "content-security-policy", "x-content-type-options", "clear-site-data":
+		return true
+	case "access-control-allow-origin", "access-control-allow-credentials", "access-control-allow-methods",
+		"access-control-allow-headers", "access-control-allow-private-network", "access-control-expose-headers",
+		"access-control-max-age":
 		return true
 	default:
 		return false
