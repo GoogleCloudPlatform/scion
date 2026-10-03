@@ -19,10 +19,68 @@ on:
     branches: [ main ]
   pull_request:
 
+# One run per PR: a new push to the same PR cancels the superseded run
+# (ptone/scion#2845). Runs on main are never cancelled. Outside pull_request
+# the group is the unique run_id, not github.ref: GitHub keeps at most one
+# *pending* run per group and cancels an older pending run even when
+# cancel-in-progress is false, so a shared refs/heads/main group would drop
+# queued main runs whenever pushes land in quick succession.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
 jobs:
+  # Path detection for jobs that only matter when specific files change
+  # (ptone/scion#2845). Gating uses this job plus a job-level `if:`, never
+  # `on.paths`: a skipped job still reports its check, whereas a workflow
+  # filtered out by on.paths reports nothing at all.
+  #
+  # On pull_request it diffs the PR head against the PR base (three-dot,
+  # i.e. against the merge base). On any other event (push to main) every
+  # output is 'true': post-merge runs always exercise everything, and a
+  # push's `before` SHA is not always usable (new branch, force push).
+  # If the diff itself fails, the outputs fall back to 'true' (fail open).
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      single_node_vm: ${{ steps.diff.outputs.single_node_vm }}
+    steps:
+      - name: Checkout code
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Diff against PR base
+        id: diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "Event is ${EVENT_NAME}, not pull_request: running every gated job."
+            echo "single_node_vm=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! changed=$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}"); then
+            echo "::warning title=Path detection failed::git diff ${BASE_SHA}...${HEAD_SHA} failed; running every gated job."
+            echo "single_node_vm=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Changed files:"
+          echo "$changed"
+          if echo "$changed" | grep -qE '^(scripts/single-node-vm/|\.github/workflows/ci\.yml$)'; then
+            echo "single_node_vm=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "single_node_vm=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
@@ -289,35 +347,6 @@ jobs:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-launch-store-postgres
 
-  test-full-suite:
-    name: Full Test Suite (reporting only)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-
-      - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version-file: 'go.mod'
-          cache: true
-
-      - name: Run full test suite (with SQLite)
-        run: |
-          set -o pipefail
-          go test -count=1 -timeout 30m ./... 2>&1 | tee test-full-suite-output.txt
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: full-test-suite-results
-          path: test-full-suite-output.txt
-          retention-days: 14
-
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
@@ -403,31 +432,15 @@ jobs:
             exit 1
           fi
 
-  single-node-vm-deploy-tests:
-    name: single-node-vm deploy.sh test harness
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-
-      # Never contacts GCP: a stub `gcloud` shadows any real one on PATH.
-      # ubuntu-latest already ships bash >= 4 and python3; see
-      # scripts/single-node-vm/tests/README.md for what this covers.
-      - name: Run scripts/single-node-vm/tests/run.sh
-        run: ./scripts/single-node-vm/tests/run.sh
-
-  lint-method-not-allowed:
-    name: Lint 405 Allow header (reporting only)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
       - name: Check for bare MethodNotAllowed calls
+        # Reporting only. This was the separate "Lint 405 Allow header
+        # (reporting only)" job; it was folded in here to save a runner
+        # spin-up (ptone/scion#2845). It must never fail shellcheck:
+        # continue-on-error absorbs its non-zero exit, and the result is
+        # reported in the step summary. !cancelled() runs it even when
+        # Run shellcheck above failed, as the separate job did.
+        if: ${{ !cancelled() }}
+        continue-on-error: true
         run: |
           echo "## 405 Allow Header Lint" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -476,3 +489,24 @@ jobs:
             echo "See step summary for details."
             exit 1
           fi
+
+
+  single-node-vm-deploy-tests:
+    name: single-node-vm deploy.sh test harness
+    needs: changes
+    # Runs only when scripts/single-node-vm/** or this workflow changed, and
+    # always on push to main. Fails open: if the changes job did not succeed,
+    # the harness runs anyway.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.single_node_vm == 'true') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      # Never contacts GCP: a stub `gcloud` shadows any real one on PATH.
+      # ubuntu-latest already ships bash >= 4 and python3; see
+      # scripts/single-node-vm/tests/README.md for what this covers.
+      - name: Run scripts/single-node-vm/tests/run.sh
+        run: ./scripts/single-node-vm/tests/run.sh
