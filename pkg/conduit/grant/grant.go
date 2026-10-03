@@ -297,6 +297,12 @@ func Verify(ctx context.Context, token []byte, keys KeySet, expect Expectation, 
 	if len(token) == 0 || len(token) > maxTokenSize {
 		return nil, ErrMalformed
 	}
+	// Only the base64url alphabet and the segment separator are allowed.
+	// The standard decoder silently skips CR and LF even in strict mode, so
+	// this check keeps token bytes canonical.
+	if !tokenCharsetOK(token) {
+		return nil, ErrMalformed
+	}
 	parts := strings.Split(string(token), ".")
 	if len(parts) != 3 {
 		return nil, ErrMalformed
@@ -307,6 +313,13 @@ func Verify(ctx context.Context, token []byte, keys KeySet, expect Expectation, 
 	}
 	var hdr header
 	if err := decodeStrict(hdrBytes, &hdr); err != nil {
+		return nil, ErrMalformed
+	}
+	// encoding/json matches keys case-insensitively and lets a duplicate
+	// key win. Requiring the header bytes to equal the canonical encoding of
+	// the parsed values rejects case variants, duplicates, reordering and
+	// whitespace: the header is exactly {"alg","typ","kid"}.
+	if !canonical(hdrBytes, hdr) {
 		return nil, ErrMalformed
 	}
 	if hdr.Alg != Algorithm {
@@ -337,6 +350,11 @@ func Verify(ctx context.Context, token []byte, keys KeySet, expect Expectation, 
 	}
 	var w wireClaims
 	if err := decodeStrict(payload, &w); err != nil {
+		return nil, ErrMalformed
+	}
+	// The payload is held to the same canonical encoding as the header, so
+	// a case-variant or duplicate claim key cannot be signed into a grant.
+	if !canonical(payload, w) {
 		return nil, ErrMalformed
 	}
 	c := &Claims{
@@ -381,6 +399,25 @@ func Verify(ctx context.Context, token []byte, keys KeySet, expect Expectation, 
 		return nil, ErrReplay
 	}
 	return c, nil
+}
+
+// tokenCharsetOK reports whether token holds only base64url characters and
+// '.' separators.
+func tokenCharsetOK(token []byte) bool {
+	for _, b := range token {
+		switch {
+		case b >= 'A' && b <= 'Z', b >= 'a' && b <= 'z', b >= '0' && b <= '9', b == '-', b == '_', b == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// canonical reports whether raw is exactly the encoding Mint produces for v.
+func canonical(raw []byte, v any) bool {
+	want, err := json.Marshal(v)
+	return err == nil && bytes.Equal(raw, want)
 }
 
 // decodeStrict decodes exactly one JSON object with no unknown fields and no
