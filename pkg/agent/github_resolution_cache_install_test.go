@@ -61,7 +61,7 @@ func newInstallTestResolver(t *testing.T, credential string) (r *GitHubSkillReso
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := NewGitHubResolutionCache(dir, time.Hour)
+	first, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func newInstallTestResolver(t *testing.T, credential string) (r *GitHubSkillReso
 	}, true)
 	first.Flush()
 
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestContentlessHitWithoutCredentialIsUsed(t *testing.T) {
 
 func TestGitHubSkillResolver_FlushCache(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestNewGitHubResolutionCache_DirModeFailureIsNotFatal(t *testing.T) {
 	chmod = func(string, os.FileMode) error { return errors.New("operation not permitted") }
 	t.Cleanup(func() { chmod = orig })
 
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}

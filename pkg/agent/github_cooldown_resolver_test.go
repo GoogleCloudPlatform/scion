@@ -59,7 +59,7 @@ func newCooldownTestResolver(t *testing.T, mux *http.ServeMux, clock *fakeClock)
 	t.Helper()
 	server, srvMux := newTestGitHubServer(t)
 	srvMux.Handle("/", mux)
-	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Hour)
+	cache, err := newTestResolutionCache(t.TempDir(), time.Hour)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestGitHubSkillResolver_CooldownWritesNothingToDisk(t *testing.T) {
 			CachedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour), IsBranchRef: true,
 		},
 	})
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

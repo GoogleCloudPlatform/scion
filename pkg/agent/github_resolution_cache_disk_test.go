@@ -72,7 +72,7 @@ func TestGitHubResolutionCache_DirAndFileModes(t *testing.T) {
 
 	t.Run("new directory and file", func(t *testing.T) {
 		dir := filepath.Join(parent, "new", "cache")
-		cache, err := NewGitHubResolutionCache(dir, time.Hour)
+		cache, err := newTestResolutionCache(dir, time.Hour)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -95,7 +95,7 @@ func TestGitHubResolutionCache_DirAndFileModes(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if _, err := NewGitHubResolutionCache(dir, time.Hour); err != nil {
+		if _, err := newTestResolutionCache(dir, time.Hour); err != nil {
 			t.Fatal(err)
 		}
 		assertMode(t, dir, 0o700)
@@ -119,7 +119,7 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 // no temp file may remain, and the in-memory cache keeps working.
 func TestGitHubResolutionCache_WriteFailureKeepsOldFile(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestGitHubResolutionCache_LoadDropsUnusableEntriesAndRewrites(t *testing.T)
 		nilEntry:  nil,
 	})
 
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func TestGitHubResolutionCache_LoadDropsUnusableEntriesAndRewrites(t *testing.T)
 	assertMode(t, filepath.Join(dir, resolutionCacheFileName), 0o600)
 
 	// A second load finds nothing to drop and must not rewrite.
-	cache2, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache2, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestGitHubResolutionCache_LoadRewritesInvalidJSON(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, resolutionCacheFileName), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestGitHubResolutionCache_StaleBranchServedAfterReload(t *testing.T) {
 		key: {Skill: ResolvedSkill{Name: "old"}, CachedAt: now.Add(-time.Hour), ExpiresAt: now.Add(-30 * time.Minute), IsBranchRef: true},
 	})
 
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ func TestGitHubResolutionCache_StaleBranchServedAfterReload(t *testing.T) {
 // after that write schedules another.
 func TestGitHubResolutionCache_BurstCoalescesWrites(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,13 +343,12 @@ func TestGitHubResolutionCache_BurstCoalescesWrites(t *testing.T) {
 // runs on its own, without an explicit Flush.
 func TestGitHubResolutionCache_DelayedWriteFires(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := NewGitHubResolutionCache(dir, time.Hour, WithResolutionCacheSaveDelay(time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
 	flushed := make(chan struct{}, 1)
 	cache.onFlush = func() { flushed <- struct{}{} }
-	cache.saveDelay = time.Millisecond
 
 	cache.putEntry("gh://o/r/s@main", ResolvedSkill{Name: "s"}, true)
 	// The timeout only turns a missing write into a failure instead of a
@@ -362,6 +361,33 @@ func TestGitHubResolutionCache_DelayedWriteFires(t *testing.T) {
 
 	if f := readCacheFile(t, dir); len(f.Entries) != 1 {
 		t.Fatalf("file has %d entries, want 1", len(f.Entries))
+	}
+}
+
+// TestGitHubResolutionCache_SaveDelayOption checks the save delay a cache
+// is built with: the default without options, the option's value when
+// positive, and the default again for a non-positive value.
+func TestGitHubResolutionCache_SaveDelayOption(t *testing.T) {
+	cases := []struct {
+		name string
+		opts []ResolutionCacheOption
+		want time.Duration
+	}{
+		{"default", nil, DefaultResolutionCacheSaveDelay},
+		{"set", []ResolutionCacheOption{WithResolutionCacheSaveDelay(time.Minute)}, time.Minute},
+		{"zero keeps default", []ResolutionCacheOption{WithResolutionCacheSaveDelay(0)}, DefaultResolutionCacheSaveDelay},
+		{"negative keeps default", []ResolutionCacheOption{WithResolutionCacheSaveDelay(-time.Second)}, DefaultResolutionCacheSaveDelay},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cache, err := NewGitHubResolutionCache(t.TempDir(), time.Hour, tc.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cache.saveDelay != tc.want {
+				t.Fatalf("saveDelay = %v, want %v", cache.saveDelay, tc.want)
+			}
+		})
 	}
 }
 
@@ -435,7 +461,7 @@ func TestGitHubSkillResolver_MarksContentlessCacheHit(t *testing.T) {
 		key: {Skill: ResolvedSkill{Name: "s", URI: uri, Files: []ResolvedFile{{Path: "SKILL.md", URL: "https://raw.githubusercontent.com/acme/private/x/SKILL.md"}}},
 			CachedAt: now, ExpiresAt: now.Add(time.Hour), IsBranchRef: true},
 	})
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +519,7 @@ func TestNewGitHubSkillResolverWithCredentials_UsesSingletonOnly(t *testing.T) {
 		"gh://o/r/s@main": {Skill: ResolvedSkill{Name: "s"}, CachedAt: old, ExpiresAt: old.Add(time.Minute), IsBranchRef: true},
 	})
 
-	singleton, err := NewGitHubResolutionCache(t.TempDir(), time.Hour)
+	singleton, err := newTestResolutionCache(t.TempDir(), time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

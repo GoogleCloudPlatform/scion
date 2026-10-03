@@ -89,12 +89,27 @@ const (
 	ttlJitterFraction = 0.10
 )
 
-// resolutionCacheSaveDelay is how long a Put waits before the cache file is
-// rewritten. Puts that arrive during this window share one write, so a burst
-// of resolutions rewrites the file once instead of once per Put. A variable
-// only so this package's tests can make the delayed write never fire on its
-// own and call Flush explicitly instead.
-var resolutionCacheSaveDelay = 2 * time.Second
+// DefaultResolutionCacheSaveDelay is how long a Put waits before the cache
+// file is rewritten, unless WithResolutionCacheSaveDelay sets another value.
+// Puts that arrive during this window share one write, so a burst of
+// resolutions rewrites the file once instead of once per Put.
+const DefaultResolutionCacheSaveDelay = 2 * time.Second
+
+// ResolutionCacheOption configures a GitHubResolutionCache at construction
+// (see NewGitHubResolutionCache).
+type ResolutionCacheOption func(*GitHubResolutionCache)
+
+// WithResolutionCacheSaveDelay sets how long a Put waits before the cache
+// file is rewritten (default DefaultResolutionCacheSaveDelay). A
+// non-positive d leaves the default in place. Tests use a long delay so the
+// delayed write never fires on its own and they call Flush explicitly.
+func WithResolutionCacheSaveDelay(d time.Duration) ResolutionCacheOption {
+	return func(c *GitHubResolutionCache) {
+		if d > 0 {
+			c.saveDelay = d
+		}
+	}
+}
 
 // JitteredTTL returns ttl adjusted by a uniformly random amount within
 // +/-ttlJitterFraction of ttl, so cache entries written together — the
@@ -151,7 +166,7 @@ type GitHubResolutionCache struct {
 	lastRefreshFailure map[string]time.Time
 
 	// saveDelay is how long a Put waits before the file is rewritten (see
-	// resolutionCacheSaveDelay and scheduleSave).
+	// WithResolutionCacheSaveDelay and scheduleSave).
 	saveDelay time.Duration
 
 	// pendingMu guards savePending and saveTimer: whether a rewrite of the
@@ -209,8 +224,9 @@ type resolutionCacheFile struct {
 // NewGitHubResolutionCache creates or loads a resolution cache at the
 // given directory with the specified TTL. The directory is created with
 // mode 0700, and an existing directory or cache file with looser
-// permissions is tightened (see resolutionCacheDirMode).
-func NewGitHubResolutionCache(dir string, ttl time.Duration) (*GitHubResolutionCache, error) {
+// permissions is tightened (see resolutionCacheDirMode). opts adjust the
+// defaults (see ResolutionCacheOption).
+func NewGitHubResolutionCache(dir string, ttl time.Duration, opts ...ResolutionCacheOption) (*GitHubResolutionCache, error) {
 	if err := os.MkdirAll(dir, resolutionCacheDirMode); err != nil {
 		return nil, err
 	}
@@ -226,7 +242,10 @@ func NewGitHubResolutionCache(dir string, ttl time.Duration) (*GitHubResolutionC
 		ttl:       ttl,
 		entries:   make(map[string]*resolutionCacheEntry),
 		filePath:  filepath.Join(dir, resolutionCacheFileName),
-		saveDelay: resolutionCacheSaveDelay,
+		saveDelay: DefaultResolutionCacheSaveDelay,
+	}
+	for _, opt := range opts {
+		opt(c)
 	}
 	c.load()
 	return c, nil

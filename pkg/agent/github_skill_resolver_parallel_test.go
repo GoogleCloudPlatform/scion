@@ -355,7 +355,7 @@ func TestGitHubSkillResolver_Parallel_CancelFailsQueuedRefsFast(t *testing.T) {
 // GitHub fails as a timeout, and a ref with a fresh cache entry is still
 // served.
 func TestGitHubSkillResolver_Parallel_DeadlineKeepsSerialOutcomes(t *testing.T) {
-	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Hour)
+	cache, err := newTestResolutionCache(t.TempDir(), time.Hour)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestGitHubSkillResolver_Parallel_RecoversPanic(t *testing.T) {
 // duplicate refs resolved in parallel through the resolution cache still
 // share one fetch.
 func TestGitHubSkillResolver_Parallel_SharedCacheSingleFlight(t *testing.T) {
-	cache, err := NewGitHubResolutionCache(t.TempDir(), 5*time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}

@@ -28,17 +28,23 @@ import (
 	"time"
 )
 
-func init() {
-	// The delayed write would otherwise fire on its own after a test has
-	// returned, possibly while t.TempDir() is being removed. Tests that check
-	// what reaches disk call Flush; TestGitHubResolutionCache_DelayedWriteFires
-	// covers the timer itself with its own short delay.
-	resolutionCacheSaveDelay = time.Hour
+// testResolutionCacheSaveDelay is the save delay of caches built by
+// newTestResolutionCache: long enough that the delayed write never fires on
+// its own during a test, where it could otherwise run after the test has
+// returned, possibly while t.TempDir() is being removed.
+const testResolutionCacheSaveDelay = time.Hour
+
+// newTestResolutionCache is NewGitHubResolutionCache with
+// testResolutionCacheSaveDelay. Tests that check what reaches disk call
+// Flush; TestGitHubResolutionCache_DelayedWriteFires covers the timer itself
+// with its own short delay.
+func newTestResolutionCache(dir string, ttl time.Duration) (*GitHubResolutionCache, error) {
+	return NewGitHubResolutionCache(dir, ttl, WithResolutionCacheSaveDelay(testResolutionCacheSaveDelay))
 }
 
 func TestGitHubResolutionCache_PutAndGet(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	cache, err := newTestResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -72,7 +78,7 @@ func TestGitHubResolutionCache_PutAndGet(t *testing.T) {
 
 func TestGitHubResolutionCache_Miss(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	cache, err := newTestResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -85,7 +91,7 @@ func TestGitHubResolutionCache_Miss(t *testing.T) {
 
 func TestGitHubResolutionCache_Expiry(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, 1*time.Millisecond)
+	cache, err := newTestResolutionCache(dir, 1*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -107,7 +113,7 @@ func TestGitHubResolutionCache_Expiry(t *testing.T) {
 
 func TestGitHubResolutionCache_PersistAndReload(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	cache, err := newTestResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -128,7 +134,7 @@ func TestGitHubResolutionCache_PersistAndReload(t *testing.T) {
 	}
 
 	// Create a new cache instance from the same directory
-	cache2, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	cache2, err := newTestResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache (reload): %v", err)
 	}
@@ -153,7 +159,7 @@ func testCredKey(ref, credential string) string {
 // credential value itself never appears in the file.
 func TestGitHubResolutionCache_CredentialEntryPersisted(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	cache, err := newTestResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -183,7 +189,7 @@ func TestGitHubResolutionCache_CredentialEntryPersisted(t *testing.T) {
 		t.Fatal("cache file contains file content; Content must not be persisted")
 	}
 
-	cache2, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	cache2, err := newTestResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache (reload): %v", err)
 	}
@@ -203,7 +209,7 @@ func TestGitHubResolutionCache_CredentialEntryPersisted(t *testing.T) {
 // credential-scoped entries are both persisted.
 func TestGitHubResolutionCache_MixedPublicAndCredential(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	cache, err := newTestResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -215,7 +221,7 @@ func TestGitHubResolutionCache_MixedPublicAndCredential(t *testing.T) {
 	cache.putEntry(credKey, ResolvedSkill{Name: "priv-skill", URI: "gh://owner/repo/priv-skill@main"}, false)
 	cache.Flush()
 
-	cache2, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	cache2, err := newTestResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache (reload): %v", err)
 	}
@@ -229,7 +235,7 @@ func TestGitHubResolutionCache_MixedPublicAndCredential(t *testing.T) {
 
 func TestGitHubResolutionCache_ExpiredNotLoaded(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, 1*time.Millisecond)
+	cache, err := newTestResolutionCache(dir, 1*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -241,7 +247,7 @@ func TestGitHubResolutionCache_ExpiredNotLoaded(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	// Reload — expired entries should not be loaded
-	cache2, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	cache2, err := newTestResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache (reload): %v", err)
 	}
@@ -264,7 +270,7 @@ func TestGitHubResolutionCache_ExpiredNotLoaded(t *testing.T) {
 // many of the n goroutines had started before the release.
 func TestGitHubResolutionCache_ResolveWithFetch_Coalesces(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	cache, err := newTestResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -316,7 +322,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_Coalesces(t *testing.T) {
 // within one ref.
 func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCap(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	cache, err := newTestResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -396,7 +402,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCap(t *testing.T) {
 // identity's cap must not block a fetch under a different identity.
 func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCapIsolatedAcrossProjects(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	cache, err := newTestResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -456,7 +462,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PerCredentialCapIsolatedAcrossPr
 // nothing still references it, or the map grows forever.
 func TestGitHubResolutionCache_ResolveWithFetch_CredSlotsReturnsToEmpty(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	cache, err := newTestResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -515,7 +521,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_CredSlotsReturnsToEmpty(t *testi
 // closed, and that error would reach the waiter as well).
 func TestGitHubResolutionCache_ResolveWithFetch_CancelledLeaderDoesNotFailWaiter(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	cache, err := newTestResolutionCache(dir, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -632,7 +638,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_CancelledLeaderDoesNotFailWaiter
 // only returns early if *that* is cancelled, which a correct bound never
 // does from the leader's deadline alone.
 func TestGitHubResolutionCache_ResolveWithFetch_ShortDeadlineLeaderDoesNotFailWaiter(t *testing.T) {
-	cache, err := NewGitHubResolutionCache(t.TempDir(), 5*time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), 5*time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -745,7 +751,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_ShortDeadlineLeaderDoesNotFailWa
 // unclosed channel, so the test would hang if ResolveWithFetch waited on it.
 func TestGitHubResolutionCache_ResolveWithFetch_StaleServesImmediately(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -798,7 +804,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_StaleServesImmediately(t *testin
 // same ref must coalesce into a single background fetch.
 func TestGitHubResolutionCache_ResolveWithFetch_StaleRefreshesOnce(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -889,7 +895,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_StaleRefreshesOnce(t *testing.T)
 // synchronously instead.
 func TestGitHubResolutionCache_ResolveWithFetch_PastMaxStaleAgeResolvesSynchronously(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -931,7 +937,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_PastMaxStaleAgeResolvesSynchrono
 // recently it was cached (even well within MaxResolutionStaleAge).
 func TestGitHubResolutionCache_ResolveWithFetch_SHARefNeverServedStale(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -985,7 +991,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_SHARefNeverServedStale(t *testin
 // only has to cover it getting scheduled at all, not completing any work.
 func TestGitHubResolutionCache_ResolveWithFetch_RefreshFailureBackoffSkipsRetry(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -1046,7 +1052,7 @@ func TestGitHubResolutionCache_ResolveWithFetch_RefreshFailureBackoffSkipsRetry(
 // retrying) on the next call.
 func TestGitHubResolutionCache_ResolveWithFetch_FailureNeverCached(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := NewGitHubResolutionCache(dir, time.Hour)
+	cache, err := newTestResolutionCache(dir, time.Hour)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}

@@ -967,7 +967,7 @@ func TestGitHubSkillResolver_ResolutionCacheHit(t *testing.T) {
 	})
 
 	resolver := newTestGitHubResolver(server)
-	cache, err := NewGitHubResolutionCache(t.TempDir(), 5*time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), 5*time.Minute)
 	if err != nil {
 		t.Fatalf("cache creation failed: %v", err)
 	}
@@ -1347,7 +1347,7 @@ func TestGitHubSkillResolver_CacheHitCredentialCheck(t *testing.T) {
 		_, _ = w.Write([]byte("hello"))
 	})
 
-	cache, err := NewGitHubResolutionCache(t.TempDir(), 5*time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), 5*time.Minute)
 	if err != nil {
 		t.Fatalf("cache creation failed: %v", err)
 	}
@@ -1455,7 +1455,7 @@ func TestGitHubSkillResolver_CrossCredentialCacheIsolation(t *testing.T) {
 	})
 
 	// Use a shared cache to demonstrate isolation.
-	cache, err := NewGitHubResolutionCache(t.TempDir(), 5*time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), 5*time.Minute)
 	if err != nil {
 		t.Fatalf("cache creation failed: %v", err)
 	}
@@ -1868,7 +1868,7 @@ func TestGitHubSkillResolver_SharedCacheSingleton(t *testing.T) {
 	})
 
 	// Create a shared cache
-	cache, err := NewGitHubResolutionCache(t.TempDir(), 5*time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), 5*time.Minute)
 	if err != nil {
 		t.Fatalf("cache creation failed: %v", err)
 	}
@@ -2687,7 +2687,7 @@ func TestGitHubSkillResolver_CrossProjectCredentialIsolation(t *testing.T) {
 
 	// A single shared cache, exactly as the broker wires it (one
 	// GitHubResolutionCache singleton serving every project).
-	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -2804,7 +2804,7 @@ func TestGitHubSkillResolver_SameProjectDifferentUserCredentialIsolation(t *test
 	})
 
 	// A single shared cache, exactly as the broker wires it.
-	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -2956,7 +2956,7 @@ func TestGitHubSkillResolver_SameProjectSameUserDifferentTokenIsolation(t *testi
 				_, _ = w.Write([]byte("SECRET"))
 			})
 
-			cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+			cache, err := newTestResolutionCache(t.TempDir(), time.Minute)
 			if err != nil {
 				t.Fatalf("NewGitHubResolutionCache: %v", err)
 			}
@@ -3114,7 +3114,7 @@ func TestGitHubSkillResolver_ScopeLayeringIsolation(t *testing.T) {
 				_, _ = w.Write([]byte("CONTENT"))
 			})
 
-			cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+			cache, err := newTestResolutionCache(t.TempDir(), time.Minute)
 			if err != nil {
 				t.Fatalf("NewGitHubResolutionCache: %v", err)
 			}
@@ -3224,7 +3224,7 @@ func TestGitHubSkillResolver_FullSHARefNeverServedStale(t *testing.T) {
 		_, _ = w.Write([]byte(content.Load().(string)))
 	})
 
-	cache, err := NewGitHubResolutionCache(t.TempDir(), -time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), -time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -3281,7 +3281,7 @@ func TestGitHubSkillResolver_CoalescedCallersKeepOwnAlias(t *testing.T) {
 		_, _ = w.Write([]byte("CONTENT"))
 	})
 
-	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -3368,7 +3368,7 @@ func TestGitHubSkillResolver_CachedWaiterDeadline_ClassifiedAsTimeout(t *testing
 		}
 	})
 
-	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
@@ -3404,7 +3404,7 @@ func TestGitHubSkillResolver_CachedWaiterDeadline_ClassifiedAsTimeout(t *testing
 // matches context.DeadlineExceeded; plain cancellation returns exactly
 // context.Canceled.
 func TestGitHubResolutionCache_WaiterDeadline_WrapsTypedAndContextError(t *testing.T) {
-	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Minute)
+	cache, err := newTestResolutionCache(t.TempDir(), time.Minute)
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
