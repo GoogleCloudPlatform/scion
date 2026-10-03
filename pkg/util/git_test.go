@@ -1354,6 +1354,18 @@ func TestStripGitURLCredentials(t *testing.T) {
 		{"@ host in path is not userinfo", "https://github.com/org/repo@github.com/x", "https://github.com/org/repo@github.com/x"},
 		{"credentials then @ host in path", "https://u:p@github.com/org/x@github.com/repo", "https://github.com/org/x@github.com/repo"},
 		{"login containing / is path", "https://a/b@github.com/x", "https://a/b@github.com/x"},
+		// A port then '@' in the path is not userinfo (#2368 review).
+		{"port then @ in path", "https://host:8443/org/repo@v1", "https://host:8443/org/repo@v1"},
+		{"default port then @ in path", "https://github.com:443/org/repo@v1", "https://github.com:443/org/repo@v1"},
+		{"ipv6 port then @ in path", "https://[::1]:8443/org/repo@v1", "https://[::1]:8443/org/repo@v1"},
+		{"credentials, port, @ in path", "https://u:t@host:8443/org/repo@v1", "https://host:8443/org/repo@v1"},
+		// A password with '/' that cannot be a port is still stripped.
+		{"password starting with / stripped", "https://u:/pw@github.com/org/repo", "https://github.com/org/repo"},
+		{"password with leading-zero digits and / stripped", "https://u:0123/w@github.com/org/repo", "https://github.com/org/repo"},
+		{"password with out-of-range digits and / stripped", "https://u:65536/w@github.com/org/repo", "https://github.com/org/repo"},
+		{"password with digits+letters and / stripped", "https://u:12ab/w@github.com/org/repo", "https://github.com/org/repo"},
+		// Port-like password: RFC 3986 reads a port; the hub rejects the '@' path.
+		{"port-like password read as port", "https://u:8443/w@github.com/org/repo", "https://u:8443/w@github.com/org/repo"},
 		{"empty", "", ""},
 	}
 	for _, tt := range tests {

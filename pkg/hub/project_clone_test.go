@@ -508,6 +508,16 @@ func TestProjectClone_GitRemoteOverride_RejectsNonGitURL(t *testing.T) {
 		"https://u:SECRET_P/w@github.com/org/repo",
 		"https://u:SECRET_P/w@x@github.com/org/repo.git",
 		"ssh://git:SECRET_P/w@github.com/org/repo.git",
+		// A port then '@' in the path, and passwords with '/' that look
+		// like (or almost like) a port: all ambiguous, all rejected
+		// without storing anything (GCP#2368 review).
+		"https://git.example.com:8443/org/repo@v1",
+		"https://github.com:443/org/repo@v1",
+		"https://[::1]:8443/org/repo@v1",
+		"https://u:SECRET_P@git.example.com:8443/org/repo@v1",
+		"https://u:8443/SECRET_P@github.com/org/repo",
+		"https://u:0123/SECRET_P@github.com/org/repo",
+		"https://u:/SECRET_P@github.com/org/repo",
 		// '@' in the path would make credential stripping change the host.
 		"https://github.com/org/x@evil.example/repo",
 		"https://bad_host/org/repo",

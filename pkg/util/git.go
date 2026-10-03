@@ -712,6 +712,15 @@ func StripGitURLCredentials(remote string) string {
 // first ':') contains no '/', and the host after it (up to the next '/') is
 // non-empty and contains no '@'. Once a '/' appears in the login position the
 // path has started, so no later '@' can end the userinfo.
+//
+// A '/' after the first ':' is ambiguous: "host:8443/org/repo@v1" is a port
+// followed by a path with '@', while "user:pa/ss@host/repo" is a password
+// with an unencoded '/'. When the text before that '/' is a valid host:port
+// (a 1-65535 port without leading zeros), s is read as RFC 3986 does, with no
+// userinfo. Otherwise it cannot be a valid authority, so the '@' is taken to
+// end a password and the credential is stripped (fail closed). Callers that
+// persist the result must still reject '@' in the path, since a password
+// that looks like a port ("user:8443/x@host/repo") is left in place.
 func userinfoEnd(s string) int {
 	for from := 0; ; {
 		i := strings.Index(s[from:], "@")
@@ -724,12 +733,36 @@ func userinfoEnd(s string) int {
 		if strings.Contains(login, "/") {
 			return -1
 		}
+		if authority, _, ok := strings.Cut(userinfo, "/"); ok && isHostAndPort(authority) {
+			return -1
+		}
 		host, _, _ := strings.Cut(s[at+1:], "/")
 		if host != "" && !strings.Contains(host, "@") {
 			return at
 		}
 		from = at + 1
 	}
+}
+
+// isHostAndPort reports whether s is a non-empty host followed by ':' and a
+// port of 1-65535 without leading zeros (e.g. "host:8443", "[::1]:8443").
+func isHostAndPort(s string) bool {
+	colon := strings.LastIndex(s, ":")
+	if colon <= 0 {
+		return false
+	}
+	port := s[colon+1:]
+	if port == "" || len(port) > 5 || port[0] == '0' {
+		return false
+	}
+	n := 0
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n <= 65535
 }
 
 // ToHTTPSCloneURL converts any git URL to HTTPS clone form with a .git suffix.
