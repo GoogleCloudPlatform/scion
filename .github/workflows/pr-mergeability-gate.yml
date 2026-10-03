@@ -51,20 +51,26 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
-# One gate run per PR (ptone/scion#2845): a newer event for the same PR
-# cancels the in-flight run it supersedes.
+# One gate run per PR head (ptone/scion#2845): duplicate runs for the same
+# PR head (e.g. ready_for_review and synchronize for one push) collapse, and a
+# newer run for that head cancels the in-flight one.
 #
 # INVARIANT: every PR's latest head must end with a completed (not cancelled)
-# Mergeability Gate result. This holds because every trigger type above starts
-# a run that always executes the job (there is no job-level `if:`), and each
-# run reads the PR's current state from the API. So a run is only cancelled by
-# a newer run for the same PR, and that newer run completes. Events outside
-# `types:` (labeled, edited, ...) create no run at all, so they cannot cancel
-# anything. If you add a trigger type whose run may be skipped, or a job-level
-# `if:`, set cancel-in-progress to false (queue instead of cancel), or a
-# skipped run could leave the head with only a cancelled gate result.
+# Mergeability Gate result. The head SHA is part of the group key, so a run
+# can only be cancelled by another run for the *same* head, and every run
+# executes the job (no job-level `if:`), so the surviving run for each head
+# completes. Runs for different heads never cancel each other, which keeps
+# the invariant independent of the order in which GitHub creates runs: an
+# older-head run created late cannot cancel the newest head's run. The cost
+# is that a superseded head's run finishes instead of being cancelled; it is
+# cheap (a few seconds of API reads). If you add a trigger type whose run may
+# be skipped, or a job-level `if:`, set cancel-in-progress to false (queue
+# instead of cancel), or a skipped run could leave the head with only a
+# cancelled gate result.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  # pull_request_target is this workflow's only trigger, so this is always
+  # true; written as an expression to document that cancelling is PR-only.
   cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
 
 permissions:

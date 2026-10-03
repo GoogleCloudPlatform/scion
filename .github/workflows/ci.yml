@@ -55,6 +55,9 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+          # Blobless partial clone: the diff below needs only commits and
+          # trees (--no-renames means no blob content comparison).
+          filter: blob:none
 
       - name: Diff against PR base
         id: diff
@@ -68,14 +71,18 @@ jobs:
             echo "single_node_vm=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if ! changed=$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}"); then
+          # --no-renames: list both sides of a rename, so a file moved out of
+          # a gated directory still counts as a change to that directory.
+          if ! changed=$(git diff --name-only --no-renames "${BASE_SHA}...${HEAD_SHA}"); then
             echo "::warning title=Path detection failed::git diff ${BASE_SHA}...${HEAD_SHA} failed; running every gated job."
             echo "single_node_vm=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "Changed files:"
           echo "$changed"
-          if echo "$changed" | grep -qE '^(scripts/single-node-vm/|\.github/workflows/ci\.yml$)'; then
+          # Here-string, not `echo | grep -q`: under pipefail, grep -q exiting
+          # on the first match SIGPIPEs echo on large PRs and fails the test.
+          if grep -qE '^(scripts/single-node-vm/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
             echo "single_node_vm=true" >> "$GITHUB_OUTPUT"
           else
             echo "single_node_vm=false" >> "$GITHUB_OUTPUT"
@@ -489,7 +496,6 @@ jobs:
             echo "See step summary for details."
             exit 1
           fi
-
 
   single-node-vm-deploy-tests:
     name: single-node-vm deploy.sh test harness
