@@ -46,8 +46,8 @@ import (
 //     later page and appears only on a fresh page-0 fetch;
 //   - a key bump (heartbeat) that moves an unfetched row from "after the
 //     cursor" (not yet shown) to "before it" (newer than everything already
-//     shown): the walk skips it, which is the documented contract for a
-//     row that moves from after the cursor to before it.
+//     shown): the walk skips it, which is the intended behavior for a row
+//     that moves from after the cursor to before it.
 //
 // The reverse crossing (a row that moves from before the cursor to after
 // it appears twice) needs a row's key to REGRESS, which
@@ -203,7 +203,7 @@ func (r *regressingAfterNCallsStore) ListAgentMembers(ctx context.Context, filte
 // after the cursor, is shown again on a later page of the same walk. This
 // is the concurrency contract's stated behavior for that crossing direction
 // (the row appears twice), not a bug — the test exists to prove the walk
-// reaches that documented outcome (via re-reading and repositioning, not an
+// reaches that intended outcome (via re-reading and repositioning, not an
 // offset) rather than silently deduplicating or skipping, and to pin it as
 // a regression guard since positionAfterCursor's comparison is symmetric
 // (pkg/store/agentsort.Less has no direction-specific branch): if the
@@ -253,5 +253,5 @@ func TestListProjectAgentsSorted_Concurrency_KeyRegressionDuplicatesRow(t *testi
 		}
 		cursor = page.NextCursor
 	}
-	assert.True(t, seenAgain, "a row whose key regresses below the cursor must resurface later in the same walk (design 4.5, documented behavior)")
+	assert.True(t, seenAgain, "a row whose key regresses below the cursor must resurface later in the same walk (intended behavior)")
 }

@@ -13,10 +13,10 @@
 // limitations under the License.
 
 // Package agentsort is the single reference implementation of the
-// server-sorted agent list total order. Both the
-// project-endpoint positioning (pkg/hub) and the test suites that assert
-// pages concatenate to "the agentsort reference" use it, so there is exactly
-// one place that can get a tie-break wrong.
+// server-sorted agent list total order. Both the project-endpoint
+// positioning (pkg/hub) and the test suites that assert pages concatenate
+// to "the agentsort reference" use it, so there is exactly one place that
+// can get a tie-break wrong.
 package agentsort
 
 import (

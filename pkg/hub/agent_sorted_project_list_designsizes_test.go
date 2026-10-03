@@ -30,14 +30,13 @@ import (
 )
 
 // This file runs the decision-count and candidate-ceiling gates at
-// realistic sizes (n in 25, 100, 500, 501, 1200; real
-// 2000/2001-row ceiling rows). Fixtures use store.Store.WithTx (one
-// transaction for the whole batch)
-// rather than one CreateAgent call per row: a 1200-row bulk insert this way
-// takes well under a second in this sandbox, which is what makes these
-// sizes practical to run as unit tests at all — the smaller sizes used
-// elsewhere in this package were a overcautious reaction to this repo's
-// cold-build compile time, not to real per-row insert cost.
+// boundary sizes (n in 25, 100, 500, 501, 1200; real 2000/2001-row
+// ceiling rows). Fixtures use store.Store.WithTx (one transaction for the
+// whole batch) rather than one CreateAgent call per row: a 1200-row bulk
+// insert this way takes well under a second in this sandbox, which is what
+// makes these sizes practical to run as unit tests at all — the smaller
+// sizes used elsewhere in this package were a overcautious reaction to
+// this repo's cold-build compile time, not to real per-row insert cost.
 
 // TestListProjectAgentsSorted_DecisionCounts_DesignSizes is the non-waivable
 // decision-count hard gate at the sizes above, all-readable (R=n).
@@ -180,7 +179,7 @@ func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Complete(t *testing.
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	require.NotNil(t, resp.Complete)
-	assert.True(t, *resp.Complete, "completeness is decided on the candidate count n, not R (design 5.3 step 2)")
+	assert.True(t, *resp.Complete, "completeness is decided on the candidate count n, not R")
 	assert.Len(t, resp.Agents, r, "a complete response's page is the whole readable set")
 	assert.Equal(t, r, resp.TotalCount)
 	assertStatsWithinReadable(t, resp, agents[:r])

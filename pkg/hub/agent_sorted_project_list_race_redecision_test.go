@@ -197,7 +197,7 @@ func TestListProjectAgentsSorted_Race_MissingRow_ExactDecisionCount(t *testing.T
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	assert.Empty(t, resp.Agents)
-	assert.Len(t, emitter.records, 6, "a missing row must cost exactly the step-3 read, no more")
+	assert.Len(t, emitter.records, 6, "a missing row must cost exactly the read-pass decision, no more")
 }
 
 // TestListProjectAgentsSorted_Race_ProjectMismatch_ExactDecisionCount is the
@@ -217,7 +217,7 @@ func TestListProjectAgentsSorted_Race_ProjectMismatch_ExactDecisionCount(t *test
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	assert.Empty(t, resp.Agents)
-	assert.Len(t, emitter.records, 6, "a project-mismatched row must cost exactly the step-3 read, no more")
+	assert.Len(t, emitter.records, 6, "a project-mismatched row must cost exactly the read-pass decision, no more")
 }
 
 // --- missing-row drop in paged mode must leave a valid short page ---

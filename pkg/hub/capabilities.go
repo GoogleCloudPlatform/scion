@@ -334,11 +334,11 @@ func (a *AuthzService) ComputeCapabilitiesForActions(ctx context.Context, identi
 // remaining actions (evaluated on the full row), preserving the action order
 // ResourceActions[resourceType] defines — the same order
 // ComputeCapabilitiesBatch produces, which is what the non-waivable
-// deep-equality gate requires and what the
-// decision-count accounting depends on: an item whose read decision came
-// from the read pass and whose remaining actions came from the
-// remaining-actions pass must look identical to one where every action was
-// decided by a single ComputeCapabilitiesBatch call.
+// deep-equality gate requires and what the decision-count accounting
+// depends on: an item whose read decision came from the read pass and
+// whose remaining actions came from the remaining-actions pass must look
+// identical to one where every action was decided by a single
+// ComputeCapabilitiesBatch call.
 func mergeCapabilities(order []Action, readCap, restCap *Capabilities) *Capabilities {
 	allowed := make([]string, 0, len(order))
 	for _, action := range order {

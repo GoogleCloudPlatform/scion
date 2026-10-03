@@ -29,19 +29,19 @@ import (
 )
 
 // TestListProjectAgents_CLIWalk_LegacyBindingSurvivesPagination is the
-// legacy cursor-walk case: a legacy (no "sort")
-// project-agents cursor walk, driven through hubclient.Projects().ListAgents
-// the way cmd/project_health.go's walk does (limit=200, following
-// NextCursor until empty), must return every agent exactly once under the
-// project cursor binding, which applies in both legacy and sorted mode.
-// Run for both a user and an agent JWT.
+// legacy cursor-walk case: a legacy (no "sort") project-agents cursor walk,
+// driven through hubclient.Projects().ListAgents the way
+// cmd/project_health.go's walk does (limit=200, following NextCursor until
+// empty), must return every agent exactly once under the project cursor
+// binding, which applies in both legacy and sorted mode. Run for both a
+// user and an agent JWT.
 func TestListProjectAgents_CLIWalk_LegacyBindingSurvivesPagination(t *testing.T) {
 	f := sortedListSetup(t)
 
-	// Uses 450 agents at limit=200, as
-	// cmd/project_health.go's walk does (bulk insert via store.Store.WithTx
-	// makes this cheap, and legacy mode's per-page cost is independent of
-	// total candidate count, unlike sorted mode).
+	// Uses 450 agents at limit=200, as cmd/project_health.go's walk does
+	// (bulk insert via store.Store.WithTx makes this cheap, and legacy
+	// mode's per-page cost is independent of total candidate count, unlike
+	// sorted mode).
 	const total = 450
 	const pageLimit = 200
 	agents := f.createAgentsBulk(t, total, "walk", string(state.PhaseStopped), nil)
