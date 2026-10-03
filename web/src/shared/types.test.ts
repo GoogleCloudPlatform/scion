@@ -70,5 +70,6 @@ describe('isEmptyPerAgentWorkspace', () => {
     ).toBe(false);
     expect(isEmptyPerAgentWorkspace({ labels: label('shared') })).toBe(false);
     expect(isEmptyPerAgentWorkspace({})).toBe(false);
+    expect(isEmptyPerAgentWorkspace(undefined)).toBe(false);
   });
 });

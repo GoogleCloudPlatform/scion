@@ -195,10 +195,11 @@ export function isSharedWorkspace(project: Project): boolean {
  * raw empty-per-agent value (the hub's ResolveProjectSharingMode treats
  * both the same on a non-git project).
  */
-export function isEmptyPerAgentWorkspace(project: {
+export function isEmptyPerAgentWorkspace(project?: {
   gitRemote?: string | undefined;
   labels?: Record<string, string> | undefined;
 }): boolean {
+  if (!project) return false;
   if (project.gitRemote) return false;
   const mode = project.labels?.['scion.dev/workspace-mode'];
   return mode === 'per-agent' || mode === 'empty-per-agent';
