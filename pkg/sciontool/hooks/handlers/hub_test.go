@@ -5,7 +5,9 @@ Copyright 2025 The Scion Authors.
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 )
 
 // scrubHubEnv clears all Hub-related environment variables for the
@@ -671,6 +674,7 @@ type fakeHub struct {
 type fakeResponse struct {
 	status     int
 	retryAfter string
+	body       string
 }
 
 func newFakeHub(t *testing.T, createdBy string, ancestry ...string) *fakeHub {
@@ -702,6 +706,7 @@ func (f *fakeHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Retry-After", next.retryAfter)
 			}
 			w.WriteHeader(next.status)
+			_, _ = w.Write([]byte(next.body))
 			return
 		}
 		recipient, _ := payload["recipient"].(string)
@@ -716,10 +721,13 @@ func (f *fakeHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.outbound = append(f.outbound, payload)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{}`))
-	default:
+	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents/test-agent-id/status":
 		f.statusCalls++
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{}`))
+	default:
+		f.t.Errorf("fakeHub: unexpected request %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
 	}
 }
 
@@ -876,15 +884,19 @@ func TestHubHandler_AssistantTextForwarding(t *testing.T) {
 func TestHubHandler_AssistantReplyRateLimitRetry(t *testing.T) {
 	t.Run("short Retry-After: one retry, then success", func(t *testing.T) {
 		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
-		fh.outboundScript = []fakeResponse{{status: http.StatusTooManyRequests, retryAfter: "1"}}
+		fh.outboundScript = []fakeResponse{{status: http.StatusTooManyRequests, retryAfter: "2"}}
 		handler := fh.start()
+		var waits []time.Duration
+		handler.wait = func(_ context.Context, d time.Duration) error {
+			waits = append(waits, d) // observe, don't sleep
+			return nil
+		}
 
-		start := time.Now()
 		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
 			t.Fatalf("Handle returned error: %v", err)
 		}
-		if elapsed := time.Since(start); elapsed < time.Second {
-			t.Errorf("Expected the retry to wait out Retry-After (1s), returned after %s", elapsed)
+		if len(waits) != 1 || waits[0] != 2*time.Second {
+			t.Errorf("Expected one wait of Retry-After (2s), got %v", waits)
 		}
 		payload := fh.lastOutbound()
 		if payload["msg"] != "Hello" {
@@ -897,6 +909,25 @@ func TestHubHandler_AssistantReplyRateLimitRetry(t *testing.T) {
 		}
 		if fh.statusCalls != 1 {
 			t.Errorf("Expected the status update to still be sent, got %d calls", fh.statusCalls)
+		}
+	})
+
+	t.Run("retry budget is the mirror's, not the whole hook's", func(t *testing.T) {
+		// 3s + retryReserve fits the 5s hook budget but not mirrorBudget.
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		fh.outboundScript = []fakeResponse{{status: http.StatusTooManyRequests, retryAfter: "3"}}
+		handler := fh.start()
+		handler.wait = func(context.Context, time.Duration) error {
+			t.Error("Expected no wait: Retry-After exceeds the mirror budget")
+			return nil
+		}
+
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		_, outbound, _ := fh.counts()
+		if outbound != 1 {
+			t.Errorf("Expected exactly 1 outbound request, got %d", outbound)
 		}
 	})
 
@@ -1244,4 +1275,95 @@ func TestHubHandler_AssistantReplyAddresseeCache(t *testing.T) {
 			t.Error("Expected the symlink target to be left untouched")
 		}
 	})
+}
+
+func TestRetryAfterWithinBudget(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	rateLimited := func(d time.Duration) error {
+		return &hub.HTTPStatusError{StatusCode: http.StatusTooManyRequests, RetryAfter: d, HasRetryAfter: true}
+	}
+	withDeadline := func(remaining time.Duration) context.Context {
+		ctx, cancel := context.WithDeadline(context.Background(), now.Add(remaining))
+		t.Cleanup(cancel)
+		return ctx
+	}
+	tests := []struct {
+		name     string
+		ctx      context.Context
+		err      error
+		wantWait time.Duration
+		wantOK   bool
+	}{
+		{"no deadline", context.Background(), rateLimited(10 * time.Second), 10 * time.Second, true},
+		{"just under", withDeadline(2*time.Second + time.Millisecond), rateLimited(time.Second), time.Second, true},
+		{"exactly fits", withDeadline(2 * time.Second), rateLimited(time.Second), time.Second, true},
+		{"just over", withDeadline(2*time.Second - time.Millisecond), rateLimited(time.Second), 0, false},
+		{"zero wait, reserve still required", withDeadline(retryReserve - time.Millisecond), rateLimited(0), 0, false},
+		{"503 with Retry-After", context.Background(), &hub.HTTPStatusError{StatusCode: http.StatusServiceUnavailable, RetryAfter: time.Second, HasRetryAfter: true}, 0, false},
+		{"429 without Retry-After", context.Background(), &hub.HTTPStatusError{StatusCode: http.StatusTooManyRequests}, 0, false},
+		{"not an HTTPStatusError", context.Background(), errors.New("connection refused"), 0, false},
+		{"wrapped 429", context.Background(), fmt.Errorf("send: %w", rateLimited(time.Second)), time.Second, true},
+		{"nil error", context.Background(), nil, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wait, ok := retryAfterWithinBudget(tt.ctx, tt.err, now)
+			if ok != tt.wantOK || wait != tt.wantWait {
+				t.Errorf("retryAfterWithinBudget = (%s, %v), want (%s, %v)", wait, ok, tt.wantWait, tt.wantOK)
+			}
+		})
+	}
+}
+
+// A creator the hub no longer resolves (400 addr_unknown) disables the
+// mirror for the agent: the skip is cached, so later Stops send nothing.
+func TestHubHandler_AssistantReplyAddrUnknownCachesSkip(t *testing.T) {
+	fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+	fh.outboundScript = []fakeResponse{{
+		status: http.StatusBadRequest,
+		body:   `{"error":{"code":"addr_unknown","message":"recipient_id is not a valid addressee"}}`,
+	}}
+	handler := fh.start()
+
+	for i := 0; i < 2; i++ {
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+	}
+	self, outbound, _ := fh.counts()
+	if outbound != 1 {
+		t.Errorf("Expected only the first Stop to send (1 outbound request), got %d", outbound)
+	}
+	if self != 1 {
+		t.Errorf("Expected 1 agent lookup, got %d", self)
+	}
+	c, ok := readAddresseeCache(filepath.Join(os.Getenv("HOME"), addresseeCacheFile), "test-agent-id")
+	if !ok || c.RecipientID != "" {
+		t.Errorf("Expected a cached skip, got %+v ok=%v", c, ok)
+	}
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	if fh.statusCalls != 2 {
+		t.Errorf("Expected both status updates to be sent, got %d", fh.statusCalls)
+	}
+}
+
+// Any other 400 is not treated as a permanent addressee failure.
+func TestHubHandler_AssistantReplyOther400DoesNotCacheSkip(t *testing.T) {
+	fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+	fh.outboundScript = []fakeResponse{{
+		status: http.StatusBadRequest,
+		body:   `{"error":{"code":"validation_error","message":"msg too long"}}`,
+	}}
+	handler := fh.start()
+
+	for i := 0; i < 2; i++ {
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+	}
+	_, outbound, accepted := fh.counts()
+	if outbound != 2 || accepted != 1 {
+		t.Errorf("Expected the second Stop to send and be accepted, got %d requests / %d accepted", outbound, accepted)
+	}
 }

@@ -31,6 +31,11 @@ type HubHandler struct {
 	// addresseeCachePath caches the assistant-reply addressee resolved by
 	// creatorUserID; see readAddresseeCache.
 	addresseeCachePath string
+
+	// wait blocks for d or until ctx is done, returning ctx.Err() in the
+	// latter case. Nil means waitCtx; tests substitute it to observe the
+	// requested rate-limit wait without sleeping.
+	wait func(ctx context.Context, d time.Duration) error
 }
 
 // NewHubHandler creates a new hub handler.
@@ -50,22 +55,31 @@ func NewHubHandler() *HubHandler {
 	}
 }
 
-// retryReserve is the part of the hook's budget a rate-limit retry must
-// leave unspent: time for the retried send itself and for the status update
-// that follows the mirror in Handle.
+// mirrorBudget bounds the assistant-reply mirror (lookup, send and any
+// rate-limit retry) within Handle's 5s hook budget, so at least 1.5s is
+// always left for the status update that follows it.
+const mirrorBudget = 3500 * time.Millisecond
+
+// retryReserve is the part of the mirror's budget a rate-limit retry must
+// leave unspent after its Retry-After wait: time for the retried send
+// itself. It does not protect the status update; mirrorBudget does.
 const retryReserve = time.Second
 
 // forwardAssistantReply mirrors an assistant reply to the agent's creator as
 // an outbound "assistant-reply" message. The hub requires an explicit
 // addressee, so the reply is addressed to the creator by user ID; when the
 // creator is unknown or is not a user (an agent created by another agent),
-// the mirror is skipped. ctx is the hook's own budget (see Handle); a 429 is
-// retried once if its Retry-After, plus retryReserve, fits in what remains.
+// the mirror is skipped. The mirror runs under its own mirrorBudget deadline
+// derived from ctx; a 429 is retried once if its Retry-After, plus
+// retryReserve, fits in what remains of that budget.
 // Best-effort: failures are logged, never returned.
 func (h *HubHandler) forwardAssistantReply(ctx context.Context, text string, metadata map[string]string, thinkingFiltered bool) {
+	ctx, cancel := context.WithTimeout(ctx, mirrorBudget)
+	defer cancel()
+
 	creatorID, err := h.creatorUserID(ctx)
 	if err != nil {
-		log.Error("Hub: outbound assistant reply skipped, agent lookup failed: %v", err)
+		log.Warn("Hub: outbound assistant reply skipped, agent lookup failed: %v", err)
 		return
 	}
 	if creatorID == "" {
@@ -80,16 +94,19 @@ func (h *HubHandler) forwardAssistantReply(ctx context.Context, text string, met
 		Metadata:    metadata,
 	}
 	err = h.client.SendOutboundMessage(ctx, msg)
-	if wait, ok := retryAfterWithinBudget(ctx, err); ok {
+	if wait, ok := retryAfterWithinBudget(ctx, err, time.Now()); ok {
 		log.Debug("Hub: outbound assistant reply rate limited, retrying in %s", wait)
-		timer := time.NewTimer(wait)
-		select {
-		case <-timer.C:
+		if err = h.waitFor(ctx, wait); err == nil {
 			err = h.client.SendOutboundMessage(ctx, msg)
-		case <-ctx.Done():
-			timer.Stop()
-			err = ctx.Err()
 		}
+	}
+	if isAddrUnknown(err) {
+		// The creator no longer resolves (e.g. the user was deleted). That
+		// will not change for this agent, so cache a skip instead of
+		// sending a request the hub rejects on every later Stop.
+		log.Warn("Hub: assistant reply addressee %s is unknown to the hub; disabling the mirror for this agent", creatorID)
+		writeAddresseeCache(h.addresseeCachePath, addresseeCache{AgentID: h.client.AgentID()})
+		return
 	}
 	if err != nil {
 		log.Error("Hub: outbound assistant reply failed: %v", err)
@@ -97,6 +114,35 @@ func (h *HubHandler) forwardAssistantReply(ctx context.Context, text string, met
 	}
 	log.Debug("Hub: Forwarded assistant reply to message store (%d bytes, thinking_filtered=%v)",
 		len(text), thinkingFiltered)
+}
+
+// isAddrUnknown reports whether err is the hub's 400 addr_unknown rejection.
+func isAddrUnknown(err error) bool {
+	var statusErr *hub.HTTPStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusBadRequest &&
+		statusErr.Code() == addrUnknownCode
+}
+
+// addrUnknownCode is the hub's ErrCodeAddrUnknown (pkg/hub/errors.go).
+const addrUnknownCode = "addr_unknown"
+
+func (h *HubHandler) waitFor(ctx context.Context, d time.Duration) error {
+	if h.wait != nil {
+		return h.wait(ctx, d)
+	}
+	return waitCtx(ctx, d)
+}
+
+// waitCtx blocks for d or until ctx is done.
+func waitCtx(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // creatorUserID returns the user ID of the agent's creator, or "" when the
@@ -171,14 +217,15 @@ func writeAddresseeCache(path string, c addresseeCache) {
 }
 
 // retryAfterWithinBudget reports whether err is a 429 carrying a Retry-After
-// that, plus retryReserve, elapses before ctx's deadline, and returns the
-// wait.
-func retryAfterWithinBudget(ctx context.Context, err error) (time.Duration, bool) {
+// such that waiting it out, plus retryReserve, fits within (<=) the time
+// remaining at now before ctx's deadline, and returns the wait. With no
+// deadline, any such 429 qualifies.
+func retryAfterWithinBudget(ctx context.Context, err error, now time.Time) (time.Duration, bool) {
 	var statusErr *hub.HTTPStatusError
 	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusTooManyRequests || !statusErr.HasRetryAfter {
 		return 0, false
 	}
-	if deadline, ok := ctx.Deadline(); ok && statusErr.RetryAfter+retryReserve > time.Until(deadline) {
+	if deadline, ok := ctx.Deadline(); ok && statusErr.RetryAfter+retryReserve > deadline.Sub(now) {
 		return 0, false
 	}
 	return statusErr.RetryAfter, true

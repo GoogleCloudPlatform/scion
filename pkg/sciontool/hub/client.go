@@ -1859,24 +1859,57 @@ func (e *HTTPStatusError) Error() string {
 	return fmt.Sprintf("hub returned error %d: %s", e.StatusCode, e.Body)
 }
 
-// parseRetryAfter parses a Retry-After header value: either a non-negative
-// number of seconds or an HTTP-date. A date in the past yields zero.
+// Code returns the hub API error code from a JSON error body
+// ({"error":{"code":"..."}}), or "" when the body carries none.
+func (e *HTTPStatusError) Code() string {
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(e.Body), &body) != nil {
+		return ""
+	}
+	return body.Error.Code
+}
+
+// maxRetryAfter caps a parsed Retry-After. It bounds the seconds value
+// before conversion (so a huge value cannot overflow time.Duration into a
+// negative wait) and is far beyond any caller's retry budget.
+const maxRetryAfter = 24 * time.Hour
+
+// parseRetryAfter parses a Retry-After header value: either delay-seconds
+// (one or more ASCII digits, RFC 9110 §10.2.3) or an HTTP-date. A date in
+// the past yields zero; values above maxRetryAfter are capped to it.
 func parseRetryAfter(v string, now time.Time) (time.Duration, bool) {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0, false
 	}
-	if secs, err := strconv.Atoi(v); err == nil {
-		if secs < 0 {
+	if v[0] >= '0' && v[0] <= '9' {
+		secs, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			// All digits but out of range for uint64: still a valid,
+			// enormous delay.
+			if errors.Is(err, strconv.ErrRange) {
+				return maxRetryAfter, true
+			}
 			return 0, false
+		}
+		if secs > uint64(maxRetryAfter/time.Second) {
+			return maxRetryAfter, true
 		}
 		return time.Duration(secs) * time.Second, true
 	}
 	if t, err := http.ParseTime(v); err == nil {
-		if d := t.Sub(now); d > 0 {
-			return d, true
+		d := t.Sub(now)
+		switch {
+		case d <= 0:
+			return 0, true
+		case d > maxRetryAfter:
+			return maxRetryAfter, true
 		}
-		return 0, true
+		return d, true
 	}
 	return 0, false
 }
