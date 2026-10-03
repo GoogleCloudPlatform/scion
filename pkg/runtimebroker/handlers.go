@@ -1734,8 +1734,11 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, errDeleteTargetNotFound) {
-			// No side effects: the hub's broker clients treat a 404 on
-			// delete as an idempotent success.
+			// No container and no files, but per-agent runtime objects
+			// may remain when the container was removed outside scion.
+			// Beyond that, no side effects: the hub's broker clients
+			// treat a 404 on delete as an idempotent success.
+			s.cleanupLeftoverAgentResources(ctx, id, projectID)
 			s.agentLifecycleLog.Info("Agent delete: no matching agent in project",
 				"agent_id", id, "project_id", projectID)
 			NotFound(w, "Agent")
@@ -1815,6 +1818,12 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 		span.SetStatus(codes.Error, err.Error())
 		RuntimeError(w, "Failed to delete agent: "+err.Error())
 		return
+	}
+	if target.containerID == "" {
+		// The container was already gone, so DeleteTarget made no runtime
+		// call and the runtime never removed the objects it created with
+		// the container.
+		s.cleanupLeftoverAgentResources(ctx, target.name, projectID)
 	}
 
 	// On the NFS workspace, the agent's worktree (worktree-per-agent) or
@@ -4704,6 +4713,36 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 		projectPath: resolved,
 		projectID:   projectID,
 	}, nil
+}
+
+// agentResourceCleaner is implemented by managers whose runtime can remove
+// per-agent objects left behind after the agent's container is gone (see
+// runtime.AgentResourceCleaner and agent.AgentManager.CleanupAgentResources).
+type agentResourceCleaner interface {
+	CleanupAgentResources(ctx context.Context, agentName, projectID string) error
+}
+
+// cleanupLeftoverAgentResources removes the per-agent runtime objects of an
+// agent whose container no longer exists, across the default and every
+// auxiliary runtime, since the container may have run on any of them. It is
+// scoped to projectID and does nothing without one. It is best effort: a
+// failure is logged and does not fail the delete, matching the cleanup that
+// runtime Delete does when the container still exists.
+func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, projectID string) {
+	if projectID == "" {
+		return
+	}
+	slug := api.Slugify(agentName)
+	for _, mgr := range s.allManagers() {
+		c, ok := mgr.(agentResourceCleaner)
+		if !ok {
+			continue
+		}
+		if err := c.CleanupAgentResources(ctx, slug, projectID); err != nil {
+			s.agentLifecycleLog.Warn("Agent delete: failed to remove leftover runtime objects",
+				"agent_id", agentName, "project_id", projectID, "error", err)
+		}
+	}
 }
 
 // findAgentProjectDir returns the .scion dir of the project that owns the
