@@ -101,6 +101,10 @@ type Capabilities struct {
 	EndpointIncarnation string          `json:"endpoint_incarnation"`
 	ExecScope           string          `json:"exec_scope"`
 	TransportLimits     TransportLimits `json:"transport_limits"`
+	// IncarnationSource says where EndpointIncarnation comes from (design
+	// v2.4 §3.4): "launch_id", "generation", or "" for legacy endpoints. The
+	// registry only stores and round-trips it; nothing filters on it.
+	IncarnationSource string `json:"incarnation_source,omitempty"`
 }
 
 // Has reports whether the capabilities advertise name as a stream kind or

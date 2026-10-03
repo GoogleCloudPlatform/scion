@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -623,6 +624,41 @@ func TestConduitRegistry_CapabilitiesRoundTrip(t *testing.T) {
 	assert.False(t, found)
 }
 
+func TestConduitRegistry_IncarnationSourceRoundTrip(t *testing.T) {
+	// Design v2.4 §3.4: incarnation_source is stored and returned verbatim,
+	// and never filtered on ("" = legacy).
+	f := newConduitFixture(t)
+	gen := f.registerRelay("relay-1")
+	for i, src := range []string{"launch_id", "generation", ""} {
+		rec := agentSession(fmt.Sprintf("s-%d", i), "relay-1", gen, "inc-A")
+		rec.PrincipalID = fmt.Sprintf("agent-%d", i)
+		rec.Capabilities.IncarnationSource = src
+		f.insert(rec)
+
+		w := registry.Want{ProjectID: rec.ProjectID, Incarnation: "inc-A"}
+		got, err := f.reg.Eligible(f.ctx, registry.PrincipalAgent, rec.PrincipalID, w, f.clock.Now())
+		require.NoError(t, err)
+		require.Len(t, got, 1, "source %q", src)
+		assert.Equal(t, src, got[0].Capabilities.IncarnationSource)
+		assert.Equal(t, rec.Capabilities, got[0].Capabilities)
+
+		// Admission (which returns only a Decision) is unaffected by it.
+		d, err := f.reg.Admission(f.ctx, rec.SessionID, w)
+		require.NoError(t, err)
+		assert.True(t, d.Admissible, "source %q: %s", src, d.Reason)
+
+		ps, found, err := f.store.ListPrincipalSessionsBySession(f.ctx, rec.SessionID)
+		require.NoError(t, err)
+		require.True(t, found)
+		assert.Equal(t, src, ps.Sessions[0].Session.Capabilities.IncarnationSource)
+	}
+
+	// Legacy JSON omits the key entirely.
+	b, err := json.Marshal(registry.Capabilities{})
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "incarnation_source")
+}
+
 func TestConduitRegistry_RegisterRelay_ConcurrentSameInstance(t *testing.T) {
 	f := newConduitFixture(t)
 	const n = 8
@@ -760,6 +796,12 @@ func TestConduitRegistry_PruneRelayInstances_OnlyIdleAndStale(t *testing.T) {
 // destructive relay job reaches the store while *armed is true.
 func guardedRegistry(t *testing.T, f *conduitFixture, armed *bool) *registry.Registry {
 	t.Helper()
+	return guardedRegistryWith(t, f, armed, registry.Config{Clock: f.clock})
+}
+
+// guardedRegistryWith is guardedRegistry with an explicit Config.
+func guardedRegistryWith(t *testing.T, f *conduitFixture, armed *bool, cfg registry.Config) *registry.Registry {
+	t.Helper()
 	fs := &registry.FaultStore{Inner: f.store, Fault: func(_ context.Context, op string) error {
 		if *armed && (op == registry.OpDeleteSessionsOfStaleRelays || op == registry.OpDeleteIdleRelays) {
 			t.Errorf("refused call reached the store (%s)", op)
@@ -767,7 +809,7 @@ func guardedRegistry(t *testing.T, f *conduitFixture, armed *bool) *registry.Reg
 		}
 		return nil
 	}}
-	return registry.New(fs, registry.Config{Clock: f.clock})
+	return registry.New(fs, cfg)
 }
 
 func TestConduitRegistry_ReapStaleRelays_HorizonFloor(t *testing.T) {
@@ -824,6 +866,32 @@ func TestConduitRegistry_PruneRelayInstances_HorizonFloor(t *testing.T) {
 	assert.Equal(t, 0, n) // idle for 1h-1s: kept
 	f.clock.Advance(2 * time.Second)
 	n, err = reg.PruneRelayInstances(f.ctx, registry.MinRelayPruneAfter, f.clock.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.ErrorIs(t, f.reg.HeartbeatRelay(f.ctx, "relay-idle", idle), registry.ErrRelaySuperseded)
+}
+
+func TestConduitRegistry_PruneRelayInstances_FloorIsRelayStaleAfterIfLarger(t *testing.T) {
+	// r5-F1: with RelayStaleAfter (2h) above MinRelayPruneAfter (1h), the
+	// prune floor is RelayStaleAfter.
+	f := newConduitFixture(t)
+	armed := true
+	staleAfter := 2 * time.Hour
+	reg := guardedRegistryWith(t, f, &armed, registry.Config{Clock: f.clock, RelayStaleAfter: staleAfter})
+	idle := f.registerRelay("relay-idle")
+
+	// Idle for more than 2h: 1h and 2h-1ns would both prune it.
+	f.clock.Advance(staleAfter + time.Minute)
+	_, err := reg.PruneRelayInstances(f.ctx, registry.MinRelayPruneAfter, f.clock.Now())
+	assert.ErrorIs(t, err, registry.ErrInvalidInput)
+	_, err = reg.PruneRelayInstances(f.ctx, staleAfter-time.Nanosecond, f.clock.Now())
+	assert.ErrorIs(t, err, registry.ErrInvalidInput)
+	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-idle", idle))
+
+	// Exactly 2h is accepted.
+	armed = false
+	f.clock.Advance(staleAfter + time.Second)
+	n, err := reg.PruneRelayInstances(f.ctx, staleAfter, f.clock.Now())
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 	assert.ErrorIs(t, f.reg.HeartbeatRelay(f.ctx, "relay-idle", idle), registry.ErrRelaySuperseded)
