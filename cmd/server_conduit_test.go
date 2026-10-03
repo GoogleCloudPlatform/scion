@@ -314,6 +314,29 @@ func TestStartConduit(t *testing.T) {
 		}
 	})
 
+	t.Run("outside HA a failed start releases the internal listener", func(t *testing.T) {
+		resetServerFlags()
+		enableHub = true
+		t.Setenv("K_SERVICE", "")
+		t.Setenv("SCION_SERVER_SESSION_SECRET", "conduit-test-signing-secret-0123456789")
+		probe, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		addr := probe.Addr().String()
+		require.NoError(t, probe.Close())
+
+		// This test store has no database client for the conduit
+		// registry, so the relay start fails after the listener opened.
+		srv := conduitHubServer(t, true)
+		cfg := &config.GlobalConfig{}
+		cfg.Hub.Conduit.PeerAuth = config.ConduitPeerAuthHMAC
+		cfg.Hub.Conduit.InternalListen = addr
+		require.NoError(t, run(t, srv, cfg))
+		require.Nil(t, srv.ConduitRelayFatal(), "the relay did not start")
+		ln, err := net.Listen("tcp", addr)
+		require.NoError(t, err, "the internal listen port was released")
+		require.NoError(t, ln.Close())
+	})
+
 	t.Run("outside HA a failure is logged, not fatal", func(t *testing.T) {
 		resetServerFlags()
 		enableHub = true

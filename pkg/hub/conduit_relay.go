@@ -224,8 +224,8 @@ func (s *Server) ConduitRelayFatal() <-chan error {
 }
 
 // ConduitInternalHandler serves the internal relay API. It is mounted only
-// on the internal listener, never on the public mux, and answers 503 until
-// the relay is published and 404 when no relay runs.
+// on the internal listener, never on the public mux, and answers 503 while
+// no relay is published (not yet started, or its start failed).
 func (s *Server) ConduitInternalHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rt := s.conduit.Load()

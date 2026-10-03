@@ -182,7 +182,7 @@ func startConduit(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Ser
 	return nil
 }
 
-func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, wg *sync.WaitGroup, errCh chan<- error, requireHA bool) error {
+func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, wg *sync.WaitGroup, errCh chan<- error, requireHA bool) (err error) {
 	// C8: checked first, before any listener opens or peer auth is built,
 	// so the operator sees this cause rather than a later symptom.
 	if requireHA && !hubSrv.ConduitGrantRingShared() {
@@ -202,11 +202,18 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 
 	var endpoint string
 	if listen := cfg.Hub.Conduit.InternalListen; listen != "" {
-		ln, err := net.Listen("tcp", listen)
-		if err != nil {
-			return fmt.Errorf("conduit internal listener %s: %w", listen, err)
+		ln, lerr := net.Listen("tcp", listen)
+		if lerr != nil {
+			return fmt.Errorf("conduit internal listener %s: %w", listen, lerr)
 		}
 		srv := &http.Server{Handler: hubSrv.ConduitInternalHandler(), ReadHeaderTimeout: 10 * time.Second}
+		// A relay that does not start must not keep the port.
+		defer func() {
+			if err != nil {
+				_ = srv.Close()
+				_ = ln.Close() // Serve may not have taken it over yet
+			}
+		}()
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
