@@ -712,7 +712,7 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 // (matching the shape used for the file-target checks below) and returns
 // false, so callers can simply `if !validateEnvSecretTarget(...) { return }`.
 func validateEnvSecretTarget(w http.ResponseWriter, secretType, target string) bool {
-	if secretType != store.SecretTypeEnvironment {
+	if secretType != store.SecretTypeEnvironment && secretType != "" {
 		return true
 	}
 	if !secret.IsReservedEnvTarget(target) {

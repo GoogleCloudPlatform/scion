@@ -36,6 +36,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -213,6 +214,40 @@ func TestSetSecret_ReservedTargetOnEnvironmentSecret_Rejected(t *testing.T) {
 		t.Fatalf("reserved target: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 	checkJSONError(t, rec.Body.String())
+}
+
+// TestSetSecret_ReservedTarget_EmptySecretType_Rejected confirms that a
+// secret with an unset (empty) type is treated as environment-type for the
+// reserved-target check, matching how an empty type is resolved downstream.
+// The PUT handler defaults an empty type to environment before validating;
+// the direct validateEnvSecretTarget call covers callers (such as the update
+// path with a stored empty type) that pass the empty type through as-is.
+func TestSetSecret_ReservedTarget_EmptySecretType_Rejected(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+
+	body := SetSecretRequest{
+		Value:  base64.StdEncoding.EncodeToString([]byte("test-value")),
+		Type:   "",
+		Target: "SCION_FOO",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/RESERVED_EMPTY_TYPE_KEY", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("reserved target with empty type: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	checkJSONError(t, rec.Body.String())
+
+	direct := httptest.NewRecorder()
+	if validateEnvSecretTarget(direct, "", "SCION_FOO") {
+		t.Fatalf("validateEnvSecretTarget with empty type: expected reserved target to be rejected")
+	}
+	if direct.Code != http.StatusBadRequest {
+		t.Fatalf("validateEnvSecretTarget with empty type: expected 400, got %d: %s", direct.Code, direct.Body.String())
+	}
+	checkJSONError(t, direct.Body.String())
+	if !validateEnvSecretTarget(httptest.NewRecorder(), "", "MY_APP_TOKEN") {
+		t.Fatalf("validateEnvSecretTarget with empty type: expected non-reserved target to be allowed")
+	}
 }
 
 // TestSetSecret_ReservedGCEMetadataTarget_Rejected confirms that the
