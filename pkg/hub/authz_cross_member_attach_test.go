@@ -215,13 +215,12 @@ func TestCrossMemberAttach_UATScopes(t *testing.T) {
 			[]string{"agent:attach"}, nil)
 		require.NoError(t, err, "project owner should be able to select explicit attach for their own agents")
 
-		// The owner role carries agent.port_access, so an explicit
-		// port-access token is within issuer authority. (Member eligibility
-		// for this scope is governed by the relationship-based mint
-		// eligibility rules, not pinned here.)
+		// An explicit port-access token is likewise mintable by a project
+		// owner. (Mint eligibility for this selector is governed by the
+		// relationship-based mint eligibility rules, not pinned here.)
 		_, _, err = srv.uatService.CreateToken(rs4MintContext(ownerID), ownerID, "ports", project.ID,
 			[]string{"agent:port_access"}, nil)
-		assert.NoError(t, err, "owner role carries agent.port_access, so an explicit port-access token is mintable")
+		assert.NoError(t, err, "project owner should be able to select explicit port_access")
 	})
 }
 

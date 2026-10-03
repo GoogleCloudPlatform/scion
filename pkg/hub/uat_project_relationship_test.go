@@ -915,14 +915,20 @@ func TestProjectUAT_AttachRecheckedOnEachHandshake(t *testing.T) {
 // Acceptance: no stock project role gains attach; no dependency on B.
 // ---------------------------------------------------------------------------
 
-// TestProjectRoles_DoNotGrantAttachOrPortAccess locks in the current,
-// correct state so a future edit to the stock role permission lists cannot
-// silently reintroduce cross-member attach/port_access.
+// TestProjectRoles_DoNotGrantAttachOrPortAccess locks in the stock project
+// role permission lists so a future edit cannot silently change cross-member
+// attach/port_access. No stock role grants agent.attach. project-owner and
+// project-admin grant agent.port_access (opening a member's already-exposed
+// ports); project-member does not.
 func TestProjectRoles_DoNotGrantAttachOrPortAccess(t *testing.T) {
 	revisions := map[string]int{
-		store.ProjectRoleOwner:  4,
-		store.ProjectRoleAdmin:  4,
+		store.ProjectRoleOwner:  5,
+		store.ProjectRoleAdmin:  5,
 		store.ProjectRoleMember: 4,
+	}
+	portAccess := map[string]bool{
+		store.ProjectRoleOwner: true,
+		store.ProjectRoleAdmin: true,
 	}
 	for _, role := range BuiltInRoles() {
 		if role.ScopeType != store.RoleScopeProject {
@@ -931,8 +937,13 @@ func TestProjectRoles_DoNotGrantAttachOrPortAccess(t *testing.T) {
 		t.Run(role.Name, func(t *testing.T) {
 			assert.NotContains(t, role.Permissions, "agent.attach",
 				"no stock project role should grant agent.attach to other members' agents")
-			assert.NotContains(t, role.Permissions, "agent.port_access",
-				"no stock project role should grant agent.port_access to other members' agents")
+			if portAccess[role.Name] {
+				assert.Contains(t, role.Permissions, "agent.port_access",
+					"role %s should grant agent.port_access", role.Name)
+			} else {
+				assert.NotContains(t, role.Permissions, "agent.port_access",
+					"role %s should not grant agent.port_access to other members' agents", role.Name)
+			}
 			if want, ok := revisions[role.Name]; ok {
 				assert.Equal(t, want, role.Revision,
 					"role %s revision must be bumped deliberately if its permission list changes", role.Name)
