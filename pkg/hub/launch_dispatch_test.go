@@ -84,8 +84,14 @@ type asyncLaunchFixture struct {
 
 func newAsyncLaunchFixture(t *testing.T, caps *store.BrokerCapabilities) *asyncLaunchFixture {
 	t.Helper()
+	return newAsyncLaunchFixtureOn(t, createTestStore(t), caps)
+}
+
+// newAsyncLaunchFixtureOn builds the fixture on an existing store, so a
+// Server sharing the store can serve requests with f.dispatcher.
+func newAsyncLaunchFixtureOn(t *testing.T, s store.Store, caps *store.BrokerCapabilities) *asyncLaunchFixture {
+	t.Helper()
 	ctx := context.Background()
-	s := createTestStore(t)
 	project := &store.Project{ID: tid("al-project"), Name: "al-project", Slug: "al-project"}
 	require.NoError(t, s.CreateProject(ctx, project))
 	broker := &store.RuntimeBroker{

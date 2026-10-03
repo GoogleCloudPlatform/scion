@@ -84,7 +84,7 @@ func TestLaunchStartRefusal(t *testing.T) {
 		r := launchStartRefusal(base(), now)
 		require.NotNil(t, r)
 		assert.True(t, r.InFlight)
-		assert.Equal(t, ErrCodeAgentLaunching, r.Code)
+		assert.Equal(t, "agent_launching", r.Code)
 		assert.Equal(t, http.StatusConflict, r.HTTPStatus)
 	})
 	t.Run("in flight past deadline proceeds", func(t *testing.T) {
@@ -116,7 +116,7 @@ func TestLaunchStartRefusal(t *testing.T) {
 		r := launchStartRefusal(a, now)
 		require.NotNil(t, r)
 		assert.False(t, r.InFlight)
-		assert.Equal(t, ErrCodeAgentCreateIncomplete, r.Code)
+		assert.Equal(t, "agent_create_incomplete", r.Code)
 		assert.Equal(t, "agent a1 cannot be started: its create is still stopping; "+incompleteCreateRecoveryHint, r.Message)
 		assert.Equal(t, "tmpl", r.Details["template"])
 		assert.Equal(t, "the task", r.Details["task"])
@@ -128,7 +128,7 @@ func TestLaunchStartRefusal(t *testing.T) {
 		a.LaunchError = "launch_timeout"
 		r := launchStartRefusal(a, now)
 		require.NotNil(t, r)
-		assert.Equal(t, ErrCodeAgentCreateIncomplete, r.Code)
+		assert.Equal(t, "agent_create_incomplete", r.Code)
 		assert.Equal(t, "agent a1 cannot be started: its create did not complete (launch_timeout); "+incompleteCreateRecoveryHint, r.Message)
 	})
 }
@@ -234,7 +234,7 @@ func TestAgentLifecycle_LaunchGuard(t *testing.T) {
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
 			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 			apiErr := decodeLaunchGuardError(t, rec)
-			assert.Equal(t, ErrCodeAgentCreateIncomplete, apiErr.Code)
+			assert.Equal(t, "agent_create_incomplete", apiErr.Code)
 			assert.Contains(t, apiErr.Message, "(image_pull_failed)")
 			assert.Contains(t, apiErr.Details, "template")
 			assert.Contains(t, apiErr.Details, "task")
@@ -295,7 +295,7 @@ func TestHandleExistingAgent_LaunchGuard(t *testing.T) {
 		})
 		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 		apiErr := decodeLaunchGuardError(t, rec)
-		assert.Equal(t, ErrCodeAgentCreateIncomplete, apiErr.Code)
+		assert.Equal(t, "agent_create_incomplete", apiErr.Code)
 		assert.Contains(t, apiErr.Message, "still stopping")
 		assert.False(t, disp.startCalled)
 	})
@@ -314,8 +314,8 @@ func TestReincarnateAgent_LaunchGuard(t *testing.T) {
 		seed launchSeed
 		code string
 	}{
-		{"in-flight", seedInFlight, ErrCodeAgentLaunching},
-		{"incomplete", seedIncompleteActive, ErrCodeAgentCreateIncomplete},
+		{"in-flight", seedInFlight, "agent_launching"},
+		{"incomplete", seedIncompleteActive, "agent_create_incomplete"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
