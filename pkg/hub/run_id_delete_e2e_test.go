@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -253,5 +255,29 @@ func TestRunID_E2E_StaleDeleteSparesRecreatedAgent(t *testing.T) {
 	entries, deletes = mgr.snapshot()
 	if len(entries) != 0 || len(deletes) != 2 || deletes[1].RunID != runB {
 		t.Fatalf("delete B: entries=%v deletes=%v, want B's entry deleted by run %s", entries, deletes, runB)
+	}
+}
+
+// The 1a-2 deletion engine (agent_delete_engine.go) hands the row it read
+// after the claim to DispatchAgentDelete, so an HTTP DELETE reaches the
+// broker client with the row's run ID. Engine → real dispatcher → client.
+func TestRunID_DeleteEngineSendsRowRunID(t *testing.T) {
+	srv, s := testServer(t)
+	client := &mockRuntimeBrokerClient{}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
+	agent := setupBrokerAgentInPhase(t, s, "runid-engine", state.PhaseRunning)
+	if _, err := s.SetAgentRunID(context.Background(), agent.ID, "run-current"); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE status %d: %s", rec.Code, rec.Body.String())
+	}
+	if !client.deleteCalled {
+		t.Fatal("broker DeleteAgent was not called")
+	}
+	if got := client.lastDeleteOpts.runID; got != "run-current" {
+		t.Errorf("broker delete runId = %q, want run-current", got)
 	}
 }
