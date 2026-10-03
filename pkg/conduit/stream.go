@@ -64,7 +64,6 @@ type stream struct {
 	remoteErr     error // delivered to Read after buf drains
 	localClosed   bool  // Close/CloseWithCode called: reads stop
 	closeSent     bool  // a StreamClose for this id was sent or queued
-	removed       bool
 	failErr       error // session failure
 }
 
