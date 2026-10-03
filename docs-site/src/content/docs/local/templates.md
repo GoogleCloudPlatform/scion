@@ -132,7 +132,7 @@ To ensure consistent and reliable agent execution across the platform, Scion enf
 - **What it is:** Scion automatically loads all Markdown files from an embedded boilerplate filesystem (`mandatory_boilerplate/`) and **prepends** them directly to the final `agent_instructions` file inside the agent's home directory.
 - **Why it exists:** This guarantees that every provisioned agent — regardless of template, role, or harness choice — is seeded with critical platform contracts before starting.
 - **Embedded contents:**
-  - **Workspace Orientation:** Clear explanations of `SCION_WORKSPACE_MODE` (`shared-plain`, `worktree-per-agent`, `clone-per-agent`), `SCION_WORKSPACE_GIT`, and how directories/shared volumes are mounted.
+  - **Workspace Orientation:** Clear explanations of `SCION_WORKSPACE_MODE` (`shared-plain`, `worktree-per-agent`, `clone-per-agent`, `empty-per-agent`), `SCION_WORKSPACE_GIT`, and how directories/shared volumes are mounted.
   - **Agent Status Signals:** Exact protocols directing the agent to explicitly declare its execution states via `sciontool status` (e.g. `sciontool status ask_user "<question>"`, `sciontool status blocked "<reason>"`, or `sciontool status task_completed "<task>"`). This prevents false stall timeouts, handles notifications routing, and tracks progress.
 - **Template Isolation:** Because this preamble is injected programmatically by the Hub or CLI, it cannot be overridden, removed, or bypassed by custom templates, securing baseline platform behaviors across all agents.
 

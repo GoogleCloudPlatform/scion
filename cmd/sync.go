@@ -469,10 +469,13 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 		statusln("All files are up to date on remote, nothing to upload.")
 		// Still need to finalize to apply the manifest to the agent
 		manifest := transfer.BuildManifest(localFiles)
-		if _, err := hubCtx.Client.Workspace().FinalizeSyncTo(ctx, agentID, manifest); err != nil {
+		finalizeResp, err := hubCtx.Client.Workspace().FinalizeSyncTo(ctx, agentID, manifest)
+		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to finalize sync: %w", err))
 		}
-		statusln("Workspace sync applied to agent.")
+		for _, line := range syncToResultLines(0, 0, 0, true, finalizeResp) {
+			statusln(line)
+		}
 		return nil
 	}
 
@@ -504,7 +507,7 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 	}
 
 	if isJSONOutput() {
-		return outputJSON(map[string]interface{}{
+		result := map[string]interface{}{
 			"status":           "success",
 			"command":          "sync",
 			"direction":        "to",
@@ -513,15 +516,14 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 			"bytesTransferred": uploadedBytes,
 			"filesSkipped":     len(resp.ExistingFiles),
 			"filesApplied":     finalizeResp.FilesApplied,
-		})
+		}
+		if len(finalizeResp.Warnings) > 0 {
+			result["warnings"] = finalizeResp.Warnings
+		}
+		return outputJSON(result)
 	}
-
-	statusf("Sync complete: %d files uploaded, %s transferred\n", uploadedCount, humanize.Bytes(uint64(uploadedBytes)))
-	if len(resp.ExistingFiles) > 0 {
-		statusf("Skipped %d unchanged files\n", len(resp.ExistingFiles))
-	}
-	if finalizeResp.Applied {
-		statusf("Applied %d files to agent workspace\n", finalizeResp.FilesApplied)
+	for _, line := range syncToResultLines(uploadedCount, uploadedBytes, len(resp.ExistingFiles), false, finalizeResp) {
+		statusln(line)
 	}
 
 	return nil
@@ -579,4 +581,38 @@ func resolveLocalWorkspacePath(agentName string) (string, error) {
 
 	// Fall back to current directory
 	return ".", nil
+}
+
+// syncToResultLines returns the status lines to show after a sync-to
+// finalize. When the hub reports that it ignored the workspace files
+// (empty-per-agent), its warning replaces the "applied" / "Sync complete"
+// lines, which would be misleading. Other hub warnings are always shown.
+func syncToResultLines(uploadedCount int, uploadedBytes int64, skipped int, nothingToUpload bool, resp *hubclient.SyncToFinalizeResponse) []string {
+	if resp == nil {
+		// No finalize body: nothing ignored or applied, but the upload
+		// summary still applies.
+		resp = &hubclient.SyncToFinalizeResponse{}
+	}
+	ignored, rest := splitFilesIgnoredWarning(resp.Warnings)
+	var lines []string
+	if ignored {
+		lines = append(lines, "Warning: "+api.WarningEmptyPerAgentWorkspaceFilesIgnored)
+	}
+	for _, w := range rest {
+		lines = append(lines, "Warning: "+w)
+	}
+	if ignored {
+		return lines
+	}
+	if nothingToUpload {
+		return append(lines, "Workspace sync applied to agent.")
+	}
+	lines = append(lines, fmt.Sprintf("Sync complete: %d files uploaded, %s transferred", uploadedCount, humanize.Bytes(uint64(uploadedBytes))))
+	if skipped > 0 {
+		lines = append(lines, fmt.Sprintf("Skipped %d unchanged files", skipped))
+	}
+	if resp.Applied {
+		lines = append(lines, fmt.Sprintf("Applied %d files to agent workspace", resp.FilesApplied))
+	}
+	return lines
 }
