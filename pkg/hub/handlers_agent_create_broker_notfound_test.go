@@ -270,6 +270,13 @@ func TestResolveRuntimeBroker_ExplicitBrokerErrors_ListOnlyUsableBrokers(t *test
 
 	project := &store.Project{ID: tid("nf-usable-project"), Slug: "nf-usable", Name: "NF Usable"}
 	require.NoError(t, s.CreateProject(ctx, project))
+	// As project admin the member may update the project (and so auto-link
+	// a broker) but still may not dispatch to a non-AutoProvide broker.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("nf-member"), Email: "member@example.com", DisplayName: "Member",
+		Role: store.UserRoleMember, Status: "active",
+	}))
+	grantProjectRole(t, s, tid("nf-member"), project.ID, "project-admin")
 	addProvider := func(b *store.RuntimeBroker) {
 		require.NoError(t, s.CreateRuntimeBroker(ctx, b))
 		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
@@ -306,6 +313,20 @@ func TestResolveRuntimeBroker_ExplicitBrokerErrors_ListOnlyUsableBrokers(t *test
 		assert.Equal(t, []string{shared.ID}, listed(t, resp))
 	})
 
+	t.Run("auto-link offline broker 503", func(t *testing.T) {
+		unlinked := &store.RuntimeBroker{ID: tid("nf-usable-unlinked"), Name: "Usable Unlinked", Slug: "usable-unlinked", Status: store.BrokerStatusOffline}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, unlinked))
+		w := httptest.NewRecorder()
+		_, err := srv.resolveRuntimeBroker(memberContext(ctx), w, unlinked.Slug, project)
+		require.Error(t, err)
+		require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Equal(t, []string{shared.ID}, listed(t, resp))
+		_, err = s.GetProjectProvider(ctx, project.ID, unlinked.ID)
+		assert.True(t, errors.Is(err, store.ErrNotFound), "offline broker must not be linked, got %v", err)
+	})
+
 	t.Run("unknown broker 404", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		_, err := srv.resolveRuntimeBroker(memberContext(ctx), w, "ghost", project)
@@ -316,6 +337,140 @@ func TestResolveRuntimeBroker_ExplicitBrokerErrors_ListOnlyUsableBrokers(t *test
 		assert.Equal(t, []string{shared.ID}, listed(t, resp))
 		assert.Contains(t, resp.Error.Message, `"Shared Broker"`)
 		assert.False(t, strings.Contains(resp.Error.Message, "Private Broker"), resp.Error.Message)
+	})
+}
+
+// A provider requested by its broker's current name after a rename (provider
+// rows keep the name from link time) resolves to the existing provider
+// instead of re-linking it: the provider row is unchanged and a caller
+// without project-update rights is not refused. Offline is still a 503.
+func TestResolveRuntimeBroker_RenamedProvider_DoesNotRelink(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("nf-rename-project"), Slug: "nf-rename", Name: "NF Rename"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	broker := &store.RuntimeBroker{
+		ID: tid("nf-rename-broker"), Name: "Old Name", Slug: "old-name",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: broker.ID, BrokerName: broker.Name,
+		LocalPath: "/srv/linked", LinkedBy: "cli", Status: store.BrokerStatusOnline,
+	}))
+	broker.Name = "New Name"
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+	callers := map[string]context.Context{
+		"admin":     devUserContext(ctx),
+		"non-admin": memberContext(ctx),
+	}
+	for caller, cctx := range callers {
+		for _, ref := range []string{"New Name", "new name"} {
+			w := httptest.NewRecorder()
+			brokerID, err := srv.resolveRuntimeBroker(cctx, w, ref, project)
+			require.NoError(t, err, "caller=%s ref=%q body=%s", caller, ref, w.Body.String())
+			assert.Equal(t, broker.ID, brokerID, "caller=%s ref=%q", caller, ref)
+
+			provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "/srv/linked", provider.LocalPath, "caller=%s ref=%q", caller, ref)
+			assert.Equal(t, "cli", provider.LinkedBy, "caller=%s ref=%q", caller, ref)
+		}
+	}
+
+	broker.Status = store.BrokerStatusOffline
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+	w := httptest.NewRecorder()
+	_, err := srv.resolveRuntimeBroker(memberContext(ctx), w, "New Name", project)
+	require.Error(t, err)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "cli", provider.LinkedBy)
+}
+
+// Without an explicit broker, the 422 no_runtime_broker responses (default
+// unusable, several to choose from, none usable) list only the brokers the
+// caller may use, and degrade to an empty list with a permission message when
+// every online provider is filtered out.
+func TestResolveRuntimeBroker_NoRuntimeBroker_ListsOnlyUsableBrokers(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	newProject := func(name string, brokers ...*store.RuntimeBroker) *store.Project {
+		t.Helper()
+		project := &store.Project{ID: tid("nrb-" + name), Slug: "nrb-" + name, Name: "NRB " + name}
+		require.NoError(t, s.CreateProject(ctx, project))
+		for _, b := range brokers {
+			require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+				ProjectID: project.ID, BrokerID: b.ID, BrokerName: b.Name, Status: b.Status,
+			}))
+		}
+		return project
+	}
+	newBroker := func(name string, autoProvide bool) *store.RuntimeBroker {
+		t.Helper()
+		b := &store.RuntimeBroker{ID: tid("nrb-broker-" + name), Name: "NRB " + name, Slug: "nrb-" + name,
+			Status: store.BrokerStatusOnline, AutoProvide: autoProvide}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, b))
+		return b
+	}
+	sharedA, sharedB := newBroker("shared-a", true), newBroker("shared-b", true)
+	privateA, privateB := newBroker("private-a", false), newBroker("private-b", false)
+
+	resolve422 := func(t *testing.T, project *store.Project) ErrorResponse {
+		t.Helper()
+		w := httptest.NewRecorder()
+		brokerID, err := srv.resolveRuntimeBroker(memberContext(ctx), w, "", project)
+		require.Error(t, err)
+		assert.Empty(t, brokerID)
+		require.Equal(t, http.StatusUnprocessableEntity, w.Code, w.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Equal(t, ErrCodeNoRuntimeBroker, resp.Error.Code)
+		return resp
+	}
+	listedIDs := func(t *testing.T, resp ErrorResponse) []string {
+		t.Helper()
+		raw, ok := resp.Error.Details["availableBrokers"].([]interface{})
+		require.True(t, ok, "availableBrokers must be a JSON list (even when empty), got %T", resp.Error.Details["availableBrokers"])
+		ids := []string{}
+		for _, entry := range raw {
+			ids = append(ids, entry.(map[string]interface{})["id"].(string))
+		}
+		return ids
+	}
+
+	t.Run("several to choose from", func(t *testing.T) {
+		resp := resolve422(t, newProject("multi", sharedA, sharedB, privateA))
+		assert.ElementsMatch(t, []string{sharedA.ID, sharedB.ID}, listedIDs(t, resp))
+		assert.Contains(t, resp.Error.Message, "Multiple runtime brokers")
+	})
+
+	t.Run("default not usable", func(t *testing.T) {
+		project := newProject("default", privateA, sharedA)
+		project.DefaultRuntimeBrokerID = privateA.ID
+		require.NoError(t, s.UpdateProject(ctx, project))
+		resp := resolve422(t, project)
+		assert.Equal(t, []string{sharedA.ID}, listedIDs(t, resp))
+		assert.Contains(t, resp.Error.Message, "specify an alternative")
+	})
+
+	t.Run("all filtered out", func(t *testing.T) {
+		resp := resolve422(t, newProject("none", privateA, privateB))
+		assert.Empty(t, listedIDs(t, resp))
+		assert.Contains(t, resp.Error.Message, "permission to use")
+	})
+
+	t.Run("default not usable and no alternatives", func(t *testing.T) {
+		project := newProject("default-none", privateA, privateB)
+		project.DefaultRuntimeBrokerID = privateA.ID
+		require.NoError(t, s.UpdateProject(ctx, project))
+		resp := resolve422(t, project)
+		assert.Empty(t, listedIDs(t, resp))
+		assert.Contains(t, resp.Error.Message, "no alternatives found")
 	})
 }
 

@@ -1448,12 +1448,33 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		brokerSummaries = append([]RuntimeBrokerSummary{*defaultBrokerSummary}, brokerSummaries...)
 	}
 
+	// Every error response below lists only the brokers the caller may use
+	// for this project (online providers that pass canDispatchToBroker),
+	// default first. Computed only on error paths: it costs a dispatch check
+	// per online provider.
+	usableBrokers := func() []RuntimeBrokerSummary {
+		return s.usableBrokerSummaries(ctx, brokerSummaries, availableBrokers)
+	}
+
 	// Case 1: Explicit runtime broker specified
 	if requestedBrokerID != "" {
-		// Every error response in this case lists only the brokers the caller
-		// may use for this project (online providers that pass
-		// canDispatchToBroker), default first.
-		usableBrokers := s.usableBrokerSummaries(ctx, brokerSummaries, availableBrokers)
+
+		// acceptProvider resolves to an existing provider of this project,
+		// refusing it with 503 if its broker record shows it offline. If the
+		// broker record cannot be read (rec == nil), let it through, as
+		// brokerReachable does.
+		acceptProvider := func(brokerID string, rec *store.RuntimeBroker) (string, error) {
+			if rec != nil && !s.brokerRecordReachable(rec) {
+				// The broker exists but is offline: refuse at resolution,
+				// before any agent row is created (ptone/scion#2715).
+				slog.Warn("Requested broker is offline during agent creation",
+					"requestedBrokerID", requestedBrokerID, "brokerID", rec.ID,
+					"status", rec.Status, "project_id", project.ID)
+				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers())
+				return "", store.ErrNotFound
+			}
+			return brokerID, nil
+		}
 
 		// Check if the requested broker is a provider to this project. Match
 		// the ID exactly and the name/slug case-insensitively, the same way
@@ -1483,17 +1504,10 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			}
 		}
 		if matchedID != "" {
-			// The broker exists but is offline: refuse at resolution, before
-			// any agent row is created (ptone/scion#2715). If the broker
-			// record cannot be read, let it through, as brokerReachable does.
-			if matchedErr == nil && matched != nil && !s.brokerRecordReachable(matched) {
-				slog.Warn("Requested broker is offline during agent creation",
-					"requestedBrokerID", requestedBrokerID, "brokerID", matched.ID,
-					"status", matched.Status, "project_id", project.ID)
-				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers)
-				return "", store.ErrNotFound
+			if matchedErr != nil {
+				matched = nil
 			}
-			return matchedID, nil
+			return acceptProvider(matchedID, matched)
 		}
 
 		// Broker is not yet a provider — try to auto-link it.
@@ -1502,6 +1516,17 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		// providers aren't established via CLI registration.
 		broker, err := s.findBrokerByIDOrSlug(ctx, requestedBrokerID)
 		if err == nil && broker != nil {
+			// The lookup can find a broker that already is a provider even
+			// though the passes above missed it, e.g. by its current name
+			// after a rename (provider rows keep the name from link time).
+			// Treat that as the provider match: never re-link (the upsert
+			// would rewrite the provider row) or require project update.
+			for _, p := range allProviders {
+				if p.BrokerID == broker.ID {
+					return acceptProvider(broker.ID, broker)
+				}
+			}
+
 			// Linking a new provider (and possibly setting it as the project
 			// default) changes where the project's agents may run, so it
 			// requires the same authorization as the providers-add endpoint:
@@ -1527,7 +1552,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 				slog.Warn("Requested broker is offline during agent creation",
 					"requestedBrokerID", requestedBrokerID, "brokerID", broker.ID,
 					"status", broker.Status, "project_id", project.ID)
-				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers)
+				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers())
 				return "", store.ErrNotFound
 			}
 
@@ -1541,7 +1566,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			if addErr := s.store.AddProjectProvider(ctx, provider); addErr != nil {
 				slog.Warn("Failed to auto-link broker during agent creation",
 					"broker", broker.Name, "project_id", project.ID, "error", addErr)
-				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers)
+				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers())
 				return "", store.ErrNotFound
 			}
 			slog.Info("Auto-linked broker as project provider",
@@ -1565,7 +1590,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		slog.Warn("Requested broker not found during agent creation",
 			"requestedBrokerID", requestedBrokerID, "project_id", project.ID,
 			"providerCount", len(allProviders))
-		RuntimeBrokerNotFound(w, requestedBrokerID, usableBrokers)
+		RuntimeBrokerNotFound(w, requestedBrokerID, usableBrokers())
 		return "", store.ErrNotFound
 	}
 
@@ -1582,10 +1607,10 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			}
 		}
 		// Default broker is not available or not dispatchable
-		if len(availableBrokers) > 0 {
-			NoRuntimeBroker(w, "Default runtime broker is unavailable; specify an alternative", brokerSummaries)
+		if usable := usableBrokers(); len(usable) > 0 {
+			NoRuntimeBroker(w, "Default runtime broker is unavailable; specify an alternative", usable)
 		} else {
-			NoRuntimeBroker(w, "Default runtime broker is unavailable and no alternatives found", brokerSummaries)
+			NoRuntimeBroker(w, "Default runtime broker is unavailable and no alternatives found", usable)
 		}
 		return "", store.ErrNotFound
 	}
@@ -1616,7 +1641,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		if brokerErr == nil && broker.Status == store.BrokerStatusOnline && s.canDispatchToBroker(ctx, broker) {
 			return allProviders[0].BrokerID, nil
 		}
-		NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", brokerSummaries)
+		NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", usableBrokers())
 		return "", store.ErrNotFound
 	}
 
@@ -1630,13 +1655,18 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 
 	switch len(dispatchable) {
 	case 0:
-		NoRuntimeBroker(w, "No runtime brokers available for this project; register a runtime broker first", brokerSummaries)
+		if len(availableBrokers) > 0 {
+			// Online brokers exist, but none the caller may use.
+			NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", usableBrokers())
+		} else {
+			NoRuntimeBroker(w, "No runtime brokers available for this project; register a runtime broker first", usableBrokers())
+		}
 		return "", store.ErrNotFound
 	case 1:
 		return dispatchable[0].ID, nil
 	default:
 		// Multiple dispatchable brokers - require explicit selection
-		NoRuntimeBroker(w, "Multiple runtime brokers available for this project; specify runtimeBrokerId to select one", brokerSummaries)
+		NoRuntimeBroker(w, "Multiple runtime brokers available for this project; specify runtimeBrokerId to select one", usableBrokers())
 		return "", store.ErrNotFound
 	}
 }
