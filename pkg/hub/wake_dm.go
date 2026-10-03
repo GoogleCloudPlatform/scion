@@ -234,6 +234,18 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 	}
 }
 
+// validateGroupMemberDeliverable is validateAgentDeliverable for a group[]
+// member. Group messages never wake agents, so a suspended member gets a
+// reason that points the sender at a direct, waking message instead of the
+// generic "use --wake" hint (which group sends do not accept).
+func validateGroupMemberDeliverable(agent *store.Agent) *AgentDMError {
+	err := validateAgentDeliverable(agent)
+	if err != nil && state.Phase(agent.Phase) == state.PhaseSuspended {
+		err.Message = fmt.Sprintf("agent %q is suspended; group messages do not wake agents — message it directly with --wake", agent.Slug)
+	}
+	return err
+}
+
 // validateAgentDeliverable checks that the target agent is in a state that
 // can accept message delivery when wake was NOT requested. Returns nil when
 // the agent is running, or a typed error describing why delivery is not

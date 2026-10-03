@@ -1604,11 +1604,13 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		primaryInterrupt := interrupt && state.Phase(primaryAgent.Phase) == state.PhaseRunning
 		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, agentContent, primaryInterrupt, msg); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
-			_ = s.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error())
-			// Keep storeMsg's in-memory state in sync with the store update
-			// above so the response below reports the real outcome instead
-			// of the optimistic "dispatched" state set at persist time.
-			errText := err.Error()
+			_ = s.markFailed(ctx, storeMsg.ID, err.Error())
+			// Mirror the store update above in storeMsg so the response
+			// below reports the real outcome instead of the optimistic
+			// "dispatched" state set at persist time. markFailed persists
+			// the sanitized reason (ptone/scion#1841), so sanitize here too:
+			// the response must carry exactly what the store holds.
+			errText := sanitizeFailureReason(err.Error())
 			storeMsg.DispatchState = store.MessageDispatchFailed
 			storeMsg.DispatchFailureReason = &errText
 			dispatchFailureCode = dispatchFailureCodeDispatchError
@@ -1785,7 +1787,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 					// "delivered".
 					errText := err.Error()
 					if mentionPersisted {
-						_ = s.store.MarkMessageFailed(ctx, mentionStoreMsg.ID, errText)
+						_ = s.markFailed(ctx, mentionStoreMsg.ID, errText)
 					}
 					for i, mr := range mentionResults {
 						if strings.EqualFold(mr.Slug, mentionAgent.Slug) {
