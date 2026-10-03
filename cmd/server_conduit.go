@@ -31,7 +31,6 @@ import (
 	"cloud.google.com/go/compute/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
-	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -117,16 +116,6 @@ func conduitReconnectWindowSetting(cfg *config.GlobalConfig) time.Duration {
 	return d
 }
 
-// conduitInstanceID is this process's relay instance id: the host name (a
-// restarted pod with the same name supersedes its predecessor at once), or
-// a random id when there is none.
-func conduitInstanceID() string {
-	if h, err := os.Hostname(); err == nil && h != "" {
-		return h
-	}
-	return uuid.NewString()
-}
-
 // conduitAdvertiseEndpoint derives the internal endpoint other hub nodes
 // use to reach this node: the configured internal_advertise, else
 // http://<host>:<port> where host is the listen host when it is a specific
@@ -205,7 +194,7 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 	if err := checkConduitAdvertiseHost(cfg.Hub.Conduit.InternalAdvertise, hubEndpoint); err != nil {
 		return err
 	}
-	id := conduitInstanceID()
+	id := hub.ConduitInstanceID(cfg.Hub.Conduit.InstanceID)
 	auth, mode, err := hub.NewConduitPeerAuth(conduitPeerAuthOptions(ctx, cfg, id, metadata.OnGCE()))
 	if err != nil {
 		return err

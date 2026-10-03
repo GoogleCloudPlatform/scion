@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -63,9 +64,8 @@ const conduitRegistryReapInterval = 1
 
 // ConduitRelayOptions configures StartConduitRelay.
 type ConduitRelayOptions struct {
-	// InstanceID is this process's relay instance id ("" = the host name;
-	// a restarted pod with the same name supersedes its predecessor's
-	// generation at once).
+	// InstanceID is this process's relay instance id ("" =
+	// ConduitInstanceID("")). It must be unique among live processes.
 	InstanceID string
 	// InternalEndpoint is the advertised base URL of this process's
 	// internal listener ("" = unaddressable).
@@ -149,11 +149,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 	}
 	id := opts.InstanceID
 	if id == "" {
-		if h, err := os.Hostname(); err == nil && h != "" {
-			id = h
-		} else {
-			id = uuid.NewString()
-		}
+		id = ConduitInstanceID("")
 	}
 	r, err := relay.New(relay.Config{
 		InstanceID:       id,
@@ -185,6 +181,25 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		slog.Warn("Conduit relay is unaddressable (no internal endpoint); this is only correct for a single-node hub")
 	}
 	return nil
+}
+
+// ConduitInstanceID returns this process's relay instance id: the
+// configured id, else POD_NAME, else the host name plus a random
+// per-process suffix (a random id when there is no host name). Two live
+// processes must never share an id: a relay start supersedes any relay
+// registered under the same id.
+func ConduitInstanceID(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	if pod := os.Getenv("POD_NAME"); pod != "" {
+		return pod
+	}
+	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h + "-" + suffix
+	}
+	return uuid.NewString()
 }
 
 // ConduitRelayFatal is closed or receives when the relay stops serving on

@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +60,10 @@ func TestHubConduitConfig_Validate(t *testing.T) {
 		{name: "peer auth unknown", cfg: HubConduitConfig{PeerAuth: "mtls"}, wantErr: []string{"peer_auth"}},
 		{name: "peer SA not an email", cfg: HubConduitConfig{PeerServiceAccounts: []string{"hub"}}, wantErr: []string{"peer_service_accounts"}},
 		{name: "peer SA padded", cfg: HubConduitConfig{PeerServiceAccounts: []string{" hub@p.iam.gserviceaccount.com"}}, wantErr: []string{"peer_service_accounts"}},
+		{name: "instance id", cfg: HubConduitConfig{InstanceID: "hub-east-1.example_0"}},
+		{name: "instance id with space", cfg: HubConduitConfig{InstanceID: "hub 1"}, wantErr: []string{"instance_id"}},
+		{name: "instance id non-ascii", cfg: HubConduitConfig{InstanceID: "hüb"}, wantErr: []string{"instance_id"}},
+		{name: "instance id too long", cfg: HubConduitConfig{InstanceID: strings.Repeat("a", ConduitMaxInstanceIDLen+1)}, wantErr: []string{"instance_id", "at most 128"}},
 		{name: "every problem reported", cfg: HubConduitConfig{GrantKeyActivation: "1s", ReconnectWindow: "1h", PeerAuth: "x"},
 			wantErr: []string{"grant_key_activation", "reconnect_window", "peer_auth"}},
 	}
@@ -109,6 +114,7 @@ func TestHubConduitConfig_IsZero(t *testing.T) {
 		"peer SAs":   {PeerServiceAccounts: []string{"a@b"}},
 		"audience":   {PeerAudience: "a"},
 		"window":     {ReconnectWindow: "1s"},
+		"instance":   {InstanceID: "hub-0"},
 	} {
 		assert.False(t, c.IsZero(), name)
 	}
@@ -121,6 +127,7 @@ func TestConduitConfig_V1RoundTrip(t *testing.T) {
 		GrantKeyActivation: "20m", TCPAllowedPorts: []int{22, 8080}, InternalListen: ":9810",
 		InternalAdvertise: "http://10.0.0.5:9810", PeerAuth: "oidc",
 		PeerServiceAccounts: []string{"hub@p.iam.gserviceaccount.com"}, PeerAudience: "aud", ReconnectWindow: "7s",
+		InstanceID: "hub-0",
 	}
 	v1 := ConvertGlobalToV1ServerConfig(gc)
 	require.NotNil(t, v1.Hub)
@@ -175,5 +182,12 @@ server:
 		cfg, err := LoadGlobalConfig(configPath)
 		require.NoError(t, err)
 		assert.Equal(t, "9s", cfg.Hub.Conduit.ReconnectWindow)
+	})
+
+	t.Run("instance id env", func(t *testing.T) {
+		t.Setenv(conduitSchemaEnvVar(t, "instance_id"), "hub-east-1")
+		cfg, err := LoadGlobalConfig(configPath)
+		require.NoError(t, err)
+		assert.Equal(t, "hub-east-1", cfg.Hub.Conduit.InstanceID)
 	})
 }

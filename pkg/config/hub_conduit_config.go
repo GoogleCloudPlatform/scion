@@ -45,6 +45,9 @@ const (
 	ConduitMaxReconnectWindow = 5 * time.Minute
 )
 
+// ConduitMaxInstanceIDLen is the longest accepted instance_id.
+const ConduitMaxInstanceIDLen = 128
+
 // HubConduitConfig holds the conduit settings of the hub server
 // (server.hub.conduit). The values are kept as configured and checked by
 // Validate at startup, so a malformed value is a startup error rather than
@@ -74,13 +77,17 @@ type HubConduitConfig struct {
 	// GoAway.reconnect_after_ms on a planned close ("" = the relay
 	// default, 5s; design v2.6 §3.3).
 	ReconnectWindow string `json:"reconnectWindow,omitempty" yaml:"reconnectWindow,omitempty" koanf:"reconnectWindow"`
+	// InstanceID is this node's relay instance id ("" = POD_NAME, else
+	// the host name plus a random per-process suffix). It must be unique
+	// among live hub processes.
+	InstanceID string `json:"instanceId,omitempty" yaml:"instanceId,omitempty" koanf:"instanceId"`
 }
 
 // IsZero reports whether nothing is configured.
 func (c HubConduitConfig) IsZero() bool {
 	return c.GrantKeyActivation == "" && len(c.TCPAllowedPorts) == 0 && c.InternalListen == "" &&
 		c.InternalAdvertise == "" && c.PeerAuth == "" && len(c.PeerServiceAccounts) == 0 && c.PeerAudience == "" &&
-		c.ReconnectWindow == ""
+		c.ReconnectWindow == "" && c.InstanceID == ""
 }
 
 // GrantKeyActivationDuration parses GrantKeyActivation ("" = 0, meaning
@@ -173,6 +180,11 @@ func (c HubConduitConfig) Validate() error {
 	for _, sa := range c.PeerServiceAccounts {
 		if !strings.Contains(sa, "@") || strings.TrimSpace(sa) != sa {
 			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.peer_service_accounts entry %q: want a service-account email", sa))
+		}
+	}
+	if id := c.InstanceID; id != "" {
+		if len(id) > ConduitMaxInstanceIDLen || strings.IndexFunc(id, func(r rune) bool { return r <= ' ' || r > '~' }) >= 0 {
+			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.instance_id %q: want at most %d printable ASCII characters without spaces", id, ConduitMaxInstanceIDLen))
 		}
 	}
 	return errors.Join(errs...)

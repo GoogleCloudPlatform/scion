@@ -882,6 +882,10 @@ type V1ServerHubConduitConfig struct {
 	// ReconnectWindow is the jitter window a planned close (GoAway) gives
 	// targets to redial in (e.g. "5s"; default "5s", 0s-5m).
 	ReconnectWindow string `json:"reconnect_window,omitempty" yaml:"reconnect_window,omitempty" koanf:"reconnect_window"`
+	// InstanceID is this node's relay instance id; it must be unique among
+	// live hub processes (default: POD_NAME, else the host name plus a
+	// random per-process suffix).
+	InstanceID string `json:"instance_id,omitempty" yaml:"instance_id,omitempty" koanf:"instance_id"`
 }
 
 // V1BrokerConfig holds Runtime Broker configuration.
@@ -2008,6 +2012,7 @@ var knownCompoundFields = []string{
 	"reconnect_window",
 	"internal_listen",
 	"peer_audience",
+	"instance_id",
 	"peer_auth",
 	"authorized_domains",
 	"platform_auth_sa",
@@ -2333,6 +2338,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
 				PeerAudience:        c.PeerAudience,
 				ReconnectWindow:     c.ReconnectWindow,
+				InstanceID:          c.InstanceID,
 			}
 		}
 	}
@@ -2667,6 +2673,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
 			PeerAudience:        c.PeerAudience,
 			ReconnectWindow:     c.ReconnectWindow,
+			InstanceID:          c.InstanceID,
 		}
 	}
 	if gc.Hub.SoftDeleteRetainFiles {

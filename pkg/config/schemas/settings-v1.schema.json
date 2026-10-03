@@ -1033,6 +1033,13 @@
               "description": "Jitter window sent with a planned close (GoAway.reconnect_after_ms): targets redial after a uniformly random delay in [0, window] (e.g. '5s'; default '5s', between '0s' and '5m').",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_RECONNECTWINDOW",
               "x-since": "1"
+            },
+            "instance_id": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "This node's relay instance id; must be unique among live hub processes. Default: POD_NAME when set, else the host name plus a random per-process suffix.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INSTANCEID",
+              "x-since": "1"
             }
           }
         }
