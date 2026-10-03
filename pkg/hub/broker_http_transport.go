@@ -155,8 +155,19 @@ func (t *brokerHTTPTransport) decodeResponseWithSnippet(resp *http.Response, out
 	return nil
 }
 
+// maxBrokerErrorBodyBytes caps how much of a broker's error response body is
+// read into a brokerStatusError (ptone/scion#1841). Broker error bodies are
+// small JSON envelopes ({"error":{"code","message","details"}}) that
+// isBrokerAgentNotFound / brokerErrorMessage / brokerErrorDetails decode, so
+// 64KiB leaves two orders of magnitude of headroom for legitimate bodies
+// while bounding what a misbehaving or compromised broker can make the hub
+// buffer (and then carry in error text) per failed request. A body over the
+// cap is truncated; JSON decoding of it then fails and callers fall back to
+// the status code, which is the safe behaviour for an oversized error.
+const maxBrokerErrorBodyBytes = 64 << 10
+
 func brokerHTTPError(resp *http.Response) error {
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxBrokerErrorBodyBytes))
 	return &brokerStatusError{StatusCode: resp.StatusCode, Body: string(respBody), RetryAfter: resp.Header.Get("Retry-After")}
 }
 

@@ -3544,7 +3544,13 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 		return
 	}
 
-	failMsg := fmt.Sprintf("Broadcast delivery failed to agent %q: %v", targetAgent.Slug, deliveryErr)
+	// ptone/scion#1841: sanitize the (possibly broker-supplied) error text
+	// before it reaches the sender's terminal, as publishDeliveryFailed does.
+	reason := "unknown error"
+	if deliveryErr != nil {
+		reason = sanitizeFailureReason(deliveryErr.Error())
+	}
+	failMsg := fmt.Sprintf("Broadcast delivery failed to agent %q: %s", targetAgent.Slug, reason)
 	structuredMsg := &messages.StructuredMessage{
 		Sender:      "system",
 		Recipient:   msg.Sender,

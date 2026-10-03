@@ -125,10 +125,15 @@ type messageFailureMarker interface {
 // broker message sweep only reprocesses "pending" rows). Every
 // MarkMessageFailed call site in pkg/hub should go through this helper (or
 // Server.markFailed) rather than calling the store directly.
+//
+// The reason is passed through sanitizeFailureReason before it is persisted
+// as dispatch_failure_reason (ptone/scion#1841): on the synchronous paths it
+// is a raw dispatch error that can embed an arbitrary broker response body.
+// Sanitizing is idempotent, so already-sanitized reasons are unaffected.
 func markMessageFailed(ctx context.Context, st messageFailureMarker, msgID string, reason string) error {
 	finCtx, finCancel := finalizationContext(ctx)
 	defer finCancel()
-	return st.MarkMessageFailed(finCtx, msgID, reason)
+	return st.MarkMessageFailed(finCtx, msgID, sanitizeFailureReason(reason))
 }
 
 // dispatchFailedError constructs an AgentDMError for a definite dispatch

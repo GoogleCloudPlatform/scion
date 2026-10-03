@@ -1131,7 +1131,10 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 
 	var failMsg string
 	if deliveryErr != nil && !errors.Is(deliveryErr, store.ErrNotFound) {
-		failMsg = fmt.Sprintf("Message delivery failed to agent %q: %v", agentSlug, deliveryErr)
+		// ptone/scion#1841: deliveryErr can carry a raw broker response
+		// body; sanitize here so every DELIVERY_FAILED notice is covered
+		// whichever path produced it.
+		failMsg = fmt.Sprintf("Message delivery failed to agent %q: %s", agentSlug, sanitizeFailureReason(deliveryErr.Error()))
 	} else {
 		failMsg = fmt.Sprintf("Message delivery failed: agent %q not found in project", agentSlug)
 	}
