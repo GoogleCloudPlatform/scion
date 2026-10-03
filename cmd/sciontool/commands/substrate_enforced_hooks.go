@@ -5,6 +5,7 @@ Copyright 2026 The Scion Authors.
 package commands
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -68,31 +69,53 @@ func enforcedHooksDirAncestors() []string {
 // group/other-write bits. A missing entry is not an error — bootstrap
 // creates the hooks dir itself fresh, root-owned, 0755 (see
 // pkg/sciontool/substrate's writeBootstrapFile), so there is nothing to fix
-// until at least one bootstrap has run. A symlink is refused (logged, left
-// alone), never chmod/chowned through.
+// until at least one bootstrap has run. A symlink or non-directory is refused
+// (logged, left alone), never chmod/chowned through.
+//
+// The entry is opened ONCE with O_NOFOLLOW|O_DIRECTORY and the fstat and the
+// fchown/fchmod all act on that fd, so they operate on the exact inode we
+// opened. A by-name os.Lstat followed by a by-name os.Chown/os.Chmod would
+// re-resolve the path each time: an entry swapped for a symlink between the
+// stat and the chmod would then be followed (os.Lchown cannot help — Chmod
+// still follows the path, and Linux has no lchmod). This fixup exists because
+// a chain entry may legitimately be non-root-owned or group/other-writable,
+// so that race is real and must be closed, not assumed away.
 func fixupEnforcedHooksDirEntry(path string) {
-	info, err := os.Lstat(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			// Missing entry: nothing to fix until bootstrap has created it.
+			return
+		case errors.Is(err, syscall.ELOOP):
+			log.Error("fixupEnforcedHooksDirChain: %s is a symlink; refusing to touch it", path)
+			return
+		case errors.Is(err, syscall.ENOTDIR):
+			log.Error("fixupEnforcedHooksDirChain: %s is not a directory; refusing to touch it", path)
+			return
+		default:
+			log.Error("fixupEnforcedHooksDirChain: failed to open %s without following symlinks: %v", path, err)
+			return
+		}
+	}
+	defer func() { _ = f.Close() }()
+
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+		log.Error("fixupEnforcedHooksDirChain: failed to stat %s: %v", path, err)
 		return
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		log.Error("fixupEnforcedHooksDirChain: %s is a symlink; refusing to touch it", path)
-		return
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return
-	}
+
 	if st.Uid != 0 || st.Gid != 0 {
-		if err := os.Chown(path, 0, 0); err != nil {
+		if err := f.Chown(0, 0); err != nil {
 			log.Error("fixupEnforcedHooksDirChain: failed to chown %s to root: %v", path, err)
 		} else {
 			log.Info("fixupEnforcedHooksDirChain: chowned %s to root:root", path)
 		}
 	}
-	if perm := info.Mode().Perm(); perm&enforcedHooksDirModeBits != 0 {
+	if perm := os.FileMode(st.Mode).Perm(); perm&enforcedHooksDirModeBits != 0 {
 		newPerm := perm &^ enforcedHooksDirModeBits
-		if err := os.Chmod(path, newPerm); err != nil {
+		if err := f.Chmod(newPerm); err != nil {
 			log.Error("fixupEnforcedHooksDirChain: failed to chmod %s to %#o: %v", path, newPerm, err)
 		} else {
 			log.Info("fixupEnforcedHooksDirChain: chmod %s from %#o to %#o (stripped group/other write)", path, perm, newPerm)
