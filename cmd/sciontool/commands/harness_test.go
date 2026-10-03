@@ -360,3 +360,80 @@ func TestScrubSecrets_RedactsAuthCandidateValues(t *testing.T) {
 		t.Errorf("missing redaction marker: %q", scrubbed)
 	}
 }
+
+// TestRunHarnessProvision_HarnessOutputsDirEnv checks that with
+// SCION_HARNESS_OUTPUTS_DIR set the provisioner sees the variable and its
+// outputs are validated there, and the bundle's outputs/ is not used.
+func TestRunHarnessProvision_HarnessOutputsDirEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		wantErr string
+	}{{"valid", `{"K":"v"}`, ""}, {"invalid", "not-json", "invalid env output"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			outDir := filepath.Join(t.TempDir(), "outputs")
+			t.Setenv("SCION_HARNESS_OUTPUTS_DIR", outDir)
+			t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+
+			bundle := filepath.Join(home, ".scion", "harness")
+			scriptPath := filepath.Join(bundle, "provision.sh")
+			writeTestFile(t, scriptPath, "#!/bin/sh\nmkdir -p \"$SCION_HARNESS_OUTPUTS_DIR\"\nprintf '"+tc.content+"' > \"$SCION_HARNESS_OUTPUTS_DIR/env.json\"\nexit 0\n")
+			if err := os.Chmod(scriptPath, 0755); err != nil {
+				t.Fatal(err)
+			}
+			manifestPath := writeManifest(t, bundle, baseManifest(t, home, scriptPath))
+
+			err := runHarnessProvision(context.Background(), manifestPath)
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("runHarnessProvision: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+			if _, err := os.Stat(filepath.Join(outDir, "env.json")); err != nil {
+				t.Errorf("output not in SCION_HARNESS_OUTPUTS_DIR: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(bundle, "outputs")); err == nil {
+				t.Error("bundle outputs/ was used")
+			}
+		})
+	}
+}
+
+func TestRunHarnessProvision_RelativeHarnessDirRejected(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_HARNESS_OUTPUTS_DIR", "outputs")
+	bundle := filepath.Join(home, ".scion", "harness")
+	scriptPath := filepath.Join(bundle, "noop.sh")
+	writeTestFile(t, scriptPath, "#!/bin/sh\nexit 0\n")
+	_ = os.Chmod(scriptPath, 0755)
+	err := runHarnessProvision(context.Background(), writeManifest(t, bundle, baseManifest(t, home, scriptPath)))
+	if err == nil || !strings.Contains(err.Error(), "SCION_HARNESS_OUTPUTS_DIR must be an absolute path") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// TestScrubSecrets_HarnessSecretsDir checks that staged secret values are
+// read from SCION_HARNESS_SECRETS_DIR when set and from the bundle's
+// secrets/ when unset.
+func TestScrubSecrets_HarnessSecretsDir(t *testing.T) {
+	home := t.TempDir()
+	bundle := filepath.Join(home, ".scion", "harness")
+	memDir := filepath.Join(t.TempDir(), "harness-secrets")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), "bundle-secret-value\n")
+	writeTestFile(t, filepath.Join(memDir, "A"), "memory-secret-value\n")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+	const line = "bundle-secret-value memory-secret-value"
+
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	if got := scrubSecrets(line, m); got != "[REDACTED] memory-secret-value" {
+		t.Errorf("unset: %q", got)
+	}
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", memDir)
+	if got := scrubSecrets(line, m); got != "bundle-secret-value [REDACTED]" {
+		t.Errorf("set: %q", got)
+	}
+}
