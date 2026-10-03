@@ -445,4 +445,21 @@ describe('scion-page-admin-role-bindings lifecycle warnings read the display zon
     comp.formExpiresAt = 'bogus';
     expect(comp.createFormValid).toBe(true);
   });
+
+  it('compares lifecycle ordering in the display zone across a DST gap', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createComponent(handler);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+    setPreferredTimeZone('America/New_York');
+    comp.formPrincipalId = 'user-a';
+    comp.formRoleId = 'role-1';
+    comp.formScopeType = 'system';
+    // 02:30 falls in the New York spring-forward gap and resolves to 07:30Z.
+    // 03:15 is 07:15Z, so expiry comes before activation. Read in the
+    // browser zone (UTC), the two values would compare the other way round.
+    comp.formNotBefore = '2030-03-10T02:30';
+    comp.formExpiresAt = '2030-03-10T03:15';
+    expect(comp.createFormValid).toBe(false);
+  });
 });

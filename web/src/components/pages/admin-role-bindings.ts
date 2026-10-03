@@ -965,7 +965,8 @@ export class ScionPageAdminRoleBindings extends LitElement {
   /**
    * Epoch ms of a `datetime-local` lifecycle value, read as wall-clock time
    * in the effective display zone (the zone the inputs are labelled and
-   * submitted in), or `NaN` when it does not parse.
+   * submitted in). `parseWallClock` returns '' for a value it cannot read;
+   * that case maps to `NaN` here, so callers skip the comparison.
    */
   private wallClockMs(value: string): number {
     const iso = parseWallClock(value, effectiveTimeZone());
