@@ -78,7 +78,11 @@ allowed_paths=(
   # Ent adapter: queries brokers by scion.io/broker-role label.
   "^pkg/store/entadapter/project_store.go$"
 
-  # Model constants: defines LabelTemplate = "scion.io/template".
+  # Model constants: defines LabelTemplate = "scion.io/template" and the
+  # shared project members group marker keys (canonical
+  # scion.io/project-members-group and the read-only legacy
+  # scion.io/system-project-members-group, ptone/scion#2556), so pkg/hub and
+  # pkg/store/entadapter import one definition.
   "^pkg/store/models.go$"
 
   # --- pkg/hub/ ---
@@ -112,13 +116,12 @@ allowed_paths=(
 
   # --- pkg/store/entadapter/ ---
   # Composite adapter: defines system annotation constants for project
-  # members-group, agents-group, and adoption-review-required.
+  # agents-group and adoption-review-required.
   "^pkg/store/entadapter/composite.go$"
 
   # --- pkg/hub/ (additional) ---
-  # Core project handlers: defines system annotation constants for project
-  # members-group and agents-group, including the legacy read-only
-  # scion.io/system-project-members-group key (ptone/scion#2556).
+  # Core project handlers: defines the project agents-group system
+  # annotation constant (the members-group keys live in pkg/store/models.go).
   "^pkg/hub/handlers_projects_core.go$"
 
   # Passthrough gate: checks scion.io/broker-role label on embedded brokers.

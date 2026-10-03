@@ -41,7 +41,7 @@ import (
 const emptyAgentRoleBackfillMarkerSection = "migration_empty_agent_roles_backfilled"
 const delegationEdgeBackfillMarkerSection = "migration_delegation_edge_backfill_v1"
 const projectMembersGroupMarkerBackfillSection = "backfill_project_group_markers_done"
-const systemProjectMembersGroupAnnotation = "scion.io/system-project-members-group"
+const legacyProjectMembersGroupMarkerMigrationSection = "migration_legacy_project_members_group_marker_v1"
 const projectAgentsGroupMarkerBackfillSection = "migration_project_agents_group_markers_backfilled"
 const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
 const adoptionReviewRequiredAnnotation = "scion.io/adoption-review-required"
@@ -511,6 +511,14 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	if err := c.BackfillProjectMembersGroupMarkers(ctx); err != nil {
 		return fmt.Errorf("project members group marker backfill: %w", err)
 	}
+	// Runs after BackfillProjectMembersGroupMarkers, which now writes the
+	// canonical key, so on any database this leaves no legacy marker behind.
+	// Non-fatal like the allowlist migration below: a failure only leaves
+	// legacy-marked groups unadoptable by project registration, as before,
+	// and the migration retries on the next start.
+	if err := c.MigrateLegacyProjectMembersGroupMarkers(ctx); err != nil {
+		slog.Error("legacy project members group marker migration failed (non-fatal)", "error", err)
+	}
 	if err := c.BackfillProjectAgentsGroupMarkers(ctx); err != nil {
 		return fmt.Errorf("project agents group marker backfill: %w", err)
 	}
@@ -973,14 +981,14 @@ func (c *CompositeStore) BackfillProjectMembersGroupMarkers(ctx context.Context)
 				"group", g.ID, "slug", g.Slug, "project_id", project.ID, "expected_slug", expectedSlug)
 			continue
 		}
-		if g.Annotations[systemProjectMembersGroupAnnotation] == "true" {
+		if g.Annotations[store.AnnotationProjectMembersGroup] == "true" {
 			continue
 		}
 		annotations := make(map[string]string, len(g.Annotations)+1)
 		for k, v := range g.Annotations {
 			annotations[k] = v
 		}
-		annotations[systemProjectMembersGroupAnnotation] = "true"
+		annotations[store.AnnotationProjectMembersGroup] = "true"
 		if err := c.client.Group.UpdateOneID(g.ID).
 			SetAnnotations(annotations).
 			Exec(ctx); err != nil {
@@ -992,6 +1000,94 @@ func (c *CompositeStore) BackfillProjectMembersGroupMarkers(ctx context.Context)
 		"rows_updated", updated, "rows_skipped", skipped)
 
 	_, err = c.UpsertHubSetting(ctx, projectMembersGroupMarkerBackfillSection,
+		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
+	if errors.Is(err, store.ErrRevisionConflict) {
+		return nil
+	}
+	return err
+}
+
+// legacyProjectMembersGroupMarkerPageSize is a package variable, not a
+// const, so tests can lower it to exercise pagination cheaply. Production
+// code never changes it.
+var legacyProjectMembersGroupMarkerPageSize = 500
+
+// MigrateLegacyProjectMembersGroupMarkers rewrites the legacy project members
+// group marker key (store.LegacyAnnotationProjectMembersGroup), which
+// BackfillProjectMembersGroupMarkers wrote before ptone/scion#2556, to the
+// canonical key the hub checks (store.AnnotationProjectMembersGroup). Until
+// then the hub refused to adopt a legacy-marked members group on project
+// re-ensure. The rewrite only changes the annotation: it never sets
+// Group.OwnerID or touches memberships or role bindings.
+//
+// Only groups whose legacy key is "true" are touched. A group that also
+// carries the canonical key with a value other than "true" has conflicting
+// markers; it is logged and left as is rather than guessed at.
+//
+// The migration walks all groups in ID-keyset pages and is idempotent: a
+// rewritten group no longer carries the legacy key, so a rerun after an
+// interruption skips it. Per-group update errors are logged and skipped; the
+// completion marker (a hub_settings row) is written only when every legacy
+// group was rewritten, so a failed group is retried on the next start.
+func (c *CompositeStore) MigrateLegacyProjectMembersGroupMarkers(ctx context.Context) error {
+	if _, err := c.GetHubSetting(ctx, legacyProjectMembersGroupMarkerMigrationSection); err == nil {
+		return nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+
+	var rewritten, conflicting, failed int
+	var lastID uuid.UUID
+	for {
+		q := c.client.Group.Query().
+			Order(ent.Asc(entgroup.FieldID)).
+			Limit(legacyProjectMembersGroupMarkerPageSize)
+		if lastID != uuid.Nil {
+			q = q.Where(entgroup.IDGT(lastID))
+		}
+		groups, err := q.All(ctx)
+		if err != nil {
+			return fmt.Errorf("query groups for legacy members group marker migration: %w", err)
+		}
+		for _, g := range groups {
+			if g.Annotations[store.LegacyAnnotationProjectMembersGroup] != "true" {
+				continue
+			}
+			if v, ok := g.Annotations[store.AnnotationProjectMembersGroup]; ok && v != "true" {
+				conflicting++
+				slog.Warn("legacy members group marker migration: conflicting marker keys, leaving group unchanged",
+					"group", g.ID, "slug", g.Slug, "canonical_value", v)
+				continue
+			}
+			annotations := make(map[string]string, len(g.Annotations))
+			for k, v := range g.Annotations {
+				annotations[k] = v
+			}
+			delete(annotations, store.LegacyAnnotationProjectMembersGroup)
+			annotations[store.AnnotationProjectMembersGroup] = "true"
+			if err := c.client.Group.UpdateOneID(g.ID).
+				SetAnnotations(annotations).
+				Exec(ctx); err != nil {
+				failed++
+				slog.Error("legacy members group marker migration: failed to rewrite group marker",
+					"group", g.ID, "slug", g.Slug, "error", err)
+				continue
+			}
+			rewritten++
+		}
+		if len(groups) < legacyProjectMembersGroupMarkerPageSize {
+			break
+		}
+		lastID = groups[len(groups)-1].ID
+	}
+
+	slog.Info("migrated legacy project members group markers",
+		"rows_rewritten", rewritten, "rows_conflicting", conflicting, "rows_failed", failed)
+	if failed > 0 {
+		return fmt.Errorf("legacy members group marker migration: %d group(s) failed, will retry on next start", failed)
+	}
+
+	_, err := c.UpsertHubSetting(ctx, legacyProjectMembersGroupMarkerMigrationSection,
 		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
 	if errors.Is(err, store.ErrRevisionConflict) {
 		return nil
