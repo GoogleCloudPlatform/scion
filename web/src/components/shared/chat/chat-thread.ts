@@ -37,7 +37,6 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { guard } from 'lit/directives/guard.js';
 import { repeat } from 'lit/directives/repeat.js';
@@ -59,6 +58,15 @@ import '../code-editor.js';
 import '../markdown-preview.js';
 import './chat-file-preview.js';
 import type { PreviewTarget } from './chat-file-preview.js';
+import './chat-action-sheet.js';
+import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
+import {
+  placeMenuInViewport,
+  renderMenuRows,
+  runMenuAction,
+  shouldUseMenuSheet,
+  type MenuAction,
+} from './context-menu.js';
 import {
   parseContainerPath,
   buildFileApiUrl,
@@ -115,6 +123,28 @@ const JUMP_SCROLL_VIEW_TOLERANCE_PX = 24;
 
 /** Jump-to-message re-check: cap on corrective re-scrolls to avoid a loop. */
 const JUMP_SCROLL_MAX_RECHECKS = 2;
+
+/** The hub rejects agent names longer than this many runes. */
+const MAX_AGENT_NAME_LENGTH = 63;
+
+/** Length of the random suffix in a default /spawn name. */
+const SPAWN_SUFFIX_LENGTH = 4;
+
+/**
+ * Default /spawn name: `<template>-<suffix>`. The template part is
+ * truncated so the whole name fits the hub's length limit, and trailing
+ * hyphens are dropped so the result stays a valid slug. The suffix is a
+ * random integer below 36^length in base36, left-padded with zeros, so
+ * it is always exactly SPAWN_SUFFIX_LENGTH characters of [0-9a-z].
+ */
+function defaultSpawnName(template: string): string {
+  const suffix = Math.floor(Math.random() * 36 ** SPAWN_SUFFIX_LENGTH)
+    .toString(36)
+    .padStart(SPAWN_SUFFIX_LENGTH, '0');
+  const maxBase = MAX_AGENT_NAME_LENGTH - SPAWN_SUFFIX_LENGTH - 1;
+  const base = Array.from(template).slice(0, maxBase).join('').replace(/-+$/, '');
+  return `${base}-${suffix}`;
+}
 
 /**
  * /status: safety bound on agent-list pages followed via `nextCursor`. At the
@@ -463,6 +493,9 @@ export class ScionChatThread extends LitElement {
 
   /** Position of the right-click context menu. */
   @state() private contextMenuPosition: { x: number; y: number } = { x: 0, y: 0 };
+
+  /** The open message menu is the mobile bottom sheet, not the popup. */
+  @state() private contextMenuAsSheet = false;
 
   // ---- Path-link file preview state (#1148) ----
 
@@ -973,7 +1006,8 @@ export class ScionChatThread extends LitElement {
         }
       }
 
-      /* Phase-5: Context menu */
+      /* Phase-5: Context menu. It renders hidden and is shown once placed in
+         the viewport. */
       .context-menu-overlay {
         position: fixed;
         inset: 0;
@@ -981,6 +1015,7 @@ export class ScionChatThread extends LitElement {
       }
 
       .context-menu {
+        visibility: hidden;
         position: fixed;
         z-index: 150;
         background: var(--scion-surface, #ffffff);
@@ -1046,6 +1081,12 @@ export class ScionChatThread extends LitElement {
    * new conversationKey — we must tear down old state and reload.
    */
   override updated(changedProperties: Map<string, unknown>): void {
+    if (this.contextMenuMessage && !this.contextMenuAsSheet) {
+      placeMenuInViewport(
+        this.renderRoot.querySelector<HTMLElement>('.context-menu'),
+        this.contextMenuPosition
+      );
+    }
     if (
       changedProperties.has('conversationKey') &&
       changedProperties.get('conversationKey') !== undefined
@@ -2088,8 +2129,12 @@ export class ScionChatThread extends LitElement {
     const currentId = this.fetchId;
 
     try {
+      // Viewing inter-agent exchanges requires agent.attach, which members
+      // lack on agents they did not create. The markers are optional, so a
+      // 403 just hides them rather than raising the access-denied toast.
       const res = await apiFetch(
-        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/interagent?${params.toString()}`
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/interagent?${params.toString()}`,
+        { suppressAccessDeniedToast: true }
       );
       if (!res.ok || currentId !== this.fetchId) return;
 
@@ -2654,8 +2699,10 @@ export class ScionChatThread extends LitElement {
 
     // A tap-opened (or right-clicked) context menu is positioned at a fixed
     // viewport point; once the thread scrolls it no longer points at the
-    // message it targets, so dismiss it rather than leave it stranded.
-    if (this.contextMenuMessage) {
+    // message it targets, so dismiss it rather than leave it stranded. The
+    // mobile sheet is not anchored to the message, so it stays open (a new
+    // message arriving scrolls the list underneath it).
+    if (this.contextMenuMessage && !this.contextMenuAsSheet) {
       this.closeContextMenu();
     }
 
@@ -3251,62 +3298,86 @@ export class ScionChatThread extends LitElement {
   // Phase-5: Context menu
   // ---------------------------------------------------------------------------
 
-  /** Render the context menu overlay when a message is right-clicked. */
-  private renderContextMenu() {
-    if (!this.contextMenuMessage) return nothing;
-
-    const msg = this.contextMenuMessage;
+  /** The actions of a message's menu, shared by the popup and the sheet. */
+  private messageMenuActions(msg: Message): MenuAction[] {
     const isOwnMessage = msg.senderId === (this._currentUserId || this.currentUserId);
     const canEditDelete = isOwnMessage && !this.hasAgentReplyAfter(msg);
+    const actions: MenuAction[] = [
+      { id: 'reply', label: 'Reply', icon: 'reply', run: () => this.handleContextMenuReply() },
+    ];
+    if (canEditDelete) {
+      actions.push(
+        { id: 'edit', label: 'Edit', icon: 'pencil', run: () => this.handleContextMenuEdit() },
+        {
+          id: 'delete',
+          label: 'Delete',
+          icon: 'trash',
+          destructive: true,
+          run: () => void this.handleContextMenuDelete(),
+        }
+      );
+    }
+    actions.push(
+      {
+        id: 'copy-text',
+        label: 'Copy text',
+        icon: 'clipboard',
+        run: () => this.handleContextMenuCopyText(),
+      },
+      {
+        id: 'copy-link',
+        label: 'Copy link',
+        icon: 'link-45deg',
+        run: () => this.handleContextMenuCopyLink(),
+      }
+    );
+    if (
+      this.isSenderAgent(msg) &&
+      !this.isDM &&
+      !(msg.sender.startsWith('agent:') && msg.sender.slice(6) === this.defaultAgent)
+    ) {
+      actions.push({
+        id: 'set-default-agent',
+        label: 'Make this agent thread default',
+        icon: 'robot',
+        run: () => void this.handleContextMenuSetDefault(),
+      });
+    }
+    if (this.isSenderAgent(msg)) actions.push(...this.agentMenuActions(msg));
+    return actions;
+  }
 
+  /** Render the context menu when a message is right-clicked or tapped. */
+  private renderContextMenu() {
+    if (!this.contextMenuMessage || this.contextMenuAsSheet) return nothing;
     return html`
       <div class="context-menu-overlay" @click=${this.closeContextMenu}></div>
-      <div
-        class="context-menu"
-        style="left: ${this.contextMenuPosition.x}px; top: ${this.contextMenuPosition.y}px;"
-      >
-        <div class="context-menu-item" @click=${() => this.handleContextMenuReply()}>
-          <sl-icon name="reply"></sl-icon>
-          Reply
-        </div>
-        ${canEditDelete
-          ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuEdit()}>
-              <sl-icon name="pencil"></sl-icon>
-              Edit
-            </div>`
-          : nothing}
-        ${canEditDelete
-          ? html`<div
-              class="context-menu-item danger"
-              @click=${() => this.handleContextMenuDelete()}
-            >
-              <sl-icon name="trash"></sl-icon>
-              Delete
-            </div>`
-          : nothing}
-        <div class="context-menu-item" @click=${() => this.handleContextMenuCopyText()}>
-          <sl-icon name="clipboard"></sl-icon>
-          Copy text
-        </div>
-        <div class="context-menu-item" @click=${() => this.handleContextMenuCopyLink()}>
-          <sl-icon name="link-45deg"></sl-icon>
-          Copy link
-        </div>
-        ${this.isSenderAgent(msg) &&
-        !this.isDM &&
-        !(msg.sender.startsWith('agent:') && msg.sender.slice(6) === this.defaultAgent)
-          ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuSetDefault()}>
-              <sl-icon name="robot"></sl-icon>
-              Make this agent thread default
-            </div>`
-          : nothing}
-        ${this.isSenderAgent(msg) ? this.renderAgentActionMenuItems(msg) : nothing}
+      <div class="context-menu">
+        ${renderMenuRows(this.messageMenuActions(this.contextMenuMessage))}
       </div>
     `;
   }
 
+  /** The mobile presentation of the message menu. */
+  private renderContextMenuSheet() {
+    const msg = this.contextMenuAsSheet ? this.contextMenuMessage : null;
+    return html`
+      <scion-action-sheet
+        .items=${msg ? this.messageMenuActions(msg) : []}
+        heading=${msg ? this.getSenderDisplayName(msg) || msg.sender : ''}
+        .open=${msg !== null}
+        @action-sheet-select=${(e: CustomEvent<ActionSheetSelectDetail>): void => {
+          if (this.contextMenuMessage) {
+            runMenuAction(this.messageMenuActions(this.contextMenuMessage), e.detail.id);
+          }
+        }}
+        @action-sheet-close=${(): void => this.closeContextMenu()}
+      ></scion-action-sheet>
+    `;
+  }
+
   /**
-   * "Open terminal" / "Open in graph" context-menu items for the message's
+   * "Open terminal" / "Open in graph" menu actions for the message's
    * author agent — the same icons, labels and actions as the toolbar's
    * `renderAgentToolbarButtons` (pages/chat.ts) and the members sidebar's
    * `renderAgent` (chat-members.ts), scoped to the author of this message
@@ -3327,30 +3398,28 @@ export class ScionChatThread extends LitElement {
    * classify a message as agent-authored by `type` alone, with no id to act
    * on.
    */
-  private renderAgentActionMenuItems(msg: Message): TemplateResult {
-    if (!msg.senderId) return html``;
+  private agentMenuActions(msg: Message): MenuAction[] {
+    if (!msg.senderId) return [];
     const member = this.agentMembers.find((m) => m.id === msg.senderId);
     const projectId = this.resolveAgentActionProjectId(msg);
-    return html`
-      ${member?.canAttach === true
-        ? html`<div
-            class="context-menu-item"
-            @click=${(): void => this.handleContextMenuOpenTerminal()}
-          >
-            <sl-icon name="terminal"></sl-icon>
-            Open terminal
-          </div>`
-        : nothing}
-      ${projectId
-        ? html`<div
-            class="context-menu-item"
-            @click=${(): void => this.handleContextMenuOpenGraph()}
-          >
-            <sl-icon name="diagram-3"></sl-icon>
-            Open in graph
-          </div>`
-        : nothing}
-    `;
+    const actions: MenuAction[] = [];
+    if (member?.canAttach === true) {
+      actions.push({
+        id: 'open-terminal',
+        label: 'Open terminal',
+        icon: 'terminal',
+        run: () => this.handleContextMenuOpenTerminal(),
+      });
+    }
+    if (projectId) {
+      actions.push({
+        id: 'open-graph',
+        label: 'Open in graph',
+        icon: 'diagram-3',
+        run: () => this.handleContextMenuOpenGraph(),
+      });
+    }
+    return actions;
   }
 
   /**
@@ -3394,6 +3463,7 @@ export class ScionChatThread extends LitElement {
     e.preventDefault();
     this.contextMenuMessage = msg;
     this.contextMenuPosition = { x: e.clientX, y: e.clientY };
+    this.contextMenuAsSheet = shouldUseMenuSheet();
     document.addEventListener('keydown', this.handleContextMenuKeydown);
   }
 
@@ -3860,26 +3930,44 @@ export class ScionChatThread extends LitElement {
       '  /status — Show project agent status',
       '  /clear — Clear the conversation view',
       '  /help — Show this help message',
-      '  /spawn <template> — Spawn a new agent from a template',
+      '  /spawn <template> [name] — Spawn a new agent from a template',
       '  /stop <agent> — Stop a running agent',
       '  /default <agent|clear> — Set or clear the thread default agent',
     ].join('\n');
     this.insertLocalSystemMessage(helpText);
   }
 
-  /** /spawn <template> — Spawn a new agent. */
+  /**
+   * /spawn <template> [name] — Create and start a new agent.
+   *
+   * The hub's create handler requires both `name` and `projectId`, so an
+   * omitted name defaults to the template plus a short random suffix (the
+   * hub rejects a name already taken in the project; see
+   * `defaultSpawnName`). The response wraps the created agent as
+   * `{ agent }`.
+   *
+   * Like /stop, a DM resolves the peer agent's project: a DM's
+   * `this.projectId` is only the inherited project (whatever the user was
+   * viewing before opening the DM), so spawning there would create the
+   * agent in an unrelated project.
+   */
   private async handleSlashSpawn(args: string): Promise<void> {
-    const template = args.trim();
-    if (!template) {
-      this.insertLocalSystemMessage('Usage: /spawn <template>');
+    const parts = args.trim().split(/\s+/).filter(Boolean);
+    const template = parts[0];
+    if (!template || parts.length > 2) {
+      this.insertLocalSystemMessage('Usage: /spawn <template> [name]');
+      return;
+    }
+    const name = parts[1] || defaultSpawnName(template);
+
+    const projectId = this.isDM ? this.peerAgentProjectId() : this.projectId;
+    if (!projectId) {
+      this.insertLocalSystemMessage('No project context available.');
       return;
     }
 
     try {
-      const body: Record<string, unknown> = {
-        template,
-        project_id: this.projectId,
-      };
+      const body = { name, projectId, template };
       const res = await apiFetch('/api/v1/agents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3892,9 +3980,9 @@ export class ScionChatThread extends LitElement {
         return;
       }
 
-      const data = (await res.json()) as { name?: string; slug?: string };
-      const name = data?.slug || data?.name || template;
-      this.insertLocalSystemMessage(`Agent "${name}" spawned successfully.`);
+      const data = (await res.json()) as { agent?: { name?: string; slug?: string } };
+      const spawned = data?.agent?.slug || data?.agent?.name || name;
+      this.insertLocalSystemMessage(`Agent "${spawned}" spawned successfully.`);
     } catch (err) {
       this.insertLocalSystemMessage(
         `Failed to spawn agent: ${err instanceof Error ? err.message : 'unknown error'}`
@@ -4089,7 +4177,7 @@ export class ScionChatThread extends LitElement {
           @default-agent-change=${this.handleDefaultAgentChange}
           @chat-slash-command=${this.handleSlashCommand}
         ></scion-chat-composer>
-        ${this.renderContextMenu()} ${this.renderFilePreview()}
+        ${this.renderContextMenu()} ${this.renderContextMenuSheet()} ${this.renderFilePreview()}
       </div>
     `;
   }

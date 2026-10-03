@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -364,5 +365,84 @@ func TestGitHubSkillResolver_CooldownWritesNothingToDisk(t *testing.T) {
 	}
 	if _, ok := cache.Get(keyFor(missURI)); ok {
 		t.Error("a rate_limited error must not be stored as a resolution")
+	}
+}
+
+// TestGitHubResolveError_UnwrapReachesRateLimitError: a rate-limit error
+// wrapped in a githubResolveError is still found by errors.As and errors.Is,
+// withRateLimitRef still names the ref, and Resolve's classification would
+// report it as rate_limited.
+func TestGitHubResolveError_UnwrapReachesRateLimitError(t *testing.T) {
+	rl := &GitHubRateLimitError{RetryAt: time.Now().Add(time.Minute), Sent: true}
+	wrapped := fmt.Errorf("failed to resolve ref: %w",
+		&githubResolveError{code: SkillErrCodeUpstreamUnavailable, msg: "outer", err: rl})
+
+	var got *GitHubRateLimitError
+	if !errors.As(wrapped, &got) || got != rl {
+		t.Fatalf("errors.As must reach the rate-limit error, got %v", got)
+	}
+	if !errors.Is(wrapped, rl) {
+		t.Error("errors.Is must reach the rate-limit error")
+	}
+	named := withRateLimitRef(wrapped, "gh://o/r/s@main")
+	if !strings.Contains(named.Error(), "gh://o/r/s@main") {
+		t.Errorf("expected the ref in %q", named.Error())
+	}
+}
+
+// TestGitHubSkillResolver_CooldownDuringBackoffFailsWithoutSleeping: a 503
+// is normally retried after a backoff. If a cooldown for the same identity
+// starts in the meantime (here, while the 503 is served), the retry is not
+// sent and the call fails at once with a rate-limit error instead of
+// sleeping the backoff first.
+func TestGitHubSkillResolver_CooldownDuringBackoffFailsWithoutSleeping(t *testing.T) {
+	clock := newFakeClock()
+	var r *GitHubSkillResolver
+	var commitCalls atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		commitCalls.Add(1)
+		r.cooldown.record(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
+		w.Header().Set("Retry-After", "10")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	r = newCooldownTestResolver(t, mux, clock)
+
+	start := time.Now()
+	res, err := r.Resolve(context.Background(), []api.SkillReference{{URI: "gh://owner/repo/s@main"}}, ResolveOpts{})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(res.Errors) != 1 || res.Errors[0].Code != GitHubRateLimitedCode || res.Errors[0].RetryAfter != "60" {
+		t.Fatalf("expected one rate_limited error with RetryAfter 60, got %+v", res.Errors)
+	}
+	if n := commitCalls.Load(); n != 1 {
+		t.Errorf("expected 1 request, got %d", n)
+	}
+	if elapsed >= 5*time.Second {
+		t.Errorf("expected no backoff sleep, took %s", elapsed)
+	}
+}
+
+// TestGitHubSkillResolver_CooldownRetryAfterRoundsUpWithFloor pins how
+// cooldownRetryAfter renders the time left on a cooldown: a fraction of a
+// second rounds up, and the result is never below 1, even when RetryAt has
+// already passed by the tracker's clock.
+func TestGitHubSkillResolver_CooldownRetryAfterRoundsUpWithFloor(t *testing.T) {
+	clock := newFakeClock()
+	r := &GitHubSkillResolver{cooldown: NewGitHubCooldown(clock.Now)}
+	now := clock.Now()
+	for _, tc := range []struct {
+		left time.Duration
+		want string
+	}{
+		{30*time.Second + 200*time.Millisecond, "31"},
+		{100 * time.Millisecond, "1"},
+		{-time.Second, "1"},
+	} {
+		if got := r.cooldownRetryAfter(&GitHubRateLimitError{RetryAt: now.Add(tc.left)}); got != tc.want {
+			t.Errorf("RetryAt = now + (%v): got %q, want %q", tc.left, got, tc.want)
+		}
 	}
 }

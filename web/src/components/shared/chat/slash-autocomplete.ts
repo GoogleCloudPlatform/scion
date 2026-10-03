@@ -52,7 +52,7 @@ const BUILT_IN_COMMANDS: SlashCommand[] = [
   { name: 'status', description: 'Show project status', usage: '/status' },
   { name: 'clear', description: 'Clear the conversation', usage: '/clear' },
   { name: 'help', description: 'Show available commands', usage: '/help' },
-  { name: 'spawn', description: 'Spawn a new agent', usage: '/spawn <template>' },
+  { name: 'spawn', description: 'Spawn a new agent', usage: '/spawn <template> [name]' },
   { name: 'stop', description: 'Stop a running agent', usage: '/stop <agent>' },
   { name: 'default', description: 'Set or clear default agent', usage: '/default <agent|clear>' },
 ];

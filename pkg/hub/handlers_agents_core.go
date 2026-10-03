@@ -325,6 +325,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	if !checkAgentReadScope(w, r) {
 		return
 	}
+	// The listing performs no authorization-state writes, so one input memo
+	// serves every authorization decision this request makes.
+	r = r.WithContext(withAuthzInputMemo(r.Context()))
 
 	ctx := r.Context()
 	query := r.URL.Query()
@@ -861,14 +864,126 @@ func (s *Server) reserveQuotaHTTP(ctx context.Context, w http.ResponseWriter, li
 // implementation detail of the store today, not a contract. Release is a
 // no-op for a limit that was never reserved, so this is safe to call even
 // when only one of the two reservations was ever made (ptone/scion#1986).
+//
+// The release runs on a context detached from ctx's cancellation, under its
+// own quotaReleaseTimeout (ptone/scion#2087). Every caller is a cleanup or
+// rollback step: on a create-failure path ctx is often the request's context,
+// which is already canceled by the time the failure is handled (the client
+// disconnected, or a dispatch hit its control-channel timeout). Releasing on
+// that ctx would fail with "context canceled" and strand the reservation —
+// and when store.DeleteAgent already succeeded there is no agent row left
+// for the normal delete path to reclaim it from.
 func (s *Server) releaseAgentQuotas(ctx context.Context, resourceID, runtimeBrokerID string) {
 	if s.quotaService == nil {
 		return
 	}
+	ctx, cancel := detachedCleanupContext(ctx, quotaReleaseTimeout)
+	defer cancel()
 	if runtimeBrokerID != "" {
 		s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, resourceID)
 	}
 	s.quotaService.Release(ctx, "max_agents_per_project", resourceID)
+}
+
+// Budgets for best-effort cleanup that must outlive the request that
+// triggered it (ptone/scion#2087). Each step gets its own budget on a fresh
+// detached context, so a slow runtime delete cannot starve the store delete
+// or the quota release that follow it.
+const (
+	// quotaReleaseTimeout bounds releaseAgentQuotas (two store writes).
+	quotaReleaseTimeout = 5 * time.Second
+
+	// createCleanupStoreTimeout bounds the store.DeleteAgent of a failed
+	// create's row.
+	createCleanupStoreTimeout = 5 * time.Second
+
+	// createCleanupRuntimeTimeout bounds the runtime-side delete of a failed
+	// create (DispatchAgentDelete / managedAgentDelete). It is deliberately
+	// longer than dispatchDeleteTimeout (15s): a cross-node delete is routed
+	// to a deferred dispatch whose rolling wait is dispatchDeleteTimeout, and
+	// this budget must leave that wait intact rather than cut it short.
+	createCleanupRuntimeTimeout = 30 * time.Second
+)
+
+// Values for cleanupFailedCreate's revokeCredentials argument, so call sites
+// read as intent rather than a bare bool.
+const (
+	cleanupRevokeCredentials = true
+	cleanupSkipRevoke        = false
+)
+
+// detachedCleanupContext returns a context that keeps ctx's values but not
+// its cancellation or deadline, bounded instead by timeout. It is for cleanup
+// that must run to completion even when the request that triggered it has
+// been canceled.
+func detachedCleanupContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
+}
+
+// cleanupFailedCreate is the single best-effort cleanup for a create that
+// failed after its agent row was written and its quota reservations taken
+// (ptone/scion#2087, ptone/scion#1986). In order it:
+//
+//  1. revokes the agent's credentials, when revokeCredentials is set;
+//  2. deletes the agent's runtime-side resources via deleteRuntime, when
+//     non-nil (DispatchAgentDelete for a broker agent, managedAgentDelete for
+//     a managed one);
+//  3. deletes the agent row; and
+//  4. releases its quota reservations.
+//
+// Every step runs on a context detached from ctx with its own short budget,
+// so a canceled request cannot skip any of them. The cleanup runs
+// synchronously, before the caller writes its error response, so it may delay
+// that response by up to ~45s in the worst case (5s revoke + 30s runtime
+// delete + 5s row delete + 5s release). That can exceed a client's own
+// timeout (the CLI's is 30s), in which case the client sees a timeout rather
+// than the create error — a deliberate trade for not leaking the agent's
+// row, runtime resources and reservations. Failures are logged and
+// otherwise ignored: the caller has already decided the create failed and is
+// about to report that error, which a cleanup failure must not replace.
+//
+// revokeCredentials must be false when the failure surfaced as an error from
+// a dispatcher call that minted the credential: those calls
+// (DispatchAgentCreateWithGather and friends) already revoke on their own
+// error return, and revoking again here would be a redundant second revoke.
+// It is true for a failure the dispatcher reported as success (missing env
+// vars), where no such revoke fired.
+func (s *Server) cleanupFailedCreate(ctx context.Context, agent *store.Agent, runtimeBrokerID string, revokeCredentials bool, deleteRuntime func(context.Context) error) {
+	if revokeCredentials {
+		// Detaches from ctx and applies its own timeout internally.
+		revokeAgentCredentialsBestEffort(ctx, s.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
+	}
+	// Each step's detached context is scoped to its own closure so its
+	// deferred cancel fires when that step ends, not when the whole cleanup
+	// does.
+	if deleteRuntime != nil {
+		func() {
+			rctx, cancel := detachedCleanupContext(ctx, createCleanupRuntimeTimeout)
+			defer cancel()
+			if err := deleteRuntime(rctx); err != nil {
+				s.agentLifecycleLog.Warn("Create-failure cleanup: runtime delete failed", "agent_id", agent.ID, "error", err)
+			}
+		}()
+	}
+	func() {
+		sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
+		defer cancel()
+		if err := s.store.DeleteAgent(sctx, agent.ID); err != nil {
+			s.agentLifecycleLog.Warn("Create-failure cleanup: agent row delete failed", "agent_id", agent.ID, "error", err)
+		}
+	}()
+	// Detaches from ctx and applies its own timeout internally.
+	s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
+}
+
+// dispatchDeleteFailedCreate returns cleanupFailedCreate's deleteRuntime step
+// for a broker-dispatched create: remove the agent's provisioned files and
+// branch on the broker so orphaned local state doesn't trigger spurious
+// sync-registration attempts.
+func dispatchDeleteFailedCreate(dispatcher AgentDispatcher, agent *store.Agent) func(context.Context) error {
+	return func(ctx context.Context) error {
+		return dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
+	}
 }
 
 // errInvalidDisplayName is returned by createAgentWithIdentityKey when slug
@@ -1192,6 +1307,11 @@ func (s *Server) createAgentInProject(
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	// Collect warnings the dispatcher raises (hub-side TZ drops and the
+	// broker's hub-only env warnings) so they reach this response, including
+	// when an existing agent is started, resumed or recovered below.
+	ctx, dispatchWarns := withDispatchWarnings(ctx)
 
 	switch s.handleExistingAgent(ctx, w, existingAgent, project, runtimeBrokerID, req, notifySubscriberType, notifySubscriberID, createdBy) {
 	case existingAgentStarted, existingAgentErrored:
@@ -1726,7 +1846,12 @@ func (s *Server) createAgentInProject(
 
 		if !hasLocalPath && !s.isEmbeddedBroker(runtimeBrokerID) {
 			stor := s.GetStorage()
+			// Both failures below come after the row and reservations were
+			// written but before any dispatch: nothing to delete on a broker
+			// (nil deleteRuntime) and no credential minted yet (minting happens
+			// in the dispatcher), so no revoke.
 			if stor == nil {
+				s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, nil)
 				RuntimeError(w, "Storage not configured for workspace bootstrap")
 				return
 			}
@@ -1734,6 +1859,7 @@ func (s *Server) createAgentInProject(
 			storagePath := storage.WorkspaceStoragePath(s.HubID(), agent.ProjectID, agent.ID)
 			uploadURLs, existingFiles, err := generateWorkspaceUploadURLs(ctx, stor, storagePath, req.WorkspaceFiles)
 			if err != nil {
+				s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, nil)
 				RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
 				return
 			}
@@ -1817,9 +1943,10 @@ func (s *Server) createAgentInProject(
 			task = agent.AppliedConfig.Task
 		}
 		if err := s.managedAgentCreate(ctx, agent, task); err != nil {
-			_ = s.managedAgentDelete(ctx, agent)
-			_ = s.store.DeleteAgent(ctx, agent.ID)
-			s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
+			// managedAgentCreate mints no agent credential: nothing to revoke.
+			s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, func(cctx context.Context) error {
+				return s.managedAgentDelete(cctx, agent)
+			})
 			RuntimeError(w, "Failed to create managed agent: "+err.Error())
 			return
 		}
@@ -1864,10 +1991,10 @@ func (s *Server) createAgentInProject(
 				if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
 					// and delete the agent record so orphaned local files don't
-					// trigger spurious sync-registration attempts.
-					_ = dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
-					_ = s.store.DeleteAgent(ctx, agent.ID)
-					s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
+					// trigger spurious sync-registration attempts. No revoke here:
+					// DispatchAgentCreateWithGather already revoked any credential
+					// it minted on this error return.
+					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, dispatchDeleteFailedCreate(dispatcher, agent))
 					dispatchCreateErrorResponse(w, err)
 					return
 				} else if envReqs != nil {
@@ -1884,7 +2011,7 @@ func (s *Server) createAgentInProject(
 
 					writeJSON(w, http.StatusAccepted, CreateAgentResponse{
 						Agent:     redactedAgentCopy(ctx, s, agent),
-						Warnings:  warnings,
+						Warnings:  append(warnings, dispatchWarns.Warnings()...),
 						EnvGather: hubEnvGather,
 					})
 					return
@@ -1902,10 +2029,10 @@ func (s *Server) createAgentInProject(
 				if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
 					// and delete the agent record so orphaned local files don't
-					// trigger spurious sync-registration attempts.
-					_ = dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
-					_ = s.store.DeleteAgent(ctx, agent.ID)
-					s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
+					// trigger spurious sync-registration attempts. No revoke here:
+					// DispatchAgentCreateWithGather already revoked any credential
+					// it minted on this error return.
+					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, dispatchDeleteFailedCreate(dispatcher, agent))
 					dispatchCreateErrorResponse(w, err)
 					return
 				} else if envReqs != nil && len(envReqs.Needs) > 0 {
@@ -1915,13 +2042,11 @@ func (s *Server) createAgentInProject(
 					//
 					// DispatchAgentCreateWithGather returned this as a value, not
 					// an error, so its own revoke-on-failure defer did not fire —
-					// the credential it minted is revoked here instead, before the
-					// row is deleted (ptone/scion#1956: a create that fails after
-					// the mint must not leave the credential valid for its full TTL).
-					revokeAgentCredentialsBestEffort(ctx, s.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
-					_ = dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
-					_ = s.store.DeleteAgent(ctx, agent.ID)
-					s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
+					// the cleanup revokes the credential it minted instead
+					// (cleanupRevokeCredentials), before the row is deleted
+					// (ptone/scion#1956: a create that fails after the mint must
+					// not leave the credential valid for its full TTL).
+					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupRevokeCredentials, dispatchDeleteFailedCreate(dispatcher, agent))
 					MissingEnvVars(w, envReqs.Needs, s.buildEnvGatherResponse(ctx, agent, envReqs))
 					return
 				} else {
@@ -1972,7 +2097,7 @@ func (s *Server) createAgentInProject(
 
 	writeJSON(w, http.StatusCreated, CreateAgentResponse{
 		Agent:    redactedAgentCopy(ctx, s, agent),
-		Warnings: warnings,
+		Warnings: append(warnings, dispatchWarns.Warnings()...),
 	})
 }
 
@@ -2081,6 +2206,9 @@ func isTerminalAgentPhase(phase string) bool {
 // buildEnvGatherResponse converts a broker's env requirements into the Hub-level
 // response format, enriching it with scope information from the dispatcher.
 func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent, brokerReqs *RemoteEnvRequirementsResponse) *EnvGatherResponse {
+	// TZ is never gathered: never forward it to the CLI as a need, even if
+	// an older broker reported one the dispatcher did not already remove.
+	takeTZGatherNeed(brokerReqs)
 	resp := &EnvGatherResponse{
 		AgentID:   agent.ID,
 		Required:  brokerReqs.Required,
@@ -2091,6 +2219,11 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	// Build hubHas with scope info
 	// Try to determine the scope for each key the Hub provided
 	for _, key := range brokerReqs.HubHas {
+		if key == agentTZEnvKey {
+			// TZ is labelled with the rung of the agent TZ chain.
+			resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: s.agentTZ(ctx, agent).Source})
+			continue
+		}
 		source := EnvSource{Key: key, Scope: "hub"}
 
 		// Check if we can determine a more specific scope
@@ -2261,6 +2394,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 
+	ctx, dispatchWarns := withDispatchWarnings(ctx)
 	if err := dispatcher.DispatchFinalizeEnv(ctx, agent, req.Env); err != nil {
 		var stillMissing *ErrEnvStillMissing
 		if errors.As(err, &stillMissing) {
@@ -2285,7 +2419,8 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	s.enrichAgent(ctx, agent, project, nil)
 
 	writeJSON(w, http.StatusOK, CreateAgentResponse{
-		Agent: redactedAgentCopy(ctx, s, agent),
+		Agent:    redactedAgentCopy(ctx, s, agent),
+		Warnings: dispatchWarns.Warnings(),
 	})
 }
 
@@ -2660,6 +2795,11 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
 	ctx := r.Context()
 
+	// Show a TZ that an older hub persisted in the env records as the legacy
+	// pin it becomes, so the configure page never round-trips it as an env
+	// entry. In memory only: the next write persists the adoption.
+	adoptLegacyTZ(agent.AppliedConfig)
+
 	// Enrich agent with project and broker names
 	s.enrichAgent(ctx, agent, nil, nil)
 	resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)
@@ -2724,6 +2864,10 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		Config       *api.ScionConfig       `json:"config,omitempty"`
 		GCPIdentity  *GCPIdentityAssignment `json:"gcp_identity,omitempty"`
 		StateVersion int64                  `json:"stateVersion"`
+		// ExplicitTimezone pins (an IANA zone name) or unpins ("") the
+		// agent's container timezone. Absent leaves the pin unchanged. It
+		// is accepted in any phase and applies at the next start.
+		ExplicitTimezone *string `json:"explicitTimezone,omitempty"`
 	}
 
 	// The body is read into a buffer, rather than decoded straight off
@@ -2780,6 +2924,26 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		Conflict(w, "Version conflict - resource was modified")
 		return
 	}
+
+	if updates.ExplicitTimezone != nil {
+		if !agent.DeletedAt.IsZero() {
+			Conflict(w, "explicitTimezone cannot be updated for deleted agents")
+			return
+		}
+		// Validate before any write so a bad zone changes nothing.
+		if _, err := applyExplicitTimezoneEdit(&store.AgentAppliedConfig{}, *updates.ExplicitTimezone); err != nil {
+			ValidationError(w, err.Error(), map[string]interface{}{"field": "explicitTimezone"})
+			return
+		}
+	}
+
+	// warnings are returned with the updated agent.
+	var warnings []string
+
+	// Adopt a TZ that an older hub persisted in the env records into
+	// ExplicitTimezone before anything below reads or writes the agent's
+	// TZ, and in particular before config.env's TZ is stripped.
+	adoptLegacyTZ(agent.AppliedConfig)
 
 	// Apply updates
 	if updates.Name != "" {
@@ -2848,10 +3012,18 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// first assignment into agent.AppliedConfig itself.
 		old := *agent.AppliedConfig
 
-		// SEAM for ptone/scion#2457 task #16 (I2): once that task lands, its
-		// PATCH config.env["TZ"] strip belongs HERE, between the `old`
-		// snapshot above and the recordExplicitEdits call below -- never
-		// after it. See recordExplicitEdits' doc comment for why.
+		// config.env never sets the agent timezone; explicitTimezone does.
+		// The strip runs here, between the `old` snapshot above and the
+		// recordExplicitEdits call below -- never after it. See
+		// recordExplicitEdits' doc comment for why. An empty value is a
+		// marker the configure page may round-trip, so it is dropped
+		// silently.
+		if v, ok := cfg.Env[agentTZEnvKey]; ok {
+			delete(cfg.Env, agentTZEnvKey)
+			if v != "" {
+				warnings = append(warnings, configEnvTZIgnoredWarning)
+			}
+		}
 		if agent.AppliedConfig.CreateInputs != nil {
 			// canViewAgentEnv is the same attach-equivalent-access gate the
 			// GET response's Env redaction uses (ResponseView). A caller who
@@ -3005,6 +3177,32 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		}
 	}
 
+	// Writer (b) of ExplicitTimezone. Unlike config edits it is accepted in
+	// any phase; a running container keeps its TZ until the next start.
+	if updates.ExplicitTimezone != nil {
+		if agent.AppliedConfig == nil {
+			agent.AppliedConfig = &store.AgentAppliedConfig{}
+		}
+		// Warn only when the edit changes the zone the agent resolves to
+		// while a container is live; any other phase picks the zone up at
+		// its next start anyway. A same-zone re-pin that only clears the
+		// legacy label, or an unpin that falls back to the same zone, leaves
+		// the container as it is.
+		live := phaseHasLiveContainer(agent.Phase)
+		var zoneBefore string
+		if live {
+			zoneBefore = s.agentTZ(ctx, agent).TZ
+		}
+		changed, err := applyExplicitTimezoneEdit(agent.AppliedConfig, *updates.ExplicitTimezone)
+		if err != nil {
+			ValidationError(w, err.Error(), map[string]interface{}{"field": "explicitTimezone"})
+			return
+		}
+		if live && changed && s.agentTZ(ctx, agent).TZ != zoneBefore {
+			warnings = append(warnings, explicitTimezoneNextStartWarning)
+		}
+	}
+
 	if updates.Name != "" {
 		// Name and its identity key are written in the same transaction:
 		// the key row is what makes the key's per-project uniqueness a
@@ -3031,7 +3229,24 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, redactedAgentCopy(ctx, s, agent))
+	tz := s.agentTZ(ctx, agent)
+	writeJSON(w, http.StatusOK, agentUpdateResponse{
+		Agent:            redactedAgentCopy(ctx, s, agent),
+		ResolvedTimezone: tz.TZ,
+		TimezoneSource:   tz.Source,
+		Warnings:         warnings,
+	})
+}
+
+// agentUpdateResponse is the agent PATCH response: the updated agent plus
+// the container timezone it will get at its next start, the rung of the
+// agent TZ chain that supplies it, and any warnings about the request.
+// resolvedTimezone is "" (source "none") when no TZ will be sent.
+type agentUpdateResponse struct {
+	*store.Agent
+	ResolvedTimezone string   `json:"resolvedTimezone"`
+	TimezoneSource   string   `json:"timezoneSource"`
+	Warnings         []string `json:"warnings,omitempty"`
 }
 
 // checkBrokerAvailability verifies the agent's runtime broker is reachable.
@@ -3820,6 +4035,10 @@ func isContainerNameConflict(err error) bool {
 		strings.Contains(msg, "is already in use by container")
 }
 
+// skillResolutionErrorCode mirrors runtimebroker.ErrCodeSkillResolution; it
+// is duplicated because importing pkg/runtimebroker would invert layering.
+const skillResolutionErrorCode = "skill_resolution_failed"
+
 // dispatchCreateErrorResponse classifies a failed create/provision dispatch to
 // the runtime broker and writes the matching HTTP response.
 //
@@ -3830,12 +4049,22 @@ func isContainerNameConflict(err error) bool {
 // status code survives the HTTP hop as a *brokerStatusError — so it is
 // checked here before falling back to the generic "runtime broker failed"
 // 502 every other failure still gets (ptone/scion#1316 fault 3).
+//
+// A required-skill resolution failure is relayed verbatim: the broker's
+// status, message, details and Retry-After, with no hub prefix (#2546 R2).
 func dispatchCreateErrorResponse(w http.ResponseWriter, err error) {
+	var se *brokerStatusError
+	isSkillResolution := errors.As(err, &se) && se.brokerErrorCode() == skillResolutionErrorCode
+
 	switch {
 	case isContainerNameConflict(err):
 		Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
+	case isSkillResolution:
+		if se.RetryAfter != "" {
+			w.Header().Set("Retry-After", se.RetryAfter)
+		}
+		writeError(w, se.StatusCode, skillResolutionErrorCode, se.brokerErrorMessage(), se.brokerErrorDetails())
 	case isBrokerStatus(err, http.StatusNotFound):
-		var se *brokerStatusError
 		message := err.Error()
 		if errors.As(err, &se) {
 			message = se.brokerErrorMessage()

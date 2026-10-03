@@ -26,12 +26,13 @@ import (
 // AssignableRoles — the read-only "which project roles could this actor
 // grant" view behind GET …/members/assignable-roles (ptone/scion#2529).
 //
-// It writes nothing and decides nothing on its own: for each role it replays
-// the Phase P (pre-transaction) checks SetMemberRoles runs when the role is
-// newly created for a principal, through the same helpers and in the same
-// order, and reports the decision the PUT would return. Custom-role
-// authority comes only from customRoleAuthorityFromStore; the structural
-// role_binding.* refusal only from checkNoRoleBindingPermissionInCreatedCustomRoles.
+// It writes nothing and decides nothing on its own: for each role it runs
+// memberRoleDecision, the per-role decision SetMemberRoles Phase P also
+// uses (project_membership_role_decision.go), with every check selected, and
+// reports the decision the PUT would return when the role is newly created
+// for a principal. Custom-role authority comes only from
+// customRoleAuthorityFromStore; the structural role_binding.* refusal only
+// from checkNoRoleBindingPermissionInCreatedCustomRoles.
 // ---------------------------------------------------------------------------
 
 // AssignableProjectRole is one project-scoped role definition with the
@@ -51,23 +52,6 @@ type AssignableProjectRole struct {
 	// rather than reason text. Omitted when Grantable is true.
 	DenialCode string                 `json:"denialCode,omitempty"`
 	Details    map[string]interface{} `json:"details,omitempty"`
-}
-
-// assignableActorAuthority is the actor-side input to every per-role
-// decision, evaluated once per request exactly as SetMemberRoles Phase P
-// evaluates it for a plan that creates a binding.
-type assignableActorAuthority struct {
-	// credentialDenial, when set, refuses every role: the PUT's credential
-	// gate runs before any other check.
-	credentialDenial *MembershipDecision
-	// authorityDenial, when set, refuses every role: an actor with no
-	// project role and no hub role_binding.create authority. The PUT checks
-	// this after the structural role_binding.* guard.
-	authorityDenial *MembershipDecision
-	role            string
-	isDirectOwner   bool
-	hubOverride     bool
-	customCreate    customRoleAuthority
 }
 
 // AssignableRoles lists every project-scoped role definition (the built-in
@@ -128,7 +112,12 @@ func (svc *ProjectMembershipService) AssignableRoles(ctx context.Context, actor 
 			RoleKind:    projectRoleKind(rd.Name),
 			Grantable:   true,
 		}
-		if d := svc.assignableRoleDecision(ctx, actor, projectID, authority, rd); d != nil {
+		// Every check, for this one role, using the same per-check logic
+		// and refusal constructors the PUT uses when the role is newly
+		// created for a principal. The order is memberRoleDecision's; the
+		// PUT's own stage order lives in SetMemberRoles and is pinned
+		// against this by TestAssignableRoles_ConsistentWithPut.
+		if d, _ := svc.memberRoleDecision(ctx, actor, projectID, authority, planChange{op: MembershipOpAdd, roleName: rd.Name}, rd, memberRoleCheckAll); d != nil {
 			item.Grantable = false
 			item.Reason = d.Reason
 			item.DenialCode = d.DenialCode
@@ -140,24 +129,12 @@ func (svc *ProjectMembershipService) AssignableRoles(ctx context.Context, actor 
 }
 
 // assignableActorAuthority evaluates the actor-side checks of
-// SetMemberRoles Phase P once, for a plan that creates a binding.
-func (svc *ProjectMembershipService) assignableActorAuthority(ctx context.Context, actor UserIdentity, projectID string, roles []*store.RoleDefinition) (assignableActorAuthority, error) {
-	var a assignableActorAuthority
-
+// SetMemberRoles Phase P once, for a plan that creates a binding: the
+// credential gate, then memberActorAuthorityPreTx (asking custom-role
+// create authority only when a custom role is listed).
+func (svc *ProjectMembershipService) assignableActorAuthority(ctx context.Context, actor UserIdentity, projectID string, roles []*store.RoleDefinition) (*memberActorAuthority, error) {
 	if denial := svc.checkMembershipCredential(ctx, actor.ID()); denial != nil {
-		a.credentialDenial = denial
-		return a, nil
-	}
-
-	a.role = svc.projectEffectiveRole(ctx, actor.ID(), projectID)
-	if a.role == "" {
-		if !svc.actorHasHubRoleBindingAuthority(ctx, actor.ID(), MembershipOpAdd) {
-			a.authorityDenial = noProjectRoleDecision()
-			return a, nil
-		}
-		a.hubOverride = true
-	} else {
-		a.isDirectOwner = svc.isActorDirectOwner(ctx, actor.ID(), projectID)
+		return &memberActorAuthority{credentialDenial: denial}, nil
 	}
 
 	hasCustom := false
@@ -167,45 +144,5 @@ func (svc *ProjectMembershipService) assignableActorAuthority(ctx context.Contex
 			break
 		}
 	}
-	if hasCustom {
-		auth, err := svc.customRoleAuthorityFromStore(ctx, svc.store, actor.ID(), projectID, PermRoleBindingCreate)
-		if err != nil {
-			return a, err
-		}
-		a.customCreate = auth
-	}
-	return a, nil
-}
-
-// assignableRoleDecision returns the decision SetMemberRoles Phase P would
-// return for creating rd on a principal that does not hold it, or nil when
-// it would be allowed. The check order matches the PUT so the reported
-// reason is the one the PUT would give.
-func (svc *ProjectMembershipService) assignableRoleDecision(ctx context.Context, actor UserIdentity, projectID string, a assignableActorAuthority, rd *store.RoleDefinition) *MembershipDecision {
-	if a.credentialDenial != nil {
-		return a.credentialDenial
-	}
-	if d := checkNoRoleBindingPermissionInCreatedCustomRoles([]*store.RoleDefinition{rd}); d != nil {
-		return d
-	}
-	if a.authorityDenial != nil {
-		return a.authorityDenial
-	}
-	customAuth := map[string]customRoleAuthority{PermRoleBindingCreate: a.customCreate}
-	if d := svc.governanceDecisionForChange(a.role, a.isDirectOwner, a.hubOverride, customAuth, planChange{op: MembershipOpAdd, roleName: rd.Name}); d != nil {
-		return d
-	}
-	if svc.authz == nil {
-		return nil
-	}
-	delDecision := svc.authz.CanDelegate(ctx, actor, GrantDescriptor{
-		Type:             GrantTypeRoleBinding,
-		RoleDefinitionID: rd.ID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-	})
-	if !delDecision.Allowed {
-		return canDelegateRefusal(rd, delDecision.Reason)
-	}
-	return nil
+	return svc.memberActorAuthorityPreTx(ctx, actor.ID(), projectID, true, false, hasCustom, false)
 }

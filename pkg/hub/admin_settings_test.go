@@ -1018,3 +1018,44 @@ func TestHandlePutServerConfig_ClearTopLevelStrings_RoundTrip(t *testing.T) {
 		t.Errorf("default_model was not in the request and should be unchanged, got %v (settings.yaml: %s)", raw["default_model"], data)
 	}
 }
+
+// File-mode PUT rejects a shared_dir_size that is not a Kubernetes quantity,
+// naming the key, and writes nothing.
+func TestHandlePutServerConfig_SharedDirSize_InvalidRejected(t *testing.T) {
+	for body, key := range map[string]string{
+		`{"runtimes":{"gke":{"type":"kubernetes","shared_dir_size":"1TB"}}}`: "runtimes.gke.shared_dir_size",
+		`{"profiles":{"big":{"runtime":"gke","shared_dir_size":"lots"}}}`:    "profiles.big.shared_dir_size",
+	} {
+		t.Run(key, func(t *testing.T) {
+			srv := &Server{}
+			rr, settingsPath := fileModePutServerConfig(t, srv, body)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), key) {
+				t.Errorf("400 body should name %s, got: %s", key, rr.Body.String())
+			}
+			if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+				data, _ := os.ReadFile(settingsPath)
+				t.Errorf("nothing should be persisted for an invalid value, got settings.yaml: %s", data)
+			}
+		})
+	}
+}
+
+// File-mode PUT accepts a valid shared_dir_size and persists it.
+func TestHandlePutServerConfig_SharedDirSize_ValidPersisted(t *testing.T) {
+	srv := &Server{}
+	rr, settingsPath := fileModePutServerConfig(t, srv,
+		`{"runtimes":{"gke":{"type":"kubernetes","shared_dir_size":"1Ti"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "shared_dir_size: 1Ti") {
+		t.Errorf("settings.yaml should carry the size, got: %s", data)
+	}
+}

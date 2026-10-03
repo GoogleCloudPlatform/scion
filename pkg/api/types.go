@@ -601,6 +601,11 @@ type AgentInfo struct {
 	Profile    string            `json:"profile,omitempty"`
 	Kubernetes *AgentK8sMetadata `json:"kubernetes,omitempty"`
 	Warnings   []string          `json:"warnings,omitempty"`
+	// HubOnlyEnvWarnings carries only the warnings for broker-local values
+	// of hub-only env keys (TZ) that the broker dropped for a hub-dispatched
+	// agent. They are also included in Warnings; this field lets the broker
+	// relay just these to the hub without leaking its other local warnings.
+	HubOnlyEnvWarnings []string `json:"hubOnlyEnvWarnings,omitempty"`
 
 	// ExplicitImage and ExplicitImagePullPolicy record the image /
 	// kubernetes.imagePullPolicy that the INLINE config (--config), not a

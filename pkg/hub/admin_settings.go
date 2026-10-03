@@ -439,6 +439,14 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// shared_dir_size on runtime and profile entries must be a Kubernetes
+	// quantity; reject a bad value here, naming its key, rather than writing
+	// it to settings.yaml where it would fail every agent start.
+	if errs := config.ValidateSharedDirSizes(req.Runtimes, req.Profiles); len(errs) > 0 {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+		return
+	}
+
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to resolve settings directory", nil)

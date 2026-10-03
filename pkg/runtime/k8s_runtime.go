@@ -1381,6 +1381,29 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 	return nil
 }
 
+// warnOnStorageClassMismatch logs a warning when a reused claim's storage
+// class differs from the requested (non-empty) one. Existing claims are
+// never changed, so a new class only applies to newly created claims; the
+// warning makes that visible, with the phase when the claim is still Pending
+// (for example because its class cannot provision ReadWriteMany volumes).
+func warnOnStorageClassMismatch(pvc *corev1.PersistentVolumeClaim, requested string) {
+	if pvc == nil || requested == "" {
+		return
+	}
+	existing := ""
+	if pvc.Spec.StorageClassName != nil {
+		existing = *pvc.Spec.StorageClassName
+	}
+	if existing == requested {
+		return
+	}
+	args := []any{"pvc", pvc.Name, "existing_storage_class", existing, "requested_storage_class", requested}
+	if pvc.Status.Phase == corev1.ClaimPending {
+		args = append(args, "phase", string(pvc.Status.Phase))
+	}
+	runtimeLog.Warn("Reusing existing shared-dir PVC whose storage class differs from the requested class; existing claims are not changed", args...)
+}
+
 // ensureProjectRWXClaim is the idempotent get-or-create core for project-scoped
 // RWX PVCs. It creates a PVC with a deterministic name if one does not already
 // exist. Used by both shared-dir and (future) workspace claim paths.
@@ -1392,9 +1415,10 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 	pvcName := sharedDirPVCName(projectName, dirName)
 
 	// Check if PVC already exists (project-scoped, may have been created by another agent)
-	_, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+	existing, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
 	if err == nil {
 		runtimeLog.Info("Project RWX PVC already exists, reusing", "pvc", pvcName, "dir", dirName)
+		warnOnStorageClassMismatch(existing, storageClass)
 		return nil
 	}
 

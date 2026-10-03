@@ -16,7 +16,10 @@ package hub
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -202,4 +205,146 @@ func (d *HTTPAgentDispatcher) resolveStorageTZ(ctx context.Context, agent *store
 		}
 	}
 	return result
+}
+
+// setResolvedAgentTZ makes env carry exactly the resolver's TZ: it removes
+// any TZ already in env and, when the resolver supplied a value, sets it and
+// classifies it as a plain config var. This is the only place the hub writes
+// TZ into a dispatched env (create, finalize-env, start and restart).
+func setResolvedAgentTZ(env map[string]string, classifications *map[string]api.EnvKind, tz agentTZ) {
+	if env == nil {
+		return
+	}
+	delete(env, agentTZEnvKey)
+	if classifications != nil && *classifications != nil {
+		delete(*classifications, agentTZEnvKey)
+	}
+	if tz.TZ == "" {
+		return
+	}
+	env[agentTZEnvKey] = tz.TZ
+	if classifications != nil {
+		classifyEnv(classifications, agentTZEnvKey, api.EnvKindPlain)
+	}
+}
+
+// withoutTZKey returns keys without TZ. It is used on env key lists the hub
+// acts on (as_needed keys, broker env-gather needs): TZ is never gathered.
+func withoutTZKey(keys []string) []string {
+	if len(keys) == 0 {
+		return keys
+	}
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if k != agentTZEnvKey {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// isTZTargetedSecret reports whether a resolved secret would be projected
+// into the container's TZ environment variable.
+func isTZTargetedSecret(s ResolvedSecret) bool {
+	return (s.Type == "environment" || s.Type == "") && s.Target == agentTZEnvKey
+}
+
+// dropTZTargetedSecrets removes env-type secrets targeting TZ. Runtimes add
+// env-type secrets after config env, so such a secret would override the
+// resolver's TZ in the container. Each dropped secret is logged and reported
+// as a dispatch warning; the secret's value is never included.
+func (d *HTTPAgentDispatcher) dropTZTargetedSecrets(ctx context.Context, agent *store.Agent, secrets []ResolvedSecret) []ResolvedSecret {
+	if len(secrets) == 0 {
+		return secrets
+	}
+	out := make([]ResolvedSecret, 0, len(secrets))
+	for _, s := range secrets {
+		if !isTZTargetedSecret(s) {
+			out = append(out, s)
+			continue
+		}
+		agentName := ""
+		agentID := ""
+		if agent != nil {
+			agentName, agentID = agent.Name, agent.ID
+		}
+		d.warnTZ("ignoring secret that targets TZ; the agent timezone comes only from the TZ resolver",
+			"agent_id", agentID, "secret", s.Name, "source", s.Source)
+		addDispatchWarnings(ctx, fmt.Sprintf(
+			"Warning: ignoring secret %q (%s scope) targeting TZ for agent %s: set the agent timezone with explicitTimezone, a TZ environment variable or the hub default timezone",
+			s.Name, s.Source, agentName))
+	}
+	return out
+}
+
+// takeTZGatherNeed removes TZ from the needs of a broker env-gather response
+// (Needs, and the SecretInfo and Alternatives that describe needs), so the
+// hub never acts on TZ as a gathered key or forwards it to the CLI, and
+// reports whether the broker listed TZ as needed. TZ is never gathered: a
+// current broker never reports it; an older one might, and the caller
+// answers it with resolveAgentTZ(forGatherAnswer=true). The informational
+// Required, HubHas and BrokerHas lists keep TZ; buildEnvGatherResponse
+// labels a hub-supplied TZ with the resolver's source.
+func takeTZGatherNeed(reqs *RemoteEnvRequirementsResponse) bool {
+	if reqs == nil {
+		return false
+	}
+	needed := false
+	for _, k := range reqs.Needs {
+		if k == agentTZEnvKey {
+			needed = true
+			break
+		}
+	}
+	reqs.Needs = withoutTZKey(reqs.Needs)
+	delete(reqs.SecretInfo, agentTZEnvKey)
+	delete(reqs.Alternatives, agentTZEnvKey)
+	for k, alts := range reqs.Alternatives {
+		reqs.Alternatives[k] = withoutTZKey(alts)
+	}
+	return needed
+}
+
+// withoutCallerTZ returns a copy of a caller-supplied env map (CLI-gathered
+// env, a reconcile replay, as_needed values) without TZ, which only the
+// resolver writes into a dispatched env. A non-empty TZ is reported as a
+// dispatch warning.
+func (d *HTTPAgentDispatcher) withoutCallerTZ(ctx context.Context, agent *store.Agent, env map[string]string) map[string]string {
+	v, ok := env[agentTZEnvKey]
+	if !ok {
+		return env
+	}
+	out := make(map[string]string, len(env))
+	for k, val := range env {
+		if k != agentTZEnvKey {
+			out[k] = val
+		}
+	}
+	if v != "" {
+		agentID := ""
+		if agent != nil {
+			agentID = agent.ID
+		}
+		d.warnTZ("ignoring TZ in submitted env; the agent timezone comes only from the TZ resolver", "agent_id", agentID)
+		addDispatchWarnings(ctx, "TZ in submitted env is ignored; use explicitTimezone")
+	}
+	return out
+}
+
+// agentTZ resolves an agent's container TZ for hub handlers (the agent
+// PATCH response, the env-gather response). It uses the server's HTTP
+// dispatcher when one is installed, so the result matches what a dispatch
+// would send, and otherwise an equivalent resolver over the server's store,
+// hub ID and live hub agent defaults.
+func (s *Server) agentTZ(ctx context.Context, agent *store.Agent) agentTZ {
+	if d, ok := s.GetDispatcher().(*HTTPAgentDispatcher); ok && d != nil {
+		return d.resolveAgentTZ(ctx, agent, false)
+	}
+	r := &HTTPAgentDispatcher{
+		store:                    s.store,
+		hubID:                    s.HubID(),
+		hubAgentDefaultsProvider: s.hubAgentDefaults,
+		log:                      slog.Default(),
+	}
+	return r.resolveAgentTZ(ctx, agent, false)
 }
