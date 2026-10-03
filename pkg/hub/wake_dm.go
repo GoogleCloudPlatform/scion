@@ -158,7 +158,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 		agent.Phase = string(state.PhaseStarting)
-		s.events.PublishAgentStatus(ctx, agent)
+		// Publish from a re-read: a delete that claimed the row meanwhile
+		// must not be painted over (design ptone/scion#2483 note F).
+		s.publishAgentStatusFresh(ctx, agent)
 
 		// Wait for the agent to report its first activity (readiness signal).
 		if err := s.waitForAgentReady(ctx, agent.ID, 30*time.Second); err != nil {
@@ -203,7 +205,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 		agent.Phase = string(state.PhaseRunning)
-		s.events.PublishAgentStatus(ctx, agent)
+		// Publish from a re-read: a delete that claimed the row meanwhile
+		// must not be painted over (design ptone/scion#2483 note F).
+		s.publishAgentStatusFresh(ctx, agent)
 
 		return &WakeResult{Outcome: WakeResumed}, nil
 

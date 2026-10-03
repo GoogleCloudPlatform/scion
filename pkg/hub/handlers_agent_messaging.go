@@ -1474,7 +1474,10 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 
 	s.events.PublishAgentCreated(ctx, agent)
 
-	writeJSON(w, http.StatusOK, agent.ToAPI())
+	// Answer with the same enriched shape as GET /agents/{id}, so the
+	// restored agent carries its deletion view (null) and project/broker
+	// names like every other agent response.
+	s.writeAgentGetResponse(w, r, agent)
 }
 
 // MessageRequest is the request body for sending a message to an agent.
@@ -2572,7 +2575,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				Phase:    agent.Phase,
 				Activity: agent.Activity,
 			})
-			s.events.PublishAgentStatus(ctx, agent)
+			// Publish from a re-read: a delete that claimed the row meanwhile
+			// must not be painted over (design ptone/scion#2483 note F).
+			s.publishAgentStatusFresh(ctx, agent)
 
 			// B11/B13: reflect persistence failure in the response status.
 			// The request still succeeds (dispatch worked), but the caller
