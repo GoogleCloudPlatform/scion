@@ -106,6 +106,7 @@ const USED_ICONS = [
   'eye',
   'eye-slash',
   'file-earmark',
+  'files',
   'file-earmark-arrow-down',
   'file-earmark-code',
   'file-earmark-plus',
