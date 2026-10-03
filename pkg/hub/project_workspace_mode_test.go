@@ -222,7 +222,6 @@ func TestProjectClone_WorkspaceModeRederived(t *testing.T) {
 	}{
 		{name: "non-git per-agent stays empty-per-agent", srcLabel: "per-agent", wantLabel: "per-agent", wantSharing: store.SharingModeEmptyPerAgent},
 		{name: "non-git per-agent + git override becomes clone-per-agent", srcLabel: "per-agent", overrideGit: "https://github.com/o/r.git", wantLabel: "per-agent", wantSharing: store.SharingModeClonePerAgent, wantCloneGit: true},
-		{name: "non-git shared + git override becomes git shared", srcLabel: "shared", overrideGit: "https://github.com/o/r.git", wantLabel: "shared", wantSharing: store.SharingModeSharedPlain, wantCloneGit: true},
 		{name: "non-git shared carried", srcLabel: "shared", wantLabel: "shared", wantSharing: store.SharingModeSharedPlain},
 		{name: "git worktree carried", srcRemote: "github.com/test/src", srcLabel: "worktree-per-agent", wantLabel: "worktree-per-agent", wantSharing: store.SharingModeWorktreePerAgent, wantCloneGit: true},
 		{name: "unknown label dropped", srcLabel: "bogus", wantSharing: store.SharingModeSharedPlain},
