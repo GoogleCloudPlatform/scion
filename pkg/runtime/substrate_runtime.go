@@ -174,18 +174,29 @@ func substrateRuntimeCacheKey(cfg config.V1SubstrateConfig) (string, error) {
 // equal config (see substrateRuntimesMu). There is no auto-detect path for
 // substrate (substrate-runtime.md §2): callers only reach this constructor when
 // a profile explicitly selects it.
+//
+// Errors fall into two classes, and only the first matches
+// ErrSubstrateProfileInvalid:
+//   - deterministic config validation failures (a missing required endpoint,
+//     or a block substrate.Validate rejects): the same settings fail the same
+//     way on every attempt, so they are tagged with the sentinel;
+//   - construct-time dependency failures from substrateRuntimeBuilder
+//     (building the Kubernetes client, substrate.Dial's trust-bundle/CA load
+//     and API dial): these can be transient, so they are returned untagged
+//     and a broker whose default runtime hits one starts degraded rather
+//     than refusing to start.
 func NewSubstrateRuntime(sc *config.V1SubstrateConfig) (*SubstrateRuntime, error) {
 	if sc == nil {
 		sc = &config.V1SubstrateConfig{}
 	}
 	if sc.APIEndpoint == "" {
-		return nil, fmt.Errorf("substrate: runtimes.<name>.substrate.api_endpoint is required")
+		return nil, substrateProfileInvalid(fmt.Errorf("substrate: runtimes.<name>.substrate.api_endpoint is required"))
 	}
 	if sc.RouterEndpoint == "" {
-		return nil, fmt.Errorf("substrate: runtimes.<name>.substrate.router_endpoint is required")
+		return nil, substrateProfileInvalid(fmt.Errorf("substrate: runtimes.<name>.substrate.router_endpoint is required"))
 	}
 	if err := substrate.Validate(sc); err != nil {
-		return nil, err
+		return nil, substrateProfileInvalid(err)
 	}
 
 	key, err := substrateRuntimeCacheKey(*sc)

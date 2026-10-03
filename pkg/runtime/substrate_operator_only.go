@@ -22,12 +22,18 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// ErrSubstrateProfileInvalid marks a substrate runtime that GetRuntime could
-// not construct: the profile failed ValidateOperatorOnlySubstrateProfile, or
-// its operator-defined runtime block was rejected by NewSubstrateRuntime. The
-// *ErrorRuntime GetRuntime returns in either case carries an error matching
-// this sentinel under errors.Is, so a caller can tell a misconfigured
-// substrate profile apart from any other runtime construction failure.
+// ErrSubstrateProfileInvalid marks a substrate runtime that failed
+// deterministic config validation: the profile failed
+// ValidateOperatorOnlySubstrateProfile, or its operator-defined runtime block
+// failed NewSubstrateRuntime's config checks (a missing required endpoint, or
+// substrate.Validate). The *ErrorRuntime GetRuntime returns in those cases
+// carries an error matching this sentinel under errors.Is, so a caller can
+// tell a misconfigured substrate profile apart from any other runtime
+// construction failure.
+//
+// Construct-time dependency failures (building the Kubernetes client,
+// substrate.Dial) do NOT match this sentinel: they can be transient, so they
+// surface as a plain degraded *ErrorRuntime instead.
 var ErrSubstrateProfileInvalid = errors.New("substrate profile invalid")
 
 // substrateProfileError tags a substrate construction failure with

@@ -141,7 +141,12 @@ func addVertexAIHost(add func(string), env map[string]string) error {
 //     endpoint (agent/template env this function reads from the same env
 //     map the actor's own bootstrap payload is built from — see
 //     buildBootstrapEnv's callers). Each of these goes through
-//     addTenantHost, the same substrate.NormalizeEgressAllowEntry validator
+//     addTenantHost, which admits a tenant host ONLY if an operator
+//     egress_allow entry covers it (substrate.EgressAllowCovers: an exact
+//     match, or a wildcard entry one label above it) — that coverage gate
+//     is the PRIMARY control, so a tenant value can never add a host the
+//     operator has not already allowed. As defense-in-depth, the host must
+//     first pass the same substrate.NormalizeEgressAllowEntry validator
 //     operator-configured egress_allow entries use below, which also
 //     rejects every IP-literal/CIDR form (loopback, link-local including
 //     the cloud metadata address, private, and any other numeric address)

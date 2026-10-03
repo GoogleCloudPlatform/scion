@@ -2715,23 +2715,29 @@ func colocatedBrokerRegisters(cfg *config.GlobalConfig, s store.Store) bool {
 
 // refuseErrorRuntimeAtStartup returns a non-nil error when rt — the broker's
 // own default runtime, as resolved once at startup by runtime.GetRuntime — is
-// an *runtime.ErrorRuntime for a substrate profile that failed to construct,
-// i.e. its error matches runtime.ErrSubstrateProfileInvalid. The scope is
-// substrate only.
+// an *runtime.ErrorRuntime for a substrate default runtime that failed
+// deterministic config validation, i.e. its error matches
+// runtime.ErrSubstrateProfileInvalid. The scope is substrate only.
 //
 // GetRuntime never returns an error or nil: a construction or validation
 // failure comes back as a Runtime whose every method returns the stored
-// error. For a substrate profile that failure is a settings problem — a
-// profile that fails ValidateOperatorOnlySubstrateProfile, or an
-// operator-defined runtime block NewSubstrateRuntime rejects — that a
-// running broker can never recover from, and that also governs where the
-// bootstrap payload and the actor's egress are sent. Refuse to start instead
-// of coming up looking healthy; the operator fixes the settings and restarts.
+// error. For a substrate profile, a config validation failure is a settings
+// problem — a profile that fails ValidateOperatorOnlySubstrateProfile, or an
+// operator-defined runtime block that fails NewSubstrateRuntime's config
+// checks (required endpoints, substrate.Validate) — that a running broker
+// can never recover from, and that also governs where the bootstrap payload
+// and the actor's egress are sent. Refuse to start instead of coming up
+// looking healthy; the operator fixes the settings and restarts.
 //
-// Every other *ErrorRuntime (for example a Kubernetes client that fails
-// Verify at startup, or a missing container CLI) does not block startup: the
-// broker starts degraded exactly as it always has, logging the "error"
-// runtime name, because those failures can be transient or environmental.
+// Every other *ErrorRuntime does not block startup: the broker starts
+// degraded exactly as it always has, logging the "error" runtime name,
+// because those failures can be transient or environmental. That includes a
+// substrate runtime whose construct-time dependencies failed (building the
+// Kubernetes client, or substrate.Dial's trust-bundle/CA load and API dial,
+// e.g. on an API-server blip at boot) — refusing on those would turn a
+// transient outage into a crash loop; a pod restart is the retry. It also
+// includes, for example, a Kubernetes client that fails Verify at startup,
+// or a missing container CLI.
 //
 // Named profiles other than the default are unaffected: those are resolved
 // lazily, per request, and this check only ever sees the one runtime
@@ -2741,7 +2747,7 @@ func refuseErrorRuntimeAtStartup(rt runtime.Runtime) error {
 	if !ok || !errors.Is(er.Err, runtime.ErrSubstrateProfileInvalid) {
 		return nil
 	}
-	return fmt.Errorf("runtime broker: configured substrate runtime failed to construct: %w", er.Err)
+	return fmt.Errorf("runtime broker: configured substrate runtime failed config validation: %w", er.Err)
 }
 
 // resolveBrokerDefaultRuntime resolves the broker's default runtime with

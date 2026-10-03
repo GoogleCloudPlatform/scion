@@ -2386,6 +2386,10 @@ func managerSupportsAsyncLaunch(mgr agent.Manager) bool {
 
 // managerRuntimeProvider lets a manager other than agent.AgentManager
 // (tests) supply the runtime it runs agents on directly.
+//
+// test seam: it exists so test managers (fakes that are not an
+// agent.AgentManager) can supply a runtime; no production manager
+// implements it.
 type managerRuntimeProvider interface {
 	managerRuntime() scionrt.Runtime
 }

@@ -249,10 +249,15 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			util.Debugf("GetRuntime: substrate profile failed operator-only validation: %v", verr)
 			return &ErrorRuntime{Err: substrateProfileInvalid(verr)}
 		}
+		// NewSubstrateRuntime already tags its deterministic config
+		// validation failures with ErrSubstrateProfileInvalid; construct-time
+		// dependency failures (Kubernetes client build, substrate.Dial) are
+		// passed through untagged so they surface as a plain degraded
+		// ErrorRuntime, not a startup refusal. Do not wrap err here.
 		rt, err := NewSubstrateRuntime(rtConfig.Substrate)
 		if err != nil {
 			util.Debugf("GetRuntime: failed to create substrate runtime: %v", err)
-			return &ErrorRuntime{Err: substrateProfileInvalid(err)}
+			return &ErrorRuntime{Err: err}
 		}
 		return rt
 	}

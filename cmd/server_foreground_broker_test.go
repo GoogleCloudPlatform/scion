@@ -250,6 +250,114 @@ func TestResolveBrokerDefaultRuntime_NonSubstrateErrorRuntimeStartsDegraded(t *t
 	assert.Equal(t, []string{"Runtime broker using runtime: error"}, logged)
 }
 
+// writeOperatorSubstrateSettings isolates HOME and writes operatorSettings as
+// the operator-level ~/.scion/settings.json (so a substrate runtime defined
+// there passes ValidateOperatorOnlySubstrateProfile), and runs the test from
+// an empty working directory so no project settings are picked up. The
+// returned getRuntime resolves the default runtime from operator settings
+// alone, the way a deployed broker does.
+func writeOperatorSubstrateSettings(t *testing.T, operatorSettings string) func(string, string) scionruntime.Runtime {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".scion"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".scion", "settings.json"), []byte(operatorSettings), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+	return func(string, string) scionruntime.Runtime {
+		return scionruntime.GetRuntime("", "")
+	}
+}
+
+// operatorSubstrateSettings returns operator settings whose default profile
+// is an operator-defined substrate runtime with both required endpoints and
+// the given extra substrate fields (a JSON fragment, may be empty).
+func operatorSubstrateSettings(extraSubstrateFields string) string {
+	return `{
+		"schema_version": "1",
+		"active_profile": "substrate",
+		"runtimes": {
+			"substrate-prod": {
+				"type": "substrate",
+				"substrate": {
+					"api_endpoint": "api.ate-system.svc:443",
+					"router_endpoint": "http://atenet-router.ate-system.svc:80"` + extraSubstrateFields + `
+				}
+			}
+		},
+		"profiles": {"substrate": {"runtime": "substrate-prod"}}
+	}`
+}
+
+// TestResolveBrokerDefaultRuntime_SubstrateConfigValidationFailureRefusesStart:
+// an operator-defined substrate default runtime that fails NewSubstrateRuntime's
+// deterministic config validation (here substrate.Validate rejecting an
+// unsupported egress_trust_bundle) is a settings problem that no retry can
+// fix, so the broker must still refuse to start. The builder is stubbed to
+// prove validation alone decides this: nothing is ever built or dialed.
+func TestResolveBrokerDefaultRuntime_SubstrateConfigValidationFailureRefusesStart(t *testing.T) {
+	built := 0
+	restore := scionruntime.SetSubstrateRuntimeBuilderForTest(func(config.V1SubstrateConfig) (*scionruntime.SubstrateRuntime, error) {
+		built++
+		return nil, fmt.Errorf("builder must not be reached for an invalid config")
+	})
+	t.Cleanup(restore)
+
+	getRuntime := writeOperatorSubstrateSettings(t, operatorSubstrateSettings(`,
+					"egress_trust_bundle": "not-a-supported-bundle.example.com"`))
+
+	var logged []string
+	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	rt, err := resolveBrokerDefaultRuntime(getRuntime, logf)
+	if err == nil {
+		t.Fatalf("expected startup to be refused for a substrate config validation failure, got runtime %q", rt.Name())
+	}
+	assert.ErrorIs(t, err, scionruntime.ErrSubstrateProfileInvalid)
+	assert.Contains(t, err.Error(), "egress_trust_bundle")
+	assert.Nil(t, rt)
+	assert.Empty(t, logged, "a refused startup must not log a runtime as in use")
+	assert.Zero(t, built, "config validation must fail before the runtime is built")
+}
+
+// TestResolveBrokerDefaultRuntime_SubstrateBuildFailureStartsDegraded: a
+// valid operator-defined substrate default runtime whose construct-time
+// dependencies fail (stubbed substrateRuntimeBuilder, standing in for the
+// Kubernetes client build or substrate.Dial failing on an API-server blip at
+// boot) must NOT refuse startup — refusing would turn a transient outage into
+// a crash loop. The broker starts degraded on an *ErrorRuntime that does not
+// match ErrSubstrateProfileInvalid and logs the "error" runtime name.
+func TestResolveBrokerDefaultRuntime_SubstrateBuildFailureStartsDegraded(t *testing.T) {
+	buildErr := fmt.Errorf("substrate: build Kubernetes client: simulated API server unavailable")
+	built := 0
+	restore := scionruntime.SetSubstrateRuntimeBuilderForTest(func(config.V1SubstrateConfig) (*scionruntime.SubstrateRuntime, error) {
+		built++
+		return nil, buildErr
+	})
+	t.Cleanup(restore)
+
+	getRuntime := writeOperatorSubstrateSettings(t, operatorSubstrateSettings(""))
+
+	var logged []string
+	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	rt, err := resolveBrokerDefaultRuntime(getRuntime, logf)
+	if err != nil {
+		t.Fatalf("a substrate construct-time dependency failure must not refuse startup, got: %v", err)
+	}
+	assert.Equal(t, 1, built, "test setup: the stubbed builder should have been called once")
+	er, ok := rt.(*scionruntime.ErrorRuntime)
+	if !ok {
+		t.Fatalf("expected a degraded *ErrorRuntime, got %T", rt)
+	}
+	assert.ErrorIs(t, er.Err, buildErr)
+	assert.NotErrorIs(t, er.Err, scionruntime.ErrSubstrateProfileInvalid)
+	assert.Equal(t, []string{"Runtime broker using runtime: error"}, logged)
+}
+
 // TestResolveBrokerDefaultRuntime_HealthyRuntimeStartsNormally: an ordinary
 // runtime is returned as-is and logged.
 func TestResolveBrokerDefaultRuntime_HealthyRuntimeStartsNormally(t *testing.T) {

@@ -20,6 +20,29 @@ holding a worker indefinitely. A cold template build is the easiest way to
 hit this, but it is a general dispatch-timeout gap, not specific to this
 runtime.
 
+**Timeout invariant.** The hub→broker create timeout must be at least the
+substrate start budget: actor create, then bootstrap, then the wait for the
+actor to reach `RUNNING`. The two sides are bounded by different settings,
+and only one of them can be configured today:
+
+- **Broker side (the start budget).** The wait for `RUNNING` is bounded by
+  `defaultActorRunningTimeout` in `pkg/runtime/substrate_runtime.go`
+  (5 minutes). It is a compiled-in constant, not a setting, and so is the
+  post-start healthz wait. On a cold template, the golden build that runs
+  before this is bounded separately by `runtimes.<name>.substrate.template_ready_timeout`,
+  the only configurable substrate start bound (default 10 minutes).
+- **Hub side (the create timeout).** There is **no hub setting** for this. A
+  substrate broker serves every create synchronously (it does not support
+  async launch, so `hub.launch_timeout` does not apply). The hub waits on a
+  fixed 120-second request timeout, whether it dispatches over the control
+  channel or calls the broker directly over HTTP.
+
+The hub's fixed 120 seconds is shorter than the broker's worst-case start
+budget, so the invariant only holds when the start actually finishes inside
+the hub's window. Warming the template (below) keeps the golden build out of
+the request path. Until the hub timeout becomes configurable, treat a create
+that times out on the hub as the orphaned-actor case described above.
+
 Warm a golden for a brand-new project by creating one throwaway agent first —
 the first `CreateActorTemplate` for a project needs that project's atespace
 to exist, and an ordinary `scion start` creates it as a side effect:
