@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -45,6 +46,15 @@ type tzCleanupFixture struct {
 	emptyMarker string
 	// clean: no TZ anywhere.
 	clean string
+	// unpinned: an explicit unpin plus a TZ that reappeared in Env.
+	unpinned string
+	// softDeleted: a soft-deleted agent with an Env-only TZ.
+	softDeleted string
+}
+
+// all returns every fixture agent ID.
+func (f tzCleanupFixture) all() []string {
+	return []string{f.envOnly, f.inlineMatch, f.inlineOnly, f.storageMatch, f.pinned, f.emptyMarker, f.clean, f.unpinned, f.softDeleted}
 }
 
 func newTZCleanupFixture(t *testing.T, s store.Store) tzCleanupFixture {
@@ -59,6 +69,8 @@ func newTZCleanupFixture(t *testing.T, s store.Store) tzCleanupFixture {
 		pinned:       tid("agent-tzc-pinned"),
 		emptyMarker:  tid("agent-tzc-empty"),
 		clean:        tid("agent-tzc-clean"),
+		unpinned:     tid("agent-tzc-unpinned"),
+		softDeleted:  tid("agent-tzc-soft-deleted"),
 	}
 	require.NoError(t, s.CreateProject(ctx, f.project))
 	require.NoError(t, s.CreateEnvVar(ctx, &store.EnvVar{
@@ -80,15 +92,21 @@ func newTZCleanupFixture(t *testing.T, s store.Store) tzCleanupFixture {
 		f.pinned:       {ExplicitTimezone: "UTC", Env: map[string]string{"TZ": "Europe/Berlin"}},
 		f.emptyMarker:  {Env: map[string]string{"TZ": ""}},
 		f.clean:        {Env: map[string]string{"FOO": "bar"}},
+		f.unpinned:     {ExplicitTimezoneUnpinned: true, Env: map[string]string{"TZ": "Europe/Rome"}},
+		f.softDeleted:  {Env: map[string]string{"TZ": "Australia/Adelaide"}},
 	}
 	for id, ac := range configs {
-		require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		a := &store.Agent{
 			ID:            id,
 			Slug:          id,
 			Name:          id,
 			ProjectID:     f.project.ID,
 			AppliedConfig: ac,
-		}))
+		}
+		if id == f.softDeleted {
+			a.DeletedAt = time.Now()
+		}
+		require.NoError(t, s.CreateAgent(ctx, a))
 	}
 	return f
 }
@@ -131,10 +149,11 @@ func TestAppliedConfigTZCleanupAdoptsAndCounts(t *testing.T) {
 	f := newTZCleanupFixture(t, s)
 
 	result, log := runTZCleanup(t, s, nil)
-	assert.Equal(t, 7, result.AgentsScanned)
-	assert.Equal(t, 4, result.AgentsAdopted, "envOnly, inlineMatch, inlineOnly and storageMatch are adopted")
-	assert.Equal(t, 2, result.AgentsStripped, "pinned and emptyMarker are only stripped")
-	assert.Contains(t, log, "Adopted 4 agent TZ value(s)")
+	assert.Equal(t, 9, result.AgentsScanned, "soft-deleted agents are scanned too")
+	assert.Equal(t, 5, result.AgentsAdopted, "envOnly, inlineMatch, inlineOnly, storageMatch and softDeleted are adopted")
+	assert.Equal(t, 3, result.AgentsStripped, "pinned, emptyMarker and unpinned are only stripped")
+	assert.Contains(t, log, "Adopted 5 agent TZ value(s)")
+	assert.Contains(t, log, "stripped TZ from 3 agent(s) without a new pin")
 	assert.Contains(t, log, "ADOPT agent="+f.envOnly+" source=legacy")
 	assert.NotContains(t, log, "Asia/Kathmandu", "TZ values are never logged")
 
@@ -142,7 +161,14 @@ func TestAppliedConfigTZCleanupAdoptsAndCounts(t *testing.T) {
 	assertLegacyPin(t, s, f.inlineMatch, "Europe/Paris")
 	assertLegacyPin(t, s, f.inlineOnly, "Asia/Tokyo")
 	assertLegacyPin(t, s, f.storageMatch, "America/New_York")
+	assertLegacyPin(t, s, f.softDeleted, "Australia/Adelaide")
 	assert.Equal(t, "bar", loadAppliedConfig(t, s, f.envOnly).Env["FOO"], "other env keys are untouched")
+
+	unpinned := loadAppliedConfig(t, s, f.unpinned)
+	assert.Empty(t, unpinned.ExplicitTimezone, "an explicit unpin is not re-pinned")
+	assert.False(t, unpinned.ExplicitTimezoneLegacy)
+	assert.True(t, unpinned.ExplicitTimezoneUnpinned)
+	assert.False(t, appliedConfigHasEnvTZ(unpinned))
 
 	pinned := loadAppliedConfig(t, s, f.pinned)
 	assert.Equal(t, "UTC", pinned.ExplicitTimezone, "an existing pin is kept")
@@ -159,10 +185,10 @@ func TestAppliedConfigTZCleanupIsIdempotent(t *testing.T) {
 	f := newTZCleanupFixture(t, s)
 
 	first, _ := runTZCleanup(t, s, nil)
-	require.Equal(t, 4, first.AgentsAdopted)
+	require.Equal(t, 5, first.AgentsAdopted)
 
 	versions := map[string]int64{}
-	for _, id := range []string{f.envOnly, f.inlineMatch, f.inlineOnly, f.storageMatch, f.pinned, f.emptyMarker, f.clean} {
+	for _, id := range f.all() {
 		a, err := s.GetAgent(context.Background(), id)
 		require.NoError(t, err)
 		versions[id] = a.StateVersion
@@ -185,17 +211,17 @@ func TestAppliedConfigTZCleanupDryRunMakesNoChanges(t *testing.T) {
 	f := newTZCleanupFixture(t, s)
 
 	result, log := runTZCleanup(t, s, map[string]string{"dryRun": "true"})
-	assert.Equal(t, 4, result.AgentsAdopted)
-	assert.Equal(t, 2, result.AgentsStripped)
+	assert.Equal(t, 5, result.AgentsAdopted)
+	assert.Equal(t, 3, result.AgentsStripped)
 	assert.Contains(t, log, "DRY RUN")
-	assert.Contains(t, log, "Would adopt 4")
+	assert.Contains(t, log, "Would adopt 5")
 
 	ac := loadAppliedConfig(t, s, f.envOnly)
 	assert.Empty(t, ac.ExplicitTimezone)
 	assert.Equal(t, "Asia/Kathmandu", ac.Env["TZ"])
 
 	realRun, _ := runTZCleanup(t, s, nil)
-	assert.Equal(t, 4, realRun.AgentsAdopted, "a dry run leaves the work for the real run")
+	assert.Equal(t, 5, realRun.AgentsAdopted, "a dry run leaves the work for the real run")
 }
 
 // TZ cleanup first, then env cleanup: every saved TZ is pinned, and the env
@@ -205,13 +231,14 @@ func TestAppliedConfigTZCleanupThenEnvCleanup(t *testing.T) {
 	f := newTZCleanupFixture(t, s)
 
 	result, _ := runTZCleanup(t, s, nil)
-	assert.Equal(t, 4, result.AgentsAdopted)
+	assert.Equal(t, 5, result.AgentsAdopted)
 	runEnvCleanup(t, s)
 
 	assertLegacyPin(t, s, f.envOnly, "Asia/Kathmandu")
 	assertLegacyPin(t, s, f.inlineMatch, "Europe/Paris")
 	assertLegacyPin(t, s, f.inlineOnly, "Asia/Tokyo")
 	assertLegacyPin(t, s, f.storageMatch, "America/New_York")
+	assertLegacyPin(t, s, f.softDeleted, "Australia/Adelaide")
 	assert.Equal(t, "UTC", loadAppliedConfig(t, s, f.pinned).ExplicitTimezone)
 
 	again, _ := runTZCleanup(t, s, nil)
@@ -239,6 +266,8 @@ func TestAppliedConfigEnvCleanupThenTZCleanup(t *testing.T) {
 	assertLegacyPin(t, s, f.inlineMatch, "Europe/Paris")
 	assertLegacyPin(t, s, f.inlineOnly, "Asia/Tokyo")
 	assertLegacyPin(t, s, f.storageMatch, "America/New_York")
+	assert.Empty(t, loadAppliedConfig(t, s, f.softDeleted).ExplicitTimezone,
+		"the env cleanup also sweeps soft-deleted rows, so their no-source TZ is not pinned")
 	assert.Equal(t, "UTC", loadAppliedConfig(t, s, f.pinned).ExplicitTimezone)
 
 	again, _ := runTZCleanup(t, s, nil)

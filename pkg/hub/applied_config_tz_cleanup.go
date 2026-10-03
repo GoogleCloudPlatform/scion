@@ -30,9 +30,10 @@ import (
 // ExplicitTimezone with ExplicitTimezoneLegacy set, so it reports timezone
 // source "legacy", and both env copies are stripped. It is an optional
 // maintenance migration (see resolveMaintenanceExecutor, key
-// "applied-config-tz-cleanup"); nothing runs it automatically, and skipping
-// it changes no behaviour because the lazy adoption still runs on each read.
-// What it adds is a single count of the agents whose saved TZ became a pin,
+// "applied-config-tz-cleanup"); nothing runs it automatically. On its own,
+// skipping it changes nothing, because the lazy adoption still runs on each
+// read; it matters only relative to applied-config-env-cleanup (see below).
+// It also gives a single count of the agents whose saved TZ became a pin,
 // which makes the adopted pins findable.
 //
 // Order relative to applied-config-env-cleanup. Both orders are safe:
@@ -148,7 +149,7 @@ func (e *AppliedConfigTZCleanupExecutor) run(ctx context.Context, logger io.Writ
 	if dryRun {
 		verb = "Would adopt"
 	}
-	_, _ = fmt.Fprintf(logger, "Scanned %d agent(s). %s %d agent TZ value(s) as legacy pins; stripped %d TZ record(s) without a new pin.\n",
+	_, _ = fmt.Fprintf(logger, "Scanned %d agent(s). %s %d agent TZ value(s) as legacy pins; stripped TZ from %d agent(s) without a new pin.\n",
 		result.AgentsScanned, verb, result.AgentsAdopted, result.AgentsStripped)
 	return result, nil
 }
