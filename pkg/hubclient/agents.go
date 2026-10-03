@@ -260,6 +260,12 @@ type CreateAgentRequest struct {
 	// AgentRole specifies the requested authorization role.
 	AgentRole string `json:"agentRole,omitempty"`
 
+	// NoAuth disables auth credential propagation into the agent container
+	// (CLI --no-auth). Honoured by the Hub on the create path only; an
+	// existing agent that is resumed/restarted in place does not re-read it
+	// (ptone/scion#1855).
+	NoAuth bool `json:"noAuth,omitempty"`
+
 	// MessageMode specifies the initial message mode for the agent.
 	// Valid values: "none", "lineage", "branch", "project", "hub".
 	// When omitted, resolved from template, parent inheritance, or "project" default.

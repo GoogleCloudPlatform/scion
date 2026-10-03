@@ -580,7 +580,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	}
 
 	if hubCtx != nil {
-		return startAgentViaHub(hubCtx, agentName, task, resume, inlineCfg)
+		return startAgentViaHub(cmd, hubCtx, agentName, task, resume, inlineCfg)
 	}
 
 	// Local mode
@@ -860,7 +860,97 @@ func workspaceFinalizeNotice(filesApplied int, warnings []string) []string {
 	return lines
 }
 
-func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, inlineCfg *api.ScionConfig) error {
+// startAgentViaHub creates/starts (or resumes/restarts in place) an agent via
+// the Hub. cmd is used only to detect which flags the user explicitly set (for
+// the "not applied to an existing agent" warning); it may be nil.
+// hubStartImpliesResume reports whether `scion start` on an existing hub agent
+// in the given phase should be sent as a resume request. Suspended agents
+// resume their session; stopped agents restart in place with a fresh session
+// (the hub's resume-in-place path). Error-phase agents are deliberately not
+// included: the hub only restarts them in place with --force
+// (resumeInPlaceDecision), so `start` on them still reports a conflict.
+func hubStartImpliesResume(phase string) bool {
+	return phase == string(state.PhaseSuspended) || phase == string(state.PhaseStopped)
+}
+
+// hubCreateReusesExistingAgent mirrors the hub's handleExistingAgent decision
+// tree (pkg/hub/handlers_agent_create_helpers.go) and reports whether a create
+// request for an agent already in the given phase will start, resume or
+// restart that agent in place rather than create a new one. On those paths the
+// hub applies only the task and attach mode; all other create configuration
+// is ignored.
+func hubCreateReusesExistingAgent(phase string, resume, force bool) bool {
+	switch phase {
+	case string(state.PhaseSuspended), string(state.PhaseCreated):
+		return true
+	case string(state.PhaseStopped):
+		return resume
+	case string(state.PhaseError):
+		return resume && force
+	default:
+		// Not found, running (conflict), provisioning (deleted and
+		// re-created by env-gather, so flags do apply), or unknown.
+		return false
+	}
+}
+
+// hubStartActionWord returns the verb printed before a hub start request so it
+// reflects what the hub will actually do with an agent in the given phase.
+func hubStartActionWord(phase string, resume, force bool) string {
+	switch {
+	case phase == string(state.PhaseStopped) && resume:
+		// The hub restarts a stopped agent with a fresh harness session.
+		return "Restarting"
+	case resume && force:
+		return "Force-resuming"
+	case resume:
+		return "Resuming"
+	default:
+		return "Starting"
+	}
+}
+
+// configFlagsNotAppliedToExistingAgent lists the start/resume flags that carry
+// agent configuration. When the hub reuses an existing agent in place it
+// applies only the task and --attach, so explicitly setting any of these has
+// no effect.
+var configFlagsNotAppliedToExistingAgent = []string{
+	"type", "harness-config", "harness", "harness-auth", "image", "model",
+	"thinking-level", "config", "broker", "label", "role", "message-mode",
+	"branch", "workspace", "service-account", "enable-telemetry",
+	"disable-telemetry", "no-auth",
+}
+
+// warnFlagsIgnoredForExistingAgent prints one stderr warning naming the
+// configuration flags the user explicitly set that the hub will not apply
+// because the agent already exists and is being reused in place.
+func warnFlagsIgnoredForExistingAgent(cmd *cobra.Command, agentName, phase string) {
+	if cmd == nil {
+		return
+	}
+	var ignored []string
+	noAuthIgnored := false
+	for _, name := range configFlagsNotAppliedToExistingAgent {
+		f := cmd.Flags().Lookup(name)
+		if f == nil || !f.Changed {
+			continue
+		}
+		ignored = append(ignored, "--"+name)
+		if name == "no-auth" {
+			noAuthIgnored = true
+		}
+	}
+	if len(ignored) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Warning: agent '%s' already exists (phase: %s) and is reused in place; these flags are not applied to an existing agent: %s\n",
+		agentName, phase, strings.Join(ignored, ", "))
+	if noAuthIgnored {
+		fmt.Fprintf(os.Stderr, "  --no-auth is not applied when resuming or restarting an existing agent (see ptone/scion#1855); delete and re-create the agent to apply it.\n")
+	}
+}
+
+func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task string, resume bool, inlineCfg *api.ScionConfig) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
 	// Get the project ID for this project
@@ -940,6 +1030,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		Notify:          !startNoNotify,
 		AgentRole:       agentRoleFlag,
 		MessageMode:     messageModeFlag,
+		NoAuth:          noAuth,
 	}
 
 	// Wire --service-account flag into the GCP identity assignment.
@@ -1033,31 +1124,31 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Check if the agent is suspended on the hub; if so, start implicitly
-	// resumes the session. This check is best-effort — if it fails (agent
-	// doesn't exist yet), we fall through to "Starting".
-	if !resume {
-		suspendCheckStart := time.Now()
-		checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		existing, getErr := hubCtx.Client.ProjectAgents(projectID).Get(checkCtx, agentName)
-		checkCancel()
-		if debugMode {
-			util.Debugf("[startup] suspend check completed in %s (err=%v)", time.Since(suspendCheckStart), getErr)
-		}
-		if getErr == nil && existing != nil && existing.Phase == string(state.PhaseSuspended) {
-			resume = true
-			req.Resume = true
-		}
+	// Check whether the agent already exists on the hub. A suspended or
+	// stopped agent is resumed/restarted in place (parity with local mode and
+	// `scion resume`, ptone/scion#1911). This check is best-effort — if it
+	// fails (agent doesn't exist yet), we fall through to "Starting".
+	existingCheckStart := time.Now()
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	existing, getErr := hubCtx.Client.ProjectAgents(projectID).Get(checkCtx, agentName)
+	checkCancel()
+	if debugMode {
+		util.Debugf("[startup] existing-agent check completed in %s (err=%v)", time.Since(existingCheckStart), getErr)
+	}
+	existingPhase := ""
+	if getErr == nil && existing != nil {
+		existingPhase = existing.Phase
+	}
+	if !resume && hubStartImpliesResume(existingPhase) {
+		resume = true
+		req.Resume = true
+	}
+	if hubCreateReusesExistingAgent(existingPhase, req.Resume, req.ForceResume) {
+		warnFlagsIgnoredForExistingAgent(cmd, agentName, existingPhase)
 	}
 
 	if !isJSONOutput() {
-		action := "Starting"
-		if resume {
-			action = "Resuming"
-		}
-		if resume && forceResume {
-			action = "Force-resuming"
-		}
+		action := hubStartActionWord(existingPhase, resume, req.ForceResume)
 		fmt.Printf("%s agent '%s'...\n", action, agentName)
 	}
 

@@ -1,0 +1,294 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// hubStartStub is an httptest hub that answers the calls startAgentViaHub
+// makes on the non-attach path: project GET, existing-agent GET, and the
+// agent create POST (whose raw JSON body it captures).
+type hubStartStub struct {
+	server        *httptest.Server
+	createBody    map[string]interface{}
+	createCalls   int
+	existingPhase string // "" → existing-agent GET returns 404
+}
+
+func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *hubStartStub {
+	t.Helper()
+	stub := &hubStartStub{existingPhase: existingPhase}
+	stub.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": projectID, "name": "p"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID+"/agents/"+agentName:
+			if stub.existingPhase == "" {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": "not_found", "message": "agent not found"},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "agent-id", "slug": agentName, "name": agentName,
+				"phase": stub.existingPhase, "status": stub.existingPhase,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
+			stub.createCalls++
+			raw, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			require.NoError(t, json.Unmarshal(raw, &stub.createBody))
+			_ = json.NewEncoder(w).Encode(&hubclient.CreateAgentResponse{
+				Agent: &hubclient.Agent{
+					ID: "agent-id", Slug: agentName, Name: agentName,
+					Status: "running", Phase: "running", Created: time.Now().UTC(),
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(stub.server.Close)
+	return stub
+}
+
+func (s *hubStartStub) hubCtx(t *testing.T, projectID string) *HubContext {
+	t.Helper()
+	client, err := hubclient.New(s.server.URL)
+	require.NoError(t, err)
+	return &HubContext{Client: client, Endpoint: s.server.URL, ProjectID: projectID}
+}
+
+// resetHubStartGlobals zeroes the package-level flag vars startAgentViaHub
+// reads and restores them after the test.
+func resetHubStartGlobals(t *testing.T) {
+	t.Helper()
+	origNoAuth, origAttach, origForce := noAuth, attach, forceResume
+	origTemplate, origImage, origBroker := templateName, agentImage, runtimeBrokerID
+	origHC, origHA, origLabels := harnessConfigFlag, harnessAuthFlag, labelFlags
+	origRole, origMM, origFormat := agentRoleFlag, messageModeFlag, outputFormat
+	t.Cleanup(func() {
+		noAuth, attach, forceResume = origNoAuth, origAttach, origForce
+		templateName, agentImage, runtimeBrokerID = origTemplate, origImage, origBroker
+		harnessConfigFlag, harnessAuthFlag, labelFlags = origHC, origHA, origLabels
+		agentRoleFlag, messageModeFlag, outputFormat = origRole, origMM, origFormat
+	})
+	noAuth, attach, forceResume = false, false, false
+	templateName, agentImage, runtimeBrokerID = "", "", ""
+	harnessConfigFlag, harnessAuthFlag, labelFlags = "", "", nil
+	agentRoleFlag, messageModeFlag, outputFormat = "", "", ""
+}
+
+// newFlagCmd builds a throwaway command carrying the start flags the warning
+// inspects, and marks the given ones as explicitly set.
+func newFlagCmd(t *testing.T, set map[string]string) *cobra.Command {
+	t.Helper()
+	c := &cobra.Command{Use: "start"}
+	var s string
+	var b bool
+	c.Flags().StringVar(&s, "image", "", "")
+	c.Flags().StringVar(&s, "type", "", "")
+	c.Flags().StringVar(&s, "broker", "", "")
+	c.Flags().BoolVar(&b, "no-auth", false, "")
+	c.Flags().BoolVar(&b, "attach", false, "")
+	for name, val := range set {
+		require.NoError(t, c.Flags().Set(name, val))
+	}
+	return c
+}
+
+// ptone/scion#1912: --no-auth must reach the hub on the wire.
+func TestStartAgentViaHub_SendsNoAuthOnWire(t *testing.T) {
+	resetHubStartGlobals(t)
+	const projectID, agentName = "proj-noauth", "noauth-agent"
+
+	for _, tc := range []struct {
+		name   string
+		noAuth bool
+	}{{"set", true}, {"unset", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newHubStartStub(t, projectID, agentName, "")
+			noAuth = tc.noAuth
+			var err error
+			captureStdIO(t, func() {
+				err = startAgentViaHub(nil, stub.hubCtx(t, projectID), agentName, "", false, nil)
+			})
+			require.NoError(t, err)
+			require.Equal(t, 1, stub.createCalls)
+			v, present := stub.createBody["noAuth"]
+			if tc.noAuth {
+				assert.Equal(t, true, v, "create body must carry noAuth=true")
+			} else {
+				assert.False(t, present, "noAuth must be omitted when not set")
+			}
+		})
+	}
+}
+
+// ptone/scion#1911: the existing-agent pre-check converts start on a stopped
+// or suspended agent into a resume request, and leaves other phases alone.
+func TestStartAgentViaHub_ExistingAgentPreCheck(t *testing.T) {
+	const projectID, agentName = "proj-precheck", "precheck-agent"
+
+	for _, tc := range []struct {
+		phase      string
+		wantResume bool
+		wantAction string
+	}{
+		{"", false, "Starting agent"},
+		{"stopped", true, "Restarting agent"},
+		{"suspended", true, "Resuming agent"},
+		{"running", false, "Starting agent"},
+		// The hub only restarts error-phase agents in place with --force,
+		// so start leaves them as-is (and the hub still reports 409).
+		{"error", false, "Starting agent"},
+	} {
+		t.Run("phase="+tc.phase, func(t *testing.T) {
+			resetHubStartGlobals(t)
+			stub := newHubStartStub(t, projectID, agentName, tc.phase)
+			var err error
+			stdout, _ := captureStdIO(t, func() {
+				err = startAgentViaHub(nil, stub.hubCtx(t, projectID), agentName, "", false, nil)
+			})
+			require.NoError(t, err)
+			require.Equal(t, 1, stub.createCalls)
+			if tc.wantResume {
+				assert.Equal(t, true, stub.createBody["resume"])
+			} else {
+				_, present := stub.createBody["resume"]
+				assert.False(t, present, "resume must not be set for phase %q", tc.phase)
+			}
+			assert.Contains(t, stdout, tc.wantAction+" '"+agentName+"'")
+		})
+	}
+}
+
+// ptone/scion#1911 / #1912: explicitly set config flags that the hub will not
+// apply to an existing agent produce one stderr warning naming them, and
+// --no-auth cites ptone/scion#1855.
+func TestStartAgentViaHub_WarnsIgnoredFlagsForExistingAgent(t *testing.T) {
+	const projectID, agentName = "proj-warn", "warn-agent"
+
+	t.Run("stopped agent with config flags", func(t *testing.T) {
+		resetHubStartGlobals(t)
+		stub := newHubStartStub(t, projectID, agentName, "stopped")
+		noAuth, agentImage = true, "img:1"
+		cmd := newFlagCmd(t, map[string]string{"image": "img:1", "no-auth": "true", "attach": "true"})
+		attach = false // --attach is applied by the hub; keep the test off the attach path
+		var err error
+		_, stderr := captureStdIO(t, func() {
+			err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
+		})
+		require.NoError(t, err)
+		assert.Contains(t, stderr, "these flags are not applied to an existing agent: --image, --no-auth\n")
+		assert.Contains(t, stderr, "ptone/scion#1855")
+		assert.NotContains(t, stderr, "--attach")
+		assert.NotContains(t, stderr, "--type")
+	})
+
+	t.Run("resume on stopped agent with --no-auth", func(t *testing.T) {
+		resetHubStartGlobals(t)
+		stub := newHubStartStub(t, projectID, agentName, "stopped")
+		noAuth = true
+		cmd := newFlagCmd(t, map[string]string{"no-auth": "true"})
+		var err error
+		stdout, stderr := captureStdIO(t, func() {
+			err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", true, nil)
+		})
+		require.NoError(t, err)
+		assert.Contains(t, stderr, "--no-auth")
+		assert.Contains(t, stderr, "ptone/scion#1855")
+		assert.Contains(t, stdout, "Restarting agent")
+	})
+
+	t.Run("new agent gets no warning", func(t *testing.T) {
+		resetHubStartGlobals(t)
+		stub := newHubStartStub(t, projectID, agentName, "")
+		noAuth = true
+		cmd := newFlagCmd(t, map[string]string{"image": "img:1", "no-auth": "true"})
+		var err error
+		_, stderr := captureStdIO(t, func() {
+			err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
+		})
+		require.NoError(t, err)
+		assert.NotContains(t, stderr, "not applied to an existing agent")
+		assert.Equal(t, true, stub.createBody["noAuth"])
+	})
+
+	t.Run("running agent gets no warning", func(t *testing.T) {
+		resetHubStartGlobals(t)
+		stub := newHubStartStub(t, projectID, agentName, "running")
+		cmd := newFlagCmd(t, map[string]string{"image": "img:1"})
+		var err error
+		_, stderr := captureStdIO(t, func() {
+			err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
+		})
+		require.NoError(t, err)
+		assert.NotContains(t, stderr, "not applied to an existing agent")
+	})
+
+	t.Run("no explicit flags gets no warning", func(t *testing.T) {
+		resetHubStartGlobals(t)
+		stub := newHubStartStub(t, projectID, agentName, "stopped")
+		var err error
+		_, stderr := captureStdIO(t, func() {
+			err = startAgentViaHub(newFlagCmd(t, nil), stub.hubCtx(t, projectID), agentName, "", false, nil)
+		})
+		require.NoError(t, err)
+		assert.NotContains(t, stderr, "not applied to an existing agent")
+	})
+}
+
+func TestHubCreateReusesExistingAgent(t *testing.T) {
+	for _, tc := range []struct {
+		phase         string
+		resume, force bool
+		want          bool
+	}{
+		{"", true, true, false},
+		{"suspended", false, false, true},
+		{"created", false, false, true},
+		{"stopped", false, false, false},
+		{"stopped", true, false, true},
+		{"error", true, false, false},
+		{"error", true, true, true},
+		{"running", true, true, false},
+		{"provisioning", true, false, false},
+	} {
+		assert.Equal(t, tc.want, hubCreateReusesExistingAgent(tc.phase, tc.resume, tc.force),
+			"phase=%q resume=%v force=%v", tc.phase, tc.resume, tc.force)
+	}
+}
+
+func TestHubStartActionWord(t *testing.T) {
+	assert.Equal(t, "Starting", hubStartActionWord("", false, false))
+	assert.Equal(t, "Restarting", hubStartActionWord("stopped", true, false))
+	assert.Equal(t, "Resuming", hubStartActionWord("suspended", true, false))
+	assert.Equal(t, "Force-resuming", hubStartActionWord("error", true, true))
+	assert.Equal(t, "Resuming", hubStartActionWord("", true, false))
+}

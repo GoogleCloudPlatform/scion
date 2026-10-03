@@ -44,6 +44,16 @@ implicitly resumes its harness session (continuing the prior conversation);
 starting a **stopped** or **error** agent runs a fresh session. See
 [`scion suspend`](#scion-suspend) and [`scion resume`](#scion-resume).
 
+**In Hub mode**, starting an existing **stopped** agent restarts it in place
+(printed as "Restarting", with a fresh session), the same as `scion resume`.
+Starting an **error**-phase agent still fails with a conflict: use
+`scion resume --force` or delete it first. When an existing agent is reused in
+place, the Hub applies only the task and `--attach`. Other configuration flags
+you set explicitly (for example `--type`, `--image`, `--harness-config`,
+`--broker`, `--label` or `--no-auth`) are not applied, and the CLI prints a
+warning that names them. `--no-auth` on an existing agent is tracked in
+ptone/scion#1855.
+
 **Usage:** `scion start <agent-name> [task] [flags]`
 
 - **Arguments:**
@@ -54,7 +64,7 @@ starting a **stopped** or **error** agent runs a fresh session. See
     - `-t, --type <string>`: Template to use (default "gemini").
     - `-i, --image <string>`: Override container image.
     - `-a, --attach`: Attach to the agent immediately after starting.
-    - `--no-auth`: Disable authentication propagation.
+    - `--no-auth`: Disable authentication propagation (also sent to the Hub in Hub mode; applies when the agent is created).
     - `-d, --detached`: Run in detached mode (default true).
     - `--config <path>`: Path to inline agent config file (YAML/JSON) for Just-In-Time (JIT) overrides, or `-` for stdin.
     - `--harness-config <string>`: Named harness configuration to use.
