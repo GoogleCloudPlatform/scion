@@ -393,6 +393,32 @@ describe('QuickPaletteHost: open, close and focus', () => {
     expect(onSelectionSettled).not.toHaveBeenCalled();
   });
 
+  it("hide() after a selection's close settles, before onSelectionSettled runs, skips it", async () => {
+    const onSelectionSettled = vi.fn();
+    const h = createHost({ onSelectionSettled });
+    const palette = await openReady(h);
+
+    select(palette, agentTarget('a1'));
+    fireFromDialog(palette, 'sl-after-hide');
+    h.hide();
+    await nextTask();
+
+    expect(onSelectionSettled).not.toHaveBeenCalled();
+  });
+
+  it("dispose() after a selection's close settles, before onSelectionSettled runs, skips it", async () => {
+    const onSelectionSettled = vi.fn();
+    const h = createHost({ onSelectionSettled });
+    const palette = await openReady(h);
+
+    select(palette, agentTarget('a1'));
+    fireFromDialog(palette, 'sl-after-hide');
+    h.dispose();
+    await nextTask();
+
+    expect(onSelectionSettled).not.toHaveBeenCalled();
+  });
+
   it('dispose() removes the element and later opens do nothing', async () => {
     const load = vi.fn(() => Promise.resolve([candidate('a1')]));
     const h = createHost({ load });

@@ -132,6 +132,8 @@ export class QuickPaletteHost {
   /** The element focused when the palette opened, refocused on a non-selection dismiss. */
   private invoker: HTMLElement | null = null;
   private closedBySelection = false;
+  /** The timer that runs `onSelectionSettled` once a selection's close settles. */
+  private settleTimer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
   /**
    * The palette element whose dialog is running its close animation: set on
@@ -230,12 +232,14 @@ export class QuickPaletteHost {
   /**
    * Closes the palette, if it is open, and moves focus nowhere when the
    * close settles: neither to the invoker nor through `onSelectionSettled`,
-   * even for a close already animating. For a surface going off screen,
+   * even for a close already animating or one that has settled but not yet
+   * run `onSelectionSettled`. For a surface going off screen,
    * whose invoker goes with it. Closing also releases Shoelace's focus trap
    * and scroll lock, which would otherwise stay active on whatever is shown
    * next.
    */
   hide(): void {
+    clearTimeout(this.settleTimer);
     this.invoker = null;
     this.closedBySelection = false;
     this.close();
@@ -367,7 +371,7 @@ export class QuickPaletteHost {
       // Shoelace queues its own focus restore to the dialog's trigger in a
       // timeout just before firing this event; acting in a later timeout
       // keeps that restore from overriding the surface's own focus move.
-      setTimeout(() => this.options.onSelectionSettled?.());
+      this.settleTimer = setTimeout(() => this.options.onSelectionSettled?.());
     } else {
       this.invoker?.focus();
     }
