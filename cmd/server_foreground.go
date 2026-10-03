@@ -178,7 +178,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// In hosted mode, materialize any missing harness configs from the
 		// binary's embedded catalog. This ensures newly added harness configs
 		// from binary updates are available on disk without a full InitGlobal.
-		// Force=false preserves any operator-customized configs.
+		// Force=false refreshes bundle-owned files (config.yaml and the
+		// provisioner scripts) but preserves other operator files.
 		if err := config.MaterializeBundledHarnessConfigs(globalDir, config.MaterializeOptions{Force: false}); err != nil {
 			log.Printf("Warning: failed to materialize missing harness configs: %v", err)
 		}
