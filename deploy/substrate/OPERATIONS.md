@@ -358,6 +358,32 @@ kubectl ate get actors -a <atespace>
 kubectl ate delete actor -a <atespace> <NAME> --any-state
 ```
 
+### Exec error redaction after a restart
+
+The broker redacts the secret values it placed in an agent's bootstrap
+environment out of exec error text, using a per-agent list of those values
+that it caches in memory when it starts the agent. That cache is not
+persisted. After a broker restart, or for any actor this broker process
+never bootstrapped itself, the cache has no entry for the agent, so an exec
+failure's error text (including the truncated control-server stderr it
+embeds) is written to the **broker's own log** without that redaction.
+
+The exposure is narrow:
+
+- **Client responses are unaffected.** A failed exec returns an opaque
+  error to the caller. The detailed error text only ever reaches the broker
+  log.
+- **The exec child carries no agent secrets.** Its environment is built
+  from the exec user's passwd entry (plus a fixed PATH and the CA-bundle
+  path variables), not from the agent's bootstrap environment. A secret can therefore only appear if the command's own
+  output prints it, for example a command that reads a secret file and
+  fails.
+
+Treat broker logs as sensitive anyway, as you already should: restrict who
+can read them, and don't paste exec failure lines from them into shared
+channels without checking them first. Agents created after the restart are
+redacted normally.
+
 ## Removing or changing the substrate runtime configuration
 
 **Delete every substrate agent before removing (or changing the type of)

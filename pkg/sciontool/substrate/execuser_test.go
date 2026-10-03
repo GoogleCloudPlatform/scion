@@ -163,6 +163,9 @@ func TestExecUserCredential_SameIdentitySkipsCredential(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not resolve current user: %v", err)
 	}
+	if me.Gid == "0" {
+		t.Skip("current user's primary gid is 0, which is refused before the same-identity shortcut applies")
+	}
 	restore := SetExecUserLookupForTest(func(username string) (*user.User, error) {
 		return me, nil
 	})
@@ -216,6 +219,59 @@ func TestExecUserCredential_RootUIDIsRefused(t *testing.T) {
 	}
 }
 
+// TestExecUserCredential_RootGIDIsRefused: a target name whose passwd
+// entry has a non-zero uid but primary gid 0 must be refused with a clear
+// error and no credential or environment, so the /exec child never runs
+// with the root group as its primary group. The uid is non-zero so only the
+// gid-0 guard can produce the refusal.
+func TestExecUserCredential_RootGIDIsRefused(t *testing.T) {
+	restore := SetExecUserLookupForTest(func(username string) (*user.User, error) {
+		return &user.User{Uid: "4242", Gid: "0", Username: username, HomeDir: "/home/scion"}, nil
+	})
+	defer restore()
+
+	envPairs, homeDir, cred, err := execUserCredential("scion", "/bin/sh")
+	if err == nil {
+		t.Fatalf("expected execUserCredential to refuse a user with primary gid 0, got nil error and cred=%+v", cred)
+	}
+	if !strings.Contains(err.Error(), "has primary gid 0; refusing to exec with the root group") {
+		t.Errorf("error = %q, want it to say the user has primary gid 0 and is refused", err)
+	}
+	if envPairs != nil || homeDir != "" || cred != nil {
+		t.Errorf("got envPairs=%v homeDir=%q cred=%+v, want nothing returned alongside the refusal", envPairs, homeDir, cred)
+	}
+}
+
+// TestExecUserCredential_NonZeroGIDIsAccepted is the positive control for
+// the gid-0 refusal: the same synthetic entry with a non-zero primary gid
+// still yields a credential carrying that uid and gid, so the guard rejects
+// only gid 0 rather than every gid. The ids are chosen not to match the
+// test process's own identity, so the same-identity shortcut does not apply.
+func TestExecUserCredential_NonZeroGIDIsAccepted(t *testing.T) {
+	const uid, gid = 4242, 4243
+	if os.Geteuid() == uid && os.Getegid() == gid {
+		t.Skip("test process already runs as the synthetic identity")
+	}
+	restore := SetExecUserLookupForTest(func(username string) (*user.User, error) {
+		return &user.User{Uid: "4242", Gid: "4243", Username: username, HomeDir: "/home/scion"}, nil
+	})
+	defer restore()
+
+	_, homeDir, cred, err := execUserCredential("scion", "/bin/sh")
+	if err != nil {
+		t.Fatalf("execUserCredential with a non-zero gid: %v", err)
+	}
+	if cred == nil {
+		t.Fatal("expected a credential for a non-zero uid/gid, got nil")
+	}
+	if cred.Uid != uid || cred.Gid != gid {
+		t.Errorf("cred = %+v, want Uid=%d Gid=%d", cred, uid, gid)
+	}
+	if homeDir != "/home/scion" {
+		t.Errorf("homeDir = %q, want /home/scion", homeDir)
+	}
+}
+
 // TestCheckExecHomeDir covers the working-directory precondition runExec
 // applies: an existing directory passes; an empty, missing, or non-directory
 // home is refused with an error naming the user.
@@ -257,6 +313,9 @@ func TestExecUserCredential_RealScionUser(t *testing.T) {
 	}
 	if u.Uid == "0" {
 		t.Skip("the \"scion\" user on this machine is uid 0, which execUserCredential refuses")
+	}
+	if u.Gid == "0" {
+		t.Skip("the \"scion\" user on this machine has primary gid 0, which execUserCredential refuses")
 	}
 	envPairs, _, _, err := execUserCredential("scion", "/bin/sh")
 	if err != nil {

@@ -108,7 +108,10 @@ func SetExecUserLookupForTest(lookup func(username string) (*user.User, error)) 
 // the agent workload as an unprivileged user, so a passwd entry (or a
 // test/image misconfiguration) mapping the target name to root must never
 // yield a root child, whether through a credential or through the
-// same-identity shortcut below.
+// same-identity shortcut below. A primary gid of 0 is refused the same way
+// and in the same position (before that shortcut): a non-root uid running
+// with the root group as its primary group could still write any
+// group-writable root-group file.
 //
 // cred is nil when user resolves to this process's own current identity
 // (euid/egid already match) — the shape a test that asks to run as its own
@@ -136,6 +139,9 @@ func execUserCredential(username, shPath string) (envPairs []string, homeDir str
 	gid64, err := strconv.ParseUint(u.Gid, 10, 32)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("substrate: user %q has an unparseable gid %q: %w", username, u.Gid, err)
+	}
+	if gid64 == 0 {
+		return nil, "", nil, fmt.Errorf("substrate: user %q has primary gid 0; refusing to exec with the root group", username)
 	}
 	uid, gid := uint32(uid64), uint32(gid64)
 
