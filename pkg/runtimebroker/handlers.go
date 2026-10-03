@@ -4769,16 +4769,18 @@ type agentResourceCleaner interface {
 
 // cleanupLeftoverAgentResources removes the per-agent runtime objects of an
 // agent whose container no longer exists, across the default and every
-// auxiliary runtime, since the container may have run on any of them. It is
-// scoped to projectID and does nothing without one. It is best effort: a
-// failure is logged and does not fail the delete, matching the cleanup that
-// runtime Delete does when the container still exists.
+// auxiliary runtime, since the container may have run on any of them. When
+// the request carries a recorded runtime type (ptone/scion#2748), only
+// runtimes of that type are cleaned. It is scoped to projectID and does
+// nothing without one. It is best effort: a failure is logged and does not
+// fail the delete, matching the cleanup that runtime Delete does when the
+// container still exists.
 func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, projectID string) {
 	if projectID == "" {
 		return
 	}
 	slug := api.Slugify(agentName)
-	for _, mgr := range s.allManagers() {
+	for _, mgr := range s.allManagers(ctx) {
 		c, ok := mgr.(agentResourceCleaner)
 		if !ok {
 			continue
