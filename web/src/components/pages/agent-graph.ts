@@ -129,6 +129,8 @@ export class AgentGraphPage extends LitElement {
       const data = (await response.json()) as { agents?: Agent[] } | Agent[];
       this.agents = Array.isArray(data) ? data : data.agents || [];
       stateManager.seedAgents(this.agents);
+      if (Array.isArray(data) || !(data as { nextCursor?: string }).nextCursor)
+        stateManager.markAgentSetComplete('full');
     } catch (err) {
       console.error('Failed to load agents:', err);
       if (!quiet) {
