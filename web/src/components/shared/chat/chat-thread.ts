@@ -1066,6 +1066,21 @@ export class ScionChatThread extends LitElement {
         margin: 0.25rem 1rem;
         white-space: pre-wrap;
       }
+
+      /* Clear a landscape phone's notch and rounded corners (the page uses
+         viewport-fit=cover) on whichever sides this column meets the screen
+         edge. Each inset is a transparent border, so the row's background still
+         paints to the screen edge and only its content moves in. The chat page
+         sets --chat-inset-left and --chat-inset-right for the edges the
+         conversation touches; both are 0 everywhere else. */
+      .interagent-toggle-bar,
+      .state-msg,
+      .messages-scroll,
+      .typing-indicator,
+      .send-error {
+        border-left: var(--chat-inset-left, 0px) solid transparent;
+        border-right: var(--chat-inset-right, 0px) solid transparent;
+      }
     `,
   ];
 

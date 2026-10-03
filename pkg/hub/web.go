@@ -237,7 +237,7 @@ var spaShellTemplate = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
     <title>Scion</title>
 
     <!-- app-icons:start -- kept identical to web/index.html; see TestSPAShellAppIconTags. -->
