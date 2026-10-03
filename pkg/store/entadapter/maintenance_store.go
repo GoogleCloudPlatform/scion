@@ -57,6 +57,12 @@ var defaultSeedOperations = []store.MaintenanceOperation{
 		Category:    store.MaintenanceCategoryMigration,
 	},
 	{
+		Key:         "applied-config-tz-cleanup",
+		Title:       "Applied Config TZ Cleanup",
+		Description: `Optional. Converts the TZ that older hubs saved in agent.appliedConfig.env into an explicit timezone pin (source "legacy") in one pass and reports how many agents it converted. On its own, skipping this changes nothing, because the hub already does this for each agent the next time that agent's timezone is read; it matters only relative to applied-config-env-cleanup. Safe to re-run; a second run converts 0. Order with applied-config-env-cleanup: both orders are safe. Run this first to keep every saved TZ as a pin. If applied-config-env-cleanup runs first, it removes saved TZ values that match no live plain source (for example a TZ copied in from a runtime profile or the hub default); those agents then follow the user, project or hub timezone settings instead of being pinned. A TZ that matches the agent's explicit config is kept by that cleanup and converted here.`,
+		Category:    store.MaintenanceCategoryMigration,
+	},
+	{
 		Key:         "pull-images",
 		Title:       "Pull Container Images",
 		Description: "Pulls the latest container images for all configured harnesses from the image registry.",

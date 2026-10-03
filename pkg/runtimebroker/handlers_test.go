@@ -475,7 +475,35 @@ func TestHostInfo(t *testing.T) {
 	}
 
 	if resp.Capabilities == nil {
-		t.Error("expected capabilities to be present")
+		t.Fatal("expected capabilities to be present")
+	}
+	if !resp.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("expected capabilities.emptyPerAgentWorkspace to be true (design #2703 P2)")
+	}
+}
+
+// TestHostInfo_EmptyPerAgentFollowsDefaultRuntime pins that /api/v1/info
+// advertises EmptyPerAgentWorkspace per default runtime (false for one that
+// opts out, as Cloud Run does), matching the heartbeat.
+func TestHostInfo_EmptyPerAgentFollowsDefaultRuntime(t *testing.T) {
+	srv := newTestServer(t)
+	srv.runtime = &noEmptyPerAgentTestRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "cloudrun" }}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/info", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+	var resp BrokerInfoResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Capabilities == nil {
+		t.Fatal("expected capabilities to be present")
+	}
+	if resp.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("capabilities.emptyPerAgentWorkspace = true, want false for a default runtime that opts out")
 	}
 }
 
@@ -2676,7 +2704,7 @@ func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
 		"name": "hub-managed-agent",
 		"projectSlug": "settings-test-project",
 		"hubEndpoint": "http://localhost:9810",
-		"config": {"template": "claude"}
+		"config": {"template": "claude", "workspace": "` + projectPath + `"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -3914,7 +3942,7 @@ func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 		"projectId": "project-abc",
 		"projectSlug": "my-hub-project",
 		"provisionOnly": true,
-		"config": {"template": "claude"}
+		"config": {"template": "claude", "workspace": "/hub/projects/my-hub-project"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

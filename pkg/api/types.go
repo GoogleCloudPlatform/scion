@@ -495,6 +495,14 @@ type ScionConfig struct {
 	// repo. Persisted so resume/restart honors the same contract as first start.
 	ExplicitWorkspace bool `json:"explicit_workspace,omitempty" yaml:"explicit_workspace,omitempty"`
 
+	// EmptyPerAgentWorkspace records that the agent's workspace is its
+	// private, non-git agents/<slug>/workspace directory (design #2703).
+	// Persisted so a restart or resume that arrives without the mode (e.g.
+	// a dropped or undecodable request body) can never fall back to legacy
+	// workspace resolution or an enclosing repo root, and so delete skips
+	// worktree/branch cleanup for it.
+	EmptyPerAgentWorkspace bool `json:"empty_per_agent_workspace,omitempty" yaml:"empty_per_agent_workspace,omitempty"`
+
 	// Info contains persisted metadata about the agent
 	Info *AgentInfo `json:"-" yaml:"-"`
 }
@@ -848,6 +856,22 @@ func IsSharedWorkspaceFromContext(ctx context.Context) bool {
 	return v
 }
 
+type emptyPerAgentWorkspaceContextKey struct{}
+
+// ContextWithEmptyPerAgentWorkspace returns a new context marking the agent's
+// workspace as empty-per-agent (design #2703): a private, initially empty,
+// non-git directory at <projectDir>/agents/<slug>/workspace.
+func ContextWithEmptyPerAgentWorkspace(ctx context.Context) context.Context {
+	return context.WithValue(ctx, emptyPerAgentWorkspaceContextKey{}, true)
+}
+
+// IsEmptyPerAgentWorkspaceFromContext returns true if the context marks the
+// agent's workspace as empty-per-agent.
+func IsEmptyPerAgentWorkspaceFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(emptyPerAgentWorkspaceContextKey{}).(bool)
+	return v
+}
+
 type githubAppContextKey struct{}
 
 // ContextWithGitHubApp returns a new context with the GitHub App enabled flag attached.
@@ -1024,6 +1048,11 @@ type StartOptions struct {
 	InlineConfig      *ScionConfig // Inline config from --config flag, merged over template config
 	SharedDirs        []SharedDir  // Project-level shared directories (from Hub, merged with settings)
 	ExtraHosts        []string     // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
+
+	// EmptyPerAgentWorkspace gives the agent a private, initially empty,
+	// non-git workspace at <projectDir>/agents/<slug>/workspace (design
+	// #2703). Mutually exclusive with Workspace, GitClone and SharedWorkspace.
+	EmptyPerAgentWorkspace bool
 
 	// ProjectPreStartHookScript is the project-owner-supplied shell script
 	// inlined from the project's active ProjectPreStartHook at agent-create

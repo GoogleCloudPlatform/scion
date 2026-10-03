@@ -229,6 +229,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			Exec:        true,
 			Reprovision: true,
 			AsyncLaunch: true,
+			// EmptyPerAgentWorkspace, like Attach, reflects the default
+			// runtime (false for Cloud Run, which rejects the mode).
+			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(s.runtime),
 		},
 		Profiles: s.buildInfoProfiles(runtimeType),
 	}
@@ -1046,6 +1049,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		WorkspaceMode:      req.WorkspaceMode,
 		HTTPRequest:        r,
 		Operation:          opCreate,
+		// Threaded only for the workspace-source checks; the download
+		// itself runs after buildStartContext (below, or in runLaunch).
+		WorkspaceStoragePath: req.WorkspaceStoragePath,
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, startContextSpanText(err))
@@ -3177,6 +3183,39 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 	})
 }
 
+// scionTokenDirScript sets TOKEN_DIR to the scion user's ~/.scion inside
+// the agent container, falling back to /home/scion when getent is missing
+// or has no entry. (A `getent … | cut … || echo …` pipeline never takes the
+// fallback: its status is cut's, which succeeds on empty input.) It is a
+// brace group, so callers can chain it with && like a single command.
+const scionTokenDirScript = `{ d="$(getent passwd scion 2>/dev/null | cut -d: -f6)"; ` +
+	`[ -n "$d" ] || d=/home/scion; ` +
+	`TOKEN_DIR="$d/.scion"; }`
+
+// scionTokenWriteCmd returns the in-container command that writes the agent
+// token (read from stdin) to the scion user's token file via temp+rename.
+func scionTokenWriteCmd() []string {
+	return []string{"sh", "-c",
+		scionTokenDirScript + " && " +
+			"mkdir -p \"$TOKEN_DIR\" && " +
+			"cat > \"$TOKEN_DIR/scion-token.tmp\" && " +
+			"mv \"$TOKEN_DIR/scion-token.tmp\" \"$TOKEN_DIR/scion-token\"",
+	}
+}
+
+// transportTokenWriteCmd returns the in-container command that writes the
+// transport token (read from stdin) to the scion user's transport token
+// file via temp+rename, created mode 0600.
+func transportTokenWriteCmd() []string {
+	return []string{"sh", "-c",
+		"umask 077 && " +
+			scionTokenDirScript + " && " +
+			"mkdir -p \"$TOKEN_DIR\" && " +
+			"cat > \"$TOKEN_DIR/transport-token.tmp\" && " +
+			"mv \"$TOKEN_DIR/transport-token.tmp\" \"$TOKEN_DIR/transport-token\"",
+	}
+}
+
 // resetAuth writes a fresh token into a running agent's container and signals
 // sciontool init (PID 1) to restart its token refresh loop via SIGUSR2.
 func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID string) {
@@ -3233,16 +3272,27 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 	// becomes part of the outer host process's command line and is readable
 	// via /proc/<pid>/cmdline for the lifetime of the exec, while stdin is
 	// not. See #1355.
-	writeCmd := []string{"sh", "-c",
-		"TOKEN_DIR=\"$(getent passwd scion 2>/dev/null | cut -d: -f6 || echo /home/scion)/.scion\" && " +
-			"mkdir -p \"$TOKEN_DIR\" && " +
-			"cat > \"$TOKEN_DIR/scion-token.tmp\" && " +
-			"mv \"$TOKEN_DIR/scion-token.tmp\" \"$TOKEN_DIR/scion-token\"",
-	}
+	writeCmd := scionTokenWriteCmd()
 
 	if _, err := rt.ExecWithStdin(ctx, target, writeCmd, strings.NewReader(req.Token)); err != nil {
 		s.writeRuntimeOpError(w, ctx, "write token file on agent", err, "agent_id", id)
 		return
+	}
+
+	// Write the transport token, when the hub sent one, the same way
+	// (stdin, temp+rename), with a umask so the file is created 0600.
+	// sciontool init re-reads it on the signal below and normalises its
+	// ownership. A failure here does not fail the reset: the agent token is
+	// already in place.
+	transportWritten := false
+	transportFailed := false
+	if req.TransportToken != "" {
+		if _, err := rt.ExecWithStdin(ctx, target, transportTokenWriteCmd(), strings.NewReader(req.TransportToken)); err != nil {
+			transportFailed = true
+			s.agentLifecycleLog.Warn("reset-auth: failed to write transport token file", "agent_id", id, "error", err)
+		} else {
+			transportWritten = true
+		}
 	}
 
 	// Signal sciontool init (PID 1) to re-read the token and restart its refresh
@@ -3258,13 +3308,19 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 		s.agentLifecycleLog.Warn("reset-auth: failed to signal PID 1 (token still written, poller will reload)", "agent_id", id, "error", err)
 	}
 
-	s.agentLifecycleLog.Info("Auth reset completed", "agent_id", id, "signaled", signaled)
+	s.agentLifecycleLog.Info("Auth reset completed", "agent_id", id, "signaled", signaled,
+		"transport_token_written", transportWritten)
 
 	s.forceHeartbeatAll("reset-auth", id)
 
 	msg := "Auth reset: token written and init signaled"
 	if !signaled {
 		msg = "Auth reset: token written; signal failed (poller will reload)"
+	}
+	if transportWritten {
+		msg += "; transport token written"
+	} else if transportFailed {
+		msg += "; transport token write failed"
 	}
 	writeJSON(w, http.StatusOK, ResetAuthResponse{
 		Message: msg,

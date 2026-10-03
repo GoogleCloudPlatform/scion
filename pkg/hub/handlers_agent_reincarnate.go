@@ -146,9 +146,10 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		ref.write(w)
 		return
 	}
-	// The delete claim the gate admitted; the worker pins its completion
-	// failed-marker clear to it (see clearFailedDeletion), so a delete that
-	// claims after this point keeps its marker.
+	// The delete claim the gate admitted; the worker pins the failed-marker
+	// clear just before its completion write to it (see
+	// clearFailedDeletion), so a delete that claims after this point keeps
+	// its marker.
 	admittedDeletionClaim := agent.DeletionClaim
 
 	var req ReincarnateAgentRequest

@@ -396,6 +396,12 @@ func (s *Server) handleConvListMessages(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	if GetAgentIdentityFromContext(ctx) != nil {
+		for i := range result.Items {
+			scopeProvenanceToDMParties(conv, &result.Items[i])
+		}
+	}
+
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -454,7 +460,31 @@ func (s *Server) handleGetConversationMessage(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	if GetAgentIdentityFromContext(ctx) != nil {
+		scopeProvenanceToDMParties(conv, msg)
+	}
+
 	writeJSON(w, http.StatusOK, msg)
+}
+
+// scopeProvenanceToDMParties limits the SenderProjectID/RecipientProjectID
+// provenance fields returned to agent callers to rows whose sender and
+// recipient are both named in the conversation's DM key — the same
+// row-party rule peerProjectFromRow applies. For any other row (a party
+// outside the key, or a non-direct conversation, which has no DM key) both
+// fields are cleared before the row is written to the response. Call only
+// after any authorization that reads the stamps.
+func scopeProvenanceToDMParties(conv *store.Conversation, msg *store.Message) {
+	if msg == nil || (msg.SenderProjectID == nil && msg.RecipientProjectID == nil) {
+		return
+	}
+	if conv != nil && conv.Kind == "direct" &&
+		isCanonicalDMParticipant(conv.ExternalRef, messages.SenderPrefix(msg.Sender), msg.SenderID) &&
+		isCanonicalDMParticipant(conv.ExternalRef, messages.SenderPrefix(msg.Recipient), msg.RecipientID) {
+		return
+	}
+	msg.SenderProjectID = nil
+	msg.RecipientProjectID = nil
 }
 
 // handleCreateConversation handles POST /api/v1/conversations.
@@ -1283,18 +1313,17 @@ func (s *Server) crossProjectPeerAllowed(ctx context.Context, callerProjectID, p
 		peerAgent, err := s.store.GetAgent(ctx, peerID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				// Refinement (msg-attach-arch, 2026-09-30, in response to
-				// ptone/scion#2282 — SenderProjectID/RecipientProjectID are
-				// never persisted, so stampedPeerProject is always nil in
-				// practice today): with no stamp we cannot tell same-project
-				// from cross-project for a deleted peer. But when the flag is
-				// ON, every possible peer project would be allowed anyway, so
-				// the missing project doesn't matter — allow. When the flag
-				// is OFF, assuming same-project would be a flag-off bypass
-				// for a genuinely cross-project deleted sender, so deny.
-				// This is exact under the current policy in both cases, and
-				// needs no change once the stamp is actually persisted
-				// (peerProjectFromRow will simply stop returning nil).
+				// Refinement (msg-attach-arch, 2026-09-30): with no stamp
+				// (a row written before ptone/scion#2282 persisted
+				// SenderProjectID/RecipientProjectID, a human-sent row, or a
+				// conversation-level check with no row) we cannot tell
+				// same-project from cross-project for a deleted peer. But
+				// when the flag is ON, every possible peer project would be
+				// allowed anyway, so the missing project doesn't matter —
+				// allow. When the flag is OFF, assuming same-project would be
+				// a flag-off bypass for a genuinely cross-project deleted
+				// sender, so deny. This is exact under the current policy in
+				// both cases.
 				if s.crossProjectMessagingEnabled() {
 					return peerAllowed, ""
 				}

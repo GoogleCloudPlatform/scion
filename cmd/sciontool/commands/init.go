@@ -1683,6 +1683,15 @@ func handleAuthReset(hubClient *hub.Client, tokenRefreshCancel *context.CancelFu
 		hubClient.SetToken(newToken)
 	}
 
+	// Reset-auth may also have written a fresh transport token. Adopt it so
+	// this process uses it immediately and the file is owned by the scion
+	// user for every other hub client in the container.
+	if adopted, err := hubClient.AdoptTransportTokenFile(targetUID, targetGID); err != nil {
+		log.Error("AUTH_RESET: Failed to adopt transport token file: %v", err)
+	} else if adopted {
+		log.TaggedInfo("AUTH_RESET", "Transport token reloaded")
+	}
+
 	// Clear any AUTH_LOST message from agent-info.json.
 	_ = statusHandler.SetMessage("")
 
