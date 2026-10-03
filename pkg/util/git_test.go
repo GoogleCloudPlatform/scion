@@ -731,7 +731,7 @@ func TestPruneWorktrees_SkipsInsideContainer(t *testing.T) {
 	}
 }
 
-// TestRemoveWorktree_RefusesOutOfTreePath covers Phase 2 acceptance criterion
+// TestRemoveWorktree_RefusesOutOfTreePath covers acceptance criterion
 // 8: RemoveWorktree must refuse to remove a path whose resolved (symlink-free)
 // location does not lie under base, and must not touch anything under the
 // real external target while refusing.

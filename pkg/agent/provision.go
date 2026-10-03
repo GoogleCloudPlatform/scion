@@ -207,7 +207,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 						util.Debugf("delete: shared worktree removal failed in %v: %v", time.Since(worktreeStart), err)
 						if errors.Is(err, util.ErrPathNotContained) {
 							// The marker's WorktreePath passed the lexical
-							// read-boundary check (Phase 1) but resolves
+							// read-boundary check but resolves
 							// outside repoRoot once symlinks are followed
 							// (e.g. a symlinked worktrees dir or leaf).
 							// Do NOT fall back to a raw recursive removal —

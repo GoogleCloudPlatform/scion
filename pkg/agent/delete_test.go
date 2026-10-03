@@ -705,7 +705,7 @@ func TestDeleteAgentFiles_SharedWorktree_SoleSharer_DeleteRemoves(t *testing.T) 
 	}
 }
 
-// TestDeleteAgentFiles_OutOfTreeMarker_SoleSharer_LeaksRatherThanDeletes
+// TestDeleteAgentFiles_OutOfTreeMarker_SoleSharer_RetainsRatherThanDeletes
 // covers acceptance criterion 3 for the sole-sharer case: if the recorded
 // WorktreePath points outside every scion-created shape, DeleteAgentFiles
 // must never touch the out-of-tree path. The read
@@ -713,11 +713,11 @@ func TestDeleteAgentFiles_SharedWorktree_SoleSharer_DeleteRemoves(t *testing.T) 
 // Sharers refcount, blanks only WorktreePath — so the sole sharer
 // is still found and still unregistered; the teardown caller guard then
 // skips removal on the blanked path. The real worktree (still at its
-// original, valid location) is therefore LEAKED, not removed: a deliberate,
+// original, valid location) is therefore LEFT IN PLACE, not removed: a deliberate,
 // accepted trade-off (see readMarker's doc comment) — never act on an
 // untrusted path, even at the cost of a cleanup that would otherwise have
 // happened safely via other means.
-func TestDeleteAgentFiles_OutOfTreeMarker_SoleSharer_LeaksRatherThanDeletes(t *testing.T) {
+func TestDeleteAgentFiles_OutOfTreeMarker_SoleSharer_RetainsRatherThanDeletes(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 
 	tmpDir := t.TempDir()
@@ -772,16 +772,16 @@ func TestDeleteAgentFiles_OutOfTreeMarker_SoleSharer_LeaksRatherThanDeletes(t *t
 		t.Errorf("external content must survive an out-of-tree marker delete: %v", err)
 	}
 
-	// The real worktree is leaked, not removed: the marker degrades (refcount
+	// The real worktree is left in place, not removed: the marker degrades (refcount
 	// kept, path blanked) rather than being discarded, so the refcount path
 	// handles teardown and correctly refuses to act on the blanked path. This
-	// is the accepted trade-off — a leak, never a wrongful delete.
+	// is the accepted trade-off — a retained worktree, never a wrongful delete.
 	if _, err := os.Stat(wtPath); err != nil {
-		t.Errorf("real in-tree worktree should be leaked (left in place), not removed: stat err=%v", err)
+		t.Errorf("real in-tree worktree should be left in place, not removed: stat err=%v", err)
 	}
 }
 
-// TestDeleteAgentFiles_OutOfTreeMarker_JoinedAgent_FailsClosed covers Phase 2
+// TestDeleteAgentFiles_OutOfTreeMarker_JoinedAgent_FailsClosed covers
 // acceptance criterion 3 for a joined (non-creator) sharer: when that agent
 // is the last sharer and the recorded WorktreePath is out-of-tree, there is
 // no independent trusted path to fall back to (a joiner never had its own worktree
@@ -854,7 +854,7 @@ func TestDeleteAgentFiles_OutOfTreeMarker_JoinedAgent_FailsClosed(t *testing.T) 
 
 	// agent-b never had its own worktree directory (it joined agent-a's), so
 	// there is no independent trusted path to fall back to — the shared
-	// worktree the joiner was using must be left alone too (leaked, not
+	// worktree the joiner was using must be left alone too (left in place, not
 	// deleted; a lost refcount is the acceptable cost of failing closed).
 	if _, err := os.Stat(wtA); err != nil {
 		t.Errorf("shared worktree must survive when the last-sharer marker is out-of-tree: %v", err)
@@ -872,7 +872,7 @@ func TestDeleteAgentFiles_OutOfTreeMarker_JoinedAgent_FailsClosed(t *testing.T) 
 // lost, and deleting the FIRST agent removed a worktree the second was still
 // using (data loss). Both clauses matter: the worktree must survive the
 // first (non-last) delete AND actually be removed on the last one — a fix
-// that only avoids over-deletion by leaking forever (never removing) would
+// that only avoids over-deletion by retaining forever (never removing) would
 // pass the first clause and fail the second.
 func TestDeleteAgentFiles_ProvisionAgentLayout_FirstDeleteKeepsWorktree_LastDeleteRemoves(t *testing.T) {
 	scionDir, _ := reprovisionSetup(t)
@@ -913,7 +913,7 @@ func TestDeleteAgentFiles_ProvisionAgentLayout_SymlinkedProjectAncestor(t *testi
 // outer repo's top level) is NOT projectDir's parent. The classification
 // check must use the real, resolved projectDir passed through explicitly —
 // not derive it from repoRoot — or a legitimate marker here false-rejects
-// and the worktree leaks at the last sharer instead of being removed.
+// and the worktree is left behind at the last sharer instead of being removed.
 func TestDeleteAgentFiles_ProvisionAgentLayout_ScionInSubdirectory(t *testing.T) {
 	scionDir, _ := reprovisionSetup(t)
 	outerRepoDir := filepath.Dir(scionDir) // reprovisionSetup already git-init'd this
@@ -956,7 +956,7 @@ func TestDeleteAgentFiles_ProvisionAgentLayout_ScionInSubdirectory(t *testing.T)
 // lost, and deleting the FIRST agent removed a worktree the second was still
 // using (data loss). Both clauses matter: the worktree must survive the
 // first (non-last) delete AND actually be removed on the last one — a fix
-// that only avoids over-deletion by leaking forever (never removing) would
+// that only avoids over-deletion by retaining forever (never removing) would
 // pass the first clause and fail the second.
 func runProvisionAgentLayoutFirstLastDelete(t *testing.T, scionDir string) {
 	t.Helper()
@@ -1036,7 +1036,7 @@ func runProvisionAgentLayoutFirstLastDelete(t *testing.T, scionDir string) {
 	}
 
 	// Delete agent-b LAST. The worktree must actually be removed now — this
-	// is the clause a leak-only fix would fail.
+	// is the clause a never-remove fix would fail.
 	if _, err := DeleteAgentFiles("agent-b", scionDir, true); err != nil {
 		t.Fatalf("DeleteAgentFiles(agent-b): %v", err)
 	}

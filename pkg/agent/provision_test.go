@@ -4004,7 +4004,7 @@ func TestProvisionAgent_UserWorkspaceOverrideLeavesRepoRootUnset(t *testing.T) {
 	}
 }
 
-// TestProvisionAgent_TemplateInjectedRepoRootIsInert is a regression test
+// TestProvisionAgent_TemplateSuppliedRepoRootIsInert is a regression test
 // proving a template's scion-agent.json setting
 // "provisioned_worktree_repo_root" (the old, now-removed ScionConfig field
 // name) or "provisionedWorktreeRepoRoot" (the also-removed AgentInfo field
@@ -4012,7 +4012,7 @@ func TestProvisionAgent_UserWorkspaceOverrideLeavesRepoRootUnset(t *testing.T) {
 // either key, so no unmarshal of a template document can ever populate
 // anything ProvisionAgent or run.go trusts — proven here by asserting no
 // repo root gets persisted for a plain --workspace agent.
-func TestProvisionAgent_TemplateInjectedRepoRootIsInert(t *testing.T) {
+func TestProvisionAgent_TemplateSuppliedRepoRootIsInert(t *testing.T) {
 	tmpDir := t.TempDir()
 	projectScionDir, tplDir := provisionAgentRepoRootScaffold(t, tmpDir)
 
@@ -4039,15 +4039,15 @@ func TestProvisionAgent_TemplateInjectedRepoRootIsInert(t *testing.T) {
 	}
 	agentDir := config.GetAgentDir(projectScionDir, agentName, false)
 	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
-		t.Fatalf("template-injected repo root persisted into state: %q (want empty)", got)
+		t.Fatalf("template-supplied repo root persisted into state: %q (want empty)", got)
 	}
 }
 
-// TestProvisionAgent_InlineConfigInjectedRepoRootIsInert is the inline-config
+// TestProvisionAgent_InlineConfigSuppliedRepoRootIsInert is the inline-config
 // variant of the same case: an inline config (as sent by the hub for
 // CreateAgentRequest.Config or --config) setting the same two field names
 // must also have no effect.
-func TestProvisionAgent_InlineConfigInjectedRepoRootIsInert(t *testing.T) {
+func TestProvisionAgent_InlineConfigSuppliedRepoRootIsInert(t *testing.T) {
 	tmpDir := t.TempDir()
 	projectScionDir, _ := provisionAgentRepoRootScaffold(t, tmpDir)
 
@@ -4075,6 +4075,6 @@ func TestProvisionAgent_InlineConfigInjectedRepoRootIsInert(t *testing.T) {
 	}
 	agentDir := config.GetAgentDir(projectScionDir, agentName, false)
 	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
-		t.Fatalf("inline-config-injected repo root persisted into state: %q (want empty)", got)
+		t.Fatalf("inline-config-supplied repo root persisted into state: %q (want empty)", got)
 	}
 }

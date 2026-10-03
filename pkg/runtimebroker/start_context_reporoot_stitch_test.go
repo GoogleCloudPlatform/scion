@@ -117,7 +117,7 @@ func TestTryProvisionWorktree_Start_StitchesRepoRoot(t *testing.T) {
 		t.Skipf("git too old, worktree mode not eligible on this host: %s", reason)
 	}
 
-	// --- Phase 1: broker side — the real tryProvisionWorktree call. ---
+	// --- Step 1: broker side — the real tryProvisionWorktree call. ---
 	bare := initBareRepoWithCommit(t)
 	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
 
@@ -150,7 +150,7 @@ func TestTryProvisionWorktree_Start_StitchesRepoRoot(t *testing.T) {
 		t.Fatal("tryProvisionWorktree: expected opts.Workspace to be set")
 	}
 
-	// --- Phase 2: mirror the broker handler, then call the real pkg/agent.Start. ---
+	// --- Step 2: mirror the broker handler, then call the real pkg/agent.Start. ---
 	// createAgent (handlers.go) threads sc.ProvisionedWorktreeRepoRoot onto
 	// ctx exactly like this, right after buildStartContext returns and before
 	// Manager.Start is called.
@@ -171,7 +171,7 @@ func TestTryProvisionWorktree_Start_StitchesRepoRoot(t *testing.T) {
 	mgr := agent.NewManager(mockRT)
 
 	// This mirrors the real broker dispatch shape: opts.Workspace is the
-	// broker-provisioned worktree from Phase 1, GitClone is nil (the worktree
+	// broker-provisioned worktree from Step 1, GitClone is nil (the worktree
 	// is already provisioned host-side — no in-container clone needed), and
 	// RunConfig.RepoRoot is never supplied directly anywhere in this test.
 	startOpts := api.StartOptions{
@@ -384,7 +384,7 @@ func TestTryProvisionWorktree_ProvisionThenStart_RepoRootSurvives(t *testing.T) 
 
 	env := map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "p1"}
 
-	// Phase 1: provision-only, exactly like DispatchAgentProvision. The ctx
+	// Step 1: provision-only, exactly like DispatchAgentProvision. The ctx
 	// signal is present, but Start (and so RunConfig) is never involved —
 	// only ProvisionAgent's own persistence call can record the repo root.
 	provisionCtx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), repoRoot)
@@ -398,10 +398,10 @@ func TestTryProvisionWorktree_ProvisionThenStart_RepoRootSurvives(t *testing.T) 
 		t.Fatalf("Provision failed: %v", err)
 	}
 
-	// Phase 2: a LATER, separate Start dispatch — no ctx signal (the broker
+	// Step 2: a LATER, separate Start dispatch — no ctx signal (the broker
 	// does not re-run tryProvisionWorktree for a plain start) and an empty
 	// Workspace (exactly what the hub sends on start after provision-only).
-	// RepoRoot must come from what Provision persisted in Phase 1.
+	// RepoRoot must come from what Provision persisted in Step 1.
 	if _, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:        "agent-a",
 		ProjectPath: projectScionDir,
@@ -654,14 +654,14 @@ func TestCreateAgent_ProvisionOnlyThenStart_RepoRootSurvives(t *testing.T) {
 		}
 	}`
 
-	// Phase 1: provision-only through the real HTTP handler. The container
+	// Step 1: provision-only through the real HTTP handler. The container
 	// must never start in this phase.
 	postCreateAgentExpectCreated(t, srv, body)
 	if runCalled {
 		t.Fatal("RunFunc was called during a provisionOnly request — the container must not start")
 	}
 
-	// Phase 2: a later, separate start dispatch — no ctx signal (the broker
+	// Step 2: a later, separate start dispatch — no ctx signal (the broker
 	// does not re-run tryProvisionWorktree for a plain start) and an empty
 	// Workspace (exactly what the hub sends on start after provision-only).
 	if _, err := mgr.Start(context.Background(), api.StartOptions{
@@ -887,7 +887,7 @@ func TestTryProvisionWorktree_KubernetesRuntimeName_ProvisionsNothing(t *testing
 // wrap createAgent performs right before the async-launch branch
 // (api.ContextWithProvisionedWorktreeRepoRoot, handlers.go) is a no-op for
 // this dispatch. The wrap-then-WithoutCancel sequence beginAsyncLaunch
-// actually runs is replayed here directly, so a value that leaked in despite
+// actually runs is replayed here directly, so a value that got through despite
 // an empty ProvisionedWorktreeRepoRoot would be caught on either side of
 // that boundary.
 func TestBuildStartContext_KubernetesDispatchOnDockerDefaultBroker_SetsNoRepoRootCtxValue(t *testing.T) {

@@ -4937,7 +4937,7 @@ func TestProvision_WorktreePerAgent_RegistryDecoy_Refused(t *testing.T) {
 }
 
 // TestProvision_WorktreePerAgent_FakeBackLink_RejectsGitDiscoveredPath covers
-// Phase 3 acceptance criterion 7: git's own worktree list — not just the
+// acceptance criterion 7: git's own worktree list — not just the
 // sharer marker — is a JOIN discovery source, and it can be steered by
 // rewriting the admin back-link file (base/.git/worktrees/<name>/gitdir).
 // That file is what "git worktree list" derives a worktree's reported path

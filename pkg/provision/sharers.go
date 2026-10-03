@@ -66,7 +66,7 @@ func sharerPath(base, branch string) string {
 // (e.g. as base/.scion). A project's .scion directory does not always sit at
 // the repo top level (a project can be initialized in a repo subdirectory),
 // so reconstructing it from base would false-reject a legitimate shape-2
-// marker whenever that layout is in play, degrading it to a leak. Callers
+// marker whenever that layout is in play, leaving its worktree behind. Callers
 // that have no meaningful shape-2 concept for their layout (ProvisionShared,
 // the hub read path — both always produce shape-1 paths) pass projectDir="";
 // isProvisionAgentWorkspaceShape then always reports false, leaving
@@ -310,7 +310,7 @@ func hasRealWorktreeGitfile(path string) bool {
 // differs between the two string forms — the marker would still point at the
 // right directory on disk, but would no longer match the recorded-form shape
 // the classification check expects, degrading a legitimate marker's
-// WorktreePath to blank and leaking the worktree at the last sharer instead
+// WorktreePath to blank and leaving the worktree behind at the last sharer instead
 // of removing it. Keeping a real recorded form immutable for the marker's
 // life closes this from the write side; WorktreePathIsScionCreated's
 // lexical-only (no EvalSymlinks) comparison closes the matching read-side

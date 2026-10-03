@@ -1414,9 +1414,9 @@ func TestNarrowGitAdminMounts_SkippedForLinkedProject(t *testing.T) {
 }
 
 func TestNarrowGitAdminMounts_SkippedForNonDockerRuntime(t *testing.T) {
-	// Phase 1 gates the mount narrowing to Docker only; podman/apple (and any
+	// The mount narrowing is gated to Docker only; podman/apple (and any
 	// RuntimeName not yet extended) must fall through unchanged until their
-	// own phase lands.
+	// own support lands.
 	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
 
 	for _, runtimeName := range []string{"", "podman", "apple"} {
@@ -1434,7 +1434,7 @@ func TestNarrowGitAdminMounts_SkippedForNonDockerRuntime(t *testing.T) {
 		}
 		argStr := strings.Join(args, " ")
 		if strings.Contains(argStr, ":/repo-root/.git/config:ro") {
-			t.Errorf("runtime %q must not get the narrowed admin-dir mount (Phase 1 is docker-only), got: %s", runtimeName, argStr)
+			t.Errorf("runtime %q must not get the narrowed admin-dir mount (narrowing is docker-only), got: %s", runtimeName, argStr)
 		}
 	}
 }

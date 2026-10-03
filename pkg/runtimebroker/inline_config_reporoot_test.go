@@ -121,13 +121,13 @@ func TestApplyInlineConfigUpdate_RepoRootOverrideIsInert(t *testing.T) {
 	}
 
 	// Belt and suspenders: raw scion-agent.json bytes must never contain the
-	// injected host path at all — proves there is no field, under any name,
+	// supplied host path at all — proves there is no field, under any name,
 	// that captured it.
 	rawCfg, err := os.ReadFile(filepath.Join(agentDir, "scion-agent.json"))
 	if err != nil {
 		t.Fatalf("reading scion-agent.json: %v", err)
 	}
 	if strings.Contains(string(rawCfg), "/etc") {
-		t.Fatalf("scion-agent.json unexpectedly contains the injected path: %s", rawCfg)
+		t.Fatalf("scion-agent.json unexpectedly contains the supplied path: %s", rawCfg)
 	}
 }

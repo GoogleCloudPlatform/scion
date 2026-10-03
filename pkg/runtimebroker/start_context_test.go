@@ -4480,7 +4480,7 @@ func TestBuildStartContext_WorktreePerAgentCreate_ProvisioningFailureCleansUpPar
 // helper tryProvisionWorktree calls to pick the mounted workspace after
 // ProvisionShared has already run — must not take the registry's recorded
 // path at face value. A registered path that is lexically in-tree-shaped
-// (passes the Phase 1 read boundary) but is not a genuine worktree (an
+// (passes the registry read boundary) but is not a genuine worktree (an
 // in-tree decoy directory, no real git admin metadata) must be rejected by
 // the full relationship check, falling back to the agent's own freshly-
 // provisioned path instead.
@@ -4494,7 +4494,7 @@ func TestResolveActualWorkspace_RejectsPathFailingRelationshipValidation(t *test
 	branch := "shared-branch"
 
 	// Register a decoy directly: lexically in-tree (base/worktrees/decoy,
-	// passing the Phase 1 read-boundary shape check) but backed by nothing —
+	// passing the registry read-boundary shape check) but backed by nothing —
 	// no real git worktree was ever created there. A brand-new branch with no
 	// prior registration is used so RegisterSharer's write-side immutability
 	// (see its doc comment) doesn't apply here; that protection is exercised

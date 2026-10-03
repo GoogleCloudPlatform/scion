@@ -341,7 +341,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// Mount .git separately and workspace at its relative path.
 			registerMount(filepath.Join(config.RepoRoot, ".git"), "/repo-root/.git", false, true)
 			if config.RuntimeName == "docker" {
-				// Mount narrowing (Phase 1, Docker + hub-native only): narrow the
+				// Mount narrowing (Docker + hub-native only): narrow the
 				// container's write access to the shared base repo's admin
 				// surface — see narrowGitAdminMounts. This broader surface
 				// (hooks/info/config/config.worktree) stays hub-native-only:

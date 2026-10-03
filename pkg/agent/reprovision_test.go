@@ -844,7 +844,7 @@ func TestReprovision_IgnoresProvisionedWorktreeSignalForCloneWorkspace(t *testin
 
 	// A REAL base with a REAL worktree — deliberately a value that WOULD
 	// validate if it were ever checked against a matching workspace, so this
-	// test cannot pass merely because the injected value is garbage. The
+	// test cannot pass merely because the supplied value is garbage. The
 	// gate still must not persist it, because workspaceSource stays empty on
 	// this path regardless of what the ctx value names.
 	realBase := t.TempDir()
