@@ -113,3 +113,16 @@ export function getStateDisplay(status: string): StateDisplay {
   }
   return { emoji: '', icon: '', variant: 'neutral', pulse: false };
 }
+
+/**
+ * Get the human-readable display label for an activity, if one is defined.
+ * Matching is case-insensitive and only considers own keys of
+ * ACTIVITY_DISPLAY. Returns undefined for unknown activities and for known
+ * activities without a custom label, so callers can fall back to the raw
+ * value.
+ */
+export function activityLabel(activity: string | undefined): string | undefined {
+  const key = (activity || '').toLowerCase();
+  if (!Object.hasOwn(ACTIVITY_DISPLAY, key)) return undefined;
+  return ACTIVITY_DISPLAY[key as AgentActivity].label;
+}

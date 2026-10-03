@@ -1124,7 +1124,6 @@ export class ScionPageBrokerDetail extends LitElement {
           </div>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
             size="small"
           ></scion-status-badge>
         </div>

@@ -1554,7 +1554,6 @@ export class ScionPageAgentDetail extends LitElement {
             <span class="info-value">
               <scion-status-badge
                 status=${agent.phase as StatusType}
-                label=${agent.phase}
                 size="small"
               ></scion-status-badge>
             </span>

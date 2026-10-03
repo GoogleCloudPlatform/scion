@@ -31,8 +31,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { PropertyValues } from 'lit';
-import { ACTIVITY_DISPLAY } from '../../../shared/agent-state-display.js';
-import type { AgentActivity } from '../../../shared/types.js';
+import { ACTIVITY_DISPLAY, activityLabel } from '../../../shared/agent-state-display.js';
 import { apiFetch } from '../../../client/api.js';
 import { navigateTo } from '../../../client/main.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../../client/open-terminal.js';
@@ -993,10 +992,7 @@ export class ScionChatMembers extends LitElement {
     // not the `lastSeen` heartbeat.
     // Without a detail message, fall back to the activity's display label
     // (e.g. "waiting" for `blocked`) so the tooltip matches the badge.
-    const activityKey = (a.activity || '').toLowerCase();
-    const activityText = Object.hasOwn(ACTIVITY_DISPLAY, activityKey)
-      ? (ACTIVITY_DISPLAY[activityKey as AgentActivity].label ?? a.activity)
-      : a.activity;
+    const activityText = activityLabel(a.activity) ?? a.activity;
     const detailText = a.detailMessage || activityText || a.phase || 'unknown';
     const updated = a.lastActivityEvent ? this.formatRelativeTime(a.lastActivityEvent) : '';
     const updatedText = updated ? `Updated: ${updated}` : '';

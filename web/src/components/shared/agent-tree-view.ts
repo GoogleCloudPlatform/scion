@@ -1229,7 +1229,6 @@ export class ScionAgentTreeView extends LitElement {
           <span class="name">${agent.name}</span>
           <scion-status-badge
             status=${status as StatusType}
-            label=${status}
             size="small"
           ></scion-status-badge>
           ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}
