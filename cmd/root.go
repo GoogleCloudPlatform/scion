@@ -333,6 +333,7 @@ func init() {
 	// Display zone for human-readable times (JSON output is always UTC)
 	rootCmd.PersistentFlags().StringVar(&displayTZ, "tz", "", "Show times in this IANA time zone, e.g. America/New_York (default: local zone; JSON output is unchanged)")
 	rootCmd.PersistentFlags().BoolVar(&displayUTC, "utc", false, "Show times in UTC (JSON output is unchanged)")
+	rootCmd.MarkFlagsMutuallyExclusive("tz", "utc")
 
 	// Debug mode flag
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output (equivalent to SCION_DEBUG=1)")

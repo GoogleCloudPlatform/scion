@@ -50,6 +50,7 @@ not place them. Some relative helpers showed future times as "just now".
   `clitime.Relative`, so a future next run reads "in X" instead of the old,
   incorrect "just now". `clitime.Now()` exposes the injected clock so this
   rule and `Relative` agree in tests.
+- Review follow-up: cobra's `MarkFlagsMutuallyExclusive("tz", "utc")` on the root now rejects `--tz` with `--utc`, even after a subcommand; `clitime.ResolveZone` lets `utc` win because cobra checks flag groups only after `PersistentPreRunE`.
 
 ## Tests
 

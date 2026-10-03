@@ -56,13 +56,11 @@ var (
 )
 
 // ResolveZone returns the display zone for the global --tz and --utc flags.
-// The flags are mutually exclusive. An empty tz with utc false selects the
-// process local zone. An unknown zone name is an error.
+// utc takes precedence over tz; the scion root command rejects setting both
+// through a cobra flag group. An empty tz with utc false selects the process
+// local zone. An unknown zone name is an error.
 func ResolveZone(tz string, utc bool) (*time.Location, error) {
 	tz = strings.TrimSpace(tz)
-	if utc && tz != "" {
-		return nil, fmt.Errorf("--tz and --utc are mutually exclusive")
-	}
 	if utc {
 		return time.UTC, nil
 	}

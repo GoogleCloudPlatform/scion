@@ -109,8 +109,11 @@ func TestResolveZone(t *testing.T) {
 			t.Errorf("ResolveZone(%q) error = %v, want an invalid --tz error", bad, err)
 		}
 	}
-	if _, err := ResolveZone("America/New_York", true); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Errorf("ResolveZone(tz, utc) error = %v, want mutually exclusive", err)
+	// utc wins; the CLI rejects --tz with --utc via a cobra flag group.
+	for _, tz := range []string{"America/New_York", "Mars/Olympus"} {
+		if loc, err := ResolveZone(tz, true); err != nil || loc != time.UTC {
+			t.Errorf("ResolveZone(%q, utc) = %v, %v; want UTC", tz, loc, err)
+		}
 	}
 }
 

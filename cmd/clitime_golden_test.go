@@ -115,6 +115,10 @@ func runRootGolden(t *testing.T, args ...string) (string, error) {
 		rootCmd.SetErr(nil)
 	})
 	// Flag values persist across Execute calls in one process; start clean.
+	// Reset the Changed bits too: cobra's --tz/--utc exclusivity group reads
+	// them, so a stale bit from an earlier run would fail the next one.
+	resetTimeZoneFlagsChanged(t)
+	t.Cleanup(func() { resetTimeZoneFlagsChanged(t) })
 	displayTZ, displayUTC, outputFormat = "", false, ""
 	messagesShowAll, messagesJSON, secretOutputJSON = false, false, false
 
@@ -124,6 +128,15 @@ func runRootGolden(t *testing.T, args ...string) (string, error) {
 	var err error
 	out := captureStdout(t, func() { err = rootCmd.Execute() })
 	return out, err
+}
+
+func resetTimeZoneFlagsChanged(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"tz", "utc"} {
+		f := rootCmd.PersistentFlags().Lookup(name)
+		require.NotNil(t, f, name)
+		f.Changed = false
+	}
 }
 
 func TestGoldenCLITimes(t *testing.T) {
@@ -229,7 +242,31 @@ func TestGlobalTimeZoneFlags_Errors(t *testing.T) {
 
 	_, err = runRootGolden(t, "--tz", "America/New_York", "--utc", "messages", "--all")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "mutually exclusive")
+	assert.Contains(t, err.Error(), "[tz utc] were all set")
+}
+
+// The --tz/--utc group is registered on the root's persistent flags; cobra
+// must still enforce it when the flags are given after a subcommand.
+func TestGlobalTimeZoneFlags_ExclusiveOnSubcommand(t *testing.T) {
+	pinLocalZone(t, "Asia/Tokyo")
+	srv := newGoldenTimeHub(t)
+	setupGoldenTimeProject(t, srv.URL)
+
+	for _, args := range [][]string{
+		{"list", "--tz", "UTC", "--utc"},
+		{"messages", "--all", "--utc", "--tz", "Asia/Kathmandu"},
+		{"--utc", "messages", "--all", "--tz", "UTC"},
+	} {
+		_, err := runRootGolden(t, args...)
+		require.Error(t, err, "%v", args)
+		assert.Contains(t, err.Error(), "[tz utc] were all set", "%v", args)
+	}
+
+	// Either flag alone after a subcommand is still accepted.
+	_, err := runRootGolden(t, "messages", "--all", "--utc")
+	require.NoError(t, err)
+	_, err = runRootGolden(t, "messages", "--all", "--tz", "UTC")
+	require.NoError(t, err)
 }
 
 func TestGlobalTimeZoneFlags_Registered(t *testing.T) {
