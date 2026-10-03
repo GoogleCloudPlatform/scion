@@ -75,7 +75,18 @@ const (
 	// resolution of the same ref with the same credential returns the
 	// remembered error without calling GitHub. It is kept short because the
 	// cause can be fixed at any time (the path is added, access is granted).
+	//
+	// The key carries a fingerprint of the credential value, so a credential
+	// minted fresh for each create (a GitHub App installation token) gets a
+	// new key every time: a not_found remembered for one create is not used
+	// by the next one, only by other resolutions within the same create.
 	failureCacheTTL = time.Minute
+
+	// maxRememberedFailures bounds how many failures are remembered at once
+	// (see recordFailure). When the limit is reached after dropping expired
+	// entries, a new failure is not remembered; not remembering is always
+	// safe, it only means the next resolution asks GitHub again.
+	maxRememberedFailures = 1024
 
 	// refreshFailureBackoff bounds how often a background stale-refresh is
 	// retried for the same flight key after it fails. Without this, a
@@ -193,6 +204,11 @@ type GitHubResolutionCache struct {
 	lifecycleMu sync.Mutex
 	closing     bool
 	refreshWG   sync.WaitGroup
+
+	// drainOnce starts the single goroutine that closes drained once
+	// refreshWG reaches zero (see refreshesDone).
+	drainOnce sync.Once
+	drained   chan struct{}
 
 	// saveDelay is how long a Put waits before the file is rewritten (see
 	// WithResolutionCacheSaveDelay and scheduleSave).
@@ -369,7 +385,9 @@ func cacheableFailure(err error) bool {
 }
 
 // recordFailure remembers err for cacheKey until failureCacheTTL from now,
-// and drops any expired failures so the map stays small.
+// and drops any expired failures so the map stays small. Once
+// maxRememberedFailures unexpired failures are held, a failure for a new
+// cacheKey is not remembered.
 func (c *GitHubResolutionCache) recordFailure(cacheKey string, err error) {
 	now := time.Now()
 	c.failureMu.Lock()
@@ -381,6 +399,9 @@ func (c *GitHubResolutionCache) recordFailure(cacheKey string, err error) {
 		if !now.Before(f.expiresAt) {
 			delete(c.failures, k)
 		}
+	}
+	if _, ok := c.failures[cacheKey]; !ok && len(c.failures) >= maxRememberedFailures {
+		return
 	}
 	c.failures[cacheKey] = cachedFailure{err: err, expiresAt: now.Add(failureCacheTTL)}
 }
@@ -460,25 +481,37 @@ func (c *GitHubResolutionCache) Flush() {
 // The cache stays usable after Close: lookups and synchronous resolutions
 // work as before, a stale entry is served without starting a refresh, and a
 // later Put schedules a delayed write as usual. Safe for concurrent use and
-// for calling more than once.
+// for calling more than once. All calls share one goroutine waiting for the
+// refreshes (see refreshesDone); when Close returns on ctx, that goroutine
+// keeps waiting until the refreshes finish, bounded by githubFlightTimeout.
 func (c *GitHubResolutionCache) Close(ctx context.Context) error {
 	c.lifecycleMu.Lock()
 	c.closing = true
 	c.lifecycleMu.Unlock()
 
-	done := make(chan struct{})
-	go func() {
-		c.refreshWG.Wait()
-		close(done)
-	}()
 	var err error
 	select {
-	case <-done:
+	case <-c.refreshesDone():
 	case <-ctx.Done():
 		err = ctx.Err()
 	}
 	c.Flush()
 	return err
+}
+
+// refreshesDone returns a channel closed once every background refresh has
+// finished. It must only be called after closing is set, so no refresh is
+// added once the wait has started. The first call starts the one goroutine
+// that waits; later calls return the same channel.
+func (c *GitHubResolutionCache) refreshesDone() <-chan struct{} {
+	c.drainOnce.Do(func() {
+		c.drained = make(chan struct{})
+		go func() {
+			c.refreshWG.Wait()
+			close(c.drained)
+		}()
+	})
+	return c.drained
 }
 
 // startRefresh runs refresh in a background goroutine tracked by refreshWG
@@ -951,6 +984,7 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 			return skill, nil
 		}
 		if ferr := c.recentFailure(cacheKey); ferr != nil {
+			util.Debugf("github: returning remembered not_found for %s", logRef)
 			return ResolvedSkill{}, ferr
 		}
 
@@ -1106,6 +1140,7 @@ func (c *GitHubResolutionCache) resolveWithFetchAccept(
 	}
 
 	if ferr := c.recentFailure(cacheKey); ferr != nil {
+		util.Debugf("github: returning remembered not_found for %s", logRef)
 		return ResolvedSkill{}, ferr
 	}
 

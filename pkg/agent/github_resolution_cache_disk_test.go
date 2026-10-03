@@ -689,3 +689,49 @@ func TestGitHubResolutionCache_NoRefreshAfterClose(t *testing.T) {
 		t.Fatalf("fetch ran %d times for the synchronous resolution, want 1", n)
 	}
 }
+
+// TestGitHubResolutionCache_RepeatedCloseSharesOneWait checks that Close
+// calls returning on ctx while a refresh runs all use the same wait for the
+// refreshes, rather than each leaving a goroutine of its own behind, and
+// that the wait ends once the refresh does.
+func TestGitHubResolutionCache_RepeatedCloseSharesOneWait(t *testing.T) {
+	const key = "gh://o/r/s@main"
+	cache := newStaleCacheForClose(t, t.TempDir(), key)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fetch := func(context.Context) (ResolvedSkill, error) {
+		close(started)
+		<-release
+		return ResolvedSkill{}, errors.New("released")
+	}
+	if _, err := cache.ResolveWithFetch(context.Background(), key, "flight", "cred", "ref", true, nil, fetch); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var first <-chan struct{}
+	for i := 0; i < 3; i++ {
+		if err := cache.Close(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Close %d = %v, want context.Canceled", i, err)
+		}
+		done := cache.refreshesDone()
+		if i == 0 {
+			first = done
+		} else if done != first {
+			t.Fatalf("Close %d waits on a new channel; each Close starts its own wait", i)
+		}
+	}
+
+	close(release)
+	select {
+	case <-first:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wait did not end after the refresh finished")
+	}
+	if err := cache.Close(context.Background()); err != nil {
+		t.Fatalf("Close after the refresh finished = %v", err)
+	}
+}

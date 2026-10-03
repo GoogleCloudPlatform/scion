@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -192,5 +193,65 @@ func TestGitHubSkillResolver_MissingRefNotRefetched(t *testing.T) {
 	}
 	if got := hits.Load(); got != 1 {
 		t.Fatalf("GitHub was asked %d times, want 1", got)
+	}
+}
+
+// TestGitHubResolutionCache_RecordFailureSetsTTL checks that a recorded
+// failure expires failureCacheTTL after it was recorded.
+func TestGitHubResolutionCache_RecordFailureSetsTTL(t *testing.T) {
+	cache, err := newTestResolutionCache(t.TempDir(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := time.Now()
+	cache.recordFailure("k", &githubResolveError{code: SkillErrCodeNotFound, msg: "nf"})
+	after := time.Now()
+
+	cache.failureMu.Lock()
+	f, ok := cache.failures["k"]
+	cache.failureMu.Unlock()
+	if !ok {
+		t.Fatal("failure not recorded")
+	}
+	if f.expiresAt.Before(before.Add(failureCacheTTL)) || f.expiresAt.After(after.Add(failureCacheTTL)) {
+		t.Fatalf("expiresAt = %v, want within [%v, %v]", f.expiresAt,
+			before.Add(failureCacheTTL), after.Add(failureCacheTTL))
+	}
+}
+
+// TestGitHubResolutionCache_RememberedFailuresAreCapped checks that at
+// most maxRememberedFailures unexpired failures are held: a failure for a
+// new key is not remembered once the limit is reached, a key already held
+// is still updated, and expired entries make room again.
+func TestGitHubResolutionCache_RememberedFailuresAreCapped(t *testing.T) {
+	cache, err := newTestResolutionCache(t.TempDir(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nf := &githubResolveError{code: SkillErrCodeNotFound, msg: "nf"}
+	for i := 0; i < maxRememberedFailures; i++ {
+		cache.recordFailure(fmt.Sprintf("k%d", i), nf)
+	}
+	cache.recordFailure("extra", nf)
+	if cache.recentFailure("extra") != nil {
+		t.Error("failure for a new key remembered past the limit")
+	}
+	cache.recordFailure("k0", nf)
+	if cache.recentFailure("k0") == nil {
+		t.Error("failure for a key already held was dropped at the limit")
+	}
+	cache.failureMu.Lock()
+	if n := len(cache.failures); n != maxRememberedFailures {
+		t.Errorf("remembered %d failures, want %d", n, maxRememberedFailures)
+	}
+	// Expire one entry; the next record drops it and has room.
+	f := cache.failures["k1"]
+	f.expiresAt = time.Now().Add(-time.Second)
+	cache.failures["k1"] = f
+	cache.failureMu.Unlock()
+
+	cache.recordFailure("extra", nf)
+	if cache.recentFailure("extra") == nil {
+		t.Error("failure not remembered after an expired entry made room")
 	}
 }
