@@ -126,7 +126,7 @@ func (a *AuthzService) evaluateBearerGate(ctx context.Context, principal Princip
 	}
 
 	// A typed-nil *ScopedUserIdentity carries no boundary, ceiling, or
-	// scopes to evaluate. It denies with the project-access reason rather
+	// scopes to evaluate. It denies with the project access reason rather
 	// than dereferencing a nil receiver or treating a missing credential as
 	// an unconstrained one.
 	if in.missing {

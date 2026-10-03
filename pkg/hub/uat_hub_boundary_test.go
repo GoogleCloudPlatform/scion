@@ -358,11 +358,11 @@ func TestHubUAT_MemberReachesOnlyProjectsWithAccess(t *testing.T) {
 // denial is the uniform forbidden error.
 func TestCreateToken_HubBoundaryRequiresLiveAuthority(t *testing.T) {
 	srv, s := testServer(t)
-	adminID := tid("hubuat-mint-hubadmin")
+	adminID := tid("hubuat-hubadmin-minter")
 	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "member", store.SystemRoleHubAdmin)
 
 	_, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(adminID), CreateTokenParams{
-		UserID: adminID, Name: "hubuat-mint-hubadmin", Boundary: TokenBoundary{Kind: BoundaryKindHub}, Scopes: []string{"agent:delete"},
+		UserID: adminID, Name: "hubuat-hubadmin-minter", Boundary: TokenBoundary{Kind: BoundaryKindHub}, Scopes: []string{"agent:delete"},
 	})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrUATProjectForbidden)

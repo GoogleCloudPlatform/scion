@@ -228,7 +228,7 @@ func TestEvaluateBearerCeiling_EmitsNoDecisionAudit(t *testing.T) {
 }
 
 // TestEvaluateBearerCeiling_StoreFaultDenies pins that a store fault at the
-// project-access stage or in the kernel denies and is reported as an
+// project access stage or in the kernel denies and is reported as an
 // indeterminate error, never as an allow.
 func TestEvaluateBearerCeiling_StoreFaultDenies(t *testing.T) {
 	f := newBearerFixture(t, "fault")
