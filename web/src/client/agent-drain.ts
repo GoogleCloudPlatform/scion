@@ -125,9 +125,12 @@ export interface DrainAgentsOptions {
   retryDelayMs?: number;
   fetchFn?: AgentDrainFetch;
   /**
-   * Continue from this already-fetched page: its agents come first, it
-   * counts as one of the `maxRequests` pages, and the rest are requested
-   * from its cursor.
+   * Continue from this already-fetched page: its agents come first, and
+   * the rest are requested from its cursor. It counts as one of the
+   * `maxRequests` pages only when it holds at least {@link DRAIN_PAGE_LIMIT}
+   * agents (the server ignored the request's smaller `limit`). A shorter
+   * page does not use up a drain page, so the cap still covers
+   * `maxRequests` pages of {@link DRAIN_PAGE_LIMIT} after it.
    */
   firstPage?: DrainFirstPage;
 }
@@ -219,8 +222,9 @@ async function fetchPageOnce(
  * parameters, e.g. `label`; `limit`, `cursor` and `view` are set here).
  *
  * Guarantees:
- * - At most `maxRequests` successful page requests; each page is attempted
- *   at most `retries + 1` times. Network errors, unparseable bodies, 5xx,
+ * - At most `maxRequests` successful page requests (one more after a short
+ *   carried `firstPage`); each page is attempted at most `retries + 1`
+ *   times. Network errors, unparseable bodies, 5xx,
  *   408 and 429 are retried; any other non-OK status ends the drain at once
  *   with `error.status` set.
  * - A page with zero items and a `nextCursor` does not end the drain (the
@@ -249,6 +253,8 @@ export async function drainAgents(
   let capabilities: Capabilities | undefined;
   let cursor: string | undefined;
   let requests = 0;
+  // A short carried page does not use up one of the `maxRequests` pages.
+  let cap = maxRequests;
 
   if (firstPage) {
     for (const a of firstPage.agents) {
@@ -257,6 +263,7 @@ export async function drainAgents(
     capabilities = firstPage.capabilities;
     cursor = firstPage.nextCursor;
     requests = 1;
+    if (firstPage.agents.length < DRAIN_PAGE_LIMIT) cap++;
   }
 
   const result = (
@@ -269,7 +276,7 @@ export async function drainAgents(
     ...extra,
   });
 
-  while (requests < maxRequests) {
+  while (requests < cap) {
     let body: LegacyListBody | undefined;
     let lastError: AgentDrainError | null = null;
     for (let attempt = 0; attempt <= retries; attempt++) {

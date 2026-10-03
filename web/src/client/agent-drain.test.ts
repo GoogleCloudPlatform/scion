@@ -290,6 +290,40 @@ describe('drainAgents', () => {
     expect(result.firstPageFailed).toBe(false);
   });
 
+  it('a short first page (the server honoured a smaller limit) does not use up a drain page', async () => {
+    const rows = rowsDesc(1600);
+    const server = fakeServer({ rows });
+    const result = await drainAgents('/x', {
+      fetchFn: server.fn,
+      firstPage: { agents: rows.slice(0, 25), nextCursor: '25' },
+    });
+    // Four pages of 500 after the 25-row page: 25 + 500 + 500 + 500 + 75.
+    expect(server.urls.map((u) => u.searchParams.get('cursor'))).toEqual([
+      '25',
+      '525',
+      '1025',
+      '1525',
+    ]);
+    expect(result.requests).toBe(5);
+    expect(result.complete).toBe(true);
+    expect(result.capped).toBe(false);
+    expect(result.agents).toHaveLength(1600);
+    expect(result.firstPageFailed).toBe(false);
+  });
+
+  it('a short first page above the cap still ends capped after four full drain pages', async () => {
+    const rows = rowsDesc(2600);
+    const server = fakeServer({ rows });
+    const result = await drainAgents('/x', {
+      fetchFn: server.fn,
+      firstPage: { agents: rows.slice(0, 25), nextCursor: '25' },
+    });
+    expect(server.urls).toHaveLength(DRAIN_MAX_REQUESTS);
+    expect(result.requests).toBe(DRAIN_MAX_REQUESTS + 1);
+    expect(result.capped).toBe(true);
+    expect(result.agents).toHaveLength(2025);
+  });
+
   it('an aborted signal rejects with AbortError instead of resolving a partial result', async () => {
     const controller = new AbortController();
     const server = fakeServer({

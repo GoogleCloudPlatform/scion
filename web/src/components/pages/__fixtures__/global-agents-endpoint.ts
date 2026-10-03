@@ -88,7 +88,8 @@ export interface Fake {
 /**
  * A fake global agents endpoint: sorted fit requests (complete when the set
  * fits), sorted cursor pages, `stats` (IDs omitted above 2,000), scope,
- * k=v label and phase; legacy (unsorted) cursor pages of 500.
+ * k=v label and phase; legacy (unsorted) cursor pages of `limit` rows
+ * (500 by default).
  */
 export function fakeFetch(fake: Fake) {
   return (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -142,8 +143,9 @@ export function fakeFetch(fake: Fake) {
 
     const sort = u.searchParams.get('sort');
     if (!sort) {
+      // The legacy list honours `limit`, defaulting to 500.
       const start = Number(u.searchParams.get('cursor') ?? '0');
-      const end = start + 500;
+      const end = start + Number(u.searchParams.get('limit') ?? '500');
       return Promise.resolve(
         jsonResponse({
           agents: list.slice(start, end),

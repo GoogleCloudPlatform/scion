@@ -259,7 +259,7 @@ describe('scion-page-agents — agent list window', () => {
       expect(internals(el2).agentWindow.items[0].id).toBe('g-01199');
     });
 
-    it('a legacy server (no sorted mode) is complete with no cursor, and is drained otherwise', async () => {
+    it('a legacy server (no sorted mode) that ignores limit is drained from its first page', async () => {
       const fake: Fake = {
         agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
         requests: [],
@@ -280,6 +280,38 @@ describe('scion-page-agents — agent list window', () => {
       expect(internals(el).agentWindow.state).toBe('held');
       expect(internals(el).agents.length).toBe(1200);
       expect(stateManager.isAgentSetComplete('full')).toBe(true);
+    });
+
+    it('1,600 agents at page size 25 on a legacy server that honours limit end held and complete in five requests', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 1600 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      // An old server: no sorted mode, but `limit` is honoured.
+      const legacy = (input: string | URL | Request, init?: RequestInit) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(raw, 'http://localhost');
+        for (const k of ['sort', 'dir', 'fit', 'stats', 'phase']) u.searchParams.delete(k);
+        return fakeFetch(fake)(u.pathname + (u.search || ''), init);
+      };
+      vi.stubGlobal('fetch', vi.fn(legacy));
+      const el = await mount();
+      expect(query(fake.requests[0]).get('limit')).toBe('25');
+      // The 25-row answer, then four drain pages of 500 from its cursor.
+      expect(fake.requests.length).toBeLessThanOrEqual(5);
+      expect(fake.requests.slice(1).map((r) => query(r).get('cursor'))).toEqual([
+        '25',
+        '525',
+        '1025',
+        '1525',
+      ]);
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('held');
+      expect(win.banner).toBeNull();
+      expect(internals(el).agents).toHaveLength(1600);
+      expect(stateManager.isAgentSetComplete('full')).toBe(true);
+      expect(text(el)).not.toContain('more exist');
     });
   });
 
