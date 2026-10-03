@@ -60,6 +60,10 @@ func TestDefaultModelAliases_KnownHarnessReturnsBuiltInTable(t *testing.T) {
 	for alias, model := range aliases {
 		assert.NotEmpty(t, model, "alias %q", alias)
 		assert.NotEqual(t, alias, model, "alias %q resolves to itself", alias)
+		// A model that is itself an alias key would make resolution
+		// transitive or circular; aliases must map to concrete models.
+		assert.NotContains(t, aliases, model,
+			"alias %q resolves to another alias %q", alias, model)
 	}
 }
 

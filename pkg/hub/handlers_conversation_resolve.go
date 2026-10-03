@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -146,20 +147,18 @@ func (s *Server) resolveAgentConversation(
 	}
 
 	// Look up the target agent.
-	agentResult, err := s.store.ListAgents(ctx, store.AgentFilter{
-		ProjectID: searchProjectID,
-	}, store.ListOptions{})
-	if err != nil {
+	targetAgent, err := s.findLiveProjectAgent(ctx, searchProjectID, agentSlug)
+	if errors.Is(err, store.ErrInvalidInput) {
+		// A malformed project ID cannot hold any agent.
 		NotFound(w, "Agent")
 		return
 	}
-
-	var targetAgent *store.Agent
-	for i := range agentResult.Items {
-		if agentResult.Items[i].ID == agentSlug || agentResult.Items[i].Slug == agentSlug {
-			targetAgent = &agentResult.Items[i]
-			break
-		}
+	if err != nil {
+		// A lookup failure is not evidence that the agent does not exist.
+		s.messageLog.Error("Failed to look up agent for conversation resolve",
+			"project_id", searchProjectID, "agent_ref", agentSlug, "error", err)
+		InternalError(w)
+		return
 	}
 
 	if targetAgent == nil {

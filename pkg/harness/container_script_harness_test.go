@@ -1545,3 +1545,60 @@ func TestContainerScriptHarness_NoAuthSentinelNeverForwarded(t *testing.T) {
 		}
 	})
 }
+
+// The config.yaml thinking block must reach the provision manifest under
+// harness_config.thinking with the exact JSON keys scion_harness.resolve_thinking
+// reads (levels[*].max/value, default). A max of 0 must survive serialization.
+func TestContainerScriptHarness_ManifestCarriesThinkingBlock(t *testing.T) {
+	h, _ := newTestContainerScriptHarness(t)
+	h.entry.Thinking = &config.HarnessThinkingConfig{
+		Levels: []config.HarnessThinkingLevel{
+			{Max: 0, Value: "none"},
+			{Max: 50, Value: "medium"},
+			{Max: 100, Value: "high"},
+		},
+		Default: "medium",
+	}
+	agentHome := t.TempDir()
+	if err := h.Provision(context.Background(), "a", agentHome, agentHome, "/workspace"); err != nil {
+		t.Fatal(err)
+	}
+	manifestData, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw struct {
+		HarnessConfig struct {
+			Thinking *struct {
+				Levels  []map[string]any `json:"levels"`
+				Default string           `json:"default"`
+			} `json:"thinking"`
+		} `json:"harness_config"`
+	}
+	if err := json.Unmarshal(manifestData, &raw); err != nil {
+		t.Fatal(err)
+	}
+	thinking := raw.HarnessConfig.Thinking
+	if thinking == nil {
+		t.Fatalf("manifest harness_config has no thinking block: %s", manifestData)
+	}
+	if thinking.Default != "medium" {
+		t.Errorf("thinking.default = %q, want medium", thinking.Default)
+	}
+	want := []struct {
+		max   float64
+		value string
+	}{{0, "none"}, {50, "medium"}, {100, "high"}}
+	if len(thinking.Levels) != len(want) {
+		t.Fatalf("thinking.levels = %v, want %d entries", thinking.Levels, len(want))
+	}
+	for i, w := range want {
+		gotMax, ok := thinking.Levels[i]["max"].(float64)
+		if !ok || gotMax != w.max {
+			t.Errorf("levels[%d].max = %v (present=%v), want %v", i, thinking.Levels[i]["max"], ok, w.max)
+		}
+		if got := thinking.Levels[i]["value"]; got != w.value {
+			t.Errorf("levels[%d].value = %v, want %q", i, got, w.value)
+		}
+	}
+}
