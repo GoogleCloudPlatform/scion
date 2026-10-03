@@ -857,8 +857,9 @@ type V1ServerHubConduitConfig struct {
 	// GrantKeyActivation is the publish-before-sign delay of a new grant
 	// key (e.g. "15m"; minimum "1m").
 	GrantKeyActivation string `json:"grant_key_activation,omitempty" yaml:"grant_key_activation,omitempty" koanf:"grant_key_activation"`
-	// TCPAllowedPorts is the allow-list of agent ports a TCP stream may
-	// target (empty: every port outside the hub deny-list).
+	// TCPAllowedPorts lists additional agent-local ports a TCP stream
+	// grant may target besides the agent's exposed ports. The reserved
+	// ports (9810, 18380) are always refused. Empty: exposed ports only.
 	TCPAllowedPorts []int `json:"tcp_allowed_ports,omitempty" yaml:"tcp_allowed_ports,omitempty" koanf:"tcp_allowed_ports"`
 	// InternalListen is the host:port of the internal relay API listener.
 	// It must be reachable only inside the cluster/VPC.

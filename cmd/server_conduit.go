@@ -51,7 +51,7 @@ func registerConduitServerFlags(f *pflag.FlagSet) {
 	f.StringVar(&conduitInternalAdvertise, "internal-advertise", "", "Base URL other hub nodes use to reach the internal listener (default: POD_IP or the listen host)")
 	f.StringVar(&conduitGrantKeyActivation, "conduit-grant-key-activation", "", "Publish-before-sign delay of a new conduit grant key (default 15m, minimum 1m)")
 	f.StringVar(&conduitReconnectWindow, "conduit-reconnect-window", "", "Jitter window targets redial in after a planned conduit close (default 5s, 0s-5m)")
-	f.IntSliceVar(&conduitTCPAllowedPorts, "conduit-tcp-allowed-ports", nil, "Agent ports a conduit TCP stream may target (comma-separated; default: all outside the hub deny-list)")
+	f.IntSliceVar(&conduitTCPAllowedPorts, "conduit-tcp-allowed-ports", nil, "Additional agent-local ports a conduit TCP stream may target besides the agent's exposed ports (comma-separated; reserved ports are always refused; default: exposed ports only)")
 }
 
 // applyConduitFlagOverrides copies the explicitly set conduit flags into

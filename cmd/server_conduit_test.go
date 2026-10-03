@@ -337,3 +337,18 @@ func TestNewCommandBus_ConduitHA(t *testing.T) {
 
 // fakeCommandBus stands in for a started Postgres bus.
 type fakeCommandBus struct{ hub.NoopCommandBus }
+
+// TestBuildHubServerConfig_ConduitTCPAllowedPorts: tcp_allowed_ports
+// reaches hub.ServerConfig.ConduitTCPAllowedPorts unchanged, and unset
+// stays empty (the hub then allows exposed ports only; pinned in
+// pkg/hub TestAuthorizeConduitTCPTarget_AllowedPortsSemantics).
+func TestBuildHubServerConfig_ConduitTCPAllowedPorts(t *testing.T) {
+	for name, ports := range map[string][]int{"unset": nil, "listed": {22, 8080}} {
+		t.Run(name, func(t *testing.T) {
+			cfg := config.DefaultGlobalConfig()
+			cfg.Hub.Conduit.TCPAllowedPorts = ports
+			sc := buildHubServerConfig(&cfg, "", "", nil, false, "", nil)
+			assert.Equal(t, ports, sc.ConduitTCPAllowedPorts)
+		})
+	}
+}

@@ -992,7 +992,7 @@
             "tcp_allowed_ports": {
               "type": "array",
               "items": { "type": "integer", "minimum": 1, "maximum": 65535 },
-              "description": "Agent ports a TCP stream may target. Empty allows every port outside the hub deny-list.",
+              "description": "Additional agent-local ports a TCP stream grant may target besides the agent's exposed ports. The reserved ports (9810, 18380) are always refused. Empty (the default) means exposed ports only; this setting never narrows access to exposed ports.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_TCPALLOWEDPORTS",
               "x-since": "1"
             },
