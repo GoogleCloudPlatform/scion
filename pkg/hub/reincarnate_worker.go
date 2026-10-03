@@ -377,8 +377,8 @@ func (s *Server) advanceListedRecord(ctx context.Context, rec *store.AgentReinca
 // (context.Background()-derived), independent of the HTTP request that
 // triggered this — see handleReincarnateAgent for why that matters for
 // self-migration. admittedDeletionClaim is the delete claim the handler's
-// startGate admitted; the completion step's failed-marker clear is pinned
-// to it.
+// startGate admitted; the failed-marker clear just before the completion
+// write is pinned to it.
 //
 // fresh is the new generation's AppliedConfig, already fully resolved by
 // buildFreshAppliedConfig at request time (before the 202 was returned); this
@@ -615,6 +615,20 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 
+	// A successful reincarnate clears a failed delete marker (design
+	// ptone/scion#2483 §2.1). The new generation is live and this worker won
+	// the record, so the start succeeded. The clear runs BEFORE the
+	// completion write below, so any caller that observes completion
+	// (reincarnation_state none) also observes the cleared marker; until
+	// then start stays blocked by the in-progress reincarnation. If the
+	// completion write then fails, the marker stays cleared: that failure
+	// is bookkeeping only. The clear bumps state_version; the completion
+	// write's re-read-and-retry absorbs it. Pinned to the claim the
+	// handler's gate admitted, so a newer delete keeps its marker. agent is
+	// the starting-step row: a marker at the admitted claim cannot appear
+	// later, because a new claim always bumps the claim epoch.
+	s.clearFailedDeletionAtClaim(ctx, agent, admittedDeletionClaim)
+
 	// generation++ and reincarnation_state clears (AC-1). Phase is
 	// deliberately left at "starting" here — exactly like a normal start
 	// dispatch (see wake_dm.go), the container's own status report moves it
@@ -634,7 +648,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// writer of Message during the window (for example a message-only
 	// status POST); this write must never clobber a value that is no
 	// longer the one the stopping step set.
-	if completed, err := s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
+	if _, err := s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState:   store.ReincarnationStateNone,
 		generation:           &toGeneration,
 		appliedConfig:        fresh,
@@ -647,11 +661,6 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		// hand if this persistently fails to land.
 		s.agentLifecycleLog.Error("reincarnation worker: agent started on new generation but failed to persist completion",
 			"agent_id", agentID, "reincarnation_id", reincarnationID, "target_generation", toGeneration, "error", err)
-	} else {
-		// A successful reincarnate clears a failed delete marker (design
-		// ptone/scion#2483 §2.1). After the completion write: it bumps
-		// state_version.
-		s.clearFailedDeletionAtClaim(ctx, completed, admittedDeletionClaim)
 	}
 
 	s.agentLifecycleLog.Info("reincarnation completed",
