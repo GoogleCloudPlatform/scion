@@ -15,11 +15,11 @@
  */
 
 /**
- * Tests for <scion-chat-switcher>'s multi-group palette behavior (Agents,
+ * Tests for <scion-quick-palette>'s multi-group palette behavior (Agents,
  * Threads and People groups): the four-group keyboard infrastructure
  * (Tab/Shift+Tab cycling, Up/Down within a group, show-more past 10 rows)
  * and the Threads group's incomplete-results notice.
- * `chat-switcher-palette.test.ts` continues to cover the single-group
+ * `quick-palette.test.ts` continues to cover the single-group
  * (Agents-only) case unmodified.
  *
  * happy-dom does not retarget events across shadow roots, so real
@@ -30,8 +30,8 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 
-await import('./chat-switcher.js');
-type ScionChatSwitcher = import('./chat-switcher.js').ScionChatSwitcher;
+await import('./quick-palette.js');
+type ScionQuickPalette = import('./quick-palette.js').ScionQuickPalette;
 import type {
   GroupState,
   PaletteCandidate,
@@ -92,8 +92,8 @@ function manyThreads(n: number): PaletteCandidate[] {
 
 async function mountPalette(
   groups: Partial<Record<PaletteGroup, GroupState>>
-): Promise<ScionChatSwitcher> {
-  const el = document.createElement('scion-chat-switcher') as ScionChatSwitcher;
+): Promise<ScionQuickPalette> {
+  const el = document.createElement('scion-quick-palette');
   el.open = true;
   el.groups = groups;
   document.body.appendChild(el);
@@ -101,15 +101,15 @@ async function mountPalette(
   return el;
 }
 
-function input(el: ScionChatSwitcher): HTMLInputElement {
+function input(el: ScionQuickPalette): HTMLInputElement {
   return el.shadowRoot!.querySelector('#palette-query-input') as HTMLInputElement;
 }
 
-function activeText(el: ScionChatSwitcher): string | null | undefined {
+function activeText(el: ScionQuickPalette): string | null | undefined {
   return el.shadowRoot?.querySelector('.palette-option.active')?.textContent?.trim();
 }
 
-function press(el: ScionChatSwitcher, key: string, extra: KeyboardEventInit = {}): void {
+function press(el: ScionQuickPalette, key: string, extra: KeyboardEventInit = {}): void {
   input(el).dispatchEvent(
     new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...extra })
   );
@@ -289,7 +289,7 @@ describe('Up/Down: wraps within the active group only', () => {
     // the new global best), so "ranked is nonempty but activeId matches
     // nothing in it" has no reachable sequence of public calls in the current
     // architecture — set it directly, the same technique
-    // chat-switcher-palette.test.ts's Enter-key test uses for the analogous
+    // quick-palette.test.ts's Enter-key test uses for the analogous
     // commitActivePaletteCandidate guard. Two rows in the group (not one) so
     // this discriminates "first row" from "last row" — the ArrowUp test
     // below covers the mirror case.
@@ -498,7 +498,7 @@ describe('Threads incomplete-results notice', () => {
 });
 
 describe('Multi-group status text', () => {
-  function status(el: ScionChatSwitcher): string | null | undefined {
+  function status(el: ScionQuickPalette): string | null | undefined {
     return el.shadowRoot?.querySelector('.palette-status')?.textContent?.trim();
   }
 
@@ -635,11 +635,11 @@ describe('ensureGroupExpandedFor: defensive guards (private method, direct invoc
 // ARIA role of its own.
 // ===========================================================================
 
-function placeholderOption(el: ScionChatSwitcher): Element | null {
+function placeholderOption(el: ScionQuickPalette): Element | null {
   return el.shadowRoot!.querySelector('#palette-empty-overall');
 }
 
-function listboxOwns(el: ScionChatSwitcher): string[] {
+function listboxOwns(el: ScionQuickPalette): string[] {
   return (
     el.shadowRoot!.querySelector('#palette-result-list')?.getAttribute('aria-owns') ?? ''
   ).split(' ');

@@ -28,6 +28,7 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
@@ -261,7 +262,7 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 		SetRuntime(a.Runtime).
 		SetRuntimeBrokerID(a.RuntimeBrokerID).
 		SetWebPtyEnabled(a.WebPTYEnabled).
-		SetExposedPorts(a.ExposedPorts).
+		SetExposedPorts(utcExposedPorts(a.ExposedPorts)).
 		SetTaskSummary(a.TaskSummary).
 		SetMessage(a.Message).
 		SetCreated(now).
@@ -796,7 +797,11 @@ func (s *AgentStore) DeleteAgent(ctx context.Context, id string) error {
 	return nil
 }
 
-// ListAgents returns agents matching the filter criteria.
+// ListAgents returns agents matching the filter criteria. See the
+// store.AgentStore interface doc for the legacy/sorted-mode split:
+// opts.SortBy empty is the
+// legacy path, unchanged; opts.SortBy set to "created" or "updated" is the
+// real-SQL sorted-mode path the global endpoint's sorted mode uses directly.
 func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
 	preds, err := agentFilterPredicates(filter)
 	if err != nil {
@@ -825,17 +830,68 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 		limit = maxAgentListLimit
 	}
 
-	if opts.Cursor != "" {
-		cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
-		if err != nil {
-			return nil, fmt.Errorf("invalid cursor: %w", err)
+	if opts.SortBy == "" {
+		// Legacy path: a request without sort is byte-identical to before
+		// sorted mode existed, untouched by it.
+		if opts.Cursor != "" {
+			cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
+			if err != nil {
+				return nil, fmt.Errorf("invalid cursor: %w", err)
+			}
+			query.Where(agentBeforeCursor(cursorCreated, cursorID))
 		}
-		query.Where(agentBeforeCursor(cursorCreated, cursorID))
+
+		// Fetch one extra row to detect whether a further page exists.
+		rows, err := query.
+			Order(agent.ByCreated(entsql.OrderDesc()), agent.ByID(entsql.OrderDesc())).
+			Limit(limit + 1).
+			All(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		items := make([]store.Agent, 0, len(rows))
+		for _, a := range rows {
+			items = append(items, *entAgentToStore(a))
+		}
+
+		result := &store.ListResult[store.Agent]{TotalCount: totalCount}
+		if len(items) > limit {
+			result.Items = items[:limit]
+			last := result.Items[len(result.Items)-1]
+			result.NextCursor = encodeListCursor(last.Created, last.ID, opts.CursorBinding)
+		} else {
+			result.Items = items
+		}
+		return result, nil
 	}
 
-	// Fetch one extra row to detect whether a further page exists.
+	// Sorted mode. Fail closed on an unrecognized
+	// sort or dir, matching ListAgentMembers' own contract, rather than
+	// letting agentSortOrder/agentAfterCursor silently fall back to a
+	// default. The hub validates these before calling in; this is the store
+	// API's own contract, independent of any one caller.
+	if opts.SortBy != agentsort.Created && opts.SortBy != agentsort.Updated {
+		return nil, fmt.Errorf("ListAgents: invalid sort %q: %w", opts.SortBy, store.ErrInvalidInput)
+	}
+	if opts.SortDir != agentsort.Asc && opts.SortDir != agentsort.Desc {
+		return nil, fmt.Errorf("ListAgents: invalid dir %q: %w", opts.SortDir, store.ErrInvalidInput)
+	}
+	// A legacy opaque cursor has no meaning in sorted mode. Reject it rather
+	// than ignore it, so a caller that passes one (alone or alongside
+	// SortCursor) gets an error instead of a silently different page.
+	if opts.Cursor != "" {
+		return nil, fmt.Errorf("ListAgents: legacy cursor is not valid in sorted mode: %w", store.ErrInvalidInput)
+	}
+	if opts.SortCursor != nil {
+		query.Where(agentAfterCursor(opts.SortBy, opts.SortDir, *opts.SortCursor))
+	}
+
+	// Fetch one extra row to detect whether a further page exists, exactly
+	// like the legacy path above: the store's existing limit+1
+	// probe says whether more rows exist.
 	rows, err := query.
-		Order(agent.ByCreated(entsql.OrderDesc()), agent.ByID(entsql.OrderDesc())).
+		Order(agentSortOrder(opts.SortBy, opts.SortDir)).
 		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
@@ -851,18 +907,45 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 	if len(items) > limit {
 		result.Items = items[:limit]
 		last := result.Items[len(result.Items)-1]
-		result.NextCursor = encodeListCursor(last.Created, last.ID, opts.CursorBinding)
+		lastRow := agentsort.KeyFor(opts.SortBy, last.ID, last.Created, last.Updated, last.LastActivityEvent)
+		result.NextCursor = store.EncodeAgentCursor(opts.SortBy, opts.SortDir, lastRow.K, lastRow.Created, last.ID, opts.CursorBinding)
 	} else {
 		result.Items = items
 	}
 	return result, nil
 }
 
+// CountAgentsByPhaseIDs returns the id and phase of every agent matching
+// filter, via a narrow SELECT id, phase with no decision made: it backs
+// the global endpoint's sorted-mode "stats"
+// population. Unlike ListAgentMembers it has no candidate ceiling: the
+// global endpoint's stats population is the same SQL scope predicate that
+// already authorizes the request, with no per-row read filter.
+func (s *AgentStore) CountAgentsByPhaseIDs(ctx context.Context, filter store.AgentFilter) ([]store.IDPhase, error) {
+	preds, err := agentFilterPredicates(filter)
+	if err != nil {
+		return nil, err
+	}
+	query := s.client.Agent.Query()
+	if len(preds) > 0 {
+		query.Where(preds...)
+	}
+	rows, err := query.Select(agent.FieldID, agent.FieldPhase).All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]store.IDPhase, len(rows))
+	for i, a := range rows {
+		out[i] = store.IDPhase{ID: a.ID.String(), Phase: a.Phase}
+	}
+	return out, nil
+}
+
 // CountAgents returns the number of agents matching filter, using the exact
 // predicate ListAgents applies for its own total count (agentFilterPredicates),
-// with no row loaded. It backs the sorted-mode candidate ceiling pre-check
-// (design lists-graph.md 5.3 step 0): a cheap COUNT before any member row is
-// read, so a candidate pool above the ceiling costs no more than one query.
+// with no row loaded. It backs the sorted-mode candidate ceiling pre-check:
+// a cheap COUNT before any member row is read, so a candidate pool above the
+// ceiling costs no more than one query.
 func (s *AgentStore) CountAgents(ctx context.Context, filter store.AgentFilter) (int, error) {
 	preds, err := agentFilterPredicates(filter)
 	if err != nil {
@@ -880,18 +963,18 @@ func (s *AgentStore) CountAgents(ctx context.Context, filter store.AgentFilter) 
 // reads (ID, OwnerID, ProjectID, Labels, Ancestry), plus Phase, Created,
 // Updated and LastActivityEvent for positioning (pkg/store/agentsort) and
 // stats. This list, not a separately maintained one, is the projection's
-// definition (design lists-graph.md 5.1): widening agentResource's
-// inputs without adding the new field here is exactly what the non-waivable
-// equality gate is meant to catch. That gate -- a reflection-filled
-// store.Agent written and read back through the real ListAgentMembers and
-// GetAgentsByIDs, compared via reflect.DeepEqual(memberResource(m),
-// agentResource(full)) -- lives in pkg/hub (TestListProjectAgentsSorted_
-// MemberProjectionEquality, agent_sorted_project_list_reflection_test.go),
-// not in this package: agentResource and memberResource are only visible
-// from package hub. TestListAgentMembers_ProjectionEqualsFullRow in this
-// package is a narrower, store-only check that the narrow SELECT's columns
-// agree with a full-row read; it is not itself reflection-filled and cannot
-// substitute for the hub-level gate.
+// definition: widening agentResource's inputs without adding the new field
+// here is exactly what the non-waivable equality gate is meant to catch.
+// That gate -- a reflection-filled store.Agent written and read back through
+// the real ListAgentMembers and GetAgentsByIDs, compared via
+// reflect.DeepEqual(memberResource(m), agentResource(full)) -- lives in
+// pkg/hub (TestListProjectAgentsSorted_MemberProjectionEquality,
+// agent_sorted_project_list_reflection_test.go), not in this package:
+// agentResource and memberResource are only visible from package hub.
+// TestListAgentMembers_ProjectionEqualsFullRow in this package is a
+// narrower, store-only check that the narrow SELECT's columns agree with a
+// full-row read; it is not itself reflection-filled and cannot substitute
+// for the hub-level gate.
 var agentMemberSelectFields = []string{
 	agent.FieldID,
 	agent.FieldOwnerID,
@@ -929,8 +1012,8 @@ func entAgentToMember(a *ent.Agent) store.AgentMember {
 }
 
 // ListAgentMembers returns up to max agents matching filter, projected down
-// to the narrow AgentMember shape and ordered per the section-4.2 total
-// order for (sort, dir) (design lists-graph.md 5.1, 5.3).
+// to the narrow AgentMember shape and ordered per the sorted-mode total
+// order for (sort, dir).
 //
 // The SQL SELECT list is exactly agentMemberSelectFields — no wide column
 // (AppliedConfig in particular) is ever read off the wire for a candidate
@@ -945,8 +1028,8 @@ func entAgentToMember(a *ent.Agent) store.AgentMember {
 // keeps exactly one implementation of the tie-break rules instead of asking
 // each dialect to reproduce it) and sorts them in Go.
 func (s *AgentStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sortKey, dir string, max int) ([]store.AgentMember, error) {
-	// Fail closed on an unrecognized sort or dir (design lists-graph.md 5.1:
-	// "Unknown values return ErrInvalidInput"), rather than letting
+	// Fail closed on an unrecognized sort or dir (unknown values return
+	// ErrInvalidInput), rather than letting
 	// agentsort.KeyFor/Less silently fall back to a default ordering. The
 	// hub handler already validates these before calling in; this is the
 	// store API's own contract, independent of any one caller.
@@ -1298,6 +1381,18 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetExitReason("")
 	}
 
+	// ClearExit covers the case the phase-transition clear above does not:
+	// a lifecycle start/restart dispatched while the CURRENT phase is
+	// already running (or anything else). A disruption reason can be
+	// recorded on a still-running agent ahead of its pod actually stopping
+	// (state.ExitReasonPreempted/ExitReasonEvicted), and that reason
+	// describes the old pod, not the new generation a start/restart brings
+	// up, so it must be cleared regardless of the current phase.
+	if su.ClearExit {
+		upd.ClearExitCode()
+		upd.SetExitReason("")
+	}
+
 	// T1 async agent create (design t1-async-create-v11.md §3.3): a write of
 	// phase=running always clears launch_error (T3) — once an agent has run,
 	// it must never again match the incomplete-create predicate, whatever
@@ -1363,7 +1458,7 @@ func (s *AgentStore) UpdateAgentExposedPorts(ctx context.Context, id string, por
 
 	affected, err := s.client.Agent.Update().
 		Where(agent.IDEQ(uid)).
-		SetExposedPorts(ports).
+		SetExposedPorts(utcExposedPorts(ports)).
 		SetUpdated(time.Now()).
 		Save(ctx)
 	if err != nil {
@@ -1373,6 +1468,22 @@ func (s *AgentStore) UpdateAgentExposedPorts(ctx context.Context, id string, por
 		return store.ErrNotFound
 	}
 	return nil
+}
+
+// utcExposedPorts returns a copy of ports with every ExposedAt converted to
+// UTC. agents.exposed_ports is a JSON column, so the field-level UTC mutation
+// hook cannot reach the embedded times; normalising here covers every writer.
+// The caller's slice is not modified. A nil slice stays nil.
+func utcExposedPorts(ports []store.ExposedPort) []store.ExposedPort {
+	if ports == nil {
+		return nil
+	}
+	out := make([]store.ExposedPort, len(ports))
+	for i, p := range ports {
+		p.ExposedAt = p.ExposedAt.UTC()
+		out[i] = p
+	}
+	return out
 }
 
 // PurgeDeletedAgents permanently removes soft-deleted agents older than cutoff.
@@ -1434,6 +1545,311 @@ func (s *AgentStore) MarkStaleAgentsOffline(ctx context.Context, threshold time.
 		return nil, err
 	}
 	return updated, nil
+}
+
+// containerMissingStatus is the container_status recorded by
+// MarkAgentContainerMissing.
+const containerMissingStatus = "missing"
+
+// containerMissingKeptExitReasons are the exit reasons, more specific than
+// container_missing, that MarkAgentContainerMissing keeps (together with the
+// stored message and exit code) when the agent already has one: the runtime
+// broker recorded why the container went away before it disappeared.
+// These match the ExitReason values added by ptone/scion#2542; switch to
+// those constants once both changes have landed.
+var containerMissingKeptExitReasons = []string{"preempted", "evicted"}
+
+// MarkAgentContainerMissing implements store.AgentStore. See the interface
+// documentation for the guard conditions.
+//
+// Every guard is part of the UPDATE's WHERE clause (a compare-and-set), not
+// a separate read: the row changes only if it still matches at write time,
+// so a concurrent delete, start, stop, reassignment or heartbeat always wins
+// without relying on a row lock. Two such UPDATEs run in one transaction:
+// the first matches only a row whose exit reason is one to keep and leaves
+// the reason, message and exit code alone; the second, run only when the
+// first changed nothing, matches every other row and records
+// container_missing.
+func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*store.Agent, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	guards := func(reason predicate.Agent) *ent.AgentUpdate {
+		return tx.Agent.Update().
+			Where(
+				agent.IDEQ(uid),
+				agent.DeletedAtIsNil(),
+				agent.RuntimeBrokerIDEQ(brokerID),
+				agent.PhaseEQ("running"),
+				agent.Or(
+					agent.ReincarnationStateIsNil(),
+					agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),
+				),
+				agent.Or(agent.LastSeenIsNil(), agent.LastSeenLT(cutoff)),
+				reason,
+			).
+			SetPhase("error").
+			SetActivity("").
+			SetStalledFromActivity("").
+			SetToolName("").
+			SetContainerStatus(containerMissingStatus)
+	}
+
+	n, err := guards(agent.ExitReasonIn(containerMissingKeptExitReasons...)).Save(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if n == 0 {
+		n, err = guards(agent.Or(
+			agent.ExitReasonIsNil(),
+			agent.ExitReasonNotIn(containerMissingKeptExitReasons...),
+		)).
+			ClearExitCode().
+			SetExitReason(string(state.ExitReasonContainerMissing)).
+			SetMessage(message).
+			Save(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+	}
+	if n == 0 {
+		return nil, nil
+	}
+	updated, err := tx.Agent.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return entAgentToStore(updated), nil
+}
+
+// clearRuntimeTargetHook, when set by a test, runs inside each
+// ClearAgentRuntimeTarget attempt between the read and the conditional write,
+// with the attempt's transaction, so the test can change the row and make the
+// write miss.
+var clearRuntimeTargetHook func(ctx context.Context, tx *ent.Tx, id uuid.UUID)
+
+// setRuntimeTargetHook, when set by a test, runs inside the
+// SetAgentRuntimeTarget transaction after the read and its checks, just
+// before the conditional write, so a test can change the row in between.
+var setRuntimeTargetHook func(ctx context.Context, tx *ent.Tx, id uuid.UUID)
+
+// clearRuntimeTargetAttempts bounds ClearAgentRuntimeTarget's re-read and
+// retry loop.
+const clearRuntimeTargetAttempts = 5
+
+// ClearAgentRuntimeTarget implements store.AgentStore. See the interface for
+// the contract.
+//
+// Each attempt reads and conditionally writes inside one transaction, with
+// the row locked (SELECT ... FOR UPDATE) where the dialect supports it, so a
+// concurrent writer cannot slip in between. The write is additionally
+// conditional on the stored applied config and state_version being
+// unchanged; if it still misses, the row is re-read and the clear retried, up
+// to clearRuntimeTargetAttempts times, after which an error is returned.
+func (s *AgentStore) ClearAgentRuntimeTarget(ctx context.Context, id string) (bool, int64, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, 0, err
+	}
+	// Prime dialect detection before opening a transaction (see
+	// UpdateAgentStatus).
+	useLock := s.usesRowLocks(ctx)
+	for i := 0; i < clearRuntimeTargetAttempts; i++ {
+		res, err := s.clearRuntimeTargetOnce(ctx, uid, id, useLock)
+		if err != nil {
+			return false, 0, err
+		}
+		if res.done {
+			return res.cleared, res.newVersion, nil
+		}
+	}
+	return false, 0, fmt.Errorf("clear runtime target for agent %s: agent changed concurrently %d times", id, clearRuntimeTargetAttempts)
+}
+
+// runtimeTargetKeys are the applied-config JSON keys ClearAgentRuntimeTarget
+// removes.
+var runtimeTargetKeys = []string{"runtimeTarget", "runtimeTargetCandidate"}
+
+// clearRuntimeTargetResult is the outcome of one ClearAgentRuntimeTarget
+// attempt. done is false only when the conditional write matched no row
+// because the agent changed after it was read.
+type clearRuntimeTargetResult struct {
+	done       bool
+	cleared    bool
+	newVersion int64
+}
+
+// clearRuntimeTargetOnce is one ClearAgentRuntimeTarget attempt.
+func (s *AgentStore) clearRuntimeTargetOnce(ctx context.Context, uid uuid.UUID, id string, useLock bool) (clearRuntimeTargetResult, error) {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return clearRuntimeTargetResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil())
+	if useLock {
+		q = q.ForUpdate()
+	}
+	row, err := q.Select(agent.FieldAppliedConfig, agent.FieldStateVersion).Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return clearRuntimeTargetResult{done: true}, nil
+		}
+		return clearRuntimeTargetResult{}, mapError(err)
+	}
+	if row.AppliedConfig == "" {
+		return clearRuntimeTargetResult{done: true}, nil
+	}
+	// Edit the raw JSON object rather than round-tripping it through
+	// store.AgentAppliedConfig, so every other stored key is kept exactly
+	// as written.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
+		return clearRuntimeTargetResult{}, fmt.Errorf("clear runtime target for agent %s: %w", id, err)
+	}
+	found := false
+	for _, k := range runtimeTargetKeys {
+		if _, ok := raw[k]; ok {
+			delete(raw, k)
+			found = true
+		}
+	}
+	if !found {
+		return clearRuntimeTargetResult{done: true}, nil
+	}
+	cleared, err := json.Marshal(raw)
+	if err != nil {
+		return clearRuntimeTargetResult{}, err
+	}
+	if clearRuntimeTargetHook != nil {
+		clearRuntimeTargetHook(ctx, tx, uid)
+	}
+	newVersion := row.StateVersion + 1
+	n, err := tx.Agent.Update().
+		Where(
+			agent.IDEQ(uid),
+			agent.DeletedAtIsNil(),
+			agent.AppliedConfigEQ(row.AppliedConfig),
+			agent.StateVersionEQ(row.StateVersion),
+		).
+		SetAppliedConfig(string(cleared)).
+		SetStateVersion(newVersion).
+		Save(ctx)
+	if err != nil {
+		return clearRuntimeTargetResult{}, mapError(err)
+	}
+	if n == 0 {
+		return clearRuntimeTargetResult{}, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return clearRuntimeTargetResult{}, err
+	}
+	return clearRuntimeTargetResult{done: true, cleared: true, newVersion: newVersion}, nil
+}
+
+// appliedConfigUnchanged matches a row whose applied_config is still the
+// value read; an empty read also matches a NULL column.
+func appliedConfigUnchanged(read string) predicate.Agent {
+	if read == "" {
+		return agent.Or(agent.AppliedConfigIsNil(), agent.AppliedConfigEQ(""))
+	}
+	return agent.AppliedConfigEQ(read)
+}
+
+// SetAgentRuntimeTarget implements store.AgentStore. See the interface for
+// the contract.
+//
+// The read and the conditional write run in one transaction, with the row
+// locked where the dialect supports it. The write is conditional on
+// state_version and the stored applied config being unchanged, and edits
+// only the two target keys in the raw JSON, so concurrent status writes
+// (which do not touch applied_config) are never undone.
+func (s *AgentStore) SetAgentRuntimeTarget(ctx context.Context, id string, expectedVersion int64, target, candidate string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	// Prime dialect detection before opening a transaction (see
+	// UpdateAgentStatus).
+	useLock := s.usesRowLocks(ctx)
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil())
+	if useLock {
+		q = q.ForUpdate()
+	}
+	row, err := q.Select(agent.FieldAppliedConfig, agent.FieldStateVersion).Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return false, nil
+		}
+		return false, mapError(err)
+	}
+	if row.StateVersion != expectedVersion {
+		return false, nil
+	}
+	raw := map[string]json.RawMessage{}
+	if row.AppliedConfig != "" {
+		if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
+			return false, fmt.Errorf("set runtime target for agent %s: %w", id, err)
+		}
+		if raw == nil { // the stored value was the JSON literal null
+			raw = map[string]json.RawMessage{}
+		}
+	}
+	for key, value := range map[string]string{"runtimeTarget": target, "runtimeTargetCandidate": candidate} {
+		if value == "" {
+			delete(raw, key)
+			continue
+		}
+		enc, err := json.Marshal(value)
+		if err != nil {
+			return false, err
+		}
+		raw[key] = enc
+	}
+	updated, err := json.Marshal(raw)
+	if err != nil {
+		return false, err
+	}
+	if setRuntimeTargetHook != nil {
+		setRuntimeTargetHook(ctx, tx, uid)
+	}
+	n, err := tx.Agent.Update().
+		Where(
+			agent.IDEQ(uid),
+			agent.DeletedAtIsNil(),
+			agent.StateVersionEQ(expectedVersion),
+			appliedConfigUnchanged(row.AppliedConfig),
+		).
+		SetAppliedConfig(string(updated)).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // stalledExcluded lists the activities that disqualify a running agent from

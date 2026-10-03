@@ -7,6 +7,7 @@ package supervisor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -566,5 +567,66 @@ func TestSupervisor_Run_NoRequirePrivilegeDropRunsWithoutCredentials(t *testing.
 				t.Errorf("child did not run: %v", statErr)
 			}
 		})
+	}
+}
+
+// TestSupervisor_Run_RequirePrivilegeDropRefusesUndroppableCredentials proves
+// that, with RequirePrivilegeDrop set, a Config whose UID or GID
+// fails the credential drop's own UID>0 && GID>0 predicate must make Run
+// return (1, ErrPrivilegeDropRequired) WITHOUT starting the child, rather
+// than silently running it with no Credential (i.e. as whatever this
+// process is, root in production). The child would create a marker file;
+// its absence proves nothing was executed.
+func TestSupervisor_Run_RequirePrivilegeDropRefusesUndroppableCredentials(t *testing.T) {
+	cases := []struct {
+		name     string
+		uid, gid int
+	}{
+		{name: "uid0", uid: 0, gid: 1000},
+		{name: "gid0", uid: 1000, gid: 0},
+		{name: "both0", uid: 0, gid: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "ran")
+			config := DefaultConfig()
+			config.UID = tc.uid
+			config.GID = tc.gid
+			config.RequirePrivilegeDrop = true
+			sup := New(config)
+
+			exitCode, err := sup.Run(context.Background(), []string{"sh", "-c", "touch " + marker})
+			if !errors.Is(err, ErrPrivilegeDropRequired) {
+				t.Errorf("Run(UID=%d, GID=%d, RequirePrivilegeDrop) err = %v, want ErrPrivilegeDropRequired", tc.uid, tc.gid, err)
+			}
+			if exitCode != 1 {
+				t.Errorf("exit code = %d, want 1", exitCode)
+			}
+			if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+				t.Errorf("the child ran (marker exists, stat err=%v); it must not start without a credential drop in enforced mode", statErr)
+			}
+		})
+	}
+}
+
+// TestSupervisor_Run_RequirePrivilegeDropIgnoresRootless pins that the
+// enforced-mode refusal above does not exempt Config.Rootless: Rootless only
+// selects which HOME/USER/LOGNAME env block the child gets (see Run's own
+// env-setting block), it never authorises starting an un-dropped child when
+// RequirePrivilegeDrop is set. A UID/GID pair that fails the credential
+// drop's own predicate must still refuse and must still not start the child,
+// regardless of Rootless.
+func TestSupervisor_Run_RequirePrivilegeDropIgnoresRootless(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "ran")
+	config := DefaultConfig()
+	config.RequirePrivilegeDrop = true
+	config.Rootless = true
+	config.Username = "scion"
+	exitCode, err := New(config).Run(context.Background(), []string{"sh", "-c", "touch " + marker})
+	if !errors.Is(err, ErrPrivilegeDropRequired) || exitCode != 1 {
+		t.Fatalf("Run(Rootless, RequirePrivilegeDrop) = (%d, %v), want (1, ErrPrivilegeDropRequired)", exitCode, err)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Errorf("child ran despite RequirePrivilegeDrop")
 	}
 }

@@ -21,6 +21,17 @@ import { setupChatMobileMocks, PROJECT_A } from './mock-api.js';
 export async function openChatRail(page: Page): Promise<void> {
   await setupChatMobileMocks(page);
   await page.goto(`/chat/space/${PROJECT_A.id}`, { waitUntil: 'domcontentloaded' });
+  // The legacy /chat/space/{id} URL triggers a client-side redirect to the
+  // readable slug URL once spaces load (parseV2Route's legacySpaceMatch ->
+  // navigateTo). That redirect is a full client-side navigation, and
+  // main.ts's renderRoute handles every navigation (other than returning
+  // from a hidden terminal view) by removing the old page element and
+  // creating a new one — so a caller that proceeds as soon as the *first*
+  // <scion-page-chat> instance renders can measure or click into a page
+  // that is about to be torn down and replaced. Waiting for the URL to
+  // settle to the redirected form first means every caller sees the one
+  // instance that is actually going to stick around.
+  await page.waitForURL(/\/chat\/[^/]+$/, { timeout: 15_000 });
   await expect(page.locator('.space-header', { hasText: PROJECT_A.name })).toBeVisible({
     timeout: 15_000,
   });

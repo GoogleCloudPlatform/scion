@@ -124,6 +124,12 @@ type keysResult struct {
 	OperationID string // present only when the Hub minted and returned one
 	AgentID     string
 	Message     string // human-readable detail; never normative (contract §2.4a)
+	// RetryAfterSeconds is the Hub's Retry-After value (seconds), when the
+	// response carried one (429 keys_rate_limited; also present on some 503
+	// keys_unavailable responses). 0 means none was present — this is
+	// informational only: the CLI never auto-retries regardless (contract
+	// C§2.4a: "describes admission, not permission to replay").
+	RetryAfterSeconds int
 }
 
 // reportKeysResult is the single exit point for sendKeysViaHub and
@@ -146,6 +152,9 @@ func reportKeysResult(agentName string, res keysResult, cause error) error {
 		}
 		if res.AgentID != "" {
 			details["agent_id"] = res.AgentID
+		}
+		if res.RetryAfterSeconds > 0 {
+			details["retry_after_seconds"] = res.RetryAfterSeconds
 		}
 		status := "success"
 		if res.Outcome != keysOutcomeDispatched {
@@ -179,6 +188,14 @@ func reportKeysResult(agentName string, res keysResult, cause error) error {
 	suffix := ""
 	if res.Outcome == keysOutcomeUnknown {
 		suffix = " — the terminal may or may not have received them; check before resending"
+	}
+	if res.RetryAfterSeconds > 0 {
+		// Informational only: this never triggers an automatic retry here
+		// or anywhere upstream (contract C§2.4a: Retry-After "describes
+		// admission, not permission to replay"). Phrased with "do not
+		// retry", the one allowed form, never a bare "retry" that could
+		// read as an invitation.
+		suffix += fmt.Sprintf(" (Retry-After: %ds — do not retry automatically)", res.RetryAfterSeconds)
 	}
 	if cause != nil {
 		if res.Message == "" || res.Message == cause.Error() {
@@ -231,10 +248,10 @@ func classifyHubKeysError(err error) keysResult {
 		isDefiniteRejection = true
 	}
 	if !isDefiniteRejection {
-		return keysResult{Outcome: keysOutcomeUnknown, Code: apiErr.Code, OperationID: opID, Message: apiErr.Message}
+		return keysResult{Outcome: keysOutcomeUnknown, Code: apiErr.Code, OperationID: opID, Message: apiErr.Message, RetryAfterSeconds: apiErr.RetryAfterSeconds}
 	}
 
-	return keysResult{Outcome: keysOutcomeRejected, Code: apiErr.Code, OperationID: opID, Message: apiErr.Message}
+	return keysResult{Outcome: keysOutcomeRejected, Code: apiErr.Code, OperationID: opID, Message: apiErr.Message, RetryAfterSeconds: apiErr.RetryAfterSeconds}
 }
 
 // classifyLocalKeysError turns an agent.Manager.SendKeys/SendKeysLocal error
@@ -260,7 +277,19 @@ func classifyLocalKeysError(err error) keysResult {
 	// cannot be proven to have happened before delivery began (see
 	// agent.Manager.SendKeys's doc comment on ErrKeysNotStarted). Ambiguous,
 	// never reported as a plain rejection.
-	return keysResult{Outcome: keysOutcomeUnknown, Message: err.Error()}
+	//
+	// This fixed message, not err.Error(), is
+	// what JSON mode prints (reportKeysResult's ActionResult.Message is
+	// exactly this field) and is the real, independent protection for that
+	// output path. It is NOT what protects the human-readable error path:
+	// reportKeysResult still wraps the caller's original err via %w into
+	// the returned error, and cmd/root.go's Execute prints that. The actual
+	// protection there is upstream, in SendKeys/SendKeysLocal's own
+	// sanitization (sendKeysDeliveryErrorClass, pkg/agent/manager.go) --
+	// err itself never carries backend text by the time it reaches this
+	// function. This fixed Message does not depend on that holding; it is
+	// a second, independent guarantee for the field it actually controls.
+	return keysResult{Outcome: keysOutcomeUnknown, Message: "keys dispatch outcome is unknown; do not retry automatically"}
 }
 
 // rejectInvalidKeys validates keys via agentkeys.ValidateKeys and, if
@@ -295,7 +324,12 @@ func sendKeysViaHub(hubCtx *HubContext, agentName, keys string) error {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
-	projectID, err := GetProjectID(hubCtx)
+	// Contract C§3 "ambiguous resolution fails rather
+	// than guessing" (ptone/scion#2200): unlike GetProjectID's default behavior (shared by
+	// every other command, left unchanged), the keys path fails closed
+	// when several projects match the git remote, instead of silently
+	// picking the first one.
+	projectID, err := getProjectIDForKeys(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}

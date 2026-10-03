@@ -2597,6 +2597,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				}
 				if errors.Is(err, ErrBrokerTimeout) {
 					GatewayTimeout(w, "Broker unreachable after 30s deadline")
+				} else if isBrokerAgentNotFound(err) {
+					// The broker answered that the agent has no running
+					// container: a state conflict, not a broker failure.
+					writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+						"Agent has no running container; the message was not delivered", nil)
 				} else if req.Wake {
 					RuntimeError(w, "Agent resumed successfully but message delivery failed: "+err.Error())
 				} else {

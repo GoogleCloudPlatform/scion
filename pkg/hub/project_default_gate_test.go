@@ -153,6 +153,7 @@ func TestProjectDefaultGate_CreatorWithActAsSucceeds(t *testing.T) {
 
 func TestProjectDefaultGate_HubScopedDefaultDeniedWhenModeOff(t *testing.T) {
 	f := bypassAgentsSetup(t)
+	bindFixtureOwner(t, f)
 	// Mode=off (default) — hub-scoped SA assignment requires enforce
 	sa := hubScopedSAForAgent(t, f, true)
 	setProjectDefaultSA(t, f, sa.ID)

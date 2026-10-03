@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -130,15 +131,15 @@ const (
 
 // CredentialKind describes the authentication material that established a principal.
 // Credential constraints are caveats: they may narrow authority but never grant it.
-type CredentialKind string
+type CredentialKind = credentialmeta.Kind
 
 const (
-	CredentialKindInteractive CredentialKind = "interactive"
-	CredentialKindUAT         CredentialKind = "uat"
-	CredentialKindAgentJWT    CredentialKind = "agent_jwt"
-	CredentialKindFederation  CredentialKind = "federation"
-	CredentialKindBroker      CredentialKind = "broker"
-	CredentialKindDev         CredentialKind = "dev"
+	CredentialKindInteractive = credentialmeta.KindInteractive
+	CredentialKindUAT         = credentialmeta.KindUAT
+	CredentialKindAgentJWT    = credentialmeta.KindAgentJWT
+	CredentialKindFederation  = credentialmeta.KindFederation
+	CredentialKindBroker      = credentialmeta.KindBroker
+	CredentialKindDev         = credentialmeta.KindDev
 
 	// CredentialKindHubDelivery is the internal credential a hub-side
 	// material delivery caller presents (ptone/scion#2228 part 2). It is
@@ -353,14 +354,17 @@ const (
 	// role-definition resolution (Step 4), and access-constraint load
 	// failure (Step 7c, detected after Step 9 because the failure there
 	// is folded into a deny-all restriction rather than an early return).
+	// enforceUATConstraints also sets it when the live project-access
+	// lookup for a user access token fails on a store fault.
 	DenyCauseResolutionError DenyCause = "resolution_error"
 )
 
 // IsIndeterminate reports whether this deny was caused by a store or
 // resolution fault on the tagged paths, rather than a policy fact — the
 // access check could not be decided. Tagged: principal, role-binding,
-// role-definition and access-constraint resolution in decide(), and the
-// delegation-ceiling error. Not yet tagged: relationship-fact and
+// role-definition and access-constraint resolution in decide(), the
+// user-access-token live project-access lookup (enforceUATConstraints), and
+// the delegation-ceiling error. Not yet tagged: relationship-fact and
 // source-active lookup failures (isCurrentHubMember, relationshipSourceActive,
 // progenySourceFor). A false result for those candidates does not prove a
 // policy deny.
@@ -664,7 +668,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	if credential.Kind == CredentialKindUAT {
 		if user, ok := principal.Identity.(UserIdentity); ok {
 			if scoped, ok := user.(*ScopedUserIdentity); ok {
-				if denied := a.enforceUATConstraints(scoped, request.Resource, request.Action); denied != nil {
+				if denied := a.enforceUATConstraints(ctx, principal, scoped, request.Resource, request.Action, permissionID); denied != nil {
 					return decorateDecision(*denied, request, principal, credential, auditPermissionID(request))
 				}
 			}
@@ -2170,7 +2174,23 @@ func auditPermissionID(request AuthzRequest) string {
 // enforceUATConstraints checks the project and scope restrictions carried by a
 // ScopedUserIdentity (produced from a UAT). Returns a deny Decision if the
 // request falls outside the token's allowed project or scopes, nil otherwise.
-func (a *AuthzService) enforceUATConstraints(scoped *ScopedUserIdentity, resource Resource, action Action) *Decision {
+//
+// This adds a third check (ptone/scion#2092) after the two pre-existing
+// ones, in this fixed order: project match, then the token's permission
+// ceiling, then live project access (permissionID is the already-resolved
+// canonical permission Decide computed for this request, so the admission
+// check evaluates the exact permission the kernel will evaluate, not a
+// re-derived one). It runs last so only in-scope requests pay the extra
+// store lookup.
+func (a *AuthzService) enforceUATConstraints(ctx context.Context, principal PrincipalContext, scoped *ScopedUserIdentity, resource Resource, action Action, permissionID string) *Decision {
+	// A typed-nil *ScopedUserIdentity carries no project, ceiling, or scopes
+	// to evaluate. Deny with the same reason as the live-project-access
+	// check below rather than dereferencing a nil receiver or treating a
+	// missing credential as an unconstrained one.
+	if scoped == nil {
+		return &Decision{Allowed: false, Reason: "token holder lacks active access to the target project"}
+	}
+
 	// Enforce project constraint: the resource must belong to the token's project.
 	projectID := scoped.ScopedProjectID()
 	if resource.Type == "project" {
@@ -2185,10 +2205,40 @@ func (a *AuthzService) enforceUATConstraints(scoped *ScopedUserIdentity, resourc
 		return &Decision{Allowed: false, Reason: "token not scoped for hub-level resources"}
 	}
 
-	// Enforce scope constraint: the resource:action must be in the token's scopes.
-	scope := resource.Type + ":" + string(action)
-	if !scoped.HasScope(scope) {
-		return &Decision{Allowed: false, Reason: "token does not have scope: " + scope}
+	// Enforce scope constraint: the token's frozen permission ceiling must
+	// allow the exact permission Decide resolved for this request. This is
+	// the same ceiling later steps (e.g. CanDelegate) consult, so this gate
+	// and the rest of the credential's authority share one source of truth
+	// instead of two independently-derived views of the same scopes.
+	if !scoped.Ceiling().Allows(permissionID) {
+		return &Decision{Allowed: false, Reason: "token does not have scope: " + resource.Type + ":" + string(action)}
+	}
+
+	// Live project access is required at use time, not just at mint time
+	// (ptone/scion#2092): retained creation ancestry or ownership never
+	// substitutes for current project access. ProjectTargetAdmission relies
+	// on ResolveTargetScope to reject any resource that isn't really a
+	// matching project target (ErrProjectMismatch), so this call is the
+	// actual authority for that classification, not the two checks above.
+	// It fails closed on any error (including
+	// ErrUnsupportedPrincipalKind for a non-local-user principal, which
+	// cannot occur for a ScopedUserIdentity today but is handled the same
+	// as any other denial rather than panicking or special-cased here).
+	// A store or resolution fault during the lookup still denies, but is
+	// tagged DenyCauseResolutionError (so Decision.IsIndeterminate reports
+	// true), matching the other store-error denies in decide(). Policy-fact
+	// errors (inactive user, project mismatch, unsupported principal kind,
+	// class mismatch) stay plain denies.
+	admission, err := a.ProjectTargetAdmission(ctx, principal, projectID, permissionID, resource, nil)
+	if err != nil {
+		d := &Decision{Allowed: false, Reason: "token holder lacks active access to the target project"}
+		if isProjectAccessLookupFault(err) {
+			d.DenyCause = DenyCauseResolutionError
+		}
+		return d
+	}
+	if !admission.Admitted {
+		return &Decision{Allowed: false, Reason: "token holder lacks active access to the target project"}
 	}
 
 	return nil
@@ -2565,8 +2615,10 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 
 // getProjectScopedPermissions returns only the permissions that the principal
 // holds through project-scoped role bindings for the given project. System-
-// scoped bindings are excluded. This is the A2 issuer-ceiling resolver: hub
-// or system authority must not enlarge a project-scoped token.
+// scoped bindings are excluded: hub or system authority must not enlarge a
+// project-scoped token. Not called from production code; retained because
+// authz_boundary_test.go pins its binding-resolution parity with
+// projectScopedPermissionsStrict.
 //
 // The method retains group-expanded principals, activation-window filtering,
 // and AccessConstraint reduction — exactly as getEffectivePermissions does —

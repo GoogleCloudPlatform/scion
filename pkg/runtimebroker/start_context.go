@@ -47,6 +47,11 @@ type startContext struct {
 	TemplateSlug string
 	Manager      agent.Manager
 
+	// RuntimeType is the runtime type this dispatch resolved to through
+	// resolveManagerForOpts (dispatchRuntimeType), which can differ from the
+	// broker's default runtime. The create path reports it to the hub.
+	RuntimeType string
+
 	// EnvClassifications is the merged provenance map: what the hub sent,
 	// plus the broker-written keys classified in buildStartContext. Nil means
 	// the hub sent none — see api.EnvKind's three-state contract. No consumer
@@ -70,6 +75,13 @@ type startContextInputs struct {
 	ProjectPath string
 	ProjectSlug string
 	ProjectID   string
+	// ProjectPathFromContainer is set when ProjectPath was recovered from
+	// the agent's listed container rather than sent by the caller. That
+	// value is the resolved .scion directory the container recorded, not a
+	// project root, so it is used for settings and saved-profile resolution
+	// only: the hub-managed marker block and host-side worktree provisioning,
+	// which treat ProjectPath as a project root, skip it.
+	ProjectPathFromContainer bool
 
 	// Config from CreateAgentConfig (nil for startAgent/restartAgent)
 	Config *CreateAgentConfig
@@ -164,7 +176,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// This block also handles the case where the createAgent handler already
 	// resolved ProjectPath (for env-gather) before calling buildStartContext,
 	// which would skip the resolution block above.
-	if in.ProjectPath != "" && (in.ProjectSlug != "" || in.ProjectID != "") {
+	//
+	// A path recovered from the agent's container is already a .scion
+	// directory; it is not a project root to initialize, so it skips this
+	// block (see ProjectPathFromContainer).
+	if in.ProjectPath != "" && !in.ProjectPathFromContainer && (in.ProjectSlug != "" || in.ProjectID != "") {
 		scionPath := filepath.Join(in.ProjectPath, config.DotScion)
 
 		if config.IsProjectMarkerFile(scionPath) {
@@ -427,10 +443,14 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// 4. Hub endpoint
-	runtimeName := ""
-	if s.runtime != nil {
-		runtimeName = s.runtime.Name()
-	}
+	// The hub endpoint (its container-bridge rewrite and the cloudrun-family
+	// overrides) and the colocated extra hosts all depend on where this
+	// agent runs, so they key off the runtime this dispatch resolved to
+	// (dispatchRuntimeType, above), not the broker's default runtime: a
+	// docker-default broker can dispatch an agent to a kubernetes profile,
+	// and that pod must not receive a docker-bridge hub URL or docker
+	// --add-host entries.
+	runtimeName := dispatchRuntimeType
 
 	// Resolve hub connection early — needed for colocated detection and
 	// template hydration below. The connection-endpoint header applies to
@@ -732,7 +752,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	worktreeProvisioned := false
 	if in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
 		var err error
-		worktreeProvisioned, err = s.tryProvisionWorktree(ctx, in, &opts, env)
+		worktreeProvisioned, err = s.tryProvisionWorktree(ctx, in, &opts, env, dispatchRuntimeType)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			return nil, &startContextError{Status: http.StatusInternalServerError, Message: err.Error()}
@@ -862,6 +882,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Opts:               opts,
 		TemplateSlug:       templateSlug,
 		Manager:            mgr,
+		RuntimeType:        dispatchRuntimeType,
 		EnvClassifications: envCls,
 	}, nil
 }
@@ -1211,16 +1232,24 @@ func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
 // worktree path and returns true (opts.GitClone is NOT set, suppressing the
 // in-container clone). On failure or if git is too old, it logs a warning and
 // returns false so the caller falls through to clone-per-agent.
-func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs, opts *api.StartOptions, env map[string]string) (bool, error) {
-	runtimeName := ""
-	if s.runtime != nil {
-		runtimeName = s.runtime.Name()
+//
+// runtimeName is the runtime this dispatch resolved to (buildStartContext's
+// dispatchRuntimeType), not the broker's default runtime: host-side
+// provisioning is skipped for an agent dispatched to kubernetes even when the
+// broker's default runtime is docker.
+func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs, opts *api.StartOptions, env map[string]string, runtimeName string) (bool, error) {
+	// A path recovered from the agent's container is a .scion directory,
+	// not the project root a worktree base is created under; provisioning
+	// sees no project path for it, as it did before that path was recovered
+	// ahead of this call (see ProjectPathFromContainer).
+	worktreeProjectPath := in.ProjectPath
+	if in.ProjectPathFromContainer {
+		worktreeProjectPath = ""
 	}
-
 	result := resolveWorktreeProvision(worktreeProvisionInput{
 		WorkspaceMode: in.WorkspaceMode,
 		GitClone:      in.Config.GitClone,
-		ProjectPath:   in.ProjectPath,
+		ProjectPath:   worktreeProjectPath,
 		ProjectID:     in.ProjectID,
 		ProjectSlug:   in.ProjectSlug,
 		AgentID:       in.AgentID,
@@ -1428,7 +1457,7 @@ type worktreeProvisionInput struct {
 	Branch        string
 
 	// RuntimeName is the name of the container runtime ("kubernetes", "docker",
-	// etc.) from runtime.Name(). Used to reject host-side worktree provisioning
+	// etc.) this dispatch resolved to. Used to reject host-side worktree provisioning
 	// on Kubernetes where pods cannot bind-mount host worktrees — worktree-per-agent
 	// on K8s requires the NFS backend (init-container path).
 	RuntimeName string
@@ -1502,7 +1531,7 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 	// supported only via the NFS backend (init-container path in
 	// k8s_runtime.go). When the broker's host-side path is reached for a
 	// K8s runtime, fall back to clone-per-agent.
-	if in.RuntimeName == "kubernetes" {
+	if isKubernetesRuntimeName(in.RuntimeName) {
 		return worktreeProvisionResult{
 			Reason: "worktree-per-agent on Kubernetes requires the NFS backend; " +
 				"node-local host-side provisioning is not supported (pods cannot bind-mount host worktrees)",

@@ -220,6 +220,8 @@ When transport auth is configured, the Hub injects these environment variables i
 | `SCION_TRANSPORT_AUDIENCE` | Audience the transport token was minted for (IAP client ID or hub URL). |
 | `SCION_TRANSPORT_TOKEN_EXPIRY` | Token expiry in RFC 3339 format. |
 
+On the Kubernetes runtime, `SCION_TRANSPORT_TOKEN` comes from the agent's per-agent Secret through `secretKeyRef`, not from a plain value in the Pod spec. See [Hub Transport Credential](/scion/hosted/ha/kubernetes/#hub-transport-credential). Other runtimes set it as a regular environment variable.
+
 ### Refresh response: `tokens[]` array
 
 The agent token refresh endpoint (`POST /api/v1/agents/{id}/token/refresh`) returns a generalized `tokens[]` array alongside the legacy single-token fields for backward compatibility:

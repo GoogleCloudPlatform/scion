@@ -212,8 +212,9 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/permissions":    "hub-admin:role",
 
 	// Access Constraints (AC1)
-	"/api/v1/admin/access-constraints":  "hub-admin:access_constraint",
-	"/api/v1/admin/access-constraints/": "hub-admin:access_constraint",
+	"/api/v1/admin/access-constraints":                "hub-admin:access_constraint",
+	"/api/v1/admin/access-constraints/":               "hub-admin:access_constraint",
+	"GET /api/v1/admin/access-constraints/{id}/audit": "policy:audit",
 
 	// Access Constraint Previews (B7)
 	"/api/v1/admin/access-constraint-previews":  "hub-admin:access_constraint",
@@ -225,6 +226,23 @@ var routePermissionClassifications = map[string]string{
 	// Role import/export
 	"/api/v1/admin/roles/export": "hub-admin:role",
 	"/api/v1/admin/roles/import": "hub-admin:role",
+}
+
+func TestConstraintAuditRoutePermissionClassification(t *testing.T) {
+	const pattern = "GET /api/v1/admin/access-constraints/{id}/audit"
+
+	if got := routePermissionClassifications[pattern]; got != "policy:audit" {
+		t.Fatalf("permission classification for %s = %q, want %q", pattern, got, "policy:audit")
+	}
+
+	meta, ok := routeMetadataTable[pattern]
+	if !ok {
+		t.Fatalf("route metadata missing for %s", pattern)
+	}
+	if meta.Classification != RoutePolicy || meta.Permission != "hub.audit.read" {
+		t.Fatalf("route metadata for %s = classification %q, permission %q; want %q and %q",
+			pattern, meta.Classification, meta.Permission, RoutePolicy, "hub.audit.read")
+	}
 }
 
 func TestRegisteredRoutesHavePermissionClassification(t *testing.T) {

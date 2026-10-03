@@ -32,6 +32,8 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
+import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
+import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import { getLanguageFromPath } from '../code-editor.js';
 import { hashColor, getInitials } from './chat-avatar.js';
 import {
@@ -61,12 +63,6 @@ export interface AttachmentRefInfo {
 
 /** Image MIME types rendered inline. */
 const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
-
-const MESSAGE_TIME_FORMAT = new Intl.DateTimeFormat('en', {
-  hour12: false,
-  hour: '2-digit',
-  minute: '2-digit',
-});
 
 /** Non-`text/*` MIME types whose bytes are still text. */
 const TEXT_MIMES = new Set([
@@ -523,6 +519,13 @@ function styleMentions(htmlStr: string): string {
 
 @customElement('scion-chat-message')
 export class ScionChatMessage extends LitElement {
+  /**
+   * Re-renders this message when the effective display zone changes
+   * (review R2-1), so a thread already on screen when the preference
+   * loads or changes doesn't stay stuck in the browser zone.
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   /** The message body text. */
   @property()
   body = '';
@@ -1582,6 +1585,27 @@ export class ScionChatMessage extends LitElement {
       padding-top: 0.25em;
       border-top: 1px solid var(--scion-border, #e2e8f0);
     }
+
+    /* The 70%-of-row cap reads as wasted space on a phone. Removing it
+       (rather than raising it) lets the bubble grow to whatever the flex
+       layout actually has left beside the avatar: .bubble is a flex child
+       of .message-wrapper alongside the fixed-width avatar and its gap, so
+       it is already bounded by the space those leave, with no separate
+       max-width needed to keep it off the avatar's column. */
+    @media (max-width: 768px) {
+      .bubble {
+        max-width: none;
+      }
+
+      .message-wrapper {
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
+      }
+
+      .bubble-content {
+        padding: 0.625rem 0.75rem;
+      }
+    }
   `;
 
   override connectedCallback(): void {
@@ -2039,7 +2063,7 @@ export class ScionChatMessage extends LitElement {
                   ${this.routedTo
                     ? html`<span class="routed-to"> &rarr; ${this.routedTo}</span>`
                     : nothing}
-                  <span class="msg-time">${this.formatTime()}</span>
+                  <span class="msg-time" title=${this.formatTimeTitle()}>${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
                 </div>
               `
@@ -2052,7 +2076,7 @@ export class ScionChatMessage extends LitElement {
                     ? html`<span class="cross-project-label">${this.senderProjectSlug}</span>`
                     : nothing}
                   <span class="routed-to"> &rarr; ${this.routedTo}</span>
-                  <span class="msg-time">${this.formatTime()}</span>
+                  <span class="msg-time" title=${this.formatTimeTitle()}>${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
                 </div>
               `
@@ -2439,12 +2463,19 @@ export class ScionChatMessage extends LitElement {
 
   private formatTime(): string {
     if (!this.timestamp) return '';
-    try {
-      const d = new Date(this.timestamp);
-      return Number.isNaN(d.getTime()) ? 'Invalid Date' : MESSAGE_TIME_FORMAT.format(d);
-    } catch {
-      return '';
-    }
+    const formatted = formatInstant(this.timestamp, 'time');
+    return formatted || 'Invalid Date';
+  }
+
+  /**
+   * Full instant plus zone label for the `.msg-time` tooltip (review R1-3,
+   * AC4: "sees native chat timestamps in Tokyo time, with a zone label").
+   * Low-noise: surfaced as a `title`, not inline text, since every message
+   * in a thread shares the same effective zone.
+   */
+  private formatTimeTitle(): string {
+    if (!this.timestamp) return '';
+    return formatInstantWithZone(this.timestamp);
   }
 
   /** Deterministic colour from the sender ID (preferred) or slug/name fallback. */

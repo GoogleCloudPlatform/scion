@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -1125,6 +1126,67 @@ func TestReadTokenFile_Hardening(t *testing.T) {
 		got := ReadTokenFile()
 		assert.Len(t, got, tokenFileMaxBytes, "the read should be bounded to tokenFileMaxBytes")
 	})
+}
+
+// TestEnforceTokenFileOwnerChecks_DefaultIsOff proves ReadTokenFile and
+// ChownTokenFile work against a host-written token file without ever
+// calling EnforceTokenFileOwnerChecks: the owner check it gates defaults
+// to off, which is the state every unenforced caller runs in.
+func TestEnforceTokenFileOwnerChecks_DefaultIsOff(t *testing.T) {
+	home := t.TempDir()
+	cleanup := SetTokenHome(home)
+	defer cleanup()
+
+	scionDir := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(scionDir, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(scionDir, TokenFile), []byte("host-written-token\n"), 0600))
+
+	assert.Equal(t, "host-written-token", ReadTokenFile())
+	assert.NoError(t, ChownTokenFile(os.Getuid(), os.Getgid()))
+}
+
+// TestEnforceTokenFileOwnerChecks_TogglesWithoutBreakingTheLegitimateCase
+// proves turning the owner check on (an enforced caller's path) doesn't
+// disturb the always-on checks (symlink, hardlink, FIFO, directory
+// refusals — none of which depend on the owner) and still accepts the
+// legitimate same-owner case, which is what a real enforced-caller token
+// file looks like once the host has written it or ChownTokenFile has run.
+// Genuinely mismatched ownership can't be constructed without root (chown
+// to an arbitrary uid requires it), so that specific branch is exercised
+// by code reading rather than by a non-root test — the same limitation
+// every other real-fchown scenario in this package already has.
+func TestEnforceTokenFileOwnerChecks_TogglesWithoutBreakingTheLegitimateCase(t *testing.T) {
+	for _, enforced := range []bool{false, true} {
+		t.Run(strconv.FormatBool(enforced), func(t *testing.T) {
+			EnforceTokenFileOwnerChecks(enforced)
+			t.Cleanup(func() { EnforceTokenFileOwnerChecks(false) })
+
+			home := t.TempDir()
+			cleanup := SetTokenHome(home)
+			defer cleanup()
+			scionDir := filepath.Join(home, ".scion")
+			require.NoError(t, os.MkdirAll(scionDir, 0700))
+			tokenPath := filepath.Join(scionDir, TokenFile)
+
+			// Symlink and hardlink refusals are unconditional (O_NOFOLLOW /
+			// Nlink==1), so both must refuse the same way regardless of
+			// the toggle.
+			victim := filepath.Join(scionDir, "victim")
+			require.NoError(t, os.WriteFile(victim, []byte("do-not-leak"), 0600))
+			require.NoError(t, os.Symlink(victim, tokenPath))
+			assert.Equal(t, "", ReadTokenFile())
+			require.NoError(t, os.Remove(tokenPath))
+
+			require.NoError(t, os.Link(victim, tokenPath))
+			assert.Equal(t, "", ReadTokenFile())
+			require.NoError(t, os.Remove(tokenPath))
+
+			// The normal, same-owner case must succeed either way.
+			require.NoError(t, os.WriteFile(tokenPath, []byte("a-token\n"), 0600))
+			assert.Equal(t, "a-token", ReadTokenFile())
+			assert.NoError(t, ChownTokenFile(os.Getuid(), os.Getgid()))
+		})
+	}
 }
 
 // TestWriteTokenFile_Hardening exercises WriteFileNoFollowChown's

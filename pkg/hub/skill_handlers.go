@@ -1457,8 +1457,13 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 			}
 			ghResolved, err := s.resolveGitHubSkill(ctx, skillRef.URI, req.ProjectID, refSHAMemo)
 			if err != nil {
+				code := "resolve_failed"
+				var rl *agent.GitHubRateLimitError
+				if errors.As(err, &rl) {
+					code = agent.GitHubRateLimitedCode
+				}
 				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: "resolve_failed", Message: err.Error(),
+					URI: skillRef.URI, Code: code, Message: err.Error(),
 				})
 			} else {
 				resolved = append(resolved, *ghResolved)
@@ -1848,6 +1853,29 @@ func injectGHFlightJoin(cacheKey string) {
 	}
 }
 
+// ghStaleServeHook, when non-nil, is called synchronously each time
+// resolveGitHubSkill serves a stale entry, with the cache key and whether a
+// background refresh was started. Tests use it to assert that no refresh was
+// started without waiting for one. Atomic for the same reason as
+// ghFlightJoinHook.
+var ghStaleServeHook atomic.Pointer[func(cacheKey string, refreshStarted bool)]
+
+func injectGHStaleServe(cacheKey string, refreshStarted bool) {
+	if hook := ghStaleServeHook.Load(); hook != nil {
+		(*hook)(cacheKey, refreshStarted)
+	}
+}
+
+// githubCooldown returns the rate-limit cooldown tracker for gh://
+// resolution: s.ghCooldown when set (tests), else the process-wide tracker
+// shared with the broker-side resolver.
+func (s *Server) githubCooldown() *agent.GitHubCooldown {
+	if s.ghCooldown != nil {
+		return s.ghCooldown
+	}
+	return agent.SharedGitHubCooldown()
+}
+
 // resolveGitHubSkill resolves a gh:// skill URI via the Hub's GitHub resolution cache.
 // This method is called by handleSkillsResolve for gh:// URIs. It:
 //  1. Parses the gh:// URI
@@ -1859,6 +1887,12 @@ func injectGHFlightJoin(cacheKey string) {
 //  5. Otherwise calls the GitHub API to resolve commit SHA and file list,
 //     coalescing concurrent callers for the same cache key into one call
 //  6. Stores the result in the cache and returns it
+//
+// While the credential identity (the GitHub App installation, or anonymous)
+// is in a rate-limit cooldown (see agent.GitHubCooldown), a fresh or stale
+// cache entry is still served, but no background refresh is started, and a
+// miss fails at once with an *agent.GitHubRateLimitError naming the ref
+// instead of sending a request.
 //
 // refSHAMemo is a per-request memo keyed by "(owner)/(repo)@(ref):(tokenScope)"
 // that is shared across all URIs in one handleSkillsResolve call. It prevents
@@ -1911,6 +1945,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 
 	// 3. Compute cache key
 	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, installID)
+	cooldownID := agent.GitHubCooldownIdentityForInstallation(installID)
 
 	// 4. Check cache
 	if s.ghResolutionStore != nil {
@@ -1928,17 +1963,29 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 				slog.WarnContext(ctx, "github_resolution_cache: stale lookup failed",
 					"uri", rawURI, "error", staleErr)
 			} else if ok {
-				if s.recentGHRefreshFailure(cacheKey) {
+				refreshStarted := false
+				if _, cooling := s.githubCooldown().Active(cooldownID); cooling {
+					slog.WarnContext(ctx, "github_resolution_cache: serving stale entry, skipping refresh during a rate-limit cooldown",
+						"uri", rawURI, "commit_sha", safeShortSHA(stale.CommitSHA))
+				} else if s.recentGHRefreshFailure(cacheKey) {
 					slog.WarnContext(ctx, "github_resolution_cache: serving stale entry, skipping refresh after a recent failure",
 						"uri", rawURI, "commit_sha", safeShortSHA(stale.CommitSHA))
 				} else {
 					slog.InfoContext(ctx, "github_resolution_cache: serving stale entry, refreshing in background",
 						"uri", rawURI, "commit_sha", safeShortSHA(stale.CommitSHA))
+					refreshStarted = true
 					go s.refreshGitHubSkillInBackground(cacheKey, rawURI, ghRef, token, installID, isBranchRef)
 				}
+				injectGHStaleServe(cacheKey, refreshStarted)
 				return buildResolvedSkillResponse(ghRef, stale), nil
 			}
 		}
+	}
+
+	// A miss during a rate-limit cooldown fails now, without starting a
+	// flight: no request could be sent for this identity anyway.
+	if retryAt, cooling := s.githubCooldown().Active(cooldownID); cooling {
+		return nil, &agent.GitHubRateLimitError{Ref: rawURI, RetryAt: retryAt, Unauthenticated: agent.GitHubCooldownIdentityIsAnonymous(cooldownID)}
 	}
 
 	// 5. Cache miss, with no usable stale entry: coalesce concurrent misses
@@ -2001,6 +2048,10 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 	select {
 	case res := <-resultCh:
 		if res.Err != nil {
+			var rl *agent.GitHubRateLimitError
+			if errors.As(res.Err, &rl) {
+				return nil, rl.WithRef(rawURI)
+			}
 			return nil, res.Err
 		}
 		// Build the response from this caller's own ghRef, not whichever
@@ -2105,18 +2156,21 @@ func (s *Server) fetchAndCacheGitHubSkill(
 	// cannot contain "@" or ":", and Git ref names cannot contain ":". The
 	// installID suffix is the same for every URI in one request (shared
 	// projectID → shared installation) but is included for forward-safety.
+	cooldown := s.githubCooldown()
+	cooldownID := agent.GitHubCooldownIdentityForInstallation(installID)
+
 	memoKey := strings.ToLower(ghRef.Owner) + "/" + strings.ToLower(ghRef.Repo) + "@" + ghRef.Ref + ":" + installID
 	commitSHA, seen := refSHAMemo.get(memoKey)
 	if !seen {
 		var err error
-		commitSHA, err = ghResolveCommitSHA(ctx, apiBase, ghRef.Owner, ghRef.Repo, ghRef.Ref, token)
+		commitSHA, err = ghResolveCommitSHA(ctx, cooldown, cooldownID, apiBase, ghRef.Owner, ghRef.Repo, ghRef.Ref, token)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve commit SHA: %w", err)
 		}
 		refSHAMemo.set(memoKey, commitSHA)
 	}
 
-	fileEntries, err := ghListContents(ctx, apiBase, rawBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
+	fileEntries, err := ghListContents(ctx, cooldown, cooldownID, apiBase, rawBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list contents: %w", err)
 	}

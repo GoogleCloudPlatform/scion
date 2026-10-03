@@ -1897,3 +1897,29 @@ func TestExecuteAgentKeys_OperationIDUniquePerRequest(t *testing.T) {
 		t.Errorf("expected distinct operation IDs per request, got the same value twice: %q", r1.OperationID)
 	}
 }
+
+// TestExecuteAgentKeys_HumanCrossProjectWithAttach_Dispatched covers plan
+// row AK-22: unlike an agent caller (which TestAuthorizeAgentKeysCrossProject
+// pins is blanket-denied cross-project before any attach check), a human
+// caller with a genuine attach relationship on a target in a *different*
+// project than any other agent they own must still be dispatched, at the
+// full HTTP level, on both route shapes. f.owner owns both f.agentInA
+// (project A) and f.agentInB (project B); targeting f.agentInB exercises
+// exactly this "no blanket cross-project ban for humans" property end to
+// end, not just at authorizeAgentKeysCrossProject's own unit level.
+func TestExecuteAgentKeys_HumanCrossProjectWithAttach_Dispatched(t *testing.T) {
+	for _, shape := range keysRouteShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			f, d, storeSpy, events := newExecuteAgentKeysFixture(t)
+
+			rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, shape.path(f.agentInB), validKeysBody)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s: status = %d, want 200; body: %s", shape.name, rec.Code, rec.Body.String())
+			}
+			if got := d.callCount(); got != 1 {
+				t.Errorf("%s: dispatcher called %d times, want 1", shape.name, got)
+			}
+			assertNoKeysSideEffects(t, storeSpy, events)
+		})
+	}
+}

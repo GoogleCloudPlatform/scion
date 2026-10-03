@@ -207,7 +207,11 @@ func computeCacheKey(owner, repo, skillPath, ref, tokenScope string) string {
 // ghResolveCommitSHA resolves a GitHub ref (branch, tag, or SHA) to a full 40-char commit SHA.
 // If the ref is already a full 40-char lowercase hex SHA, it is returned as-is.
 // Otherwise, calls GET /repos/{owner}/{repo}/commits/{ref} with Accept: application/vnd.github.v3.sha.
-func ghResolveCommitSHA(ctx context.Context, apiBase, owner, repo, ref, token string) (string, error) {
+//
+// The request goes through cooldown for identity (see agent.GitHubCooldown):
+// while identity is rate limited no request is sent, and a rate-limit
+// response starts a cooldown; both come back as *agent.GitHubRateLimitError.
+func ghResolveCommitSHA(ctx context.Context, cooldown *agent.GitHubCooldown, identity, apiBase, owner, repo, ref, token string) (string, error) {
 	// Short-circuit if ref is already a full 40-char SHA
 	if isFullCommitSHA(ref) {
 		return ref, nil
@@ -225,7 +229,7 @@ func ghResolveCommitSHA(ctx context.Context, apiBase, owner, repo, ref, token st
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := cooldown.Do(client, req, identity)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve commit SHA for %s@%s: %w", repo, ref, err)
 	}
@@ -259,7 +263,9 @@ func ghResolveCommitSHA(ctx context.Context, apiBase, owner, repo, ref, token st
 // short-lived signed token, which would be dead long before this entry's
 // cache TTL expires. A URL built from the resolved commit SHA is permanent,
 // and the caller authenticates it with its own credential.
-func ghListContents(ctx context.Context, apiBase, rawBase, owner, repo, path, commitSHA, token string) ([]GitHubFileEntry, error) {
+//
+// Like ghResolveCommitSHA, the request goes through cooldown for identity.
+func ghListContents(ctx context.Context, cooldown *agent.GitHubCooldown, identity, apiBase, rawBase, owner, repo, path, commitSHA, token string) ([]GitHubFileEntry, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s", apiBase, owner, repo, path, commitSHA)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -272,7 +278,7 @@ func ghListContents(ctx context.Context, apiBase, rawBase, owner, repo, path, co
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := cooldown.Do(client, req, identity)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list contents for %s/%s at %s: %w", owner, repo, path, err)
 	}

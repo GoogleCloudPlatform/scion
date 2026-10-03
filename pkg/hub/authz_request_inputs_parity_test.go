@@ -3815,11 +3815,14 @@ func TestParity_R2_AncestorOnly(t *testing.T) {
 }
 
 // TestParity_R3_RelationshipGrantRestrictedByUATScope is row R3
-// ("relationship grant restricted by UAT scope | deep-equal 'relationship
-// grant restricted by ...'"). The UAT owner's ceiling does not cover
-// agent.delete, so the owner relationship would grant it but the 7a
-// restriction blocks it, producing the "relationship grant restricted by"
-// Reason prefix (decide step 9).
+// ("relationship grant restricted by UAT scope | deep-equal"). The UAT
+// owner's ceiling does not cover agent.delete, so the owner relationship
+// would grant it but the token's scope blocks it. Step 1
+// (enforceUATConstraints) evaluates the token's permission ceiling — the
+// same ceiling the 7a restriction uses — so for a UAT the scope denial
+// lands at step 1, before any relationship candidate is considered. The
+// 7a "relationship grant restricted by credential_scope" branch is still
+// exercised for agent tokens (authz_relationship_rules_test.go).
 func TestParity_R3_RelationshipGrantRestrictedByUATScope(t *testing.T) {
 	_, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -3832,11 +3835,9 @@ func TestParity_R3_RelationshipGrantRestrictedByUATScope(t *testing.T) {
 	res := Resource{Type: "agent", ID: agentID, ParentType: "project", ParentID: projectID, OwnerID: ownerID}
 
 	owner := NewAuthenticatedUser(ownerID, "r3-owner@test.com", "r3", "member", "api")
-	// Step 1 (enforceUATConstraints) checks the identity's legacy scopes
-	// list independently of the 7a ceiling restriction: the legacy list
-	// must name agent:delete so the request reaches the kernel/relationship
-	// stage at all, while the ceiling deliberately omits it so 7a is what
-	// actually blocks the owner-relationship grant.
+	// The legacy scopes list names agent:delete while the ceiling omits it:
+	// step 1 consults the ceiling, so the legacy list cannot widen the
+	// token past it.
 	ceiling, ok := permissions.BuildCeilingFromSelectors([]string{"agent:read"}) // deliberately NOT agent:delete
 	require.True(t, ok)
 	scoped := NewScopedUserIdentityWithCeiling(owner, projectID, []string{"agent:delete"}, "r3-uat", ceiling)
@@ -3848,7 +3849,7 @@ func TestParity_R3_RelationshipGrantRestrictedByUATScope(t *testing.T) {
 	refDecisions, _, _, _ := runParity(t, s, scoped, []rawTuple{{res, ActionDelete}, {res, ActionRead}})
 	require.Len(t, refDecisions, 2)
 	assert.False(t, refDecisions[0].Allowed)
-	assert.Contains(t, refDecisions[0].Reason, "relationship grant restricted by", "H2: must hit the restricted-relationship-grant branch, not a plain deny")
+	assert.Equal(t, "token does not have scope: agent:delete", refDecisions[0].Reason, "H2: the ceiling, not the legacy scopes list, must decide the step-1 scope check")
 }
 
 // =============================================================================

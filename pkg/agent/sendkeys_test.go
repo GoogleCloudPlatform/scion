@@ -386,12 +386,18 @@ func TestSendKeys_PlainErrorOnAmbiguousExecFailure(t *testing.T) {
 	if errors.Is(err, agentkeys.ErrTargetNotFound) || errors.Is(err, agentkeys.ErrAgentNotRunning) || errors.Is(err, agentkeys.ErrTerminalNotReady) || errors.Is(err, ErrKeysNotStarted) {
 		t.Fatalf("an ambiguous Exec failure must never be reported as one of the proven-before-execution sentinels, got: %v", err)
 	}
-	// The underlying error's *text* must still be discoverable (for
-	// diagnostics), but not via errors.Is/errors.As — see
-	// TestSendKeys_PostExecFailureWrappingCtxErrorIsNotErrKeysNotStarted for
-	// why the chain is deliberately broken.
-	if !strings.Contains(err.Error(), execErr.Error()) {
-		t.Fatalf("expected the underlying Exec error's text to be present, got: %v", err)
+	// The underlying error's own *text* must never appear — it may carry
+	// caller-supplied content (contract §5), and this return value is
+	// printed directly to the user by the local-mode CLI path
+	// (cmd/keys.go). Only a fixed, content-free error class
+	// (sendKeysDeliveryErrorClass) is reported, never via errors.Is/errors.As
+	// either — see TestSendKeys_PostExecFailureWrappingCtxErrorIsNotErrKeysNotStarted
+	// for why the chain is deliberately broken.
+	if strings.Contains(err.Error(), execErr.Error()) {
+		t.Fatalf("the underlying Exec error's text must not be present, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "delivery_failed") {
+		t.Fatalf("expected the sanitized error class %q, got: %v", "delivery_failed", err)
 	}
 	if errors.Is(err, execErr) {
 		t.Fatalf("the underlying Exec error must not be reachable via errors.Is (chain must be broken), got: %v", err)
@@ -494,13 +500,18 @@ func TestSendKeys_PostExecFailureWrappingCtxErrorIsNotErrKeysNotStarted(t *testi
 	// itself; that is the fix, not a gap. What must still hold is that the
 	// mock's own crafted error really did wrap context.DeadlineExceeded
 	// (confirming this test reproduces the intended repro shape) and that
-	// its text survives into SendKeys's returned error for diagnostics.
+	// SendKeys reports it via the fixed, content-free error class
+	// (sendKeysDeliveryErrorClass) rather than the mock error's own text —
+	// which, for a real backend, could carry caller-supplied content.
 	mockErr := fmt.Errorf("exec stream: %w", context.DeadlineExceeded)
 	if !errors.Is(mockErr, context.DeadlineExceeded) {
 		t.Fatal("test setup error: mock's own error does not wrap context.DeadlineExceeded")
 	}
-	if !strings.Contains(err.Error(), "context deadline exceeded") {
-		t.Fatalf("expected the underlying error's text to survive for diagnostics, got: %v", err)
+	if strings.Contains(err.Error(), "exec stream") {
+		t.Fatalf("the underlying error's own text must not be present, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "context_deadline_exceeded") {
+		t.Fatalf("expected the sanitized error class %q, got: %v", "context_deadline_exceeded", err)
 	}
 }
 
@@ -811,6 +822,17 @@ func TestTmuxOctalEscape(t *testing.T) {
 		{`"`, `\042`},
 		{`\`, `\134`},
 		{"a;b", `\141\073\142`},
+		// AK-17: shell metacharacters, with
+		// hardcoded expected octal values -- unlike the SendKeys-level and
+		// real-tmux tests (which compare against sendKeysScript's own
+		// output and so cannot independently catch an encoding regression
+		// in tmuxOctalEscape itself), this table is the one place that
+		// actually proves each byte's escape sequence, byte for byte.
+		{"$", `\044`},
+		{"`", `\140`},
+		{"|", `\174`},
+		{"$(id)", `\044\050\151\144\051`},
+		{"`id`", `\140\151\144\140`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
@@ -839,7 +861,19 @@ func TestSendKeysScript(t *testing.T) {
 // uniformly by tmuxOctalEscape. TestRealTmuxSendKeys separately proves the
 // round trip against a real tmux server.
 func TestSendKeys_StdinScriptForSpecialCharacters(t *testing.T) {
-	cases := []string{";", "abc;", `a"b`, `a\b`, "a;b;c", "line1\nline2"}
+	cases := []string{
+		";", "abc;", `a"b`, `a\b`, "a;b;c", "line1\nline2",
+		// AK-17: shell metacharacters that would
+		// matter if this payload were ever interpreted by a shell instead of
+		// octal-escaped into a tmux send-keys/paste-buffer argument. Added
+		// here because tmuxOctalEscape (TestTmuxOctalEscape) already proves
+		// byte-for-byte octal escaping is applied uniformly regardless of
+		// which byte it is, but AK-17 specifically names these bytes and
+		// asks for coverage through the full SendKeys path (this test),
+		// including the single most dangerous shape, a full command
+		// substitution.
+		"$(id)", "`id`", "a;b|c", "|", "a$(id)b", "a`id`b",
+	}
 	for _, keys := range cases {
 		t.Run(keys, func(t *testing.T) {
 			var captured []execRecord
@@ -969,6 +1003,80 @@ func TestSendKeys_MarksExecCallsSensitive(t *testing.T) {
 	for i, sensitive := range sawSensitive {
 		if !sensitive {
 			t.Errorf("Exec call %d was not marked sensitive via runtime.WithSensitiveExec", i)
+		}
+	}
+}
+
+// TestSendKeys_DeliveryFailure_SecretInBackendErrorAndOutput_NotSurfaced
+// covers the case where the delivery call itself
+// (Runtime.ExecWithStdin) fails with both a backend error and a returned
+// output string that carry the distinctive secret — the pathological case a
+// real backend should never produce (see runSimpleCommandWithStdin, which
+// only wraps the process's exit error, never its captured output, into the
+// error it returns) but that SendKeys must not trust — SendKeys's own
+// returned error string must not contain the secret either. SendKeys reports
+// only a fixed message naming the agent plus a sanitized, content-free error
+// class (sendKeysDeliveryErrorClass), never the backend error's text.
+//
+// The positive control captures the backend error directly (via
+// backendErrCh, independent of whatever SendKeys does with it) and asserts
+// it really did contain the secret — proving the mock actually exercised the
+// leak scenario, rather than this test vacuously passing because the mock
+// was never called or built an error that didn't carry the secret at all.
+func TestSendKeys_DeliveryFailure_SecretInBackendErrorAndOutput_NotSurfaced(t *testing.T) {
+	const secret = "AK-SENTINEL-manager-level-do-not-leak-7e2f"
+
+	backendErrCh := make(chan error, 1)
+	agent := runningAgent()
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			if len(cmd) > 0 && cmd[0] == "tmux" && len(cmd) > 1 && cmd[1] == "-V" {
+				return "tmux 3.3a", nil
+			}
+			// tmux has-session readiness probe: succeed.
+			return "", nil
+		},
+		ExecWithStdinFunc: func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+			// A pathological backend that embeds the secret into both its
+			// error and its returned output — unlike any real backend in
+			// this repo (which only wraps the process exit status, never
+			// output, into the error value), but exactly the worst case
+			// SendKeys's own wrapping must still not leak through.
+			backendErr := fmt.Errorf("delivery failed (output: %s)", secret)
+			backendErrCh <- backendErr
+			return secret, backendErr
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
+	if err == nil {
+		t.Fatal("expected SendKeys to return an error")
+	}
+
+	// Positive control: the backend error the mock actually constructed and
+	// returned to SendKeys must itself contain the secret — otherwise the
+	// assertions below would pass vacuously.
+	select {
+	case backendErr := <-backendErrCh:
+		if !strings.Contains(backendErr.Error(), secret) {
+			t.Fatalf("positive control failed: the mock backend's own error does not contain the secret: %v", backendErr)
+		}
+	default:
+		t.Fatal("positive control failed: ExecWithStdinFunc was never called")
+	}
+
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("SendKeys's returned error string contains the distinctive secret: %v", err)
+	}
+	// Walk the full unwrap chain too, in case some future change joins the
+	// secret in via %w at a different point in the chain.
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if strings.Contains(e.Error(), secret) {
+			t.Errorf("an error in SendKeys's wrapped chain contains the distinctive secret: %v", e)
 		}
 	}
 }
@@ -1655,5 +1763,110 @@ func TestSameTargetInstance(t *testing.T) {
 				t.Errorf("sameTargetInstance(%+v, %+v) = %v, want %v", tc.a, tc.b, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSendKeys_NoReplay_SingleExecWithStdin covers plan row A.1/A.4's gap:
+// only SendKeysLocal's own no-replay test (TestSendKeysLocal_NoReplay_ConnectionIsNotRetried)
+// counted delivery attempts; SendKeys (the non-local entry point) shares the
+// identical sendKeysCore delivery call but had no attempt-count test of its
+// own. Proves SendKeys performs exactly one ExecWithStdin call -- no
+// internal retry -- when the delivery call fails.
+func TestSendKeys_NoReplay_SingleExecWithStdin(t *testing.T) {
+	agent := runningAgent()
+	var attempts int
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			return "", nil
+		},
+		ExecWithStdinFunc: func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+			attempts++
+			return "", errors.New("simulated delivery failure")
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	if err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c"); err == nil {
+		t.Fatal("expected an error from the failing delivery call")
+	}
+	if attempts != 1 {
+		t.Fatalf("expected exactly 1 delivery attempt (no internal replay), got %d", attempts)
+	}
+}
+
+// TestSendKeys_ConcurrentWithPastedMessage_NoInterleave covers plan row
+// "serialization": SendKeys must also serialize against the buffered
+// *paste* delivery path (deliverImmediate with interrupt=false and a
+// non-empty message, which uses tmux load-buffer/paste-buffer rather than
+// send-keys) -- only the interrupt and MessageRaw paths had an interleave
+// test before this. Same sequence-contiguity technique as
+// TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave: every tmux
+// invocation (via either Exec or ExecWithStdin, since the paste path's
+// load-buffer step uses ExecWithStdin) is tagged by caller, and a
+// correctly serialized run produces exactly one transition in the recorded
+// sequence.
+func TestSendKeys_ConcurrentWithPastedMessage_NoInterleave(t *testing.T) {
+	agent := runningAgent()
+
+	var mu sync.Mutex
+	var sequence []string
+	record := func(who string) {
+		mu.Lock()
+		sequence = append(sequence, who)
+		mu.Unlock()
+	}
+	leaveDelay := 3 * time.Millisecond
+
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			record(currentCaller(ctx))
+			time.Sleep(leaveDelay)
+			return "", nil
+		},
+		ExecWithStdinFunc: func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+			record(currentCaller(ctx))
+			time.Sleep(leaveDelay)
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ctx := withCaller(context.Background(), "keys")
+		if err := mgr.SendKeys(ctx, "proj-1", "test-agent", "agent-abc", "C-c"); err != nil {
+			t.Errorf("SendKeys failed: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		ctx := withCaller(context.Background(), "paste")
+		if err := mgr.deliverImmediate(ctx, "test-agent", "proj-1", "a pasted message", false); err != nil {
+			t.Errorf("deliverImmediate (paste) failed: %v", err)
+		}
+	}()
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sequence) < 2 {
+		t.Fatalf("expected at least 2 recorded calls (one per caller), got %v", sequence)
+	}
+	transitions := 0
+	for i := 1; i < len(sequence); i++ {
+		if sequence[i] != sequence[i-1] {
+			transitions++
+		}
+	}
+	if transitions != 1 {
+		t.Fatalf("SendKeys and a pasted message interleaved their tmux calls for the same target: sequence = %v (want exactly one transition between callers, got %d)", sequence, transitions)
 	}
 }

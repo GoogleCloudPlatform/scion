@@ -23,7 +23,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -167,19 +166,18 @@ type ListAgentsResponse struct {
 	Agents     []AgentWithCapabilities `json:"agents"`
 	NextCursor string                  `json:"nextCursor,omitempty"`
 	TotalCount int                     `json:"totalCount"`
-	// Sort and Dir echo the request's sort mode (design lists-graph.md 4.6).
-	// Both are omitted unless the request supplied "sort" (4.1, 4.6):
-	// legacy-mode responses never set these.
+	// Sort and Dir echo the request's sort mode. Both are omitted unless
+	// the request supplied "sort": legacy-mode responses never set these.
 	Sort string `json:"sort,omitempty"`
 	Dir  string `json:"dir,omitempty"`
 	// Complete is set only when the request supplied "fit" (sorted mode): true
 	// iff the unphased candidate set had at most fit members, in which case
-	// Agents is its whole readable subset (design 4.6, 4.1 "fit"). A pointer
+	// Agents is its whole readable subset. A pointer
 	// so "fit not sent" (nil, omitted) is distinguishable from "fit sent,
 	// complete: false".
 	Complete *bool `json:"complete,omitempty"`
-	// Stats is populated only when the request supplied "stats=1" (design
-	// 4.6). It is computed over the request filter with Phase cleared, kept
+	// Stats is populated only when the request supplied "stats=1". It is
+	// computed over the request filter with Phase cleared, kept
 	// label/scope/projectId/broker/includeDeleted, and (project user path)
 	// read-filtered the same way the page is.
 	Stats        *ListAgentsStats `json:"stats,omitempty"`
@@ -187,20 +185,26 @@ type ListAgentsResponse struct {
 	Capabilities *Capabilities    `json:"_capabilities,omitempty"`
 }
 
-// ListAgentsStats is the sorted-mode "stats" response block (design
-// lists-graph.md 4.6).
+// ListAgentsStats is the sorted-mode "stats" response block.
 type ListAgentsStats struct {
 	// Total is the exact readable, label(k=v)-filtered count, phase NOT
-	// applied (design 4.6).
+	// applied.
 	Total int `json:"total"`
 	// Running is the count of phase == "running" among the same population,
 	// always present regardless of the request's own phase filter.
 	Running int `json:"running"`
-	// Agents is exactly the counted population as [id, phase] pairs. The
-	// project endpoint is already bounded by the 2,000 candidate ceiling
-	// (design 5.3), so it is never omitted here — the >2000 omission rule
-	// applies only to the global endpoint (P2 scope).
-	Agents [][2]string `json:"agents"`
+	// Agents is exactly the counted population as [id, phase] pairs, EXCEPT
+	// on the global endpoint when Total exceeds 2,000, where it is nil and
+	// so omitted from the response entirely. The project
+	// endpoint is already bounded by the 2,000 candidate ceiling,
+	// so it is never omitted there.
+	//
+	// A *slice, not a slice: encoding/json's omitempty on a plain slice
+	// can't distinguish "intentionally empty" (Total == 0, an empty but
+	// present array) from "omitted" (Total > 2000) — both have len 0.
+	// omitempty on a pointer checks only nilness, which is exactly the
+	// distinction this field needs.
+	Agents *[][2]string `json:"agents,omitempty"`
 }
 
 type CreateAgentRequest struct {
@@ -326,13 +330,37 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	identity := GetIdentityFromContext(ctx)
 
+	// Sorted mode validates sort and dir before either short-circuit below,
+	// so an invalid value is a 400 for every caller and the short-circuit
+	// echo only ever carries validated values. Without sort, nothing here
+	// runs and both short-circuits return the legacy empty list.
+	sorted := isSortedModeRequest(query)
+	var sortParam, dirParam string
+	if sorted {
+		var ok bool
+		if sortParam, dirParam, ok = parseSortAndDir(w, query); !ok {
+			return
+		}
+	}
+
+	// writeShortCircuit writes the empty list for an unauthenticated or
+	// None-scope caller. In sorted mode it first validates the remaining
+	// sorted parameters (fit, cursor exclusion), so an invalid fit is a 400
+	// for these callers exactly as for a caller with scope.
+	writeShortCircuit := func() {
+		var p agentListParams
+		if sorted {
+			var ok bool
+			if p, ok = parseAgentListParamsAfterSortDir(w, query, agentListLimit(query), sortParam, dirParam); !ok {
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, sortedShortCircuitResponse(p))
+	}
+
 	// RS2: Unauthenticated callers get an empty list immediately.
 	if identity == nil {
-		writeJSON(w, http.StatusOK, ListAgentsResponse{
-			Agents:     []AgentWithCapabilities{},
-			TotalCount: 0,
-			ServerTime: time.Now().UTC(),
-		})
+		writeShortCircuit()
 		return
 	}
 
@@ -350,11 +378,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	if scopeResult.Scopes.IsNone() {
 		// Legitimate no-authority result. Return empty list without querying
 		// the store. No broad resource query is issued for None.
-		writeJSON(w, http.StatusOK, ListAgentsResponse{
-			Agents:     []AgentWithCapabilities{},
-			TotalCount: 0,
-			ServerTime: time.Now().UTC(),
-		})
+		writeShortCircuit()
 		return
 	}
 
@@ -432,12 +456,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	filter.MemberProjectIDs = classification.SharedProjectIDs
 	filter.ExcludedProjectIDs = append(filter.ExcludedProjectIDs, classification.ExcludedOwnedProjectIDs...)
 
-	limit := 500
-	if l := query.Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
+	limit := agentListLimit(query)
 
 	// Finding 8: Canonicalize all set-like filter fields before hashing.
 	if len(filter.ExcludedProjectIDs) > 0 {
@@ -448,6 +467,25 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(filter.MemberProjectIDs) > 1 {
 		filter.MemberProjectIDs = canonicalizeStringSlice(filter.MemberProjectIDs)
+	}
+
+	if sorted {
+		// Sorted mode: pure SQL, race-free,
+		// no per-item read filter -- the SQL scope predicate already baked
+		// into filter above (AuthorizedProjectIDs, classification, etc.) is
+		// the authorization, exactly as the legacy branch below relies on.
+		// Dispatched after every gate and filter-building step above, so
+		// caps/messageability for returned rows run through the same
+		// identity and filter the legacy branch uses.
+		// sort and dir were already validated above; only the remaining
+		// parameters are parsed here, at the same point in the request as
+		// before, so the order of 400s is unchanged.
+		params, ok := parseAgentListParamsAfterSortDir(w, query, limit, sortParam, dirParam)
+		if !ok {
+			return
+		}
+		s.listAgentsSorted(w, r, filter, params, identity)
+		return
 	}
 
 	// RS2: Cursor binding computed AFTER authorization scope and all caller
@@ -470,28 +508,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	items, nextCursor, totalCount := result.Items, result.NextCursor, result.TotalCount
 
-	// RS2: Enrichment runs only after the authorized store result is obtained.
-	s.enrichAgents(ctx, items)
-
-	// Compute per-item and scope capabilities for authorized items.
-	agents := make([]AgentWithCapabilities, 0, len(items))
-	resources := make([]Resource, len(items))
-	for i := range items {
-		resources[i] = agentResource(&items[i])
-	}
-	for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent") {
-		item := items[i]
-		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, cap))
-		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: cap})
-	}
-
-	// Compute messageability for each agent relative to the viewer.
-	for i := range agents {
-		agents[i].Messageability = s.ComputeMessageability(ctx, identity, &agents[i].Agent)
-	}
-
-	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
-	s.addAgentCreateIfAnyProjectAllows(ctx, identity, scopeCap)
+	agents, scopeCap := s.buildGlobalAgentPage(ctx, identity, items)
 
 	writeJSON(w, http.StatusOK, ListAgentsResponse{
 		Agents:       agents,
@@ -1895,6 +1912,13 @@ func (s *Server) createAgentInProject(
 					// Broker reported missing required env vars — fail the dispatch.
 					// Clean up the provisioning agent and its files so orphaned
 					// local state doesn't trigger spurious sync-registration.
+					//
+					// DispatchAgentCreateWithGather returned this as a value, not
+					// an error, so its own revoke-on-failure defer did not fire —
+					// the credential it minted is revoked here instead, before the
+					// row is deleted (ptone/scion#1956: a create that fails after
+					// the mint must not leave the credential valid for its full TTL).
+					revokeAgentCredentialsBestEffort(ctx, s.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 					_ = dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
 					_ = s.store.DeleteAgent(ctx, agent.ID)
 					s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
@@ -2025,6 +2049,16 @@ func mergeDispatchedAgent(dst, src *store.Agent) {
 	}
 	if src.RuntimeState != "" {
 		dst.RuntimeState = src.RuntimeState
+	}
+	// A resume that hit a version conflict re-reads the row as dst and
+	// retries with src (the in-memory agent the dispatch already ran
+	// against, including the caller's clear of a stale exit reason/code
+	// from the prior generation). Carry that clear through for a running
+	// resume, the same as the other running-phase fields above — otherwise
+	// the retry's full-row write would keep dst's stale values instead.
+	if src.Phase == string(state.PhaseRunning) {
+		dst.ExitReason = src.ExitReason
+		dst.ExitCode = src.ExitCode
 	}
 }
 
@@ -3004,6 +3038,17 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 // Returns true if the broker is available (or no broker is assigned).
 // Returns false and writes a 503 error response if the broker is offline.
 func (s *Server) checkBrokerAvailability(w http.ResponseWriter, r *http.Request, agent *store.Agent) bool {
+	if s.brokerReachable(r.Context(), agent) {
+		return true
+	}
+	RuntimeBrokerUnavailable(w, agent.RuntimeBrokerID, nil)
+	return false
+}
+
+// brokerReachable reports whether the agent's runtime broker looks reachable,
+// without writing a response. It returns true when no broker is assigned, and
+// when the broker status cannot be read.
+func (s *Server) brokerReachable(ctx context.Context, agent *store.Agent) bool {
 	if agent.RuntimeBrokerID == "" {
 		return true
 	}
@@ -3014,19 +3059,14 @@ func (s *Server) checkBrokerAvailability(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Fall back to DB status check (covers co-located mode where there's no WebSocket)
-	broker, err := s.store.GetRuntimeBroker(r.Context(), agent.RuntimeBrokerID)
+	broker, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Failed to check broker status", "brokerID", agent.RuntimeBrokerID, "error", err)
 		// If we can't verify, let it through rather than blocking
 		return true
 	}
 
-	if broker.Status == store.BrokerStatusOnline {
-		return true
-	}
-
-	RuntimeBrokerUnavailable(w, agent.RuntimeBrokerID, nil)
-	return false
+	return broker.Status == store.BrokerStatusOnline
 }
 
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id string) {
@@ -3098,16 +3138,24 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		}
 	}
 
-	// Phase-aware delete: agents in "created" phase were never provisioned on the
-	// broker — no container, no workspace, no branch. Skip broker dispatch entirely
-	// and go straight to hub-side cleanup. This prevents hanging on a stale broker
-	// for agents that never left the creation phase.
-	skipBrokerDispatch := agent.Phase == string(state.PhaseCreated)
+	// Phase-aware delete: an agent in the "created" phase can still have
+	// state on its broker, in two cases:
+	//   - provision-only create: the broker provisioned it (worktree and
+	//     branch) and the agent stays in "created" until it is started;
+	//   - a start in flight: the creating request timed out before the
+	//     broker answered, and the broker may hold a pod, Secrets or
+	//     workspace files for it.
+	// Dispatch the delete on a best-effort basis, so both are removed: only
+	// when the broker looks reachable, and a dispatch error does not block
+	// removing the hub record. This keeps a stale broker from blocking the
+	// delete of an agent that never left the creation phase.
+	createdPhase := agent.Phase == string(state.PhaseCreated)
+	skipBrokerDispatch := createdPhase && !s.brokerReachable(ctx, agent)
 
 	// Verify broker is reachable before deleting to avoid orphaned containers.
 	// Force mode bypasses this check so stuck agents can always be cleaned up.
-	// Created-phase agents skip this check since they have nothing on the broker.
-	if !isManagedAgentRuntime(agent.Runtime) && !skipBrokerDispatch && !force && !s.checkBrokerAvailability(w, r, agent) {
+	// Created-phase agents skip this check: their dispatch is best-effort.
+	if !isManagedAgentRuntime(agent.Runtime) && !createdPhase && !force && !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}
 
@@ -3117,10 +3165,15 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 	now := time.Now()
 
 	// If a dispatcher is available, dispatch the deletion to the runtime broker.
-	// Skip dispatch for created-phase agents — they were never provisioned.
+	// Skip dispatch for created-phase agents whose broker is not reachable.
 	if dispatcher := s.GetDispatcher(); dispatcher != nil && agent.RuntimeBrokerID != "" && !skipBrokerDispatch {
 		if err := dispatcher.DispatchAgentDelete(ctx, agent, deleteFiles, removeBranch, softDelete, now); err != nil {
-			if force {
+			if createdPhase {
+				// Created phase: the dispatch is best-effort, continue with
+				// hub record deletion.
+				s.agentLifecycleLog.Warn("Failed to dispatch created-phase agent delete to broker (continuing)",
+					"agent_id", agent.ID, "error", err)
+			} else if force {
 				// Force mode: log warning and continue with hub record deletion
 				s.agentLifecycleLog.Warn("Failed to dispatch agent delete to broker (force=true, continuing)",
 					"agent_id", agent.ID, "error", err)
@@ -3144,7 +3197,7 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 	}
 
 	// Revoke all credentials for the deleted agent (best-effort, Phase 1H)
-	if _, err := s.store.RevokeAgentCredentialsByAgent(ctx, agent.ID, "system", "agent_deleted"); err != nil {
+	if _, err := s.store.RevokeAgentCredentialsByAgent(ctx, agent.ID, "system", agentCredentialRevokeReasonDeleted); err != nil {
 		slog.Warn("Failed to revoke agent credentials on delete", "agent_id", agent.ID, "error", err)
 	}
 
