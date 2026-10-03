@@ -23,6 +23,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
@@ -204,6 +205,7 @@ interface V1RuntimeConfig {
   list_all_namespaces?: boolean;
   env?: Record<string, string>;
   cloudrun?: V1CloudRunConfig;
+  safe_to_evict?: boolean;
 }
 
 interface V1ProfileConfig {
@@ -213,6 +215,7 @@ interface V1ProfileConfig {
   image_registry?: string;
   env?: Record<string, string>;
   resources?: ResourceSpec;
+  safe_to_evict?: boolean;
   [key: string]: unknown;
 }
 
@@ -4134,6 +4137,16 @@ export class ScionPageAdminServerConfig extends LitElement {
                   >
                   <span class="hint">List agents across all namespaces</span>
                 </div>
+                <div class="form-field">
+                  <label>Safe to Evict</label>
+                  <span class="hint"
+                    >Kubernetes only. false adds the cluster-autoscaler safe-to-evict: "false"
+                    annotation to agent pods; true adds nothing. A profile's value wins.</span
+                  >
+                  ${this.renderSafeToEvictSelect(rt.safe_to_evict, readOnly, (v) =>
+                    this.updateRuntimeSafeToEvict(name, v)
+                  )}
+                </div>
               `
             : html`
                 <div class="form-field">
@@ -4190,6 +4203,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         delete rt.namespace;
         delete rt.gke;
         delete rt.list_all_namespaces;
+        delete rt.safe_to_evict;
       } else {
         // Switching away from Cloud Run — clear cloudrun sub-object
         delete rt.cloudrun;
@@ -4197,6 +4211,56 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
     updated[name] = rt;
     this.runtimes = updated;
+  }
+
+  /**
+   * Tri-state select for safe_to_evict: empty (unset, inherit), "false" or
+   * "true". Unset and true add nothing to the pod; only false annotates it.
+   */
+  private renderSafeToEvictSelect(
+    value: boolean | undefined,
+    readOnly: boolean,
+    onChange: (v: boolean | undefined) => void
+  ): TemplateResult {
+    const current = value === false ? 'false' : value === true ? 'true' : '';
+    return html`<sl-select
+      class="safe-to-evict"
+      placeholder="Not set"
+      clearable
+      value=${current}
+      ?disabled=${readOnly}
+      @sl-change=${(e: Event) => {
+        const v = (e.target as HTMLSelectElement).value;
+        onChange(v === 'false' ? false : v === 'true' ? true : undefined);
+      }}
+    >
+      <sl-option value="false">false</sl-option>
+      <sl-option value="true">true</sl-option>
+    </sl-select>`;
+  }
+
+  private updateRuntimeSafeToEvict(name: string, value: boolean | undefined): void {
+    const updated = { ...this.runtimes };
+    const rt = { ...updated[name] };
+    if (value === undefined) {
+      delete rt.safe_to_evict;
+    } else {
+      rt.safe_to_evict = value;
+    }
+    updated[name] = rt;
+    this.runtimes = updated;
+  }
+
+  private updateProfileSafeToEvict(name: string, value: boolean | undefined): void {
+    const updated = { ...this.profiles };
+    const profile = { ...updated[name] };
+    if (value === undefined) {
+      delete profile.safe_to_evict;
+    } else {
+      profile.safe_to_evict = value;
+    }
+    updated[name] = profile;
+    this.profiles = updated;
   }
 
   private updateRuntimeBool(
@@ -4362,6 +4426,16 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+          </div>
+          <div class="form-field">
+            <label>Safe to Evict</label>
+            <span class="hint"
+              >Kubernetes only. false adds the cluster-autoscaler safe-to-evict: "false" annotation
+              to agent pods; true adds nothing. Empty uses the runtime's value.</span
+            >
+            ${this.renderSafeToEvictSelect(profile.safe_to_evict, readOnly, (v) =>
+              this.updateProfileSafeToEvict(name, v)
+            )}
           </div>
           <div class="form-field">
             <label>CPU Request</label>
