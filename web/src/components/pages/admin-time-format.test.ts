@@ -109,9 +109,17 @@ describe('admin and access-boundary time formatting (tz-refactor task 20)', () =
       page.formatSchedule({
         appliesWhen: { notBefore: TOKYO_MIDNIGHT, expiresAt: '2026-09-30T23:15:00Z' },
       })
-    ).toBe('From Sep 24, 00:00 Until Oct 1, 08:15 (Asia/Tokyo)');
+    ).toBe('From Sep 24, 2026, 00:00 Until Oct 1, 2026, 08:15 (Asia/Tokyo)');
     expect(page.formatSchedule({ appliesWhen: { expiresAt: TOKYO_MIDNIGHT } })).toBe(
-      'Until Sep 24, 00:00 (Asia/Tokyo)'
+      'Until Sep 24, 2026, 00:00 (Asia/Tokyo)'
+    );
+    // A bound that does not parse falls back to its raw value; the zone label
+    // stays only while the other bound was converted.
+    expect(
+      page.formatSchedule({ appliesWhen: { notBefore: 'bogus', expiresAt: TOKYO_MIDNIGHT } })
+    ).toBe('From bogus Until Sep 24, 2026, 00:00 (Asia/Tokyo)');
+    expect(page.formatSchedule({ appliesWhen: { notBefore: 'bogus', expiresAt: 'junk' } })).toBe(
+      'From bogus Until junk'
     );
     expect(page.formatSchedule({ appliesWhen: null })).toBe('Always');
     expect(page.formatSchedule({ appliesWhen: {} })).toBe('Always');
@@ -145,8 +153,8 @@ describe('admin and access-boundary time formatting (tz-refactor task 20)', () =
 
   it('metrics dashboard numbers format through formatNumber', () => {
     const page = el('scion-page-metrics');
-    expect(page.formatNumber(999)).toBe('999');
-    expect(page.formatNumber(12_345)).toBe('12.3K');
-    expect(page.formatNumber(2_500_000)).toBe('2.5M');
+    expect(page.formatCompactNumber(999)).toBe('999');
+    expect(page.formatCompactNumber(12_345)).toBe('12.3K');
+    expect(page.formatCompactNumber(2_500_000)).toBe('2.5M');
   });
 });

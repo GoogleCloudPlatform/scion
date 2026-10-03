@@ -1198,10 +1198,14 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
     if (!schedule) return 'Always';
     const { notBefore, expiresAt } = schedule;
     if (!notBefore && !expiresAt) return 'Always';
+    const from = notBefore ? formatInstant(notBefore, 'datetime-full') : '';
+    const until = expiresAt ? formatInstant(expiresAt, 'datetime-full') : '';
     const parts: string[] = [];
-    if (notBefore) parts.push(`From ${formatInstant(notBefore) || notBefore}`);
-    if (expiresAt) parts.push(`Until ${formatInstant(expiresAt) || expiresAt}`);
-    return `${parts.join(' ')} (${zoneLabel()})`;
+    if (notBefore) parts.push(`From ${from || notBefore}`);
+    if (expiresAt) parts.push(`Until ${until || expiresAt}`);
+    // One zone label for both bounds, and only when at least one of them was
+    // actually converted (an unparsable raw value is not in any zone).
+    return from || until ? `${parts.join(' ')} (${zoneLabel()})` : parts.join(' ');
   }
 
   private get canCreate(): boolean {
