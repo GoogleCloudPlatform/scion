@@ -15,12 +15,20 @@
 package runtimebroker
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // These tests pin that a start or restart of an existing agent whose saved
@@ -28,28 +36,61 @@ import (
 // the agent on the broker's default runtime, while a start that names no
 // profile keeps the default (ptone/scion#2709).
 
-// stubRuntimeSettings replaces the settings resolveManagerForOptsStrict
-// reads for the duration of the test.
-func stubRuntimeSettings(t *testing.T, fn func(string) (*config.VersionedSettings, []string, error)) {
-	t.Helper()
-	orig := loadRuntimeSettings
-	loadRuntimeSettings = fn
-	t.Cleanup(func() { loadRuntimeSettings = orig })
+// lockedBuffer is a bytes.Buffer safe for a logger and a test to share.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
 }
 
-func TestStartAgent_UnresolvableSavedProfileReturns503(t *testing.T) {
-	cases := []struct {
-		name     string
-		settings func(string) (*config.VersionedSettings, []string, error)
-		wantMsg  string
-	}{
-		{name: "profile missing", wantMsg: "not found"},
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureLifecycleLog sends srv's agent lifecycle log to the returned buffer.
+func captureLifecycleLog(srv *Server) *lockedBuffer {
+	buf := &lockedBuffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(buf, nil))
+	return buf
+}
+
+// secretSettingsPath stands in for the absolute settings path an OS error
+// from the real loader carries.
+const secretSettingsPath = "/secret/dir/settings.yaml"
+
+// unresolvedCase is one way a saved profile can fail to resolve.
+type unresolvedCase struct {
+	name string
+	// settings replaces the settings loader; nil uses the real loader
+	// against the fixture's project, which does not define "vanished".
+	settings func(string) (*config.VersionedSettings, []string, error)
+	// noSettingsFile removes the project's settings.yaml first.
+	noSettingsFile bool
+	wantMsg        string
+	// absent must not appear in the response body.
+	absent []string
+	// wantLog must appear in the Warn log entry.
+	wantLog string
+}
+
+func unresolvedCases() []unresolvedCase {
+	return []unresolvedCase{
+		{name: "profile missing", wantMsg: `profile \"vanished\" not found`, wantLog: "not found"},
 		{
 			name: "settings load fails",
 			settings: func(string) (*config.VersionedSettings, []string, error) {
-				return nil, nil, errors.New("malformed settings")
+				return nil, nil, errors.New("open " + secretSettingsPath + ": permission denied")
 			},
-			wantMsg: "malformed settings",
+			wantMsg: "project settings could not be loaded",
+			absent:  []string{"/secret/dir", "permission denied"},
+			wantLog: secretSettingsPath,
 		},
 		{
 			name: "no settings",
@@ -57,30 +98,86 @@ func TestStartAgent_UnresolvableSavedProfileReturns503(t *testing.T) {
 				return nil, nil, nil
 			},
 			wantMsg: "no project settings found",
+			wantLog: "no project settings found",
+		},
+		{
+			// The real loader layers the embedded defaults, so a project
+			// with no settings file on disk fails as "profile not found".
+			name:           "no settings file on disk",
+			noSettingsFile: true,
+			wantMsg:        `profile \"vanished\" not found`,
+			wantLog:        "not found",
 		},
 	}
-	for _, tc := range cases {
+}
+
+func (tc unresolvedCase) apply(t *testing.T, f *lifecycleFixture) {
+	t.Helper()
+	if tc.settings != nil {
+		f.srv.loadSettings = tc.settings
+	}
+	if tc.noSettingsFile {
+		if err := os.Remove(filepath.Join(f.projectPath, "settings.yaml")); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// assertSavedProfileUnresolved checks the 503 shape, the body and the
+// single server-side log entry for tc.
+func assertSavedProfileUnresolved(t *testing.T, tc unresolvedCase, w *httptest.ResponseRecorder, logs *lockedBuffer, projectPath string) {
+	t.Helper()
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+	if got := w.Header().Get("Retry-After"); got != "30" {
+		t.Errorf("Retry-After = %q, want 30", got)
+	}
+	body := w.Body.String()
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode body: %v: %s", err, body)
+	}
+	if resp.Error.Code != ErrCodeRuntimeUnavailable {
+		t.Errorf("code = %q, want %q", resp.Error.Code, ErrCodeRuntimeUnavailable)
+	}
+	if !strings.Contains(body, "vanished") || !strings.Contains(body, tc.wantMsg) {
+		t.Errorf("body does not name the profile and cause %q: %s", tc.wantMsg, body)
+	}
+	for _, s := range append([]string{projectPath}, tc.absent...) {
+		if strings.Contains(body, s) {
+			t.Errorf("body contains %q: %s", s, body)
+		}
+	}
+	entries := 0
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "saved runtime profile cannot be resolved") {
+			entries++
+			for _, want := range []string{"level=WARN", "agent=", "profile=vanished", "projectDir=", tc.wantLog} {
+				if !strings.Contains(line, want) {
+					t.Errorf("log entry missing %q: %s", want, line)
+				}
+			}
+		}
+	}
+	if entries != 1 {
+		t.Errorf("unresolved profile log entries = %d, want 1:\n%s", entries, logs.String())
+	}
+}
+
+func TestStartAgent_UnresolvableSavedProfileReturns503(t *testing.T) {
+	for _, tc := range unresolvedCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newLifecycleFixture(t)
+			logs := captureLifecycleLog(f.srv)
 			const name = "saved-profile-agent"
 			writeSavedAgentProfile(t, f.projectPath, name, "vanished")
-			if tc.settings != nil {
-				stubRuntimeSettings(t, tc.settings)
-			}
+			tc.apply(t, f)
 
 			w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/start", map[string]any{
 				"projectPath": f.projectPath,
 			})
-			if w.Code != http.StatusServiceUnavailable {
-				t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
-			}
-			if got := w.Header().Get("Retry-After"); got != "30" {
-				t.Errorf("Retry-After = %q, want 30", got)
-			}
-			body := w.Body.String()
-			if !strings.Contains(body, "vanished") || !strings.Contains(body, tc.wantMsg) {
-				t.Errorf("body does not name the profile and cause %q: %s", tc.wantMsg, body)
-			}
+			assertSavedProfileUnresolved(t, tc, w, logs, f.projectPath)
 			if f.defaultMgr.StartCalls() != 0 {
 				t.Errorf("default runtime Start calls = %d, want 0", f.defaultMgr.StartCalls())
 			}
@@ -91,23 +188,57 @@ func TestStartAgent_UnresolvableSavedProfileReturns503(t *testing.T) {
 	}
 }
 
-// TestRestartAgent_UnresolvableSavedProfileReturns503: the restart fails
-// before its stop, so the running agent is left untouched.
+// TestRestartAgent_UnresolvableSavedProfileReturns503: the broker restart
+// endpoint fails before its stop, so the running agent is left untouched.
 func TestRestartAgent_UnresolvableSavedProfileReturns503(t *testing.T) {
-	f := newLifecycleFixture(t)
-	const name = "restart-saved-profile"
-	writeSavedAgentProfile(t, f.projectPath, name, "vanished")
-	f.defaultMgr.agents = append(f.defaultMgr.agents, lifecycleAgent(name, f.projectPath, ""))
+	for _, tc := range unresolvedCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLifecycleFixture(t)
+			logs := captureLifecycleLog(f.srv)
+			const name = "restart-saved-profile"
+			writeSavedAgentProfile(t, f.projectPath, name, "vanished")
+			f.defaultMgr.agents = append(f.defaultMgr.agents, lifecycleAgent(name, f.projectPath, ""))
+			tc.apply(t, f)
 
-	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/restart", map[string]any{})
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+			w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/restart", map[string]any{})
+			assertSavedProfileUnresolved(t, tc, w, logs, f.projectPath)
+			if f.defaultMgr.stopCalls != 0 || f.defaultMgr.StartCalls() != 0 {
+				t.Errorf("default runtime used: stop=%d start=%d", f.defaultMgr.stopCalls, f.defaultMgr.StartCalls())
+			}
+		})
 	}
-	if !strings.Contains(w.Body.String(), "vanished") {
-		t.Errorf("body does not name the profile: %s", w.Body.String())
-	}
-	if f.defaultMgr.stopCalls != 0 || f.defaultMgr.StartCalls() != 0 {
-		t.Errorf("default runtime used: stop=%d start=%d", f.defaultMgr.stopCalls, f.defaultMgr.StartCalls())
+}
+
+// TestStartAgent_UnresolvableSavedProfileOnKubernetesDefaultBroker: on a
+// broker whose default runtime is Kubernetes, a vanished saved profile
+// with an explicit "block" GCP metadata mode returns the 503, not the
+// Kubernetes/"block" 400 that classifying against the default runtime
+// would give.
+func TestStartAgent_UnresolvableSavedProfileOnKubernetesDefaultBroker(t *testing.T) {
+	clearSCIONEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	projectPath := newDockerProject(t)
+	const name = "k8s-default-saved-profile"
+	writeSavedAgentProfile(t, projectPath, name, "vanished")
+
+	cfg := DefaultServerConfig()
+	cfg.BrokerID = "test-broker-id"
+	cfg.BrokerName = "test-host"
+	cfg.StateDir = t.TempDir()
+	cfg.ContainerHubEndpoint = lifecycleBridge
+	mgr := &filteringMockManager{}
+	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }})
+	logs := captureLifecycleLog(srv)
+
+	w := lifecyclePost(t, srv, "/api/v1/agents/"+name+"/start", map[string]any{
+		"projectPath": projectPath,
+		"hubEndpoint": lifecycleHubEndpoint,
+		"resolvedEnv": map[string]string{"SCION_METADATA_MODE": "block"},
+	})
+	tc := unresolvedCase{wantMsg: `profile \"vanished\" not found`, wantLog: "not found"}
+	assertSavedProfileUnresolved(t, tc, w, logs, projectPath)
+	if mgr.StartCalls() != 0 {
+		t.Errorf("default runtime Start calls = %d, want 0", mgr.StartCalls())
 	}
 }
 
@@ -131,7 +262,7 @@ func TestStartAgent_NoSavedProfileKeepsDefault(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newLifecycleFixture(t)
 			if tc.settings != nil {
-				stubRuntimeSettings(t, tc.settings)
+				f.srv.loadSettings = tc.settings
 			}
 			w := lifecyclePost(t, f.srv, "/api/v1/agents/fresh-agent/start", map[string]any{
 				"projectPath": f.projectPath,

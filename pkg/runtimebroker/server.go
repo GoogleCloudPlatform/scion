@@ -271,6 +271,12 @@ type Server struct {
 	// the API server.
 	resolveAuxiliaryRuntime func(projectPath, agentName, profileFlag string) scionrt.Runtime
 
+	// loadSettings, when non-nil, replaces config.LoadEffectiveSettings in
+	// resolveManagerForOptsStrict (handlers.go). nil, the default, uses the
+	// real loader; tests set it per fixture to exercise each settings
+	// outcome.
+	loadSettings func(projectDir string) (*config.VersionedSettings, []string, error)
+
 	// projectProvisionMu serializes worktree provisioning per project on this
 	// node. Without this, concurrent agent creations for the same project could
 	// race inside ProvisionShared (double-clone / corrupt .git state).

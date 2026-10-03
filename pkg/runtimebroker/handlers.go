@@ -4251,9 +4251,14 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 // than running the agent on the broker's default runtime (ptone/scion#2709).
 var errSavedProfileUnresolved = errors.New("saved runtime profile cannot be resolved")
 
-// loadRuntimeSettings loads the settings resolveManagerForOptsStrict reads.
-// It is a variable so tests can exercise each settings outcome.
-var loadRuntimeSettings = config.LoadEffectiveSettings
+// loadRuntimeSettings loads the settings resolveManagerForOptsStrict reads:
+// s.loadSettings when a test sets it, config.LoadEffectiveSettings otherwise.
+func (s *Server) loadRuntimeSettings(projectDir string) (*config.VersionedSettings, []string, error) {
+	if s.loadSettings != nil {
+		return s.loadSettings(projectDir)
+	}
+	return config.LoadEffectiveSettings(projectDir)
+}
 
 // resolveManagerForOptsStrict is resolveManagerForOpts with an error result.
 // With strict set, used when opts.Profile is an existing agent's saved
@@ -4261,6 +4266,11 @@ var loadRuntimeSettings = config.LoadEffectiveSettings
 // the settings do not define returns errSavedProfileUnresolved instead of
 // the broker's default manager. Without strict the error is always nil and
 // those cases fall back to the default, as for a fresh start.
+//
+// The returned error is sent to the client, so it names only the agent,
+// the profile and a fixed cause; it does not include file paths or
+// settings content. The full detail is logged here at Warn, once per
+// failure.
 func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, strict bool) (agent.Manager, string, error) {
 	if s.config.ForceRuntime != "" {
 		if s.config.ForceRuntime == s.runtime.Name() {
@@ -4282,17 +4292,23 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, strict bool)
 	// back to the broker's default runtime either way, but a malformed
 	// settings file should leave a trace.
 	projectDir, _ := config.GetResolvedProjectDir(opts.ProjectPath)
-	vs, _, err := loadRuntimeSettings(projectDir)
+	vs, _, err := s.loadRuntimeSettings(projectDir)
 	if err != nil && strict {
-		return nil, "", fmt.Errorf("%w: agent %q profile %q: loading project settings: %v",
-			errSavedProfileUnresolved, opts.Name, opts.Profile, err)
+		s.logSavedProfileUnresolved(opts, projectDir, err)
+		return nil, "", fmt.Errorf("%w: agent %q profile %q: project settings could not be loaded",
+			errSavedProfileUnresolved, opts.Name, opts.Profile)
 	}
 	if err != nil {
 		s.agentLifecycleLog.Warn("failed to load project settings for runtime resolution; using broker default runtime",
 			"projectDir", projectDir, "error", err)
 	}
 	if vs == nil {
+		// Defensive: LoadEffectiveSettings returns non-nil settings
+		// whenever err is nil (it layers the embedded defaults), so a
+		// project with no settings file reaches ResolveRuntime below and
+		// fails there with "profile not found" instead.
 		if strict {
+			s.logSavedProfileUnresolved(opts, projectDir, errors.New("no project settings found"))
 			return nil, "", fmt.Errorf("%w: agent %q profile %q: no project settings found",
 				errSavedProfileUnresolved, opts.Name, opts.Profile)
 		}
@@ -4313,6 +4329,9 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, strict bool)
 	rtConfig, runtimeType, err := vs.ResolveRuntime(opts.Profile)
 	if err != nil {
 		if strict {
+			s.logSavedProfileUnresolved(opts, projectDir, err)
+			// ResolveRuntime's errors name only the profile and runtime
+			// ("profile %q not found", "runtime %q not found for profile %q").
 			return nil, "", fmt.Errorf("%w: agent %q: %v", errSavedProfileUnresolved, opts.Name, err)
 		}
 		// Profile or its runtime not found in settings; use default
@@ -4408,6 +4427,13 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, strict bool)
 	s.auxiliaryRuntimesMu.Unlock()
 
 	return mgr, resolved.Name(), nil
+}
+
+// logSavedProfileUnresolved records why a saved profile could not be
+// resolved, with the detail the client response leaves out.
+func (s *Server) logSavedProfileUnresolved(opts api.StartOptions, projectDir string, err error) {
+	s.agentLifecycleLog.Warn("saved runtime profile cannot be resolved; refusing to use the broker default runtime",
+		"agent", opts.Name, "profile", opts.Profile, "projectDir", projectDir, "error", err)
 }
 
 // writeSavedProfileUnresolved writes errSavedProfileUnresolved as a
