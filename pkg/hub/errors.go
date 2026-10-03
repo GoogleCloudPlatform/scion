@@ -549,16 +549,22 @@ func writeBrokerRuntimeUnavailable(w http.ResponseWriter, err error, runtime str
 	if !isBrokerRuntimeUnavailable(err) {
 		return false
 	}
-	retryAfter := defaultBrokerRuntimeRetryAfter
+	w.Header().Set("Retry-After", brokerRuntimeRetryAfter(err))
+	writeError(w, http.StatusServiceUnavailable, brokerCodeRuntimeUnavailable, brokerRuntimeUnavailableMessage(runtime), nil)
+	return true
+}
+
+// brokerRuntimeRetryAfter is the Retry-After to send for a broker's
+// runtime_unavailable answer: the broker's value if it is a positive number
+// of seconds, otherwise defaultBrokerRuntimeRetryAfter.
+func brokerRuntimeRetryAfter(err error) string {
 	var se *brokerStatusError
 	if errors.As(err, &se) {
 		if n, convErr := strconv.Atoi(strings.TrimSpace(se.RetryAfter)); convErr == nil && n > 0 {
-			retryAfter = strconv.Itoa(n)
+			return strconv.Itoa(n)
 		}
 	}
-	w.Header().Set("Retry-After", retryAfter)
-	writeError(w, http.StatusServiceUnavailable, brokerCodeRuntimeUnavailable, brokerRuntimeUnavailableMessage(runtime), nil)
-	return true
+	return defaultBrokerRuntimeRetryAfter
 }
 
 // brokerRuntimeUnavailableMessage is the hub's client-facing text for a

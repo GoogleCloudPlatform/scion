@@ -391,6 +391,53 @@ func TestRecordedRuntime_RestartStartLegFailureRecordsStopped(t *testing.T) {
 	require.True(t, published, "no stopped status event was published")
 }
 
+// TestRecordedRuntime_DeleteRuntimeUnavailableRollsBack pins the delete
+// engine's handling of a broker's runtime_unavailable answer: the delete is
+// rolled back (prior phase restored, failed with code runtime_unavailable),
+// the caller and a joiner of that delete get a 503 with the broker's
+// Retry-After (a joiner with no remembered value gets the default), and a
+// retry once the runtime is available deletes the agent.
+func TestRecordedRuntime_DeleteRuntimeUnavailableRollsBack(t *testing.T) {
+	brokerErr := &brokerStatusError{StatusCode: http.StatusServiceUnavailable, Body: brokerRuntimeUnavailableBody, RetryAfter: "7"}
+	srv, s, agent, mockClient := setupRuntimeUnavailableAgent(t, "delete-rollback", brokerErr)
+	ctx := context.Background()
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	require.Equal(t, "7", rec.Header().Get("Retry-After"), "the broker's Retry-After is passed through")
+	require.Contains(t, rec.Body.String(), brokerCodeRuntimeUnavailable)
+	require.True(t, mockClient.deleteCalled)
+
+	got, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err, "hub record must remain after a non-force delete failed")
+	require.Equal(t, "running", got.Phase, "the prior phase is restored")
+	require.Equal(t, store.DeletionStateFailed, got.DeletionState)
+	require.Equal(t, store.DeletionCodeRuntimeUnavailable, got.DeletionCode)
+
+	// A joiner of that delete answers the same 503 and Retry-After.
+	joined := httptest.NewRecorder()
+	require.True(t, srv.resolveJoinFromRow(joined, ctx, agent.ID, got.DeletionClaim))
+	require.Equal(t, http.StatusServiceUnavailable, joined.Code, joined.Body.String())
+	require.Equal(t, "7", joined.Header().Get("Retry-After"))
+	require.Contains(t, joined.Body.String(), brokerCodeRuntimeUnavailable)
+
+	// A joiner on a hub process that did not classify the failure has no
+	// remembered value and sends the default.
+	deletionRetryAfter.Delete(agent.ID)
+	joined = httptest.NewRecorder()
+	require.True(t, srv.resolveJoinFromRow(joined, ctx, agent.ID, got.DeletionClaim))
+	require.Equal(t, http.StatusServiceUnavailable, joined.Code, joined.Body.String())
+	require.Equal(t, defaultBrokerRuntimeRetryAfter, joined.Header().Get("Retry-After"))
+
+	// The runtime is registered again: a retry deletes the agent.
+	mockClient.returnErr = nil
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	_, err = s.GetAgent(ctx, agent.ID)
+	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
 // TestRecordedRuntime_ForceDeleteRemovesHubRecord pins that force=true still
 // removes the hub record when the broker answers 503 for an unavailable
 // runtime.
