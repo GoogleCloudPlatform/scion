@@ -1452,14 +1452,23 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 	if requestedBrokerID != "" {
 		// Check if the requested broker is a provider to this project (by ID, Name, or Slug)
 		for _, p := range allProviders {
-			if p.BrokerID == requestedBrokerID || p.BrokerName == requestedBrokerID {
-				return p.BrokerID, nil
-			}
-			// Fetch broker to check slug
 			broker, err := s.store.GetRuntimeBroker(ctx, p.BrokerID)
-			if err == nil && broker.Slug == requestedBrokerID {
-				return broker.ID, nil
+			matched := p.BrokerID == requestedBrokerID || p.BrokerName == requestedBrokerID ||
+				(err == nil && broker.Slug == requestedBrokerID)
+			if !matched {
+				continue
 			}
+			// The broker exists but is offline: refuse at resolution, before
+			// any agent row is created (ptone/scion#2715). If the broker
+			// record cannot be read, let it through, as brokerReachable does.
+			if err == nil && !s.brokerRecordReachable(broker) {
+				slog.Warn("Requested broker is offline during agent creation",
+					"requestedBrokerID", requestedBrokerID, "brokerID", broker.ID,
+					"status", broker.Status, "project_id", project.ID)
+				RuntimeBrokerUnavailable(w, requestedBrokerID, brokerSummaries)
+				return "", store.ErrNotFound
+			}
+			return p.BrokerID, nil
 		}
 
 		// Broker is not yet a provider — try to auto-link it.
@@ -1484,6 +1493,16 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			if !decision.Allowed {
 				logAuthzDenial(nil, identity, projectResource(project), ActionUpdate, decision.Reason)
 				writeForbiddenStructured(w, "", projectResource(project).Type, ActionUpdate)
+				return "", store.ErrNotFound
+			}
+
+			// Do not link (or dispatch to) a broker that exists but is
+			// offline: 503 before anything is written (ptone/scion#2715).
+			if !s.brokerRecordReachable(broker) {
+				slog.Warn("Requested broker is offline during agent creation",
+					"requestedBrokerID", requestedBrokerID, "brokerID", broker.ID,
+					"status", broker.Status, "project_id", project.ID)
+				RuntimeBrokerUnavailable(w, requestedBrokerID, brokerSummaries)
 				return "", store.ErrNotFound
 			}
 

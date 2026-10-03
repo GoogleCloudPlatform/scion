@@ -594,8 +594,11 @@ requested broker and lists the brokers the caller can use for the project
 ```
 
 An existing broker that is not yet a provider is auto-linked, if the caller
-may update the project. The historical example below shows the 503 for a
-broker that could not be linked:
+may update the project. A named broker that exists but is offline (not
+connected over the control channel and not `online` in the store) gets
+`503 runtime_broker_unavailable` at resolution, before any agent row is
+created or any provider link is written. The same 503 is returned when
+auto-linking fails:
 
 ```bash
 curl -s -X POST http://localhost:9810/api/v1/agents \

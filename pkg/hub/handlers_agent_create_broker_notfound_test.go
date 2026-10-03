@@ -88,11 +88,10 @@ func TestResolveRuntimeBroker_UnknownBroker_NoUsableBrokers(t *testing.T) {
 	assert.Contains(t, resp.Error.Message, "no runtime brokers are currently available")
 }
 
-// An explicitly named broker that exists but is offline is NOT reported as
-// not found. On the create path resolveRuntimeBroker returns it (no status
-// check at resolution); any failure surfaces later at dispatch. This pins the
-// existing behaviour so the 404 change cannot swallow offline brokers.
-func TestResolveRuntimeBroker_ExistingOfflineBroker_NotNotFound(t *testing.T) {
+// An explicitly named broker that exists but is offline gets 503
+// runtime_broker_unavailable at resolution (not 404), whether it is named by
+// ID, name or slug.
+func TestResolveRuntimeBroker_ExistingOfflineProvider_Returns503(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -111,10 +110,71 @@ func TestResolveRuntimeBroker_ExistingOfflineBroker_NotNotFound(t *testing.T) {
 	for _, ref := range []string{offline.ID, offline.Name, offline.Slug} {
 		w := httptest.NewRecorder()
 		brokerID, err := srv.resolveRuntimeBroker(devUserContext(ctx), w, ref, project)
-		require.NoError(t, err, "ref=%q", ref)
-		assert.Equal(t, offline.ID, brokerID, "ref=%q", ref)
-		assert.NotEqual(t, http.StatusNotFound, w.Code)
+		require.Error(t, err, "ref=%q", ref)
+		assert.Empty(t, brokerID, "ref=%q", ref)
+		require.Equal(t, http.StatusServiceUnavailable, w.Code, "ref=%q", ref)
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Equal(t, ErrCodeRuntimeBrokerUnavail, resp.Error.Code, "ref=%q", ref)
 	}
+}
+
+// End to end through the create route: an offline explicit broker is refused
+// with 503 before any agent row is created, and nothing is dispatched.
+func TestCreateAgent_ExplicitOfflineBroker_Returns503NoAgentRow(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	ctx := context.Background()
+
+	offline := &store.RuntimeBroker{
+		ID: tid("create-off-broker"), Name: "Create Offline Broker", Slug: "create-offline-broker",
+		Status: store.BrokerStatusOffline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, offline))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: offline.ID, BrokerName: offline.Name,
+		Status: store.BrokerStatusOffline,
+	}))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
+		Name:            "offline-broker-agent",
+		Task:            "do something",
+		RuntimeBrokerID: offline.Slug,
+	})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, ErrCodeRuntimeBrokerUnavail, resp.Error.Code)
+
+	_, err := s.GetAgentBySlug(ctx, project.ID, "offline-broker-agent")
+	assert.True(t, errors.Is(err, store.ErrNotFound), "no agent row may be created, got %v", err)
+}
+
+// An existing offline broker that is not yet a provider is neither linked
+// nor reported as not found: 503, and no provider row is written.
+func TestResolveRuntimeBroker_ExistingOfflineNonProvider_Returns503NoLink(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("nf-offlink-project"), Slug: "nf-offlink", Name: "NF Offline Link"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	offline := &store.RuntimeBroker{
+		ID: tid("nf-offlink-broker"), Name: "Offline Unlinked Broker", Slug: "offline-unlinked-broker",
+		Status: store.BrokerStatusOffline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, offline))
+
+	w := httptest.NewRecorder()
+	brokerID, err := srv.resolveRuntimeBroker(devUserContext(ctx), w, offline.Slug, project)
+	require.Error(t, err)
+	assert.Empty(t, brokerID)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+
+	_, err = s.GetProjectProvider(ctx, project.ID, offline.ID)
+	assert.True(t, errors.Is(err, store.ErrNotFound), "offline broker must not be auto-linked, got %v", err)
+	updated, err := s.GetProject(ctx, project.ID)
+	require.NoError(t, err)
+	assert.Empty(t, updated.DefaultRuntimeBrokerID, "offline broker must not become the project default")
 }
 
 // findBrokerByIDOrSlug really resolves by slug, so an explicit --broker <slug>
