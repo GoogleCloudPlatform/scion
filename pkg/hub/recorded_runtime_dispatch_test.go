@@ -356,3 +356,18 @@ func TestWriteBrokerRuntimeUnavailable_RetryAfter(t *testing.T) {
 	require.False(t, writeBrokerRuntimeUnavailable(rec, errors.New("boom"), "kubernetes"))
 	require.Equal(t, http.StatusOK, rec.Code, "nothing may be written for other errors")
 }
+
+// TestRecordedRuntime_ExecuteAgentKeysPassesAgentRuntime pins that the keys
+// route hands the agent's recorded runtime to the dispatcher, which sends it
+// to the broker (see TestRecordedRuntime_DispatchSendsSignedParamOverHTTP).
+func TestRecordedRuntime_ExecuteAgentKeysPassesAgentRuntime(t *testing.T) {
+	f, d, _, _ := newExecuteAgentKeysFixture(t)
+	f.agentInA.Runtime = "kubernetes"
+	require.NoError(t, f.store.UpdateAgent(context.Background(), f.agentInA))
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+f.agentInA.ID+"/keys", validKeysBody)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, 1, d.callCount())
+	require.Equal(t, "kubernetes", d.lastReq.target.Runtime)
+}

@@ -449,3 +449,41 @@ func TestRecordedRuntime_SignatureCoversParam(t *testing.T) {
 		})
 	}
 }
+
+// TestRecordedRuntime_OtherAuxiliaryRuntimeIsNotUsed pins that the
+// restriction also applies among auxiliary runtimes: an auxiliary runtime of
+// another type that sorts first and holds a same-slug agent is never listed
+// or acted on.
+func TestRecordedRuntime_OtherAuxiliaryRuntimeIsNotUsed(t *testing.T) {
+	for _, op := range []string{"stop", "delete"} {
+		t.Run(op, func(t *testing.T) {
+			srv, defaultMgr, k8sMgr := newRecordedRuntimeServer(t, true)
+			otherMgr := &listCountingManager{}
+			otherMgr.agents = []api.AgentInfo{rrAgentInfo("cloudrun-service")}
+			otherRt := &runtime.MockRuntime{NameFunc: func() string { return "cloudrun" }}
+			srv.auxiliaryRuntimesMu.Lock()
+			srv.auxiliaryRuntimes["a-cloudrun"] = auxiliaryRuntime{Runtime: otherRt, Manager: otherMgr}
+			srv.auxiliaryRuntimesMu.Unlock()
+
+			var w *httptest.ResponseRecorder
+			if op == "stop" {
+				w = serveRR(srv, http.MethodPost, "/api/v1/agents/"+rrAgent+"/stop"+rrQuery("kubernetes"), "")
+			} else {
+				w = serveRR(srv, http.MethodDelete, "/api/v1/agents/"+rrAgent+rrQuery("kubernetes"), "")
+			}
+
+			if w.Code >= 300 {
+				t.Fatalf("status = %d, want success; body = %s", w.Code, w.Body.String())
+			}
+			if k8sMgr.StopCalls()+k8sMgr.DeleteCalls() != 1 {
+				t.Errorf("kubernetes runtime: stop=%d delete=%d, want one %s", k8sMgr.StopCalls(), k8sMgr.DeleteCalls(), op)
+			}
+			if n := otherMgr.lists.Load(); n != 0 || otherMgr.StopCalls() != 0 || otherMgr.DeleteCalls() != 0 {
+				t.Errorf("cloudrun runtime used: lists=%d stop=%d delete=%d", n, otherMgr.StopCalls(), otherMgr.DeleteCalls())
+			}
+			if defaultMgr.lists.Load() != 0 || defaultMgr.StopCalls() != 0 || defaultMgr.DeleteCalls() != 0 {
+				t.Error("default runtime used")
+			}
+		})
+	}
+}

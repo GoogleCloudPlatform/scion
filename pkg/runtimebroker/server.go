@@ -1620,18 +1620,12 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	slug = strings.ToLower(slug)
 	filter := scopedNameFilter(slug, projectID)
 
-	// Try default manager first, unless a recorded runtime type
-	// (ptone/scion#2748) excludes it.
-	useDefault := s.defaultRuntimeAllowed(ctx)
-	var agents []api.AgentInfo
-	var err error
-	if useDefault {
-		agents, err = s.manager.List(ctx, filter)
-		if err != nil {
-			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
-		}
-		agents = agentsForProject(agents, projectID)
+	// Try default manager first
+	agents, err := s.manager.List(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 	}
+	agents = agentsForProject(agents, projectID)
 
 	runtimeName := s.runtime.Name()
 	var matchedRuntime scionrt.Runtime
@@ -1649,7 +1643,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// entries plus one with ListAllNamespaces) more than one could plausibly
 	// answer for the same slug.
 	if len(agents) == 0 {
-		for _, aux := range s.sortedAuxiliaryRuntimesFor(ctx) {
+		for _, aux := range s.sortedAuxiliaryRuntimes() {
 			auxAgents, auxErr := aux.Manager.List(ctx, filter)
 			if auxErr != nil {
 				listUnavailable = true
@@ -1676,15 +1670,13 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// project-scoped request, or same-slug agents across projects would collide.
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
-		if useDefault {
-			agents, err = s.manager.List(ctx, fallbackFilter)
-			if err != nil {
-				return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
-			}
-			agents = agentsWithoutProjectLabel(agents)
+		agents, err = s.manager.List(ctx, fallbackFilter)
+		if err != nil {
+			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
+		agents = agentsWithoutProjectLabel(agents)
 		if len(agents) == 0 {
-			for _, aux := range s.sortedAuxiliaryRuntimesFor(ctx) {
+			for _, aux := range s.sortedAuxiliaryRuntimes() {
 				auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
 				if auxErr != nil {
 					listUnavailable = true
