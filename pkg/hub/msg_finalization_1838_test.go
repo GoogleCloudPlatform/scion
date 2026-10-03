@@ -188,3 +188,47 @@ func TestHandleAgentMessage_ClientDisconnectStillMarksFailed(t *testing.T) {
 
 	requireSingleRowState(t, s, agentID, store.MessageDispatchFailed)
 }
+
+// deadlineRecordingDispatcher records the remaining budget on each dispatch.
+type deadlineRecordingDispatcher struct {
+	ctxHonoringDispatcher
+	budgets []time.Duration
+}
+
+func (d *deadlineRecordingDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
+	if dl, ok := ctx.Deadline(); ok {
+		d.mu.Lock()
+		d.budgets = append(d.budgets, time.Until(dl))
+		d.mu.Unlock()
+	}
+	return d.ctxHonoringDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, structuredMsg)
+}
+
+// publishBroadcastDeliveryFailed is called from the broadcast fan-out with
+// the dispatch ctx, which may already be done. The sender must still get
+// exactly one notice, dispatched on the notice budget rather than the 5s
+// row-CAS budget.
+func TestPublishBroadcastDeliveryFailed_CancelledCtxStillNotifiesSender(t *testing.T) {
+	srv, s := testServer(t)
+	_, agents := setupGroupTest(t, s, "1838-bcast", map[string]string{
+		"bc-sender": string(state.PhaseRunning),
+		"bc-target": string(state.PhaseRunning),
+	})
+	dispatcher := &deadlineRecordingDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	msg := messages.NewInstruction("agent:bc-sender", "agent:bc-target", "hello")
+	msg.SenderID = agents["bc-sender"].ID
+	srv.publishBroadcastDeliveryFailed(ctx, agents["bc-target"], msg, errors.New("runtime broker returned error 500: boom"))
+
+	notices := dispatcher.noticesTo("bc-sender")
+	require.Len(t, notices, 1, "agent sender must receive one DELIVERY_FAILED notice despite the cancelled ctx")
+	assert.Contains(t, notices[0].msg, "bc-target")
+	require.Len(t, dispatcher.budgets, 1)
+	assert.Greater(t, dispatcher.budgets[0], finalizationTimeout,
+		"the notice must use deliveryNoticeTimeout, not the row-CAS budget")
+	assert.LessOrEqual(t, dispatcher.budgets[0], deliveryNoticeTimeout)
+}
