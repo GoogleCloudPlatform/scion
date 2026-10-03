@@ -1126,12 +1126,14 @@ const (
 	// when it had one.
 	BrokerErrorDetailRunID = "runId"
 	// BrokerErrorDetailCurrentRunID carries the run the runtime holds for
-	// the agent after the failed start, from one re-list on the failure
-	// path: the scion.run_id of the agent's single runtime entry, or "" when
-	// there is none, it is unlabelled, or entries of several runs exist (so
-	// a delete falls back to the by-name resolution). It is absent when the
-	// re-list failed. When present, the hub records it in place of the run
-	// it minted, so its next delete targets what actually exists.
+	// the agent after the failed start, from one re-list of every runtime
+	// on the broker (scoped to the request's project) on the failure path:
+	// the scion.run_id of the agent's single container entry, or "" when it
+	// is unlabelled or entries of several runs exist (so a delete falls back
+	// to the by-name resolution). It is absent when no container entry is
+	// left on any runtime, or when the re-list failed; the hub then keeps
+	// the run it minted. When present, the hub records it in place of the
+	// run it minted, so its next delete targets what actually exists.
 	BrokerErrorDetailCurrentRunID = "currentRunId"
 )
 

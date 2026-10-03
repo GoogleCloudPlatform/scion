@@ -458,44 +458,56 @@ func runEntry(name, cid, runID string) api.AgentInfo {
 	return e
 }
 
-// DN1 (ptone/scion#2550 P1 round 2): a failure inside Manager.Start
-// reports the run the runtime holds afterwards, from one re-list, so the
-// hub records what exists rather than guessing. Start can fail before it
-// removes the previous entry (that entry's run is reported), after
-// creating the new one (the minted run), or with nothing left (""). Several
-// runs, or an unlabelled entry, report "" (by-name delete); a failed
-// re-list omits the detail.
+// DN1 (ptone/scion#2550 P1 round 2, revised in round 3): a failure inside
+// Manager.Start reports the run the runtime holds afterwards, from one
+// re-list of every runtime, so the hub records what exists rather than
+// guessing. Start can fail before it removes the previous entry (that
+// entry's run is reported, even from another runtime) or after creating
+// the new one (the minted run). Several runs, or an unlabelled entry,
+// report "" (by-name delete). No container entry anywhere, or a failed
+// re-list, omits the detail, so the hub keeps the run it minted.
 func TestStartFailure_ReportsCurrentRunID(t *testing.T) {
 	const agentName = "test-agent-1"
 	for _, tc := range []struct {
 		name, op   string
 		after      []api.AgentInfo
 		afterErr   error
+		aux        []api.AgentInfo // entries on an auxiliary runtime
 		wantOK     bool
 		wantRunID  string
 		wantStatus int
 	}{
 		{"start fails before removing the previous entry", "start",
-			[]api.AgentInfo{runEntry(agentName, "cid-old", "run-old")}, nil, true, "run-old", http.StatusInternalServerError},
+			[]api.AgentInfo{runEntry(agentName, "cid-old", "run-old")}, nil, nil, true, "run-old", http.StatusInternalServerError},
 		{"start fails after creating the new entry", "start",
-			[]api.AgentInfo{runEntry(agentName, "cid-new", "run-x")}, nil, true, "run-x", http.StatusInternalServerError},
-		{"start leaves no entry", "start", nil, nil, true, "", http.StatusInternalServerError},
+			[]api.AgentInfo{runEntry(agentName, "cid-new", "run-x")}, nil, nil, true, "run-x", http.StatusInternalServerError},
+		{"start leaves no entry", "start", nil, nil, nil, false, "", http.StatusInternalServerError},
 		{"start leaves entries of two runs", "start",
-			[]api.AgentInfo{runEntry(agentName, "cid-old", "run-old"), runEntry(agentName, "cid-new", "run-x")}, nil, true, "", http.StatusInternalServerError},
+			[]api.AgentInfo{runEntry(agentName, "cid-old", "run-old"), runEntry(agentName, "cid-new", "run-x")}, nil, nil, true, "", http.StatusInternalServerError},
 		{"start leaves a legacy unlabelled entry", "start",
-			[]api.AgentInfo{runEntry(agentName, "cid-legacy", "")}, nil, true, "", http.StatusInternalServerError},
-		{"file-only and other-name entries are ignored", "start",
-			[]api.AgentInfo{runEntry(agentName, "", "run-files"), runEntry("other-agent", "cid-o", "run-o")}, nil, true, "", http.StatusInternalServerError},
-		{"start re-list fails", "start", nil, errors.New("runtime down"), false, "", http.StatusInternalServerError},
+			[]api.AgentInfo{runEntry(agentName, "cid-legacy", "")}, nil, nil, true, "", http.StatusInternalServerError},
+		{"file-only and other-name entries are not entries", "start",
+			[]api.AgentInfo{runEntry(agentName, "", "run-files"), runEntry("other-agent", "cid-o", "run-o")}, nil, nil, false, "", http.StatusInternalServerError},
+		{"start re-list fails", "start", nil, errors.New("runtime down"), nil, false, "", http.StatusInternalServerError},
+		{"the previous entry is on an auxiliary runtime", "start",
+			nil, nil, []api.AgentInfo{runEntry(agentName, "cid-aux", "run-aux")}, true, "run-aux", http.StatusInternalServerError},
+		{"entries on the default and an auxiliary runtime of two runs", "start",
+			[]api.AgentInfo{runEntry(agentName, "cid-new", "run-x")}, nil, []api.AgentInfo{runEntry(agentName, "cid-aux", "run-aux")}, true, "", http.StatusInternalServerError},
 		{"restart fails before removing the previous entry", "restart",
-			[]api.AgentInfo{runEntry(agentName, "cid-old", "run-old")}, nil, true, "run-old", http.StatusInternalServerError},
-		{"restart re-list fails", "restart", nil, errors.New("runtime down"), false, "", http.StatusInternalServerError},
+			[]api.AgentInfo{runEntry(agentName, "cid-old", "run-old")}, nil, nil, true, "run-old", http.StatusInternalServerError},
+		{"restart leaves no entry", "restart", nil, nil, nil, false, "", http.StatusInternalServerError},
+		{"restart's previous entry is on an auxiliary runtime", "restart",
+			nil, nil, []api.AgentInfo{runEntry(agentName, "cid-aux", "run-aux")}, true, "run-aux", http.StatusInternalServerError},
+		{"restart re-list fails", "restart", nil, errors.New("runtime down"), nil, false, "", http.StatusInternalServerError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := newTestServer(t).manager.(*mockManager)
 			base.startErr = errors.New("docker run failed")
 			mgr := &afterStartManager{mockManager: base, afterStart: tc.after, afterErr: tc.afterErr}
 			srv := newTestServerWithManager(t, mgr)
+			if tc.aux != nil {
+				addAuxManager(srv, "aux-test", &mockManager{agents: tc.aux})
+			}
 
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentName+"/"+tc.op, strings.NewReader(`{"runId":"run-x"}`))
 			req.Header.Set("Content-Type", "application/json")
@@ -539,8 +551,57 @@ func TestCurrentRunID_ProjectScoped(t *testing.T) {
 		t.Errorf("project B: got %q, %v; want run-b", got, ok)
 	}
 	mgr.agents = mgr.agents[:1]
-	if got, ok := srv.currentRunID(context.Background(), mgr, "dev", scopeProjB); !ok || got != "" {
-		t.Errorf("only project A's entry: got %q, %v; want empty", got, ok)
+	if got, ok := srv.currentRunID(context.Background(), mgr, "dev", scopeProjB); ok {
+		t.Errorf("only project A's entry: got %q, %v; want no report (no entry in project B)", got, ok)
+	}
+}
+
+// A List failure on any runtime, here an auxiliary one, omits the current
+// run (round 3): the unlisted runtime may hold an entry.
+func TestStartFailure_AuxListErrorOmitsCurrentRunID(t *testing.T) {
+	mgr := &mockManager{agents: []api.AgentInfo{runEntry("dev", "cid-x", "run-x")}}
+	srv := newTestServerWithManager(t, mgr)
+	aux := &mockManager{}
+	aux.listErr = errors.New("aux runtime unreachable")
+	addAuxManager(srv, "aux-test", aux)
+	if got, ok := srv.currentRunID(context.Background(), mgr, "dev", ""); ok {
+		t.Errorf("got %q, reported; want no report on a list error", got)
+	}
+}
+
+// N2 (round 3): the start and restart handlers scope the re-list to the
+// request's projectId, so another project's same-name run is never
+// reported (the hub would adopt it, and its next delete would 404 and
+// leak this project's entry).
+func TestStartFailure_CurrentRunIDIsProjectScoped(t *testing.T) {
+	const agentName = "dev"
+	entries := []api.AgentInfo{
+		withRun(labelled(agentName, "cid-b", scopeProjB, ""), "run-b"),
+		withRun(labelled(agentName, "cid-a", scopeProjA, ""), "run-a"),
+	}
+	for _, op := range []string{"start", "restart"} {
+		t.Run(op, func(t *testing.T) {
+			base := &mockManager{agents: entries, startErr: errors.New("docker run failed")}
+			mgr := &afterStartManager{mockManager: base, afterStart: entries}
+			srv := newTestServerWithManager(t, mgr)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentName+"/"+op+"?projectId="+scopeProjA, strings.NewReader(`{"runId":"run-x"}`))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if mgr.StartCalls() == 0 {
+				t.Fatalf("Manager.Start not reached: %d %s", w.Code, w.Body.String())
+			}
+			var b struct {
+				Error APIError `json:"error"`
+			}
+			if err := json.NewDecoder(w.Body).Decode(&b); err != nil {
+				t.Fatal(err)
+			}
+			if got := b.Error.Details[api.BrokerErrorDetailCurrentRunID]; got != "run-a" {
+				t.Errorf("currentRunId = %v, want run-a (details %v)", got, b.Error.Details)
+			}
+		})
 	}
 }
 
@@ -591,7 +652,9 @@ func TestSyncCreate_LaunchRecordCarriesRunID(t *testing.T) {
 
 	started := make(chan struct{})
 	ctxErr := make(chan error, 1)
+	var startCtx context.Context
 	mgr.starts <- func(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+		startCtx = ctx
 		close(started)
 		<-ctx.Done()
 		ctxErr <- ctx.Err()
@@ -615,10 +678,10 @@ func TestSyncCreate_LaunchRecordCarriesRunID(t *testing.T) {
 		srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/api/v1/agents/same-name?runId="+runID, nil))
 	}
 	del("run-old")
-	select {
-	case err := <-ctxErr:
+	// The delete handler cancels synchronously, so a wrongful cancel is
+	// visible on the Start ctx as soon as del returns.
+	if err := startCtx.Err(); err != nil {
 		t.Fatalf("a stale-run delete cancelled the start: %v", err)
-	default:
 	}
 	del("run-new")
 	select {

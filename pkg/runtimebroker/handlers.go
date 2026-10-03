@@ -4954,6 +4954,75 @@ func agentHasNoProjectIdentity(a api.AgentInfo) bool {
 	return projectkeys.ProjectIDFromLabels(a.Labels) == "" && a.ProjectID == ""
 }
 
+// agentCandidate is a runtime entry for an agent name, with the manager
+// that listed it.
+type agentCandidate struct {
+	mgr   agent.Manager
+	entry api.AgentInfo
+}
+
+// collectAgentCandidates lists managers for the entries named id, scoped
+// to projectID the way a delete resolves its target: entries labelled with
+// the project, else legacy (unlabelled) containers whose recorded path
+// identifies as projectID. With no projectID, every entry of the name.
+// Entries are de-duplicated by container ID (or path, for file-only
+// entries). The error is the last List failure; the candidates from the
+// managers that listed are still returned.
+func (s *Server) collectAgentCandidates(ctx context.Context, managers []agent.Manager, id, projectID, logMsg string) ([]agentCandidate, error) {
+	var listErr error
+	collect := func(filter map[string]string, accept func(api.AgentInfo) bool) []agentCandidate {
+		var out []agentCandidate
+		seen := map[string]bool{}
+		for _, mgr := range managers {
+			if mgr == nil {
+				continue
+			}
+			agents, err := mgr.List(ctx, filter)
+			if err != nil {
+				s.agentLifecycleLog.Warn(logMsg, "agent_id", id, "error", err)
+				listErr = err
+				continue
+			}
+			for _, a := range agents {
+				if !agentNameMatches(a, id) || !accept(a) {
+					continue
+				}
+				key := a.ContainerID
+				if key == "" {
+					key = "path:" + a.ProjectPath + "|" + a.Name
+				}
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				out = append(out, agentCandidate{mgr: mgr, entry: a})
+			}
+		}
+		return out
+	}
+
+	var matches []agentCandidate
+	if projectID != "" {
+		matches = collect(map[string]string{
+			"scion.agent":              "true",
+			projectkeys.LabelProjectID: projectID,
+		}, func(a api.AgentInfo) bool { return agentInProjectStrict(a, projectID) })
+		if len(matches) == 0 {
+			// Legacy (pre-label) containers carry no project ID. Accept one
+			// only if its recorded project path positively identifies as
+			// projectID; otherwise a same-named legacy container from another
+			// project could be deleted.
+			matches = collect(map[string]string{"scion.agent": "true"}, func(a api.AgentInfo) bool {
+				return a.ContainerID != "" && agentHasNoProjectIdentity(a) &&
+					pathIdentifiesAs(a.ProjectPath, projectID)
+			})
+		}
+	} else {
+		matches = collect(map[string]string{"scion.agent": "true"}, func(api.AgentInfo) bool { return true })
+	}
+	return matches, listErr
+}
+
 // resolveDeleteTarget finds the one agent entry a delete of id in projectID
 // must act on, searching the default runtime and every auxiliary runtime.
 //
@@ -4989,67 +5058,12 @@ func agentHasNoProjectIdentity(a api.AgentInfo) bool {
 //
 // More than one distinct match is an error (fail closed) rather than a guess.
 func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, runID, projectPathHint string, needProjectPath bool) (*deleteTarget, error) {
-	type candidate struct {
-		mgr   agent.Manager
-		entry api.AgentInfo
-	}
 	managers := s.allManagers()
-
-	var listErr error
-	collect := func(filter map[string]string, accept func(api.AgentInfo) bool) []candidate {
-		var out []candidate
-		seen := map[string]bool{}
-		for _, mgr := range managers {
-			if mgr == nil {
-				continue
-			}
-			agents, err := mgr.List(ctx, filter)
-			if err != nil {
-				s.agentLifecycleLog.Warn("Agent delete: runtime list failed", "agent_id", id, "error", err)
-				listErr = err
-				continue
-			}
-			for _, a := range agents {
-				if !agentNameMatches(a, id) || !accept(a) {
-					continue
-				}
-				key := a.ContainerID
-				if key == "" {
-					key = "path:" + a.ProjectPath + "|" + a.Name
-				}
-				if seen[key] {
-					continue
-				}
-				seen[key] = true
-				out = append(out, candidate{mgr: mgr, entry: a})
-			}
-		}
-		return out
-	}
-
-	var matches []candidate
-	if projectID != "" {
-		matches = collect(map[string]string{
-			"scion.agent":              "true",
-			projectkeys.LabelProjectID: projectID,
-		}, func(a api.AgentInfo) bool { return agentInProjectStrict(a, projectID) })
-		if len(matches) == 0 {
-			// Legacy (pre-label) containers carry no project ID. Accept one
-			// only if its recorded project path positively identifies as
-			// projectID; otherwise a same-named legacy container from another
-			// project could be deleted.
-			matches = collect(map[string]string{"scion.agent": "true"}, func(a api.AgentInfo) bool {
-				return a.ContainerID != "" && agentHasNoProjectIdentity(a) &&
-					pathIdentifiesAs(a.ProjectPath, projectID)
-			})
-		}
-	} else {
-		matches = collect(map[string]string{"scion.agent": "true"}, func(api.AgentInfo) bool { return true })
-	}
+	matches, listErr := s.collectAgentCandidates(ctx, managers, id, projectID, "Agent delete: runtime list failed")
 
 	if runID != "" {
 		var otherRun bool
-		matches, otherRun = filterDeleteCandidatesByRun(matches, runID, func(c candidate) api.AgentInfo { return c.entry })
+		matches, otherRun = filterDeleteCandidatesByRun(matches, runID, func(c agentCandidate) api.AgentInfo { return c.entry })
 		if len(matches) == 0 && otherRun {
 			// A runtime that could not be listed may hold the requested
 			// run's entry. Fail closed (see the listErr case below) rather

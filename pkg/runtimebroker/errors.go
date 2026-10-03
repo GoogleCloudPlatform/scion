@@ -20,10 +20,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel/codes"
@@ -130,9 +130,8 @@ func startAttemptedDetails(runID string) map[string]interface{} {
 }
 
 // startFailureDetails is startAttemptedDetails plus the run the runtime
-// holds for the agent now (api.BrokerErrorDetailCurrentRunID), from one
-// re-list of mgr, the manager the start went to, under the request's ctx.
-// A failed re-list omits the current run, leaving the hub to its fallback.
+// holds for the agent now (api.BrokerErrorDetailCurrentRunID), when
+// currentRunID can report one. mgr is the manager the start went to.
 func (s *Server) startFailureDetails(ctx context.Context, mgr agent.Manager, id, projectID, runID string) map[string]interface{} {
 	d := startAttemptedDetails(runID)
 	if current, ok := s.currentRunID(ctx, mgr, id, projectID); ok {
@@ -141,41 +140,42 @@ func (s *Server) startFailureDetails(ctx context.Context, mgr agent.Manager, id,
 	return d
 }
 
-// currentRunID reports the scion.run_id of the agent's runtime entry on
-// mgr, scoped to projectID when one is given. It returns "" (with ok) when
-// there is no such entry, when it carries no run label, or when entries of
-// more than one run hold the name: "" makes the hub's next delete resolve
-// by name, as before run IDs, which fails closed (409) on ambiguity.
-// File-only entries (no container) are not runtime entries and are
-// ignored. ok is false only when the List call failed.
+// currentRunID reports the scion.run_id of the agent's runtime entry after
+// a failed start. It re-lists, under the request's ctx, the default
+// manager, every auxiliary manager and mgr (the one the start went to),
+// scoped to projectID the way a delete resolves its target
+// (collectAgentCandidates), so it sees what a later delete would see,
+// including a previous entry left on another runtime.
+//
+//   - One container entry: its run, or "" when it carries no run label.
+//   - Entries of more than one run: "", so the hub's next delete resolves
+//     by name, as before run IDs, which fails closed (409) on ambiguity.
+//   - No container entry on any runtime (file-only entries do not count):
+//     ok is false. The hub then keeps the run it minted, so a delayed delete
+//     cannot remove a same-name agent created later.
+//   - Any List failure: ok is false; the hub falls back as for an older
+//     broker.
 func (s *Server) currentRunID(ctx context.Context, mgr agent.Manager, id, projectID string) (string, bool) {
-	if mgr == nil {
-		return "", false
+	managers := s.allManagers()
+	if mgr != nil && !slices.Contains(managers, mgr) {
+		managers = append(managers, mgr)
 	}
-	filter := map[string]string{"scion.agent": "true", "scion.name": id}
-	if projectID != "" {
-		filter[projectkeys.LabelProjectID] = projectID
-	}
-	agents, err := mgr.List(ctx, filter)
+	cands, err := s.collectAgentCandidates(ctx, managers, id, projectID,
+		"Agent start failed: could not re-list the agent to report its current run")
 	if err != nil {
-		s.agentLifecycleLog.Warn("Agent start failed: could not re-list the agent to report its current run",
-			"agent_id", id, "project_id", projectID, "error", err)
 		return "", false
 	}
 	current, found := "", false
-	for _, a := range agents {
-		if a.ContainerID == "" || !agentNameMatches(a, id) {
+	for _, c := range cands {
+		if c.entry.ContainerID == "" {
 			continue
 		}
-		if projectID != "" && !agentInProjectStrict(a, projectID) {
-			continue
-		}
-		if found && a.RunID != current {
+		if found && c.entry.RunID != current {
 			return "", true
 		}
-		current, found = a.RunID, true
+		current, found = c.entry.RunID, true
 	}
-	return current, true
+	return current, found
 }
 
 // NotFound writes a 404 Not Found response.
