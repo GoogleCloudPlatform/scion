@@ -292,6 +292,7 @@ func TestGroupMessage_UndispatchableMemberRowMarkedFailed(t *testing.T) {
 		agents["grp-nobroker"].RuntimeBrokerID = ""
 		require.NoError(t, s.UpdateAgent(context.Background(), agents["grp-nobroker"]))
 		srv.SetDispatcher(&brokerMockDispatcher{})
+		events := subscribeAgentMessageEvents(t, srv, agents["grp-nobroker"].ID)
 
 		resp := sendGroup(t, srv, projectID, "grp-running", "group[agent:grp-running,agent:grp-nobroker]")
 		res := groupResult(t, resp, "agent:grp-nobroker")
@@ -303,6 +304,13 @@ func TestGroupMessage_UndispatchableMemberRowMarkedFailed(t *testing.T) {
 		assert.Equal(t, store.MessageDispatchFailed, rows[0].DispatchState)
 		require.NotNil(t, rows[0].DispatchFailureReason)
 		assert.Equal(t, "agent has no runtime broker", *rows[0].DispatchFailureReason)
+
+		// The SSE event carries the true state: the row is born failed,
+		// never published as "dispatched" first.
+		evts := events()
+		require.Len(t, evts, 1)
+		assert.Equal(t, store.MessageDispatchFailed, evts[0].DispatchState)
+		assert.Equal(t, "agent has no runtime broker", evts[0].DispatchFailureReason)
 	})
 
 	t.Run("no dispatcher", func(t *testing.T) {
@@ -312,6 +320,10 @@ func TestGroupMessage_UndispatchableMemberRowMarkedFailed(t *testing.T) {
 			"grp-b": string(state.PhaseRunning),
 		})
 		require.Nil(t, srv.GetDispatcher(), "test server must start without a dispatcher")
+		events := map[string]func() []UserMessageEvent{}
+		for _, slug := range []string{"grp-a", "grp-b"} {
+			events[slug] = subscribeAgentMessageEvents(t, srv, agents[slug].ID)
+		}
 
 		resp := sendGroup(t, srv, projectID, "grp-a", "group[agent:grp-a,agent:grp-b]")
 		assert.Equal(t, 0, resp.Delivered)
@@ -324,6 +336,40 @@ func TestGroupMessage_UndispatchableMemberRowMarkedFailed(t *testing.T) {
 			assert.Equal(t, store.MessageDispatchFailed, rows[0].DispatchState, slug)
 			require.NotNil(t, rows[0].DispatchFailureReason)
 			assert.Equal(t, "dispatcher not available", *rows[0].DispatchFailureReason)
+
+			evts := events[slug]()
+			require.Len(t, evts, 1, slug)
+			assert.Equal(t, store.MessageDispatchFailed, evts[0].DispatchState, slug)
+			assert.Equal(t, "dispatcher not available", evts[0].DispatchFailureReason, slug)
 		}
 	})
+}
+
+// subscribeAgentMessageEvents installs a fresh event publisher on srv and
+// returns a func that drains the user.message events published for agentID.
+// Publishing is a synchronous non-blocking send, so once the request has
+// returned every event is already buffered.
+func subscribeAgentMessageEvents(t *testing.T, srv *Server, agentID string) func() []UserMessageEvent {
+	t.Helper()
+	pub, ok := srv.events.(*ChannelEventPublisher)
+	if !ok {
+		pub = NewChannelEventPublisher()
+		t.Cleanup(pub.Close)
+		srv.SetEventPublisher(pub)
+	}
+	ch, unsub := pub.Subscribe("agent." + agentID + ".message")
+	t.Cleanup(unsub)
+	return func() []UserMessageEvent {
+		var out []UserMessageEvent
+		for {
+			select {
+			case e := <-ch:
+				var evt UserMessageEvent
+				require.NoError(t, json.Unmarshal(e.Data, &evt))
+				out = append(out, evt)
+			default:
+				return out
+			}
+		}
+	}
 }
