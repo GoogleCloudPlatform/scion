@@ -55,7 +55,8 @@ func isBrokerQuotaCountedPhase(phase string) bool {
 }
 
 // releaseBrokerQuota releases agent's max_agents_per_broker reservation, if
-// any. Best-effort and safe to call unconditionally (e.g. on every stop or
+// any, whatever its scope (broker-wide or a profile or runtime entry's own
+// limit): the release matches on the limit and the agent ID only. Best-effort and safe to call unconditionally (e.g. on every stop or
 // suspend) — a no-op when the agent has no runtime broker assigned, and
 // QuotaService.Release itself is a no-op when no reservation exists.
 func (s *Server) releaseBrokerQuota(ctx context.Context, agent *store.Agent) {
@@ -89,11 +90,20 @@ func (s *Server) rollbackBrokerQuota(ctx context.Context, agent *store.Agent, cr
 // "start" called again on an already-running agent) is a no-op rather than a
 // duplicate reservation. created reports whether this call made a new
 // reservation; pass it to rollbackBrokerQuota if dispatch then fails.
+//
+// The slot is reserved in the scope the agent's recorded profile resolves
+// to (broker_profile_quota.go): the profile or runtime entry's own
+// max_agents, else the broker-wide total.
 func (s *Server) checkAndReserveBrokerQuotaHTTP(ctx context.Context, w http.ResponseWriter, agent *store.Agent) (ok, created bool) {
-	if agent == nil || agent.RuntimeBrokerID == "" {
+	if s.quotaService == nil || agent == nil || agent.RuntimeBrokerID == "" {
 		return true, false
 	}
-	return s.reserveQuotaHTTP(ctx, w, store.LimitMaxAgentsPerBroker, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.ID)
+	created, _, err := s.reserveBrokerQuota(ctx, agent)
+	if err != nil {
+		writeQuotaReserveError(w, err, brokerQuotaExceededMessage(err))
+		return false, false
+	}
+	return true, created
 }
 
 // checkAndReserveBrokerQuota is the non-HTTP counterpart of
@@ -107,7 +117,8 @@ func (s *Server) checkAndReserveBrokerQuota(ctx context.Context, agent *store.Ag
 	if s.quotaService == nil || agent == nil || agent.RuntimeBrokerID == "" {
 		return false, nil
 	}
-	return s.quotaService.Reserve(ctx, store.LimitMaxAgentsPerBroker, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.ID)
+	created, _, err = s.reserveBrokerQuota(ctx, agent)
+	return created, err
 }
 
 // reconcileBrokerQuotaOnPhaseChange updates agent's max_agents_per_broker
@@ -158,6 +169,12 @@ func (s *Server) reconcileBrokerQuotaOnPhaseChange(ctx context.Context, agent *s
 //     reconcileMinReservationAge, since dispatch reserves before it writes
 //     the counted phase (ptone/scion#2011); the missing/soft-deleted case is
 //     never subject to that grace period.
+//   - Move: a counted agent whose reservation is in a different scope
+//     from the one its recorded profile resolves to now (a profile or
+//     runtime entry max_agents was added, changed or removed;
+//     ptone/scion#2728) has it moved to the current scope, without a cap
+//     check. Each move is logged. Skipped while the agent has a launch in
+//     flight, and when the settings failed to load.
 //   - Backfill: an agent in a counted phase on this broker with no active
 //     reservation gets one recorded directly (no cap check — this is
 //     accounting for an agent that already exists and is already running,
@@ -190,7 +207,23 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 		return
 	}
 
-	var checked, released, backfilled int
+	// Per-profile reservations (ptone/scion#2728) have broker-specific
+	// scope IDs that are not known in advance; list them once and group
+	// them by broker (their subject).
+	limitSettings, settingsOK := s.agentLimitSettings(ctx)
+	profileReservations := make(map[string][]*store.UsageReservation)
+	all, err := s.store.ListActiveReservationsByScopeType(ctx, limitDef.ID, store.QuotaScopeBrokerProfile)
+	if err != nil {
+		// Without the per-profile rows, the backfill below would see those
+		// agents as unreserved; skip the whole pass.
+		s.agentLifecycleLog.Warn("quota reconcile: failed to list per-profile reservations", "error", err)
+		return
+	}
+	for _, res := range all {
+		profileReservations[res.SubjectID] = append(profileReservations[res.SubjectID], res)
+	}
+
+	var checked, released, backfilled, moved int
 	for _, broker := range brokers.Items {
 		reservations, err := s.store.ListActiveReservations(ctx, limitDef.ID, store.QuotaScopeBroker, broker.ID)
 		if err != nil {
@@ -198,6 +231,7 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 				"broker_id", broker.ID, "error", err)
 			continue
 		}
+		reservations = append(reservations, profileReservations[broker.ID]...)
 
 		// Batch-fetch every reserved agent in one query instead of one
 		// GetAgent per reservation (N+1). GetAgentsByIDs excludes
@@ -229,9 +263,25 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 				released++
 				continue
 			}
-			if !isBrokerQuotaCountedPhase(agent.Phase) && time.Since(res.CreatedAt) >= reconcileMinReservationAge {
-				s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
-				released++
+			if !isBrokerQuotaCountedPhase(agent.Phase) {
+				if time.Since(res.CreatedAt) >= reconcileMinReservationAge {
+					s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
+					released++
+				}
+				continue
+			}
+			// Counted: move the reservation if the agent's profile limit
+			// was added, changed scope, or removed since it was made. Never
+			// while a launch is in flight, and never on settings that
+			// failed to load.
+			if !settingsOK || brokerQuotaLaunchInFlight(agent) {
+				continue
+			}
+			want := brokerQuotaScopeFor(limitSettings, broker.ID, agentQuotaProfile(agent))
+			if want.ScopeType != res.ScopeType || want.ScopeID != res.ScopeID {
+				if s.moveBrokerQuotaReservation(ctx, limitDef.ID, agent, res, want) {
+					moved++
+				}
 			}
 		}
 
@@ -248,11 +298,12 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 			if reservedIDs[agent.ID] || !isBrokerQuotaCountedPhase(agent.Phase) {
 				continue
 			}
+			want := brokerQuotaScopeFor(limitSettings, broker.ID, agentQuotaProfile(agent))
 			if _, err := s.store.CreateUsageReservation(ctx, &store.UsageReservation{
 				LimitDefinitionID: limitDef.ID,
 				SubjectID:         broker.ID,
-				ScopeType:         store.QuotaScopeBroker,
-				ScopeID:           broker.ID,
+				ScopeType:         want.ScopeType,
+				ScopeID:           want.ScopeID,
 				ResourceID:        agent.ID,
 				Reserved:          1,
 			}); err != nil {
@@ -264,8 +315,8 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 		}
 	}
 
-	if released > 0 || backfilled > 0 {
+	if released > 0 || backfilled > 0 || moved > 0 {
 		s.agentLifecycleLog.Info("quota reconcile: reconciled max_agents_per_broker reservations",
-			"checked", checked, "released", released, "backfilled", backfilled)
+			"checked", checked, "released", released, "backfilled", backfilled, "moved", moved)
 	}
 }

@@ -843,17 +843,23 @@ func (s *Server) reserveQuotaHTTP(ctx context.Context, w http.ResponseWriter, li
 	if err == nil {
 		return true, created
 	}
+	writeQuotaReserveError(w, err, quotaExceededMessage(limitName))
+	return false, false
+}
+
+// writeQuotaReserveError writes the HTTP response for a failed quota
+// reservation; exceededMessage is the text used when the quota is full.
+func writeQuotaReserveError(w http.ResponseWriter, err error, exceededMessage string) {
 	switch {
 	case errors.Is(err, store.ErrQuotaExceeded):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
-			quotaExceededMessage(limitName), nil)
+			exceededMessage, nil)
 	case errors.Is(err, ErrQuotaLockContention):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
 			"quota check temporarily unavailable, please retry", nil)
 	default:
 		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
 	}
-	return false, false
 }
 
 // releaseAgentQuotas releases resourceID's create-time quota reservations:
@@ -1888,8 +1894,13 @@ func (s *Server) createAgentInProject(
 	// If step 2 fails we must roll back step 1's reservation ourselves: we
 	// have not reached store.CreateAgent yet, so its failure-path Release
 	// below never runs for this response.
+	//     An agent whose profile (or runtime entry) sets its own max_agents
+	//     reserves against that limit instead (ptone/scion#2728); the
+	//     profile is recorded on the agent first so later starts, stops
+	//     and the reconcile pass key on the same one.
 	if runtimeBrokerID != "" {
-		if !s.checkAndReserveQuota(ctx, w, store.LimitMaxAgentsPerBroker, runtimeBrokerID, store.QuotaScopeBroker, runtimeBrokerID, agent.ID) {
+		s.recordAgentQuotaProfile(ctx, agent)
+		if ok, _ := s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent); !ok {
 			return
 		}
 	}

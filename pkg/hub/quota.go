@@ -99,6 +99,21 @@ func (qs *QuotaService) CheckAndReserve(ctx context.Context, limitName string, s
 // reservation after a failed operation must only do so when created is
 // true; otherwise they would release a reservation an earlier call made.
 func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID string, scopeType string, scopeID string, resourceID string) (created bool, err error) {
+	return qs.reserve(ctx, limitName, subjectID, scopeType, scopeID, resourceID, nil)
+}
+
+// ReserveWithLimit is Reserve with the effective limit supplied by the
+// caller instead of resolved from the override hook and entitlements. It
+// is used for per-profile max_agents limits, which come from settings: the
+// caller resolves the scope and its limit together, so a settings change
+// between the two cannot leave a scope without its limit. limit <= 0 means
+// unlimited, as in Reserve. Everything else (the limit definition lookup,
+// locking, idempotency, the enforcement switch) is the same as Reserve.
+func (qs *QuotaService) ReserveWithLimit(ctx context.Context, limitName, subjectID, scopeType, scopeID, resourceID string, limit int64) (created bool, err error) {
+	return qs.reserve(ctx, limitName, subjectID, scopeType, scopeID, resourceID, &limit)
+}
+
+func (qs *QuotaService) reserve(ctx context.Context, limitName, subjectID, scopeType, scopeID, resourceID string, explicitLimit *int64) (created bool, err error) {
 	// 1. Look up LimitDefinition by name.
 	limitDef, err := qs.store.GetLimitDefinitionByName(ctx, limitName)
 	if err != nil {
@@ -115,9 +130,14 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 
 	// 2. Resolve effective limit for the subject, consulting limitOverride
 	// first (design.md §5.2 precedence).
-	effectiveLimit, err := qs.effectiveLimitForReserve(ctx, limitName, limitDef.ID, subjectID, scopeType, scopeID)
-	if err != nil {
-		return false, fmt.Errorf("quota: resolve effective limit for %q: %w", limitName, err)
+	var effectiveLimit int64
+	if explicitLimit != nil {
+		effectiveLimit = *explicitLimit
+	} else {
+		effectiveLimit, err = qs.effectiveLimitForReserve(ctx, limitName, limitDef.ID, subjectID, scopeType, scopeID)
+		if err != nil {
+			return false, fmt.Errorf("quota: resolve effective limit for %q: %w", limitName, err)
+		}
 	}
 
 	// 3. Unlimited — no enforcement.

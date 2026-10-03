@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -137,6 +138,19 @@ type usageReservationView struct {
 	// visibly (not tooltip-only) next to the cap, since a limit shown
 	// without that context would look enforced when it is not.
 	BrokerAgentLimitSource string `json:"brokerAgentLimitSource,omitempty"`
+
+	// EntryAgentLimit, EntryAgentLimitKey and EntryAgentLimitEnforced are
+	// set only on max_agents_per_broker reservations held against a
+	// profile or runtime entry's own max_agents (scope type
+	// broker_profile, ptone/scion#2728). EntryAgentLimitKey names the
+	// settings key, e.g. "profiles.gke.max_agents". EntryAgentLimit is the
+	// current value, nil when that key is no longer set (the reconcile
+	// pass then moves the reservation to the broker-wide total).
+	// EntryAgentLimitEnforced is false when broker quota enforcement is
+	// switched off; the limit is then informational only.
+	EntryAgentLimit         *int64 `json:"entryAgentLimit,omitempty"`
+	EntryAgentLimitKey      string `json:"entryAgentLimitKey,omitempty"`
+	EntryAgentLimitEnforced *bool  `json:"entryAgentLimitEnforced,omitempty"`
 }
 
 // myUsageEntry represents one limit's current/max for the current user.
@@ -764,9 +778,25 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 	// reservation below (design.md §5.9, AC-P2-10): def is already that one
 	// lookup, so no second query is needed.
 	brokerCapacityCache := make(map[string]BrokerCapacity)
+	var limitSettings *config.VersionedSettings
+	limitSettingsLoaded := false
 	views := make([]usageReservationView, len(reservations))
 	for i, res := range reservations {
 		views[i] = usageReservationView{UsageReservation: res}
+		if def.Name == store.LimitMaxAgentsPerBroker && res.ScopeType == store.QuotaScopeBrokerProfile {
+			if !limitSettingsLoaded {
+				limitSettings, _ = s.agentLimitSettings(ctx)
+				limitSettingsLoaded = true
+			}
+			limit, key := entryAgentLimitForScope(limitSettings, res.SubjectID, res.ScopeID)
+			views[i].EntryAgentLimitKey = key
+			if limit > 0 {
+				views[i].EntryAgentLimit = &limit
+			}
+			enforced := s.brokerQuotasEnforced()
+			views[i].EntryAgentLimitEnforced = &enforced
+			continue
+		}
 		if def.Name != store.LimitMaxAgentsPerBroker || res.ScopeType != store.QuotaScopeBroker {
 			continue
 		}
@@ -814,7 +844,45 @@ func (s *Server) listBrokerScopedActiveReservations(ctx context.Context, limitDe
 		}
 		reservations = append(reservations, brokerReservations...)
 	}
+	// Reservations held against a profile or runtime entry's own
+	// max_agents (ptone/scion#2728).
+	profileReservations, err := s.store.ListActiveReservationsByScopeType(ctx, limitDefinitionID, store.QuotaScopeBrokerProfile)
+	if err != nil {
+		return nil, fmt.Errorf("list per-profile reservations: %w", err)
+	}
+	reservations = append(reservations, profileReservations...)
 	return reservations, nil
+}
+
+// entryAgentLimitForScope returns the current max_agents for a
+// broker_profile scope ID ("BROKER/profiles/NAME" or
+// "BROKER/runtimes/NAME") and the settings key it is read from. limit is
+// 0 when the key is no longer set or the scope ID is not recognised.
+func entryAgentLimitForScope(vs *config.VersionedSettings, brokerID, scopeID string) (limit int64, key string) {
+	rest, ok := strings.CutPrefix(scopeID, brokerID+"/")
+	if !ok {
+		return 0, ""
+	}
+	kind, name, ok := strings.Cut(rest, "/")
+	if !ok {
+		return 0, ""
+	}
+	key = kind + "." + name + ".max_agents"
+	if vs == nil {
+		return 0, key
+	}
+	switch kind {
+	case "profiles":
+		limit = int64(vs.Profiles[name].MaxAgents)
+	case "runtimes":
+		limit = int64(vs.Runtimes[name].MaxAgents)
+	default:
+		return 0, ""
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	return limit, key
 }
 
 func (s *Server) getMyUsage(w http.ResponseWriter, r *http.Request) {

@@ -2228,7 +2228,7 @@ var (
 	UsageReservationsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "subject_id", Type: field.TypeString},
-		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project", "broker"}},
+		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project", "broker", "broker_profile"}},
 		{Name: "scope_id", Type: field.TypeString, Default: ""},
 		{Name: "resource_id", Type: field.TypeString},
 		{Name: "reserved", Type: field.TypeInt64, Default: 1},

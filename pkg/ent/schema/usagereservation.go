@@ -44,7 +44,7 @@ func (UsageReservation) Fields() []ent.Field {
 		field.String("subject_id").
 			NotEmpty(),
 		field.Enum("scope_type").
-			Values("system", "project", "broker"),
+			Values("system", "project", "broker", "broker_profile"),
 		field.String("scope_id").
 			Default(""),
 		field.String("resource_id").

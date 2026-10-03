@@ -234,6 +234,13 @@ type AgentAppliedConfig struct {
 	Model         string            `json:"model,omitempty"`
 	ThinkingLevel *int              `json:"thinkingLevel,omitempty"`
 	Profile       string            `json:"profile,omitempty"` // Settings profile for the runtime broker
+	// QuotaProfile is the settings profile the hub counts this agent's
+	// broker capacity against (per-profile max_agents). Recorded at create
+	// from Profile, else the broker's default profile, so starts, stops
+	// and the reconcile pass key on the same profile even if the broker's
+	// default changes. Empty for agents created before it was recorded;
+	// those use Profile.
+	QuotaProfile string `json:"quotaProfile,omitempty"`
 	// RuntimeTarget is the broker runtime target (runtime name, plus cluster
 	// context and namespace for Kubernetes) whose listing reported the agent.
 	// Recorded from heartbeats once two consecutive reports name the same
@@ -3341,6 +3348,12 @@ const (
 	// dispatch to it, and a hub-wide scope would wrongly couple brokers with
 	// different host capacity together.
 	QuotaScopeBroker = "broker"
+	// QuotaScopeBrokerProfile scopes max_agents_per_broker to the agents on
+	// one runtime broker that use a settings profile (or runtime entry)
+	// with its own max_agents limit. subject_id is the broker ID and
+	// scope_id is "BROKER/profiles/NAME" or "BROKER/runtimes/NAME". Agents
+	// counted here do not count toward the broker-wide total.
+	QuotaScopeBrokerProfile = "broker_profile"
 )
 
 // System limit definition names

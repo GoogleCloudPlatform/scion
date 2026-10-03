@@ -437,3 +437,28 @@ func (q *QuotaStore) ListActiveReservations(ctx context.Context, limitDefinition
 	}
 	return result, nil
 }
+
+// ListActiveReservationsByScopeType returns active (non-released)
+// reservations for a limit in every scope of scopeType, oldest first.
+func (q *QuotaStore) ListActiveReservationsByScopeType(ctx context.Context, limitDefinitionID, scopeType string) ([]*store.UsageReservation, error) {
+	ldUID, err := parseUUID(limitDefinitionID)
+	if err != nil {
+		return nil, err
+	}
+	urs, err := q.client.UsageReservation.Query().
+		Where(
+			usagereservation.LimitDefinitionIDEQ(ldUID),
+			usagereservation.ScopeTypeEQ(usagereservation.ScopeType(scopeType)),
+			usagereservation.ReleasedAtIsNil(),
+		).
+		Order(ent.Asc(usagereservation.FieldCreatedAt)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	result := make([]*store.UsageReservation, len(urs))
+	for i, ur := range urs {
+		result[i] = entUsageReservationToStore(ur)
+	}
+	return result, nil
+}
