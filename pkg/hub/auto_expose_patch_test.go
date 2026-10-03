@@ -188,6 +188,21 @@ func TestApplyAgentUpdate_AutoExposeExplicitSurvivesRowEdit(t *testing.T) {
 	}
 }
 
+// TestApplyAgentUpdate_AutoExposeCreateInputsIsTheExplicitRecord pins that an
+// explicit value recorded in CreateInputs, but missing from InlineConfig.Env,
+// still beats the project tier when the request omits it.
+func TestApplyAgentUpdate_AutoExposeCreateInputsIsTheExplicitRecord(t *testing.T) {
+	srv, s, _, agent := setupAutoExposePatchAgent(t, autoExposePatchAgent{
+		projectAnno:  "true",
+		appliedEnv:   map[string]string{"TEMPLATE_KEY": "x", aePorts: "false"},
+		createInputs: ciWithEnv(map[string]string{aePorts: "false"}),
+	})
+	updated := patchAndReload(t, srv, s, agent.ID, configureRowEditBody(t))
+
+	assert.Equal(t, "false", updated.AppliedConfig.Env[aePorts], "the project tier must not overwrite an explicit value")
+	assert.Equal(t, "false", createInputsEnv(updated)[aePorts])
+}
+
 // TestApplyAgentUpdate_AutoExposeToggleIsExplicit is AC7's "toggling records
 // AE as explicit, and the value survives reincarnate": the sent value beats
 // the project tier live, lands in all three maps, and is what a fresh

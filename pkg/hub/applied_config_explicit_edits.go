@@ -282,10 +282,11 @@ func diffExplicitEnvKeys(oldEnv, oldInlineEnv, newEnv map[string]string) (added 
 //     explicit value survives into the new InlineConfig.Env.
 //
 // SCION_AUTO_EXPOSE_PORTS is then resolved by resolveAutoExposeEnv, with
-// explicit = patchEnv plus the previous explicit value (explicitEnvOf(old))
-// when the request did not send it: the project tier overwrites a kept
-// non-explicit value, and never an explicit one. The hub default is never
-// written; the broker applies it.
+// explicit = patchEnv plus, when the request did not send the key, the
+// previous explicit value (explicitEnvOf(old): CreateInputs, which can hold
+// an explicit value InlineConfig.Env lacks). The project tier overwrites a
+// kept non-explicit value, and never an explicit one. The hub default is
+// never written; the broker applies it.
 func applyPatchAutoExposeEnv(ac, old *store.AgentAppliedConfig, project *store.Project, patchEnv map[string]string) {
 	if ac == nil || old == nil || patchEnv == nil {
 		return
@@ -297,6 +298,7 @@ func applyPatchAutoExposeEnv(ac, old *store.AgentAppliedConfig, project *store.P
 	if ac.Env == nil {
 		ac.Env = make(map[string]string)
 	}
+	_, sentPorts := patchEnv[api.EnvAutoExposePorts]
 	for k := range autoExposeEnvKeys {
 		if _, sent := patchEnv[k]; sent {
 			continue
@@ -309,7 +311,7 @@ func applyPatchAutoExposeEnv(ac, old *store.AgentAppliedConfig, project *store.P
 		}
 	}
 	explicit := patchEnv
-	if _, sent := patchEnv[api.EnvAutoExposePorts]; !sent {
+	if !sentPorts {
 		if v, ok := explicitEnvOf(old)[api.EnvAutoExposePorts]; ok {
 			explicit = maps.Clone(patchEnv)
 			explicit[api.EnvAutoExposePorts] = v
