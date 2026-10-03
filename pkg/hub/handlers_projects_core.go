@@ -2162,14 +2162,6 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 			NotFound(w, "Project")
 			return
 		}
-		// P1b (ptone/scion#2383, design lists-graph.md 5.3 "P1b build"): the
-		// agent-JWT sorted path ships in P2. Reject before any SQL, so a
-		// sorted request from an agent token can never fall into the user
-		// path's read pass below.
-		if sorted {
-			rejectAgentJWTSortedMode(w)
-			return
-		}
 	} else {
 		// A user identity (or no identity) reached no gate at all here before
 		// this fix: any authenticated hub user, project member or not, got
@@ -2209,11 +2201,17 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	}
 
 	if sorted {
-		params, ok := parseSortedProjectListParams(w, query, limit)
+		params, ok := parseAgentListParams(w, query, limit)
 		if !ok {
 			return
 		}
-		s.listProjectAgentsSorted(w, r, projectID, query, filter, params)
+		if agentIdent != nil {
+			// Agent-JWT sorted path: no per-item read filter, unlike the
+			// user path.
+			s.listProjectAgentsSortedAgentJWT(w, r, projectID, filter, params)
+		} else {
+			s.listProjectAgentsSorted(w, r, projectID, filter, params)
+		}
 		return
 	}
 

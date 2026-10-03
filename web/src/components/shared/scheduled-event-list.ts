@@ -26,6 +26,8 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
+import { effectiveTimeZone, parseWallClock } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface ScheduledEvent {
   id: string;
@@ -48,6 +50,17 @@ interface ListResponse {
 
 @customElement('scion-scheduled-event-list')
 export class ScionScheduledEventList extends LitElement {
+  /**
+   * Re-renders this list when the effective display zone changes (review
+   * R4-1), so the create dialog's "Times in: <zone>" label never shows a
+   * zone other than the one `handleCreate`'s `parseWallClock` call parses
+   * `dialogDatetime` in. Unlike `access-boundary-schedule-editor.ts`,
+   * `dialogDatetime` is raw typed text with no instant cached from it
+   * until submit, so there is no stale cached value to re-derive here —
+   * keeping the label in sync with the live parse zone is the whole fix.
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   @property() projectId = '';
   @property({ type: Boolean }) compact = false;
 
@@ -134,9 +147,15 @@ export class ScionScheduledEventList extends LitElement {
       if (this.dialogTimingMode === 'in') {
         body.fireIn = this.dialogDuration;
       } else {
-        // Convert local datetime to ISO 8601 UTC
-        const dt = new Date(this.dialogDatetime);
-        body.fireAt = dt.toISOString();
+        // Interpret the datetime-local value as wall-clock time in the
+        // effective display zone (not the browser's zone, which is what
+        // `new Date(value).toISOString()` would use).
+        const iso = parseWallClock(this.dialogDatetime, effectiveTimeZone());
+        if (!iso) {
+          this.dialogError = 'Enter a valid date and time';
+          return;
+        }
+        body.fireAt = iso;
       }
 
       const response = await apiFetch(
@@ -458,6 +477,7 @@ export class ScionScheduledEventList extends LitElement {
             : html`
                 <sl-input
                   label="Date & Time"
+                  help-text="Times in: ${effectiveTimeZone()}"
                   type="datetime-local"
                   .value=${this.dialogDatetime}
                   @sl-input=${(e: Event) =>

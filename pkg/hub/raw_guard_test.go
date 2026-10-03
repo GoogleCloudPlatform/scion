@@ -1085,6 +1085,9 @@ func TestHandleProjectBroadcast_RawCaseVariantAndMergedDuplicate_Rejected(t *tes
 			}
 			require.NoError(t, s.CreateProject(ctx, project))
 			srv.createProjectMembersGroup(ctx, project)
+			// Project access comes only from role bindings (OwnerID alone
+			// grants nothing); bind the owner so the request reaches the raw guard.
+			require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, owner.ID))
 
 			httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+project.ID+"/broadcast", strings.NewReader(tc.body))
 			httpReq.Header.Set("Content-Type", "application/json")

@@ -184,6 +184,72 @@ var purgeRemovedWorktrees = func(base string) {
 	}()
 }
 
+// nfsExportWorkspace resolves, for the delete path, the project's
+// workspace on the NFS workspace export as seen through the broker's own
+// mount: the export mount with symlinks resolved, and the workspace path
+// relative to it (<subpath_root>/<projectID>/workspace). It returns two
+// empty strings and no error when there is nothing to do from this broker:
+// the runtime is not Kubernetes, the project's workspace_storage backend is
+// not nfs, or the export is not mounted here. agentName must be an agent
+// slug and projectID a valid project ID; the workspace path is checked the
+// same way as when it is created before a pod starts.
+func (m *AgentManager) nfsExportWorkspace(projectPath, projectID, agentName string) (resolvedHostBase, rel string, err error) {
+	if m.Runtime == nil || !isKubernetesRuntime(m.Runtime.Name()) {
+		return "", "", nil
+	}
+	if !isNFSWorktreeName(agentName) {
+		return "", "", fmt.Errorf("workspace_storage nfs: invalid agent name %q", agentName)
+	}
+	if !shareddirs.ValidProjectID(projectID) {
+		return "", "", fmt.Errorf("workspace_storage nfs: invalid project ID %q", projectID)
+	}
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return "", "", fmt.Errorf("workspace_storage nfs: resolve project directory: %w", err)
+	}
+	settings, _, err := config.LoadEffectiveSettings(projectDir)
+	if err != nil {
+		return "", "", fmt.Errorf("workspace_storage nfs: load settings: %w", err)
+	}
+	if settings == nil || settings.Server == nil || settings.Server.WorkspaceStorage == nil {
+		return "", "", nil
+	}
+	backend := nfsWorktreeBackend(settings.Server.WorkspaceStorage, store.SharingModeWorktreePerAgent)
+	if backend.Name() != "nfs" {
+		return "", "", nil
+	}
+	resolved, err := backend.Resolve(runtime.ResolveInput{
+		ProjectID:   projectID,
+		AgentID:     agentName,
+		ProjectSlug: api.Slugify(config.GetProjectName(projectDir)),
+		Mode:        store.SharingModeWorktreePerAgent,
+		ProjectDir:  projectDir,
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("workspace_storage nfs: resolve workspace: %w", err)
+	}
+	rel = resolved.ServerRelativePath
+	if rel == "" || !filepath.IsLocal(rel) || filepath.Join(resolved.HostBase, rel) != resolved.HostPath {
+		return "", "", fmt.Errorf("workspace_storage nfs: unexpected workspace path %q under %q", rel, resolved.HostBase)
+	}
+	info, err := os.Stat(resolved.HostBase)
+	if errors.Is(err, fs.ErrNotExist) {
+		// Export not mounted on this broker: nothing to remove from here.
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("workspace_storage nfs: check export mount %q: %w", resolved.HostBase, err)
+	}
+	if !info.IsDir() {
+		return "", "", fmt.Errorf("workspace_storage nfs: check export mount %q: not a directory", resolved.HostBase)
+	}
+	resolvedHostBase, err = filepath.EvalSymlinks(resolved.HostBase)
+	if err != nil {
+		return "", "", fmt.Errorf("workspace_storage nfs: resolve export mount %q: %w", resolved.HostBase, err)
+	}
+	return resolvedHostBase, rel, nil
+}
+
 // RemoveNFSWorktree removes the worktree of the agent named agentName from
 // the project's shared checkout on the NFS workspace export
 // (<subpath_root>/<projectID>/workspace/worktrees/<agentName>), through the
@@ -204,58 +270,9 @@ var purgeRemovedWorktrees = func(base string) {
 // for the caller to log; the worktree is then left in place, and an agent
 // created again with the same name reuses it.
 func (m *AgentManager) RemoveNFSWorktree(ctx context.Context, projectPath, projectID, agentName string) (path string, err error) {
-	if m.Runtime == nil || !isKubernetesRuntime(m.Runtime.Name()) {
-		return "", nil
-	}
-	if !isNFSWorktreeName(agentName) {
-		return "", fmt.Errorf("workspace_storage nfs: invalid agent name %q", agentName)
-	}
-	if !shareddirs.ValidProjectID(projectID) {
-		return "", fmt.Errorf("workspace_storage nfs: invalid project ID %q", projectID)
-	}
-	projectDir, err := config.GetResolvedProjectDir(projectPath)
-	if err != nil {
-		return "", fmt.Errorf("workspace_storage nfs: resolve project directory: %w", err)
-	}
-	settings, _, err := config.LoadEffectiveSettings(projectDir)
-	if err != nil {
-		return "", fmt.Errorf("workspace_storage nfs: load settings: %w", err)
-	}
-	if settings == nil || settings.Server == nil || settings.Server.WorkspaceStorage == nil {
-		return "", nil
-	}
-	backend := nfsWorktreeBackend(settings.Server.WorkspaceStorage, store.SharingModeWorktreePerAgent)
-	if backend.Name() != "nfs" {
-		return "", nil
-	}
-	resolved, err := backend.Resolve(runtime.ResolveInput{
-		ProjectID:   projectID,
-		AgentID:     agentName,
-		ProjectSlug: api.Slugify(config.GetProjectName(projectDir)),
-		Mode:        store.SharingModeWorktreePerAgent,
-		ProjectDir:  projectDir,
-	})
-	if err != nil {
-		return "", fmt.Errorf("workspace_storage nfs: resolve workspace: %w", err)
-	}
-	rel := resolved.ServerRelativePath
-	if rel == "" || !filepath.IsLocal(rel) || filepath.Join(resolved.HostBase, rel) != resolved.HostPath {
-		return "", fmt.Errorf("workspace_storage nfs: unexpected workspace path %q under %q", rel, resolved.HostBase)
-	}
-	info, err := os.Stat(resolved.HostBase)
-	if errors.Is(err, fs.ErrNotExist) {
-		// Export not mounted on this broker: nothing to remove from here.
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("workspace_storage nfs: check export mount %q: %w", resolved.HostBase, err)
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("workspace_storage nfs: check export mount %q: not a directory", resolved.HostBase)
-	}
-	resolvedHostBase, err := filepath.EvalSymlinks(resolved.HostBase)
-	if err != nil {
-		return "", fmt.Errorf("workspace_storage nfs: resolve export mount %q: %w", resolved.HostBase, err)
+	resolvedHostBase, rel, err := m.nfsExportWorkspace(projectPath, projectID, agentName)
+	if err != nil || resolvedHostBase == "" {
+		return "", err
 	}
 	workspace := filepath.Join(resolvedHostBase, rel)
 	worktree := filepath.Join(resolvedHostBase, nfsWorktreeSubPath(rel, agentName))

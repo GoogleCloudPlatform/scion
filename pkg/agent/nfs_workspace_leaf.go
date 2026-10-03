@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"golang.org/x/sys/unix"
@@ -80,6 +81,28 @@ const nfsLeafGroupAccessBits = unix.S_ISGID | 0o020
 // example one the kubelet created root-owned, or one made by hand), so the
 // provisioning chown stays strict for it.
 func ensureNFSWorkspaceLeaf(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, pvClaimName string, sharedDirNames []string) (prepared bool, err error) {
+	return ensureNFSWorkspaceLeaves(runtimeName, projectID, resolved, pvClaimName, sharedDirNames, "")
+}
+
+// ensureNFSAgentWorkspaceLeaf is ensureNFSWorkspaceLeaf for a
+// clone-per-agent agent: instead of the project's workspace directory, it
+// creates the agent's directory (<subpath_root>/<projectID>/agents/<agent
+// name>), which the provisioning init container mounts, and in it the
+// agent's own workspace, which the agent container mounts and clones into,
+// together with the same shared-dir directories. Both get the leaf modes,
+// and prepared requires both. The project's workspace directory is not
+// created. An existing directory is left exactly as it is, contents
+// included.
+func ensureNFSAgentWorkspaceLeaf(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, pvClaimName string, sharedDirNames []string, agentName string) (prepared bool, err error) {
+	if !isNFSWorktreeName(agentName) {
+		return false, fmt.Errorf("workspace_storage nfs: invalid agent name %q", agentName)
+	}
+	return ensureNFSWorkspaceLeaves(runtimeName, projectID, resolved, pvClaimName, sharedDirNames, agentName)
+}
+
+// ensureNFSWorkspaceLeaves implements ensureNFSWorkspaceLeaf and, with
+// agentName set, ensureNFSAgentWorkspaceLeaf.
+func ensureNFSWorkspaceLeaves(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, pvClaimName string, sharedDirNames []string, agentName string) (prepared bool, err error) {
 	if !isKubernetesRuntime(runtimeName) || resolved.Backend != "nfs" || pvClaimName == "" {
 		return false, nil
 	}
@@ -91,7 +114,21 @@ func ensureNFSWorkspaceLeaf(runtimeName, projectID string, resolved runtime.Reso
 	if rel == "" || !filepath.IsLocal(rel) || filepath.Join(resolved.HostBase, rel) != resolved.HostPath {
 		return false, fmt.Errorf("workspace_storage nfs: unexpected workspace path %q under %q", rel, resolved.HostBase)
 	}
-	leaves := []string{rel}
+	workspaceLeaf := rel
+	var leaves []string
+	if agentName != "" {
+		agentDir, err := runtime.NFSAgentDirSubPath(rel, agentName)
+		if err != nil {
+			return false, fmt.Errorf("workspace_storage nfs: %w", err)
+		}
+		workspaceLeaf = filepath.Join(agentDir, provision.AgentWorkspaceDir)
+		// The provisioning init container writes its lock, the branch
+		// record and the sentinel in the agent directory, so it needs the
+		// same group access as the workspace: an intermediate created by
+		// the walk alone would have no group write.
+		leaves = append(leaves, agentDir)
+	}
+	leaves = append(leaves, workspaceLeaf)
 	if len(sharedDirNames) > 0 {
 		dirs := make([]api.SharedDir, 0, len(sharedDirNames))
 		for _, name := range sharedDirNames {
@@ -117,7 +154,7 @@ func ensureNFSWorkspaceLeaf(runtimeName, projectID string, resolved runtime.Reso
 		if errors.Is(err, fs.ErrNotExist) {
 			slog.Info("workspace_storage nfs: export not mounted on this broker; the node will create the workspace directory "+
 				"when the pod starts, which requires an export that allows root to create directories (no_root_squash)",
-				"host_base", resolved.HostBase, "sub_path", rel)
+				"host_base", resolved.HostBase, "sub_path", workspaceLeaf)
 			return false, nil
 		}
 		return false, fmt.Errorf("workspace_storage nfs: check export mount %q: %w; %s", resolved.HostBase, err, nfsWorkspaceExportHint)
