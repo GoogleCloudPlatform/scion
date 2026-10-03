@@ -3937,6 +3937,10 @@ func isContainerNameConflict(err error) bool {
 		strings.Contains(msg, "is already in use by container")
 }
 
+// skillResolutionErrorCode mirrors runtimebroker.ErrCodeSkillResolution; it
+// is duplicated because importing pkg/runtimebroker would invert layering.
+const skillResolutionErrorCode = "skill_resolution_failed"
+
 // dispatchCreateErrorResponse classifies a failed create/provision dispatch to
 // the runtime broker and writes the matching HTTP response.
 //
@@ -3947,12 +3951,22 @@ func isContainerNameConflict(err error) bool {
 // status code survives the HTTP hop as a *brokerStatusError — so it is
 // checked here before falling back to the generic "runtime broker failed"
 // 502 every other failure still gets (ptone/scion#1316 fault 3).
+//
+// A required-skill resolution failure is relayed verbatim: the broker's
+// status, message, details and Retry-After, with no hub prefix (#2546 R2).
 func dispatchCreateErrorResponse(w http.ResponseWriter, err error) {
+	var se *brokerStatusError
+	isSkillResolution := errors.As(err, &se) && se.brokerErrorCode() == skillResolutionErrorCode
+
 	switch {
 	case isContainerNameConflict(err):
 		Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
+	case isSkillResolution:
+		if se.RetryAfter != "" {
+			w.Header().Set("Retry-After", se.RetryAfter)
+		}
+		writeError(w, se.StatusCode, skillResolutionErrorCode, se.brokerErrorMessage(), se.brokerErrorDetails())
 	case isBrokerStatus(err, http.StatusNotFound):
-		var se *brokerStatusError
 		message := err.Error()
 		if errors.As(err, &se) {
 			message = se.brokerErrorMessage()
