@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -105,7 +106,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	}
 	// Never persist credentials embedded in the override (https://user:TOKEN@…):
 	// GitRemote and the git source labels are readable by project members.
-	overrideRemote = util.StripGitURLCredentials(overrideRemote)
+	overrideRemote = dropDefaultPort(util.StripGitURLCredentials(overrideRemote))
 	// overrideCanonical is the form fed to NormalizeGitRemote/ToHTTPSCloneURL,
 	// which only understand the "git@" SCP login (see canonicalCloneRemote).
 	overrideCanonical := canonicalCloneRemote(overrideRemote)
@@ -848,12 +849,15 @@ func splitSCPRemote(remote string) (login, host, path string, ok bool) {
 // Local paths ("/x", "./x", "~/x"), bare names, bare hosts, drive paths and
 // SCP without a login (host:org/repo) are rejected.
 func validateCloneGitRemote(remote string) string {
+	if strings.IndexFunc(remote, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return errCloneRemoteInvalid
+	}
 	if strings.Contains(remote, "://") {
 		return validateCloneSchemeRemote(remote)
 	}
 
 	if login, host, path, ok := splitSCPRemote(remote); ok {
-		if scpLogin.MatchString(login) && isHostLabels(host) &&
+		if scpLogin.MatchString(login) && isHostLabels(host) && !strings.Contains(path, "@") &&
 			path != "" && !strings.HasPrefix(path, "/") && strings.Contains(strings.Trim(path, "/"), "/") {
 			return ""
 		}
@@ -865,8 +869,8 @@ func validateCloneGitRemote(remote string) string {
 	if !isHostname(host) || (hasPort && !isPort(port)) {
 		return errCloneRemoteInvalid
 	}
-	if !strings.Contains(strings.Trim(path, "/"), "/") {
-		return errCloneRemoteInvalid // need at least org/repo
+	if !strings.Contains(strings.Trim(path, "/"), "/") || strings.Contains(path, "@") {
+		return errCloneRemoteInvalid // need at least org/repo, and no '@' in the path
 	}
 	return ""
 }
@@ -896,18 +900,65 @@ func validateCloneSchemeRemote(remote string) string {
 	if !isURLHost(host) {
 		return errCloneRemoteInvalid
 	}
-	if strings.EqualFold(u.Scheme, "ssh") && u.Port() != "" {
+	if strings.EqualFold(u.Scheme, "ssh") && (u.Port() != "" || strings.HasSuffix(u.Host, ":")) {
 		return errCloneRemoteSSHPort
+	}
+	// A port must be 1-65535 without leading zeros; a bare ':' is rejected.
+	if strings.HasSuffix(u.Host, ":") || (u.Port() != "" && !isPort(u.Port())) {
+		return errCloneRemoteInvalid
+	}
+	// '@' in the path would be ambiguous with userinfo (and could make a
+	// lenient parser clone a different repository).
+	if strings.Contains(u.EscapedPath(), "@") || strings.Contains(u.Path, "@") {
+		return errCloneRemoteInvalid
 	}
 	if !util.IsGitURL(remote) {
 		return errCloneRemoteInvalid
 	}
+	// Removing credentials must change nothing but the userinfo (ssh keeps
+	// the login): fail closed if the host, port or path would differ.
 	stripped, err := url.Parse(util.StripGitURLCredentials(remote))
-	if err != nil || (stripped.User != nil && !strings.EqualFold(u.Scheme, "ssh")) ||
-		!strings.EqualFold(stripped.Hostname(), host) {
+	if err != nil {
+		return errCloneRemoteInvalid
+	}
+	want := *u
+	want.User = nil
+	if strings.EqualFold(u.Scheme, "ssh") && u.User != nil && u.User.Username() != "" {
+		want.User = url.User(u.User.Username())
+	}
+	if stripped.String() != want.String() {
 		return errCloneRemoteInvalid
 	}
 	return ""
+}
+
+// dropDefaultPort removes an explicit default port (:443 for https, :80 for
+// http) from a validated, credential-free scheme URL, so that
+// https://github.com:443/org/repo names the same repository as
+// https://github.com/org/repo. Other inputs are returned unchanged.
+func dropDefaultPort(remote string) string {
+	scheme, rest, ok := strings.Cut(remote, "://")
+	if !ok {
+		return remote
+	}
+	var port string
+	switch strings.ToLower(scheme) {
+	case "https":
+		port = ":443"
+	case "http":
+		port = ":80"
+	default:
+		return remote
+	}
+	authority, path, hasPath := strings.Cut(rest, "/")
+	if strings.Contains(authority, "@") || !strings.HasSuffix(authority, port) {
+		return remote
+	}
+	authority = strings.TrimSuffix(authority, port)
+	if hasPath {
+		return scheme + "://" + authority + "/" + path
+	}
+	return scheme + "://" + authority
 }
 
 // isHostname reports whether s looks like a DNS hostname with a dot
@@ -917,8 +968,9 @@ func isHostname(s string) bool {
 	return hostnamePattern.MatchString(s)
 }
 
-// hostnamePattern matches two or more dot-separated DNS labels.
-var hostnamePattern = regexp.MustCompile(`^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$`)
+// hostnamePattern matches two or more dot-separated DNS labels (a label may
+// not start or end with '-').
+var hostnamePattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$`)
 
 // isHostLabels reports whether s is one or more dot-separated DNS labels
 // ("gitserver", "github.com").
@@ -926,8 +978,9 @@ func isHostLabels(s string) bool {
 	return hostLabelsPattern.MatchString(s)
 }
 
-// hostLabelsPattern matches one or more dot-separated DNS labels.
-var hostLabelsPattern = regexp.MustCompile(`^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$`)
+// hostLabelsPattern matches one or more dot-separated DNS labels (a label may
+// not start or end with '-').
+var hostLabelsPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$`)
 
 // isURLHost reports whether s (a url.URL Hostname) is a DNS name or an IP
 // address.

@@ -1351,6 +1351,9 @@ func TestStripGitURLCredentials(t *testing.T) {
 		{"no path", "https://u:t@github.com", "https://github.com"},
 		{"query preserved", "https://u:t@github.com/org/repo?x=1", "https://github.com/org/repo?x=1"},
 		{"@ only in query", "https://github.com/org/repo?u=a@b", "https://github.com/org/repo?u=a@b"},
+		{"@ host in path is not userinfo", "https://github.com/org/repo@github.com/x", "https://github.com/org/repo@github.com/x"},
+		{"credentials then @ host in path", "https://u:p@github.com/org/x@github.com/repo", "https://github.com/org/x@github.com/repo"},
+		{"login containing / is path", "https://a/b@github.com/x", "https://a/b@github.com/x"},
 		{"empty", "", ""},
 	}
 	for _, tt := range tests {

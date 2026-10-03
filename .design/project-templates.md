@@ -663,18 +663,26 @@ single-label one such as `git@gitserver:org/repo`; or the scheme-less
 Anything else, such as a local path, gets a 400 with `details.field =
 "gitRemote"`. SCP style without a login (`github.com:org/repo`) is not
 supported, because it cannot be told apart from `host:port/…`; use
-`git@github.com:org/repo` or the https URL. A scheme URL is also rejected when
-removing its credentials would change its host, which catches a password with
-an unencoded `/` (`https://u:p/w@host/…`, which `net/url` cannot parse) and a
-`@` in the path, so an ambiguous userinfo can never reach `GitRemote` or the
-labels. `ssh://` URLs with a port (for example Gerrit's `:29418`) are
+`git@github.com:org/repo` or the https URL. Whitespace and control characters
+are rejected in every form, as is a `@` in the path (it is ambiguous with
+userinfo: `https://github.com/org/repo@github.com/x` must not become
+`github.com/x`). Ports must be 1-65535 without leading zeros (no bare `:`), and
+DNS labels may not start or end with `-`. A scheme URL is also rejected when
+removing its credentials would change anything but the userinfo (host, port or
+path), which catches a password with an unencoded `/` (`https://u:p/w@host/…`,
+which `net/url` cannot parse), so an ambiguous userinfo can never reach
+`GitRemote` or the labels. An explicit default port (`:443` for https, `:80`
+for http) is dropped, so `https://github.com:443/org/repo` names the same
+repository as the template's `github.com/org/repo`. `ssh://` URLs with a port (for example Gerrit's `:29418`) are
 rejected for now with a message pointing to the https URL, because
 `NormalizeGitRemote`/`ToHTTPSCloneURL` would turn the port into a path segment.
 Before anything is compared or stored, the query string and fragment are
 dropped and embedded credentials (`https://user:TOKEN@host/…`) are stripped
 (`util.StripGitURLCredentials`), because `GitRemote` and the labels are
-readable by project members. A non-`git` SCP login is rewritten to `git@` only
-when deriving `GitRemote` and `clone-url`; `source-url` keeps it.
+readable by project members. The ssh/SCP login name (`ssh://alice@…`,
+`alice@host:…`) is kept in `source-url`, because it selects the SSH account and
+is not a secret; only a password is removed. A non-`git` SCP login is rewritten
+to `git@` only when deriving `GitRemote` and `clone-url`; `source-url` keeps it.
 
 **Pre-start hook.** Only the **active** hook is copied
 (`GetActiveProjectPreStartHook`). Archived revisions are history, not

@@ -414,24 +414,33 @@ func TestProjectClone_GitRemoteOverride_RederivesSourceLabels(t *testing.T) {
 // "override" naming the template's own repository (in any URL form) is not
 // treated as a change: the template's clone-url and branch are kept.
 func TestProjectClone_GitRemoteOverride_SameRemoteKeepsLabels(t *testing.T) {
-	srv, s := testServer(t)
-	src := createSourceProject(t, srv, s)
-	ctx := context.Background()
+	for _, remote := range []string{
+		"git@github.com:test/repo.git",
+		// An explicit default port names the same repository (r4).
+		"https://github.com:443/test/repo",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			srv, s := testServer(t)
+			src := createSourceProject(t, srv, s)
+			ctx := context.Background()
 
-	src.Labels[store.LabelDefaultBranch] = "develop"
-	require.NoError(t, s.UpdateProject(ctx, src))
+			src.Labels[store.LabelDefaultBranch] = "develop"
+			require.NoError(t, s.UpdateProject(ctx, src))
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
-		map[string]interface{}{"name": "Same Remote", "gitRemote": "git@github.com:test/repo.git"})
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]interface{}{"name": "Same Remote", "gitRemote": remote})
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
-	var clone store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+			var clone store.Project
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
 
-	assert.Equal(t, "https://github.com/test/repo.git", clone.Labels[store.LabelCloneURL])
-	assert.Equal(t, "develop", clone.Labels[store.LabelDefaultBranch])
-	_, hasSource := clone.Labels[store.LabelSourceURL]
-	assert.False(t, hasSource, "source-url must not be invented when the remote is unchanged")
+			assert.Equal(t, "github.com/test/repo", clone.GitRemote)
+			assert.Equal(t, "https://github.com/test/repo.git", clone.Labels[store.LabelCloneURL])
+			assert.Equal(t, "develop", clone.Labels[store.LabelDefaultBranch])
+			_, hasSource := clone.Labels[store.LabelSourceURL]
+			assert.False(t, hasSource, "source-url must not be invented when the remote is unchanged")
+		})
+	}
 }
 
 // TestProjectClone_GitRemoteOverride_StripsCredentials checks that a token
@@ -502,6 +511,29 @@ func TestProjectClone_GitRemoteOverride_RejectsNonGitURL(t *testing.T) {
 		"https://github.com/org/x@evil.example/repo",
 		"https://bad_host/org/repo",
 		"https://[::1/org/repo",
+		// '@' in the path must not swap the repository (r4).
+		"https://github.com/org/repo@github.com/x",
+		"https://u:SECRET_P@github.com/org/x@github.com/repo",
+		"https://a/b@github.com/x",
+		"git@github.com:org/repo@github.com/x",
+		"github.com/org/repo@github.com/x",
+		// Whitespace and control characters, in every form.
+		"github.com/org/repo\nX",
+		"git@github.com:org/repo\nX",
+		"https://github.com/org/my repo",
+		"https://github.com/org/repo\tx",
+		"ssh://git@github.com/org/re\x00po",
+		"https://github.com/org/r\u00a0epo",
+		// Loose ports and hosts.
+		"https://u:SECRET_P@github.com:/org/repo",
+		"https://github.com:0443/org/repo",
+		"https://github.com:0/org/repo",
+		"https://github.com:65536/org/repo",
+		"git.example.com:0443/team/repo",
+		"https://-x.com/org/repo",
+		"https://x-.example.com/org/repo",
+		"git@-gitserver:org/repo",
+		"-x.example.com/org/repo",
 	} {
 		t.Run(remote, func(t *testing.T) {
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
@@ -596,6 +628,27 @@ func TestProjectClone_GitRemoteOverride_DerivedForms(t *testing.T) {
 			gitRemote: "github.com/acme/repo",
 			cloneURL:  "https://github.com/acme/repo.git",
 			sourceURL: "https://github.com/acme/repo.git",
+		},
+		{
+			name:      "https default port dropped",
+			remote:    "https://github.com:443/acme/repo.git",
+			gitRemote: "github.com/acme/repo",
+			cloneURL:  "https://github.com/acme/repo.git",
+			sourceURL: "https://github.com/acme/repo.git",
+		},
+		{
+			name:      "http default port dropped",
+			remote:    "http://u:SECRET_P@git.example.com:80/team/repo",
+			gitRemote: "git.example.com/team/repo",
+			cloneURL:  "https://git.example.com/team/repo.git",
+			sourceURL: "http://git.example.com/team/repo",
+		},
+		{
+			name:      "ssh login kept in source-url",
+			remote:    "ssh://alice:SECRET_P@git.example.com/team/repo.git",
+			gitRemote: "git.example.com/team/repo",
+			cloneURL:  "https://git.example.com/team/repo.git",
+			sourceURL: "ssh://alice@git.example.com/team/repo.git",
 		},
 		{
 			name:      "scheme-less host:port",

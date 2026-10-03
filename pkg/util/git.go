@@ -669,12 +669,12 @@ func IsGitURL(s string) bool {
 //   - SCP-style shorthand (git@host:org/repo) carries no password and is
 //     returned unchanged, as is anything without a "scheme://" prefix.
 //
-// The userinfo ends at the last '@' that is followed by a host and a path
-// (or by a host only, when no '/' precedes the '@'), so a password containing
-// an unencoded '/' or '@' (https://u:p/w@host/org/repo) is still removed
-// rather than left in place. A '@' inside the path (.../repo@v1) is not
-// treated as userinfo. Callers that need the result to name the same host as
-// the input should verify that separately.
+// The userinfo ends at the first '@' that is preceded by a valid login (no
+// '/' before the first ':') and followed by a host (no '@' or '/') — the RFC
+// 3986 authority with a lenient password. So a password containing an
+// unencoded '/' or '@' (https://u:p/w@host/org/repo) is still removed rather
+// than left in place, and a '@' after the start of the path (.../repo@v1,
+// .../repo@github.com/x) is never treated as userinfo.
 //
 // The URL is edited textually rather than round-tripped through net/url so
 // that the rest of it is preserved byte-for-byte.
@@ -708,20 +708,27 @@ func StripGitURLCredentials(remote string) string {
 
 // userinfoEnd returns the index of the '@' ending the userinfo of s (a URL
 // with its "scheme://" prefix, query and fragment removed), or -1 if s has no
-// userinfo. It picks the last '@' that is followed by "host/..." with a
-// non-empty host, or by a bare host when nothing before the '@' contains '/'.
+// userinfo. It picks the first '@' such that the login before it (up to the
+// first ':') contains no '/', and the host after it (up to the next '/') is
+// non-empty and contains no '@'. Once a '/' appears in the login position the
+// path has started, so no later '@' can end the userinfo.
 func userinfoEnd(s string) int {
-	for end := len(s); ; {
-		at := strings.LastIndex(s[:end], "@")
-		if at < 0 {
+	for from := 0; ; {
+		i := strings.Index(s[from:], "@")
+		if i < 0 {
 			return -1
 		}
-		after := s[at+1:]
-		slash := strings.Index(after, "/")
-		if slash > 0 || (slash < 0 && !strings.Contains(s[:at], "/")) {
+		at := from + i
+		userinfo := s[:at]
+		login, _, _ := strings.Cut(userinfo, ":")
+		if strings.Contains(login, "/") {
+			return -1
+		}
+		host, _, _ := strings.Cut(s[at+1:], "/")
+		if host != "" && !strings.Contains(host, "@") {
 			return at
 		}
-		end = at
+		from = at + 1
 	}
 }
 
