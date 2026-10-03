@@ -351,11 +351,15 @@ func TestStartAgent_AuxiliaryListErrorDoesNotFailStart(t *testing.T) {
 func TestStartAgent_DefaultListErrorFailsStart(t *testing.T) {
 	f := newLifecycleFixture(t)
 	f.registerK8sAgents()
-	f.defaultMgr.listErr = errors.New("docker unavailable")
+	const rawListErr = "docker unavailable: dial unix /var/run/docker.sock"
+	f.defaultMgr.listErr = errors.New(rawListErr)
 
 	w := lifecyclePost(t, f.srv, "/api/v1/agents/plain-agent/start", map[string]any{})
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+	if body := w.Body.String(); strings.Contains(body, rawListErr) || strings.Contains(body, "docker.sock") {
+		t.Errorf("response body leaks the raw runtime list error: %s", body)
 	}
 	if f.defaultMgr.StartCalls() != 0 {
 		t.Errorf("default runtime Start calls = %d, want 0", f.defaultMgr.StartCalls())
