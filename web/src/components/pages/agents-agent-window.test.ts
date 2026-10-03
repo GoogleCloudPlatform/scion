@@ -483,6 +483,49 @@ describe('scion-page-agents — agent list window', () => {
     });
   });
 
+  describe('the window page fetch on a paged set', () => {
+    async function nextInFlight(): Promise<{
+      el: TestEl;
+      h: ReturnType<typeof holdable>;
+      fake: Fake;
+    }> {
+      const fake: Fake = {
+        agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      const el = await mount();
+      expect(internals(el).agentWindow.state).toBe('paged');
+      h.hold();
+      void internals(el).agentWindow.next();
+      await vi.waitFor(() => expect(h.sent).toHaveLength(2));
+      expect(query(h.sent[1].url).get('cursor')).toBe('25');
+      expect(h.sent[1].signal?.aborted).toBe(false);
+      return { el, h, fake };
+    }
+
+    it('disconnecting the page aborts an in-flight Next', async () => {
+      const { el, h } = await nextInFlight();
+      unmount(el);
+      expect(h.sent[1].signal?.aborted).toBe(true);
+      h.release();
+    });
+
+    it('a superseding sorted request aborts an in-flight Next, and its late page is not shown', async () => {
+      const { el, h } = await nextInFlight();
+      internals(el).toggleSort('updated'); // desc to asc: a new sorted request
+      await vi.waitFor(() => expect(h.sent).toHaveLength(3));
+      expect(h.sent[1].signal?.aborted).toBe(true);
+      expect(query(h.sent[2].url).get('dir')).toBe('asc');
+      h.release();
+      await settle(el);
+      const win = internals(el).agentWindow;
+      expect(win.pageIndex).toBe(0);
+      expect(win.items[0].id).toBe('g-00000');
+    });
+  });
+
   describe('a view change while a drain is in flight', () => {
     /** Mounts 2,001 agents in the tree view with the first drain page held, and switches to the list view. */
     async function switchDuringDrain(

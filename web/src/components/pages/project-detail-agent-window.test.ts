@@ -3563,6 +3563,55 @@ describe('project-detail — agent list window', () => {
       expect(el.shadowRoot?.textContent).not.toContain('Could not load every agent');
     });
 
+    it('a drain of 2,001 agents that lands capped after a switch to the updated sort sends one sorted request and ends paged', async () => {
+      const projectId = 'p-drain-then-updated';
+      const { h } = setup(projectId, 2001);
+      localStorage.setItem(
+        `scion-sort-project-agents-${projectId}`,
+        JSON.stringify({ field: 'name', dir: 'asc' })
+      );
+      h.hold();
+      const el = await createComponent(projectId, { holdsFirstLoad: true });
+      expect(h.sent).toHaveLength(1);
+      expect(new URL(h.sent[0].url, 'http://x').searchParams.has('sort')).toBe(false);
+      internals(el).toggleSort('updated');
+      h.release();
+      await idle(el);
+
+      // Four drain pages, then one sorted request for the updated sort.
+      expect(h.sent).toHaveLength(5);
+      expect(
+        h.sent.slice(0, 4).every((r) => !new URL(r.url, 'http://x').searchParams.has('sort'))
+      ).toBe(true);
+      expect(new URL(h.sent[4].url, 'http://x').searchParams.get('sort')).toBe('updated');
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('paged');
+      expect(win.planRequest('view-change', '')).toBe('none');
+    });
+
+    it('a superseding sorted request aborts an in-flight Next, and its late page is not shown', async () => {
+      const projectId = 'p-next-superseded';
+      const { agents, h } = setup(projectId, 60);
+      const el = await createComponent(projectId);
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('paged');
+      h.hold();
+      void win.next();
+      await vi.waitFor(() => expect(h.sent).toHaveLength(2));
+      expect(new URL(h.sent[1].url, 'http://x').searchParams.has('cursor')).toBe(true);
+      internals(el).toggleSort('updated'); // desc to asc: a new sorted request
+      await vi.waitFor(() => expect(h.sent).toHaveLength(3));
+      expect(h.sent[1].signal?.aborted).toBe(true);
+      h.release();
+      await idle(el);
+      expect(win.pageIndex).toBe(0);
+      const expected = [...agents]
+        .sort((a, b) => (a.updated ?? '').localeCompare(b.updated ?? ''))
+        .slice(0, 25)
+        .map((a) => a.id);
+      expect(win.items.map((a) => a.id)).toEqual(expected);
+    });
+
     for (const change of ['dir', 'phase', 'page size'] as const) {
       it(`a ${change} change on page 2 lands on page 0 with no cursor`, async () => {
         const projectId = `p-reset-${change.replace(' ', '-')}`;
