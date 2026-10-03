@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -178,6 +179,7 @@ func TestSetAgentRunID_RefusedWhileDeleteHoldsRow(t *testing.T) {
 		{"no delete", "", nil, nil, false},
 		{"deleting, live lease", store.DeletionStateDeleting, &live, nil, true},
 		{"deleting, lease expired", store.DeletionStateDeleting, &expired, nil, false},
+		{"deleting, lease nil", store.DeletionStateDeleting, nil, nil, false},
 		{"finalizing, live lease", store.DeletionStateFinalizing, &live, nil, true},
 		{"finalizing, lease expired", store.DeletionStateFinalizing, &expired, nil, true},
 		{"failed", store.DeletionStateFailed, nil, nil, false},
@@ -237,4 +239,49 @@ func TestSetAgentRunID_ClaimBetweenReadAndSwapRefuses(t *testing.T) {
 	got, err := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
 	require.NoError(t, err)
 	assert.Equal(t, "run-0", got.RunID)
+}
+
+// runIDWritable (the SQL form, in SetAgentRunID's swap) and
+// store.DeletionHoldsRow (the Go form, in SetAgentRunID's pre-read and the
+// hub's start gate) agree over every deletion state x lease x deleted_at
+// combination (ptone/scion#2550 P1 round 4, DN-2).
+func TestRunIDWritable_MatchesGoPredicate(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	now := time.Now()
+	live, expired := now.Add(time.Minute), now.Add(-time.Minute)
+	states := []*string{nil}
+	for _, st := range []string{"", store.DeletionStateDeleting, store.DeletionStateFinalizing, store.DeletionStateFailed} {
+		st := st
+		states = append(states, &st)
+	}
+	leases := map[string]*time.Time{"nil": nil, "live": &live, "expired": &expired}
+	deleted := map[string]*time.Time{"live row": nil, "soft-deleted": &now}
+	i := 0
+	for _, st := range states {
+		for leaseName, lease := range leases {
+			for delName, del := range deleted {
+				stName := "NULL"
+				if st != nil {
+					stName = fmt.Sprintf("%q", *st)
+				}
+				name := fmt.Sprintf("state %s, lease %s, %s", stName, leaseName, delName)
+				i++
+				a := makeAgent(projectID, fmt.Sprintf("run-id-writable-%d", i))
+				require.NoError(t, s.CreateAgent(ctx, a), name)
+				n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{},
+					store.DeletionFields{State: st, LeaseAt: lease, DeletedAt: del})
+				require.NoError(t, err, name)
+				require.Equal(t, 1, n, name)
+
+				row, err := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
+				require.NoError(t, err, name)
+				goWritable := row.DeletedAt == nil && !store.DeletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, now)
+				sqlWritable, err := s.client.Agent.Query().
+					Where(agent.IDEQ(row.ID), runIDWritable(now)).Exist(ctx)
+				require.NoError(t, err, name)
+				assert.Equal(t, goWritable, sqlWritable, name)
+			}
+		}
+	}
 }

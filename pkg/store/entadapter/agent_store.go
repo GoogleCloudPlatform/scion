@@ -2267,7 +2267,7 @@ func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string) (
 			return "", mapError(err)
 		}
 		now := time.Now()
-		if row.DeletedAt != nil || deletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, now) {
+		if row.DeletedAt != nil || store.DeletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, now) {
 			return "", store.ErrDeleteInProgress
 		}
 		if s.afterRunIDRead != nil {
@@ -2287,22 +2287,9 @@ func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string) (
 	return "", fmt.Errorf("agent store: run_id for agent %s kept changing; giving up after %d attempts", agentID, setAgentRunIDAttempts)
 }
 
-// deletionHoldsRow mirrors the hub's start gate (deleteBlocksStart): a
-// delete holds the row while it is finalizing, or deleting under a live
-// lease. A deleting row whose lease has passed reads as failed and does
-// not block a start.
-func deletionHoldsRow(state string, leaseAt *time.Time, now time.Time) bool {
-	switch state {
-	case store.DeletionStateFinalizing:
-		return true
-	case store.DeletionStateDeleting:
-		return leaseAt != nil && leaseAt.After(now)
-	}
-	return false
-}
-
-// runIDWritable is deletionHoldsRow negated, plus deleted_at IS NULL, as a
-// predicate for SetAgentRunID's swap.
+// runIDWritable is store.DeletionHoldsRow negated, plus deleted_at IS NULL,
+// as a predicate for SetAgentRunID's swap. TestRunIDWritable_MatchesGoPredicate
+// keeps the two in step.
 func runIDWritable(now time.Time) predicate.Agent {
 	return agent.And(
 		agent.DeletedAtIsNil(),
