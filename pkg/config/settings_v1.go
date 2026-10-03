@@ -901,6 +901,18 @@ type V1NFSConfig struct {
 	MountOptions string       `json:"mount_options,omitempty" yaml:"mount_options,omitempty" koanf:"mount_options"`
 	Shares       []V1NFSShare `json:"shares,omitempty" yaml:"shares,omitempty" koanf:"shares"`
 
+	// AutoMount lets a Runtime Broker mount each share itself, at
+	// <MountRoot>/<share.ID>, in the background at startup and again before
+	// each NFS-backed dispatch to a local-container runtime (dispatches to
+	// Kubernetes or Cloud Run never mount). A broker whose default runtime
+	// is Kubernetes or Cloud Run never mounts, even with AutoMount on; it
+	// only verifies. Default false: the operator (or the kubelet, on
+	// Kubernetes) provides the mounts, and the broker only checks them
+	// read-only for /healthz and scion doctor. Mounting requires the broker
+	// to run as root (mount.nfs checks uid 0). Only server.workspace_storage
+	// reads this field; shared_dir_storage ignores it.
+	AutoMount bool `json:"auto_mount,omitempty" yaml:"auto_mount,omitempty" koanf:"auto_mount"`
+
 	// Stable, node-independent ownership for NFS-backed trees.
 	// Default 1000:1000 to converge with the K8s pod UID/GID.
 	UID int `json:"uid,omitempty" yaml:"uid,omitempty" koanf:"uid"` // default 1000
@@ -1091,10 +1103,11 @@ var sharedDirStorageIgnoredNFSFields = []struct {
 	{"gid", func(nfs *V1NFSConfig) bool { return nfs.GID != 0 }},
 	{"mount_options", func(nfs *V1NFSConfig) bool { return nfs.MountOptions != "" }},
 	{"storage_class", func(nfs *V1NFSConfig) bool { return nfs.StorageClass != "" }},
+	{"auto_mount", func(nfs *V1NFSConfig) bool { return nfs.AutoMount }},
 }
 
 // IgnoredNFSFields returns the names of the workspace-storage-only NFS
-// fields (uid, gid, mount_options, storage_class) that are set on s but
+// fields (uid, gid, mount_options, storage_class, auto_mount) that are set on s but
 // never used by shared_dir_storage, for a one-time startup warning (Phase 2
 // item 5, design §7 Phase 2: "startup validation warns about ignored
 // fields"). Returns nil if s is nil, s.NFS is nil, or backend isn't "nfs" —

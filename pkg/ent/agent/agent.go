@@ -124,6 +124,24 @@ const (
 	FieldLaunchStep = "launch_step"
 	// FieldLaunchError holds the string denoting the launch_error field in the database.
 	FieldLaunchError = "launch_error"
+	// FieldDeletionState holds the string denoting the deletion_state field in the database.
+	FieldDeletionState = "deletion_state"
+	// FieldDeletionClaim holds the string denoting the deletion_claim field in the database.
+	FieldDeletionClaim = "deletion_claim"
+	// FieldDeletionLeaseAt holds the string denoting the deletion_lease_at field in the database.
+	FieldDeletionLeaseAt = "deletion_lease_at"
+	// FieldDeletionStartedAt holds the string denoting the deletion_started_at field in the database.
+	FieldDeletionStartedAt = "deletion_started_at"
+	// FieldDeletionFailedAt holds the string denoting the deletion_failed_at field in the database.
+	FieldDeletionFailedAt = "deletion_failed_at"
+	// FieldDeletionCode holds the string denoting the deletion_code field in the database.
+	FieldDeletionCode = "deletion_code"
+	// FieldDeletionError holds the string denoting the deletion_error field in the database.
+	FieldDeletionError = "deletion_error"
+	// FieldDeletionPrior holds the string denoting the deletion_prior field in the database.
+	FieldDeletionPrior = "deletion_prior"
+	// FieldDeletionRequest holds the string denoting the deletion_request field in the database.
+	FieldDeletionRequest = "deletion_request"
 	// EdgeProject holds the string denoting the project edge name in mutations.
 	EdgeProject = "project"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -212,6 +230,15 @@ var Columns = []string{
 	FieldLaunchSeq,
 	FieldLaunchStep,
 	FieldLaunchError,
+	FieldDeletionState,
+	FieldDeletionClaim,
+	FieldDeletionLeaseAt,
+	FieldDeletionStartedAt,
+	FieldDeletionFailedAt,
+	FieldDeletionCode,
+	FieldDeletionError,
+	FieldDeletionPrior,
+	FieldDeletionRequest,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -269,6 +296,18 @@ var (
 	DefaultLaunchStep string
 	// DefaultLaunchError holds the default value on creation for the "launch_error" field.
 	DefaultLaunchError string
+	// DefaultDeletionState holds the default value on creation for the "deletion_state" field.
+	DefaultDeletionState string
+	// DefaultDeletionClaim holds the default value on creation for the "deletion_claim" field.
+	DefaultDeletionClaim int64
+	// DefaultDeletionCode holds the default value on creation for the "deletion_code" field.
+	DefaultDeletionCode string
+	// DefaultDeletionError holds the default value on creation for the "deletion_error" field.
+	DefaultDeletionError string
+	// DefaultDeletionPrior holds the default value on creation for the "deletion_prior" field.
+	DefaultDeletionPrior string
+	// DefaultDeletionRequest holds the default value on creation for the "deletion_request" field.
+	DefaultDeletionRequest string
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
@@ -591,6 +630,51 @@ func ByLaunchStep(opts ...sql.OrderTermOption) OrderOption {
 // ByLaunchError orders the results by the launch_error field.
 func ByLaunchError(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLaunchError, opts...).ToFunc()
+}
+
+// ByDeletionState orders the results by the deletion_state field.
+func ByDeletionState(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionState, opts...).ToFunc()
+}
+
+// ByDeletionClaim orders the results by the deletion_claim field.
+func ByDeletionClaim(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionClaim, opts...).ToFunc()
+}
+
+// ByDeletionLeaseAt orders the results by the deletion_lease_at field.
+func ByDeletionLeaseAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionLeaseAt, opts...).ToFunc()
+}
+
+// ByDeletionStartedAt orders the results by the deletion_started_at field.
+func ByDeletionStartedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionStartedAt, opts...).ToFunc()
+}
+
+// ByDeletionFailedAt orders the results by the deletion_failed_at field.
+func ByDeletionFailedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionFailedAt, opts...).ToFunc()
+}
+
+// ByDeletionCode orders the results by the deletion_code field.
+func ByDeletionCode(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionCode, opts...).ToFunc()
+}
+
+// ByDeletionError orders the results by the deletion_error field.
+func ByDeletionError(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionError, opts...).ToFunc()
+}
+
+// ByDeletionPrior orders the results by the deletion_prior field.
+func ByDeletionPrior(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionPrior, opts...).ToFunc()
+}
+
+// ByDeletionRequest orders the results by the deletion_request field.
+func ByDeletionRequest(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionRequest, opts...).ToFunc()
 }
 
 // ByProjectField orders the results by project field.

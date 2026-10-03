@@ -1039,6 +1039,14 @@ func (s *Server) handleExistingAgent(
 		return existingAgentConflict
 	}
 
+	// Delete in progress (design ptone/scion#2483 §2.1): every branch below
+	// starts, resumes, restarts or recreates existingAgent, so the shared
+	// start gate runs first, after the lifecycle authz above.
+	if ref := s.startGate(ctx, existingAgent, startEntryCreateExisting); ref.refuses() {
+		ref.write(w)
+		return existingAgentErrored
+	}
+
 	s.agentLifecycleLog.Info("handleExistingAgent: found existing agent",
 		"slug", existingAgent.Slug,
 		"existing_agent_id", existingAgent.ID,

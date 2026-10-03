@@ -59,6 +59,8 @@ import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
+import type { ScionAgentTreeView } from '../shared/agent-tree-view.js';
+import { GraphPaletteController } from '../shared/palette/graph-palette-controller.js';
 import '../shared/agent-message-viewer.js';
 import '../shared/agent-pager.js';
 import { AGENT_PAGER_PAGE_SIZES } from '../shared/agent-pager.js';
@@ -78,6 +80,9 @@ import type { FileEditorDataSource } from '../shared/file-editor.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { formatNumber } from '../../utils/format-number.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 /** A request/refresh trigger, per design §4.3; `loadData`/`fetchAndMergeAgents` both funnel into `loadAgentsForView` (design §11). */
 type AgentsViewTrigger = 'page-load' | 'label-commit' | 'lifecycle-refresh' | 'view-change';
@@ -100,6 +105,9 @@ const PAGER_PAGE_SIZE_STORAGE_KEY = 'scion-pagesize-project-agents';
 
 @customElement('scion-page-project-detail')
 export class ScionPageProjectDetail extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /**
    * Page data from SSR
    */
@@ -207,6 +215,12 @@ export class ScionPageProjectDetail extends LitElement {
    */
   @state()
   private viewMode: ViewMode = 'grid';
+
+  /** "Jump to agent" over the graph, offering the agents its tree view shows. */
+  readonly graphPalette = new GraphPaletteController(this, {
+    treeView: (): ScionAgentTreeView | null =>
+      this.renderRoot.querySelector('scion-agent-tree-view'),
+  });
 
   /**
    * Whether the agents section is expanded to full height. Collapsed (the
@@ -1495,7 +1509,7 @@ export class ScionPageProjectDetail extends LitElement {
     if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
     if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-    return n.toLocaleString();
+    return formatNumber(n);
   }
 
   private backgroundRefresh(trigger: AgentsViewTrigger = 'lifecycle-refresh'): void {
@@ -1890,18 +1904,7 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private formatDate(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      return new Intl.DateTimeFormat('en', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      }).format(date);
-    } catch {
-      return dateString;
-    }
+    return formatInstantWithZone(dateString) || dateString;
   }
 
   private getTabDataSource(tabName: string): FileBrowserDataSource {
@@ -2112,19 +2115,11 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private formatRelativeTime(isoString: string): string {
-    const date = new Date(isoString);
-    if (isNaN(date.getTime())) return '—';
-    const now = Date.now();
-    const diffMs = now - date.getTime();
-    if (diffMs < 0) return 'just now';
-    const seconds = Math.floor(diffMs / 1000);
-    if (seconds < 60) return 'just now';
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
+    const ms = new Date(isoString).getTime();
+    if (Number.isNaN(ms)) return '—';
+    // A future instant is clock skew between hub and browser.
+    if (ms > Date.now()) return 'just now';
+    return formatRelative(isoString, { style: 'narrow' });
   }
 
   private renderFilterBar() {

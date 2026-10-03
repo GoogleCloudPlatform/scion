@@ -25,10 +25,12 @@ import {
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
 import { enterAppFrame, exitAppFrame } from '../components/shared/app-frame.js';
-import { hasOpenModalDescendant } from '../components/shared/open-modal.js';
 import { TERMINAL_PALETTE_OPEN_REQUEST_EVENT } from './terminal-palette-events.js';
-import type { GroupState, PaletteGroup, PaletteTarget } from './chat-palette-types.js';
-import type { ScionQuickPalette } from '../components/shared/palette/quick-palette.js';
+import type { PaletteCandidate } from './chat-palette-types.js';
+import {
+  QuickPaletteHost,
+  isQuickPaletteShortcut,
+} from '../components/shared/palette/quick-palette-host.js';
 import '../components/shared/header.js';
 import '../components/terminal/terminal-pane.js';
 
@@ -103,23 +105,27 @@ export class TerminalWorkspaceRoot {
   private readonly ariaLive = document.createElement('div');
   private readonly placeMenu = document.createElement('div');
   /**
-   * The "Jump to agent" palette, created on first open by
-   * {@link mountPalette} so its component and data modules stay out of the
-   * main bundle. Null until then.
+   * The "Jump to agent" palette. Its component and data modules load on
+   * first open, so they stay out of the main bundle.
    */
-  private palette: ScionQuickPalette | null = null;
-  private paletteMount: Promise<ScionQuickPalette> | null = null;
-  /** Whether the palette is open or opening (its module may still be loading). */
-  private paletteOpen = false;
-  /** Per-group load state for the palette's one (Agents) group. */
-  private paletteGroups: Partial<Record<PaletteGroup, GroupState>> = {
-    agents: { status: 'loading', candidates: [] },
-  };
-  private paletteAbort: AbortController | null = null;
-  /** Bumped on every {@link loadPaletteAgents} call, so a superseded load's resolution can't publish over a newer one. */
-  private paletteGeneration = 0;
-  /** The deep-active element captured when the palette opened, refocused on a non-selection dismiss (escape/backdrop/close button) — not on a successful selection, where the newly-placed pane takes focus instead. */
-  private paletteInvoker: HTMLElement | null = null;
+  private readonly paletteHost = new QuickPaletteHost({
+    mount: this.element,
+    label: 'Jump to agent',
+    placeholder: 'Search agents…',
+    load: async (context): Promise<PaletteCandidate[]> => {
+      const { loadTerminalPaletteAgents } = await import('./terminal-palette-data.js');
+      return loadTerminalPaletteAgents(context);
+    },
+    onSelect: (target): void => {
+      this.paletteFocusAgentId = target.agentId;
+      this.paletteDialogSettled = false;
+      this.selectFromPalette(target.agentId);
+    },
+    onSelectionSettled: (): void => {
+      this.paletteDialogSettled = true;
+      this.focusPaletteTarget();
+    },
+  });
   /**
    * The most recent pane to receive real DOM focus, tracked continuously via
    * a persistent `focusin` listener (installed in the constructor) rather
@@ -128,7 +134,6 @@ export class TerminalWorkspaceRoot {
    * that session closes ({@link syncSessions}).
    */
   private lastFocusedPaneSessionKey: string | null = null;
-  private paletteClosedBySelection = false;
   /**
    * The agent picked from the palette, whose pane takes focus once it is
    * visible and the palette's close has settled — see
@@ -493,6 +498,7 @@ export class TerminalWorkspaceRoot {
   dispose(): void {
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     document.removeEventListener('focusin', this.handleGlobalFocusIn);
+    this.paletteHost.dispose();
   }
 
   /**
@@ -535,102 +541,15 @@ export class TerminalWorkspaceRoot {
   };
 
   /**
-   * Opens the palette: captures the current deep-active element to restore
-   * focus to on a non-selection dismiss, and (re)loads the Agents group —
-   * every open gets a fresh list, since agents can start/stop between opens.
-   * The focused pane itself (for a later `addOrReplaceFocused` call) is not
-   * captured here — see {@link handleGlobalFocusIn}'s own doc comment for
-   * why it is instead tracked continuously, as focus changes happen.
-   *
-   * The palette element is mounted closed and only then opened, so Shoelace
-   * always sees a real false->true transition on a connected element.
+   * Opens the palette (see {@link QuickPaletteHost.open}). The focused pane
+   * itself (for a later `addOrReplaceFocused` call) is not captured here —
+   * see {@link handleGlobalFocusIn}'s own doc comment for why it is instead
+   * tracked continuously, as focus changes happen.
    */
   private openPalette(): void {
-    if (this.paletteOpen) return;
-    this.paletteInvoker =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    this.paletteClosedBySelection = false;
+    if (this.paletteHost.isOpen) return;
     this.paletteFocusAgentId = null;
-    this.paletteOpen = true;
-    void this.loadPaletteAgents();
-    this.mountPalette().then(
-      (palette) => {
-        if (this.paletteOpen) palette.open = true;
-      },
-      () => {
-        this.paletteOpen = false;
-        this.paletteAbort?.abort();
-        this.paletteInvoker = null;
-      }
-    );
-  }
-
-  /**
-   * Loads the palette component and creates its element, once. A failed
-   * load is not cached, so the next open retries it.
-   */
-  private mountPalette(): Promise<ScionQuickPalette> {
-    this.paletteMount ??= import('../components/shared/palette/quick-palette.js')
-      .then(async () => {
-        const palette = document.createElement('scion-quick-palette');
-        palette.label = 'Jump to agent';
-        palette.placeholder = 'Search agents…';
-        palette.groups = this.paletteGroups;
-        palette.addEventListener('palette-select', (e) =>
-          this.handlePaletteSelect(e as CustomEvent<{ target: PaletteTarget }>)
-        );
-        palette.addEventListener('palette-retry', () => void this.loadPaletteAgents());
-        palette.addEventListener('palette-dismiss', () => this.closePalette());
-        palette.addEventListener('sl-after-hide', () => this.handlePaletteAfterHide());
-        this.element.append(palette);
-        // Assigned before the first render settles, so a load that finishes
-        // in the meantime still reaches the element.
-        this.palette = palette;
-        await palette.updateComplete;
-        return palette;
-      })
-      .catch((err: unknown) => {
-        this.paletteMount = null;
-        throw err;
-      });
-    return this.paletteMount;
-  }
-
-  private closePalette(): void {
-    this.paletteOpen = false;
-    if (this.palette) this.palette.open = false;
-    this.paletteAbort?.abort();
-  }
-
-  /**
-   * Closes the palette when the workspace hides (a route change away from
-   * /terminals): the invoker is hidden with it, so nothing is refocused
-   * when the close settles. Clearing the invoker is enough: while the
-   * palette is open no selection is pending, since `openPalette()` clears
-   * it and a selection closes the palette before recording its target.
-   * Closing releases Shoelace's focus trap and scroll lock, which would
-   * otherwise stay active on the destination page, and aborts the
-   * in-flight load.
-   */
-  private closePaletteWithoutFocusRestore(): void {
-    this.paletteInvoker = null;
-    this.closePalette();
-  }
-
-  /** Fires once Shoelace's close animation actually completes, regardless of how the palette closed. */
-  private handlePaletteAfterHide(): void {
-    if (this.paletteClosedBySelection) {
-      // Shoelace queues its own focus restore to the dialog's trigger in a
-      // timeout just before firing this event; focusing the picked pane in a
-      // later timeout keeps that restore from overriding it.
-      setTimeout(() => {
-        this.paletteDialogSettled = true;
-        this.focusPaletteTarget();
-      });
-    } else {
-      this.paletteInvoker?.focus();
-    }
-    this.paletteInvoker = null;
+    this.paletteHost.open();
   }
 
   /**
@@ -647,66 +566,6 @@ export class TerminalWorkspaceRoot {
     if (!pane || pane.hidden) return;
     this.paletteFocusAgentId = null;
     pane.focusTerminal();
-  }
-
-  private setPaletteAgents(state: GroupState): void {
-    this.paletteGroups = { agents: state };
-    if (this.palette) this.palette.groups = this.paletteGroups;
-  }
-
-  /**
-   * Load (or reload) the palette's one Agents group from the real,
-   * paginated, attach-filtered agents list, publishing partial results per
-   * page — see `terminal-palette-data.ts`.
-   */
-  private async loadPaletteAgents(): Promise<void> {
-    this.paletteAbort?.abort();
-    const controller = new AbortController();
-    this.paletteAbort = controller;
-    const generation = ++this.paletteGeneration;
-    const isCurrent = (): boolean => generation === this.paletteGeneration;
-    this.setPaletteAgents({
-      status: 'loading',
-      candidates: this.paletteGroups.agents?.candidates ?? [],
-    });
-    try {
-      const { loadTerminalPaletteAgents } = await import('./terminal-palette-data.js');
-      const candidates = await loadTerminalPaletteAgents({
-        controller,
-        isCurrent,
-        onProgress: (partial) => this.setPaletteAgents({ status: 'loading', candidates: partial }),
-      });
-      // A superseded load never gets here: it rejects with an AbortError.
-      this.setPaletteAgents({ status: 'ready', candidates });
-    } catch (err) {
-      if (!isCurrent()) return;
-      if (err instanceof DOMException && err.name === 'AbortError') return;
-      const message = err instanceof Error ? err.message : '';
-      this.setPaletteAgents({
-        status: 'error',
-        candidates: this.paletteGroups.agents?.candidates ?? [],
-        ...(message ? { error: message } : {}),
-      });
-    }
-  }
-
-  /**
-   * A palette selection is untrusted stale UI state until checked against
-   * the freshly loaded group — same reasoning as chat's own palette host.
-   */
-  private handlePaletteSelect(e: CustomEvent<{ target: PaletteTarget }>): void {
-    const target = e.detail?.target;
-    this.closePalette();
-    if (!target || target.kind !== 'agent') return;
-    const agentId = target.agentId;
-    const stillPresent = (this.paletteGroups.agents?.candidates ?? []).some(
-      (c) => c.target.kind === 'agent' && c.target.agentId === agentId
-    );
-    if (!stillPresent) return;
-    this.paletteClosedBySelection = true;
-    this.paletteFocusAgentId = agentId;
-    this.paletteDialogSettled = false;
-    this.selectFromPalette(agentId);
   }
 
   /**
@@ -779,18 +638,14 @@ export class TerminalWorkspaceRoot {
    */
   private readonly handleGlobalKeydown = (e: KeyboardEvent): void => {
     if (this.element.hidden) return;
-    if (e.defaultPrevented || e.repeat || e.isComposing) return;
-    if (e.altKey || e.shiftKey) return;
-    // Exactly one of Ctrl/Meta — not both, not neither.
-    if (e.metaKey === e.ctrlKey) return;
-    if (e.key.toLowerCase() !== 'k') return;
-    if (this.paletteOpen) {
+    if (!isQuickPaletteShortcut(e)) return;
+    if (this.paletteHost.isOpen) {
       e.preventDefault();
-      this.closePalette();
+      this.paletteHost.close();
       return;
     }
     if (e.ctrlKey && this.eventFromTerminalPane(e)) return;
-    if (this.hasUnrelatedModalOpen()) return;
+    if (this.paletteHost.hasUnrelatedModalOpen()) return;
     e.preventDefault();
     this.openPalette();
   };
@@ -806,18 +661,6 @@ export class TerminalWorkspaceRoot {
       .some((node) => node instanceof Element && node.tagName === 'SCION-TERMINAL-PANE');
   }
 
-  /**
-   * Is a modal other than the palette open anywhere on the page, including
-   * inside shadow roots? A terminal pane renders its own `sl-dialog`s (the
-   * Capture Auth scope and secret-conflict dialogs) inside its shadow root,
-   * where a light-DOM query cannot see them. A dialog left open in a hidden
-   * retained pane is off screen and does not count. The palette host is
-   * excluded: its own `sl-dialog` lives in its shadow root.
-   */
-  private hasUnrelatedModalOpen(): boolean {
-    return hasOpenModalDescendant(document, this.palette);
-  }
-
   setStatus(message: string): void {
     const state = this.layoutManager.getState();
     const slots = this.layoutManager.getVisibleSlots();
@@ -830,7 +673,7 @@ export class TerminalWorkspaceRoot {
   }
 
   show(visible: boolean): void {
-    if (!visible && this.paletteOpen) this.closePaletteWithoutFocusRestore();
+    if (!visible) this.paletteHost.hide();
     this.element.hidden = !visible;
     this.element.style.display = visible ? 'flex' : 'none';
     if (visible && !this._frameEntered) {

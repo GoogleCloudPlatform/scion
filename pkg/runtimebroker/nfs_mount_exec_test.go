@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -25,7 +26,8 @@ import (
 // returns false when mountpoint exits with code 1 (not a mountpoint).
 func TestExecMountChecker_IsMountpoint_NotMounted(t *testing.T) {
 	checker := NewExecMountChecker(nil)
-	checker.runCommand = func(name string, args ...string) ([]byte, error) {
+	checker.geteuid = func() int { return 0 }
+	checker.runCommand = func(_ context.Context, name string, args ...string) ([]byte, error) {
 		if name != "mountpoint" {
 			t.Fatalf("unexpected command: %s", name)
 		}
@@ -35,7 +37,7 @@ func TestExecMountChecker_IsMountpoint_NotMounted(t *testing.T) {
 		return nil, &exec.ExitError{}
 	}
 
-	mounted, err := checker.IsMountpoint("/mnt/nfs/ws1")
+	mounted, err := checker.IsMountpoint(context.Background(), "/mnt/nfs/ws1")
 	if err != nil {
 		t.Fatalf("IsMountpoint error: %v", err)
 	}
@@ -48,11 +50,12 @@ func TestExecMountChecker_IsMountpoint_NotMounted(t *testing.T) {
 // returns true when mountpoint exits with code 0.
 func TestExecMountChecker_IsMountpoint_Mounted(t *testing.T) {
 	checker := NewExecMountChecker(nil)
-	checker.runCommand = func(name string, args ...string) ([]byte, error) {
+	checker.geteuid = func() int { return 0 }
+	checker.runCommand = func(_ context.Context, name string, args ...string) ([]byte, error) {
 		return nil, nil // exit 0 = is a mountpoint
 	}
 
-	mounted, err := checker.IsMountpoint("/mnt/nfs/ws1")
+	mounted, err := checker.IsMountpoint(context.Background(), "/mnt/nfs/ws1")
 	if err != nil {
 		t.Fatalf("IsMountpoint error: %v", err)
 	}
@@ -65,15 +68,16 @@ func TestExecMountChecker_IsMountpoint_Mounted(t *testing.T) {
 // correctly with the right arguments.
 func TestExecMountChecker_Mount_Success(t *testing.T) {
 	checker := NewExecMountChecker(nil)
+	checker.geteuid = func() int { return 0 }
 	var capturedName string
 	var capturedArgs []string
-	checker.runCommand = func(name string, args ...string) ([]byte, error) {
+	checker.runCommand = func(_ context.Context, name string, args ...string) ([]byte, error) {
 		capturedName = name
 		capturedArgs = args
 		return nil, nil
 	}
 
-	err := checker.Mount("10.0.0.2", "/scion-ws", "/mnt/nfs/ws1", "vers=3,hard")
+	err := checker.Mount(context.Background(), "10.0.0.2", "/scion-ws", "/mnt/nfs/ws1", "vers=3,hard")
 	if err != nil {
 		t.Fatalf("Mount error: %v", err)
 	}
@@ -97,11 +101,12 @@ func TestExecMountChecker_Mount_Success(t *testing.T) {
 // TestExecMountChecker_Mount_Failure verifies mount failure is surfaced.
 func TestExecMountChecker_Mount_Failure(t *testing.T) {
 	checker := NewExecMountChecker(nil)
-	checker.runCommand = func(name string, args ...string) ([]byte, error) {
+	checker.geteuid = func() int { return 0 }
+	checker.runCommand = func(_ context.Context, name string, args ...string) ([]byte, error) {
 		return []byte("mount: permission denied"), fmt.Errorf("exit status 32")
 	}
 
-	err := checker.Mount("10.0.0.2", "/scion-ws", "/mnt/nfs/ws1", "vers=3,hard")
+	err := checker.Mount(context.Background(), "10.0.0.2", "/scion-ws", "/mnt/nfs/ws1", "vers=3,hard")
 	if err == nil {
 		t.Fatal("expected error from mount failure")
 	}
@@ -113,15 +118,16 @@ func TestExecMountChecker_Mount_Failure(t *testing.T) {
 // TestExecMountChecker_Unmount_Success verifies the umount command.
 func TestExecMountChecker_Unmount_Success(t *testing.T) {
 	checker := NewExecMountChecker(nil)
+	checker.geteuid = func() int { return 0 }
 	var capturedName string
 	var capturedArgs []string
-	checker.runCommand = func(name string, args ...string) ([]byte, error) {
+	checker.runCommand = func(_ context.Context, name string, args ...string) ([]byte, error) {
 		capturedName = name
 		capturedArgs = args
 		return nil, nil
 	}
 
-	err := checker.Unmount("/mnt/nfs/ws1")
+	err := checker.Unmount(context.Background(), "/mnt/nfs/ws1")
 	if err != nil {
 		t.Fatalf("Unmount error: %v", err)
 	}

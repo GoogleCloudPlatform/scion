@@ -1984,15 +1984,17 @@ export class ScionPageAdminServerConfig extends LitElement {
     const payload: Record<string, unknown> = {};
     const ok = (key: string) => this.readOnlyReason(key) === null;
 
-    // General
-    if (ok('active_profile')) payload.active_profile = this.activeProfile || undefined;
-    if (ok('default_template')) payload.default_template = this.defaultTemplate || undefined;
+    // General — send "" (not `|| undefined`) so clearing a field reaches
+    // the backend as an explicit empty string, which deletes the key from
+    // settings.yaml. An omitted key means "no change". See ptone/scion#860
+    // and ptone/scion#2535.
+    if (ok('active_profile')) payload.active_profile = this.activeProfile || '';
+    if (ok('default_template')) payload.default_template = this.defaultTemplate || '';
     if (ok('default_harness_config'))
-      payload.default_harness_config = this.resolvedHarnessConfig || undefined;
-    if (ok('default_harness_auth'))
-      payload.default_harness_auth = this.defaultHarnessAuth || undefined;
-    if (ok('image_registry')) payload.image_registry = this.imageRegistry || undefined;
-    if (ok('workspace_path')) payload.workspace_path = this.workspacePath || undefined;
+      payload.default_harness_config = this.resolvedHarnessConfig || '';
+    if (ok('default_harness_auth')) payload.default_harness_auth = this.defaultHarnessAuth || '';
+    if (ok('image_registry')) payload.image_registry = this.imageRegistry || '';
+    if (ok('workspace_path')) payload.workspace_path = this.workspacePath || '';
 
     // Default agent limits — send zero/empty values so the backend can clear
     // the field (delete from settings.yaml). Using `|| undefined` here would
@@ -2038,13 +2040,13 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
     }
     if (ok('default_max_agent_role')) {
-      payload.default_max_agent_role = this.defaultMaxAgentRole || undefined;
+      payload.default_max_agent_role = this.defaultMaxAgentRole || '';
     }
     if (ok('default_agent_role')) {
-      payload.default_agent_role = this.defaultAgentRole || undefined;
+      payload.default_agent_role = this.defaultAgentRole || '';
     }
     if (ok('default_runtime_broker')) {
-      payload.default_runtime_broker = this.defaultRuntimeBroker || undefined;
+      payload.default_runtime_broker = this.defaultRuntimeBroker || '';
     }
     // Sent unconditionally (not `|| undefined`): an explicit "" clears the
     // field server-side (admin_settings.go's `DefaultTimezone *string`
@@ -2053,6 +2055,16 @@ export class ScionPageAdminServerConfig extends LitElement {
     // leave the stored value unchanged.
     if (ok('default_timezone')) {
       payload.default_timezone = this.defaultTimezone || '';
+    }
+    // GCP identity defaults: same "" = delete contract. The service account
+    // only applies in "assign" mode, so it is cleared for any other mode
+    // (mirrors buildLayer1Payload).
+    if (ok('default_gcp_identity_mode')) {
+      payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
+    }
+    if (ok('default_gcp_identity_service_account_id')) {
+      payload.default_gcp_identity_service_account_id =
+        this.defaultGCPIdentityMode === 'assign' ? this.defaultGCPIdentitySAID || '' : '';
     }
 
     // Server
@@ -3405,7 +3417,8 @@ export class ScionPageAdminServerConfig extends LitElement {
                   >
                   ${this.renderFieldValue(
                     'default_gcp_identity_mode',
-                    this.defaultGCPIdentityMode || 'None (runtime default: Block; Passthrough on Kubernetes)',
+                    this.defaultGCPIdentityMode ||
+                      'None (runtime default: Block; Passthrough on Kubernetes)',
                     html`${this.renderEnvBadge('default_gcp_identity_mode')}<sl-select
                         placeholder="None (runtime default: Block; Passthrough on Kubernetes)"
                         clearable

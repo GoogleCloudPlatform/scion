@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -111,6 +112,10 @@ type GitHubSkillResolver struct {
 	resolveBudget   time.Duration
 	requestTimeout  time.Duration
 	downloadTimeout time.Duration
+
+	// maxConcurrent bounds the refs one Resolve call resolves at once; zero
+	// means githubResolveConcurrency.
+	maxConcurrent int
 }
 
 // durationOr returns d, or def when d is unset.
@@ -431,46 +436,129 @@ func (r *GitHubSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefer
 		defer cancel()
 	}
 
-	result := &ResolveResult{}
+	return r.resolveAll(ctx, refs, opts), nil
+}
 
-	for _, ref := range refs {
+// githubResolveConcurrency bounds how many refs a single Resolve call
+// resolves at once. On a cold cache each ref costs several GitHub round
+// trips; resolving them one after another made a template with many refs
+// pay the summed latency inside the create deadline. A small bound keeps
+// the burst of requests per create modest, since all refs share one
+// credential's rate limit and cooldown.
+const githubResolveConcurrency = 4
+
+// refOutcome is the result of resolving one ref: exactly one of skill and
+// rerr is set.
+type refOutcome struct {
+	skill *ResolvedSkill
+	rerr  *ResolveError
+}
+
+// resolveAll resolves refs with at most r.concurrency() in flight and
+// returns the results in input order: Resolved holds the successes and
+// Errors the failures, each in the order their refs appear in refs, the
+// same as resolving them one after another. Every ref is attempted, also
+// after ctx is done, so each one keeps the outcome serial resolution gave
+// it. All started work is waited for before returning.
+func (r *GitHubSkillResolver) resolveAll(ctx context.Context, refs []api.SkillReference, opts ResolveOpts) *ResolveResult {
+	outcomes := make([]refOutcome, len(refs))
+	sem := make(chan struct{}, r.concurrency())
+	var wg sync.WaitGroup
+
+	for i, ref := range refs {
 		ghRef, err := ParseGitHubSkillURI(ref.URI)
 		if err != nil {
-			result.Errors = append(result.Errors, ResolveError{
+			outcomes[i].rerr = &ResolveError{
 				URI: ref.URI, Code: "invalid_uri", Message: err.Error(),
-			})
-			continue
-		}
-
-		resolved, err := r.resolveOne(ctx, ghRef, ref, opts.ProjectID, opts.UserID)
-		if err != nil {
-			code := "resolve_failed"
-			var retryAfter string
-			var rl *GitHubRateLimitError
-			var rerr *githubResolveError
-			switch {
-			case errors.As(err, &rl):
-				// Checked first: a rate-limit error may also be wrapped in a
-				// githubResolveError, and its RetryAt is the cooldown's own end.
-				code = GitHubRateLimitedCode
-				retryAfter = r.cooldownRetryAfter(rl)
-			case errors.As(err, &rerr):
-				// Classify the failure into a stable cause code when possible
-				// (set by doWithRetry/listContents/resolveCommitSHA below), so
-				// the create path can map a required-skill failure to the
-				// right status instead of a generic 500/502.
-				code = rerr.code
-				retryAfter = rerr.retryAfter
 			}
-			result.Errors = append(result.Errors, ResolveError{
-				URI: ref.URI, Code: code, Message: err.Error(), RetryAfter: retryAfter,
-			})
 			continue
 		}
-		result.Resolved = append(result.Resolved, *resolved)
-	}
 
-	return result, nil
+		// Wait for a free slot. There is deliberately no ctx check here: a
+		// ref queued behind slow ones still runs once ctx is done, so it
+		// gets the outcome it would get if resolved on its own (a fresh
+		// cache hit is served, and anything needing GitHub fails fast as a
+		// timeout or cancellation through the usual paths). Every started
+		// ref is bound by ctx, so slots always free up.
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(i int, ref api.SkillReference, ghRef *GitHubSkillRef) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			defer func() {
+				if p := recover(); p != nil {
+					outcomes[i] = panicOutcome(ref, p)
+				}
+			}()
+			outcomes[i] = r.resolveRef(ctx, ghRef, ref, opts)
+		}(i, ref, ghRef)
+	}
+	wg.Wait()
+
+	result := &ResolveResult{}
+	for _, o := range outcomes {
+		if o.rerr != nil {
+			result.Errors = append(result.Errors, *o.rerr)
+			continue
+		}
+		result.Resolved = append(result.Resolved, *o.skill)
+	}
+	return result
+}
+
+// concurrency returns the per-Resolve bound on refs in flight.
+func (r *GitHubSkillResolver) concurrency() int {
+	if r.maxConcurrent > 0 {
+		return r.maxConcurrent
+	}
+	return githubResolveConcurrency
+}
+
+// panicOutcome reports a panic recovered while resolving ref. The resolve
+// goroutine is not covered by the request handler's own recovery, so the
+// panic is turned into a per-ref error instead of ending the process. The
+// returned message is generic and carries nothing from the panic value,
+// which may include credential material; the value and stack go to the log.
+// The log names the ref by its URI, which ParseGitHubSkillURI has already
+// accepted: it names at most a secret (?token=NAME), never a secret value,
+// and is the same string returned in ResolveError.URI.
+func panicOutcome(ref api.SkillReference, p any) refOutcome {
+	slog.Error("github: panic during skill resolution",
+		"uri", ref.URI, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
+	return refOutcome{rerr: &ResolveError{
+		URI: ref.URI, Code: "resolve_failed",
+		Message: "internal error during GitHub skill resolution",
+	}}
+}
+
+// resolveRef resolves one parsed ref and classifies a failure into the
+// ResolveError the caller reports for it.
+func (r *GitHubSkillResolver) resolveRef(ctx context.Context, ghRef *GitHubSkillRef, ref api.SkillReference, opts ResolveOpts) refOutcome {
+	resolved, err := r.resolveOne(ctx, ghRef, ref, opts.ProjectID, opts.UserID)
+	if err == nil {
+		return refOutcome{skill: resolved}
+	}
+	code := "resolve_failed"
+	var retryAfter string
+	var rl *GitHubRateLimitError
+	var rerr *githubResolveError
+	switch {
+	case errors.As(err, &rl):
+		// Checked first: a rate-limit error may also be wrapped in a
+		// githubResolveError, and its RetryAt is the cooldown's own end.
+		code = GitHubRateLimitedCode
+		retryAfter = r.cooldownRetryAfter(rl)
+	case errors.As(err, &rerr):
+		// Classify the failure into a stable cause code when possible
+		// (set by doWithRetry/listContents/resolveCommitSHA below), so
+		// the create path can map a required-skill failure to the
+		// right status instead of a generic 500/502.
+		code = rerr.code
+		retryAfter = rerr.retryAfter
+	}
+	return refOutcome{rerr: &ResolveError{
+		URI: ref.URI, Code: code, Message: err.Error(), RetryAfter: retryAfter,
+	}}
 }
 
 // resolutionCacheKey returns a canonical cache key for a skill ref.

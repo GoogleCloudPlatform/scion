@@ -71,6 +71,13 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 
 	switch phase {
 	case state.PhaseSuspended:
+		// Delete in progress (design ptone/scion#2483 §2.1): refuse before
+		// any quota reservation or start dispatch, so the message is not
+		// delivered either (AC-4). The sender's DM authz already ran.
+		if ref := s.startGate(ctx, agent, startEntryWake); ref.refuses() {
+			return nil, ref.dmError()
+		}
+
 		// Managed runtimes do not support the suspend/resume lifecycle.
 		// Return an explicit error rather than silently pretending to resume.
 		if isManagedAgentRuntime(agent.Runtime) {
