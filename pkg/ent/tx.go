@@ -42,6 +42,10 @@ type Tx struct {
 	BrokerSetting *BrokerSettingClient
 	// ChatLinkCode is the client for interacting with the ChatLinkCode builders.
 	ChatLinkCode *ChatLinkCodeClient
+	// ConduitPrincipalEpoch is the client for interacting with the ConduitPrincipalEpoch builders.
+	ConduitPrincipalEpoch *ConduitPrincipalEpochClient
+	// ConduitSession is the client for interacting with the ConduitSession builders.
+	ConduitSession *ConduitSessionClient
 	// Conversation is the client for interacting with the Conversation builders.
 	Conversation *ConversationClient
 	// ConversationParticipant is the client for interacting with the ConversationParticipant builders.
@@ -110,6 +114,8 @@ type Tx struct {
 	ProjectPreStartHook *ProjectPreStartHookClient
 	// ProjectSyncState is the client for interacting with the ProjectSyncState builders.
 	ProjectSyncState *ProjectSyncStateClient
+	// RelayInstance is the client for interacting with the RelayInstance builders.
+	RelayInstance *RelayInstanceClient
 	// RoleBinding is the client for interacting with the RoleBinding builders.
 	RoleBinding *RoleBindingClient
 	// RoleDefinition is the client for interacting with the RoleDefinition builders.
@@ -288,6 +294,8 @@ func (tx *Tx) init() {
 	tx.BrokerSecret = NewBrokerSecretClient(tx.config)
 	tx.BrokerSetting = NewBrokerSettingClient(tx.config)
 	tx.ChatLinkCode = NewChatLinkCodeClient(tx.config)
+	tx.ConduitPrincipalEpoch = NewConduitPrincipalEpochClient(tx.config)
+	tx.ConduitSession = NewConduitSessionClient(tx.config)
 	tx.Conversation = NewConversationClient(tx.config)
 	tx.ConversationParticipant = NewConversationParticipantClient(tx.config)
 	tx.DecisionAudit = NewDecisionAuditClient(tx.config)
@@ -322,6 +330,7 @@ func (tx *Tx) init() {
 	tx.ProjectContributor = NewProjectContributorClient(tx.config)
 	tx.ProjectPreStartHook = NewProjectPreStartHookClient(tx.config)
 	tx.ProjectSyncState = NewProjectSyncStateClient(tx.config)
+	tx.RelayInstance = NewRelayInstanceClient(tx.config)
 	tx.RoleBinding = NewRoleBindingClient(tx.config)
 	tx.RoleDefinition = NewRoleDefinitionClient(tx.config)
 	tx.RuntimeBroker = NewRuntimeBrokerClient(tx.config)
