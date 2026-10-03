@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -750,4 +751,25 @@ func TestConduitRegistry_PruneRelayInstances_OnlyIdleAndStale(t *testing.T) {
 	assert.Equal(t, 1, n)
 	assert.ErrorIs(t, f.reg.TouchSession(f.ctx, "b-1"), registry.ErrSessionNotFound)
 	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-fresh", fresh))
+}
+
+func TestConduitRegistry_CapabilitiesSQLDefault(t *testing.T) {
+	// A writer that omits capabilities gets the SQL-level '{}' default.
+	f := newConduitFixture(t)
+	gen := f.registerRelay("relay-1")
+	drv, ok := f.store.client.Driver().(*entsql.Driver)
+	require.True(t, ok)
+	q := fmt.Sprintf(`INSERT INTO conduit_sessions (session_id, principal_kind, principal_id, relay_instance_id,
+  relay_generation, transport, endpoint_incarnation, connection_epoch, connected_at, last_seen)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
+		f.store.ph(1), f.store.ph(2), f.store.ph(3), f.store.ph(4), f.store.ph(5),
+		f.store.ph(6), f.store.ph(7), f.store.ph(8), f.store.ph(9), f.store.ph(10))
+	now := f.clock.Now()
+	_, err := drv.DB().ExecContext(f.ctx, q, "raw-1", registry.PrincipalBroker, "broker-1", "relay-1",
+		gen, registry.TransportWS, "binc", int64(1), now, now)
+	require.NoError(t, err)
+	ps, err := f.store.ListPrincipalSessions(f.ctx, registry.PrincipalBroker, "broker-1")
+	require.NoError(t, err)
+	require.Len(t, ps.Sessions, 1)
+	assert.Equal(t, registry.Capabilities{}, ps.Sessions[0].Session.Capabilities)
 }
