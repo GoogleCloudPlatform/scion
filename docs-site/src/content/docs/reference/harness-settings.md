@@ -141,12 +141,15 @@ harness bundle, not to you:
   `<file>.bak.<timestamp>` first and reports it as a `refresh_file` action.
 
 Either way, provisioner fixes reach nodes that already have the config, and your other files
-are kept. Two kinds of script are never touched:
+are kept. Non-force seeding and non-force `upgrade` never touch two kinds of script:
 
 - Scripts in a **custom-named** config, such as one installed with
   `harness-config install --name my-claude`.
 - Scripts that are **symlinks**. These are treated as user-managed and skipped (`upgrade`
   reports a `skip_file` action).
+
+The force paths still replace the whole config, and they write through symlinks. These are
+`harness-config reset`, `upgrade --force`, and workstation-mode `scion server` start.
 
 To customize a provisioner, publish it as your own harness-config under a different name. Do
 not edit the bundled scripts in place.

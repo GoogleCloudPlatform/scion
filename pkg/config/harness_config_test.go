@@ -855,6 +855,51 @@ func TestSeedHarnessConfigFromDir_SkipsSymlinkedProvisionerScript(t *testing.T) 
 	}
 }
 
+// TestWriteFileAtomic_CreateTempFailureLeavesOriginal verifies that when the
+// temporary file cannot be created, writeFileAtomic returns an error, leaves
+// the original content in place, and leaves no temporary file behind.
+func TestWriteFileAtomic_CreateTempFailureLeavesOriginal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions are not enforced for root")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "provision.py")
+	if err := os.WriteFile(target, []byte("# original"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+
+	err := writeFileAtomic(target, []byte("# bundled"))
+	if err == nil {
+		t.Fatal("expected an error when the temp file cannot be created")
+	}
+	if !strings.Contains(err.Error(), "create temp file") {
+		t.Errorf("error = %v, want a create temp file error", err)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "# original" {
+		t.Errorf("original content changed: %q", string(data))
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "provision.py" {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("directory entries = %v, want only provision.py", names)
+	}
+}
+
 func TestSeedAllHarnessConfigsFromEmbed(t *testing.T) {
 	tmpDir := t.TempDir()
 
