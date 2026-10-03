@@ -519,9 +519,12 @@ func (r *GitHubSkillResolver) concurrency() int {
 // panic is turned into a per-ref error instead of ending the process. The
 // returned message is generic and carries nothing from the panic value,
 // which may include credential material; the value and stack go to the log.
+// The log names the ref by its URI, which ParseGitHubSkillURI has already
+// accepted: it names at most a secret (?token=NAME), never a secret value,
+// and is the same string returned in ResolveError.URI.
 func panicOutcome(ref api.SkillReference, p any) refOutcome {
 	slog.Error("github: panic during skill resolution",
-		"panic", fmt.Sprint(p), "stack", string(debug.Stack()))
+		"uri", ref.URI, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
 	return refOutcome{rerr: &ResolveError{
 		URI: ref.URI, Code: "resolve_failed",
 		Message: "internal error during GitHub skill resolution",

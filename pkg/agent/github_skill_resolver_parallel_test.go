@@ -323,9 +323,15 @@ func TestGitHubSkillResolver_Parallel_CancelFailsQueuedRefsFast(t *testing.T) {
 
 	ft.mu.Lock()
 	inFlight := ft.inFlight
+	listed := append([]string(nil), ft.listed...)
 	ft.mu.Unlock()
 	if inFlight != 0 {
 		t.Errorf("Resolve returned with %d requests still in flight", inFlight)
+	}
+	// Every queued ref was attempted, as it would be one at a time, rather
+	// than skipped.
+	if want := []string{"skill-0", "skill-1", "skill-2", "skill-3"}; !reflect.DeepEqual(listed, want) {
+		t.Errorf("listings attempted = %v, want %v", listed, want)
 	}
 	if len(res.Resolved) != 0 {
 		t.Errorf("resolved = %v, want none", resolvedNames(res))
