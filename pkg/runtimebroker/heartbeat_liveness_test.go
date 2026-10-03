@@ -136,11 +136,13 @@ func TestHeartbeatLiveness_SlowListingStillSendsHeartbeat(t *testing.T) {
 	const interval = 150 * time.Millisecond
 	svc, mgr := newLivenessService(client, interval, 30*time.Millisecond)
 	mgr.block()
-	defer mgr.unblock()
 
 	start := time.Now()
 	svc.Start(context.Background())
+	// Deferred calls run in reverse: release the listing before Stop, so a
+	// failure here cannot leave Stop waiting on a hung listing.
 	defer svc.Stop()
+	defer mgr.unblock()
 
 	calls := waitForHeartbeats(t, client, 3, 3*time.Second)
 	if first := calls[0].Time.Sub(start); first >= interval {
@@ -165,10 +167,10 @@ func TestHeartbeatLiveness_ListingRecovers(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	svc, mgr := newLivenessService(client, 100*time.Millisecond, 30*time.Millisecond)
 	mgr.block()
-	defer mgr.unblock()
 
 	svc.Start(context.Background())
 	defer svc.Stop()
+	defer mgr.unblock()
 
 	calls := waitForHeartbeats(t, client, 1, 3*time.Second)
 	assertLivenessOnly(t, calls[0].Heartbeat)

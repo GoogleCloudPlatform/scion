@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,6 +36,20 @@ type fakeControlHub struct {
 	srv      *httptest.Server
 	connects atomic.Int32
 	ended    atomic.Int32 // connections the hub saw end
+
+	mu    sync.Mutex
+	conns []*websocket.Conn
+}
+
+// closeAll closes every connection the hub accepted, so its handlers
+// return and the test server can shut down even if the client never
+// closed its side.
+func (h *fakeControlHub) closeAll() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, ws := range h.conns {
+		_ = ws.Close()
+	}
 }
 
 func newFakeControlHub(t *testing.T) *fakeControlHub {
@@ -47,6 +62,9 @@ func newFakeControlHub(t *testing.T) *fakeControlHub {
 			return
 		}
 		defer func() { _ = ws.Close() }()
+		h.mu.Lock()
+		h.conns = append(h.conns, ws)
+		h.mu.Unlock()
 		h.connects.Add(1)
 		if _, _, err := ws.ReadMessage(); err != nil { // connect message
 			h.ended.Add(1)
@@ -65,7 +83,10 @@ func newFakeControlHub(t *testing.T) *fakeControlHub {
 			}
 		}
 	}))
-	t.Cleanup(h.srv.Close)
+	t.Cleanup(func() {
+		h.closeAll()
+		h.srv.Close()
+	})
 	return h
 }
 
@@ -114,6 +135,8 @@ func TestControlChannelPing_WriteErrorClosesAndReconnects(t *testing.T) {
 
 	connectDone := make(chan error, 1)
 	go func() { connectDone <- c.Connect(context.Background()) }()
+	// On failure, close the client's side too so nothing outlives the test.
+	t.Cleanup(func() { _ = c.Close() })
 
 	waitFor(t, 3*time.Second, "the hub to see the first connection end", func() bool { return hub.ended.Load() >= 1 })
 	waitFor(t, 3*time.Second, "a second connection", func() bool { return hub.connects.Load() >= 2 })
@@ -131,8 +154,21 @@ func TestControlChannelPing_WriteErrorClosesAndReconnects(t *testing.T) {
 		t.Errorf("connection state transitions = %v, want [true false true]", transitions)
 	}
 
-	if err := c.Close(); err != nil {
-		t.Logf("Close: %v", err)
+	closeClient(t, c, connectDone)
+}
+
+// closeClient closes c and waits for its Connect call to return.
+func closeClient(t *testing.T, c *ControlChannelClient, connectDone <-chan error) {
+	t.Helper()
+	closeDone := make(chan struct{})
+	go func() {
+		_ = c.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return")
 	}
 	select {
 	case <-connectDone:
@@ -161,21 +197,8 @@ func TestControlChannelPing_RepeatedFailuresDoNotLeak(t *testing.T) {
 		return hub.ended.Load() >= hub.connects.Load()-1
 	})
 
-	closeDone := make(chan struct{})
-	go func() {
-		_ = c.Close()
-		close(closeDone)
-	}()
-	select {
-	case <-closeDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Close did not return")
-	}
-	select {
-	case <-connectDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Connect did not return after Close")
-	}
+	closeClient(t, c, connectDone)
+	hub.closeAll()
 	hub.srv.Close()
 
 	waitFor(t, 3*time.Second, "goroutines to return to baseline", func() bool {
