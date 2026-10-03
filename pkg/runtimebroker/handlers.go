@@ -2275,9 +2275,12 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 
 // dedupeSkillReferences collapses skill references that share both URI and
 // As (the install name). The surviving entry keeps the position of the first
-// occurrence and takes the field values of the last one, so a later reference
-// (the Hub's current view) updates Optional and Scope in place. References
-// with the same URI but different As are distinct installs and are kept.
+// occurrence. Which entry's values survive follows the precedence used when
+// skills are installed (agent.SkillScopeRank): a later entry replaces the
+// current one only if its scope ranks at least as high, so a tie goes to the
+// later entry. The collapse therefore only drops entries that would already
+// lose at install time. References with the same URI but different As are
+// distinct installs and are kept.
 func dedupeSkillReferences(refs []api.SkillReference) []api.SkillReference {
 	if len(refs) < 2 {
 		return refs
@@ -2288,7 +2291,9 @@ func dedupeSkillReferences(refs []api.SkillReference) []api.SkillReference {
 	for _, ref := range refs {
 		k := key{ref.URI, ref.As}
 		if i, ok := index[k]; ok {
-			out[i] = ref
+			if agent.SkillScopeRank(ref.Scope) >= agent.SkillScopeRank(out[i].Scope) {
+				out[i] = ref
+			}
 			continue
 		}
 		index[k] = len(out)

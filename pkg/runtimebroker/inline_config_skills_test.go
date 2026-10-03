@@ -138,15 +138,47 @@ func TestDedupeSkillReferences(t *testing.T) {
 			want: []api.SkillReference{{URI: "a"}, {URI: "a", As: "x"}, {URI: "a", As: "y"}},
 		},
 		{
-			name: "duplicate keeps first position and last values",
+			name: "lower-ranked later duplicate does not replace (template over hub)",
 			in: []api.SkillReference{
 				{URI: "a", Scope: "template"},
 				{URI: "b"},
 				{URI: "a", Optional: true, Scope: "hub"},
 			},
 			want: []api.SkillReference{
-				{URI: "a", Optional: true, Scope: "hub"},
+				{URI: "a", Scope: "template"},
 				{URI: "b"},
+			},
+		},
+		{
+			name: "lower-ranked later duplicate does not replace (project over template)",
+			in: []api.SkillReference{
+				{URI: "a", Scope: "project"},
+				{URI: "a", Optional: true, Scope: "template"},
+			},
+			want: []api.SkillReference{
+				{URI: "a", Scope: "project"},
+			},
+		},
+		{
+			name: "higher-ranked later duplicate replaces in first position",
+			in: []api.SkillReference{
+				{URI: "a", Scope: "hub"},
+				{URI: "b"},
+				{URI: "a", Optional: true, Scope: "project"},
+			},
+			want: []api.SkillReference{
+				{URI: "a", Optional: true, Scope: "project"},
+				{URI: "b"},
+			},
+		},
+		{
+			name: "equal rank goes to the later entry",
+			in: []api.SkillReference{
+				{URI: "a", Scope: "template"},
+				{URI: "a", Optional: true, Scope: "template"},
+			},
+			want: []api.SkillReference{
+				{URI: "a", Optional: true, Scope: "template"},
 			},
 		},
 	}
