@@ -50,10 +50,11 @@ Each agent in a **Hub-managed project without git** gets its **own private direc
 
 The directory is not a git repository, and no other agent can see it. It lives under the agent's directory on the Runtime Broker (`<project>/agents/<agent>/workspace`).
 
-- It is kept across suspend/resume where storage allows. On Kubernetes without NFS workspace storage, the contents are lost when the agent stops (see [Kubernetes](/scion/hosted/ha/kubernetes/)).
+- It is kept across suspend/resume where storage allows. On Kubernetes without NFS workspace storage (including `gke-shared-volume`), the contents are lost when the agent stops (see [Kubernetes](/scion/hosted/ha/kubernetes/)).
 - It is deleted together with the agent. Use [shared directories](#2-the-shared-directories-invariant) for files that agents should share or that must outlive an agent.
 - Files from your local project directory are **not** uploaded into it. When you start an agent from a local non-git directory, the CLI shows the Hub's warning that the files were ignored.
-- Reincarnate (moving the agent to another broker) is not supported for this mode.
+- Reincarnate (moving the agent to another Runtime Broker) is not supported for this mode.
+- Cloud Run Runtime Brokers do not support this mode. They do not advertise the `emptyPerAgentWorkspace` capability, so creating such an agent there fails with `412 Precondition Failed`.
 
 Summary:
 
@@ -99,7 +100,7 @@ scion hub projects create --name scratch --workspace-mode per-agent
 scion hub projects create https://github.com/acme/widgets.git --workspace-mode worktree-per-agent
 ```
 
-The Hub rejects unknown values with `400`. The mode is stored in the server-owned `scion.dev/workspace-mode` label: you cannot set or change that label directly, on create or later with an update. Creating or starting an Empty-per-agent agent on a Runtime Broker that does not support this mode fails with `412 Precondition Failed`; upgrade the broker. See [`scion hub projects create`](/scion/reference/cli/#scion-hub) and the [Projects API](/scion/reference/api/#projects-apiv1projects).
+The Hub rejects unknown values with `400`. The mode is stored in the server-owned `scion.dev/workspace-mode` label: you cannot set or change that label directly, on create or later with an update. Creating or starting an Empty-per-agent agent on a Runtime Broker that does not support this mode fails with `412 Precondition Failed`; upgrade the Runtime Broker. See [`scion hub projects create`](/scion/reference/cli/#scion-hub) and the [Projects API](/scion/reference/api/#projects-apiv1projects).
 
 ## Runtime environment variables
 
@@ -107,7 +108,7 @@ Agents can discover their workspace provisioning at startup through two environm
 
 ### `SCION_WORKSPACE_MODE`
 
-The canonical workspace sharing mode for the project. The broker sets it on every agent it starts. When the project has no workspace mode, its value is `shared-plain`. That includes Hub git projects created without `--workspace-mode`, even though each of their agents gets its own clone; for those, `SCION_WORKSPACE_GIT=true` tells the agent the workspace is a git checkout.
+The canonical workspace sharing mode for the project. The Runtime Broker sets it on every agent it starts. When the project has no workspace mode, its value is `shared-plain`. That includes Hub git projects created without `--workspace-mode`, even though each of their agents gets its own clone; for those, `SCION_WORKSPACE_GIT=true` tells the agent the workspace is a git checkout.
 
 | Value | Description |
 |---|---|

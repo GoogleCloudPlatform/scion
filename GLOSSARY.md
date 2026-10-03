@@ -90,7 +90,7 @@ The working directory mounted into a single agent's container at `/workspace`. H
 _Avoid_: project, repo, mount
 
 **Workspace sharing mode**:
-How a project's workspace is provisioned across its agents. There are four canonical modes: **Shared-plain**, **Worktree-per-agent** and **Clone-per-agent**, plus **Empty-per-agent** for Hub-managed projects without git. The mode is chosen when the project is created (API/CLI value `shared`, `per-agent` or `worktree-per-agent`; `per-agent` resolves to Clone-per-agent for git projects and to Empty-per-agent otherwise) and cannot be changed afterwards.
+How a project's workspace is provisioned across its agents. There are four canonical modes: **Shared-plain**, **Worktree-per-agent** and **Clone-per-agent**, plus **Empty-per-agent** for Hub-managed projects without git. The mode is chosen when the project is created (API/CLI value `shared`, `per-agent` or `worktree-per-agent`; `per-agent` resolves to Clone-per-agent for git projects and to Empty-per-agent otherwise) and cannot be changed afterwards. "Workspace mode" is used only as the name of the API field (`workspaceMode`) and CLI flag (`--workspace-mode`) whose values select the sharing mode; in prose, say "workspace sharing mode".
 _Avoid_: workspace mode, isolation mode
 
 **Shared-plain**:

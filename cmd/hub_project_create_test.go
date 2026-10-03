@@ -19,9 +19,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -216,25 +221,185 @@ func TestRunHubProjectCreate_InvalidModePassedThroughToServer(t *testing.T) {
 	}
 }
 
+func TestRunHubProjectCreate_URLWithoutFlagSendsNoWorkspaceMode(t *testing.T) {
+	mock := setupProjectCreateTest(t)
+	hubProjectCreateBranch = "main" // skip git ls-remote
+
+	require.NoError(t, runHubProjectCreate(hubProjectCreateCmd, []string{"https://github.com/acme/widgets.git"}))
+
+	body := mock.lastCreate(t)
+	assert.NotContains(t, body, "workspaceMode", "existing 'create <git-url>' must send the same body as before")
+	assert.Equal(t, "github.com/acme/widgets", body["gitRemote"])
+	assert.Equal(t, map[string]interface{}{
+		"scion.dev/default-branch": "main",
+		"scion.dev/clone-url":      "https://github.com/acme/widgets.git",
+		"scion.dev/source-url":     "https://github.com/acme/widgets.git",
+	}, body["labels"])
+}
+
 func TestWorkspaceBootstrapNotice(t *testing.T) {
-	ignored := "workspace files were ignored: this project gives each agent an empty workspace directory"
+	ignored := api.WarningEmptyPerAgentWorkspaceFilesIgnored
+	tz := "TZ in config.env is ignored"
 	for _, tc := range []struct {
-		name       string
-		sent, urls int
-		warnings   []string
-		wantLines  []string
-		wantShown  bool
+		name          string
+		sent, urls    int
+		warnings      []string
+		wantLines     []string
+		wantRemaining []string
 	}{
-		{name: "no files sent", sent: 0, urls: 0, warnings: []string{ignored}},
-		{name: "uploading", sent: 3, urls: 3},
+		{name: "no files sent", sent: 0, urls: 0, warnings: []string{ignored}, wantRemaining: []string{ignored}},
+		{name: "uploading", sent: 3, urls: 3, warnings: []string{tz}, wantRemaining: []string{tz}},
 		{name: "local broker workspace", sent: 3, urls: 0, wantLines: []string{"Using local workspace on broker."}},
+		{name: "local broker workspace with unrelated warning", sent: 3, urls: 0, warnings: []string{tz},
+			wantLines: []string{"Using local workspace on broker."}, wantRemaining: []string{tz}},
 		{name: "files ignored by hub", sent: 3, urls: 0, warnings: []string{ignored},
-			wantLines: []string{"Warning: " + ignored}, wantShown: true},
+			wantLines: []string{"Warning: " + ignored}},
+		{name: "files ignored plus unrelated warning", sent: 3, urls: 0, warnings: []string{tz, ignored},
+			wantLines: []string{"Warning: " + ignored}, wantRemaining: []string{tz}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			lines, shown := workspaceBootstrapNotice(tc.sent, tc.urls, tc.warnings)
+			lines, remaining := workspaceBootstrapNotice(tc.sent, tc.urls, tc.warnings)
 			assert.Equal(t, tc.wantLines, lines)
-			assert.Equal(t, tc.wantShown, shown)
+			assert.Equal(t, tc.wantRemaining, remaining)
+		})
+	}
+}
+
+func TestWorkspaceFinalizeNotice(t *testing.T) {
+	ignored := api.WarningEmptyPerAgentWorkspaceFilesIgnored
+	tz := "TZ in config.env is ignored"
+	assert.Equal(t, []string{"Workspace uploaded: 3 files"}, workspaceFinalizeNotice(3, nil))
+	assert.Equal(t, []string{"Workspace uploaded: 3 files", "Warning: " + tz}, workspaceFinalizeNotice(3, []string{tz}))
+	assert.Equal(t, []string{"Warning: " + ignored}, workspaceFinalizeNotice(0, []string{ignored}))
+	assert.Equal(t, []string{"Warning: " + ignored, "Warning: " + tz}, workspaceFinalizeNotice(0, []string{tz, ignored}))
+}
+
+// TestStartAgentViaHub_WorkspaceFilesWarningWiring drives startAgentViaHub
+// from a local non-git project against a mock hub and checks what reaches
+// stderr, both when the create response has no upload URLs and when the
+// files are uploaded and the sync-to finalize response carries warnings.
+func TestStartAgentViaHub_WorkspaceFilesWarningWiring(t *testing.T) {
+	ignored := api.WarningEmptyPerAgentWorkspaceFilesIgnored
+	tz := "TZ in config.env is ignored"
+	for _, tc := range []struct {
+		name             string // the CLI sends notes.txt and .scion/settings.yaml
+		createWarnings   []string
+		upload           bool
+		finalizeWarnings []string
+		want             []string
+		notWant          []string
+	}{
+		{name: "create: files ignored", createWarnings: []string{ignored, tz},
+			want: []string{"Warning: " + ignored, "Warning: " + tz}, notWant: []string{"Using local workspace on broker."}},
+		{name: "create: local workspace", createWarnings: []string{tz},
+			want: []string{"Using local workspace on broker.", "Warning: " + tz}},
+		{name: "finalize: files ignored", upload: true, finalizeWarnings: []string{ignored, tz},
+			want: []string{"Warning: " + ignored, "Warning: " + tz}, notWant: []string{"Workspace uploaded:"}},
+		{name: "finalize: uploaded", upload: true,
+			want: []string{"Workspace uploaded: 2 files"}, notWant: []string{"Warning:"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID"} {
+				t.Setenv(k, "")
+				_ = os.Unsetenv(k)
+			}
+			origOutputFormat, origTemplateName := outputFormat, templateName
+			origHarnessConfigFlag, origRuntimeBrokerID := harnessConfigFlag, runtimeBrokerID
+			t.Cleanup(func() {
+				outputFormat, templateName = origOutputFormat, origTemplateName
+				harnessConfigFlag, runtimeBrokerID = origHarnessConfigFlag, origRuntimeBrokerID
+			})
+			outputFormat = ""
+			templateName = ""
+			harnessConfigFlag = "codex"
+			runtimeBrokerID = "broker-1"
+
+			projectDir := t.TempDir() // not a git repo
+			scionDir := filepath.Join(projectDir, ".scion")
+			require.NoError(t, os.MkdirAll(scionDir, 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte("hub:\n  enabled: true\n"), 0644))
+			require.NoError(t, os.WriteFile(filepath.Join(projectDir, "notes.txt"), []byte("local file"), 0644))
+
+			projectID := "project-epa"
+			agentPath := "/api/v1/projects/" + projectID + "/agents/agent-1"
+			var (
+				mu        sync.Mutex
+				created   bool
+				finalized bool
+				sentFiles []transfer.FileInfo
+			)
+			var serverURL string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				running := &hubclient.Agent{
+					ID: "agent-1", Slug: "agent-1", Name: "agent-1",
+					Status: "running", Phase: "running", RuntimeBrokerID: "broker-1",
+				}
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
+					var req hubclient.CreateAgentRequest
+					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+						t.Errorf("decode create agent: %v", err)
+					}
+					created = true
+					sentFiles = req.WorkspaceFiles
+					resp := &hubclient.CreateAgentResponse{Agent: running, Warnings: tc.createWarnings}
+					if tc.upload {
+						resp.Agent = &hubclient.Agent{ID: "agent-1", Slug: "agent-1", Name: "agent-1", Phase: "provisioning"}
+						for _, f := range req.WorkspaceFiles {
+							resp.UploadURLs = append(resp.UploadURLs, transfer.UploadURLInfo{
+								Path: f.Path, URL: serverURL + "/upload/" + f.Path, Method: http.MethodPut,
+							})
+						}
+					}
+					_ = json.NewEncoder(w).Encode(resp)
+				case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/upload/"):
+					w.WriteHeader(http.StatusOK)
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents/agent-1/workspace/sync-to/finalize":
+					finalized = true
+					_ = json.NewEncoder(w).Encode(&hubclient.SyncToFinalizeResponse{
+						Applied: true, FilesApplied: len(sentFiles), Warnings: tc.finalizeWarnings,
+					})
+				case r.Method == http.MethodGet && r.URL.Path == agentPath:
+					if !created {
+						http.NotFound(w, r)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(running)
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID:
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": projectID, "name": "epa"})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			serverURL = server.URL
+			t.Cleanup(server.Close)
+
+			client, err := hubclient.New(server.URL)
+			require.NoError(t, err)
+			hubCtx := &HubContext{
+				Client:      client,
+				Endpoint:    server.URL,
+				ProjectID:   projectID,
+				ProjectPath: scionDir,
+				BrokerID:    "broker-1",
+			}
+
+			var runErr error
+			stderr := captureStderr(t, func() {
+				runErr = startAgentViaHub(hubCtx, "agent-1", "do it", false, nil)
+			})
+			require.NoError(t, runErr, stderr)
+			require.NotEmpty(t, sentFiles, "the CLI must have sent the local non-git files")
+			assert.Equal(t, tc.upload, finalized, "finalize must run exactly on the upload path")
+			for _, w := range tc.want {
+				assert.Equal(t, 1, strings.Count(stderr, w), "want %q exactly once in:\n%s", w, stderr)
+			}
+			for _, w := range tc.notWant {
+				assert.NotContains(t, stderr, w)
+			}
 		})
 	}
 }

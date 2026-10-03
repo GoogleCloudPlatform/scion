@@ -469,10 +469,12 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 		statusln("All files are up to date on remote, nothing to upload.")
 		// Still need to finalize to apply the manifest to the agent
 		manifest := transfer.BuildManifest(localFiles)
-		if _, err := hubCtx.Client.Workspace().FinalizeSyncTo(ctx, agentID, manifest); err != nil {
+		finalizeResp, err := hubCtx.Client.Workspace().FinalizeSyncTo(ctx, agentID, manifest)
+		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to finalize sync: %w", err))
 		}
 		statusln("Workspace sync applied to agent.")
+		printHubWarnings(finalizeResp.Warnings)
 		return nil
 	}
 
@@ -504,7 +506,7 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 	}
 
 	if isJSONOutput() {
-		return outputJSON(map[string]interface{}{
+		result := map[string]interface{}{
 			"status":           "success",
 			"command":          "sync",
 			"direction":        "to",
@@ -513,8 +515,13 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 			"bytesTransferred": uploadedBytes,
 			"filesSkipped":     len(resp.ExistingFiles),
 			"filesApplied":     finalizeResp.FilesApplied,
-		})
+		}
+		if len(finalizeResp.Warnings) > 0 {
+			result["warnings"] = finalizeResp.Warnings
+		}
+		return outputJSON(result)
 	}
+	printHubWarnings(finalizeResp.Warnings)
 
 	statusf("Sync complete: %d files uploaded, %s transferred\n", uploadedCount, humanize.Bytes(uint64(uploadedBytes)))
 	if len(resp.ExistingFiles) > 0 {
@@ -579,4 +586,13 @@ func resolveLocalWorkspacePath(agentName string) (string, error) {
 
 	// Fall back to current directory
 	return ".", nil
+}
+
+// printHubWarnings prints non-fatal Hub warnings (e.g. from sync-to
+// finalize) to stderr as "Warning: ..." lines. Nothing is printed for JSON
+// output, which carries them in its result instead.
+func printHubWarnings(warnings []string) {
+	for _, w := range warnings {
+		statusln("Warning: " + w)
+	}
 }

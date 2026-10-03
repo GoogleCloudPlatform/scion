@@ -69,7 +69,7 @@ The container technology that executes an agent's container: Docker, Podman, App
 The working directory mounted into a single agent's container at `/workspace`. How it is provisioned across a project's agents is set by the project's **workspace sharing mode**.
 
 ### Workspace sharing mode
-How a project's workspace is provisioned across its agents. There are four canonical modes: **Shared-plain**, **Worktree-per-agent** and **Clone-per-agent**, plus **Empty-per-agent** for Hub-managed projects without git. The mode is chosen when the project is created and cannot be changed afterwards. See [Workspaces & Sharing Modes](/scion/local/workspaces-and-sharing/).
+How a project's workspace is provisioned across its agents. There are four canonical modes: **Shared-plain**, **Worktree-per-agent** and **Clone-per-agent**, plus **Empty-per-agent** for Hub-managed projects without git. The mode is chosen when the project is created and cannot be changed afterwards. "Workspace mode" is the name of the API field (`workspaceMode`) and CLI flag (`--workspace-mode`) whose values select the sharing mode. See [Workspaces & Sharing Modes](/scion/local/workspaces-and-sharing/).
 
 ### Shared-plain
 A workspace sharing mode where one workspace directory is mounted into every agent with no per-agent isolation — the model used for plain (non-git) projects.

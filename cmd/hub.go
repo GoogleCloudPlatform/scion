@@ -1694,6 +1694,7 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Project created:\n")
 	fmt.Printf("  ID:     %s\n", project.ID)
 	fmt.Printf("  Slug:   %s\n", project.Slug)
+	fmt.Printf("  Name:   %s\n", project.Name)
 	fmt.Printf("  Remote: %s\n", project.GitRemote)
 	fmt.Printf("  Branch: %s\n", defaultBranch)
 	if mode := project.Labels[store.LabelWorkspaceMode]; mode != "" {

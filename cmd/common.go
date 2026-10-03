@@ -806,25 +806,55 @@ func applyServiceAccountFlag(req *hubclient.CreateAgentRequest, saFlag string) {
 	}
 }
 
-// workspaceBootstrapNotice returns the status lines to show after an agent
-// create that collected non-git workspace files (sentFiles > 0), and whether
-// they already include the Hub's warnings. When the Hub returned no upload
-// URLs it either uses the broker's local workspace or ignored the files (for
-// example, an empty-per-agent project gives each agent an empty workspace and
-// says so in warnings). In the second case the warnings replace the
-// "Using local workspace on broker." line, which would be misleading.
-func workspaceBootstrapNotice(sentFiles, uploadURLs int, warnings []string) ([]string, bool) {
-	if sentFiles == 0 || uploadURLs > 0 {
-		return nil, false
-	}
-	if len(warnings) == 0 {
-		return []string{"Using local workspace on broker."}, false
-	}
-	lines := make([]string, 0, len(warnings))
+// splitFilesIgnoredWarning reports whether warnings contain the Hub's
+// api.WarningEmptyPerAgentWorkspaceFilesIgnored and returns the other
+// warnings unchanged.
+func splitFilesIgnoredWarning(warnings []string) (ignored bool, rest []string) {
 	for _, w := range warnings {
+		if w == api.WarningEmptyPerAgentWorkspaceFilesIgnored {
+			ignored = true
+			continue
+		}
+		rest = append(rest, w)
+	}
+	return ignored, rest
+}
+
+// workspaceBootstrapNotice returns the status lines to show after an agent
+// create that collected non-git workspace files (sentFiles > 0), and the Hub
+// warnings still to be printed in the usual place. When the Hub returned no
+// upload URLs it either uses the broker's local workspace ("Using local
+// workspace on broker.") or, for an empty-per-agent project, ignored the
+// files and said so with api.WarningEmptyPerAgentWorkspaceFilesIgnored. That
+// warning replaces the local-workspace line, which would be misleading; all
+// other warnings are returned unchanged.
+func workspaceBootstrapNotice(sentFiles, uploadURLs int, warnings []string) (lines, remaining []string) {
+	if sentFiles == 0 || uploadURLs > 0 {
+		return nil, warnings
+	}
+	ignored, rest := splitFilesIgnoredWarning(warnings)
+	if ignored {
+		return []string{"Warning: " + api.WarningEmptyPerAgentWorkspaceFilesIgnored}, rest
+	}
+	return []string{"Using local workspace on broker."}, warnings
+}
+
+// workspaceFinalizeNotice returns the status lines to show after a
+// workspace bootstrap finalize (sync-to/finalize). If the Hub ignored the
+// uploaded files (empty-per-agent), its warning replaces "Workspace uploaded:
+// N files"; any other warnings follow as "Warning: ..." lines.
+func workspaceFinalizeNotice(filesApplied int, warnings []string) []string {
+	ignored, rest := splitFilesIgnoredWarning(warnings)
+	var lines []string
+	if ignored {
+		lines = append(lines, "Warning: "+api.WarningEmptyPerAgentWorkspaceFilesIgnored)
+	} else {
+		lines = append(lines, fmt.Sprintf("Workspace uploaded: %d files", filesApplied))
+	}
+	for _, w := range rest {
 		lines = append(lines, "Warning: "+w)
 	}
-	return lines, true
+	return lines
 }
 
 func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, inlineCfg *api.ScionConfig) error {
@@ -1129,7 +1159,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	}
 
 	// Workspace bootstrap: upload files and finalize
-	bootstrapLines, warningsShown := workspaceBootstrapNotice(len(workspaceFiles), len(resp.UploadURLs), resp.Warnings)
+	bootstrapLines, remainingWarnings := workspaceBootstrapNotice(len(workspaceFiles), len(resp.UploadURLs), resp.Warnings)
 	for _, line := range bootstrapLines {
 		statusln(line)
 	}
@@ -1157,7 +1187,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		if err != nil {
 			return fmt.Errorf("failed to finalize workspace bootstrap: %w", err)
 		}
-		statusf("Workspace uploaded: %d files\n", finalizeResp.FilesApplied)
+		for _, line := range workspaceFinalizeNotice(finalizeResp.FilesApplied, finalizeResp.Warnings) {
+			statusln(line)
+		}
 
 		// Poll until agent is running
 		statusf("Waiting for agent '%s' to start...\n", agentName)
@@ -1241,10 +1273,8 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		phase, _ := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
 		statusf("Phase: %s\n", phase)
 	}
-	if !warningsShown {
-		for _, w := range resp.Warnings {
-			fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
-		}
+	for _, w := range remainingWarnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 	}
 
 	if !attach {

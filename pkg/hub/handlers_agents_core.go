@@ -1846,7 +1846,7 @@ func (s *Server) createAgentInProject(
 	if project.IsEmptyPerAgent() && len(req.WorkspaceFiles) > 0 {
 		s.agentLifecycleLog.Warn("Ignoring workspace files for empty-per-agent project",
 			"agent_id", agent.ID, "project_id", project.ID, "files", len(req.WorkspaceFiles))
-		warnings = append(warnings, emptyPerAgentWorkspaceFilesIgnoredWarning)
+		warnings = append(warnings, api.WarningEmptyPerAgentWorkspaceFilesIgnored)
 		req.WorkspaceFiles = nil
 	}
 

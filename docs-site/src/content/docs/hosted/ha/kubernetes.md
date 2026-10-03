@@ -268,7 +268,7 @@ How agents of a git-backed project use `<subpath_root>/<project-id>/workspace` d
 - **Shared-plain.** Every agent mounts the workspace directory at `/workspace`.
 - **Clone-per-agent.** Each agent gets its own directory next to the workspace directory, `<subpath_root>/<project-id>/agents/<agent-name>`, and its own clone of the repository in `agents/<agent-name>/workspace`, described below. The project's workspace directory is not used.
 
-Hub-managed projects without git that use **Empty-per-agent** (each agent gets its own private directory that starts empty) are not yet supported on the NFS workspace backend: a broker with `workspace_storage.backend: nfs` refuses to start such an agent with an error. Without NFS workspace storage, see [Empty-per-agent workspaces](#empty-per-agent-workspaces) below.
+Hub-managed projects without git that use **Empty-per-agent** (each agent gets its own private directory that starts empty) are not yet supported on the NFS workspace backend: a Runtime Broker with `workspace_storage.backend: nfs` refuses to start such an agent with an error. Without NFS workspace storage (including `gke-shared-volume`), see [Empty-per-agent workspaces](#empty-per-agent-workspaces) below.
 
 Worktree-per-agent needs git 2.48 or later in the provisioning init container, in the agent images and on the broker. Worktrees with relative paths, which this mode adds, set a repository extension that older git versions cannot read, so once a project has one, older git can no longer use its shared checkout. With an older git in the init container, the agent's worktree directory is left empty instead, as described below for older images.
 
@@ -300,7 +300,7 @@ Older agent images behave in one of two ways. With an image whose `sciontool` pr
 
 ### Empty-per-agent Workspaces
 
-On clusters without NFS workspace storage, an agent in an Empty-per-agent project (a Hub-managed project without git created with workspace mode `per-agent`; see [Workspaces & Sharing Modes](/scion/local/workspaces-and-sharing/)) gets its own EmptyDir workspace volume. It starts empty, as intended, but **its contents are lost when the agent stops or its Pod is replaced**, so suspend/resume does not keep them either. Git clone-per-agent workspaces on EmptyDir behave the same way. Have agents write anything that must survive to a [shared directory](#shared-directory-pvcs).
+On clusters without NFS workspace storage (including `gke-shared-volume`), an agent in an Empty-per-agent project (a Hub-managed project without git created with workspace mode `per-agent`; see [Workspaces & Sharing Modes](/scion/local/workspaces-and-sharing/)) gets its own EmptyDir workspace volume. It starts empty, as intended, but **its contents are lost when the agent stops or its Pod is replaced**, so suspend/resume does not keep them either. Git clone-per-agent workspaces on EmptyDir behave the same way. Have agents write anything that must survive to a [shared directory](#shared-directory-pvcs).
 
 ### Secret Modes
 
