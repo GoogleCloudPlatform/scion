@@ -430,6 +430,15 @@ this broker are:
   later attempt, and the broker treats a conflict (meaning some other
   caller claimed first) as a hijack and deletes the actor. See `README.md`
   for the fix options.
+- **`/exec` does not run a login shell.** The actor's control server runs
+  each exec command as the unprivileged `scion` user by switching uid and
+  gid directly, in that user's home directory, and refuses a user that
+  resolves to root. Supplementary groups are not applied (the child has
+  only the user's primary group), `PATH` is the fixed root-trusted search
+  path rather than anything from the user's profile, and no profile or rc
+  files are sourced, so commands that rely on login-shell setup must set it
+  up themselves. A child that calls `setsid` escapes the process-group kill
+  on timeout; it stays unprivileged and is reaped at container teardown.
 
 ## TODO (not automated yet)
 
