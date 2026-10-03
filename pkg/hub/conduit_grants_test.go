@@ -105,7 +105,7 @@ func newConduitFixture(t *testing.T) *conduitFixture {
 	require.NoError(t, err)
 	f.agent = got
 
-	srv.conduitGrants = newConduitGrantKeys(&dbConduitGrantKeyStore{store: s, encryptionKey: srv.encryptionKey}, "", f.clock.Now)
+	srv.conduitGrants = newConduitGrantKeys(&memoryConduitGrantKeyStore{}, f.clock.Now)
 	setConduitExperiment(t, srv, true)
 	return f
 }
@@ -336,16 +336,24 @@ func TestMintConduitGrant_AgentCaller(t *testing.T) {
 	assert.ErrorIs(t, err, errConduitForbidden, "agent without lifecycle scope cannot attach")
 }
 
-// TestConduitGrantKeys_SharedAcrossNodes: two hub nodes on one database sign
+var testGrantEncryptionKey = secret.DeriveLocalEncryptionKey("test-shared-secret")
+
+func newTestDBGrantKeyStore(t *testing.T, s store.SecretStore) *dbConduitGrantKeyStore {
+	t.Helper()
+	db, err := newDBConduitGrantKeyStore(s, testGrantEncryptionKey)
+	require.NoError(t, err)
+	return db
+}
+
+// TestConduitGrantKeys_SharedAcrossNodes: hub nodes on one database sign
 // with the same key set, including when they bootstrap concurrently.
 func TestConduitGrantKeys_SharedAcrossNodes(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 	clock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
-	encKey := secret.DeriveLocalEncryptionKey("test-shared-secret")
 	nodes := make([]*conduitGrantKeys, 8)
 	for i := range nodes {
-		nodes[i] = newConduitGrantKeys(&dbConduitGrantKeyStore{store: s, encryptionKey: encKey}, "", clock.Now)
+		nodes[i] = newConduitGrantKeys(newTestDBGrantKeyStore(t, s), clock.Now)
 	}
 	kids := make([]string, len(nodes))
 	var wg sync.WaitGroup
@@ -373,17 +381,74 @@ func TestConduitGrantKeys_SharedAcrossNodes(t *testing.T) {
 	assert.NotContains(t, raw, "seed")
 }
 
-func TestConduitGrantKeys_SharedSecretBootstrapIsDeterministic(t *testing.T) {
+// TestConduitGrantKeys_BootstrapKeyIsRandom: the first key is not derived
+// from any hub secret, and independent bootstraps differ.
+func TestConduitGrantKeys_BootstrapKeyIsRandom(t *testing.T) {
+	const sharedSecret = "test-shared-secret"
 	clock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
-	var kids []string
+	derived := deriveSharedSigningKey(sharedSecret, conduitGrantKeySecretName+":bootstrap")
+	var seeds [][]byte
 	for range 2 {
-		_, s := testServer(t) // separate databases
-		k := newConduitGrantKeys(&dbConduitGrantKeyStore{store: s}, "shared", clock.Now)
-		signer, err := k.signer(context.Background())
+		_, s := testServer(t) // separate databases, same shared secret
+		db, err := newDBConduitGrantKeyStore(s, secret.DeriveLocalEncryptionKey(sharedSecret))
 		require.NoError(t, err)
+		k := newConduitGrantKeys(db, clock.Now)
+		_, err = k.signer(context.Background())
+		require.NoError(t, err)
+		ring, _, err := db.Load(context.Background())
+		require.NoError(t, err)
+		require.Len(t, ring.Keys, 1)
+		assert.NotEqual(t, derived, ring.Keys[0].Seed, "bootstrap key must not be derived from the shared secret")
+		seeds = append(seeds, ring.Keys[0].Seed)
+	}
+	assert.NotEqual(t, seeds[0], seeds[1], "independent bootstraps must differ")
+}
+
+// TestConduitGrantKeySet_EphemeralWithoutEncryption: with no encryption at
+// rest configured the ring is never written to the secret store; it works
+// from memory, and a restart (or another node) gets a different ring.
+func TestConduitGrantKeySet_EphemeralWithoutEncryption(t *testing.T) {
+	ctx := context.Background()
+	_, err := newDBConduitGrantKeyStore(nil, nil)
+	require.Error(t, err, "persistence requires an encryption key")
+
+	srv, s := testServer(t)
+	srv.encryptionKey = nil
+	setConduitExperiment(t, srv, true)
+	restart := func() {
+		srv.conduitGrantsOnce = sync.Once{}
+		srv.conduitGrants = nil
+	}
+	var kids []string
+	for range 2 { // one hub instance, then the same hub restarted
+		restart()
+		k := srv.conduitGrantKeySet()
+		_, ok := k.store.(*memoryConduitGrantKeyStore)
+		require.True(t, ok, "no encryption key: ring must be held in memory")
+		signer, err := k.signer(ctx)
+		require.NoError(t, err)
+		kid, err := srv.RotateConduitGrantKey(ctx)
+		require.NoError(t, err)
+		assert.NotEqual(t, signer.KeyID, kid)
+		pubs, err := srv.ConduitGrantPublicKeys(ctx)
+		require.NoError(t, err)
+		assert.Len(t, pubs, 2, "rotation works in memory")
 		kids = append(kids, signer.KeyID)
 	}
-	assert.Equal(t, kids[0], kids[1])
+	assert.NotEqual(t, kids[0], kids[1], "a restarted hub gets a new ring")
+
+	_, err = s.GetSecret(ctx, conduitGrantKeySecretName, store.ScopeHub, conduitGrantKeyScopeID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "nothing is written to the secret store")
+
+	// With encryption configured the ring is persisted.
+	srv.encryptionKey = testGrantEncryptionKey
+	restart()
+	_, err = srv.ConduitGrantPublicKeys(ctx)
+	require.NoError(t, err)
+	_, ok := srv.conduitGrantKeySet().store.(*dbConduitGrantKeyStore)
+	assert.True(t, ok)
+	_, err = s.GetSecret(ctx, conduitGrantKeySecretName, store.ScopeHub, conduitGrantKeyScopeID)
+	assert.NoError(t, err)
 }
 
 // TestConduitGrantKeys_Rotation: rotation by kid propagates to other nodes;
@@ -393,8 +458,8 @@ func TestConduitGrantKeys_Rotation(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 	clock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
-	nodeA := newConduitGrantKeys(&dbConduitGrantKeyStore{store: s}, "", clock.Now)
-	nodeB := newConduitGrantKeys(&dbConduitGrantKeyStore{store: s}, "", clock.Now)
+	nodeA := newConduitGrantKeys(newTestDBGrantKeyStore(t, s), clock.Now)
+	nodeB := newConduitGrantKeys(newTestDBGrantKeyStore(t, s), clock.Now)
 	first, err := nodeA.signer(ctx)
 	require.NoError(t, err)
 	_, err = nodeB.signer(ctx)
@@ -431,17 +496,93 @@ func TestConduitGrantKeys_Rotation(t *testing.T) {
 	assert.Equal(t, kid, pubs[0].KeyID)
 }
 
+// TestConduitGrantKeys_ConcurrentRotationsLoseNoKey: rotations racing on
+// several nodes against one store each land; no rotated-in key is lost.
+func TestConduitGrantKeys_ConcurrentRotationsLoseNoKey(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		st   func(t *testing.T) conduitGrantKeyStore
+	}{
+		{"database", func(t *testing.T) conduitGrantKeyStore { _, s := testServer(t); return newTestDBGrantKeyStore(t, s) }},
+		{"memory", func(*testing.T) conduitGrantKeyStore { return &memoryConduitGrantKeyStore{} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			clock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+			st := tc.st(t)
+			first, err := newConduitGrantKeys(st, clock.Now).signer(ctx)
+			require.NoError(t, err)
+
+			const n = conduitGrantKeyRotateAttempts - 1 // each can lose at most n-1 races
+			kids := make([]string, n)
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			for i := range n {
+				node := newConduitGrantKeys(st, clock.Now)
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					<-start
+					kid, err := node.rotate(ctx, conduitGrantKeyDefaultActivation, time.Hour)
+					if err != nil {
+						t.Errorf("rotation %d: %v", i, err)
+						return
+					}
+					kids[i] = kid
+				}()
+			}
+			close(start)
+			wg.Wait()
+
+			ring, _, err := st.Load(ctx)
+			require.NoError(t, err)
+			have := map[string]bool{}
+			for _, k := range ring.Keys {
+				have[k.KeyID] = true
+			}
+			assert.True(t, have[first.KeyID], "bootstrap key lost")
+			for i, kid := range kids {
+				assert.True(t, have[kid], "rotation %d's key %s lost", i, kid)
+			}
+			assert.Len(t, ring.Keys, n+1)
+		})
+	}
+}
+
+// casLosingStore always loses the compare-and-swap.
+type casLosingStore struct{ *memoryConduitGrantKeyStore }
+
+func (casLosingStore) CompareAndSwap(context.Context, *grant.KeyRing, int) (bool, error) {
+	return false, nil
+}
+
+func TestConduitGrantKeys_RotationGivesUpAfterBoundedRetries(t *testing.T) {
+	clock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	k := newConduitGrantKeys(casLosingStore{&memoryConduitGrantKeyStore{}}, clock.Now)
+	_, err := k.rotate(context.Background(), conduitGrantKeyDefaultActivation, time.Hour)
+	require.Error(t, err)
+}
+
+func TestServer_ConduitGrantKeyActivationSetting(t *testing.T) {
+	srv := &Server{}
+	assert.Equal(t, conduitGrantKeyDefaultActivation, srv.conduitGrantKeyActivation())
+	srv.config.ConduitGrantKeyActivation = 2 * time.Hour
+	assert.Equal(t, 2*time.Hour, srv.conduitGrantKeyActivation())
+}
+
 type failingGrantKeyStore struct{}
 
-func (failingGrantKeyStore) Load(context.Context) (*grant.KeyRing, error) {
-	return nil, errors.New("db down")
+func (failingGrantKeyStore) Load(context.Context) (*grant.KeyRing, int, error) {
+	return nil, 0, errors.New("db down")
 }
 func (failingGrantKeyStore) Create(context.Context, *grant.KeyRing) error { return nil }
-func (failingGrantKeyStore) Update(context.Context, *grant.KeyRing) error { return nil }
+func (failingGrantKeyStore) CompareAndSwap(context.Context, *grant.KeyRing, int) (bool, error) {
+	return true, nil
+}
 
 func TestMintConduitGrant_KeyStoreErrorFailsClosed(t *testing.T) {
 	f := newConduitFixture(t)
-	f.srv.conduitGrants = newConduitGrantKeys(failingGrantKeyStore{}, "", f.clock.Now)
+	f.srv.conduitGrants = newConduitGrantKeys(failingGrantKeyStore{}, f.clock.Now)
 	_, _, err := f.mint(f.owner, tcpHeader("3000"))
 	require.Error(t, err)
 }
@@ -463,7 +604,7 @@ func TestConduitGrantKeysEndpoint(t *testing.T) {
 
 	// Public halves only: neither the seed nor the expanded private key
 	// appears in the response.
-	ring, err := f.srv.conduitGrants.store.Load(context.Background())
+	ring, _, err := f.srv.conduitGrants.store.Load(context.Background())
 	require.NoError(t, err)
 	seed := ring.Keys[0].Seed
 	for _, enc := range []string{base64.StdEncoding.EncodeToString(seed), base64.RawURLEncoding.EncodeToString(seed), fmt.Sprintf("%x", seed)} {

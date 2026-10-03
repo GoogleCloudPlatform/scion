@@ -109,12 +109,13 @@ var SecurityMutationSymbols = map[string]string{
 	"RevokeAgentCredentialsByAgent": "revoke-authority",
 
 	// Secret operations
-	"CreateSecret":         "create-resource",
-	"UpdateSecret":         "update-resource",
-	"UpsertSecret":         "create-resource",
-	"DeleteSecret":         "delete-resource",
-	"DeleteSecretsByScope": "delete-resource",
-	"GetSecretValue":       "read-secret",
+	"CreateSecret":               "create-resource",
+	"UpdateSecret":               "update-resource",
+	"UpdateSecretValueIfVersion": "update-resource",
+	"UpsertSecret":               "create-resource",
+	"DeleteSecret":               "delete-resource",
+	"DeleteSecretsByScope":       "delete-resource",
+	"GetSecretValue":             "read-secret",
 
 	// Broker secret operations
 	"CreateBrokerSecret": "create-resource",
@@ -3104,8 +3105,7 @@ var MutationClassifications = []MutationClassification{
 	// pkg/hub/conduit_grants.go — Conduit grant signing key ring
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/conduit_grants.go", Function: "Create", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Conduit grant key ring bootstrap, cryptographic infrastructure", Scope: "pkg/hub/conduit_grants.go"}},
-	{File: "pkg/hub/conduit_grants.go", Function: "Load", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Conduit grant key ring load, cryptographic infrastructure", Scope: "pkg/hub/conduit_grants.go"}},
-	{File: "pkg/hub/conduit_grants.go", Function: "Update", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Conduit grant key ring rotation, cryptographic infrastructure", Scope: "pkg/hub/conduit_grants.go"}},
+	{File: "pkg/hub/conduit_grants.go", Function: "CompareAndSwap", Symbol: "UpdateSecretValueIfVersion", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Conduit grant key ring rotation (compare-and-swap), cryptographic infrastructure", Scope: "pkg/hub/conduit_grants.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/lifecycle_hook_executor.go — pre-start hook execution

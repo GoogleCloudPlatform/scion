@@ -120,6 +120,14 @@ type ServerConfig struct {
 	// the agent's exposed ports. The reserved ports (9810, 18380) are always
 	// refused. Only used behind the hub.conduit experiment.
 	ConduitTCPAllowedPorts []int
+	// ConduitGrantKeyActivation is how long a rotated-in Conduit grant key
+	// is published before it signs (default 15m). It must be at least the
+	// maximum interval at which grant targets refresh their key set
+	// (Welcome and token refresh); otherwise a target that has not yet
+	// learned the new key refuses its grants. It must also be at least the
+	// hub's ring refresh interval (1m). Only used behind the hub.conduit
+	// experiment.
+	ConduitGrantKeyActivation time.Duration
 	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
 	AuthMode string
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
