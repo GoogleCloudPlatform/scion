@@ -29,7 +29,6 @@ import (
 // Tests for the Kubernetes safe_to_evict setting on settings runtime and
 // profile entries and kubernetes.safeToEvict on templates and agents.
 
-
 const safeToEvictSettingsYAML = `schema_version: "1"
 active_profile: gke
 runtimes:
@@ -307,4 +306,34 @@ func TestMergeKubernetesConfig_SafeToEvict(t *testing.T) {
 	require.NotNil(t, merged.Kubernetes.SafeToEvict)
 	assert.False(t, *merged.Kubernetes.SafeToEvict)
 	assert.Equal(t, "agents", merged.Kubernetes.Namespace)
+}
+
+// The DB-backed settings overlay (co-located hub and broker) carries
+// safe_to_evict on runtime and profile entries into LoadEffectiveSettings,
+// replacing the file's entries, and the resolver sees it.
+func TestSafeToEvictSettings_DBOverlay(t *testing.T) {
+	projectDir := writeSharedDirK8sGlobalSettings(t, safeToEvictSettingsYAML)
+	o := NewSettingsOverlay()
+	o.Update(
+		map[string]V1RuntimeConfig{"db-k8s": {Type: "kubernetes", SafeToEvict: boolPtr(false)}},
+		map[string]V1ProfileConfig{
+			"db":      {Runtime: "db-k8s"},
+			"db-true": {Runtime: "db-k8s", SafeToEvict: boolPtr(true)},
+		},
+		nil, "")
+	SetGlobalSettingsOverlay(o)
+	t.Cleanup(func() { SetGlobalSettingsOverlay(nil) })
+
+	vs, _, err := LoadEffectiveSettings(projectDir)
+	require.NoError(t, err)
+	got, source := vs.ResolveSafeToEvictWithSource("db")
+	require.NotNil(t, got)
+	assert.False(t, *got)
+	assert.Equal(t, "runtimes.db-k8s.safe_to_evict", source)
+	got, source = vs.ResolveSafeToEvictWithSource("db-true")
+	require.NotNil(t, got)
+	assert.True(t, *got)
+	assert.Equal(t, "profiles.db-true.safe_to_evict", source)
+	_, fileEntry := vs.Runtimes["gke-autopilot"]
+	assert.False(t, fileEntry, "overlay runtimes replace the file's")
 }
