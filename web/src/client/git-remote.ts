@@ -36,8 +36,12 @@ export const GIT_REMOTE_SSH_PORT =
 
 const SCHEMES = ['https://', 'http://', 'ssh://', 'git://'];
 const SCP_LOGIN = /^[A-Za-z0-9._-]+$/;
-const HOSTNAME = /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
-const HOST_LABELS = /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$/;
+// DNS labels may not start or end with '-'.
+const LABEL = '[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?';
+const HOSTNAME = new RegExp(`^${LABEL}(\\.${LABEL})+$`);
+const HOST_LABELS = new RegExp(`^${LABEL}(\\.${LABEL})*$`);
+// unicode.IsSpace || unicode.IsControl.
+const SPACE_OR_CONTROL = /[\s\p{Cc}]/u;
 const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 
 /** Drop everything from the first `?` or `#`; git remotes need neither and a query can carry tokens. */
@@ -48,18 +52,21 @@ export function stripQueryAndFragment(remote: string): string {
 
 /**
  * Index of the '@' ending the userinfo of `s` (a URL after "scheme://", with
- * the query and fragment removed), or -1. Picks the last '@' followed by
- * "host/..." with a non-empty host, or by a bare host when nothing before the
- * '@' contains '/'. Mirrors util.userinfoEnd.
+ * the query and fragment removed), or -1. Picks the first '@' such that the
+ * login before it (up to the first ':') contains no '/', and the host after
+ * it (up to the next '/') is non-empty and contains no '@'. Once a '/' is in
+ * the login position the path has started, so no later '@' ends the userinfo.
+ * Mirrors util.userinfoEnd.
  */
 function userinfoEnd(s: string): number {
-  let end = s.length;
-  for (;;) {
-    const at = s.lastIndexOf('@', end - 1);
+  for (let from = 0; ; ) {
+    const at = s.indexOf('@', from);
     if (at < 0) return -1;
-    const slash = s.indexOf('/', at + 1);
-    if (slash > at + 1 || (slash < 0 && !s.slice(0, at).includes('/'))) return at;
-    end = at;
+    const login = s.slice(0, at).split(':')[0];
+    if (login.includes('/')) return -1;
+    const host = s.slice(at + 1).split('/')[0];
+    if (host !== '' && !host.includes('@')) return at;
+    from = at + 1;
   }
 }
 
@@ -90,9 +97,33 @@ export function stripGitURLCredentials(remote: string): string {
   return remote.slice(0, authorityStart) + hostAndPath;
 }
 
-/** The safe form of an override: trimmed, without query/fragment or credentials. */
+/**
+ * Drop an explicit default port (:443 for https, :80 for http) from a
+ * credential-free scheme URL. Mirrors the hub's dropDefaultPort.
+ */
+export function dropDefaultPort(remote: string): string {
+  const schemeEnd = remote.indexOf('://');
+  if (schemeEnd < 0) return remote;
+  const scheme = remote.slice(0, schemeEnd).toLowerCase();
+  const port = scheme === 'https' ? ':443' : scheme === 'http' ? ':80' : '';
+  if (!port) return remote;
+  const rest = remote.slice(schemeEnd + 3);
+  const slash = rest.indexOf('/');
+  const authority = slash >= 0 ? rest.slice(0, slash) : rest;
+  if (authority.includes('@') || !authority.endsWith(port)) return remote;
+  return (
+    remote.slice(0, schemeEnd + 3) +
+    authority.slice(0, -port.length) +
+    (slash >= 0 ? rest.slice(slash) : '')
+  );
+}
+
+/**
+ * The safe form of an override, as the hub stores it in source-url: trimmed,
+ * without query/fragment, credentials or a default port.
+ */
 export function sanitizeGitRemote(remote: string): string {
-  return stripGitURLCredentials(stripQueryAndFragment(remote.trim()));
+  return dropDefaultPort(stripGitURLCredentials(stripQueryAndFragment(remote.trim())));
 }
 
 function splitSCP(remote: string): { login: string; host: string; path: string } | null {
@@ -118,13 +149,18 @@ function isPort(s: string): boolean {
 }
 
 /**
- * Host and port of a scheme URL as Go's net/url splits them (the authority
- * ends at the first '/'; userinfo ends at its last '@'), or null when Go's
- * url.Parse would fail: an unterminated IPv6 literal or a non-numeric port.
+ * Host, port and path of a scheme URL as Go's net/url splits them (the
+ * authority ends at the first '/'; userinfo ends at its last '@'), or null
+ * when Go's url.Parse would fail: an unterminated IPv6 literal or a
+ * non-numeric port. `hasColon` is true when a ':' introduces the port.
  */
-function parseURLHost(remote: string): { host: string; port: string } | null {
+function parseURLHost(
+  remote: string
+): { host: string; port: string; hasColon: boolean; path: string } | null {
   const rest = remote.slice(remote.indexOf('://') + 3);
-  let authority = rest.split('/')[0];
+  const slash = rest.indexOf('/');
+  const path = slash >= 0 ? rest.slice(slash) : '';
+  let authority = slash >= 0 ? rest.slice(0, slash) : rest;
   const at = authority.lastIndexOf('@');
   if (at >= 0) authority = authority.slice(at + 1);
   let host: string;
@@ -142,7 +178,7 @@ function parseURLHost(remote: string): { host: string; port: string } | null {
   }
   const port = portPart.slice(1);
   if (port && !/^[0-9]+$/.test(port)) return null;
-  return { host, port };
+  return { host, port, hasColon: portPart.startsWith(':'), path };
 }
 
 /** A DNS name (single label allowed) or an IP address, as url.Hostname() returns it. */
@@ -171,12 +207,20 @@ function validateSchemeRemote(remote: string): string | null {
   }
   if (!['https', 'http', 'ssh', 'git'].includes(scheme)) return GIT_REMOTE_INVALID;
   if (!isURLHost(parsed.host)) return GIT_REMOTE_INVALID;
-  if (isSSH && parsed.port) return GIT_REMOTE_SSH_PORT;
+  if (isSSH && parsed.hasColon) return GIT_REMOTE_SSH_PORT;
+  // A port must be 1-65535 without leading zeros; a bare ':' is rejected.
+  if (parsed.hasColon && !isPort(parsed.port)) return GIT_REMOTE_INVALID;
+  // '@' in the path is ambiguous with userinfo.
+  if (parsed.path.includes('@')) return GIT_REMOTE_INVALID;
   if (!isSchemeGitURL(remote)) return GIT_REMOTE_INVALID;
-  // Removing credentials must not change the host (catches a password with
-  // an unencoded '/' and an '@' in the path).
+  // Removing credentials must change nothing but the userinfo.
   const stripped = parseURLHost(stripGitURLCredentials(remote));
-  if (!stripped || stripped.host.toLowerCase() !== parsed.host.toLowerCase()) {
+  if (
+    !stripped ||
+    stripped.host.toLowerCase() !== parsed.host.toLowerCase() ||
+    stripped.port !== parsed.port ||
+    stripped.path !== parsed.path
+  ) {
     return GIT_REMOTE_INVALID;
   }
   return null;
@@ -195,15 +239,17 @@ function isSchemeGitURL(remote: string): boolean {
 }
 
 /**
- * Validate an override as the hub does: scheme URLs with a valid host (no ssh
- * port, and credential stripping must keep the host), SCP user@host:org/repo
- * with any login and any host (single-label allowed), or scheme-less
- * host[:port]/org/repo with a dotted host. SCP without a login
- * (github.com:org/repo) is rejected. Returns null when it is acceptable,
+ * Validate an override as the hub does: scheme URLs with a valid host and port
+ * (no ssh port, and credential stripping must change only the userinfo), SCP
+ * user@host:org/repo with any login and any host (single-label allowed), or
+ * scheme-less host[:port]/org/repo with a dotted host. SCP without a login
+ * (github.com:org/repo), whitespace or control characters, '@' in the path
+ * and DNS labels starting or ending with '-' are rejected. Returns null when it is acceptable,
  * otherwise the hub's 400 message. Input should be trimmed and have its query
  * and fragment removed (see {@link stripQueryAndFragment}).
  */
 export function validateGitRemote(remote: string): string | null {
+  if (SPACE_OR_CONTROL.test(remote)) return GIT_REMOTE_INVALID;
   if (remote.includes('://')) return validateSchemeRemote(remote);
 
   const scp = splitSCP(remote);
@@ -211,6 +257,7 @@ export function validateGitRemote(remote: string): string | null {
     const ok =
       SCP_LOGIN.test(scp.login) &&
       HOST_LABELS.test(scp.host) &&
+      !scp.path.includes('@') &&
       scp.path !== '' &&
       !scp.path.startsWith('/') &&
       hasOrgAndRepo(scp.path);
@@ -225,16 +272,16 @@ export function validateGitRemote(remote: string): string | null {
   if (!HOSTNAME.test(host) || (colon >= 0 && !isPort(hostPort.slice(colon + 1)))) {
     return GIT_REMOTE_INVALID;
   }
-  return hasOrgAndRepo(path) ? null : GIT_REMOTE_INVALID;
+  return hasOrgAndRepo(path) && !path.includes('@') ? null : GIT_REMOTE_INVALID;
 }
 
 /**
  * Mirror of util.NormalizeGitRemote (after the hub's canonicalCloneRemote):
- * lowercase, no scheme, no login/credentials, SCP ':' as '/', no trailing
+ * lowercase, no scheme, no login/credentials, no default port, SCP ':' as '/', no trailing
  * slash or `.git`. Two remotes naming the same repository normalize equal.
  */
 export function normalizeGitRemote(remote: string): string {
-  let r = stripQueryAndFragment(remote.trim());
+  let r = sanitizeGitRemote(remote);
   if (!r) return '';
   const scp = splitSCP(r);
   if (scp) r = `git@${scp.host}:${scp.path}`;

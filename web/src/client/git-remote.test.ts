@@ -73,6 +73,29 @@ describe('validateGitRemote', () => {
     'https://github.com/org/x@evil.example/repo',
     'https://bad_host/org/repo',
     'https://[::1/org/repo',
+    // '@' in the path must not swap the repository.
+    'https://github.com/org/repo@github.com/x',
+    'https://u:SECRET_P@github.com/org/x@github.com/repo',
+    'https://a/b@github.com/x',
+    'git@github.com:org/repo@github.com/x',
+    'github.com/org/repo@github.com/x',
+    // Whitespace and control characters, in every form.
+    'github.com/org/repo\nX',
+    'git@github.com:org/repo\nX',
+    'https://github.com/org/my repo',
+    'https://github.com/org/repo\tx',
+    'ssh://git@github.com/org/re\u0000po',
+    'https://github.com/org/r\u00a0epo',
+    // Loose ports and hosts.
+    'https://u:SECRET_P@github.com:/org/repo',
+    'https://github.com:0443/org/repo',
+    'https://github.com:0/org/repo',
+    'https://github.com:65536/org/repo',
+    'git.example.com:0443/team/repo',
+    'https://-x.com/org/repo',
+    'https://x-.example.com/org/repo',
+    'git@-gitserver:org/repo',
+    '-x.example.com/org/repo',
   ])('rejects %s', (remote) => {
     expect(validateGitRemote(remote)).toBe(GIT_REMOTE_INVALID);
   });
@@ -104,8 +127,26 @@ describe('stripGitURLCredentials / sanitizeGitRemote', () => {
     ['https://u:t@github.com', 'https://github.com'],
     ['https://u:t@github.com/org/repo?x=1', 'https://github.com/org/repo?x=1'],
     ['https://github.com/org/repo?u=a@b', 'https://github.com/org/repo?u=a@b'],
+    ['https://github.com/org/repo@github.com/x', 'https://github.com/org/repo@github.com/x'],
+    ['https://u:p@github.com/org/x@github.com/repo', 'https://github.com/org/x@github.com/repo'],
+    ['https://a/b@github.com/x', 'https://a/b@github.com/x'],
   ])('%s -> %s', (input, want) => {
     expect(stripGitURLCredentials(input)).toBe(want);
+  });
+
+  it('drops a default port', () => {
+    expect(sanitizeGitRemote('https://github.com:443/acme/repo.git')).toBe(
+      'https://github.com/acme/repo.git'
+    );
+    expect(sanitizeGitRemote('http://u:SECRET@git.example.com:80/team/repo')).toBe(
+      'http://git.example.com/team/repo'
+    );
+    expect(sanitizeGitRemote('https://git.example.com:8443/team/repo')).toBe(
+      'https://git.example.com:8443/team/repo'
+    );
+    expect(sanitizeGitRemote('ssh://alice:SECRET@git.example.com/team/repo')).toBe(
+      'ssh://alice@git.example.com/team/repo'
+    );
   });
 
   it('drops the query and fragment, then credentials', () => {
@@ -123,6 +164,8 @@ describe('normalizeGitRemote', () => {
     'alice@github.com:acme/repo.git',
     'https://x-access-token:T@github.com/acme/repo.git?x=1',
     'github.com/acme/repo/',
+    'https://github.com:443/acme/repo',
+    'http://github.com:80/acme/repo.git',
   ])('%s names github.com/acme/repo', (remote) => {
     expect(normalizeGitRemote(remote)).toBe('github.com/acme/repo');
   });

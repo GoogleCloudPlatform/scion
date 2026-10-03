@@ -525,19 +525,18 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     ]);
   });
 
-  it('treats an override naming the template repository (any form) as not overridden', async () => {
+  it.each([
+    'git@github.com:Acme/go-service-template.git',
+    // An explicit default port names the same repository (#2712 r4).
+    'https://github.com:443/acme/go-service-template',
+  ])('treats an override naming the template repository (%s) as not overridden', async (remote) => {
     const { el, requests } = await createForm({ templates: [GIT_TEMPLATE] });
     element = el;
 
     await setValue(el, '#startFrom', 'tpl-git', 'sl-change');
     await setValue(el, '#name', 'same-repo', 'sl-input');
     // Template remote is github.com/acme/go-service-template.
-    await setValue(
-      el,
-      '#templateGitRemote',
-      'git@github.com:Acme/go-service-template.git',
-      'sl-input'
-    );
+    await setValue(el, '#templateGitRemote', remote, 'sl-input');
 
     expect(text(q(el, '.badge-override'))).toBe('Override');
     expect(q(el, '.override-field.active')).toBeNull();
