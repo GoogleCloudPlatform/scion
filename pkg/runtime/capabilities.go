@@ -122,6 +122,24 @@ func HasAsyncLaunchSupport(rt Runtime) bool {
 	return !ok || !au.AsyncLaunchUnsupported()
 }
 
+// EmptyPerAgentCapableRuntime is an optional capability a Runtime may
+// implement to report whether it can run an empty-per-agent workspace
+// (design #2703): a private, non-git per-agent directory on the node or pod.
+// A runtime that does not implement it is treated as supporting the mode;
+// one that cannot (Cloud Run, which rejects the mode at Run) opts out by
+// implementing this and reporting false.
+type EmptyPerAgentCapableRuntime interface {
+	SupportsEmptyPerAgentWorkspace() bool
+}
+
+// HasEmptyPerAgentSupport reports whether rt supports empty-per-agent
+// workspaces: true unless rt implements EmptyPerAgentCapableRuntime and
+// reports false. Brokers advertise it per default runtime, like Attach.
+func HasEmptyPerAgentSupport(rt Runtime) bool {
+	ec, ok := rt.(EmptyPerAgentCapableRuntime)
+	return !ok || ec.SupportsEmptyPerAgentWorkspace()
+}
+
 // AgentResourceCleaner is an optional capability a Runtime may implement
 // when it creates per-agent objects alongside the container (for example
 // the Kubernetes runtime's per-agent Secrets and SecretProviderClass).

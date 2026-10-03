@@ -233,7 +233,7 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 			Attach:                 scionrt.HasAttachSupport(defaultRuntime),
 			Reprovision:            true,
 			AsyncLaunch:            true,
-			EmptyPerAgentWorkspace: true,
+			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(defaultRuntime),
 		},
 	}
 

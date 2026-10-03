@@ -482,6 +482,31 @@ func TestHostInfo(t *testing.T) {
 	}
 }
 
+// TestHostInfo_EmptyPerAgentFollowsDefaultRuntime pins that /api/v1/info
+// advertises EmptyPerAgentWorkspace per default runtime (false for one that
+// opts out, as Cloud Run does), matching the heartbeat.
+func TestHostInfo_EmptyPerAgentFollowsDefaultRuntime(t *testing.T) {
+	srv := newTestServer(t)
+	srv.runtime = &noEmptyPerAgentTestRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "cloudrun" }}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/info", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+	var resp BrokerInfoResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Capabilities == nil {
+		t.Fatal("expected capabilities to be present")
+	}
+	if resp.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("capabilities.emptyPerAgentWorkspace = true, want false for a default runtime that opts out")
+	}
+}
+
 func TestListAgents(t *testing.T) {
 	srv := newTestServer(t)
 

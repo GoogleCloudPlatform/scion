@@ -495,6 +495,14 @@ type ScionConfig struct {
 	// repo. Persisted so resume/restart honors the same contract as first start.
 	ExplicitWorkspace bool `json:"explicit_workspace,omitempty" yaml:"explicit_workspace,omitempty"`
 
+	// EmptyPerAgentWorkspace records that the agent's workspace is its
+	// private, non-git agents/<slug>/workspace directory (design #2703).
+	// Persisted so a restart or resume that arrives without the mode (e.g.
+	// a dropped or undecodable request body) can never fall back to legacy
+	// workspace resolution or an enclosing repo root, and so delete skips
+	// worktree/branch cleanup for it.
+	EmptyPerAgentWorkspace bool `json:"empty_per_agent_workspace,omitempty" yaml:"empty_per_agent_workspace,omitempty"`
+
 	// Info contains persisted metadata about the agent
 	Info *AgentInfo `json:"-" yaml:"-"`
 }

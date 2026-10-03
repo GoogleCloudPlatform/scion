@@ -112,21 +112,26 @@ func TestBuildStartContext_EmptyPerAgent(t *testing.T) {
 // a request carrying both the mode and another workspace source is refused
 // with a 400 instead of one silently winning.
 func TestBuildStartContext_EmptyPerAgentRefusesOtherWorkspaceSources(t *testing.T) {
-	for name, cfg := range map[string]*CreateAgentConfig{
-		"workspace":        {Workspace: "/srv/projects/notes"},
-		"git clone":        {GitClone: &api.GitCloneConfig{URL: "https://example.com/r.git"}},
-		"shared workspace": {SharedWorkspace: true},
+	for name, tc := range map[string]struct {
+		cfg         *CreateAgentConfig
+		storagePath string
+	}{
+		"workspace":        {cfg: &CreateAgentConfig{Workspace: "/srv/projects/notes"}},
+		"git clone":        {cfg: &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: "https://example.com/r.git"}}},
+		"shared workspace": {cfg: &CreateAgentConfig{SharedWorkspace: true}},
+		"workspace upload": {storagePath: "workspaces/proj-1/agent-1"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv, _ := newEmptyPerAgentStartContextServer(t)
 			_, err := srv.buildStartContext(context.Background(), startContextInputs{
-				Name:          "worker",
-				AgentID:       "agent-1",
-				ProjectSlug:   "notes",
-				ProjectID:     "proj-1",
-				WorkspaceMode: "empty-per-agent",
-				Config:        cfg,
-				Operation:     opCreate,
+				Name:                 "worker",
+				AgentID:              "agent-1",
+				ProjectSlug:          "notes",
+				ProjectID:            "proj-1",
+				WorkspaceMode:        "empty-per-agent",
+				Config:               tc.cfg,
+				WorkspaceStoragePath: tc.storagePath,
+				Operation:            opCreate,
 			})
 			var sce *startContextError
 			if !errors.As(err, &sce) || sce.Status != http.StatusBadRequest {
@@ -143,7 +148,8 @@ func TestBuildStartContext_EmptyPerAgentRefusesOtherWorkspaceSources(t *testing.
 // half of the P1 carry-over: a create for a hub-managed project with no
 // workspace mode, path or clone is refused rather than falling back to the
 // shared project directory. Start (which legitimately omits config), a
-// linked project's own path, and a create carrying a workspace are not.
+// linked project's own path, and a create carrying a workspace or a GCS
+// workspace upload (#2760 r1 B1) are not.
 func TestBuildStartContext_AmbiguousHubManagedCreateRefused(t *testing.T) {
 	srv, globalDir := newEmptyPerAgentStartContextServer(t)
 	hubManaged := filepath.Join(globalDir, "projects", "notes")
@@ -165,6 +171,10 @@ func TestBuildStartContext_AmbiguousHubManagedCreateRefused(t *testing.T) {
 		{name: "pre-resolved hub-managed path", mutate: func(in *startContextInputs) { in.ProjectPath = hubManaged }, refused: true},
 		{name: "nil config", mutate: func(in *startContextInputs) { in.Config = nil }, refused: true},
 		{name: "workspace sent", mutate: func(in *startContextInputs) { in.Config.Workspace = hubManaged }},
+		{name: "GCS workspace upload sent", mutate: func(in *startContextInputs) {
+			in.ProjectPath = hubManaged
+			in.WorkspaceStoragePath = "workspaces/proj-1/agent-1"
+		}},
 		{name: "mode sent", mutate: func(in *startContextInputs) { in.WorkspaceMode = "shared-plain" }},
 		{name: "linked project path", mutate: func(in *startContextInputs) { in.ProjectPath = filepath.Join(t.TempDir(), "linked") }},
 		{name: "start", mutate: func(in *startContextInputs) { in.Operation = opHTTPStart; in.Config = nil }},

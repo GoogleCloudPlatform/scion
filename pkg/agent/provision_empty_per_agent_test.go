@@ -318,3 +318,105 @@ func TestDeleteAgentFiles_EmptyPerAgent_RemovesWorkspace(t *testing.T) {
 		t.Fatalf("sibling workspace must be kept: %q, %v", b, err)
 	}
 }
+
+// TestGetAgent_EmptyPerAgent_PersistedModeSurvivesLostFlag pins review N1 of
+// #2760: the mode is persisted in scion-agent.json at provision, so a resume
+// whose request lost it (no ctx flag) still recreates the private workspace
+// rather than falling back to legacy resolution or the enclosing repo.
+func TestGetAgent_EmptyPerAgent_PersistedModeSurvivesLostFlag(t *testing.T) {
+	tmpDir := emptyPerAgentFixture(t)
+	root := filepath.Join(tmpDir, "repo")
+	gitInitForTest(t, root)
+	projectScionDir := filepath.Join(root, ".scion")
+	projectDir := initEmptyPerAgentProject(t, projectScionDir, true, "")
+
+	ctx := api.ContextWithEmptyPerAgentWorkspace(context.Background())
+	_, ws, _, err := ProvisionAgent(ctx, "worker", "default", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+	agentDir := filepath.Join(projectDir, "agents", "worker")
+	persisted, err := (&config.Template{Path: agentDir}).LoadConfig()
+	if err != nil {
+		t.Fatalf("load persisted scion-agent.json: %v", err)
+	}
+	if !persisted.EmptyPerAgentWorkspace {
+		t.Fatal("scion-agent.json must record empty_per_agent_workspace")
+	}
+
+	if err := os.RemoveAll(ws); err != nil {
+		t.Fatal(err)
+	}
+	_, _, got, _, err := GetAgent(context.Background(), "worker", "", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("GetAgent (resume without flag) failed: %v", err)
+	}
+	want := filepath.Join(agentDir, "workspace")
+	if got != want {
+		t.Fatalf("workspace = %q, want %q", got, want)
+	}
+	assertEmptyDir(t, want)
+	if _, err := os.Stat(filepath.Join(want, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("resumed workspace must not be a worktree, stat .git err = %v", err)
+	}
+}
+
+// TestDeleteAgentFiles_EmptyPerAgent_GitInitWorkspaceKeepsBranches pins
+// review N4 of #2760: deleting an empty-per-agent agent whose workspace the
+// agent turned into a git repo, in a project inside an enclosing repository
+// that has a branch named like the agent, removes only the agent's
+// directories -- no worktree removal and no branch deletion.
+func TestDeleteAgentFiles_EmptyPerAgent_GitInitWorkspaceKeepsBranches(t *testing.T) {
+	for name, gitWorkspace := range map[string]func(git func(string, ...string) string, root, ws string){
+		// The agent ran `git init` in its workspace.
+		"git init in workspace": func(git func(string, ...string) string, root, ws string) {
+			git(ws, "init", "-q", "-b", "worker")
+			git(ws, "commit", "-q", "--allow-empty", "-m", "agent work")
+		},
+		// The workspace's .git points into the enclosing repository with
+		// branch worker checked out; worktree cleanup would follow it and
+		// delete that branch.
+		"workspace linked to the enclosing repo": func(git func(string, ...string) string, root, ws string) {
+			git(root, "worktree", "add", "-q", ws, "worker")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Host conditions: inside an agent container SCION_HOST_UID
+			// disables worktree pruning, which would mask a branch delete.
+			t.Setenv("SCION_HOST_UID", "")
+			tmpDir := emptyPerAgentFixture(t)
+			root := filepath.Join(tmpDir, "repo")
+			gitInitForTest(t, root)
+			git := func(dir string, args ...string) string {
+				t.Helper()
+				full := append([]string{"-C", dir, "-c", "user.email=t@example.com", "-c", "user.name=t"}, args...)
+				out, err := exec.Command("git", full...).CombinedOutput()
+				if err != nil {
+					t.Fatalf("git %v: %v: %s", args, err, out)
+				}
+				return string(out)
+			}
+			git(root, "commit", "-q", "--allow-empty", "-m", "init")
+			git(root, "branch", "worker")
+			projectScionDir := filepath.Join(root, ".scion")
+			projectDir := initEmptyPerAgentProject(t, projectScionDir, true, "")
+
+			ctx := api.ContextWithEmptyPerAgentWorkspace(context.Background())
+			_, ws, _, err := ProvisionAgent(ctx, "worker", "default", "", "", projectScionDir, "", "", "", "")
+			if err != nil {
+				t.Fatalf("ProvisionAgent failed: %v", err)
+			}
+			gitWorkspace(git, root, ws)
+
+			if _, err := DeleteAgentFiles("worker", projectScionDir, true); err != nil {
+				t.Fatalf("DeleteAgentFiles failed: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(projectDir, "agents", "worker")); !os.IsNotExist(err) {
+				t.Fatalf("expected agents/worker to be removed, stat err = %v", err)
+			}
+			if out := git(root, "branch", "--list", "worker"); !strings.Contains(out, "worker") {
+				t.Fatal("the enclosing repository's branch 'worker' must survive deleting an empty-per-agent agent")
+			}
+		})
+	}
+}

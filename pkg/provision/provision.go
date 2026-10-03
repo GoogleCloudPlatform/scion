@@ -387,7 +387,7 @@ func ProvisionShared(in ProvisionInput) error {
 	// lands (design #2703 P3); runtime.CheckWorkspaceBackendMode fails closed
 	// for it on NFS, so reaching here is a routing bug.
 	if in.Mode == store.SharingModeEmptyPerAgent {
-		return fmt.Errorf("ProvisionShared: EmptyPerAgent mode must not use the shared NFS workspace " +
+		return fmt.Errorf("ProvisionShared: EmptyPerAgent mode has no shared workspace to provision " +
 			"(should be routed to localBackend by SelectWorkspaceBackend)")
 	}
 

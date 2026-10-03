@@ -186,6 +186,11 @@ func (r *CloudRunRuntime) resolveConfig(ctx context.Context) error {
 
 func (r *CloudRunRuntime) Name() string { return "cloudrun" }
 
+// SupportsEmptyPerAgentWorkspace reports false: Run rejects empty-per-agent
+// workspaces (rejectEmptyPerAgentOnCloudRun), so a broker whose default
+// runtime is Cloud Run must not advertise the capability.
+func (r *CloudRunRuntime) SupportsEmptyPerAgentWorkspace() bool { return false }
+
 func (r *CloudRunRuntime) ExecUser() string {
 	return "scion"
 }

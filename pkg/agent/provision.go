@@ -117,6 +117,19 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		agentsDirs = append(agentsDirs, globalDir)
 	}
 
+	// Empty-per-agent (design #2703): the agent's workspace is a private,
+	// non-git directory that owns no worktree or branch. Even when the
+	// agent ran `git init` in it, or the project sits inside an enclosing
+	// repository with a same-named branch, delete must only remove the
+	// agent's directories -- never a worktree, a sharer registration, a
+	// prune of the enclosing repo, or a branch.
+	emptyPerAgent := persistedEmptyPerAgent(agentsDirs, externalAgentDir, agentName)
+	if emptyPerAgent {
+		util.Debugf("delete: %s is empty-per-agent; skipping worktree and branch cleanup", agentName)
+		repoRoot = ""
+		worktreeDir = ""
+	}
+
 	// Phase 1: synchronous git operations (worktree removal, pruning, branch cleanup).
 	// No background deletions happen here to avoid triggering macOS autofs
 	// in a goroutine that could block git subprocess I/O system-wide.
@@ -207,7 +220,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		// Check if it's a worktree before trying to remove it.
 		// Skip when the refcount path already handled removal/detach —
 		// the shared worktree must not be removed while other sharers remain.
-		if !refcountHandled {
+		if !refcountHandled && !emptyPerAgent {
 			if _, err := os.Stat(filepath.Join(agentWorkspace, ".git")); err == nil {
 				util.Debugf("delete: removing workspace at %s", agentWorkspace)
 				worktreeStart := time.Now()
@@ -291,6 +304,28 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	}
 
 	return branchDeleted, nil
+}
+
+// persistedEmptyPerAgent reports whether the agent's persisted
+// scion-agent.json (in any of its agent dirs, or the external per-agent state
+// dir) records the empty-per-agent workspace mode.
+func persistedEmptyPerAgent(agentsDirs []string, externalAgentDir, agentName string) bool {
+	candidates := make([]string, 0, len(agentsDirs)+1)
+	for _, dir := range agentsDirs {
+		candidates = append(candidates, filepath.Join(dir, agentName))
+	}
+	if externalAgentDir != "" {
+		candidates = append(candidates, externalAgentDir)
+	}
+	for _, dir := range candidates {
+		if !config.ScionAgentConfigExists(dir) {
+			continue
+		}
+		if cfg, err := (&config.Template{Path: dir}).LoadConfig(); err == nil && cfg.EmptyPerAgentWorkspace {
+			return true
+		}
+	}
+	return false
 }
 
 // migrateLegacyAgentState moves prompt.md and scion-agent.json from the
@@ -1825,6 +1860,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if explicitWorkspace {
 		finalScionCfg.ExplicitWorkspace = true
 	}
+	if emptyPerAgent {
+		finalScionCfg.EmptyPerAgentWorkspace = true
+	}
 
 	// Update agent-specific scion-agent.json
 	if finalScionCfg == nil {
@@ -2331,6 +2369,15 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// that recovery would CreateWorktree a throwaway managed worktree and the
 	// agent would silently edit that phantom branch instead of the operator's
 	// explicit tree — breaking "edit the real tree in place" on resume.
+	//
+	// An empty-per-agent agent's persisted mode (design #2703) is ORed into
+	// ctx, so a resume whose request lost the mode still recreates its
+	// private directory below instead of a worktree or nothing.
+	if config.ScionAgentConfigExists(agentDir) {
+		if persisted, cfgErr := (&config.Template{Path: agentDir}).LoadConfig(); cfgErr == nil && persisted.EmptyPerAgentWorkspace {
+			ctx = api.ContextWithEmptyPerAgentWorkspace(ctx)
+		}
+	}
 	if agentWorkspace != "" && config.ScionAgentConfigExists(agentDir) {
 		if persisted, cfgErr := (&config.Template{Path: agentDir}).LoadConfig(); cfgErr != nil {
 			util.Debugf("GetAgent: could not load persisted config to check explicit workspace: %v", cfgErr)

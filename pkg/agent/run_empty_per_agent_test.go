@@ -150,6 +150,65 @@ func TestStart_EmptyPerAgent_MountsPrivateWorkspace(t *testing.T) {
 	}
 }
 
+// TestStart_EmptyPerAgent_PersistedModeWithoutFlag pins review N1 of #2760:
+// a restart whose request lost the mode (no flag, no SCION_WORKSPACE_MODE)
+// still mounts the private workspace from the mode persisted at provision,
+// never the enclosing repo root, and the container gets the mode env.
+func TestStart_EmptyPerAgent_PersistedModeWithoutFlag(t *testing.T) {
+	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+	projectRoot := filepath.Join(tmpDir, "project")
+	gitInitForTest(t, projectRoot)
+	projectScionDir := setupEmptyPerAgentStartProject(t, projectRoot, "")
+
+	var captured runtime.RunConfig
+	var ran bool
+	mgr := NewManager(emptyPerAgentStartRuntime(&captured, &ran))
+	env := map[string]string{"SCION_AGENT_ID": "agent-1", "SCION_PROJECT_ID": "proj-1"}
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "worker", ProjectPath: projectScionDir, NoAuth: true,
+		EmptyPerAgentWorkspace: true, Env: env,
+	}); err != nil {
+		t.Fatalf("first Start failed: %v", err)
+	}
+
+	captured, ran = runtime.RunConfig{}, false
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "worker", ProjectPath: projectScionDir, NoAuth: true, Env: env,
+	}); err != nil {
+		t.Fatalf("restart without the mode failed: %v", err)
+	}
+	if !ran {
+		t.Fatal("runtime Run was not called")
+	}
+	want := filepath.Join(projectScionDir, "agents", "worker", "workspace")
+	if captured.Workspace != want {
+		t.Fatalf("Workspace = %q, want %q", captured.Workspace, want)
+	}
+	if captured.RepoRoot != "" {
+		t.Fatalf("RepoRoot = %q, want empty", captured.RepoRoot)
+	}
+	hasMode := false
+	for _, kv := range captured.Env {
+		if kv == "SCION_WORKSPACE_MODE=empty-per-agent" {
+			hasMode = true
+		}
+		if strings.HasPrefix(kv, "SCION_WORKSPACE_GIT=") {
+			t.Fatalf("unexpected %s in container env", kv)
+		}
+	}
+	if !hasMode {
+		t.Fatalf("container env must carry SCION_WORKSPACE_MODE=empty-per-agent, got %v", captured.Env)
+	}
+	if _, ok := env["SCION_WORKSPACE_MODE"]; ok {
+		t.Fatal("Start must not mutate the caller's Env map")
+	}
+}
+
 // TestStart_EmptyPerAgent_NFSFailsClosed pins that empty-per-agent on NFS
 // workspace storage is refused before anything is started, rather than
 // taking the WorktreePerAgent default or silently going node-local (design

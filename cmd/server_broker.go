@@ -139,7 +139,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 				Attach:                 runtime.HasAttachSupport(rt),
 				Reprovision:            true,
 				AsyncLaunch:            true,
-				EmptyPerAgentWorkspace: true,
+				EmptyPerAgentWorkspace: runtime.HasEmptyPerAgentSupport(rt),
 			},
 			Profiles:       profiles,
 			DefaultProfile: defaultProfile,
@@ -182,7 +182,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			Attach:                 runtime.HasAttachSupport(rt),
 			Reprovision:            true,
 			AsyncLaunch:            true,
-			EmptyPerAgentWorkspace: true,
+			EmptyPerAgentWorkspace: runtime.HasEmptyPerAgentSupport(rt),
 		}
 		// Ensure deployment-type labels are set on re-registration
 		if broker.Labels == nil {

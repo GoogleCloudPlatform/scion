@@ -111,6 +111,12 @@ type startContextInputs struct {
 	// broker can branch dispatch without re-deriving from labels.
 	WorkspaceMode string
 
+	// WorkspaceStoragePath is the create request's GCS bootstrap path. The
+	// workspace is downloaded after buildStartContext (createAgent /
+	// runLaunch), so it is threaded here only so the workspace-source
+	// checks see it as the explicit source it is.
+	WorkspaceStoragePath string
+
 	// HTTP request (for hub connection resolution)
 	HTTPRequest *http.Request
 
@@ -810,7 +816,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// same request is contradictory and refused rather than guessed at.
 	emptyPerAgent := store.SharingModeEmptyPerAgent == store.WorkspaceSharingMode(env["SCION_WORKSPACE_MODE"])
 	if emptyPerAgent {
-		if msg := emptyPerAgentConflict(in.Config); msg != "" {
+		if msg := emptyPerAgentConflict(in); msg != "" {
 			span.SetStatus(codes.Error, msg)
 			return nil, &startContextError{Status: http.StatusBadRequest, Message: msg}
 		}
@@ -1659,7 +1665,11 @@ func withHubAgentDefaults(ctx context.Context, cfg *CreateAgentConfig) context.C
 // empty-per-agent request (design #2703) also names another workspace
 // source, or "" when it does not. The hub never sends these together; a
 // request that does is refused rather than resolved in favour of either.
-func emptyPerAgentConflict(cfg *CreateAgentConfig) string {
+func emptyPerAgentConflict(in startContextInputs) string {
+	if in.WorkspaceStoragePath != "" {
+		return "empty-per-agent workspaces cannot be seeded from a workspace upload"
+	}
+	cfg := in.Config
 	if cfg == nil {
 		return ""
 	}
@@ -1675,11 +1685,14 @@ func emptyPerAgentConflict(cfg *CreateAgentConfig) string {
 }
 
 // ambiguousNonGitWorkspace returns a client-facing message when a create for
-// a hub-managed project (ProjectPath is ~/.scion/projects/<slug>) names no workspace source at all:
-// no workspace mode, no workspace path, no git clone, no shared workspace and
-// no worktree. A current hub always sends one of them (the hub-managed
-// project path for a shared non-git project, the empty-per-agent mode
-// otherwise), so such a request means the mode was lost on the way.
+// a hub-managed project (ProjectPath is ~/.scion/projects/<slug>) names no
+// workspace source at all: no workspace mode, no workspace path, no GCS
+// workspace upload, no git clone, no shared workspace and no worktree. A
+// current hub always sends one of them (the hub-managed project path, or for
+// a remote broker with hub storage the upload's workspaceStoragePath, for a
+// shared non-git project; the empty-per-agent mode otherwise), so such a
+// request means the mode was lost on the way (or the hub could not compute
+// the project path, which also fails closed here).
 // Provisioning would then fall back to the shared project directory, which
 // for an empty-per-agent agent breaks isolation, so it is refused (design
 // #2703 P2). Start and restart are not checked: they legitimately omit the
@@ -1693,6 +1706,9 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 	// project's own ProjectPath keeps its existing resolution.
 	globalDir, err := config.GetGlobalDir()
 	if err != nil || filepath.Clean(in.ProjectPath) != filepath.Join(globalDir, "projects", in.ProjectSlug) {
+		return ""
+	}
+	if in.WorkspaceStoragePath != "" {
 		return ""
 	}
 	if in.Config != nil && (in.Config.Workspace != "" || in.Config.GitClone != nil || in.Config.SharedWorkspace) {
