@@ -1011,7 +1011,7 @@
             "peer_auth": {
               "type": "string",
               "enum": ["auto", "oidc", "hmac"],
-              "description": "Relay-peer authentication: 'auto' (default) uses Google OIDC ID tokens on GCP and HMAC with a key derived from the hub signing secret elsewhere.",
+              "description": "Relay-peer authentication. Requests are always signed with HMAC using a key derived from the hub signing secret (required in every mode). 'oidc' also requires a Google OIDC ID token; 'auto' (default) adds the ID token on GCP; 'hmac' uses the signature alone.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_PEERAUTH",
               "x-since": "1"
             },

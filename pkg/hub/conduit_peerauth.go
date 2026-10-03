@@ -29,14 +29,19 @@ import (
 )
 
 // Relay-peer authentication for the internal relay API (design v2.4 §3.2,
-// §3.10): a service identity, never an end-user credential. On GCP the
-// caller presents a Google-signed OIDC ID token for its service account;
-// elsewhere both sides share an HMAC key derived from the hub's shared
-// signing secret (relay.NewHMACPeerAuthFromSecret derives it with HKDF).
+// §3.10): a service identity, never an end-user credential.
 //
-// Once a mode is selected it is the only one: an OIDC token that cannot be
-// minted fails the call, and a token that does not validate is refused.
-// There is no fallback to HMAC.
+// Relay-peer requests are signed in all modes. Every request carries an
+// HMAC signature over the method, request URI, timestamp, nonce, caller id,
+// body digest and Want header, keyed with an HKDF derivation of the hub's
+// shared signing secret (relay.NewHMACPeerAuthFromSecret), and the serving
+// relay refuses a stale timestamp or a replayed nonce. On GCP (peer_auth
+// "oidc", or "auto" on GCP) the caller also presents a Google-signed OIDC
+// ID token for its service account, checked in addition to the signature.
+//
+// Both checks fail closed: a request missing either configured credential,
+// or with one that does not verify, is refused. There is no fallback from
+// one mechanism to the other.
 
 // DefaultConduitPeerAudience is the OIDC audience of relay-peer ID tokens.
 // It is a fixed string, not derived from the hub id or the node, so every
@@ -47,12 +52,12 @@ const DefaultConduitPeerAudience = "scion-conduit-relay-peer"
 type ConduitPeerAuthOptions struct {
 	// Mode is config.ConduitPeerAuth{Auto,OIDC,HMAC} ("" = auto).
 	Mode string
-	// OnGCP reports whether this node runs on GCP (auto picks OIDC).
+	// OnGCP reports whether this node runs on GCP (auto adds OIDC).
 	OnGCP bool
 	// SelfID is this relay's instance id (HMAC caller identity).
 	SelfID string
-	// SharedSecret is the hub's shared signing secret (HMAC). Required for
-	// HMAC.
+	// SharedSecret is the hub's shared signing secret, from which the HMAC
+	// key is derived. Required in every mode.
 	SharedSecret string
 	// Audience is the OIDC audience ("" = DefaultConduitPeerAudience).
 	Audience string
@@ -67,7 +72,8 @@ type ConduitPeerAuthOptions struct {
 	Validate func(ctx context.Context, token, audience string) (*idtoken.Payload, error)
 }
 
-// ResolveConduitPeerAuthMode returns the effective mode: hmac or oidc.
+// ResolveConduitPeerAuthMode returns the effective mode: hmac (signed
+// requests) or oidc (signed requests plus an OIDC ID token).
 func ResolveConduitPeerAuthMode(mode string, onGCP bool) (string, error) {
 	switch strings.ToLower(mode) {
 	case "", config.ConduitPeerAuthAuto:
@@ -85,29 +91,57 @@ func ResolveConduitPeerAuthMode(mode string, onGCP bool) (string, error) {
 }
 
 // NewConduitPeerAuth builds the relay-peer authenticator and returns the
-// selected mode.
+// selected mode. Every mode signs requests with HMAC; oidc adds the ID
+// token check.
 func NewConduitPeerAuth(o ConduitPeerAuthOptions) (relay.PeerAuth, string, error) {
 	mode, err := ResolveConduitPeerAuthMode(o.Mode, o.OnGCP)
 	if err != nil {
 		return nil, "", err
 	}
-	switch mode {
-	case config.ConduitPeerAuthHMAC:
-		if o.SharedSecret == "" {
-			return nil, mode, errors.New("conduit peer auth (hmac): no shared signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET on every hub node")
-		}
-		a, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: []byte(o.SharedSecret), SelfID: o.SelfID})
-		if err != nil {
-			return nil, mode, fmt.Errorf("conduit peer auth (hmac): %w", err)
-		}
-		return a, mode, nil
-	default:
-		a, err := newOIDCPeerAuth(o)
-		if err != nil {
-			return nil, mode, err
-		}
-		return a, mode, nil
+	if o.SharedSecret == "" {
+		return nil, mode, fmt.Errorf("conduit peer auth (%s): no shared signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET on every hub node", mode)
 	}
+	signer, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: []byte(o.SharedSecret), SelfID: o.SelfID})
+	if err != nil {
+		return nil, mode, fmt.Errorf("conduit peer auth (%s): %w", mode, err)
+	}
+	if mode == config.ConduitPeerAuthHMAC {
+		return signer, mode, nil
+	}
+	id, err := newOIDCPeerAuth(o)
+	if err != nil {
+		return nil, mode, err
+	}
+	return &signedOIDCPeerAuth{signer: signer, oidc: id}, mode, nil
+}
+
+// signedOIDCPeerAuth requires both the HMAC request signature and the
+// OIDC ID token on every request.
+type signedOIDCPeerAuth struct {
+	signer *relay.HMACPeerAuth
+	oidc   *oidcPeerAuth
+}
+
+// Sign implements relay.PeerAuth.
+func (a *signedOIDCPeerAuth) Sign(req *http.Request) error {
+	if err := a.signer.Sign(req); err != nil {
+		return err
+	}
+	return a.oidc.Sign(req)
+}
+
+// Verify implements relay.PeerAuth. The peer id is the signed caller id
+// (the relay instance id); the ID token must belong to an allowed service
+// account.
+func (a *signedOIDCPeerAuth) Verify(req *http.Request) (string, error) {
+	peer, err := a.signer.Verify(req)
+	if err != nil {
+		return "", err
+	}
+	if _, err := a.oidc.Verify(req); err != nil {
+		return "", err
+	}
+	return peer, nil
 }
 
 // oidcPeerAuth authenticates relay peers with Google-signed ID tokens.

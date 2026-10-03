@@ -17,9 +17,13 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,6 +43,7 @@ import (
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 // relayFixture is a conduit fixture with a running in-process relay, the
@@ -359,4 +364,86 @@ func TestConduitRegistryReap(t *testing.T) {
 // grant_key_activation tracks the hub's ring cache interval.
 func TestConduitGrantKeyNodeRefreshPinned(t *testing.T) {
 	assert.Equal(t, conduitGrantKeyRefresh, config.ConduitGrantKeyNodeRefresh)
+}
+
+// TestConduitInternalHandler_SignedInAllModes: with peer_auth oidc the
+// hub's internal relay API requires the request signature as well as the
+// ID token. An ID token alone, a replayed nonce and a body swapped after
+// signing are refused.
+func TestConduitInternalHandler_SignedInAllModes(t *testing.T) {
+	f := newRelayFixture(t, func(o *ConduitRelayOptions) {
+		o.PeerAuth = newOIDCModeAuth(t, "hub-a", "own", nil, nil)
+	})
+	internal := httptest.NewServer(f.srv.ConduitInternalHandler())
+	t.Cleanup(internal.Close)
+	caller := newOIDCModeAuth(t, "hub-b", "own", nil, nil)
+
+	_, _, err := f.dial(t, f.agentToken(t, f.launched), f.launched.LaunchID)
+	require.NoError(t, err)
+	ps, err := f.regStore.ListPrincipalSessions(context.Background(), registry.PrincipalAgent, f.launched.ID)
+	require.NoError(t, err)
+	require.Len(t, ps.Sessions, 1)
+	base := internal.URL + relay.InternalPathPrefix
+	rpcURL := base + "sessions/" + ps.Sessions[0].Session.SessionID + "/rpc"
+	want, err := json.Marshal(map[string]string{"project_id": f.launched.ProjectID, "incarnation": f.launched.LaunchID})
+	require.NoError(t, err)
+	rpcBody, err := proto.Marshal(&conduitv1.RpcRequest{RequestId: "r1"})
+	require.NoError(t, err)
+
+	newReq := func(t *testing.T, method, url string, body []byte) *http.Request {
+		t.Helper()
+		req, err := http.NewRequest(method, url, bytes.NewReader(body))
+		require.NoError(t, err)
+		if body != nil {
+			sum := sha256.Sum256(body)
+			req.Header.Set(relay.HeaderBodySHA256, hex.EncodeToString(sum[:]))
+			req.Header.Set(relay.HeaderWant, string(want))
+		}
+		return req
+	}
+	do := func(t *testing.T, req *http.Request) int {
+		t.Helper()
+		resp, err := internal.Client().Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	t.Run("signed with ID token", func(t *testing.T) {
+		req := newReq(t, http.MethodGet, base+"self", nil)
+		require.NoError(t, caller.Sign(req))
+		assert.Equal(t, http.StatusOK, do(t, req))
+	})
+	t.Run("ID token alone is refused", func(t *testing.T) {
+		req := newReq(t, http.MethodGet, base+"self", nil)
+		req.Header.Set("Authorization", "Bearer own")
+		assert.Equal(t, http.StatusUnauthorized, do(t, req))
+	})
+	t.Run("replayed nonce is refused", func(t *testing.T) {
+		req := newReq(t, http.MethodGet, base+"self", nil)
+		require.NoError(t, caller.Sign(req))
+		replay := req.Clone(context.Background())
+		require.Equal(t, http.StatusOK, do(t, req))
+		assert.Equal(t, http.StatusUnauthorized, do(t, replay))
+	})
+	t.Run("body swapped after signing is refused", func(t *testing.T) {
+		req := newReq(t, http.MethodPost, rpcURL, rpcBody)
+		require.NoError(t, caller.Sign(req))
+		other, err := proto.Marshal(&conduitv1.RpcRequest{RequestId: "r2", Method: "exec"})
+		require.NoError(t, err)
+		req.Body = io.NopCloser(bytes.NewReader(other))
+		req.ContentLength = int64(len(other))
+		assert.Equal(t, http.StatusBadRequest, do(t, req), "body digest mismatch")
+	})
+	t.Run("body digest swapped too is refused", func(t *testing.T) {
+		other, err := proto.Marshal(&conduitv1.RpcRequest{RequestId: "r2", Method: "exec"})
+		require.NoError(t, err)
+		req := newReq(t, http.MethodPost, rpcURL, rpcBody)
+		require.NoError(t, caller.Sign(req))
+		sum := sha256.Sum256(other)
+		req.Header.Set(relay.HeaderBodySHA256, hex.EncodeToString(sum[:]))
+		req.Body = io.NopCloser(bytes.NewReader(other))
+		req.ContentLength = int64(len(other))
+		assert.Equal(t, http.StatusUnauthorized, do(t, req), "the digest is signed")
+	})
 }

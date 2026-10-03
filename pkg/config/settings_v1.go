@@ -867,8 +867,10 @@ type V1ServerHubConduitConfig struct {
 	// node's internal listener (default: derived from POD_IP or the listen
 	// host).
 	InternalAdvertise string `json:"internal_advertise,omitempty" yaml:"internal_advertise,omitempty" koanf:"internal_advertise"`
-	// PeerAuth selects relay-peer authentication: "auto" (default; OIDC on
-	// GCP, HMAC elsewhere), "oidc" or "hmac".
+	// PeerAuth selects relay-peer authentication. Requests are always
+	// HMAC-signed with a key derived from the hub signing secret; "oidc"
+	// also requires an OIDC ID token, "auto" (default) adds it on GCP, and
+	// "hmac" uses the signature alone.
 	PeerAuth string `json:"peer_auth,omitempty" yaml:"peer_auth,omitempty" koanf:"peer_auth"`
 	// PeerServiceAccounts is the OIDC allow-list of caller service-account
 	// emails (default: this node's own service account).

@@ -192,9 +192,15 @@ func TestValidateServerPreflight_Conduit(t *testing.T) {
 // and no at-rest encryption key.
 func conduitHubServer(t *testing.T, enabled bool) *hub.Server {
 	t.Helper()
+	return conduitHubServerWith(t, enabled, hub.ServerConfig{})
+}
+
+// conduitHubServerWith is conduitHubServer with a server config.
+func conduitHubServerWith(t *testing.T, enabled bool, sc hub.ServerConfig) *hub.Server {
+	t.Helper()
 	ctx := context.Background()
 	st := newTestStore(t)
-	srv, err := hub.New(hub.ServerConfig{}, st)
+	srv, err := hub.New(sc, st)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	value, err := json.Marshal(map[string]any{"overrides": map[string]bool{"hub.conduit": enabled}})
@@ -247,6 +253,27 @@ func TestStartConduit(t *testing.T) {
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, hub.ErrConduitNoAtRestKey), "got %v", err)
 		assert.True(t, strings.Contains(err.Error(), "hosted HA"), "got %v", err)
+	})
+
+	t.Run("hosted HA without the shared secret for signing fails", func(t *testing.T) {
+		resetServerFlags()
+		hostedMode, enableHub = true, true
+		t.Setenv("K_SERVICE", "scion-hub")
+		t.Setenv("SCION_SERVER_SESSION_SECRET", "")
+		t.Setenv("SESSION_SECRET", "")
+		// The ring is shared, so the ring check passes and the peer-auth
+		// requirement is what fails.
+		srv := conduitHubServerWith(t, true, hub.ServerConfig{SharedSigningSecret: "conduit-test-signing-secret-0123456789"})
+		require.True(t, srv.ConduitGrantRingShared())
+		for _, mode := range []string{config.ConduitPeerAuthOIDC, config.ConduitPeerAuthHMAC} {
+			cfg := &config.GlobalConfig{}
+			cfg.Hub.Conduit.PeerAuth = mode
+			cfg.Hub.Conduit.PeerServiceAccounts = []string{"hub@p.iam.gserviceaccount.com"}
+			err := run(t, srv, cfg)
+			require.Error(t, err, mode)
+			assert.Contains(t, err.Error(), "no shared signing secret", mode)
+			assert.Contains(t, err.Error(), "hosted HA", mode)
+		}
 	})
 
 	t.Run("outside HA a failure is logged, not fatal", func(t *testing.T) {

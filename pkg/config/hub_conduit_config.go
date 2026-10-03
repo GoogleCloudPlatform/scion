@@ -61,7 +61,8 @@ type HubConduitConfig struct {
 	// InternalAdvertise is the base URL other nodes use to reach the
 	// internal listener ("" = derived).
 	InternalAdvertise string `json:"internalAdvertise,omitempty" yaml:"internalAdvertise,omitempty" koanf:"internalAdvertise"`
-	// PeerAuth is "auto" (or ""), "oidc" or "hmac".
+	// PeerAuth is "auto" (or ""), "oidc" or "hmac". Requests are signed in
+	// every mode; oidc (and auto on GCP) also requires an OIDC ID token.
 	PeerAuth string `json:"peerAuth,omitempty" yaml:"peerAuth,omitempty" koanf:"peerAuth"`
 	// PeerServiceAccounts is the OIDC caller allow-list ("" = own SA).
 	PeerServiceAccounts []string `json:"peerServiceAccounts,omitempty" yaml:"peerServiceAccounts,omitempty" koanf:"peerServiceAccounts"`

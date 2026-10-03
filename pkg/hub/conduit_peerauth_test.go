@@ -38,6 +38,8 @@ func (s staticTokenSource) Token() (string, error)   { return s.tok, s.err }
 func (staticTokenSource) SetToken(string, time.Time) {}
 func (staticTokenSource) Expiry() time.Time          { return time.Time{} }
 
+const testPeerSecret = "shared-signing-secret-0123456789ab"
+
 func TestResolveConduitPeerAuthMode(t *testing.T) {
 	tests := []struct {
 		mode    string
@@ -72,7 +74,12 @@ func TestNewConduitPeerAuth_Errors(t *testing.T) {
 	}{
 		{name: "unknown mode", opts: ConduitPeerAuthOptions{Mode: "mtls"}, wantErr: "unknown mode"},
 		{name: "hmac without secret", opts: ConduitPeerAuthOptions{Mode: "hmac", SelfID: "a"}, wantErr: "no shared signing secret"},
-		{name: "oidc without allowed accounts", opts: ConduitPeerAuthOptions{Mode: "oidc", TokenSource: staticTokenSource{tok: "t"}}, wantErr: "no allowed service accounts"},
+		{name: "oidc without secret", opts: ConduitPeerAuthOptions{Mode: "oidc", SelfID: "a", OwnServiceAccount: "hub@p.iam.gserviceaccount.com",
+			TokenSource: staticTokenSource{tok: "t"}}, wantErr: "no shared signing secret"},
+		{name: "auto on GCP without secret", opts: ConduitPeerAuthOptions{OnGCP: true, SelfID: "a", OwnServiceAccount: "hub@p.iam.gserviceaccount.com",
+			TokenSource: staticTokenSource{tok: "t"}}, wantErr: "no shared signing secret"},
+		{name: "oidc without allowed accounts", opts: ConduitPeerAuthOptions{Mode: "oidc", SelfID: "a", SharedSecret: testPeerSecret,
+			TokenSource: staticTokenSource{tok: "t"}}, wantErr: "no allowed service accounts"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -92,7 +99,7 @@ func TestConduitPeerAuth_HMAC(t *testing.T) {
 		require.Equal(t, config.ConduitPeerAuthHMAC, mode)
 		return a
 	}
-	a, b, other := newAuth("hub-a", "shared-signing-secret-0123456789ab"), newAuth("hub-b", "shared-signing-secret-0123456789ab"), newAuth("hub-c", "another-signing-secret-0123456789")
+	a, b, other := newAuth("hub-a", testPeerSecret), newAuth("hub-b", testPeerSecret), newAuth("hub-c", "another-signing-secret-0123456789")
 
 	req := httptest.NewRequest(http.MethodGet, "/internal/v1/conduit/self", nil)
 	require.NoError(t, a.Sign(req))
@@ -106,11 +113,9 @@ func TestConduitPeerAuth_HMAC(t *testing.T) {
 	assert.ErrorIs(t, err, relay.ErrPeerUnauthenticated)
 }
 
-// TestConduitPeerAuth_OIDC covers signing and the verification policy:
-// audience, verified email and the allow-list (own SA by default).
-func TestConduitPeerAuth_OIDC(t *testing.T) {
+// fakeIDTokens validates the fixed test tokens below.
+func fakeIDTokens(gotAudience *string) func(context.Context, string, string) (*idtoken.Payload, error) {
 	const own = "hub@p.iam.gserviceaccount.com"
-	var gotAudience string
 	claims := map[string]map[string]any{
 		"own":        {"email": own, "email_verified": true},
 		"own-upper":  {"email": "HUB@p.iam.gserviceaccount.com", "email_verified": true},
@@ -118,86 +123,150 @@ func TestConduitPeerAuth_OIDC(t *testing.T) {
 		"unverified": {"email": own, "email_verified": false},
 		"no-email":   {"email_verified": true},
 	}
-	validate := func(_ context.Context, tok, aud string) (*idtoken.Payload, error) {
-		gotAudience = aud
+	return func(_ context.Context, tok, aud string) (*idtoken.Payload, error) {
+		if gotAudience != nil {
+			*gotAudience = aud
+		}
 		c, ok := claims[tok]
 		if !ok {
 			return nil, errors.New("bad signature")
 		}
 		return &idtoken.Payload{Audience: aud, Claims: c}, nil
 	}
-	newAuth := func(t *testing.T, o ConduitPeerAuthOptions) relay.PeerAuth {
-		t.Helper()
-		o.OnGCP, o.Validate = true, validate
-		if o.TokenSource == nil {
-			o.TokenSource = staticTokenSource{tok: "own"}
-		}
-		a, mode, err := NewConduitPeerAuth(o)
-		require.NoError(t, err)
-		require.Equal(t, config.ConduitPeerAuthOIDC, mode)
-		return a
+}
+
+// newOIDCModeAuth returns an oidc-mode authenticator for selfID that
+// presents token and checks tokens with fakeIDTokens.
+func newOIDCModeAuth(t *testing.T, selfID, token string, gotAudience *string, mod func(*ConduitPeerAuthOptions)) relay.PeerAuth {
+	t.Helper()
+	o := ConduitPeerAuthOptions{
+		Mode: config.ConduitPeerAuthOIDC, SelfID: selfID, SharedSecret: testPeerSecret,
+		OwnServiceAccount: "hub@p.iam.gserviceaccount.com",
+		TokenSource:       staticTokenSource{tok: token}, Validate: fakeIDTokens(gotAudience),
 	}
-	verify := func(a relay.PeerAuth, header string) (string, error) {
-		req := httptest.NewRequest(http.MethodGet, "/internal/v1/conduit/self", nil)
-		if header != "" {
-			req.Header.Set("Authorization", header)
+	if mod != nil {
+		mod(&o)
+	}
+	a, mode, err := NewConduitPeerAuth(o)
+	require.NoError(t, err)
+	require.Equal(t, config.ConduitPeerAuthOIDC, mode)
+	return a
+}
+
+// TestConduitPeerAuth_OIDC: in oidc mode relay-peer requests are signed
+// and also carry an ID token; both are required. It covers the ID token
+// policy: audience, verified email and the allow-list (own SA by default).
+func TestConduitPeerAuth_OIDC(t *testing.T) {
+	var gotAudience string
+	server := newOIDCModeAuth(t, "hub-b", "own", &gotAudience, nil)
+	hmacOnly, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: []byte(testPeerSecret), SelfID: "hub-a"})
+	require.NoError(t, err)
+
+	newReq := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/internal/v1/conduit/sessions/s1/rpc", nil)
+		req.Header.Set(relay.HeaderBodySHA256, "abc")
+		return req
+	}
+	// signedWith signs with the HMAC key and then presents bearer.
+	signedWith := func(t *testing.T, bearer string) *http.Request {
+		t.Helper()
+		req := newReq()
+		require.NoError(t, hmacOnly.Sign(req))
+		if bearer != "" {
+			req.Header.Set("Authorization", bearer)
 		}
-		return a.Verify(req)
+		return req
 	}
 
-	t.Run("sign attaches the bearer token", func(t *testing.T) {
-		a := newAuth(t, ConduitPeerAuthOptions{OwnServiceAccount: own})
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		require.NoError(t, a.Sign(req))
+	t.Run("both credentials", func(t *testing.T) {
+		req := newReq()
+		require.NoError(t, newOIDCModeAuth(t, "hub-a", "own", nil, nil).Sign(req))
 		assert.Equal(t, "Bearer own", req.Header.Get("Authorization"))
-		id, err := a.Verify(req)
+		assert.NotEmpty(t, req.Header.Get(relay.HeaderPeerSignature))
+		id, err := server.Verify(req)
 		require.NoError(t, err)
-		assert.Equal(t, own, id)
+		assert.Equal(t, "hub-a", id, "the peer id is the signed relay instance id")
 		assert.Equal(t, DefaultConduitPeerAudience, gotAudience)
+	})
+
+	t.Run("ID token without signature is refused", func(t *testing.T) {
+		req := newReq()
+		req.Header.Set("Authorization", "Bearer own")
+		_, err := server.Verify(req)
+		assert.ErrorIs(t, err, relay.ErrPeerUnauthenticated)
+	})
+
+	t.Run("signature without ID token is refused", func(t *testing.T) {
+		_, err := server.Verify(signedWith(t, ""))
+		assert.ErrorIs(t, err, relay.ErrPeerUnauthenticated)
+	})
+
+	t.Run("tampered signed header is refused", func(t *testing.T) {
+		req := signedWith(t, "Bearer own")
+		req.Header.Set(relay.HeaderBodySHA256, "def")
+		_, err := server.Verify(req)
+		assert.ErrorIs(t, err, relay.ErrPeerUnauthenticated)
+	})
+
+	t.Run("replayed nonce is refused", func(t *testing.T) {
+		req := signedWith(t, "Bearer own")
+		replay := req.Clone(context.Background())
+		_, err := server.Verify(req)
+		require.NoError(t, err)
+		_, err = server.Verify(replay)
+		assert.ErrorIs(t, err, relay.ErrPeerUnauthenticated)
+	})
+
+	t.Run("other signing secret is refused", func(t *testing.T) {
+		req := newReq()
+		other := newOIDCModeAuth(t, "hub-c", "own", nil, func(o *ConduitPeerAuthOptions) { o.SharedSecret = "another-signing-secret-0123456789" })
+		require.NoError(t, other.Sign(req))
+		_, err := server.Verify(req)
+		assert.ErrorIs(t, err, relay.ErrPeerUnauthenticated)
 	})
 
 	t.Run("sign fails closed", func(t *testing.T) {
 		for _, src := range []staticTokenSource{{err: errors.New("no ADC")}, {tok: ""}} {
-			a := newAuth(t, ConduitPeerAuthOptions{OwnServiceAccount: own, TokenSource: src})
-			assert.Error(t, a.Sign(httptest.NewRequest(http.MethodGet, "/", nil)))
+			a := newOIDCModeAuth(t, "hub-a", "", nil, func(o *ConduitPeerAuthOptions) { o.TokenSource = src })
+			assert.Error(t, a.Sign(newReq()))
 		}
 	})
 
 	t.Run("custom audience", func(t *testing.T) {
-		a := newAuth(t, ConduitPeerAuthOptions{OwnServiceAccount: own, Audience: "custom"})
-		_, err := verify(a, "Bearer own")
+		a := newOIDCModeAuth(t, "hub-b", "own", &gotAudience, func(o *ConduitPeerAuthOptions) { o.Audience = "custom" })
+		_, err := a.Verify(signedWith(t, "Bearer own"))
 		require.NoError(t, err)
 		assert.Equal(t, "custom", gotAudience)
 	})
 
-	defaultAllow := newAuth(t, ConduitPeerAuthOptions{OwnServiceAccount: own})
-	explicitAllow := newAuth(t, ConduitPeerAuthOptions{OwnServiceAccount: own, ServiceAccounts: []string{"other@p.iam.gserviceaccount.com"}})
+	explicit := newOIDCModeAuth(t, "hub-b", "own", nil, func(o *ConduitPeerAuthOptions) {
+		o.ServiceAccounts = []string{"other@p.iam.gserviceaccount.com"}
+	})
 	tests := []struct {
 		name   string
 		auth   relay.PeerAuth
-		header string
-		wantID string
+		bearer string
+		ok     bool
 	}{
-		{name: "own SA", auth: defaultAllow, header: "Bearer own", wantID: own},
-		{name: "email case-insensitive", auth: defaultAllow, header: "Bearer own-upper", wantID: "HUB@p.iam.gserviceaccount.com"},
-		{name: "SA not allowed", auth: defaultAllow, header: "Bearer stranger"},
-		{name: "explicit list replaces own SA", auth: explicitAllow, header: "Bearer own"},
-		{name: "explicit list admits its SA", auth: explicitAllow, header: "Bearer stranger", wantID: "other@p.iam.gserviceaccount.com"},
-		{name: "unverified email", auth: defaultAllow, header: "Bearer unverified"},
-		{name: "no email", auth: defaultAllow, header: "Bearer no-email"},
-		{name: "invalid token", auth: defaultAllow, header: "Bearer forged"},
-		{name: "no header", auth: defaultAllow},
-		{name: "not a bearer token", auth: defaultAllow, header: "Basic own"},
+		{name: "own SA", auth: server, bearer: "Bearer own", ok: true},
+		{name: "email case-insensitive", auth: server, bearer: "Bearer own-upper", ok: true},
+		{name: "SA not allowed", auth: server, bearer: "Bearer stranger"},
+		{name: "explicit list replaces own SA", auth: explicit, bearer: "Bearer own"},
+		{name: "explicit list admits its SA", auth: explicit, bearer: "Bearer stranger", ok: true},
+		{name: "unverified email", auth: server, bearer: "Bearer unverified"},
+		{name: "no email", auth: server, bearer: "Bearer no-email"},
+		{name: "invalid token", auth: server, bearer: "Bearer forged"},
+		{name: "not a bearer token", auth: server, bearer: "Basic own"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			id, err := verify(tt.auth, tt.header)
-			if tt.wantID == "" {
+			id, err := tt.auth.Verify(signedWith(t, tt.bearer))
+			if !tt.ok {
 				assert.ErrorIs(t, err, relay.ErrPeerUnauthenticated)
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tt.wantID, id)
+			assert.Equal(t, "hub-a", id)
 		})
 	}
 }
