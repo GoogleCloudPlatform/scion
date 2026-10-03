@@ -1514,11 +1514,24 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			return broker.ID, nil
 		}
 
-		// Broker doesn't exist at all
+		// Broker doesn't exist at all (not by ID, name or slug). This is a
+		// 404, not a 503: nothing is unavailable, the name is simply wrong
+		// (ptone/scion#2715). The message lists the brokers the caller can
+		// actually dispatch to for this project.
 		slog.Warn("Requested broker not found during agent creation",
 			"requestedBrokerID", requestedBrokerID, "project_id", project.ID,
 			"providerCount", len(allProviders))
-		RuntimeBrokerUnavailable(w, requestedBrokerID, brokerSummaries)
+		// brokerSummaries is already default-first; keep that order.
+		usable := make([]RuntimeBrokerSummary, 0, len(brokerSummaries))
+		for _, summary := range brokerSummaries {
+			for i := range availableBrokers {
+				if availableBrokers[i].ID == summary.ID && s.canDispatchToBroker(ctx, &availableBrokers[i]) {
+					usable = append(usable, summary)
+					break
+				}
+			}
+		}
+		RuntimeBrokerNotFound(w, requestedBrokerID, usable)
 		return "", store.ErrNotFound
 	}
 
@@ -1701,6 +1714,19 @@ func (s *Server) findBrokerByIDOrSlug(ctx context.Context, identifier string) (*
 	broker, err = s.store.GetRuntimeBrokerByName(ctx, identifier)
 	if err == nil {
 		return broker, nil
+	}
+
+	// Try by slug (case-insensitive, matching the hub-default lookup). The
+	// store has no slug index for brokers; the broker table is small, so a
+	// bounded scan is fine (same pattern as broker_quota.go).
+	result, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 10000})
+	if err != nil {
+		return nil, err
+	}
+	for i := range result.Items {
+		if result.Items[i].Slug != "" && strings.EqualFold(result.Items[i].Slug, identifier) {
+			return &result.Items[i], nil
+		}
 	}
 
 	return nil, store.ErrNotFound

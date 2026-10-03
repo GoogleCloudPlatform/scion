@@ -573,7 +573,29 @@ Expected response (422):
 
 ### Runtime Broker Unavailable
 
-When specifying a runtime broker that is offline or not a provider:
+When specifying a runtime broker that does not exist at all (by ID, name or
+slug), the Hub returns `404 runtime_broker_not_found`. The message names the
+requested broker and lists the brokers the caller can use for the project
+(ptone/scion#2715):
+
+```json
+{
+  "error": {
+    "code": "runtime_broker_not_found",
+    "message": "Runtime broker \"no-such-broker\" not found. Brokers you can use for this project: \"My Mac\"",
+    "details": {
+      "requestedBrokerId": "no-such-broker",
+      "availableBrokers": [
+        {"id": "broker_abc", "name": "My Mac", "status": "online"}
+      ]
+    }
+  }
+}
+```
+
+An existing broker that is not yet a provider is auto-linked, if the caller
+may update the project. The historical example below shows the 503 for a
+broker that could not be linked:
 
 ```bash
 curl -s -X POST http://localhost:9810/api/v1/agents \
