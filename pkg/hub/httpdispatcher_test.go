@@ -5868,61 +5868,6 @@ func TestDispatchAgentCreate_IncludesHubName(t *testing.T) {
 
 func intPtr(i int) *int { return &i }
 
-// TestHTTPAgentDispatcher_TZInjection_ProfileTimezone verifies that the
-// profile's first-class timezone field is injected as TZ into the agent's
-// resolved env, taking precedence over existing TZ values from config env.
-func TestHTTPAgentDispatcher_TZInjection_ProfileTimezone(t *testing.T) {
-	ctx := context.Background()
-	memStore := createTestStore(t)
-
-	broker := &store.RuntimeBroker{
-		ID:       tid("tz-broker-1"),
-		Name:     "tz-host",
-		Slug:     "tz-host",
-		Endpoint: "http://localhost:9800",
-		Status:   store.BrokerStatusOnline,
-	}
-	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
-		t.Fatalf("create broker: %v", err)
-	}
-
-	mockClient := &mockRuntimeBrokerClient{}
-	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-
-	// Profile timezone provider returns "America/Los_Angeles" for profile "pacific".
-	dispatcher.SetProfileTimezoneProvider(func(name string) string {
-		if name == "pacific" {
-			return "America/Los_Angeles"
-		}
-		return ""
-	})
-
-	agent := &store.Agent{
-		ID:              tid("tz-agent-1"),
-		Name:            "tz-agent",
-		Slug:            "tz-agent",
-		ProjectID:       tid("project-1"),
-		RuntimeBrokerID: tid("tz-broker-1"),
-		AppliedConfig: &store.AgentAppliedConfig{
-			HarnessConfig: "claude",
-			Task:          "test timezone",
-			Profile:       "pacific",
-			// Pre-existing TZ from config env should be overridden.
-			Env: map[string]string{"TZ": "UTC"},
-		},
-	}
-
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
-	if err != nil {
-		t.Fatalf("DispatchAgentCreate failed: %v", err)
-	}
-
-	env := mockClient.lastCreateReq.ResolvedEnv
-	if got := env["TZ"]; got != "America/Los_Angeles" {
-		t.Errorf("TZ = %q, want America/Los_Angeles (profile timezone should win)", got)
-	}
-}
-
 // TestHTTPAgentDispatcher_TZInjection_HubDefault verifies that the hub's
 // default_timezone is used as a fallback when neither the profile timezone
 // nor config env TZ is set.

@@ -114,16 +114,6 @@ type transferOwnershipRequest struct {
 }
 
 // ---------------------------------------------------------------------------
-// Valid project-scoped role names
-// ---------------------------------------------------------------------------
-
-var validProjectRoles = map[string]bool{
-	store.ProjectRoleOwner:  true,
-	store.ProjectRoleAdmin:  true,
-	store.ProjectRoleMember: true,
-}
-
-// ---------------------------------------------------------------------------
 // Route handler: /api/v1/projects/{id}/members[/{bindingID}]
 // ---------------------------------------------------------------------------
 

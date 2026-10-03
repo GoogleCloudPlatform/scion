@@ -157,7 +157,7 @@ func (t *brokerHTTPTransport) decodeResponseWithSnippet(resp *http.Response, out
 
 func brokerHTTPError(resp *http.Response) error {
 	respBody, _ := io.ReadAll(resp.Body)
-	return &brokerStatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
+	return &brokerStatusError{StatusCode: resp.StatusCode, Body: string(respBody), RetryAfter: resp.Header.Get("Retry-After")}
 }
 
 func (t *brokerHTTPTransport) CreateAgent(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {

@@ -66,6 +66,10 @@ type storeCallRecord struct {
 	hasInputMemo  bool
 	hasEdgesMemo  bool
 	ceilingActive bool
+	// stack holds the fully qualified function names on the calling
+	// goroutine's stack at the time of the call, innermost first. It is
+	// captured only when recordCalls is set.
+	stack []string
 }
 
 // memoTestStore wraps a real store.Store and intercepts the methods the
@@ -131,6 +135,7 @@ func (m *memoTestStore) call(ctx context.Context, method string) error {
 			hasInputMemo:  authzInputMemoFromContext(ctx) != nil,
 			hasEdgesMemo:  delegationEdgesMemoFromContext(ctx) != nil,
 			ceilingActive: getDelegationCeilingCache(ctx) != nil,
+			stack:         callerFuncNames(),
 		})
 	}
 	fault := m.fault
@@ -690,7 +695,9 @@ func runBatchLegIfApplicable(t *testing.T, s store.Store, identity Identity, tup
 	ctx := context.Background()
 	refStore := newMemoTestStore(s)
 	refAuthz, refEmit := newRecordingAuthz(refStore)
-	refCaps := refAuthz.ComputeCapabilitiesBatch(ctx, identity, resources, resourceType)
+	// The batch installs the memo itself, so the reference masks it to
+	// keep every decision on its own store loads.
+	refCaps := refAuthz.ComputeCapabilitiesBatch(maskAllAuthzMemo(ctx), identity, resources, resourceType)
 
 	candStore := newMemoTestStore(s)
 	candAuthz, candEmit := newRecordingAuthz(candStore)
@@ -855,9 +862,18 @@ func TestParity_StoreCallCounts_ComputeCapabilitiesBatch(t *testing.T) {
 			// for a 501-row fixture).
 			assert.Equal(t, 1, pages, "exactly one constraint page for a fixture with far fewer than 500 rows")
 
+			// With no outer memo the batch installs its own, at the same cost.
+			selfStore := newMemoTestStore(s)
+			selfAuthz, _ := newRecordingAuthz(selfStore)
+			selfAuthz.ComputeCapabilitiesBatch(ctx, f.user, resources, "agent")
+			for _, m := range []string{"GetEffectiveGroups", "ListRoleBindingsForPrincipals", "GetRoleDefinitionsByIDs", "ListAccessConstraints"} {
+				assert.Equal(t, memoStore.countOf(m), selfStore.countOf(m), "%s with the batch's own memo", m)
+			}
+
+			// A masked memo gives the per-decision cost of evaluating with no memo.
 			plainStore := newMemoTestStore(s)
 			plainAuthz, _ := newRecordingAuthz(plainStore)
-			plainAuthz.ComputeCapabilitiesBatch(ctx, f.user, resources, "agent")
+			plainAuthz.ComputeCapabilitiesBatch(maskAllAuthzMemo(ctx), f.user, resources, "agent")
 			k := len(ResourceActions["agent"])
 			require.Equal(t, 8, k, "test assumes 8 agent resource actions; ResourceActions[\"agent\"] changed")
 			assert.Equal(t, k*n, plainStore.countOf("GetEffectiveGroups"), "GetEffectiveGroups without the memo")
@@ -1229,6 +1245,17 @@ var e5bExpectedFaultReason = map[string]string{
 // k-1 flips from a genuine allow to a genuine, specifically-reasoned
 // fail-closed deny, which is the only way this row can prove the fault was
 // observed (and not simply irrelevant) in the reference.
+//
+// The production install sites (the capability functions,
+// AuthorizeReadBatch and the agent list handlers) put every decision of a
+// call or list request under one memo, so this divergence is reachable in
+// production, for read decisions as well as writes: a load that fails after
+// an earlier success in the same request no longer denies the later
+// decision. That is accepted. The memo reuses only a value the same request
+// already loaded successfully, a failure before the first success is never
+// cached and still fails closed, a done ctx bypasses the memo, and lookups
+// made for other principals (relationship candidates, the delegation
+// ceiling's delegators) never observe it.
 func TestParity_E5b_DocumentedDivergenceOnLaterTransient(t *testing.T) {
 	for _, method := range []string{"GetEffectiveGroups", "ListRoleBindingsForPrincipals", "GetRoleDefinitionsByIDs", "ListAccessConstraints"} {
 		for _, k := range []int{2, 5} {
@@ -2007,6 +2034,16 @@ func TestParity_A7Prime_FirstAttemptTransientPlusDeterministicFault(t *testing.T
 // step-10 decision: the documented later-transient divergence — it fires there, never
 // on the candidate's (memo hit). The candidate's corresponding decision
 // deep-equals the same decision in a no-fault run.
+//
+// Because an edge-lookup error fails closed for every action, (c) applies
+// to read decisions exactly as to writes: a memo hit on the requester's
+// edges masks a later transient edge error for a read too. With the memo
+// installed at the capability functions, AuthorizeReadBatch and the agent
+// list handlers, that holds for every listing request; the install-site
+// form is pinned by TestMemoInstall_LaterEdgeFaultServedFromMemoAtInstallSites.
+// Edge lookups made while walking a relationship candidate's source agent
+// chain never share the memo (TestMemoInstall_SourceAgentEdgeFaultNotServedFromMemo),
+// so the divergence is limited to the requester's own ceiling lookups.
 func TestParity_A8_DelegationEdgesFail(t *testing.T) {
 	t.Run("always", func(t *testing.T) {
 		_, s := authzTestSetup(t)
@@ -2285,6 +2322,14 @@ func TestParity_A8_DelegationEdgesFail(t *testing.T) {
 // write (upstream #2206 removed the old read-only fail-open skip entirely
 // — a done-ctx store error now fails closed uniformly, regardless of
 // action) — only the call count catches that regression.
+//
+// The read arm matters as much as the write arm here: with the memo
+// installed at the capability functions, AuthorizeReadBatch and the agent
+// list handlers, a memo hit can mask a later transient edge error for a
+// read (see the delegation-edge fault test above). This test is what keeps
+// that accepted divergence from extending to a cancelled request: on a done
+// ctx the edges are always looked up again, so read and write both fail
+// closed.
 func TestParity_E6b_DoneCtxEdgesBypass_RequiredGate(t *testing.T) {
 	for _, variant := range []string{"honours", "ignores"} {
 		for _, ac := range []struct {
@@ -3511,6 +3556,32 @@ func TestParity_X5_BatchLevelInstallIsPerCall(t *testing.T) {
 	assert.Contains(t, caps2.Actions, string(ActionDelete), "the second call's own fresh memo must see the new admin binding")
 }
 
+// TestParity_CapabilitiesForActionsInstallIsPerCall checks that the
+// per-action capability function, called with no outer memo, installs a
+// memo scoped to that call: a binding added between two calls is visible
+// to the second.
+func TestParity_CapabilitiesForActionsInstallIsPerCall(t *testing.T) {
+	_, s := authzTestSetup(t)
+	f := newP1Fixture(t, s, "per-call-actions")
+	authz, _ := newRecordingAuthz(newMemoTestStore(s))
+	actions := []Action{ActionRead, ActionDelete}
+	resources := []Resource{f.agentRes, f.agentRes}
+
+	caps1 := authz.ComputeCapabilitiesForActions(context.Background(), f.user, resources, actions)
+	for i := range caps1 {
+		require.Equal(t, []string{string(ActionRead)}, caps1[i].Actions, "an ordinary member starts with read only (resource %d)", i)
+	}
+
+	createDCUser(t, s, f.userID, "per-call-actions@test.com", f.projectID, store.ProjectRoleOwner)
+
+	caps2 := authz.ComputeCapabilitiesForActions(context.Background(), f.user, resources, actions)
+	for i := range caps2 {
+		assert.Contains(t, caps2[i].Actions, string(ActionDelete), "the second call's own memo must see the new owner binding (resource %d)", i)
+	}
+	batch := authz.ComputeCapabilitiesBatch(context.Background(), f.user, []Resource{f.agentRes}, "agent")
+	assert.Contains(t, batch[0].Actions, string(ActionDelete), "a later batch call installs its own memo too")
+}
+
 // =============================================================================
 // Remaining P/U/C/R/T rows (completing the parity matrix for branch 1)
 // =============================================================================
@@ -3869,8 +3940,11 @@ func runBatchParity(t *testing.T, s store.Store, identity Identity, resourceType
 
 	refStore := newMemoTestStore(s)
 	refAuthz, refEmit := newRecordingAuthz(refStore)
-	refCaps := refAuthz.ComputeCapabilitiesBatch(ctx, identity, []Resource{res}, resourceType)
-	refAllowed, refErr := refAuthz.AuthorizeReadBatch(ctx, identity, []Resource{res})
+	// Both functions install the memo themselves, so the reference masks
+	// it to keep every decision on its own store loads.
+	refCtx := maskAllAuthzMemo(ctx)
+	refCaps := refAuthz.ComputeCapabilitiesBatch(refCtx, identity, []Resource{res}, resourceType)
+	refAllowed, refErr := refAuthz.AuthorizeReadBatch(refCtx, identity, []Resource{res})
 	require.NoError(t, refErr)
 	require.Len(t, refEmit.snapshot(), wantDecisions, "audit invariant: exactly one audit record per decision (reference)")
 

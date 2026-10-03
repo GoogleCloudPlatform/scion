@@ -1127,6 +1127,16 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to provision agent: "+err.Error(), nil)
 				return
 			}
+			// A required skill reference that could not be resolved is mapped
+			// to the status matching its cause (404 not found, 429 rate
+			// limited, 504 timeout, 502 upstream/unreachable) rather than a
+			// blanket 500/502, so the caller gets an actionable response (#2546).
+			var skillErr *agent.SkillResolutionError
+			if errors.As(err, &skillErr) {
+				markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to provision agent")
+				SkillResolutionFailed(w, skillErr)
+				return
+			}
 			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")
 			RuntimeError(w, "Failed to provision agent: "+err.Error())
 			return
@@ -1186,9 +1196,18 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// the generic 502 the hub maps RuntimeError to (ptone/scion#1316
 		// fault 3).
 		notFoundErr := errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound)
-		if notFoundErr {
+		// A required skill reference that could not be resolved is mapped to
+		// the status matching its cause (404 not found, 429 rate limited,
+		// 504 timeout, 502 upstream/unreachable) rather than a blanket
+		// 500/502, so the caller gets an actionable response (#2546).
+		var skillErr *agent.SkillResolutionError
+		isSkillErr := errors.As(err, &skillErr)
+		switch {
+		case notFoundErr:
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
-		} else {
+		case isSkillErr:
+			markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to create agent")
+		default:
 			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 		}
 
@@ -1203,7 +1222,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// have started since (for example, this agent was deleted while
 		// its start was blocked and the name was reused); its files must
 		// survive this start's failure. ownsName is a fresh read of the
-		// name's marker, taken right before the removal.
+		// name's marker, taken right before the removal. Subject to that
+		// guard, this covers every Start failure, including a skill
+		// resolution failure above (#2546). It covers broker files only,
+		// not the hub's agent record.
 		if opts.ProjectPath != "" && !ss.ownsName() {
 			s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent name is now owned by a newer start",
 				"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
@@ -1222,6 +1244,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			Conflict(w, err.Error())
 		case notFoundErr:
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to create agent: "+err.Error(), nil)
+		case isSkillErr:
+			SkillResolutionFailed(w, skillErr)
 		default:
 			RuntimeError(w, "Failed to create agent: "+err.Error())
 		}

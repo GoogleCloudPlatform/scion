@@ -33,7 +33,7 @@ import { expect, type Page } from '@playwright/test';
  * future tap-triggered UI).
  */
 const OPEN_POPUP_SELECTOR =
-  '.context-menu-overlay, sl-dropdown[open], sl-menu[open], sl-dialog[open]';
+  '.context-menu-overlay, sl-dropdown[open], sl-menu[open], sl-dialog[open], scion-action-sheet[open]';
 
 /**
  * Fails fast, with a clear message naming the stroke that caused it, if an
