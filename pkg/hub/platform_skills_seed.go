@@ -26,7 +26,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/resources"
 )
 
 // platformSkillURIPrefix is the URI scheme used for platform (binary-embedded) skills
@@ -36,8 +35,8 @@ import (
 // resolve them via the skill bank is silently skipped rather than fatal.
 const platformSkillURIPrefix = "scion-platform://"
 
-// seedPlatformSkillInsertions reads the embedded platform skills from
-// resources.PlatformSkillsFS() and upserts them as system entries in
+// seedPlatformSkillInsertions reads the platform skills from skillsFS
+// (production passes resources.PlatformSkillsFS()) and upserts them as system entries in
 // hub_settings["injected_skills"].  It runs on every hub startup so that the
 // system list always reflects the current binary — restarting the hub after
 // an upgrade automatically refreshes the entries.
@@ -45,9 +44,12 @@ const platformSkillURIPrefix = "scion-platform://"
 // Idempotent: calling more than once produces the same result.
 // Preserves user_defined entries: only the system sub-list is replaced.
 //
-// TODO: make PlatformSkillsFS injectable for testability; see GitHub issue #548
-func (s *Server) seedPlatformSkillInsertions(ctx context.Context) error {
-	skillsFS := resources.PlatformSkillsFS()
+// skillsFS is expected to hold one directory per skill at its root, each
+// containing a SKILL.md. Directories without a SKILL.md are skipped.
+func (s *Server) seedPlatformSkillInsertions(ctx context.Context, skillsFS fs.FS) error {
+	if skillsFS == nil {
+		return errors.New("seedPlatformSkillInsertions: platform skills FS is nil")
+	}
 
 	entries, err := fs.ReadDir(skillsFS, ".")
 	if err != nil {
