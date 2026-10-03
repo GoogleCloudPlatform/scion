@@ -22,7 +22,7 @@
 
 // @vitest-environment happy-dom
 
-import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { LitElement } from 'lit';
 import './agents.js';
 import { stateManager } from '../../client/state.js';
@@ -46,14 +46,15 @@ class FakeEventSource extends EventTarget {
 
 const store = new Map<string, string>();
 
-beforeAll(() => {
+/** Stubbed per test: afterEach's vi.unstubAllGlobals() removes it. */
+function stubStorage(): void {
   vi.stubGlobal('localStorage', {
     getItem: (k: string) => store.get(k) ?? null,
     setItem: (k: string, v: string) => void store.set(k, String(v)),
     removeItem: (k: string) => void store.delete(k),
     clear: () => store.clear(),
   });
-});
+}
 
 const blockedAgent = {
   id: 'a1',
@@ -75,6 +76,7 @@ async function flush(): Promise<void> {
 
 describe('scion-page-agents status badge label', () => {
   beforeEach(() => {
+    stubStorage();
     vi.stubGlobal('EventSource', FakeEventSource);
     // Force a real scope change so the dashboard scope reloads.
     stateManager.setScope({ type: 'brokers-list' });
@@ -106,6 +108,8 @@ describe('scion-page-agents status badge label', () => {
       await el.updateComplete;
       await flush();
       await el.updateComplete;
+      // Only the list view renders a table.
+      expect(el.shadowRoot?.querySelector('table') !== null).toBe(view === 'list');
 
       const badges = Array.from(el.shadowRoot?.querySelectorAll('scion-status-badge') ?? []).filter(
         (b) => (b as unknown as { status: string }).status === 'blocked'
