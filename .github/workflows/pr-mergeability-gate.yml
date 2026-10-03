@@ -47,7 +47,7 @@
 # updated.
 name: PR Mergeability Gate
 
-on:
+on: # zizmor: ignore[dangerous-triggers] -- no PR code checked out or run; see SAFETY note above
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
