@@ -4398,3 +4398,21 @@ func TestProvision_WorktreePerAgent_ExistingRegistration_Idempotent(t *testing.T
 }
 
 func intPtr(i int) *int { return &i }
+
+// --- EmptyPerAgent rejection ---
+
+func TestProvision_RejectsEmptyPerAgent(t *testing.T) {
+	err := ProvisionShared(ProvisionInput{
+		ProjectID: "proj-1",
+		Mode:      store.SharingModeEmptyPerAgent,
+		Resolved: ResolvedWorkspace{
+			HostPath: t.TempDir(),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for EmptyPerAgent on the shared NFS workspace")
+	}
+	if !strings.Contains(err.Error(), "EmptyPerAgent") {
+		t.Errorf("error should mention EmptyPerAgent, got: %v", err)
+	}
+}

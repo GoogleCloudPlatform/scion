@@ -25,6 +25,7 @@ COPY web/ web/
 COPY harnesses/ harnesses/
 COPY proto/ proto/
 COPY resources/ resources/
+COPY third_party/ third_party/
 
 # Copy the extras module
 COPY extras/scion-a2a-bridge/ extras/scion-a2a-bridge/

@@ -43,7 +43,7 @@ type mintBrokerClient struct {
 	resetAuthToken  string
 }
 
-func (m *mintBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, token string) error {
+func (m *mintBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, token, _ string) error {
 	m.resetAuthCalled = true
 	m.resetAuthToken = token
 	return nil

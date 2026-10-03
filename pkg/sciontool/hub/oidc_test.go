@@ -479,3 +479,247 @@ func TestAdjustRefreshForTransportTokens_FileSource(t *testing.T) {
 	adjusted := c.adjustRefreshForTransportTokens(time.Now().Add(8 * time.Hour))
 	assert.WithinDuration(t, transportExpiry.Add(-transportauth.RefreshMargin), adjusted, time.Second)
 }
+
+// TestRefreshToken_RecordsTransportOutcome covers the transport refresh
+// status file that sciontool doctor reads: refreshed, failed (hub reported
+// a mint failure) and absent (hub returned no transport token).
+func TestRefreshToken_RecordsTransportOutcome(t *testing.T) {
+	cases := []struct {
+		name        string
+		tokens      []map[string]interface{}
+		transportEr string
+		wantOutcome string
+		wantError   string
+	}{
+		{
+			name: "refreshed",
+			tokens: []map[string]interface{}{
+				{"layer": "transport", "type": "google_oidc", "value": makeTestJWT(time.Now().Add(time.Hour)), "expiresIn": 3600},
+			},
+			wantOutcome: TransportRefreshOutcomeRefreshed,
+		},
+		{
+			name:        "failed",
+			transportEr: "hub could not mint a transport token",
+			wantOutcome: TransportRefreshOutcomeFailed,
+			wantError:   "hub could not mint a transport token",
+		},
+		{
+			name:        "absent",
+			wantOutcome: TransportRefreshOutcomeAbsent,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Cleanup(SetTokenHome(t.TempDir()))
+			cleanup := overrideGCPDetection(false)
+			defer cleanup()
+			t.Setenv(transportauth.EnvTransportToken, makeTestJWT(time.Now().Add(30*time.Minute)))
+			t.Setenv(transportauth.EnvTransportTokenFile, "")
+			t.Setenv(transportauth.EnvTransportMode, "")
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				body := map[string]interface{}{
+					"token":      "app-credential-2",
+					"expires_at": time.Now().Add(10 * time.Hour).UTC().Format(time.RFC3339),
+					"tokens": append([]map[string]interface{}{
+						{"layer": "app", "type": "scion_access", "value": "app-credential-2", "expiresIn": 36000},
+					}, tc.tokens...),
+				}
+				if tc.transportEr != "" {
+					body["transportError"] = tc.transportEr
+				}
+				_ = json.NewEncoder(w).Encode(body)
+			}))
+			defer srv.Close()
+
+			c := NewClientWithConfig(srv.URL, "app-credential", "agent-1")
+			c.configureOIDCTransport()
+			_, _, err := c.RefreshToken(context.Background())
+			require.NoError(t, err)
+
+			st, ok := ReadTransportRefreshStatus()
+			require.True(t, ok, "transport refresh status must be recorded")
+			assert.Equal(t, tc.wantOutcome, st.Outcome)
+			assert.Equal(t, tc.wantError, st.Error)
+			assert.WithinDuration(t, time.Now(), st.At, time.Minute)
+
+			fi, err := os.Stat(TransportRefreshStatusPath())
+			require.NoError(t, err)
+			assert.Equal(t, os.FileMode(0600), fi.Mode().Perm())
+		})
+	}
+}
+
+// TestRefreshToken_NoTransportNoStatus: agents that do not use a
+// hub-provided transport token record nothing.
+func TestRefreshToken_NoTransportNoStatus(t *testing.T) {
+	// A hub with a transport minter sends a transport entry, or a
+	// transportError, to every agent. An agent without a hub-provided
+	// transport source must record nothing either way.
+	cases := []struct {
+		name           string
+		transportEntry bool
+		transportError string
+	}{
+		{name: "no transport in response"},
+		{name: "transport entry", transportEntry: true},
+		{name: "transport error", transportError: "hub could not mint a transport token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Cleanup(SetTokenHome(t.TempDir()))
+			cleanup := overrideGCPDetection(false)
+			defer cleanup()
+			t.Setenv(transportauth.EnvTransportToken, "")
+			t.Setenv(transportauth.EnvTransportTokenFile, "")
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				body := map[string]interface{}{
+					"token":      "app-credential-2",
+					"expires_at": time.Now().Add(10 * time.Hour).UTC().Format(time.RFC3339),
+				}
+				if tc.transportEntry {
+					body["tokens"] = []map[string]interface{}{
+						{"layer": "app", "type": "scion_access", "value": "app-credential-2", "expiresIn": 36000},
+						{"layer": "transport", "type": "google_oidc", "value": makeTestJWT(time.Now().Add(time.Hour)), "expiresIn": 3600},
+					}
+				}
+				if tc.transportError != "" {
+					body["transportError"] = tc.transportError
+				}
+				_ = json.NewEncoder(w).Encode(body)
+			}))
+			defer srv.Close()
+
+			c := NewClientWithConfig(srv.URL, "app-credential", "agent-1")
+			c.configureOIDCTransport()
+			require.False(t, c.hasHubProvidedTransport())
+			_, _, err := c.RefreshToken(context.Background())
+			require.NoError(t, err)
+			_, ok := ReadTransportRefreshStatus()
+			assert.False(t, ok, "status recorded without a hub-provided transport source")
+			_, err = os.Lstat(TransportTokenFilePath())
+			assert.True(t, os.IsNotExist(err), "token file written without a hub-provided transport source")
+		})
+	}
+}
+
+// TestAdoptTransportTokenFile covers reset-auth: a transport token written
+// into the file from outside replaces the expired one in use, and the file
+// is rewritten 0600.
+func TestAdoptTransportTokenFile(t *testing.T) {
+	home := t.TempDir()
+	t.Cleanup(SetTokenHome(home))
+	cleanup := overrideGCPDetection(false)
+	defer cleanup()
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+	t.Setenv(transportauth.EnvTransportToken, makeTestJWT(time.Now().Add(-5*time.Minute)))
+
+	c := NewClientWithConfig("https://hub.example.com", "app", "agent-1")
+	c.configureOIDCTransport()
+	require.NotNil(t, c.oidcSource)
+
+	// No file yet: nothing adopted.
+	adopted, err := c.AdoptTransportTokenFile(0, 0)
+	require.NoError(t, err)
+	assert.False(t, adopted)
+
+	// Simulate the broker's write (broader mode than we want).
+	fresh := makeTestJWT(time.Now().Add(time.Hour))
+	path := filepath.Join(home, ".scion", transportauth.TransportTokenFileName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0700))
+	require.NoError(t, os.WriteFile(path, []byte(fresh+"\n"), 0644))
+
+	adopted, err = c.AdoptTransportTokenFile(0, 0)
+	require.NoError(t, err)
+	assert.True(t, adopted)
+
+	got, err := c.oidcSource.Token()
+	require.NoError(t, err)
+	assert.Equal(t, fresh, got)
+	fi, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), fi.Mode().Perm())
+
+	// The reset is recorded, so doctor does not show an earlier failure.
+	st, ok := ReadTransportRefreshStatus()
+	require.True(t, ok)
+	assert.Equal(t, TransportRefreshOutcomeReset, st.Outcome)
+}
+
+// TestAdoptTransportTokenFile_UnparseableKeepsRefreshed models the
+// reset-auth case: hours after dispatch the bootstrap value has expired and
+// the valid credential is the in-memory refreshed one. An unparseable value
+// from reset-auth must not replace it, the file is restored from it, and
+// the reset is recorded as failed.
+func TestAdoptTransportTokenFile_UnparseableKeepsRefreshed(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
+	cleanup := overrideGCPDetection(false)
+	defer cleanup()
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+	t.Setenv(transportauth.EnvTransportToken, makeTestJWT(time.Now().Add(-2*time.Hour)))
+
+	c := NewClientWithConfig("https://hub.example.com", "app", "agent-1")
+	c.configureOIDCTransport()
+	require.NotNil(t, c.oidcSource)
+
+	refreshed := makeTestJWT(time.Now().Add(40 * time.Minute))
+	exp, err := transportauth.ParseTokenExpiry(refreshed)
+	require.NoError(t, err)
+	c.oidcSource.SetToken(refreshed, exp)
+
+	// The broker overwrites the file with a value that does not parse.
+	require.NoError(t, WriteTransportTokenFile("not-a-jwt", 0, 0))
+	adopted, err := c.AdoptTransportTokenFile(0, 0)
+	require.Error(t, err)
+	assert.False(t, adopted)
+
+	got, err := c.oidcSource.Token()
+	require.NoError(t, err)
+	assert.Equal(t, refreshed, got, "unparseable reset-auth value replaced the valid refreshed credential")
+
+	data, err := os.ReadFile(TransportTokenFilePath())
+	require.NoError(t, err)
+	assert.Equal(t, refreshed, strings.TrimSpace(string(data)), "file not restored from the current credential")
+
+	st, ok := ReadTransportRefreshStatus()
+	require.True(t, ok)
+	assert.Equal(t, TransportRefreshOutcomeFailed, st.Outcome)
+	assert.NotContains(t, st.Error, "not-a-jwt")
+}
+
+// TestRemoveTransportTokenFile_RemovesStatus verifies the refresh status
+// file is removed together with the token file.
+func TestRemoveTransportTokenFile_RemovesStatus(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
+	require.NoError(t, WriteTransportTokenFile(makeTestJWT(time.Now().Add(time.Hour)), 0, 0))
+	require.NoError(t, WriteTransportRefreshStatus(TransportRefreshStatus{At: time.Now(), Outcome: TransportRefreshOutcomeFailed}, 0, 0))
+
+	removed, err := RemoveTransportTokenFile()
+	require.NoError(t, err)
+	assert.True(t, removed)
+	_, ok := ReadTransportRefreshStatus()
+	assert.False(t, ok, "status file left behind")
+
+	// Status alone (no token file) is still cleaned up.
+	require.NoError(t, WriteTransportRefreshStatus(TransportRefreshStatus{At: time.Now(), Outcome: TransportRefreshOutcomeFailed}, 0, 0))
+	removed, err = RemoveTransportTokenFile()
+	require.NoError(t, err)
+	assert.False(t, removed)
+	_, err = os.Lstat(TransportRefreshStatusPath())
+	assert.True(t, os.IsNotExist(err))
+}
+
+// TestAdoptTransportTokenFile_NoHubProvidedTransport verifies a file is not
+// adopted by a client that does not use a hub-provided transport token.
+func TestAdoptTransportTokenFile_NoHubProvidedTransport(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
+	require.NoError(t, WriteTransportTokenFile(makeTestJWT(time.Now().Add(time.Hour)), 0, 0))
+	c := NewClientWithConfig("https://hub.example.com", "app", "agent-1")
+	adopted, err := c.AdoptTransportTokenFile(0, 0)
+	require.NoError(t, err)
+	assert.False(t, adopted)
+}

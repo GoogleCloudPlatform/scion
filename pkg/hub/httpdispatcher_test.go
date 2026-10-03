@@ -63,6 +63,9 @@ type mockRuntimeBrokerClient struct {
 	deleteCalled               bool
 	messageCalled              bool
 	cleanupCalled              bool
+	resetAuthCalled            bool
+	lastResetToken             string
+	lastResetTransportToken    string
 	lastBrokerID               string
 	lastEndpoint               string
 	lastAgentID                string
@@ -161,7 +164,10 @@ func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, br
 	return m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, _ string) error {
+func (m *mockRuntimeBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, token, transportToken string) error {
+	m.resetAuthCalled = true
+	m.lastResetToken = token
+	m.lastResetTransportToken = transportToken
 	return m.returnErr
 }
 
@@ -2891,8 +2897,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesGitClone(t *testing.T
 // unintended change from routing Config.Branch and Config.GitClone through
 // workspaceSpecFor (GoogleCloudPlatform/scion#1931): workspaceSpecFor reads
 // exactly the same two AppliedConfig fields buildCreateRequest read directly
-// before, so the create payload is unaffected by that refactor. RequestID is
-// a fresh UUID per call and is normalized before comparison.
+// before, so the create payload is unaffected by that refactor. The golden
+// also reflects buildCreateRequest's unconditional SCION_METADATA_MODE and
+// SCION_METADATA_MODE_SOURCE write into ResolvedEnv/EnvClassifications
+// ("block" with no GCP identity, sourced from "hub"). RequestID is a fresh
+// UUID per call and is normalized before comparison.
 func TestBuildCreateRequest_GoldenPayload(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
@@ -2971,6 +2980,14 @@ func TestBuildCreateRequest_GoldenPayload(t *testing.T) {
       "branch": "main",
       "depth": 1
     }
+  },
+  "resolvedEnv": {
+    "SCION_METADATA_MODE": "block",
+    "SCION_METADATA_MODE_SOURCE": "hub"
+  },
+  "envClassifications": {
+    "SCION_METADATA_MODE": "plain",
+    "SCION_METADATA_MODE_SOURCE": "plain"
   },
   "projectSlug": "golden-project",
   "sharedDirs": [
@@ -4529,6 +4546,88 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GCPBlockMode(t *testing.T) {
 	}
 }
 
+// TestHTTPAgentDispatcher_DispatchAgentStart_NoGCPIdentityIgnoresStoredMetadataModeEnv
+// verifies that when an agent has no GCP identity configured at all (a real
+// case for e.g. scheduled-dispatch agents with no project or hub default),
+// the dispatch still sends an authoritative "block" mode to the broker even
+// when a plain, non-secret, user-scoped env var happens to already be stored
+// under the same control-plane name. The stored var here is seeded directly
+// through the store, as a stand-in for a row that predates a create/patch
+// validation gate (or any other path that did not go through it) — the
+// dispatch layer is a separate, defense-in-depth choke point from that gate.
+func TestHTTPAgentDispatcher_DispatchAgentStart_NoGCPIdentityIgnoresStoredMetadataModeEnv(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	project := &store.Project{
+		ID:        tid("project-gcp-nil-identity"),
+		Name:      "gcp-project",
+		Slug:      "gcp-project",
+		GitRemote: "https://github.com/example/repo.git",
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-gcp-nil-identity"),
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	provider := &store.ProjectProvider{
+		ProjectID:  tid("project-gcp-nil-identity"),
+		BrokerID:   tid("broker-gcp-nil-identity"),
+		BrokerName: "test-broker",
+		LocalPath:  "/home/user/projects/myproject/.scion",
+		Status:     store.BrokerStatusOnline,
+	}
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
+		t.Fatalf("failed to add project provider: %v", err)
+	}
+
+	ownerID := tid("owner-gcp-nil-identity")
+	if _, err := memStore.UpsertEnvVar(ctx, &store.EnvVar{
+		ID:            api.NewUUID(),
+		Key:           "SCION_METADATA_MODE",
+		Value:         store.GCPMetadataModePassthrough,
+		Scope:         store.ScopeUser,
+		ScopeID:       ownerID,
+		InjectionMode: store.InjectionModeAlways,
+	}); err != nil {
+		t.Fatalf("failed to seed stored env var: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              "agent-gcp-nil-identity",
+		Name:            "gcp-agent",
+		Slug:            "gcp-agent",
+		ProjectID:       tid("project-gcp-nil-identity"),
+		OwnerID:         ownerID,
+		RuntimeBrokerID: tid("broker-gcp-nil-identity"),
+		AppliedConfig:   &store.AgentAppliedConfig{
+			// GCPIdentity intentionally left nil.
+		},
+	}
+
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
+	if err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+
+	if v := mockClient.lastResolvedEnv["SCION_METADATA_MODE"]; v != store.GCPMetadataModeBlock {
+		t.Errorf("expected SCION_METADATA_MODE=%q despite the stored env var, got %q", store.GCPMetadataModeBlock, v)
+	}
+}
+
 // mockGitHubAppMinter is a test implementation of GitHubAppTokenMinter.
 type mockGitHubAppMinter struct {
 	token  string
@@ -5658,6 +5757,123 @@ func TestDispatchFinalizeEnv_NoAsNeededMatches(t *testing.T) {
 	// Should only have called once — no second pass since no as_needed matched
 	if callCount != 1 {
 		t.Errorf("expected 1 CreateAgentWithGather call, got %d", callCount)
+	}
+}
+
+// TestDispatchFinalizeEnv_DropsReservedTargetFromCallerEnv verifies that a
+// caller-supplied env map (as submitAgentEnv passes through) cannot override
+// a scion control-plane env var by injecting it directly at the dispatch
+// layer, even if it carries the same key buildCreateRequest already wrote
+// authoritatively. Defense in depth for a path that does not go through
+// submitAgentEnv's own reserved-target rejection.
+func TestDispatchFinalizeEnv_DropsReservedTargetFromCallerEnv(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	// AppliedConfig.GCPIdentity is nil, so the authoritative write is "block".
+	agent := setupFinalizeEnvTest(t, ctx, memStore, nil)
+
+	var captured *RemoteCreateAgentRequest
+	mockClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			captured = req
+			return &RemoteAgentResponse{
+				Agent: &RemoteAgentInfo{
+					ID:    req.ID,
+					Slug:  req.Slug,
+					Name:  req.Name,
+					Phase: string(state.PhaseRunning),
+				},
+				Created: true,
+			}, nil, nil
+		},
+	}
+
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
+		"SCION_METADATA_MODE":        "passthrough",
+		"SCION_METADATA_MODE_SOURCE": "hub",
+		"ORDINARY_VAR":               "ordinary-value",
+	})
+	if err != nil {
+		t.Fatalf("DispatchFinalizeEnv returned unexpected error: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("expected CreateAgentWithGather to be called")
+	}
+
+	if got := captured.ResolvedEnv["SCION_METADATA_MODE"]; got != "block" {
+		t.Errorf("expected SCION_METADATA_MODE=block despite caller-supplied env, got %q", got)
+	}
+	if got := captured.ResolvedEnv["SCION_METADATA_MODE_SOURCE"]; got != "hub" {
+		t.Errorf("expected SCION_METADATA_MODE_SOURCE=hub (buildCreateRequest's own write), got %q", got)
+	}
+	if got := captured.ResolvedEnv["ORDINARY_VAR"]; got != "ordinary-value" {
+		t.Errorf("expected non-reserved caller env to still pass through, got %q", got)
+	}
+}
+
+// TestDispatchFinalizeEnv_DeferredReplayDropsReservedTarget verifies that a
+// deferred finalize_env dispatch row — including one that predates this
+// check and so was stored with reserved keys already in its Args — is
+// sanitized when replayed through execDispatchFinalizeEnv, because that
+// replay re-enters DispatchFinalizeEnv, which sanitizes fresh every call.
+func TestDispatchFinalizeEnv_DeferredReplayDropsReservedTarget(t *testing.T) {
+	ctx := context.Background()
+	srv, memStore := testServer(t)
+
+	agent := setupFinalizeEnvTest(t, ctx, memStore, nil)
+	agent.OwnerID = tid("owner-1") // setupFinalizeEnvTest's literal "owner-1" is not a valid UUID
+	if err := memStore.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	var captured *RemoteCreateAgentRequest
+	mockClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			captured = req
+			return &RemoteAgentResponse{
+				Agent: &RemoteAgentInfo{
+					ID:    req.ID,
+					Slug:  req.Slug,
+					Name:  req.Name,
+					Phase: string(state.PhaseRunning),
+				},
+				Created: true,
+			}, nil, nil
+		},
+	}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	srv.SetDispatcher(dispatcher)
+
+	// Simulate a dispatch row stored before the reserved-target check existed
+	// (or one that otherwise reached storage with reserved keys): its Args
+	// carry the reserved-target env directly, not through submitAgentEnv.
+	argsJSON, err := MarshalDispatchArgs(FinalizeEnvDispatchArgs{
+		Env: map[string]string{
+			"SCION_METADATA_MODE":        "passthrough",
+			"SCION_METADATA_MODE_SOURCE": "hub",
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal dispatch args: %v", err)
+	}
+	dispatchRow := store.BrokerDispatch{
+		ID:      tid("dispatch-finalize-env"),
+		AgentID: agent.ID,
+		Op:      "finalize_env",
+		Args:    argsJSON,
+	}
+
+	if _, err := srv.execDispatchFinalizeEnv(ctx, dispatchRow); err != nil {
+		t.Fatalf("execDispatchFinalizeEnv returned unexpected error: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("expected CreateAgentWithGather to be called via the deferred replay")
+	}
+	if got := captured.ResolvedEnv["SCION_METADATA_MODE"]; got != "block" {
+		t.Errorf("expected SCION_METADATA_MODE=block on deferred replay, got %q", got)
 	}
 }
 

@@ -63,7 +63,7 @@ func (f *fakeHTTPClient) RestartAgent(_ context.Context, _, _, _, _ string, _ ma
 	f.lastRestartExtras = extras
 	return nil
 }
-func (f *fakeHTTPClient) ResetAuthAgent(context.Context, string, string, string, string, string) error {
+func (f *fakeHTTPClient) ResetAuthAgent(context.Context, string, string, string, string, string, string) error {
 	return nil
 }
 func (f *fakeHTTPClient) DeleteAgent(context.Context, string, string, string, string, bool, bool, bool, time.Time) error {

@@ -2370,6 +2370,13 @@ runtimes:
 // Config.GCPIdentity at all here) now also skips the ADC file requirement,
 // where previously it would not have. Disclosed in the PR body as a
 // Docker-visible behavior change, not just a Kubernetes one.
+//
+// The resolvedEnv here includes SCION_METADATA_MODE_SOURCE=hub, matching
+// what a real hub dispatch always sends alongside an elevated mode: absent
+// that marker, effectiveGCPMetadataMode now treats a resolvedEnv-carried
+// "passthrough"/"assign" as untrusted and downgrades it, so this preflight's
+// required-keys answer stays consistent with what buildStartContext will
+// actually resolve for the same dispatch.
 func TestExtractRequiredEnvKeys_DockerResolvedEnvPassthroughSkipsADC(t *testing.T) {
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
@@ -2390,9 +2397,10 @@ runtimes:
 		Name:        "test-agent-vertex-docker-resolvedenv-passthrough",
 		ProjectPath: projectDir,
 		ResolvedEnv: map[string]string{
-			"GOOGLE_CLOUD_PROJECT": "my-project",
-			"GOOGLE_CLOUD_REGION":  "us-central1",
-			"SCION_METADATA_MODE":  store.GCPMetadataModePassthrough,
+			"GOOGLE_CLOUD_PROJECT":       "my-project",
+			"GOOGLE_CLOUD_REGION":        "us-central1",
+			"SCION_METADATA_MODE":        store.GCPMetadataModePassthrough,
+			"SCION_METADATA_MODE_SOURCE": "hub",
 		},
 		Config: &CreateAgentConfig{
 			Template: "claude",

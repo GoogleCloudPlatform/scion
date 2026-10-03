@@ -691,6 +691,19 @@ func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, u
 }
 
 const systemProjectMembersGroupAnnotation = "scion.io/project-members-group"
+
+// legacyProjectMembersGroupAnnotation is the project-members-group marker
+// written by the entadapter marker backfill
+// (BackfillProjectMembersGroupMarkers). It differs from
+// systemProjectMembersGroupAnnotation, the key createProjectMembersGroup
+// writes; ptone/scion#2556 tracks that mismatch. Until it is resolved, the
+// owner-clearing backfill matches either key.
+//
+// This literal duplicates the entadapter constant
+// systemProjectMembersGroupAnnotation in pkg/store/entadapter/composite.go;
+// fold the two together under ptone/scion#2556.
+const legacyProjectMembersGroupAnnotation = "scion.io/system-project-members-group"
+
 const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
 
 func projectMembersGroupSlug(projectSlug string) string {
@@ -702,6 +715,58 @@ func isSystemProjectMembersGroup(group *store.Group, projectID string) bool {
 		group.ProjectID == projectID &&
 		group.Annotations != nil &&
 		group.Annotations[systemProjectMembersGroupAnnotation] == "true"
+}
+
+// hasProjectMembersGroupMarker reports whether g carries either
+// project-members-group marker key and belongs to any project. It is used by
+// the owner-clearing backfill and the group PATCH guards.
+//
+// Its semantics differ from isSystemProjectMembersGroup on purpose:
+// isSystemProjectMembersGroup matches only the hub key
+// (systemProjectMembersGroupAnnotation) for one specific project, and
+// decides whether createProjectMembersGroup may adopt a group. This
+// predicate matches either key (see legacyProjectMembersGroupAnnotation)
+// for any project, so groups marked only by the entadapter backfill are
+// still protected. Fold the two together once the key mismatch is resolved
+// (ptone/scion#2556).
+func hasProjectMembersGroupMarker(g *store.Group) bool {
+	if g == nil || g.ProjectID == "" || g.Annotations == nil {
+		return false
+	}
+	return g.Annotations[systemProjectMembersGroupAnnotation] == "true" ||
+		g.Annotations[legacyProjectMembersGroupAnnotation] == "true"
+}
+
+// changesProjectMembersGroupMarker reports whether replacing the stored
+// annotations with patched would remove, add or change the value of either
+// project-members-group marker key.
+func changesProjectMembersGroupMarker(stored, patched map[string]string) bool {
+	for _, key := range []string{systemProjectMembersGroupAnnotation, legacyProjectMembersGroupAnnotation} {
+		sv, sok := stored[key]
+		pv, pok := patched[key]
+		if sok != pok || sv != pv {
+			return true
+		}
+	}
+	return false
+}
+
+// setsProjectMembersGroupMarkerKey reports whether replacing the stored
+// annotations with patched would add either project-members-group marker key
+// or change its value. Unlike changesProjectMembersGroupMarker it ignores the
+// removal of a key, so a PATCH may still drop a stray non-marking value from
+// an unmarked group.
+func setsProjectMembersGroupMarkerKey(stored, patched map[string]string) bool {
+	for _, key := range []string{systemProjectMembersGroupAnnotation, legacyProjectMembersGroupAnnotation} {
+		pv, pok := patched[key]
+		if !pok {
+			continue
+		}
+		if sv, sok := stored[key]; !sok || sv != pv {
+			return true
+		}
+	}
+	return false
 }
 
 func isSystemProjectAgentsGroup(group *store.Group, projectID string) bool {
@@ -733,21 +798,19 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 		Slug:      membersSlug,
 		GroupType: store.GroupTypeExplicit,
 		ProjectID: project.ID,
-		OwnerID:   project.OwnerID,
+		// OwnerID is deliberately left empty (ptone/scion#2599). The
+		// owner/user/group relationship row grants group.* to Group.OwnerID,
+		// and Project.OwnerID is display metadata that confers no authority
+		// (ptone/scion#2586). Copying it here would let a creator removed
+		// without an ownership transfer keep managing the members group.
+		// Members are managed through the project members endpoints;
+		// mutating this group through the group API is hub-admin-only.
 		CreatedBy: project.CreatedBy,
 		Annotations: map[string]string{
 			systemProjectMembersGroupAnnotation: "true",
 		},
 	}
 	createErr := s.store.CreateGroup(ctx, membersGroup)
-	if createErr != nil && errors.Is(createErr, store.ErrInvalidInput) && membersGroup.OwnerID != "" {
-		// FK violation: the owner user does not exist in the store. Retry
-		// without OwnerID so the group is still created for collaboration.
-		s.projectsLogger().Warn("project members group owner not found, retrying without owner",
-			"project_id", project.ID, "owner_id", membersGroup.OwnerID, "error", createErr.Error())
-		membersGroup.OwnerID = ""
-		createErr = s.store.CreateGroup(ctx, membersGroup)
-	}
 	if createErr != nil {
 		if !errors.Is(createErr, store.ErrAlreadyExists) {
 			s.projectsLogger().Warn("failed to create project members group", "project_id", project.ID, "error", createErr.Error())
@@ -769,15 +832,10 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 					"project_id", project.ID, "slug", membersSlug, "group", existing.ID)
 				return
 			} else {
+				// Adopt the existing group as is. Its OwnerID is never
+				// (re)filled from Project.OwnerID (ptone/scion#2599); the
+				// startup backfill clears any legacy value.
 				membersGroup = existing
-				// Update the owner in case it changed.
-				if membersGroup.OwnerID == "" && project.OwnerID != "" {
-					membersGroup.OwnerID = project.OwnerID
-					if updateErr := s.store.UpdateGroup(ctx, membersGroup); updateErr != nil {
-						s.projectsLogger().Warn("failed to update existing project members group",
-							"project_id", project.ID, "slug", membersSlug, "error", updateErr.Error())
-					}
-				}
 			}
 		}
 	} else {

@@ -80,6 +80,9 @@ type SyncToFinalizeResponse struct {
 	FilesApplied int `json:"filesApplied"`
 	// BytesTransferred is the total bytes transferred.
 	BytesTransferred int64 `json:"bytesTransferred"`
+	// Warnings lists non-fatal issues, e.g. files ignored because the
+	// project gives each agent an empty workspace directory.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // WorkspaceStatusResponse is the response for getting workspace sync status.
@@ -449,11 +452,28 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 
 	// Bootstrap mode: agent is provisioning, dispatch to broker now
 	if agent.Phase == string(state.PhaseProvisioning) {
-		// Store workspace storage path on agent record for broker download
+		project, err := s.store.GetProject(ctx, agent.ProjectID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		// Empty-per-agent agents start in an empty private directory
+		// (design #2703): the uploaded files are ignored, as on create, so
+		// the broker never pre-seeds the directory from GCS.
+		emptyPerAgent := project.IsEmptyPerAgent()
 		if agent.AppliedConfig == nil {
 			agent.AppliedConfig = &store.AgentAppliedConfig{}
 		}
-		agent.AppliedConfig.WorkspaceStoragePath = storagePath
+		if emptyPerAgent {
+			if len(req.Manifest.Files) > 0 {
+				s.workspaceLog.Warn("Ignoring workspace files for empty-per-agent project",
+					"agent_id", agent.ID, "project_id", project.ID, "files", len(req.Manifest.Files))
+			}
+			agent.AppliedConfig.WorkspaceStoragePath = ""
+		} else {
+			// Store workspace storage path on agent record for broker download
+			agent.AppliedConfig.WorkspaceStoragePath = storagePath
+		}
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
 			RuntimeError(w, "Failed to update agent config: "+err.Error())
 			return
@@ -469,6 +489,9 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			if writeAgentTokenIssueError(w, err) {
 				return
 			}
+			if writeEmptyPerAgentCapabilityError(w, err) {
+				return
+			}
 			RuntimeError(w, "Failed to dispatch agent: "+err.Error())
 			return
 		}
@@ -476,6 +499,15 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		// Update agent status from broker response
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
 			s.workspaceLog.Warn("Failed to update agent status after dispatch", "error", err)
+		}
+
+		if emptyPerAgent {
+			resp := SyncToFinalizeResponse{ContentHash: contentHash}
+			if len(req.Manifest.Files) > 0 {
+				resp.Warnings = []string{emptyPerAgentWorkspaceFilesIgnoredWarning}
+			}
+			writeJSON(w, http.StatusOK, resp)
+			return
 		}
 
 		writeJSON(w, http.StatusOK, SyncToFinalizeResponse{
