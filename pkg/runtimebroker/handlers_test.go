@@ -135,6 +135,7 @@ func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.Ag
 		ID:    "test-container-id",
 		Name:  opts.Name,
 		Phase: "running",
+		RunID: opts.RunID, // as pkg/agent.Start labels the new entry
 	}
 	m.mu.Lock()
 	m.agents = append(m.agents, *agent)
