@@ -90,17 +90,34 @@ func TestValidateReincarnateBrokerFlags(t *testing.T) {
 	assert.NoError(t, validateReincarnateBrokerFlags("", false))
 }
 
+// The command refuses --broker without --dry-run before resolving a hub.
+// The environment points at no real hub, so a regression cannot reach one.
+func TestReincarnateCmd_BrokerWithoutDryRun_RefusedBeforeHub(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_HUB_ENDPOINT", "http://127.0.0.1:1")
+	t.Setenv("SCION_AGENT_NAME", "")
+	prevBroker, prevDryRun, prevPath, prevHandoff := reincarnateBroker, reincarnateDryRun, projectPath, reincarnateHandoffFile
+	t.Cleanup(func() {
+		reincarnateBroker, reincarnateDryRun, projectPath, reincarnateHandoffFile = prevBroker, prevDryRun, prevPath, prevHandoff
+	})
+	reincarnateBroker, reincarnateDryRun, projectPath, reincarnateHandoffFile = "b2", false, t.TempDir(), ""
+
+	err := reincarnateCmd.RunE(reincarnateCmd, []string{"agent-1"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--broker requires --dry-run")
+}
+
 // TestReincarnateMove_OldHubIgnoringBroker_Fails: a hub that predates
 // --broker answers a dry run with a plain plan and no targetBrokerId. The
 // CLI must fail rather than present that plan as the move.
 func TestReincarnateMove_OldHubIgnoringBroker_Fails(t *testing.T) {
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
 		if !strings.HasSuffix(r.URL.Path, "/reincarnate") {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		calls++
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"agentId":"agent-1","generation":2,"state":"planned","plan":{}}`))
 	}))
@@ -111,6 +128,14 @@ func TestReincarnateMove_OldHubIgnoringBroker_Fails(t *testing.T) {
 
 	prevBroker, prevDryRun := reincarnateBroker, reincarnateDryRun
 	t.Cleanup(func() { reincarnateBroker, reincarnateDryRun = prevBroker, prevDryRun })
+
+	// --broker without --dry-run never reaches the hub, which would run a
+	// real in-place reincarnation.
+	reincarnateBroker, reincarnateDryRun = "b2", false
+	err = reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--broker requires --dry-run")
+	assert.Equal(t, 0, calls, "the hub must receive no request")
 
 	reincarnateBroker, reincarnateDryRun = "b2", true
 	err = reincarnateAgentViaHub(hubCtx, "agent-1", "", false)

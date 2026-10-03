@@ -220,6 +220,9 @@ func resolveReincarnateTarget(args []string, selfName string, hasHandoffFile, dr
 }
 
 func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSelf bool) error {
+	if err := validateReincarnateBrokerFlags(reincarnateBroker, reincarnateDryRun); err != nil {
+		return err
+	}
 	PrintUsingHub(hubCtx.Endpoint)
 
 	projectID, err := GetProjectID(hubCtx)
