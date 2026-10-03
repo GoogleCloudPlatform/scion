@@ -1660,6 +1660,35 @@ describe('scion-page-admin-server-config', () => {
       expect(text).toContain('stable');
     });
 
+    it('omits the commit count in the source-tier banner when commits_behind is missing', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: { tier: 'source', update_available: true },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      await (element as any).updateComplete;
+
+      const text = shadowText(element);
+      expect(text).toContain('Update');
+      expect(text).not.toContain('undefined');
+      expect(text).not.toMatch(/new\s+commit/);
+    });
+
+    it('renders the commit count in the source-tier banner when commits_behind is set', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: { tier: 'source', update_available: true, commits_behind: 3 },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      await (element as any).updateComplete;
+
+      expect(shadowText(element)).toMatch(/3\s+new\s+commits/);
+    });
+
     it('shows binary-tier confirm dialog text', async () => {
       element = await createComponent(
         createFetchHandler(makeBaseConfig(), {

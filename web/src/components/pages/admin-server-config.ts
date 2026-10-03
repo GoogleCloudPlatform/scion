@@ -2955,8 +2955,10 @@ export class ScionPageAdminServerConfig extends LitElement {
                     : html`Update
                       available${r.current_branch && r.current_branch !== 'main'
                         ? html` on <code>${r.current_branch}</code>`
-                        : nothing}
-                      &mdash; ${r.commits_behind} new commit${r.commits_behind === 1 ? '' : 's'}`}
+                        : nothing}${r.commits_behind != null
+                        ? html` &mdash; ${r.commits_behind} new
+                          commit${r.commits_behind === 1 ? '' : 's'}`
+                        : nothing}`}
                 </div>
                 ${r.tier === 'binary'
                   ? html`
