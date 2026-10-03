@@ -2273,37 +2273,28 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 	}
 }
 
-// dedupeSkillReferences collapses skill references that share both URI and
-// As (the install name), following the precedence used when skills are
-// installed (agent.SkillScopeRank, as in deduplicateByDestName): a later
-// entry replaces the current one only if its scope ranks at least as high, so
-// a tie goes to the later entry, and the survivor takes the position of the
-// winning occurrence. A duplicate that does not win is dropped. Dropped
-// entries would lose at install time anyway and the winner keeps its relative
-// order against other references, so what gets installed is unchanged.
-// References with the same URI but different As are distinct installs and
-// are kept.
+// dedupeSkillReferences keeps only the final occurrence of each skill
+// reference key (URI plus As) and drops earlier ones, preserving the relative
+// order of the references that remain. Downstream, the skill resolvers and
+// the provision step collapse references that share a URI last-wins, taking
+// As, Scope and Optional from the last one. The last reference for a URI is
+// always the final occurrence of its own key, so it survives and stays last
+// among that URI's references: what gets installed is unchanged. References
+// with the same URI but different As are kept as separate entries, because
+// the dedupe does not merge different install names (resolvers that resolve
+// each reference on its own install both).
 func dedupeSkillReferences(refs []api.SkillReference) []api.SkillReference {
 	if len(refs) < 2 {
 		return refs
 	}
 	type key struct{ uri, as string }
-	winner := make(map[key]int, len(refs)) // key -> index in refs of the current winner
-	removed := make([]bool, len(refs))
+	last := make(map[key]int, len(refs))
 	for i, ref := range refs {
-		k := key{ref.URI, ref.As}
-		if j, ok := winner[k]; ok {
-			if agent.SkillScopeRank(ref.Scope) < agent.SkillScopeRank(refs[j].Scope) {
-				removed[i] = true
-				continue
-			}
-			removed[j] = true
-		}
-		winner[k] = i
+		last[key{ref.URI, ref.As}] = i
 	}
-	out := make([]api.SkillReference, 0, len(winner))
+	out := make([]api.SkillReference, 0, len(last))
 	for i, ref := range refs {
-		if !removed[i] {
+		if last[key{ref.URI, ref.As}] == i {
 			out = append(out, ref)
 		}
 	}

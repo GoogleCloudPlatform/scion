@@ -337,12 +337,6 @@ var scopeRank = map[string]int{
 	"project":  5,
 }
 
-// SkillScopeRank returns the destination-name collision precedence of a skill
-// scope (higher wins). Unknown scopes rank with the unset scope.
-func SkillScopeRank(scope string) int {
-	return scopeRank[scope]
-}
-
 // SkillCollisionEntry records a single destination-name collision that was
 // resolved during skill installation. Persisted in resolved-skills.json.
 type SkillCollisionEntry struct {
