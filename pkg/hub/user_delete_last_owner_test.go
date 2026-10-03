@@ -423,6 +423,187 @@ func TestDeleteUser_ConcurrentBindingChangeAbortsWithConflict(t *testing.T) {
 	}
 }
 
+// bindingSwapStore simulates a members-API role change on project `other`
+// that commits between the guard's binding list and the cascade
+// (ptone/scion#2770 review r2 M1/L2, PG READ COMMITTED). It fires inside
+// the delete transaction on the first binding delete issued for the target,
+// whether by ID or by principal, so it models a commit before the cascade
+// starts on both the count-only and the set-check implementations.
+//   - mode "transfer": TransferOwnership(other -> target). The target's
+//     member binding is replaced by an owner binding, and the previous
+//     owner's (bob's) owner binding is replaced by a member binding. The
+//     target's binding count is unchanged.
+//   - mode "revoke": the target's member binding on `other` is removed.
+type bindingSwapStore struct {
+	store.Store
+	target, bob, other string
+	mode               string
+	injected           bool
+}
+
+func (c *bindingSwapStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return c.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&bindingSwapTx{Store: tx, parent: c})
+	})
+}
+
+type bindingSwapTx struct {
+	store.Store
+	parent *bindingSwapStore
+}
+
+func (c *bindingSwapTx) inject(ctx context.Context) error {
+	p := c.parent
+	if p.injected {
+		return nil
+	}
+	p.injected = true
+	ownerRD, err := c.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	if err != nil {
+		return err
+	}
+	memberRD, err := c.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	if err != nil {
+		return err
+	}
+	bs, err := c.ListRoleBindingsForScope(ctx, store.RoleScopeProject, p.other)
+	if err != nil {
+		return err
+	}
+	for _, b := range bs {
+		if b.PrincipalID == p.target || (p.mode == "transfer" && b.PrincipalID == p.bob) {
+			if err := c.Store.DeleteRoleBinding(ctx, b.ID); err != nil {
+				return err
+			}
+		}
+	}
+	if p.mode != "transfer" {
+		return nil
+	}
+	for _, nb := range []struct{ who, rd string }{{p.target, ownerRD.ID}, {p.bob, memberRD.ID}} {
+		if _, err := c.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: nb.rd, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: nb.who,
+			ScopeType: store.RoleScopeProject, ScopeID: p.other, CreatedBy: "concurrent-transfer",
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *bindingSwapTx) DeleteRoleBinding(ctx context.Context, id string) error {
+	if err := c.inject(ctx); err != nil {
+		return err
+	}
+	return c.Store.DeleteRoleBinding(ctx, id)
+}
+
+func (c *bindingSwapTx) DeleteRoleBindingsForPrincipal(ctx context.Context, principalType, principalID string) (int, error) {
+	if principalID == c.parent.target {
+		if err := c.inject(ctx); err != nil {
+			return 0, err
+		}
+	}
+	return c.Store.DeleteRoleBindingsForPrincipal(ctx, principalType, principalID)
+}
+
+// projectOwnerIDs returns the principal IDs of every project-owner binding
+// on projectID.
+func projectOwnerIDs(t *testing.T, s store.Store, projectID string) []string {
+	t.Helper()
+	ctx := context.Background()
+	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	bs, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, projectID)
+	require.NoError(t, err)
+	var ids []string
+	for _, b := range bs {
+		if b.RoleDefinitionID == ownerRD.ID {
+			ids = append(ids, b.PrincipalID)
+		}
+	}
+	return ids
+}
+
+// setupBindingSwap prepares, for each delete path, a target that co-owns
+// `project` with bob (users path) or is an invited member of it
+// (allow-list path), plus a member binding on `other`, which bob solely
+// owns and the guard therefore never locks or checks.
+func setupBindingSwap(t *testing.T, path string) (srv *Server, s store.Store, target, bob *store.User, other *store.Project, url string) {
+	t.Helper()
+	srv, s, alice, bob, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+	addProjectOwner(t, srv, s, alice, bob, project.ID)
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	target, url = alice, "/api/v1/users/"+alice.ID
+	if path == "allow-list" {
+		target = newInvitedUser(t, s, "user-carol", "carol@test.com")
+		url = "/api/v1/admin/allow-list/" + target.Email
+	}
+	other = newTestProject(t, s, "project-other", "Other Project")
+	createOwnerBinding(t, s, bob.ID, other.ID, nil, nil)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: target.ID,
+		ScopeType: store.RoleScopeProject, ScopeID: other.ID, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+	return srv, s, target, bob, other, url
+}
+
+// A concurrent TransferOwnership of an unchecked project to the target swaps
+// one of its bindings for another, keeping the count equal. The delete must
+// abort with 409 and change nothing, rather than delete the new owner binding
+// and leave the project with no owner (ptone/scion#2770 review r2 M1/L2).
+func TestDeleteUser_ConcurrentBindingSwapAbortsWithConflict(t *testing.T) {
+	for _, path := range []string{"users", "allow-list"} {
+		t.Run(path, func(t *testing.T) {
+			srv, s, target, bob, other, url := setupBindingSwap(t, path)
+			ctx := context.Background()
+
+			raced := &bindingSwapStore{Store: s, target: target.ID, bob: bob.ID, other: other.ID, mode: "transfer"}
+			srv.store = raced
+			rec := doRequest(t, srv, http.MethodDelete, url, nil)
+			srv.store = s
+			require.True(t, raced.injected, "precondition: the concurrent transfer was injected")
+			requireConflictRetry(t, rec)
+
+			_, err := s.GetUser(ctx, target.ID)
+			require.NoError(t, err, "aborted delete must keep the user")
+			// The rollback also undoes the injected transfer: the target
+			// keeps its member binding and bob stays the sole owner.
+			assert.Equal(t, []string{bob.ID}, projectOwnerIDs(t, s, other.ID),
+				"aborted delete must not leave the project without an owner")
+			after := allBindingsFor(t, s, target.ID)
+			assert.NotEmpty(t, after, "aborted delete must keep the target's bindings")
+		})
+	}
+}
+
+// A listed binding revoked concurrently (only possible on a project the
+// target does not own) is ignored by the cascade: the delete succeeds instead
+// of returning a false conflict (ptone/scion#2770 review r2 N3).
+func TestDeleteUser_ConcurrentBindingRevokeStillDeletes(t *testing.T) {
+	for _, path := range []string{"users", "allow-list"} {
+		t.Run(path, func(t *testing.T) {
+			srv, s, target, bob, other, url := setupBindingSwap(t, path)
+			ctx := context.Background()
+
+			raced := &bindingSwapStore{Store: s, target: target.ID, bob: bob.ID, other: other.ID, mode: "revoke"}
+			srv.store = raced
+			rec := doRequest(t, srv, http.MethodDelete, url, nil)
+			srv.store = s
+			require.True(t, raced.injected, "precondition: the concurrent revoke was injected")
+			require.Less(t, rec.Code, 300, rec.Body.String())
+
+			_, err := s.GetUser(ctx, target.ID)
+			require.ErrorIs(t, err, store.ErrNotFound)
+			assert.Empty(t, allBindingsFor(t, s, target.ID))
+			assert.Equal(t, []string{bob.ID}, projectOwnerIDs(t, s, other.ID))
+		})
+	}
+}
+
 // missingOwnerRoleTxStore makes the guard's project-owner role lookup return
 // store.ErrNotFound inside the delete transaction.
 type missingOwnerRoleTxStore struct{ store.Store }

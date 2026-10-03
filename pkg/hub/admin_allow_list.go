@@ -142,7 +142,7 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 	// DELETE /api/v1/users/{id} (ptone/scion#2598): an invited user may hold
 	// bindings if they were pre-added to a project.
 	err = s.store.WithTx(r.Context(), func(tx store.Store) error {
-		if err := guardAndCascadeUserRoleBindingsTx(r.Context(), tx, existingUser.ID, time.Now()); err != nil {
+		if err := guardAndCascadeUserRoleBindingsTx(r.Context(), tx, existingUser.ID, s.membershipNow()); err != nil {
 			return err
 		}
 		if err := tx.DeleteUser(r.Context(), existingUser.ID); err != nil {

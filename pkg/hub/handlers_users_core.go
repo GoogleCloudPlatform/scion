@@ -1177,8 +1177,9 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		// Last-project-owner guard plus role-binding cascade
 		// (ptone/scion#2598). Runs before the user row is deleted, in the
 		// same transaction; a concurrent change to the user's bindings
-		// aborts the delete with 409 conflict.
-		if err := guardAndCascadeUserRoleBindingsTx(ctx, tx, user.ID, time.Now()); err != nil {
+		// that commits before the cascade aborts the delete with 409
+		// conflict (residual race: ptone/scion#2769).
+		if err := guardAndCascadeUserRoleBindingsTx(ctx, tx, user.ID, s.membershipNow()); err != nil {
 			return err
 		}
 
@@ -1271,14 +1272,21 @@ func writeLastProjectOwnerDeleteError(w http.ResponseWriter, e *lastProjectOwner
 //
 // The binding list is read before any lock, so a binding granted to userID
 // concurrently (for example a new owner binding on a project that was never
-// locked or checked) is not seen by the guard. The cascade is a predicate
-// delete by principal, so it would remove such a binding too. To keep that
-// from silently orphaning a project, the number of rows the cascade deletes
-// is compared with the number of listed bindings: on a mismatch the function
-// returns errUserRoleBindingsChanged and the caller rolls back the whole
-// transaction (409 conflict, retry). What is guaranteed is therefore: a
-// concurrent change to the user's bindings aborts the delete with 409; it
-// never deletes a binding the guard did not see.
+// locked or checked, or the owner half of a TransferOwnership-style swap) is
+// not seen by the guard. The cascade therefore checks the set, not a count:
+// it first deletes each listed binding by ID (a listed binding that is
+// already gone was revoked concurrently; that is harmless, because every
+// project the user owns is locked, so it is ignored), then runs a predicate
+// delete by principal, which must remove nothing. If it removes any row, a
+// binding the guard did not check was committed in the meantime; the
+// function returns errUserRoleBindingsChanged and the caller rolls back the
+// whole transaction (409 conflict, retry).
+//
+// What is guaranteed: a concurrent change to the user's bindings that
+// commits before the predicate delete aborts the delete with 409. A grant
+// that commits after that statement but before the delete transaction
+// commits is not detected and can leave a stale binding on the deleted user;
+// that residual race is tracked in ptone/scion#2769.
 //
 // On denial it returns *lastProjectOwnerDeleteError listing every affected
 // project. role_bindings.principal_id has no foreign key, so without the
@@ -1336,21 +1344,33 @@ func guardAndCascadeUserRoleBindingsTx(ctx context.Context, tx store.Store, user
 		return &lastProjectOwnerDeleteError{projects: orphaned}
 	}
 
-	// Always run the cascade, even when the list was empty, so a binding
-	// granted concurrently after the list is detected by the count check.
+	// Delete the listed bindings by ID, then require the predicate delete to
+	// find nothing: any row it removes is a binding the guard never saw.
+	// Always run the predicate delete, even when the list was empty, so a
+	// binding granted concurrently after the list is detected.
+	for _, b := range bindings {
+		if err := tx.DeleteRoleBinding(ctx, b.ID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// Revoked concurrently; it can only be on a project the
+				// user does not own (owned projects are locked above).
+				continue
+			}
+			return fmt.Errorf("delete role binding %s: %w", b.ID, err)
+		}
+	}
 	n, err := tx.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		return fmt.Errorf("delete role bindings: %w", err)
 	}
-	if n != len(bindings) {
-		return fmt.Errorf("%w: listed %d, deleted %d", errUserRoleBindingsChanged, len(bindings), n)
+	if n != 0 {
+		return fmt.Errorf("%w: %d unlisted binding(s) found", errUserRoleBindingsChanged, n)
 	}
 	return nil
 }
 
 // errUserRoleBindingsChanged is returned by guardAndCascadeUserRoleBindingsTx
-// when the cascade deletes a different number of bindings than the guard
-// listed, meaning the user's bindings changed concurrently. Callers map it to
+// when the cascade finds a binding the guard did not list, meaning the
+// user's bindings changed concurrently. Callers map it to
 // 409 conflict; the transaction rolls back so nothing is deleted.
 var errUserRoleBindingsChanged = errors.New("the user's role bindings changed concurrently; retry")
 
@@ -1358,4 +1378,14 @@ var errUserRoleBindingsChanged = errors.New("the user's role bindings changed co
 // errUserRoleBindingsChanged.
 func writeUserRoleBindingsChangedError(w http.ResponseWriter) {
 	writeError(w, http.StatusConflict, ErrCodeConflict, errUserRoleBindingsChanged.Error(), nil)
+}
+
+// membershipNow returns the membership service clock, so the delete guard
+// and the members API agree on which bindings are active, including under an
+// injected clock. It falls back to the wall clock if the service is unset.
+func (s *Server) membershipNow() time.Time {
+	if s.membershipService != nil && s.membershipService.nowFunc != nil {
+		return s.membershipService.nowFunc()
+	}
+	return time.Now()
 }
