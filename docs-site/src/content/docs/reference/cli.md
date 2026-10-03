@@ -63,13 +63,17 @@ starting a **stopped** or **error** agent runs a fresh session. See
     - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). Defaults to `project`. See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--notify`: Get notified via the browser or system when the spawned agent reaches a terminal state.
     - `--no-wait`: *(Hub mode)* Return as soon as the Hub accepts the launch instead of waiting for the agent to reach `running`. Ignored with `--attach`.
-    - `--wait-timeout <duration>`: *(Hub mode)* How long to wait for the agent to start (for example `10m`). The default is the Hub's remaining launch budget plus 30 seconds, or 5 minutes when the Hub does not advertise one. Raise it if the Hub's launch timeout has been raised.
+    - `--wait-timeout <duration>`: *(Hub mode)* How long to wait for the agent to start (for example `10m`); must not be negative. The default is the Hub's remaining launch budget plus 30 seconds, or 5 minutes when the Hub does not advertise one. Raise it if the Hub's launch timeout has been raised.
 
-In Hub mode, `start` waits until the agent is running and prints each launch
-step to stderr (nothing extra under `--format json`). If the wait times out, or
-you press Ctrl-C, only the wait stops: the launch continues on the Hub, and
-re-running `scion start <agent-name>` resumes waiting. Ctrl-C exits with status
-130; a failed launch or a timeout exits 1. If the agent's create did not
+In Hub mode, `start` waits for the agent to reach `running` when the Hub
+launches it asynchronously, after a workspace upload, or with `--attach`.
+Otherwise (for example when the Hub does not launch asynchronously) it returns
+as soon as the Hub answers, as before, possibly while the agent is still
+provisioning. While waiting, each launch step is printed to stderr (nothing
+extra under `--format json`). If the wait times out, or you press Ctrl-C, only
+the wait stops: the launch continues on the Hub, and re-running
+`scion start <agent-name>` resumes waiting. Ctrl-C exits with status 130 and
+SIGTERM with 143; a failed launch or a timeout exits 1. If the agent's create did not
 complete (for example the image could not be pulled), the error shows the
 stored template and task; recreate the agent with `scion delete <agent-name>`
 followed by `scion start`.

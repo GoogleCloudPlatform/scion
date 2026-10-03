@@ -19,16 +19,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -94,16 +98,17 @@ func errResult(err error) func() (*hubclient.Agent, error) {
 }
 
 func TestWaitForAgentLaunch_RunningPrintsProgress(t *testing.T) {
+	shortenLaunchWaitTimings(t)
 	seq := &agentSequence{results: []func() (*hubclient.Agent, error){
-		agentResult(&hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("pod_create", 200, nil)}),
-		agentResult(&hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("pod_create", 198, nil)}),
+		agentResult(&hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("pod_create", 2, nil)}),
+		agentResult(&hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("pod_create", 2, nil)}),
 		errResult(errors.New("connection reset")), // transient: retried
-		agentResult(&hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("image_pull", 190, nil)}),
+		agentResult(&hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("image_pull", 2, nil)}),
 		agentResult(&hubclient.Agent{ID: "id-1", Phase: "running", Activity: "working"}),
 	}}
 	var out bytes.Buffer
 	a, err := waitForAgentLaunch(context.Background(), launchWaitOptions{
-		AgentName: "a1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 10 * time.Second, Progress: &out,
+		AgentName: "a1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 3 * time.Second, Progress: &out,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, a)
@@ -113,6 +118,7 @@ func TestWaitForAgentLaunch_RunningPrintsProgress(t *testing.T) {
 }
 
 func TestWaitForAgentLaunch_SilentWithoutProgressWriter(t *testing.T) {
+	shortenLaunchWaitTimings(t)
 	seq := &agentSequence{results: []func() (*hubclient.Agent, error){
 		agentResult(&hubclient.Agent{Phase: "running"}),
 	}}
@@ -124,6 +130,7 @@ func TestWaitForAgentLaunch_SilentWithoutProgressWriter(t *testing.T) {
 }
 
 func TestWaitForAgentLaunch_TerminalStates(t *testing.T) {
+	shortenLaunchWaitTimings(t)
 	tests := []struct {
 		name           string
 		agent          *hubclient.Agent
@@ -166,6 +173,15 @@ func TestWaitForAgentLaunch_TerminalStates(t *testing.T) {
 			wantContains:   []string{"(launch_timeout): launch timed out during image_pull", "scion delete a1"},
 		},
 		{
+			name: "start launch error is not an incomplete create",
+			agent: &hubclient.Agent{
+				Phase: "error", Template: "claude",
+				Launch: &hubclient.AgentLaunch{ID: "l2", State: "ended", Kind: "start", Error: "image_pull_failed", EndReason: "failed"},
+			},
+			wantContains: []string{"agent 'a1' did not start (image_pull_failed)", "scion logs a1"},
+			wantMissing:  []string{"scion delete", "create did not complete", "Template:"},
+		},
+		{
 			name:         "error without launch error",
 			agent:        &hubclient.Agent{Phase: "error", ContainerStatus: "Exited (1)"},
 			wantContains: []string{"agent 'a1' failed to start (phase: error, container: Exited (1))", "scion logs a1"},
@@ -180,11 +196,11 @@ func TestWaitForAgentLaunch_TerminalStates(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			seq := &agentSequence{results: []func() (*hubclient.Agent, error){
-				agentResult(&hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("pod_create", 100, nil)}),
+				agentResult(&hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("pod_create", 2, nil)}),
 				agentResult(tt.agent),
 			}}
 			_, err := waitForAgentLaunch(context.Background(), launchWaitOptions{
-				AgentName: "a1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 10 * time.Second,
+				AgentName: "a1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 3 * time.Second,
 			})
 			var failed *launchFailedError
 			require.ErrorAs(t, err, &failed)
@@ -202,13 +218,14 @@ func TestWaitForAgentLaunch_TerminalStates(t *testing.T) {
 }
 
 func TestWaitForAgentLaunch_Timeout(t *testing.T) {
+	shortenLaunchWaitTimings(t)
 	deadline := time.Date(2026, 10, 2, 12, 5, 0, 0, time.UTC)
 	tests := []struct {
 		name   string
 		launch *hubclient.AgentLaunch
 		want   string
 	}{
-		{"with deadline", activeLaunch("scheduling", 120, &deadline),
+		{"with deadline", activeLaunch("scheduling", 2, &deadline),
 			"agent 'a1' is still launching (deadline 2026-10-02T12:05:00Z); re-run scion start a1 to keep waiting"},
 		{"without deadline (older Hub)", nil,
 			"agent 'a1' is still launching; re-run scion start a1 to keep waiting"},
@@ -225,7 +242,7 @@ func TestWaitForAgentLaunch_Timeout(t *testing.T) {
 			var timeout *launchWaitTimeoutError
 			require.ErrorAs(t, err, &timeout)
 			assert.Equal(t, tt.want, err.Error())
-			assert.Less(t, time.Since(start), 5*time.Second)
+			assert.Less(t, time.Since(start), 2*time.Second)
 			var ec exitCoder
 			assert.False(t, errors.As(err, &ec), "a wait timeout exits 1")
 		})
@@ -233,6 +250,7 @@ func TestWaitForAgentLaunch_Timeout(t *testing.T) {
 }
 
 func TestWaitForAgentLaunch_Interrupted(t *testing.T) {
+	shortenLaunchWaitTimings(t)
 	deadline := time.Date(2026, 10, 2, 12, 5, 0, 0, time.UTC)
 	ctx, cancel := context.WithCancel(context.Background())
 	var calls int
@@ -241,10 +259,10 @@ func TestWaitForAgentLaunch_Interrupted(t *testing.T) {
 		if calls == 2 {
 			cancel() // the user presses Ctrl-C during the wait
 		}
-		return &hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("pod_create", 100, &deadline)}, nil
+		return &hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("pod_create", 2, &deadline)}, nil
 	}
 	_, err := waitForAgentLaunch(ctx, launchWaitOptions{
-		AgentName: "a1", Get: get, PollInterval: time.Millisecond, Timeout: 10 * time.Second,
+		AgentName: "a1", Get: get, PollInterval: time.Millisecond, Timeout: 3 * time.Second,
 	})
 	var interrupted *launchWaitInterruptedError
 	require.ErrorAs(t, err, &interrupted)
@@ -255,12 +273,13 @@ func TestWaitForAgentLaunch_Interrupted(t *testing.T) {
 }
 
 func TestWaitForAgentLaunch_DeletedWhileWaiting(t *testing.T) {
+	shortenLaunchWaitTimings(t)
 	seq := &agentSequence{results: []func() (*hubclient.Agent, error){
-		agentResult(&hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("", 100, nil)}),
+		agentResult(&hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("", 2, nil)}),
 		errResult(&apiclient.APIError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "agent not found"}),
 	}}
 	_, err := waitForAgentLaunch(context.Background(), launchWaitOptions{
-		AgentName: "a1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 10 * time.Second,
+		AgentName: "a1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 3 * time.Second,
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "agent 'a1' no longer exists")
@@ -280,7 +299,11 @@ func TestIncompleteCreateError(t *testing.T) {
 	assert.True(t, strings.HasPrefix(msg, apiErr.Message))
 	assert.Contains(t, msg, "Template: claude")
 	assert.Contains(t, msg, "Task: fix the tests")
-	assert.Contains(t, msg, "scion delete a1")
+	assert.Equal(t, 1, strings.Count(msg, "scion delete a1"), "the recreate hint is shown once: %q", msg)
+
+	// Without a recreate instruction in the Hub message, the CLI adds one.
+	err = incompleteCreateError("a1", &apiclient.APIError{Code: "agent_create_incomplete", Message: "create did not complete"})
+	assert.Equal(t, 1, strings.Count(err.Error(), "scion delete a1"))
 
 	_, ok = asIncompleteCreate(&apiclient.APIError{StatusCode: http.StatusConflict, Code: "conflict"})
 	assert.False(t, ok)
@@ -318,6 +341,8 @@ func (h *launchMockHub) serve(projectID, agentName string) *httptest.Server {
 			h.created = true
 			w.WriteHeader(h.createStatus)
 			_ = json.NewEncoder(w).Encode(h.createBody)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime-brokers/"+mockAttachBrokerID:
+			_ = json.NewEncoder(w).Encode(mockAttachBroker(""))
 		case r.Method == http.MethodGet && r.URL.Path == agentPath:
 			if !h.created {
 				w.WriteHeader(http.StatusNotFound) // suspend check: no agent yet
@@ -342,25 +367,41 @@ func (h *launchMockHub) serve(projectID, agentName string) *httptest.Server {
 	return srv
 }
 
+// shortenLaunchWaitTimings makes polling immediate and the derived wait
+// budgets short: slack 20ms, fallback 5s.
+func shortenLaunchWaitTimings(t *testing.T) {
+	t.Helper()
+	origPoll, origSlack, origFallback := launchPollInterval, launchWaitSlack, launchWaitFallback
+	t.Cleanup(func() {
+		launchPollInterval, launchWaitSlack, launchWaitFallback = origPoll, origSlack, origFallback
+	})
+	launchPollInterval = time.Millisecond
+	launchWaitSlack = 20 * time.Millisecond
+	launchWaitFallback = 5 * time.Second
+}
+
 func setupLaunchStartTest(t *testing.T, hub *launchMockHub) *HubContext {
 	t.Helper()
 	restore := saveAttachTestState()
-	origNoWait, origWait, origFormat, origPoll := startNoWait, startWaitTimeout, outputFormat, launchPollInterval
+	origNoWait, origWait, origFormat := startNoWait, startWaitTimeout, outputFormat
 	t.Cleanup(func() {
 		restore()
-		startNoWait, startWaitTimeout, outputFormat, launchPollInterval = origNoWait, origWait, origFormat, origPoll
+		startNoWait, startWaitTimeout, outputFormat = origNoWait, origWait, origFormat
 	})
+	shortenLaunchWaitTimings(t)
 	attach, templateName, labelFlags, runtimeBrokerID = false, "", nil, ""
 	harnessConfigFlag, harnessAuthFlag = "", ""
-	startNoWait, startWaitTimeout, outputFormat = false, 0, ""
-	launchPollInterval = time.Millisecond
+	// A short explicit wait makes an unintended wait fail fast instead of
+	// running to the default budget. Tests of the derived budget set it to 0.
+	startNoWait, startWaitTimeout, outputFormat = false, 3*time.Second, ""
 
-	const projectID = "proj-launch"
-	srv := hub.serve(projectID, "a1")
+	srv := hub.serve(launchTestProjectID, "a1")
 	client, err := hubclient.New(srv.URL)
 	require.NoError(t, err)
-	return &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
+	return &HubContext{Client: client, Endpoint: srv.URL, ProjectID: launchTestProjectID}
 }
+
+const launchTestProjectID = "proj-launch"
 
 func TestStartAgentViaHub_SendsOptInAndOldHubSyncAnswerUnchanged(t *testing.T) {
 	// An old Hub (or one with async launch off) ignores the opt-in and
@@ -401,7 +442,7 @@ func TestStartAgentViaHub_EndedLaunchIsSynchronous(t *testing.T) {
 
 func asyncCreateResponse(warnings ...string) hubclient.CreateAgentResponse {
 	return hubclient.CreateAgentResponse{
-		Agent:    &hubclient.Agent{ID: "id-1", Slug: "a1", Name: "a1", Phase: "provisioning", Launch: activeLaunch("", 300, nil)},
+		Agent:    &hubclient.Agent{ID: "id-1", Slug: "a1", Name: "a1", Phase: "provisioning", Launch: activeLaunch("", 2, nil)},
 		Warnings: warnings,
 	}
 }
@@ -409,7 +450,7 @@ func asyncCreateResponse(warnings ...string) hubclient.CreateAgentResponse {
 func TestStartAgentViaHub_AsyncWaitsUntilRunning(t *testing.T) {
 	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
 		afterCreate: []interface{}{
-			hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning", Launch: activeLaunch("pod_create", 290, nil)},
+			hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning", Launch: activeLaunch("pod_create", 2, nil)},
 			hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running", Activity: "working"},
 		}}
 	hubCtx := setupLaunchStartTest(t, hub)
@@ -426,18 +467,19 @@ func TestStartAgentViaHub_AsyncWaitsUntilRunning(t *testing.T) {
 }
 
 func TestStartAgentViaHub_AsyncFailure(t *testing.T) {
-	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
+	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse("broker is near capacity"),
 		afterCreate: []interface{}{
 			hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "error", Template: "claude",
 				Launch: &hubclient.AgentLaunch{ID: "l1", State: "ended", Kind: "create", Error: "unschedulable"}},
 		}}
 	hubCtx := setupLaunchStartTest(t, hub)
 	var err error
-	_ = captureStderr(t, func() {
+	stderr := captureStderr(t, func() {
 		_ = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
 	})
 	var failed *launchFailedError
 	require.ErrorAs(t, err, &failed)
+	assert.Contains(t, stderr, "Warning: broker is near capacity", "warnings are printed when the wait fails")
 	assert.Contains(t, err.Error(), "create did not complete (unschedulable)")
 	assert.Contains(t, err.Error(), "scion delete a1")
 }
@@ -479,7 +521,7 @@ func TestStartAgentViaHub_NoWaitReturnsAfterAdmission(t *testing.T) {
 func TestStartAgentViaHub_WaitTimeout(t *testing.T) {
 	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
 		afterCreate: []interface{}{
-			hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning", Launch: activeLaunch("scheduling", 250, nil)},
+			hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning", Launch: activeLaunch("scheduling", 2, nil)},
 		}}
 	hubCtx := setupLaunchStartTest(t, hub)
 	startWaitTimeout = 50 * time.Millisecond
@@ -511,13 +553,14 @@ func TestStartAgentViaHub_CreateIncomplete409(t *testing.T) {
 	assert.Contains(t, err.Error(), "Template: claude")
 	assert.Contains(t, err.Error(), "Task: fix the tests")
 	assert.NotContains(t, err.Error(), "scion hub disable")
+	assert.Equal(t, 1, strings.Count(err.Error(), "scion delete a1"))
 	assert.Equal(t, 0, hub.getsAfterCR)
 }
 
 func TestStartAgentViaHub_JSONOutputStaysClean(t *testing.T) {
 	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
 		afterCreate: []interface{}{
-			hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning", Launch: activeLaunch("pod_create", 290, nil)},
+			hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning", Launch: activeLaunch("pod_create", 2, nil)},
 			hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running"},
 		}}
 	hubCtx := setupLaunchStartTest(t, hub)
@@ -544,7 +587,7 @@ func TestAttachViaHub_LaunchingAgentHint(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == agentPath:
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{
 				ID: "id-1", Name: agentName, Phase: "provisioning", RuntimeBrokerID: mockAttachBrokerID,
-				Launch: activeLaunch("image_pull", 100, nil),
+				Launch: activeLaunch("image_pull", 2, nil),
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime-brokers/"+mockAttachBrokerID:
 			_ = json.NewEncoder(w).Encode(mockAttachBroker(""))
@@ -560,4 +603,190 @@ func TestAttachViaHub_LaunchingAgentHint(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "agent 'a1' is still launching (phase: provisioning, step: image_pull)")
 	assert.Contains(t, err.Error(), "scion start a1 --attach")
+}
+
+func TestWaitForAgentLaunch_BudgetFromFirstFetch(t *testing.T) {
+	// With no explicit timeout and no create answer to seed the budget, the
+	// first fetched agent's remainingSeconds sets it: 0s + slack (20ms).
+	shortenLaunchWaitTimings(t)
+	get := func(context.Context) (*hubclient.Agent, error) {
+		return &hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("scheduling", 0, nil)}, nil
+	}
+	start := time.Now()
+	_, err := waitForAgentLaunch(context.Background(), launchWaitOptions{AgentName: "a1", Get: get})
+	var timeout *launchWaitTimeoutError
+	require.ErrorAs(t, err, &timeout)
+	assert.Less(t, time.Since(start), 2*time.Second, "budget must come from the fetched agent, not the fallback")
+}
+
+func TestWaitForAgentLaunch_SIGTERMIsNotAnInterrupt(t *testing.T) {
+	shortenLaunchWaitTimings(t)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	get := func(context.Context) (*hubclient.Agent, error) {
+		cancel(waitSignalCause{sig: syscall.SIGTERM})
+		return &hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("pod_create", 2, nil)}, nil
+	}
+	_, err := waitForAgentLaunch(ctx, launchWaitOptions{AgentName: "a1", Get: get, PollInterval: time.Millisecond, Timeout: 3 * time.Second})
+	var interrupted *launchWaitInterruptedError
+	require.ErrorAs(t, err, &interrupted)
+	assert.True(t, strings.HasPrefix(err.Error(), "terminated while waiting; agent 'a1' is still launching"), err.Error())
+	assert.Equal(t, 143, exitCodeFor(err))
+
+	// SIGINT recorded as the cause is a plain interrupt.
+	ctx2, cancel2 := context.WithCancelCause(context.Background())
+	cancel2(waitSignalCause{sig: os.Interrupt})
+	_, err = waitForAgentLaunch(ctx2, launchWaitOptions{AgentName: "a1", Get: get, PollInterval: time.Millisecond, Timeout: 3 * time.Second})
+	assert.True(t, strings.HasPrefix(err.Error(), "stopped waiting;"), err.Error())
+	assert.Equal(t, 130, exitCodeFor(err))
+}
+
+func TestExitCodeFor(t *testing.T) {
+	assert.Equal(t, 1, exitCodeFor(errors.New("boom")))
+	assert.Equal(t, 130, exitCodeFor(fmt.Errorf("start: %w", &launchWaitInterruptedError{Agent: "a1"})))
+	assert.Equal(t, 143, exitCodeFor(fmt.Errorf("start: %w", &launchWaitInterruptedError{Agent: "a1", Signal: syscall.SIGTERM})))
+	assert.Equal(t, 1, exitCodeFor(&launchWaitTimeoutError{Agent: "a1"}))
+	assert.Equal(t, 1, exitCodeFor(&launchFailedError{Agent: "a1"}))
+}
+
+func TestValidateLaunchWaitFlags(t *testing.T) {
+	orig := startWaitTimeout
+	t.Cleanup(func() { startWaitTimeout = orig })
+	for _, d := range []time.Duration{0, time.Second, 10 * time.Minute} {
+		startWaitTimeout = d
+		assert.NoError(t, validateLaunchWaitFlags())
+	}
+	startWaitTimeout = -time.Second
+	err := validateLaunchWaitFlags()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--wait-timeout must not be negative")
+}
+
+// finalizeCreateResponse is a create answer for a workspace upload: the Hub
+// dispatches the start only on finalize, so the answer predates it.
+func finalizeCreateResponse(launch *hubclient.AgentLaunch) *hubclient.CreateAgentResponse {
+	return &hubclient.CreateAgentResponse{
+		Agent: &hubclient.Agent{ID: "id-1", Slug: "a1", Name: "a1", Phase: "created", Launch: launch},
+	}
+}
+
+func TestFinishHubStart_FinalizeWaitsOnOldHub(t *testing.T) {
+	hub := &launchMockHub{t: t, created: true, afterCreate: []interface{}{
+		hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning"},
+		hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running"},
+	}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	var err error
+	stderr := captureStderr(t, func() {
+		_ = captureStdout(t, func() {
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, finalizeCreateResponse(nil), true)
+		})
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, hub.getsAfterCR, "a finalize dispatches the start, so the CLI waits")
+	assert.Contains(t, stderr, "Agent 'a1' started via Hub.")
+	assert.Contains(t, stderr, "Phase: running")
+}
+
+func TestFinishHubStart_FinalizeBudgetFromFirstGet(t *testing.T) {
+	// The create answer advertises 3s, but it predates the finalize; the
+	// budget comes from the first GET (0s + 20ms slack).
+	hub := &launchMockHub{t: t, created: true, afterCreate: []interface{}{
+		hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning", Launch: activeLaunch("scheduling", 0, nil)},
+	}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	startWaitTimeout = 0
+	var err error
+	start := time.Now()
+	_ = captureStderr(t, func() {
+		_ = captureStdout(t, func() {
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, finalizeCreateResponse(activeLaunch("", 3, nil)), true)
+		})
+	})
+	var timeout *launchWaitTimeoutError
+	require.ErrorAs(t, err, &timeout)
+	assert.Less(t, time.Since(start), 2*time.Second)
+}
+
+func TestFinishHubStart_FinalizeNoWaitReportsCurrentPhase(t *testing.T) {
+	hub := &launchMockHub{t: t, created: true, afterCreate: []interface{}{
+		hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning"},
+	}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	startNoWait = true
+	var err error
+	stderr := captureStderr(t, func() {
+		_ = captureStdout(t, func() {
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, finalizeCreateResponse(nil), true)
+		})
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, hub.getsAfterCR)
+	assert.Contains(t, stderr, "Agent 'a1' accepted by Hub and launching.")
+	assert.Contains(t, stderr, "Phase: provisioning")
+	assert.NotContains(t, stderr, "Phase: created")
+	assert.NotContains(t, stderr, "started via Hub")
+}
+
+func TestFinishHubStart_FinalizeNoWaitFetchFailsOmitsPhase(t *testing.T) {
+	hub := &launchMockHub{t: t, created: true} // GETs answer 500
+	hubCtx := setupLaunchStartTest(t, hub)
+	startNoWait = true
+	outputFormat = "json"
+	var err error
+	var stdout string
+	_ = captureStderr(t, func() {
+		stdout = captureStdout(t, func() {
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, finalizeCreateResponse(nil), true)
+		})
+	})
+	require.NoError(t, err)
+	var result ActionResult
+	require.NoError(t, json.Unmarshal([]byte(stdout), &result))
+	assert.Equal(t, "Agent 'a1' accepted by Hub and launching.", result.Message)
+	_, hasPhase := result.Details["phase"]
+	assert.False(t, hasPhase, "a stale phase is not reported")
+}
+
+func TestStartAgentViaHub_AttachOverridesNoWait(t *testing.T) {
+	clearAppTokenSources(t)
+	orig := resolveAttachTransportFn
+	resolveAttachTransportFn = func() (transportauth.TokenSource, transportauth.HeaderMode, error) {
+		return nil, transportauth.HeaderAuthorization, nil
+	}
+	t.Cleanup(func() { resolveAttachTransportFn = orig })
+
+	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
+		afterCreate: []interface{}{
+			hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running", RuntimeBrokerID: mockAttachBrokerID},
+		}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	attach, startNoWait = true, true
+	var err error
+	_ = captureStderr(t, func() {
+		_ = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
+	})
+	// The attach step itself stops at the token gate in this test.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no access token found for Hub")
+	assert.Equal(t, 1, hub.getsAfterCR, "--attach waits for running even with --no-wait")
+}
+
+func TestStartAgentViaHub_AttachWithJSONDoesNotWait(t *testing.T) {
+	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: hubclient.CreateAgentResponse{
+		Agent: &hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning"},
+	}, afterCreate: []interface{}{
+		hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running"},
+	}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	attach, outputFormat = true, "json"
+	var err error
+	var stdout string
+	_ = captureStderr(t, func() {
+		stdout = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, hub.getsAfterCR, "JSON output returns after the JSON document, without waiting")
+	var result ActionResult
+	require.NoError(t, json.Unmarshal([]byte(stdout), &result))
+	assert.Equal(t, "provisioning", result.Details["phase"])
 }

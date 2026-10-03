@@ -19,7 +19,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -33,11 +36,10 @@ import (
 // an active launch; the CLI then polls GET agent until the agent is running
 // or the launch has failed.
 
-// launchPollInterval is how often the agent is fetched while waiting. It is
-// a variable so tests can shorten it.
-var launchPollInterval = 2 * time.Second
-
-const (
+// The wait timings are variables so tests can shorten them.
+var (
+	// launchPollInterval is how often the agent is fetched while waiting.
+	launchPollInterval = 2 * time.Second
 	// launchWaitSlack is added to the Hub-advertised remaining launch budget
 	// to form the default wait. It covers the Hub's reaper interval, the
 	// poll interval and clock skew, so the wait outlasts the Hub's own
@@ -46,6 +48,9 @@ const (
 	// launchWaitFallback is the default wait when the Hub does not advertise
 	// a launch budget (older Hub, async launch disabled, no active launch).
 	launchWaitFallback = 5 * time.Minute
+)
+
+const (
 	// launchFetchTimeout bounds one GET agent while waiting.
 	launchFetchTimeout = 30 * time.Second
 
@@ -53,8 +58,10 @@ const (
 	// agent whose create launch stopped or failed before the agent ran.
 	errCodeAgentCreateIncomplete = "agent_create_incomplete"
 
-	// exitCodeInterrupted is the conventional exit status after SIGINT.
+	// exitCodeInterrupted and exitCodeTerminated are the conventional exit
+	// statuses after SIGINT and SIGTERM (128 + signal number).
 	exitCodeInterrupted = 130
+	exitCodeTerminated  = 143
 )
 
 // Flags shared by `scion start` and `scion resume`.
@@ -62,6 +69,14 @@ var (
 	startNoWait      bool
 	startWaitTimeout time.Duration
 )
+
+// validateLaunchWaitFlags rejects invalid --no-wait / --wait-timeout values.
+func validateLaunchWaitFlags() error {
+	if startWaitTimeout < 0 {
+		return fmt.Errorf("--wait-timeout must not be negative (got %s)", startWaitTimeout)
+	}
+	return nil
+}
 
 // exitCoder is implemented by errors that request a specific process exit
 // status. Execute uses it; every other error exits 1.
@@ -174,7 +189,7 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 		select {
 		case <-waitCtx.Done():
 			if ctx.Err() != nil {
-				return last, &launchWaitInterruptedError{Agent: o.AgentName, Deadline: launchDeadline(last)}
+				return last, &launchWaitInterruptedError{Agent: o.AgentName, Deadline: launchDeadline(last), Signal: waitSignalOf(ctx)}
 			}
 			return last, &launchWaitTimeoutError{Agent: o.AgentName, Deadline: launchDeadline(last)}
 		case <-ticker.C:
@@ -307,6 +322,10 @@ func (e *launchFailedError) Error() string {
 			fmt.Fprintf(&b, "\nTask: %s", e.Task)
 		}
 	}
+	if strings.Contains(e.Reason, "scion delete") {
+		// The Hub's message already carries the recreate instruction.
+		return b.String()
+	}
 	fmt.Fprintf(&b, "\n\nThe create did not complete. Recreate the agent with:\n  scion delete %s\n  scion start %s ... (with the same template and task)", e.Agent, e.Agent)
 	return b.String()
 }
@@ -323,19 +342,67 @@ func (e *launchWaitTimeoutError) Error() string {
 		e.Agent, deadlineSuffix(e.Deadline), e.Agent)
 }
 
-// launchWaitInterruptedError is returned when the user interrupts the wait.
-// Only the wait stops; the launch continues on the Hub.
+// launchWaitInterruptedError is returned when the wait is stopped by a
+// signal (Ctrl-C or SIGTERM) or a cancelled context. Only the wait stops;
+// the launch continues on the Hub.
 type launchWaitInterruptedError struct {
 	Agent    string
 	Deadline *time.Time
+	// Signal is the signal that stopped the wait; nil means SIGINT or a
+	// plain cancellation.
+	Signal os.Signal
 }
 
 func (e *launchWaitInterruptedError) Error() string {
-	return fmt.Sprintf("stopped waiting; agent '%s' is still launching%s; re-run scion start %s to keep waiting",
-		e.Agent, deadlineSuffix(e.Deadline), e.Agent)
+	what := "stopped waiting"
+	if e.Signal == syscall.SIGTERM {
+		what = "terminated while waiting"
+	}
+	return fmt.Sprintf("%s; agent '%s' is still launching%s; re-run scion start %s to keep waiting",
+		what, e.Agent, deadlineSuffix(e.Deadline), e.Agent)
 }
 
-func (e *launchWaitInterruptedError) ExitCode() int { return exitCodeInterrupted }
+func (e *launchWaitInterruptedError) ExitCode() int {
+	if e.Signal == syscall.SIGTERM {
+		return exitCodeTerminated
+	}
+	return exitCodeInterrupted
+}
+
+// waitSignalCause is the cancellation cause recorded by signalWaitContext.
+type waitSignalCause struct{ sig os.Signal }
+
+func (c waitSignalCause) Error() string { return "received " + c.sig.String() }
+
+// waitSignalOf returns the signal that cancelled ctx, or nil.
+func waitSignalOf(ctx context.Context) os.Signal {
+	var c waitSignalCause
+	if errors.As(context.Cause(ctx), &c) {
+		return c.sig
+	}
+	return nil
+}
+
+// signalWaitContext returns a context cancelled by SIGINT or SIGTERM, with
+// the signal recorded as the cause. stop releases the signal handler.
+func signalWaitContext() (ctx context.Context, stop func()) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case sig := <-ch:
+			cancel(waitSignalCause{sig: sig})
+		case <-done:
+		}
+	}()
+	return ctx, func() {
+		signal.Stop(ch)
+		close(done)
+		cancel(nil)
+	}
+}
 
 func deadlineSuffix(d *time.Time) string {
 	if d == nil || d.IsZero() {
