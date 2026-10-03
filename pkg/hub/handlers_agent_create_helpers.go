@@ -249,8 +249,8 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// Populate GitClone config for git-anchored projects (per-agent clone mode).
 	// Shared-workspace git projects skip clone — agents mount the shared workspace instead.
 	if project != nil && project.GitRemote != "" && !project.IsSharedWorkspace() {
-		cloneURL := resolveCloneURL(project.Labels["scion.dev/clone-url"], project.GitRemote)
-		defaultBranch := project.Labels["scion.dev/default-branch"]
+		cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+		defaultBranch := project.Labels[store.LabelDefaultBranch]
 		if defaultBranch == "" {
 			defaultBranch = "main"
 		}
@@ -280,7 +280,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// For shared-workspace git projects, default the branch to the project's
 	// default branch (the workspace's current branch) instead of the agent slug.
 	if project != nil && project.IsSharedWorkspace() && agent.AppliedConfig.Branch == "" {
-		defaultBranch := project.Labels["scion.dev/default-branch"]
+		defaultBranch := project.Labels[store.LabelDefaultBranch]
 		if defaultBranch == "" {
 			defaultBranch = "main"
 		}

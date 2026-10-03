@@ -643,14 +643,19 @@ may not have intended to share.
 | **Env vars** (scope=project, `Secret == false`) | `EnvVar` | Non-secret configuration. |
 | **Injected skills** | `SkillInjection` (scope=project) | Configuration list; `SetSkillInjections` makes this a single atomic call. |
 | **Project-scoped harness configs & templates** | `HarnessConfig`, `Template` | See §5.4 — deep-copied. |
+| **GCP service accounts** (scope=project) and the **default SA** | `GCPServiceAccount`, `scion.io/default-gcp-identity-service-account-id` annotation | Re-created on the clone with fresh IDs, preserving email, GCP project, scopes, managed state and verified state. The default-SA annotation is remapped to the cloned SA's ID. See below. |
 
 **Workspace-mode label.** `scion.dev/workspace-mode` (`shared` /
 `per-agent` / `worktree-per-agent`) is copied from the source but treated as
 input to the standard `createProject` workspace-initialisation branch, not as an
 inert label. The clone therefore ends up in the same workspace mode as its
-source, provisioned fresh. The related `scion.dev/clone-url` and
-`scion.dev/default-branch` labels are copied as-is since they describe the git
-remote, which is also copied.
+source, provisioned fresh. The related `scion.dev/clone-url`,
+`scion.dev/source-url` and `scion.dev/default-branch` labels are copied as-is
+because they describe the git remote, which is also copied. The exception is a
+request whose `gitRemote` override names a *different* repository: those three
+labels are then dropped and re-derived from the override (default branch
+`main`). Otherwise `resolveCloneURL`, which prefers the label, would still clone
+the template's repository.
 
 **Pre-start hook.** Only the **active** hook is copied
 (`GetActiveProjectPreStartHook`). Archived revisions are history, not
@@ -681,6 +686,16 @@ no conflict is possible; `CreateEnvVar` is used rather than `UpsertEnvVar`, so
 that an unexpected conflict surfaces as an error rather than silently
 overwriting.
 
+**GCP service accounts.** `cloneProjectGCPServiceAccounts` lists the source's
+project-scoped `GCPServiceAccount` rows and creates one per row on the clone
+(new UUID, `CreatedBy` = caller), keeping `Verified`. This copies an association
+the source owner already set up and verified; it grants no new IAM permission,
+because what the SA itself may do stays governed by GCP. If the source's
+`scion.io/default-gcp-identity-service-account-id` annotation points at one of those SAs, the
+clone's annotation is rewritten to the cloned SA's ID and the project row is
+re-persisted. Created rows are registered for rollback before the loop, so a
+failure partway through leaves nothing behind.
+
 #### Not copied
 
 | Item | Why |
@@ -693,7 +708,6 @@ overwriting.
 | **Secret-backed env vars** (`Secret == true`) | See above. |
 | **Scheduled events / schedules** | `ScheduledEvent` carries a `ProjectID`, but its payload references agents *by name*, and no agents are cloned. Copying them would produce schedules that fire into the void. Out of scope; revisit if requested. |
 | **Project providers / contributors** | Access control, not configuration. The clone's membership is established by the standard group/policy creation for its new slug. |
-| **GCP service accounts** | Bound to external IAM state; a copied binding would be wrong or a privilege leak. |
 | **Notification subscriptions & subscription templates** | Per-user runtime preferences. |
 | **Project sync state, user access tokens** | Runtime/credential state. |
 | **Project-scoped skill bank entries** | Skill *versions* with storage payloads; deep-copying a skill bank is a materially larger feature. The injected-skills *list* is copied; if it references a project-scoped skill URI, that reference will need the source project to remain readable. Flagged as a known limitation. |
