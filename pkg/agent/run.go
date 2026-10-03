@@ -1702,6 +1702,18 @@ authDone:
 			// only where the template/agent leaves it unset. Nil off
 			// Kubernetes (cleared above).
 			k8sCfg = config.ApplySafeToEvictDefault(k8sCfg, settingsSafeToEvict)
+			// The broker-resolved Workload Identity ServiceAccount (GCP
+			// identity mode "assign") is applied over the template and
+			// persisted value, but only when non-empty: empty means no
+			// mapping applies to this dispatch, not "clear the value". It is
+			// not part of finalScionCfg, so it also applies when starting or
+			// restarting an existing agent.
+			if opts.ResolvedKubernetesServiceAccountName != "" {
+				if k8sCfg == nil {
+					k8sCfg = &api.KubernetesConfig{}
+				}
+				k8sCfg.ServiceAccountName = opts.ResolvedKubernetesServiceAccountName
+			}
 			return k8sCfg
 		}(),
 		GitClone:           opts.GitClone,
