@@ -946,3 +946,150 @@ describe('AgentListWindow states — live changes during a paged request', () =>
     expect(win.updatesAvailable).toBe(true);
   });
 });
+
+/** A window whose page fetches are held until the test resolves them. */
+function setupHeldFetch(vs: Partial<AgentListViewState> = {}) {
+  let held: Agent[] = [];
+  const calls: Array<{ signal: AbortSignal; resolve: (r: PagedPageResult) => void }> = [];
+  const fetchPage = vi.fn(
+    (params: { signal?: AbortSignal }) =>
+      new Promise<PagedPageResult>((resolve) => {
+        calls.push({ signal: params.signal!, resolve });
+      })
+  );
+  const win = new AgentListWindow({
+    viewState: viewState(vs),
+    fetchPage,
+    getAgent: () => undefined,
+    getProjectId: () => 'p-1',
+    getHeldAgents: () => held,
+  });
+  win.setPaged(pagedResult([agent('a')], { nextCursor: 'c1', totalCount: 60 }), '');
+  const setHeld = (agents: Agent[]): void => {
+    held = agents;
+  };
+  return { win, calls, setHeld };
+}
+
+describe('AgentListWindow — page fetch abort', () => {
+  const STOPS: Array<{
+    name: string;
+    stop: (win: AgentListWindow, setHeld: (a: Agent[]) => void) => void;
+    state: WindowState;
+  }> = [
+    {
+      name: 'beginSortedRequest',
+      stop: (win) => void win.beginSortedRequest('view-change', ''),
+      state: 'paged',
+    },
+    { name: 'cancelPageFetch', stop: (win) => win.cancelPageFetch(), state: 'paged' },
+    {
+      name: 'setSmall',
+      stop: (win, setHeld) => {
+        setHeld([agent('s')]);
+        win.setSmall();
+      },
+      state: 'small',
+    },
+    {
+      name: 'setPaged',
+      stop: (win) => win.setPaged(pagedResult([agent('p')], { totalCount: 1 }), ''),
+      state: 'paged',
+    },
+  ];
+
+  for (const { name, stop, state } of STOPS) {
+    it(`Next then ${name} aborts the page fetch and drops its late result`, async () => {
+      const { win, calls, setHeld } = setupHeldFetch();
+      const pending = win.next();
+      expect(calls).toHaveLength(1);
+      expect(win.loading).toBe(true);
+      const before = win.items.map((a) => a.id);
+      stop(win, setHeld);
+      expect(calls[0].signal.aborted).toBe(true);
+      expect(win.loading).toBe(false);
+      const afterStop = win.items.map((a) => a.id);
+      if (name !== 'setSmall' && name !== 'setPaged') expect(afterStop).toEqual(before);
+      calls[0].resolve(pagedResult([agent('late')], { nextCursor: 'c2', totalCount: 60 }));
+      await pending;
+      expect(win.state).toBe(state);
+      expect(win.pageIndex).toBe(0);
+      expect(win.items.map((a) => a.id)).toEqual(afterStop);
+    });
+  }
+
+  it('a second Next aborts the first, and only the second result is shown', async () => {
+    const { win, calls } = setupHeldFetch();
+    const first = win.next();
+    const second = win.next();
+    expect(calls).toHaveLength(2);
+    expect(calls[0].signal.aborted).toBe(true);
+    expect(calls[1].signal.aborted).toBe(false);
+    calls[1].resolve(pagedResult([agent('second')], { totalCount: 60 }));
+    calls[0].resolve(pagedResult([agent('first')], { totalCount: 60 }));
+    await Promise.all([first, second]);
+    expect(win.pageIndex).toBe(1);
+    expect(win.items.map((a) => a.id)).toEqual(['second']);
+  });
+});
+
+describe('AgentListWindow — sorted request tickets', () => {
+  it('supersededRequest is null with no ticket, and for a grid and list switch', () => {
+    const { win } = setup();
+    expect(win.supersededRequest('')).toBeNull();
+    win.beginSortedRequest('page-load', '');
+    expect(win.supersededRequest('')).toBeNull();
+    win.setViewState({ view: 'grid' });
+    expect(win.supersededRequest('')).toBeNull();
+  });
+
+  const CHANGES: Array<{ name: string; change: Partial<AgentListViewState>; label?: string }> = [
+    { name: 'sort', change: { sortField: 'created' } },
+    { name: 'dir', change: { sortDir: 'asc' } },
+    { name: 'phase', change: { phaseFilter: 'stopped' } },
+    { name: 'page size', change: { pageSize: 50 } },
+    { name: 'label', change: {}, label: 'env=prod' },
+    { name: 'eligibility (tree view)', change: { view: 'tree' } },
+    { name: 'eligibility (name sort)', change: { sortField: 'name' } },
+  ];
+  for (const { name, change, label } of CHANGES) {
+    it(`a ${name} change supersedes the ticket's trigger`, () => {
+      const { win } = setup();
+      win.beginSortedRequest('label-commit', '');
+      win.setViewState(change);
+      expect(win.supersededRequest(label ?? '')).toBe('label-commit');
+    });
+  }
+
+  it('supersededRequest is null after endSortedRequest', () => {
+    const { win } = setup();
+    const ticket = win.beginSortedRequest('page-load', '');
+    win.endSortedRequest(ticket);
+    win.setViewState({ sortDir: 'asc' });
+    expect(win.supersededRequest('')).toBeNull();
+
+    win.beginSortedRequest('page-load', '');
+    win.endSortedRequest();
+    expect(win.supersededRequest('env=prod')).toBeNull();
+  });
+
+  it("a stale ticket's end does not clear a newer ticket", () => {
+    const { win } = setup();
+    const older = win.beginSortedRequest('page-load', '');
+    win.beginSortedRequest('view-change', '');
+    win.endSortedRequest(older);
+    win.setViewState({ sortDir: 'asc' });
+    expect(win.supersededRequest('')).toBe('view-change');
+  });
+
+  it('setPaged under a ticket key that differs from the current view state plans a fit on a view change', () => {
+    const { win } = setup();
+    const ticket = win.beginSortedRequest('page-load', '');
+    win.setViewState({ sortDir: 'asc' });
+    win.setPaged(pagedResult([agent('a')], { nextCursor: 'c1', totalCount: 60 }), '', ticket.key);
+    expect(win.planRequest('view-change', '')).toBe('fit');
+    // The same page recorded under the current view state needs nothing.
+    win.setPaged(pagedResult([agent('a')], { nextCursor: 'c1', totalCount: 60 }), '');
+    expect(win.planRequest('view-change', '')).toBe('none');
+  });
+});
