@@ -73,6 +73,14 @@ type KubernetesRuntime struct {
 	// real exec transport.
 	execProbe execProbeFunc
 
+	// podExec, when set, replaces execInPod's exec transport. Tests use it
+	// to record the in-pod commands Run issues without a real API server.
+	podExec func(ctx context.Context, namespace, podName string, cmd []string) (string, error)
+
+	// homeSync, when set, replaces the home directory copy Run performs
+	// (syncToPod). Tests use it to observe the order of the start steps.
+	homeSync func(ctx context.Context, namespace, podName, sourcePath, destPath string) error
+
 	// PriorityClassName is the runtime-level default spec.priorityClassName
 	// applied to agent pods (settings runtimes.<name>.priority_class_name).
 	// An explicit per-template/agent kubernetes.priorityClassName overrides
@@ -729,15 +737,19 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		fmt.Printf("  Syncing agent home (%s -> %s)...\n", config.HomeDir, destHome)
 		homeSyncStart := time.Now()
 		err = r.syncWithRetry(ctx, func() error {
+			if r.homeSync != nil {
+				return r.homeSync(ctx, namespace, createdPod.Name, config.HomeDir, destHome)
+			}
 			return r.syncToPod(ctx, namespace, createdPod.Name, config.HomeDir, destHome)
 		})
 		if err != nil {
 			return createdPod.Name, fmt.Errorf("failed to sync home: %w", err)
 		}
 		syncMs := time.Since(homeSyncStart).Milliseconds()
-		// Fix ownership: tar extraction runs as root via K8s exec, so synced
-		// files are owned by root. chown them to the scion user so the
-		// privilege-dropped harness process can access its home directory.
+		// Fix ownership. The tar extraction runs as the pod user (the pod
+		// securityContext sets a non-root RunAsUser), so synced files are
+		// normally owned by it already; this chown is best effort and, as
+		// that same non-root user, cannot re-own files another user owns.
 		chownStart := time.Now()
 		//
 		// An empty UnixUsername makes destHome itself util.GetHomeDir("") ==
@@ -751,6 +763,13 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		}
 		runtimeLog.Info("Home sync complete", "agent", config.Name, "phase", "home-sync",
 			"sync_ms", syncMs, "chown_ms", time.Since(chownStart).Milliseconds())
+	}
+
+	// Copy staged secret and auth files to their targets in the agent home
+	// (see k8s_file_placement.go). This runs whether or not a home was
+	// synced, and before the startup gate, so the harness finds them.
+	if err := r.placeK8sHomeFiles(ctx, namespace, createdPod.Name, config); err != nil {
+		return createdPod.Name, err
 	}
 
 	// Workspace sync: NFS-backed pods have workspace bytes pre-populated by the
@@ -1545,27 +1564,42 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
-	// Secret mounting: determine strategy and inject secrets
+	// Secret and auth-file mounting. Every file these volumes deliver comes
+	// from k8sFileProjections. Targets inside the agent home are not mounted
+	// directly: their volume is mounted under k8sFileStagingRoot and
+	// placeK8sHomeFiles copies the files into the home after the home sync,
+	// so no root-owned mount directory is created inside the home (see
+	// k8s_file_placement.go). Targets outside the home keep a subPath mount.
 	var extraVolumes []corev1.Volume
 	var extraVolumeMounts []corev1.VolumeMount
 
-	if len(config.ResolvedSecrets) > 0 {
-		// Check if we should use the GKE CSI path
-		useGKEPath := r.GKEMode
-		if useGKEPath {
-			hasRef := false
-			for _, s := range config.ResolvedSecrets {
-				if s.Ref != "" {
-					hasRef = true
-					break
-				}
-			}
-			useGKEPath = hasRef
+	containerHome := util.GetHomeDir(config.UnixUsername)
+	fileProjections := r.k8sFileProjections(config)
+	if err := checkK8sHomeFileTargets(r.k8sHomeFilePlacements(config)); err != nil {
+		return nil, err
+	}
+	usedVolumes := map[string]bool{}
+	var agentSecretItems []corev1.KeyToPath
+	for _, p := range fileProjections {
+		usedVolumes[p.Volume] = true
+		if p.Volume == k8sAgentSecretsVolume {
+			agentSecretItems = append(agentSecretItems, corev1.KeyToPath{Key: p.Key, Path: p.Key})
 		}
+		if placedInK8sHome(p.Target, config.UnixUsername) {
+			continue
+		}
+		extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
+			Name:      p.Volume,
+			MountPath: p.Target,
+			SubPath:   p.Key,
+			ReadOnly:  true,
+		})
+	}
 
+	if len(config.ResolvedSecrets) > 0 {
 		agentSecretName := fmt.Sprintf("scion-agent-%s", config.Name)
 
-		if useGKEPath {
+		if r.useGKESecretsPath(config) {
 			// GKE hybrid path: CSI volume for file-type secrets, secretKeyRef
 			// to K8s Secret (scion-agent-{name}) for env vars. The managed
 			// SM add-on cannot sync secretObjects, so env vars reference the
@@ -1581,7 +1615,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 				csiDriverName = "secrets-store-gke.csi.k8s.io"
 			}
 			extraVolumes = append(extraVolumes, corev1.Volume{
-				Name: "secrets-store",
+				Name: k8sSecretsStoreVolume,
 				VolumeSource: corev1.VolumeSource{
 					CSI: &corev1.CSIVolumeSource{
 						Driver:   csiDriverName,
@@ -1593,14 +1627,13 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 				},
 			})
 			extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
-				Name:      "secrets-store",
-				MountPath: "/mnt/secrets-store",
+				Name:      k8sSecretsStoreVolume,
+				MountPath: k8sStagingDir(k8sSecretsStoreVolume),
 				ReadOnly:  true,
 			})
 
 			for _, s := range config.ResolvedSecrets {
-				switch s.Type {
-				case "environment":
+				if s.Type == "environment" {
 					envVars = append(envVars, corev1.EnvVar{
 						Name: s.Target,
 						ValueFrom: &corev1.EnvVarSource{
@@ -1609,24 +1642,15 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 								Key:                  s.Name,
 							},
 						},
-					})
-				case "file":
-					target := expandTildeTarget(s.Target, util.GetHomeDir(config.UnixUsername))
-					extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
-						Name:      "secrets-store",
-						MountPath: target,
-						SubPath:   s.Name,
-						ReadOnly:  true,
 					})
 				}
 			}
 		} else {
-			// Fallback path: K8s Secret with secretKeyRef for env, volume subPath for files
-			hasFileSecrets := false
-			hasVariableSecrets := false
+			// Fallback path: K8s Secret with secretKeyRef for env, and a
+			// Secret volume for file-type secrets and secrets.json. The
+			// volume projects only the file keys, not the env values.
 			for _, s := range config.ResolvedSecrets {
-				switch s.Type {
-				case "environment":
+				if s.Type == "environment" {
 					envVars = append(envVars, corev1.EnvVar{
 						Name: s.Target,
 						ValueFrom: &corev1.EnvVarSource{
@@ -1636,49 +1660,27 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 							},
 						},
 					})
-				case "file":
-					hasFileSecrets = true
-				case "variable":
-					hasVariableSecrets = true
 				}
 			}
 
-			if hasFileSecrets || hasVariableSecrets {
+			if usedVolumes[k8sAgentSecretsVolume] {
 				extraVolumes = append(extraVolumes, corev1.Volume{
-					Name: "agent-secrets",
+					Name: k8sAgentSecretsVolume,
 					VolumeSource: corev1.VolumeSource{
 						Secret: &corev1.SecretVolumeSource{
 							SecretName: agentSecretName,
+							Items:      agentSecretItems,
 						},
 					},
 				})
-			}
-
-			for _, s := range config.ResolvedSecrets {
-				if s.Type == "file" {
-					target := expandTildeTarget(s.Target, util.GetHomeDir(config.UnixUsername))
-					extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
-						Name:      "agent-secrets",
-						MountPath: target,
-						SubPath:   s.Name,
-						ReadOnly:  true,
-					})
-				}
-			}
-
-			if hasVariableSecrets {
-				secretsJSONPath := filepath.Join(util.GetHomeDir(config.UnixUsername), ".scion", "secrets.json")
 				extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
-					Name:      "agent-secrets",
-					MountPath: secretsJSONPath,
-					SubPath:   "secrets.json",
+					Name:      k8sAgentSecretsVolume,
+					MountPath: k8sStagingDir(k8sAgentSecretsVolume),
 					ReadOnly:  true,
 				})
 			}
 		}
 	}
-
-	containerHome := util.GetHomeDir(config.UnixUsername)
 
 	// ResolvedAuth is always applied when present (composes with ResolvedSecrets).
 	// Auth files are injected via a K8s Secret rather than hostPath for portability.
@@ -1687,25 +1689,18 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
 		}
 		if len(config.ResolvedAuth.Files) > 0 {
-			volName := "auth-files"
 			extraVolumes = append(extraVolumes, corev1.Volume{
-				Name: volName,
+				Name: k8sAuthFilesVolume,
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
 						SecretName: fmt.Sprintf("scion-auth-%s", config.Name),
 					},
 				},
 			})
-			for i, f := range config.ResolvedAuth.Files {
-				if f.SourcePath == "" {
-					continue
-				}
-				target := expandTildeTarget(f.ContainerPath, containerHome)
-				keyName := fmt.Sprintf("auth-file-%d", i)
+			if usedVolumes[k8sAuthFilesVolume] {
 				extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
-					Name:      volName,
-					MountPath: target,
-					SubPath:   keyName,
+					Name:      k8sAuthFilesVolume,
+					MountPath: k8sStagingDir(k8sAuthFilesVolume),
 					ReadOnly:  true,
 				})
 			}
@@ -2663,6 +2658,21 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// syncArchiveCreateArgs returns the broker-side tar arguments syncToPod uses
+// to archive sourcePath.
+func syncArchiveCreateArgs(sourcePath string) []string {
+	return []string{"-cz", "-C", sourcePath, "."}
+}
+
+// syncArchiveExtractCommand returns the shell command syncToPod runs in the
+// pod to extract the archive into destPath. It runs as the pod user (the
+// pod securityContext sets a non-root RunAsUser), so every directory it
+// writes into must be writable by that user. -m avoids utime errors on the
+// mount point.
+func syncArchiveExtractCommand(destPath string) string {
+	return fmt.Sprintf("tar -xz -m --no-same-owner --no-same-permissions -C '%s'", destPath)
+}
+
 func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, sourcePath, destPath string) error {
 	// Guard against fake/test clientsets where Config is nil (no real API
 	// server), same as execInPod. Also guard Client itself: a KubernetesRuntime
@@ -2676,7 +2686,7 @@ func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, s
 	}
 	syncStart := time.Now()
 	fmt.Printf("  Preparing tar archive from %s...\n", sourcePath)
-	tarCmd := exec.CommandContext(ctx, "tar", "-cz", "-C", sourcePath, ".")
+	tarCmd := exec.CommandContext(ctx, "tar", syncArchiveCreateArgs(sourcePath)...)
 	tarCmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
 	stdout, err := tarCmd.StdoutPipe()
 	if err != nil {
@@ -2688,10 +2698,7 @@ func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, s
 		return err
 	}
 
-	// Use sh -c to allow us to ignore certain exit codes if needed, or just to be more flexible.
-	// We use -m to avoid utime errors on the mount point.
-	remoteCmd := fmt.Sprintf("tar -xz -m --no-same-owner --no-same-permissions -C '%s'", destPath)
-	cmd := []string{"sh", "-c", remoteCmd}
+	cmd := []string{"sh", "-c", syncArchiveExtractCommand(destPath)}
 
 	req := r.Client.Clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
@@ -3581,6 +3588,9 @@ func (r *KubernetesRuntime) execInPod(ctx context.Context, namespace, podName st
 		cmdName = cmd[0]
 	}
 
+	if r.podExec != nil {
+		return r.podExec(ctx, namespace, podName, cmd)
+	}
 	// Guard against fake/test clientsets where Config is nil (no real API server).
 	if r.Client.Config == nil {
 		return "", fmt.Errorf("K8s REST config not available (test environment)")
