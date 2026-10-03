@@ -90,7 +90,6 @@ func (f *fakeDecisionAuditStore) snapshot() (written []string, attempts int) {
 type fakeDecisionAuditMetrics struct {
 	mu        sync.Mutex
 	drops     map[string]int
-	depths    []int64
 	writes    int
 	failures  int
 	maxDepth  int64
@@ -243,10 +242,10 @@ func TestDecisionAuditWriter_QueueFullShedsAllowsBeforeDenies(t *testing.T) {
 
 	e.EmitDecisionAudit(ctx, auditRec("allow", "a1"))
 	e.EmitDecisionAudit(ctx, auditRec("allow", "a2"))
-	e.EmitDecisionAudit(ctx, auditRec("deny", "d1")) // queue now full
-	e.EmitDecisionAudit(ctx, auditRec("deny", "d2")) // sheds a1
-	e.EmitDecisionAudit(ctx, auditRec("deny", "d3")) // sheds a2
-	e.EmitDecisionAudit(ctx, auditRec("deny", "d4")) // no allow left: dropped
+	e.EmitDecisionAudit(ctx, auditRec("deny", "d1"))  // queue now full
+	e.EmitDecisionAudit(ctx, auditRec("deny", "d2"))  // sheds a1
+	e.EmitDecisionAudit(ctx, auditRec("deny", "d3"))  // sheds a2
+	e.EmitDecisionAudit(ctx, auditRec("deny", "d4"))  // no allow left: dropped
 	e.EmitDecisionAudit(ctx, auditRec("allow", "a3")) // full: dropped
 
 	close(fs.gate)
