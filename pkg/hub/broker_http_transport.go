@@ -312,12 +312,22 @@ func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, broker
 	return nil
 }
 
-func (t *brokerHTTPTransport) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error {
+// resetAuthBody builds the broker reset-auth request body. The transport
+// token is included only when the hub minted one.
+func resetAuthBody(token, transportToken string) map[string]string {
+	body := map[string]string{"token": token}
+	if transportToken != "" {
+		body["transportToken"] = transportToken
+	}
+	return body
+}
+
+func (t *brokerHTTPTransport) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token, transportToken string) error {
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/reset-auth", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
-	body, err := json.Marshal(map[string]string{"token": token})
+	body, err := json.Marshal(resetAuthBody(token, transportToken))
 	if err != nil {
 		return fmt.Errorf("failed to marshal reset-auth request: %w", err)
 	}

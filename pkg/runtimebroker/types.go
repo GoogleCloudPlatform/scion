@@ -514,6 +514,11 @@ type ExecRequest struct {
 // ResetAuthRequest is the request body for resetting auth on a running agent.
 type ResetAuthRequest struct {
 	Token string `json:"token"`
+	// TransportToken, when set, is a fresh hub-minted transport token
+	// (IAP / Cloud Run invoker). It is written to the agent's transport
+	// token file alongside the agent token, so a reset also recovers an
+	// agent whose transport token has expired.
+	TransportToken string `json:"transportToken,omitempty"`
 }
 
 // ResetAuthResponse is the response for auth reset.

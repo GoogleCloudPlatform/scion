@@ -789,3 +789,16 @@ func TestFromSettings_MetadataPassthrough(t *testing.T) {
 	_, ok := src.(*MetadataSource)
 	assert.True(t, ok, "should prefer metadata on GCE even under passthrough")
 }
+
+func TestHeaderMode_HeaderName(t *testing.T) {
+	cases := map[string]string{
+		"":                 "Authorization",
+		"iap":              "Proxy-Authorization",
+		"cloudrun_invoker": "X-Serverless-Authorization",
+	}
+	for mode, want := range cases {
+		if got := ModeFromString(mode).HeaderName(); got != want {
+			t.Errorf("ModeFromString(%q).HeaderName() = %q, want %q", mode, got, want)
+		}
+	}
+}
