@@ -49,7 +49,7 @@ To avoid hitting GitHub API rate limits during concurrent agent launches, the Ru
 - **Stale-while-revalidate:** After its 30-minute TTL expires, a branch or tag entry is still served for up to 24 hours from when it was cached while a background refresh runs. Full-SHA entries are not served stale.
 - **Rate-limit cooldown:** A GitHub `429`, or a `403` reporting an exhausted or secondary rate limit, starts a cooldown for that credential (or for all unauthenticated requests), taken from `Retry-After` or `X-RateLimit-Reset`, defaulting to 60 seconds and capped at 5 minutes. During the cooldown no request is sent for that credential: a cached or stale entry is served without a refresh, and a miss fails immediately with a rate-limit error that names the ref. The Hub's own `gh://` resolution uses the same cooldown.
 - **Resolution budget:** Each resolution has its own **20-second** budget, so a slow or retrying resolution fails inside the create request with an error that names the cause instead of a bare "context canceled".
-- **Persistence:** Resolutions made with a credential are written to the broker's on-disk cache (keyed by a fingerprint of the credential, never the token itself) along with anonymous ones, so they survive a broker restart.
+- **Persistence:** Resolutions made with a credential are written to the Runtime Broker's on-disk cache (keyed by a fingerprint of the credential, never the token itself) along with anonymous ones, so they survive a Runtime Broker restart.
 
 #### Private repository resolution
 
