@@ -518,18 +518,31 @@ func TestStartSharedDirStorage_RecordOutsideAgentHome(t *testing.T) {
 // A record that cannot be parsed is an error, not a silent fallback to
 // the current settings.
 func TestStartSharedDirStorage_DamagedRecordFails(t *testing.T) {
-	f := newSharedDirStorageRunFixture(t)
-	mountRoot := filepath.Join(f.tmpDir, "nfs")
-	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, sdsProfileShareID), 0o775))
-	f.writeRawGlobalSettings(t, sdsProfileSettingsYAML(mountRoot, "nfs"))
+	for name, content := range map[string]string{
+		"not json":      "{not json",
+		"empty object":  "{}",
+		"empty backend": `{"backend":""}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newSharedDirStorageRunFixture(t)
+			mountRoot := filepath.Join(f.tmpDir, "nfs")
+			require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, sdsProfileShareID), 0o775))
+			f.writeRawGlobalSettings(t, sdsProfileSettingsYAML(mountRoot, "nfs"))
 
-	_, err := NewManager(newSDSMockRuntime("kubernetes", &sdsCapture{})).Start(context.Background(), sdsStartOpts(f, "gke-agent", "gke"))
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(config.ResolveAgentDir(f.projectScionDir, "gke-agent"), sharedDirStorageRecordFile), []byte("{not json"), 0o644))
+			_, err := NewManager(newSDSMockRuntime("kubernetes", &sdsCapture{})).Start(context.Background(), sdsStartOpts(f, "gke-agent", "gke"))
+			require.NoError(t, err)
+			recordPath := filepath.Join(config.ResolveAgentDir(f.projectScionDir, "gke-agent"), sharedDirStorageRecordFile)
+			require.NoError(t, os.WriteFile(recordPath, []byte(content), 0o644))
 
-	var restart sdsCapture
-	_, err = NewManager(newSDSMockRuntime("kubernetes", &restart)).Start(context.Background(), sdsStartOpts(f, "gke-agent", "gke"))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "shared-dir storage record")
-	assert.Equal(t, 0, restart.ran)
+			var restart sdsCapture
+			_, err = NewManager(newSDSMockRuntime("kubernetes", &restart)).Start(context.Background(), sdsStartOpts(f, "gke-agent", "gke"))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "shared-dir storage record")
+			assert.Equal(t, 0, restart.ran)
+			// The damaged record is left for the operator, not overwritten.
+			got, rerr := os.ReadFile(recordPath)
+			require.NoError(t, rerr)
+			assert.Equal(t, content, string(got))
+		})
+	}
 }

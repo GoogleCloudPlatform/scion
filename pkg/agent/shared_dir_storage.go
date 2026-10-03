@@ -333,9 +333,9 @@ type sharedDirStorageRecord struct {
 // readSharedDirStorageRecord returns the recorded shared-dir storage
 // backend for the agent whose directory is agentDir, or "" when none is
 // recorded (a first start, or an agent created before the backend was
-// recorded). A record that exists but cannot be read or parsed is an
-// error, so a damaged record never silently falls back to the current
-// settings.
+// recorded). A record that exists but cannot be read or parsed, or that
+// names no backend, is an error, so a damaged record never silently falls
+// back to the current settings.
 func readSharedDirStorageRecord(agentDir string) (string, error) {
 	if agentDir == "" {
 		return "", nil
@@ -351,12 +351,16 @@ func readSharedDirStorageRecord(agentDir string) (string, error) {
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return "", fmt.Errorf("parsing the agent's shared-dir storage record %s: %w", filepath.Join(agentDir, sharedDirStorageRecordFile), err)
 	}
+	if rec.Backend == "" {
+		return "", fmt.Errorf("the agent's shared-dir storage record %s names no backend", filepath.Join(agentDir, sharedDirStorageRecordFile))
+	}
 	return rec.Backend, nil
 }
 
 // writeSharedDirStorageRecord records backend for the agent whose
 // directory is agentDir. The file is written to a temporary name and
-// renamed into place, so a reader never sees a partial record.
+// renamed into place, so a reader never sees a partial record. The file and
+// the directory are synced so the record survives a crash.
 func writeSharedDirStorageRecord(agentDir, backend string) error {
 	if agentDir == "" {
 		return fmt.Errorf("no agent directory to record the shared-dir storage backend in")
@@ -376,6 +380,11 @@ func writeSharedDirStorageRecord(agentDir, backend string) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
 		return err
@@ -387,6 +396,12 @@ func writeSharedDirStorageRecord(agentDir, backend string) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		_ = os.Remove(tmpName)
 		return err
+	}
+	// Sync the directory so the rename survives a crash. Not all platforms
+	// support this; a failure here does not undo the write.
+	if d, derr := os.Open(agentDir); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	return nil
 }
