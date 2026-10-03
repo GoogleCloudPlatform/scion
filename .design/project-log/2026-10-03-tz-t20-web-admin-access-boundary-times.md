@@ -22,7 +22,7 @@ AC17: one formatter, the user's display zone, 24-hour time everywhere. Before th
 ## Test evidence
 
 - New `admin-time-format.test.ts`, plus render tests in `admin-experiments.test.ts`, `admin-role-bindings.test.ts` and `admin-role-detail.test.ts`. They set an Asia/Tokyo display preference while vitest pins the browser zone to UTC, and check that midnight renders as `00:00`. Two of them also check a live re-render after a zone change.
-- `vitest run` over all touched admin, access-boundary and role-binding test files, `format-scan.test.ts` and `time.test.ts`: 20 files and 409 tests pass after review round 1. They include a test that an expiry which is past in Tokyo but future in UTC shows the warning; it fails without the fix. The same run under host `TZ=Asia/Tokyo` and `TZ=Asia/Kathmandu` also passes; vitest pins `TZ=UTC` regardless of the host zone.
+- `vitest run` over all touched admin, access-boundary and role-binding test files, `format-scan.test.ts` and `time.test.ts`: 20 files and 410 tests pass after review round 2. Two of the tests fail with the role-binding fix reverted: an expiry that is past in Tokyo but future in UTC must show the warning, and the create form must block an activation in the America/New_York spring-forward gap that falls after its expiry. A Tokyo-only ordering test cannot catch this, because Tokyo has no DST. The same run under host `TZ=Asia/Tokyo` and `TZ=Asia/Kathmandu` also passes; vitest pins `TZ=UTC` regardless of the host zone.
 - `tsc --noEmit` is clean. ESLint on the changed source files adds no new errors compared with upstream main.
 
 ## Follow-ups (not done here)
