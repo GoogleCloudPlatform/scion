@@ -1019,7 +1019,44 @@ type StartOptions struct {
 	// time. If non-empty, the broker writes it to pre-start.d/30-project-custom
 	// before the agent container starts.
 	ProjectPreStartHookScript string
+
+	// Checkpoint, when set, is called by the runtime immediately before each
+	// resource-creating call (an async launch's pre-create gate, design
+	// t1-async-create-v11.md §3.8.3). A non-nil error stops the launch
+	// before that resource is created, and the runtime returns it (wrapped).
+	// step names the resource about to be created (e.g. "secrets",
+	// "pod_create"). Nil (the synchronous path) means no gate.
+	Checkpoint func(ctx context.Context, step string) error
+	// OnResourceCreated, when set, is called by the runtime after each true
+	// create of a launch-owned runtime resource, with the created object's
+	// identity (design §3.8.4), so an aborted launch can delete exactly what
+	// it created. Nil (the synchronous path) means nothing is recorded.
+	// Setting it also makes the caller the owner of a failed or cancelled
+	// start's cleanup: the runtime then skips its own start cleanup and
+	// leaves the reported resources to the caller. Set both hooks together.
+	OnResourceCreated func(ResourceHandle)
 }
+
+// ResourceHandle identifies one runtime resource created during a launch
+// (design t1-async-create-v11.md §3.8.4), reported by the runtime via
+// StartOptions.OnResourceCreated after each true create. UID is the
+// identity a cleanup deletes by: the Kubernetes object UID, or the
+// container ID for container runtimes. Namespace is empty for runtimes
+// that have no namespaces.
+type ResourceHandle struct {
+	Kind      string // one of the ResourceKind* constants
+	Namespace string
+	Name      string
+	UID       string
+}
+
+// ResourceHandle.Kind values.
+const (
+	ResourceKindSecret              = "secret"
+	ResourceKindSecretProviderClass = "secretproviderclass"
+	ResourceKindPod                 = "pod"
+	ResourceKindContainer           = "container"
+)
 
 type StatusEvent struct {
 	AgentID   string `json:"agent_id"`

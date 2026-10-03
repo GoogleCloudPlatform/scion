@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"net/http"
 	"sync"
@@ -32,9 +33,10 @@ import (
 // constant even though all three are 5s today, so a change to one cannot
 // silently change the others.
 const (
-	claimAttemptTimeout     = 5 * time.Second
-	keepaliveAttemptTimeout = 5 * time.Second
-	terminalAttemptTimeout  = 5 * time.Second
+	claimAttemptTimeout      = 5 * time.Second
+	checkpointAttemptTimeout = 5 * time.Second
+	keepaliveAttemptTimeout  = 5 * time.Second
+	terminalAttemptTimeout   = 5 * time.Second
 
 	reportMinBackoff = 1 * time.Second
 	reportMaxBackoff = 10 * time.Second
@@ -73,6 +75,10 @@ type launchSender struct {
 	seq          int64
 	completed    bool
 	abortOutcome *keepaliveOutcome
+	// checkpointUnreachable records that a checkpoint ran out of ctx'
+	// without any definitive Hub answer (design §3.8.2: then abort with
+	// failed{hub_unreachable}).
+	checkpointUnreachable bool
 
 	terminalOnce    sync.Once
 	terminalStarted int32 // atomic
@@ -321,7 +327,7 @@ var errAbortedByKeepalive = errors.New("launch report: a keepalive answer ended 
 // sendReportBlocking retries sendOnce with a jittered backoff in
 // [minBackoff, maxBackoff) until it gets a definitive answer or ctx is done.
 // abortable also lets a keepalive answer that concurrently classified to an
-// abort action end the wait early; only SendClaim sets it. Design §3.8.5:
+// abort action end the wait early; SendClaim and Checkpoint set it. Design §3.8.5:
 // "the keepalive stops when the terminal's first attempt starts; from then
 // on only the terminal's answer decides cleanup" -- so SendTerminal must
 // keep retrying on its own TTL-bounded ctx regardless of abortCh, never
@@ -377,6 +383,78 @@ func (s *launchSender) SendClaim(ctx context.Context) (*hubclient.AgentLaunchRep
 		At:         time.Now(),
 	}
 	return s.sendReportBlocking(ctx, report, reportMinBackoff, reportMaxBackoff, claimAttemptTimeout, true)
+}
+
+// errLaunchEndedAtCheckpoint is what Checkpoint returns to the runtime when
+// the launch must create nothing further: a checkpoint answer (or an
+// earlier keepalive answer) ended it. The runtime returns it, wrapped, from
+// Run; runLaunch then acts on the recorded outcome (LastAbortOutcome), not
+// on this error.
+var errLaunchEndedAtCheckpoint = errors.New("launch checkpoint: the launch has ended")
+
+// Checkpoint is the runtime's pre-create gate (api.StartOptions.Checkpoint,
+// design t1-async-create-v11.md §3.8.3), called immediately before each
+// resource-creating call. It sends a synchronous checkpoint report and
+// blocks, retrying with a 1-10s backoff, until a definitive answer or until
+// ctx (the launch's ctx') is done. Answers follow the §3.8.2 table:
+//   - applied/duplicate: return nil, the create proceeds;
+//   - completed: return nil and skip every later checkpoint (Run continues);
+//   - any abort answer: record it exactly as a keepalive abort would (so
+//     runLaunch's KeepaliveAborted select wakes and applies the cleanup
+//     rule) and return errLaunchEndedAtCheckpoint, so nothing is created.
+//
+// A checkpoint after an earlier abort returns errLaunchEndedAtCheckpoint
+// without sending.
+func (s *launchSender) Checkpoint(ctx context.Context, step string) error {
+	if s.IsCompleted() {
+		return nil
+	}
+	if s.IsAborted() {
+		return errLaunchEndedAtCheckpoint
+	}
+	report := &hubclient.AgentLaunchReport{
+		LaunchID:   s.rec.ID,
+		InstanceID: s.instanceID,
+		Seq:        s.nextSeq(),
+		State:      hubclient.AgentLaunchReportStateCheckpoint,
+		Step:       step,
+		At:         time.Now(),
+	}
+	result, err := s.sendReportBlocking(ctx, report, reportMinBackoff, reportMaxBackoff, checkpointAttemptTimeout, true)
+	if err != nil {
+		if errors.Is(err, errAbortedByKeepalive) {
+			return errLaunchEndedAtCheckpoint
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			s.mu.Lock()
+			s.checkpointUnreachable = true
+			s.mu.Unlock()
+		}
+		return fmt.Errorf("launch checkpoint %s: %w", step, err)
+	}
+	switch action := classifyGateAnswer(result); action {
+	case gateContinue:
+		return nil
+	case gateCompleted:
+		s.recordKeepaliveCompleted()
+		return nil
+	case gateStopNoCleanup:
+		s.server.agentLifecycleLog.Error("runLaunch: checkpoint got a protocol/auth answer; stopping with no cleanup",
+			"agent_id", s.agentID, "launch_id", s.rec.ID, "step", step, "http_status", result.HTTPStatus)
+		s.recordKeepaliveAbort(action, result)
+		return errLaunchEndedAtCheckpoint
+	default:
+		s.recordKeepaliveAbort(action, result)
+		return errLaunchEndedAtCheckpoint
+	}
+}
+
+// CheckpointUnreachable reports whether a checkpoint ran out of ctx'
+// without a definitive Hub answer.
+func (s *launchSender) CheckpointUnreachable() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.checkpointUnreachable
 }
 
 // StartKeepalive starts the per-launch keepalive goroutine (design §3.8.5).
