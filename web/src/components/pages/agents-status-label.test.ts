@@ -82,10 +82,10 @@ describe('scion-page-agents status badge label', () => {
       'fetch',
       vi.fn(() =>
         Promise.resolve(
-          new Response(
-            JSON.stringify({ agents: [blockedAgent], _capabilities: { actions: [] } }),
-            { status: 200, headers: { 'Content-Type': 'application/json' } }
-          )
+          new Response(JSON.stringify({ agents: [blockedAgent], _capabilities: { actions: [] } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
         )
       )
     );
@@ -107,11 +107,9 @@ describe('scion-page-agents status badge label', () => {
       await flush();
       await el.updateComplete;
 
-      const badges = Array.from(
-        el.shadowRoot?.querySelectorAll('scion-status-badge') ?? []
-      ).filter((b) => (b as unknown as { status: string }).status === 'blocked') as Array<
-        LitElement & { label: string }
-      >;
+      const badges = Array.from(el.shadowRoot?.querySelectorAll('scion-status-badge') ?? []).filter(
+        (b) => (b as unknown as { status: string }).status === 'blocked'
+      ) as Array<LitElement & { label: string }>;
       expect(badges).toHaveLength(1);
       const badge = badges[0];
       await badge.updateComplete;

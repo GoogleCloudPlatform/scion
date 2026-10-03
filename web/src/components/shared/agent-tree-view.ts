@@ -1227,10 +1227,7 @@ export class ScionAgentTreeView extends LitElement {
           title=${`${agent.name}${agent.template ? ` — ${agent.template}` : ''}${isRoot && creator ? `\ncreated by ${creator}` : ''}`}
         >
           <span class="name">${agent.name}</span>
-          <scion-status-badge
-            status=${status as StatusType}
-            size="small"
-          ></scion-status-badge>
+          <scion-status-badge status=${status as StatusType} size="small"></scion-status-badge>
           ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}
           <span
             class="mode-icon"
