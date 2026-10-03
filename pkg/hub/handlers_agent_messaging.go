@@ -2594,7 +2594,15 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			}
 
 			// Synchronous delivery with 30s retry deadline for transient broker failures.
-			retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+			// ptone/scion#1839: carry the persisted message ID so a broker
+			// that accepts (buffers) the message and later fails to flush it
+			// can report the failure back against this row, as the
+			// agent-to-agent (ExecuteAgentDM) and web chat paths do.
+			dispatchCtx := ctx
+			if persistedMsgID != "" {
+				dispatchCtx = withDispatchMessageID(ctx, persistedMsgID)
+			}
+			retryCtx, retryCancel := context.WithTimeout(dispatchCtx, 30*time.Second)
 			defer retryCancel()
 
 			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, dispatchMsg.Msg, req.Interrupt, dispatchMsg); err != nil {
@@ -2972,6 +2980,24 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				continue
 			}
 
+			// ptone/scion#1839: per-member deliverability gate, mirroring
+			// the phase gate on direct sends (handleAgentMessage,
+			// ExecuteAgentDM, deliverToAgent). A non-running member cannot
+			// receive terminal input; dispatching would leave a
+			// "dispatched" row the broker then silently drops. The row is
+			// already persisted above, so it is marked failed (visible in
+			// history) and the member gets a failure result. The reason is
+			// hub-generated, so it is safe to return to the caller.
+			if phaseErr := validateAgentDeliverable(agent); phaseErr != nil {
+				if persisted {
+					if markErr := s.markFailed(ctx, storeMsg.ID, phaseErr.Message); markErr != nil {
+						s.messageLog.Error("Failed to mark set message as failed", "id", storeMsg.ID, "error", markErr)
+					}
+				}
+				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: phaseErr.Message}
+				continue
+			}
+
 			if dispatcher == nil {
 				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "dispatcher not available"}
 				continue
@@ -2981,7 +3007,14 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				continue
 			}
 
-			retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+			// ptone/scion#1839: carry the per-member persisted message ID
+			// (RecipientID = agent.ID, Recipient = "agent:<slug>") so a
+			// post-acceptance broker failure is reported against this row.
+			groupDispatchCtx := ctx
+			if persisted {
+				groupDispatchCtx = withDispatchMessageID(ctx, storeMsg.ID)
+			}
+			retryCtx, retryCancel := context.WithTimeout(groupDispatchCtx, 30*time.Second)
 			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, plainMessage, interrupt, &agentMsg); err != nil {
 				retryCancel()
 				if markErr := s.markFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
@@ -3451,7 +3484,9 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			DispatchState: store.MessageDispatchDispatched,
 			CreatedAt:     time.Now(),
 		}
+		persisted := true
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
+			persisted = false
 			s.messageLog.Error("Failed to persist broadcast message", "agent_id", agent.ID, "error", err)
 		}
 
@@ -3467,7 +3502,15 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			})
 		}
 
-		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+		// ptone/scion#1839: carry the per-agent persisted message ID
+		// (RecipientID = agent.ID) so a post-acceptance broker failure is
+		// reported against this row. Only when the row exists — an ID with
+		// no row would point the broker's report at nothing.
+		broadcastDispatchCtx := ctx
+		if persisted {
+			broadcastDispatchCtx = withDispatchMessageID(ctx, storeMsg.ID)
+		}
+		retryCtx, retryCancel := context.WithTimeout(broadcastDispatchCtx, 30*time.Second)
 		dispatchErr := dispatchWithBrokerRetry(retryCtx, dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
 		retryCancel()
 
@@ -3475,8 +3518,10 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			s.messageLog.Error("Failed to deliver broadcast message to agent",
 				"agent_id", agent.ID,
 				"agentSlug", agent.Slug, "error", dispatchErr)
-			if markErr := s.markFailed(ctx, storeMsg.ID, dispatchErr.Error()); markErr != nil {
-				s.messageLog.Error("Failed to mark broadcast message as failed", "id", storeMsg.ID, "error", markErr)
+			if persisted {
+				if markErr := s.markFailed(ctx, storeMsg.ID, dispatchErr.Error()); markErr != nil {
+					s.messageLog.Error("Failed to mark broadcast message as failed", "id", storeMsg.ID, "error", markErr)
+				}
 			}
 			s.publishBroadcastDeliveryFailed(ctx, &agent, &agentMsg, dispatchErr)
 		}
@@ -3761,7 +3806,14 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		}
 
 		// Per-dispatch timeout is the lesser of 10s or the remaining aggregate budget.
-		dispatchCtx, cancel := context.WithTimeout(aggregateCtx, 10*time.Second)
+		// ptone/scion#1839: carry the persisted mention row's ID
+		// (RecipientID = mentionAgent.ID) so a post-acceptance broker
+		// failure is reported against it.
+		mentionDispatchParent := aggregateCtx
+		if persisted {
+			mentionDispatchParent = withDispatchMessageID(aggregateCtx, storeMsg.ID)
+		}
+		dispatchCtx, cancel := context.WithTimeout(mentionDispatchParent, 10*time.Second)
 		if dispatchErr := dispatchWithBrokerRetry(dispatchCtx, dispatcher, mentionAgent, mentionMsg.Msg, false, mentionMsg); dispatchErr != nil {
 			cancel()
 			if aggregateCtx.Err() != nil {
