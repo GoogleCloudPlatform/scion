@@ -2129,8 +2129,12 @@ export class ScionChatThread extends LitElement {
     const currentId = this.fetchId;
 
     try {
+      // Viewing inter-agent exchanges requires agent.attach, which members
+      // lack on agents they did not create. The markers are optional, so a
+      // 403 just hides them rather than raising the access-denied toast.
       const res = await apiFetch(
-        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/interagent?${params.toString()}`
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/interagent?${params.toString()}`,
+        { suppressAccessDeniedToast: true }
       );
       if (!res.ok || currentId !== this.fetchId) return;
 
