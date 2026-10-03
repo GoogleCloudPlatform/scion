@@ -298,6 +298,7 @@ func TestRecordedRuntime_HubRelaysBroker503(t *testing.T) {
 		{"logs", http.MethodGet, "/logs", nil},
 		{"message", http.MethodPost, "/message", map[string]interface{}{"message": "hi"}},
 		{"delete", http.MethodDelete, "", nil},
+		{"reset-auth", http.MethodPost, "/reset-auth", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -305,9 +306,6 @@ func TestRecordedRuntime_HubRelaysBroker503(t *testing.T) {
 
 			rec := doRequest(t, srv, tc.method, "/api/v1/agents/"+agent.ID+tc.action, tc.body)
 
-			if tc.name == "suspend" && rec.Code == http.StatusBadRequest {
-				t.Skipf("suspend not supported for this fixture's harness: %s", rec.Body.String())
-			}
 			requireRelayed503(t, rec)
 			if tc.name == "restart" && mockClient.startCalled {
 				t.Error("restart started the agent after the broker reported its runtime unavailable")
@@ -319,6 +317,33 @@ func TestRecordedRuntime_HubRelaysBroker503(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRecordedRuntime_BulkResetAuthMarksRuntimeUnavailable pins that the
+// admin bulk reset-auth reports a broker's runtime_unavailable answer with
+// that code on the agent's failed entry, so the caller can tell it is
+// retryable.
+func TestRecordedRuntime_BulkResetAuthMarksRuntimeUnavailable(t *testing.T) {
+	srv, _, agent, _ := setupRuntimeUnavailableAgent(t, "bulk-reset-auth", runtimeUnavailableErr())
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/agents/reset-auth-all", nil)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body struct {
+		Failed []struct {
+			ID   string `json:"id"`
+			Code string `json:"code"`
+		} `json:"failed"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+	var found bool
+	for _, f := range body.Failed {
+		if f.ID == agent.ID {
+			found = true
+			require.Equal(t, brokerCodeRuntimeUnavailable, f.Code)
+		}
+	}
+	require.True(t, found, "agent missing from failed entries: %s", rec.Body.String())
 }
 
 // TestRecordedRuntime_ForceDeleteRemovesHubRecord pins that force=true still

@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -31,10 +32,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
-// These tests pin that an existing-agent request carrying the agent's
-// recorded runtime type only ever reaches runtimes of that type, and gets a
-// retryable 503 instead of the default runtime when none is registered
-// (ptone/scion#2748).
+// These tests pin how an existing-agent request carrying the agent's
+// recorded runtime type picks its runtime (ptone/scion#2748): the recorded
+// type first; any registered runtime that lists the agent otherwise; and a
+// retryable 503, instead of the default runtime, when no runtime lists the
+// agent and the recorded type is not registered.
 
 const (
 	rrAgent   = "worker"
@@ -51,6 +53,64 @@ type listCountingManager struct {
 func (m *listCountingManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 	m.lists.Add(1)
 	return m.filteringMockManager.List(ctx, filter)
+}
+
+// rrManager is a listCountingManager that also counts every call that acts
+// on an existing agent, on the manager or on its runtime, so a test can tell
+// which runtime served a request. Start is not counted: restart's start leg
+// resolves its runtime from the agent's saved profile, not from the
+// recorded runtime type.
+type rrManager struct {
+	listCountingManager
+	acts atomic.Int32
+}
+
+func (m *rrManager) acted() int32 { return m.acts.Load() }
+
+func (m *rrManager) Stop(ctx context.Context, agentID, projectPath string) error {
+	m.acts.Add(1)
+	return m.listCountingManager.Stop(ctx, agentID, projectPath)
+}
+
+func (m *rrManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	m.acts.Add(1)
+	return m.listCountingManager.Delete(ctx, agentID, deleteFiles, projectPath, removeBranch)
+}
+
+func (m *rrManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	m.acts.Add(1)
+	return m.listCountingManager.DeleteTarget(ctx, agentName, containerID, deleteFiles, projectPath, removeBranch)
+}
+
+func (m *rrManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
+	m.acts.Add(1)
+	return m.listCountingManager.Message(ctx, agentID, projectID, message, interrupt)
+}
+
+func (m *rrManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
+	m.acts.Add(1)
+	return m.listCountingManager.MessageRaw(ctx, agentID, projectID, keys)
+}
+
+func (m *rrManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+	m.acts.Add(1)
+	return m.listCountingManager.SendKeys(ctx, projectID, agentSlug, expectedAgentID, keys)
+}
+
+// newRRRuntime returns a mock runtime named name whose agent-level calls
+// count as acts of m.
+func newRRRuntime(name string, m *rrManager) *runtime.MockRuntime {
+	return &runtime.MockRuntime{
+		NameFunc:    func() string { return name },
+		StopFunc:    func(context.Context, string) error { m.acts.Add(1); return nil },
+		DeleteFunc:  func(context.Context, string) error { m.acts.Add(1); return nil },
+		GetLogsFunc: func(context.Context, string) (string, error) { m.acts.Add(1); return "log", nil },
+		ExecFunc:    func(context.Context, string, []string) (string, error) { m.acts.Add(1); return "", nil },
+		ExecWithStdinFunc: func(context.Context, string, []string, io.Reader) (string, error) {
+			m.acts.Add(1)
+			return "", nil
+		},
+	}
 }
 
 func rrAgentInfo(containerID string) api.AgentInfo {
@@ -71,26 +131,24 @@ func rrAgentInfo(containerID string) api.AgentInfo {
 // registers a kubernetes auxiliary runtime holding a same-named agent in the
 // same project, so a lookup that strays to the wrong runtime finds a match
 // there and the test can tell which runtime served the request.
-func newRecordedRuntimeServer(t *testing.T, withK8s bool) (*Server, *listCountingManager, *listCountingManager) {
+func newRecordedRuntimeServer(t *testing.T, withK8s bool) (*Server, *rrManager, *rrManager) {
 	t.Helper()
 	setupTestScionEnv(t)
 
-	defaultMgr := &listCountingManager{}
+	defaultMgr := &rrManager{}
 	defaultMgr.agents = []api.AgentInfo{rrAgentInfo("docker-container")}
-	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
-	srv := New(cfg, defaultMgr, rt)
+	srv := New(cfg, defaultMgr, newRRRuntime("docker", defaultMgr))
 
-	var auxMgr *listCountingManager
+	var auxMgr *rrManager
 	if withK8s {
-		auxMgr = &listCountingManager{}
+		auxMgr = &rrManager{}
 		auxMgr.agents = []api.AgentInfo{rrAgentInfo("k8s-pod")}
-		auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
 		srv.auxiliaryRuntimesMu.Lock()
-		srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
+		srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: newRRRuntime("kubernetes", auxMgr), Manager: auxMgr}
 		srv.auxiliaryRuntimesMu.Unlock()
 	}
 	return srv, defaultMgr, auxMgr
@@ -119,25 +177,114 @@ func serveRR(srv *Server, method, path string, body string) *httptest.ResponseRe
 
 // existingAgentRequests is every existing-agent route the hub dispatches,
 // plus the bare GET.
-var existingAgentRequests = []struct {
+type existingAgentRequest struct {
 	name, method, action, body string
-}{
+}
+
+var existingAgentRequests = []existingAgentRequest{
 	{"get", http.MethodGet, "", ""},
 	{"delete", http.MethodDelete, "", ""},
 	{"stop", http.MethodPost, "/stop", ""},
 	{"restart", http.MethodPost, "/restart", ""},
 	{"reset-auth", http.MethodPost, "/reset-auth", `{"token":"t"}`},
 	{"message", http.MethodPost, "/message", `{"message":"hi"}`},
-	{"has-prompt", http.MethodPost, "/has-prompt", ""},
+	{"has-prompt", http.MethodGet, "/has-prompt", ""},
 	{"logs", http.MethodGet, "/logs", ""},
 	{"exec", http.MethodPost, "/exec", `{"command":["true"]}`},
 }
 
-func TestRecordedRuntime_UnregisteredReturns503WithoutDefaultFallback(t *testing.T) {
+// servedBy reports whether the request for route tc was served by the
+// runtime whose manager is m and whose agent entry has containerID: it acted
+// on the agent, or — for the read-only routes — answered from its listing.
+func servedBy(tc existingAgentRequest, w *httptest.ResponseRecorder, m *rrManager, containerID string) bool {
+	switch tc.name {
+	case "get":
+		return strings.Contains(w.Body.String(), `"containerId":"`+containerID+`"`)
+	case "has-prompt":
+		return m.lists.Load() > 0
+	default:
+		return m.acted() > 0
+	}
+}
+
+// TestRecordedRuntime_RecordedTypeServesEveryRoute pins, for every
+// existing-agent route, that when both the default (docker) and an auxiliary
+// (kubernetes) runtime list the agent, the runtime of the recorded type
+// serves the request and the other runtime is neither listed nor acted on.
+func TestRecordedRuntime_RecordedTypeServesEveryRoute(t *testing.T) {
+	// "k8s" and "remote" are accepted because pkg/runtime.GetRuntime
+	// (factory.go) already normalizes them to kubernetes; see
+	// isKubernetesRuntimeName.
+	for _, recorded := range []string{"kubernetes", "k8s", "remote", "docker"} {
+		for _, tc := range existingAgentRequests {
+			t.Run(recorded+"/"+tc.name, func(t *testing.T) {
+				srv, defaultMgr, k8sMgr := newRecordedRuntimeServer(t, true)
+				want, wantID, other := k8sMgr, "k8s-pod", defaultMgr
+				if recorded == "docker" {
+					want, wantID, other = defaultMgr, "docker-container", k8sMgr
+				}
+
+				w := serveRR(srv, tc.method, "/api/v1/agents/"+rrAgent+tc.action+rrQuery(recorded), tc.body)
+
+				if w.Code >= 400 {
+					t.Fatalf("status = %d; body = %s", w.Code, w.Body.String())
+				}
+				if !servedBy(tc, w, want, wantID) {
+					t.Errorf("the %s runtime did not serve the request (lists=%d acts=%d body=%.120s)",
+						recorded, want.lists.Load(), want.acted(), w.Body.String())
+				}
+				if n, a := other.lists.Load(), other.acted(); n != 0 || a != 0 {
+					t.Errorf("the other runtime was consulted: lists=%d acts=%d", n, a)
+				}
+			})
+		}
+	}
+}
+
+// TestRecordedRuntime_PositiveMatchWins pins that a recorded type that does
+// not hold the agent never hides a runtime that does: the agent, listed only
+// by the default (docker) runtime, is served there whether or not a
+// runtime of the recorded type is registered.
+func TestRecordedRuntime_PositiveMatchWins(t *testing.T) {
+	for _, tc := range existingAgentRequests {
+		for _, k8sRegistered := range []bool{true, false} {
+			name := tc.name + "/kubernetes-unregistered"
+			if k8sRegistered {
+				name = tc.name + "/kubernetes-registered"
+			}
+			t.Run(name, func(t *testing.T) {
+				srv, defaultMgr, k8sMgr := newRecordedRuntimeServer(t, k8sRegistered)
+				if k8sMgr != nil {
+					k8sMgr.agents = nil
+				}
+
+				w := serveRR(srv, tc.method, "/api/v1/agents/"+rrAgent+tc.action+rrQuery("kubernetes"), tc.body)
+
+				if w.Code >= 400 {
+					t.Fatalf("status = %d; body = %s", w.Code, w.Body.String())
+				}
+				if !servedBy(tc, w, defaultMgr, "docker-container") {
+					t.Errorf("the docker runtime holding the agent did not serve the request (lists=%d acts=%d body=%.120s)",
+						defaultMgr.lists.Load(), defaultMgr.acted(), w.Body.String())
+				}
+				if k8sMgr != nil && k8sMgr.acted() != 0 {
+					t.Errorf("the kubernetes runtime acted (%d) although it does not hold the agent", k8sMgr.acted())
+				}
+			})
+		}
+	}
+}
+
+// TestRecordedRuntime_FoundNowhereUnregisteredReturns503 pins the fail-closed
+// case: no registered runtime lists the agent and the recorded type has no
+// registered runtime, so the broker answers with a retryable 503 and nothing
+// acts on the agent.
+func TestRecordedRuntime_FoundNowhereUnregisteredReturns503(t *testing.T) {
 	for _, recorded := range []string{"kubernetes", "k8s", "cloudrun"} {
 		for _, tc := range existingAgentRequests {
 			t.Run(recorded+"/"+tc.name, func(t *testing.T) {
 				srv, defaultMgr, _ := newRecordedRuntimeServer(t, false)
+				defaultMgr.agents = nil
 
 				w := serveRR(srv, tc.method, "/api/v1/agents/"+rrAgent+tc.action+rrQuery(recorded), tc.body)
 
@@ -148,20 +295,42 @@ func TestRecordedRuntime_UnregisteredReturns503WithoutDefaultFallback(t *testing
 				if !strings.Contains(w.Body.String(), "is not available on this broker") {
 					t.Errorf("body = %s, want the runtime-not-available message", w.Body.String())
 				}
-				if n := defaultMgr.lists.Load(); n != 0 {
-					t.Errorf("default runtime was listed %d time(s); it must not be consulted", n)
-				}
-				if defaultMgr.StopCalls() != 0 || defaultMgr.DeleteCalls() != 0 {
-					t.Errorf("default runtime acted on the agent (stop=%d delete=%d)",
-						defaultMgr.StopCalls(), defaultMgr.DeleteCalls())
+				if a := defaultMgr.acted(); a != 0 {
+					t.Errorf("default runtime acted on the agent (%d)", a)
 				}
 			})
 		}
 	}
 }
 
+// TestRecordedRuntime_FoundNowhereRegisteredStaysInRecordedType covers an
+// agent no runtime lists while the recorded type is registered: the request
+// is handled within the recorded type as before (an idempotent stop), and
+// the default runtime does not act.
+func TestRecordedRuntime_FoundNowhereRegisteredStaysInRecordedType(t *testing.T) {
+	srv, defaultMgr, k8sMgr := newRecordedRuntimeServer(t, true)
+	defaultMgr.agents = nil
+	k8sMgr.agents = nil
+
+	w := serveRR(srv, http.MethodPost, "/api/v1/agents/"+rrAgent+"/stop"+rrQuery("kubernetes"), "")
+
+	if w.Code == http.StatusServiceUnavailable {
+		t.Fatalf("status = 503; a registered recorded type must not fail closed: %s", w.Body.String())
+	}
+	if defaultMgr.acted() != 0 {
+		t.Errorf("default runtime acted (%d)", defaultMgr.acted())
+	}
+	if w.Code != http.StatusAccepted {
+		t.Errorf("status = %d, want the idempotent 202 for an agent that is gone; body = %s", w.Code, w.Body.String())
+	}
+	if k8sMgr.lists.Load() == 0 {
+		t.Error("the recorded (kubernetes) runtime was not searched")
+	}
+}
+
 func TestRecordedRuntime_KeysUnregisteredIsKeysUnavailable(t *testing.T) {
 	srv, defaultMgr, _ := newRecordedRuntimeServer(t, false)
+	defaultMgr.agents = nil
 	var sent atomic.Bool
 	defaultMgr.sendKeysFunc = func(context.Context, string, string, string, string) error {
 		sent.Store(true)
@@ -186,95 +355,55 @@ func TestRecordedRuntime_KeysUnregisteredIsKeysUnavailable(t *testing.T) {
 	if res.Outcome != agentkeys.OutcomeKeysUnavailable || res.OperationID != "op-1" {
 		t.Errorf("result = %+v, want keys_unavailable echoing op-1", res)
 	}
-	if sent.Load() || defaultMgr.lists.Load() != 0 {
-		t.Errorf("default runtime was used (sent=%v lists=%d)", sent.Load(), defaultMgr.lists.Load())
+	if sent.Load() {
+		t.Error("keys were sent through the default runtime")
 	}
 }
 
-func TestRecordedRuntime_RegisteredTypeIsTheOnlyRuntimeUsed(t *testing.T) {
-	// "remote" is accepted because pkg/runtime.GetRuntime (factory.go)
-	// already normalizes it to kubernetes; see isKubernetesRuntimeName.
-	for _, recorded := range []string{"kubernetes", "k8s", "remote"} {
-		t.Run(recorded+"/stop", func(t *testing.T) {
-			srv, defaultMgr, auxMgr := newRecordedRuntimeServer(t, true)
-
-			w := serveRR(srv, http.MethodPost, "/api/v1/agents/"+rrAgent+"/stop"+rrQuery(recorded), "")
-
-			if w.Code >= 300 {
-				t.Fatalf("status = %d, want success; body = %s", w.Code, w.Body.String())
+func TestRecordedRuntime_KeysServedByRuntimeHoldingAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		k8sHolds    bool
+		wantK8s     bool
+		withK8s     bool
+		dockerHolds bool
+	}{
+		{"recorded type holds it", true, true, true, true},
+		{"only docker holds it, kubernetes registered", false, false, true, true},
+		{"only docker holds it, kubernetes unregistered", false, false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, defaultMgr, auxMgr := newRecordedRuntimeServer(t, tc.withK8s)
+			var defaultSent, auxSent atomic.Bool
+			defaultMgr.sendKeysFunc = func(context.Context, string, string, string, string) error {
+				defaultSent.Store(true)
+				return nil
 			}
-			if auxMgr.StopCalls() != 1 || defaultMgr.StopCalls() != 0 {
-				t.Errorf("stop calls: kubernetes=%d docker=%d, want 1 and 0", auxMgr.StopCalls(), defaultMgr.StopCalls())
+			if auxMgr != nil {
+				if !tc.k8sHolds {
+					auxMgr.agents = nil
+				}
+				auxMgr.sendKeysFunc = func(context.Context, string, string, string, string) error {
+					auxSent.Store(true)
+					return nil
+				}
 			}
-			if n := defaultMgr.lists.Load(); n != 0 {
-				t.Errorf("default runtime was listed %d time(s)", n)
+
+			w := postKeys(t, srv, rrAgent, rrProject+"&"+api.RecordedRuntimeQueryParam+"=kubernetes", agentkeys.BrokerRequest{
+				ProjectID:     rrProject,
+				AgentID:       "agent-id",
+				OperationID:   "op-2",
+				ExecuteBefore: time.Now().UTC().Add(10 * time.Second),
+				Keys:          "C-c",
+			})
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+			}
+			if auxSent.Load() != tc.wantK8s || defaultSent.Load() == tc.wantK8s {
+				t.Errorf("keys sent: kubernetes=%v docker=%v, want kubernetes=%v", auxSent.Load(), defaultSent.Load(), tc.wantK8s)
 			}
 		})
-		t.Run(recorded+"/delete", func(t *testing.T) {
-			srv, defaultMgr, auxMgr := newRecordedRuntimeServer(t, true)
-
-			w := serveRR(srv, http.MethodDelete, "/api/v1/agents/"+rrAgent+rrQuery(recorded), "")
-
-			if w.Code >= 300 {
-				t.Fatalf("status = %d, want success; body = %s", w.Code, w.Body.String())
-			}
-			if auxMgr.DeleteCalls() != 1 || defaultMgr.DeleteCalls() != 0 {
-				t.Errorf("delete calls: kubernetes=%d docker=%d, want 1 and 0", auxMgr.DeleteCalls(), defaultMgr.DeleteCalls())
-			}
-			if auxMgr.lastDeleteContainerID != "k8s-pod" {
-				t.Errorf("deleted container %q, want k8s-pod", auxMgr.lastDeleteContainerID)
-			}
-			if n := defaultMgr.lists.Load(); n != 0 {
-				t.Errorf("default runtime was listed %d time(s)", n)
-			}
-		})
-	}
-}
-
-func TestRecordedRuntime_KeysRegisteredTypeIsTheOnlyRuntimeUsed(t *testing.T) {
-	srv, defaultMgr, auxMgr := newRecordedRuntimeServer(t, true)
-	var defaultSent, auxSent atomic.Bool
-	defaultMgr.sendKeysFunc = func(context.Context, string, string, string, string) error {
-		defaultSent.Store(true)
-		return nil
-	}
-	auxMgr.sendKeysFunc = func(context.Context, string, string, string, string) error {
-		auxSent.Store(true)
-		return nil
-	}
-
-	w := postKeys(t, srv, rrAgent, rrProject+"&"+api.RecordedRuntimeQueryParam+"=kubernetes", agentkeys.BrokerRequest{
-		ProjectID:     rrProject,
-		AgentID:       "agent-id",
-		OperationID:   "op-2",
-		ExecuteBefore: time.Now().UTC().Add(10 * time.Second),
-		Keys:          "C-c",
-	})
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
-	}
-	if !auxSent.Load() || defaultSent.Load() {
-		t.Errorf("keys sent: kubernetes=%v docker=%v, want true and false", auxSent.Load(), defaultSent.Load())
-	}
-}
-
-// TestRecordedRuntime_MatchingDefaultSkipsAuxiliary covers a recorded type
-// equal to the default runtime's: the auxiliary runtime of another type is
-// never consulted.
-func TestRecordedRuntime_MatchingDefaultSkipsAuxiliary(t *testing.T) {
-	srv, defaultMgr, auxMgr := newRecordedRuntimeServer(t, true)
-	// Only the auxiliary runtime holds the agent: a lookup that strayed
-	// there would stop it.
-	defaultMgr.agents = nil
-
-	w := serveRR(srv, http.MethodPost, "/api/v1/agents/"+rrAgent+"/stop"+rrQuery("docker"), "")
-
-	if w.Code >= 300 {
-		t.Fatalf("status = %d, want success; body = %s", w.Code, w.Body.String())
-	}
-	if auxMgr.StopCalls() != 0 || auxMgr.lists.Load() != 0 {
-		t.Errorf("kubernetes runtime was used (stop=%d lists=%d)", auxMgr.StopCalls(), auxMgr.lists.Load())
 	}
 }
 
@@ -361,8 +490,9 @@ func TestRecordedRuntime_SignatureCoversParam(t *testing.T) {
 		{"added", "projectId=" + rrProject, signedQuery, false},
 	}
 
-	newAuthServer := func(t *testing.T) (*Server, *listCountingManager) {
+	newAuthServer := func(t *testing.T) (*Server, *rrManager) {
 		srv, defaultMgr, _ := newRecordedRuntimeServer(t, false)
+		defaultMgr.agents = nil
 		mw := NewMultiKeyBrokerAuthMiddleware(true, 5*time.Minute, false)
 		mw.UpdateKeys([]secretKeyEntry{{hubName: "hub", secretKey: secret}})
 		srv.brokerAuthMiddleware = mw
@@ -378,11 +508,12 @@ func TestRecordedRuntime_SignatureCoversParam(t *testing.T) {
 		}
 		return req.Header
 	}
-	check := func(t *testing.T, wantAuth bool, status int, body string, defaultMgr *listCountingManager) {
+	check := func(t *testing.T, wantAuth bool, status int, body string, defaultMgr *rrManager) {
 		t.Helper()
 		if wantAuth {
 			// Authenticated: the request reached the recorded-runtime gate
-			// (no kubernetes runtime registered → 503).
+			// (no runtime lists the agent and no kubernetes runtime is
+			// registered → 503).
 			if status != http.StatusServiceUnavailable {
 				t.Fatalf("status = %d, want 503 from the handler; body = %s", status, body)
 			}
@@ -391,7 +522,7 @@ func TestRecordedRuntime_SignatureCoversParam(t *testing.T) {
 		if status != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401; body = %s", status, body)
 		}
-		if defaultMgr.lists.Load() != 0 || defaultMgr.StopCalls() != 0 {
+		if defaultMgr.lists.Load() != 0 || defaultMgr.acted() != 0 {
 			t.Errorf("a request failing authentication reached a runtime")
 		}
 	}
@@ -485,5 +616,41 @@ func TestRecordedRuntime_OtherAuxiliaryRuntimeIsNotUsed(t *testing.T) {
 				t.Error("default runtime used")
 			}
 		})
+	}
+}
+
+// TestKnownRuntimeNamesMatchRuntimeNames pins knownRuntimeNames, and the
+// kubernetes spelling, to the Name() values of the runtimes
+// pkg/runtime.GetRuntime (factory.go) constructs, so a renamed or added
+// runtime cannot drift from the recorded-runtime matching. GetRuntime's
+// "cloudrun-instances" case constructs a CloudRunRuntime, so it reports
+// "cloudrun".
+func TestKnownRuntimeNamesMatchRuntimeNames(t *testing.T) {
+	constructed := []runtime.Runtime{
+		&runtime.DockerRuntime{},
+		&runtime.PodmanRuntime{},
+		&runtime.AppleContainerRuntime{},
+		&runtime.CloudRunRuntime{},
+		&runtime.CloudRunSandboxRuntime{},
+		&runtime.KubernetesRuntime{},
+	}
+	names := map[string]bool{}
+	for _, rt := range constructed {
+		name := rt.Name()
+		got, ok := canonicalRuntimeName(name)
+		if !ok || got != name {
+			t.Errorf("canonicalRuntimeName(%q) = (%q,%v), want the name itself", name, got, ok)
+		}
+		if name != "kubernetes" {
+			names[name] = true
+		}
+	}
+	for name := range knownRuntimeNames {
+		if !names[name] {
+			t.Errorf("knownRuntimeNames has %q, which no runtime GetRuntime constructs reports", name)
+		}
+	}
+	if len(names) != len(knownRuntimeNames) {
+		t.Errorf("runtime names %v, knownRuntimeNames %v", names, knownRuntimeNames)
 	}
 }

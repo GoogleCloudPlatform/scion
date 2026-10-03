@@ -28,13 +28,19 @@ import (
 // (ptone/scion#2748).
 //
 // The hub sends the runtime type it recorded for an agent (store
-// Agent.Runtime, the broker-reported runtime.Runtime.Name() of the runtime
-// that started it) as the api.RecordedRuntimeQueryParam query parameter on
-// every existing-agent request. The broker then looks for the agent only in
-// runtimes of that type, and when none is registered answers with a
-// retryable 503 rather than looking in its default runtime — which could
-// otherwise report "not found", or an idempotent success, while the agent is
-// still running in a runtime this broker cannot reach right now.
+// Agent.Runtime) as the api.RecordedRuntimeQueryParam query parameter on
+// every existing-agent request. The broker uses it to pick the runtime that
+// holds the agent:
+//
+//   - runtimes of the recorded type are searched first;
+//   - if the agent is not there but another registered runtime lists it, that
+//     runtime is used: a positive match wins over the recorded type, which can
+//     be a guess (for example a runtime backfilled from a broker profile);
+//   - if no registered runtime lists it and the recorded type has no
+//     registered runtime, the broker answers with a retryable 503 rather than
+//     acting through its default runtime, which could otherwise report "not
+//     found", or an idempotent success, while the agent is still running in a
+//     runtime this broker cannot reach right now.
 //
 // An empty parameter (an older hub, or an agent with no recorded runtime)
 // keeps the previous behaviour: every registered runtime is searched,
@@ -77,10 +83,19 @@ func canonicalRuntimeName(name string) (string, bool) {
 	return "", false
 }
 
+// runtimeMatchName is the name runtimes are matched by: the canonical name
+// for a recognised runtime name, otherwise the name itself.
+func runtimeMatchName(name string) string {
+	if canonical, ok := canonicalRuntimeName(name); ok {
+		return canonical
+	}
+	return name
+}
+
 type recordedRuntimeKey struct{}
 
-// withRecordedRuntime returns ctx restricted to runtimes whose canonical
-// name is canonical (as returned by canonicalRuntimeName).
+// withRecordedRuntime returns ctx restricted to runtimes whose match name
+// (runtimeMatchName) is canonical.
 func withRecordedRuntime(ctx context.Context, canonical string) context.Context {
 	return context.WithValue(ctx, recordedRuntimeKey{}, canonical)
 }
@@ -103,8 +118,7 @@ func runtimeAllowed(ctx context.Context, rt scionrt.Runtime) bool {
 	if rt == nil {
 		return false
 	}
-	got, ok := canonicalRuntimeName(rt.Name())
-	return ok && got == want
+	return runtimeMatchName(rt.Name()) == want
 }
 
 // defaultRuntimeAllowed reports whether the broker's default runtime may hold
@@ -130,16 +144,22 @@ func (s *Server) sortedAuxiliaryRuntimesFor(ctx context.Context) []namedAuxiliar
 }
 
 // applyRecordedRuntime reads the recorded runtime type from r and returns the
-// context existing-agent lookups must use:
+// context existing-agent lookups for agent id in projectID must use:
 //
 //   - no recorded type: ctx unchanged (every runtime is searched);
 //   - an unrecognised type: ctx unchanged, logged — the broker cannot tell
 //     which runtime it names, so it keeps the previous behaviour rather than
 //     refusing every operation on the agent;
-//   - a recognised type with at least one registered runtime of that type
-//     (default or auxiliary): ctx restricted to those runtimes;
-//   - a recognised type with no registered runtime: errRuntimeNotRegistered.
-func (s *Server) applyRecordedRuntime(r *http.Request, id string) (context.Context, string, error) {
+//   - a recognised type whose runtimes list the agent: ctx restricted to
+//     runtimes of that type;
+//   - otherwise, if any registered runtime lists the agent: ctx restricted to
+//     runtimes of that runtime's type (logged, since the recorded type is
+//     then wrong);
+//   - otherwise, a recognised type with a registered runtime: ctx restricted
+//     to runtimes of that type (the agent is gone; the operation reports it
+//     as it would there);
+//   - otherwise: errRuntimeNotRegistered.
+func (s *Server) applyRecordedRuntime(r *http.Request, id, projectID string) (context.Context, string, error) {
 	ctx := r.Context()
 	recorded := r.URL.Query().Get(api.RecordedRuntimeQueryParam)
 	if recorded == "" {
@@ -152,10 +172,22 @@ func (s *Server) applyRecordedRuntime(r *http.Request, id string) (context.Conte
 		return ctx, recorded, nil
 	}
 	restricted := withRecordedRuntime(ctx, canonical)
-	if s.defaultRuntimeAllowed(restricted) || len(s.sortedAuxiliaryRuntimesFor(restricted)) > 0 {
+	registered := s.defaultRuntimeAllowed(restricted) || len(s.sortedAuxiliaryRuntimesFor(restricted)) > 0
+	if registered {
+		if _, _, found := s.findAgentRuntimeTarget(restricted, id, projectID); found {
+			return restricted, recorded, nil
+		}
+	}
+	if _, rt, found := s.findAgentRuntimeTarget(ctx, id, projectID); found && rt != nil {
+		actual := runtimeMatchName(rt.Name())
+		s.agentLifecycleLog.Warn("Agent found in a runtime other than its recorded type; using that runtime",
+			"agent_id", id, "recorded_runtime", recorded, "runtime", actual)
+		return withRecordedRuntime(ctx, actual), recorded, nil
+	}
+	if registered {
 		return restricted, recorded, nil
 	}
-	s.agentLifecycleLog.Warn("Recorded runtime has no registered manager on this broker",
+	s.agentLifecycleLog.Warn("Recorded runtime has no registered manager on this broker and no runtime lists the agent",
 		"agent_id", id, "runtime", recorded)
 	return ctx, recorded, fmt.Errorf("%w: %s", errRuntimeNotRegistered, recorded)
 }

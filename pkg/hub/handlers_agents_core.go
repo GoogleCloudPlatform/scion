@@ -4029,6 +4029,9 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 
 	if err := disp.DispatchAgentResetAuth(ctx, agent); err != nil {
 		slog.Error("Failed to reset agent auth", "agent_id", id, "error", err)
+		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"auth reset failed: "+err.Error(), nil)
 		return
