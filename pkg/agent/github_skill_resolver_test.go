@@ -3689,7 +3689,9 @@ func TestRetryAfter_HugeValueDoesNotOverflow(t *testing.T) {
 	// 99999999999 seconds wraps to a large positive duration; 9223372037
 	// wraps to a negative one and 18446744074 to under a second, so a cap
 	// applied after the multiplication would not catch the last two.
-	for _, huge := range []string{"99999999999", "9223372037", "18446744074"} {
+	// 99999999999999999999 does not fit in int64 at all and must still read
+	// as huge, not as absent.
+	for _, huge := range []string{"99999999999", "9223372037", "18446744074", "99999999999999999999"} {
 		t.Run(huge, func(t *testing.T) {
 			newResp := func(status int) *http.Response {
 				resp := &http.Response{StatusCode: status, Header: make(http.Header)}
@@ -3708,6 +3710,29 @@ func TestRetryAfter_HugeValueDoesNotOverflow(t *testing.T) {
 				t.Errorf("retryAfterDuration = %v, %v; want ok and longer than githubMaxBackoff", got, ok)
 			}
 		})
+	}
+}
+
+func TestParseRetryAfterSeconds(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+		ok   bool
+	}{
+		{"0", 0, true},
+		{"30", 30, true},
+		{"99999999999999999999", math.MaxInt64, true},
+		{"-99999999999999999999", 0, false},
+		{"+99999999999999999999", 0, false},
+		{"1.5", 0, false},
+		{"Wed, 21 Oct 2015 07:28:00 GMT", 0, false},
+		{"", 0, false},
+	}
+	for _, tc := range cases {
+		got, ok := parseRetryAfterSeconds(tc.in)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("parseRetryAfterSeconds(%q) = %d, %v; want %d, %v", tc.in, got, ok, tc.want, tc.ok)
+		}
 	}
 }
 

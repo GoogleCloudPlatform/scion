@@ -999,6 +999,10 @@ func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHub
 		return nil, &githubResolveError{
 			code: SkillErrCodeNotFound,
 			msg:  fmt.Sprintf("file %s not found in repo %s/%s at %s", filePath, ghRef.Owner, ghRef.Repo, commitSHA[:12]),
+			// The listing at this commit named the file, so a 404 here is an
+			// upstream inconsistency (for example raw content lagging a
+			// push), not a missing ref; it is not remembered.
+			fileMissingAfterListing: true,
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -1058,6 +1062,10 @@ type githubResolveError struct {
 	msg        string
 	retryAfter string
 	err        error
+	// fileMissingAfterListing marks a not_found for a file download that the
+	// directory listing at the same commit named. cacheableFailure does not
+	// remember these.
+	fileMissingAfterListing bool
 }
 
 func (e *githubResolveError) Error() string { return e.msg }
@@ -1112,8 +1120,8 @@ func retryAfterDuration(resp *http.Response) (time.Duration, bool) {
 	if ra == "" {
 		return 0, false
 	}
-	seconds, err := strconv.ParseInt(ra, 10, 64)
-	if err != nil || seconds < 0 {
+	seconds, ok := parseRetryAfterSeconds(ra)
+	if !ok || seconds < 0 {
 		return 0, false
 	}
 	// Saturate rather than overflow: a huge value must still read as longer
@@ -1358,7 +1366,7 @@ func isRetryableResponse(resp *http.Response) bool {
 func retryDelay(resp *http.Response, attempt int) time.Duration {
 	if resp != nil {
 		if ra := resp.Header.Get("Retry-After"); ra != "" {
-			if seconds, err := strconv.ParseInt(ra, 10, 64); err == nil && seconds >= 0 {
+			if seconds, ok := parseRetryAfterSeconds(ra); ok && seconds >= 0 {
 				return secondsUpTo(seconds, githubMaxBackoff)
 			}
 		}

@@ -1122,6 +1122,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// their delayed write. Deferred so it runs on every return path, and
 	// after the HTTP server has drained, when in-flight requests have
 	// finished adding to it.
+	//
+	// parentCtx keeps the caller's ctx: ctx is reassigned below to the
+	// drain timeout, whose cancel runs before this deferred func, so a
+	// bound derived from it would already be cancelled here.
 	parentCtx := ctx
 	defer func() {
 		if s.ghResolutionCache == nil {

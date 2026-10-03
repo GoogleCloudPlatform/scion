@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -376,12 +375,14 @@ func (c *GitHubResolutionCache) putEntry(uri string, skill ResolvedSkill, isBran
 }
 
 // cacheableFailure reports whether a fetch error is worth remembering for
-// failureCacheTTL: only a not_found, which does not change between attempts
-// made close together. Retryable causes (5xx, no response), timeouts, rate
-// limits and unclassified errors are never remembered.
+// failureCacheTTL: only a not_found for the ref or the skill directory,
+// which does not change between attempts made close together. A file
+// download that 404s after the listing named it, retryable causes (5xx, no
+// response), timeouts, rate limits and unclassified errors are never
+// remembered.
 func cacheableFailure(err error) bool {
 	var rerr *githubResolveError
-	return errors.As(err, &rerr) && rerr.code == SkillErrCodeNotFound
+	return errors.As(err, &rerr) && rerr.code == SkillErrCodeNotFound && !rerr.fileMissingAfterListing
 }
 
 // recordFailure remembers err for cacheKey until failureCacheTTL from now,
@@ -898,7 +899,7 @@ func usableRetryAfter(v string) bool {
 	if v == "" {
 		return false
 	}
-	if secs, err := strconv.ParseInt(v, 10, 64); err == nil {
+	if secs, ok := parseRetryAfterSeconds(v); ok {
 		return secs > 0
 	}
 	_, err := http.ParseTime(v)
