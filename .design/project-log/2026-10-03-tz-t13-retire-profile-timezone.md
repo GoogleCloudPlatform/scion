@@ -87,3 +87,21 @@ and Asia/Kathmandu (pkg/config, cmd, and targeted pkg/hub).
 ## Review round 2
 
 Clean apart from one Low (the base named in the round 1 note), fixed here.
+
+## Upstream sync and bot review (2026-10-03)
+
+- Merged upstream main f261ebee into the branch as a merge commit instead of
+  rebasing, so the published history is kept. One textual conflict, in the
+  profile schema in `pkg/config/opsettings/registry.go`: upstream's new
+  `safe_to_evict` and `shared_dir_storage_backend` keys are kept and the
+  removed `timezone` key stays dropped. One semantic conflict: upstream's
+  `TestPutServerConfigDB_SharedDirStorageBackend_RoundTrip` edited the
+  removed profile `Timezone` field as its "another field". It now edits
+  `DefaultTemplate`, which tests the same thing.
+- Time-literal and CLI time-zone gates are clean on the merged tree.
+- Two automated review comments were declined: the nil-map guard has no
+  effect, because a nil map lookup with a comma-ok assertion already returns
+  nil, and the nil-row guard contradicts the `GetHubSetting` contract
+  (`ErrNotFound` for a missing section, never a nil row with a nil error).
+- Re-ran pkg/config, the cmd settings-init tests and targeted pkg/hub tests
+  (server-config, retirement, seed) under TZ=Asia/Tokyo and Asia/Kathmandu.
