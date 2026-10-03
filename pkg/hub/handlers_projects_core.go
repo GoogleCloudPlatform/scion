@@ -3112,6 +3112,12 @@ func (s *Server) dispatchAgentDeletions(ctx context.Context, agents []store.Agen
 			continue
 		}
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
+			// Usually the row is already gone with the project; record the
+			// stop intent for any that remains.
+			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil && !errors.Is(err, store.ErrNotFound) {
+				s.agentLifecycleLog.Warn("failed to record run intent during project deletion",
+					"agent_id", agent.ID, "error", err)
+			}
 			if err := dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, now); err != nil {
 				s.agentLifecycleLog.Warn("failed to dispatch agent delete during project deletion",
 					"agent_id", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)

@@ -524,6 +524,14 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 	ctx, cancel := context.WithTimeout(e.ctx, deleteDispatchBudget)
 	defer cancel()
 
+	// A delete is a stop: record it before anything is dispatched. The
+	// claim already holds the row, so a failed write is logged rather than
+	// failing the delete.
+	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+		s.agentLifecycleLog.Warn("Failed to record run intent for agent delete",
+			"agent_id", agent.ID, "error", err)
+	}
+
 	// Managed agent: clean up cloud resources directly, skip the broker.
 	// Errors are logged, as before (follow-up 4).
 	if isManagedAgentRuntime(agent.Runtime) {

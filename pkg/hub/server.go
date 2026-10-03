@@ -3643,10 +3643,26 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 				endLifecycleOp()
 				continue
 			}
+		}
+		intentAt, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped)
+		if err != nil {
+			slog.Error("Scheduler: auto-suspend intent write failed",
+				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+			endLifecycleOp()
+			continue
+		}
+		if agent.RuntimeBrokerID != "" {
 			s.syncWorkspaceOnStop(ctx, agent)
 			if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
 				slog.Error("Scheduler: auto-suspend dispatch failed",
 					"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+				// This stop was the system's, not the user's: put the
+				// intent back to running unless something newer replaced
+				// it.
+				if _, rerr := s.store.RevertRunIntent(ctx, agent.ID, store.RunIntentStopped, intentAt, store.RunIntentRunning); rerr != nil {
+					slog.Error("Scheduler: auto-suspend intent revert failed",
+						"agent_id", agent.ID, "agent_name", agent.Name, "error", rerr)
+				}
 				endLifecycleOp()
 				continue
 			}
@@ -3657,7 +3673,7 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 			ContainerStatus: "stopped",
 			Activity:        "",
 		}
-		err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate)
+		err = s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate)
 		endLifecycleOp()
 		if err != nil {
 			slog.Error("Scheduler: auto-suspend status update failed",
@@ -4467,6 +4483,9 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			return nil
 		}
 
+		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
+		}
 		if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
 			slog.Error("Scheduler: failed to dispatch agent creation",
 				"eventID", evt.ID,

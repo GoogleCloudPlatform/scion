@@ -186,10 +186,30 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 	return "", nil
 }
 
+// stopSupersededResult is the result recorded on a queued stop row that was
+// not applied because a newer start or stop superseded it.
+const stopSupersededResult = `{"superseded":true}`
+
 func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (string, error) {
 	agent, err := s.resolveDispatchAgent(ctx, d)
 	if err != nil {
 		return "", err
+	}
+	var intentAt *time.Time
+	if d.Args != "" {
+		args, err := UnmarshalStopArgs(d.Args)
+		if err != nil {
+			return "", fmt.Errorf("unmarshal stop args: %w", err)
+		}
+		intentAt = args.IntentAt
+	}
+	// A stop queued while the broker was offline applies only while the
+	// stop intent it was queued for is still the current one; a start or
+	// stop recorded since then supersedes it.
+	if intentAt != nil && !agent.RunIntentMatches(store.RunIntentStopped, *intentAt) {
+		s.agentLifecycleLog.Info("reconcile: queued stop superseded by a newer run intent; not applied",
+			"id", d.ID, "agent_id", agent.ID, "run_intent", agent.RunIntent)
+		return stopSupersededResult, nil
 	}
 	defer s.beginLifecycleOp(agent.ID)()
 	dispatcher := s.GetDispatcher()
@@ -198,6 +218,18 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 	}
 	if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
 		return "", fmt.Errorf("dispatch stop: %w", err)
+	}
+	if intentAt != nil {
+		// The queued stop has now been applied: release the per-broker
+		// reservation as a direct stop does, and replace the stop_queued
+		// container status.
+		s.releaseBrokerQuota(ctx, agent)
+		if agent.ContainerStatus == containerStatusStopQueued {
+			if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{ContainerStatus: "stopped"}); err != nil {
+				s.agentLifecycleLog.Warn("reconcile: failed to update container status after queued stop",
+					"id", d.ID, "agent_id", agent.ID, "error", err)
+			}
+		}
 	}
 	return "", nil
 }
