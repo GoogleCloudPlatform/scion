@@ -52,6 +52,10 @@ func newTestServerForRuntimeRemap(t *testing.T) (*Server, *mockManager) {
 	// default runtime instead of this test's remap). See clearSCIONEnv.
 	clearSCIONEnv(t)
 	t.Setenv("HOME", t.TempDir())
+	// Point KUBECONFIG at a path that does not exist, so a test that
+	// forgets to pin srv.resolveAuxiliaryRuntime can never reach a real
+	// cluster from the ambient kubeconfig (ptone/scion#2680).
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "absent"))
 
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
@@ -229,14 +233,18 @@ func TestBuildStartContext_HubDefaultPassthroughKeptWhenRuntimeMatches(t *testin
 // must survive a runtime remap completely unaffected — the broker-side
 // re-check is scoped to the hub-default rung only, by construction.
 //
-// srv.resolveAuxiliaryRuntime returns a mock "kubernetes" runtime so the
-// remap never builds a real cluster client from the ambient KUBECONFIG/ADC
-// (ptone/scion#2680).
+// The remap targets a fictitious "other" runtime, as in
+// TestBuildStartContext_HubDefaultPassthroughDowngradedOnRuntimeRemap: the
+// target must be one where a FLAGGED grant would downgrade, or this test
+// cannot tell the flag gate apart from no gate at all. Kubernetes keeps
+// passthrough for every grant, flagged or not, so it would make this test
+// vacuous. srv.resolveAuxiliaryRuntime is pinned so the remap never builds
+// a real runtime client from the ambient environment (ptone/scion#2680).
 func TestBuildStartContext_UnflaggedPassthroughUnaffectedByRuntimeRemap(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
-	projectPath := writeRemapSettings(t, "kubernetes")
+	projectPath := writeRemapSettings(t, "other")
 	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
-		return &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+		return &runtime.MockRuntime{NameFunc: func() string { return "other" }}
 	}
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
@@ -261,6 +269,55 @@ func TestBuildStartContext_UnflaggedPassthroughUnaffectedByRuntimeRemap(t *testi
 	}
 	if sc.Opts.Env["GCE_METADATA_HOST"] != "" {
 		t.Errorf("expected no GCE_METADATA_HOST redirect for an unflagged passthrough, got %q", sc.Opts.Env["GCE_METADATA_HOST"])
+	}
+}
+
+// TestBuildStartContext_HubDefaultPassthroughDowngradedOnUnresolvableRuntime
+// covers the resolved.Name() == "error" branch of resolveManagerForOpts:
+// the profile names Kubernetes, but the runtime cannot be built (e.g. the
+// cluster is unreachable), so the resolver returns an ErrorRuntime. A
+// flagged passthrough must downgrade to block, and the failed runtime must
+// not be registered as an auxiliary runtime. srv.resolveAuxiliaryRuntime is
+// pinned to a mock named "error" so the test never depends on whether a
+// real cluster is reachable (ptone/scion#2680).
+func TestBuildStartContext_HubDefaultPassthroughDowngradedOnUnresolvableRuntime(t *testing.T) {
+	srv, _ := newTestServerForRuntimeRemap(t)
+	projectPath := writeRemapSettings(t, "kubernetes")
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+		return &runtime.MockRuntime{NameFunc: func() string { return "error" }}
+	}
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-remap-unresolvable",
+		ProjectPath: projectPath,
+		Config: &CreateAgentConfig{
+			GCPIdentity: &GCPIdentityConfig{
+				MetadataMode:        "passthrough",
+				RequireLocalRuntime: true,
+			},
+		},
+		HTTPRequest: r,
+		Operation:   opCreate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if sc.Opts.Env["SCION_METADATA_MODE"] != "block" {
+		t.Errorf("expected SCION_METADATA_MODE='block' when the runtime cannot be resolved, got %q", sc.Opts.Env["SCION_METADATA_MODE"])
+	}
+	if sc.Opts.Env["GCE_METADATA_HOST"] != "localhost:18380" {
+		t.Errorf("expected GCE_METADATA_HOST='localhost:18380' once downgraded, got %q", sc.Opts.Env["GCE_METADATA_HOST"])
+	}
+	if sc.Manager == srv.manager {
+		t.Error("expected a dedicated manager for the unresolvable runtime, got the broker's default manager")
+	}
+	srv.auxiliaryRuntimesMu.Lock()
+	n := len(srv.auxiliaryRuntimes)
+	srv.auxiliaryRuntimesMu.Unlock()
+	if n != 0 {
+		t.Errorf("expected the unresolvable runtime not to be registered as an auxiliary runtime, got %d entries", n)
 	}
 }
 
@@ -376,6 +433,10 @@ func newTestServerForSavedProfileRemap(t *testing.T, agentName, remapRuntimeName
 	// resolveManagerForOpts calls reads settings.
 	clearSCIONEnv(t)
 	t.Setenv("HOME", t.TempDir())
+	// Point KUBECONFIG at a path that does not exist, so a test that
+	// forgets to pin srv.resolveAuxiliaryRuntime can never reach a real
+	// cluster from the ambient kubeconfig (ptone/scion#2680).
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "absent"))
 
 	origWd, err := os.Getwd()
 	if err != nil {
@@ -668,6 +729,10 @@ func newTestServerForLateCheckOrdering(t *testing.T, agentName, urlID, remapRunt
 	// fixture's working directory not matching the project directory below.
 	clearSCIONEnv(t)
 	t.Setenv("HOME", t.TempDir())
+	// Point KUBECONFIG at a path that does not exist, so a test that
+	// forgets to pin srv.resolveAuxiliaryRuntime can never reach a real
+	// cluster from the ambient kubeconfig (ptone/scion#2680).
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "absent"))
 
 	tmpDir := t.TempDir()
 	dotScion := filepath.Join(tmpDir, ".scion")
