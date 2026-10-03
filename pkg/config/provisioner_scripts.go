@@ -16,6 +16,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -95,25 +96,27 @@ func writeFileAtomic(targetPath string, data []byte) error {
 		return fmt.Errorf("create temp file for %s: %w", targetPath, err)
 	}
 	tmpName := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpName) }
-	if _, err := tmp.Write(data); err != nil {
+	renamed := false
+	defer func() {
+		// Close is idempotent here; the error from a second Close is ignored.
 		_ = tmp.Close()
-		cleanup()
+		if !renamed {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
 		return fmt.Errorf("write temp file for %s: %w", targetPath, err)
 	}
 	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		cleanup()
 		return fmt.Errorf("chmod temp file for %s: %w", targetPath, err)
 	}
 	if err := tmp.Close(); err != nil {
-		cleanup()
 		return fmt.Errorf("close temp file for %s: %w", targetPath, err)
 	}
 	if err := os.Rename(tmpName, targetPath); err != nil {
-		cleanup()
 		return fmt.Errorf("replace %s: %w", targetPath, err)
 	}
+	renamed = true
 	return nil
 }
 
@@ -142,8 +145,11 @@ func seedHarnessConfigFile(srcFS fs.FS, basePath, relPath, targetPath string, fo
 		return seedFileFromGenericFS(srcFS, basePath, relPath, targetPath, force, false)
 	}
 	data, err := fs.ReadFile(srcFS, path.Join(filepath.ToSlash(basePath), filepath.ToSlash(relPath)))
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil // not in the bundle; nothing to seed
+	}
+	if err != nil {
+		return fmt.Errorf("read bundled %s: %w", relPath, err)
 	}
 	result, err := refreshProvisionerScript(targetPath, data)
 	if err != nil {

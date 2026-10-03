@@ -16,6 +16,7 @@ package config
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -897,6 +898,35 @@ func TestWriteFileAtomic_CreateTempFailureLeavesOriginal(t *testing.T) {
 			names = append(names, e.Name())
 		}
 		t.Errorf("directory entries = %v, want only provision.py", names)
+	}
+}
+
+// TestSeedHarnessConfigFile_BundleReadErrors verifies that a provisioner
+// script missing from the bundle is skipped, while any other read error is
+// returned instead of being silently ignored.
+func TestSeedHarnessConfigFile_BundleReadErrors(t *testing.T) {
+	targetDir := t.TempDir()
+	targetPath := filepath.Join(targetDir, "provision.py")
+
+	// Missing from the bundle: nothing to seed, no error, no file written.
+	if err := seedHarnessConfigFile(fstest.MapFS{}, "h", "provision.py", targetPath, false); err != nil {
+		t.Fatalf("missing bundled script should be skipped, got %v", err)
+	}
+	if _, err := os.Lstat(targetPath); !os.IsNotExist(err) {
+		t.Errorf("no file should be written for a missing bundled script, stat err = %v", err)
+	}
+
+	// provision.py is a directory in the bundle, so reading it fails with an
+	// error other than fs.ErrNotExist; that must be propagated.
+	badFS := fstest.MapFS{
+		"h/provision.py/nested": &fstest.MapFile{Data: []byte("x")},
+	}
+	err := seedHarnessConfigFile(badFS, "h", "provision.py", targetPath, false)
+	if err == nil {
+		t.Fatal("expected a non-not-exist bundle read error to be returned")
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("error should not be fs.ErrNotExist: %v", err)
 	}
 }
 
