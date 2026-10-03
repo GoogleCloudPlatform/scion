@@ -51,14 +51,16 @@ var (
 	ErrUATNameRequired  = errors.New("token name is required")
 	ErrUATScopeEmpty    = errors.New("at least one scope is required")
 
-	// ErrUATBoundaryRequired is returned when a token request names no
-	// boundary. A missing boundary is never read as a hub boundary.
-	ErrUATBoundaryRequired = errors.New("token boundary is required")
+	// ErrUATProjectIDEmpty is returned when a token request names neither
+	// an explicit boundary nor a project ID. Its message names the project
+	// ID shorthand that most clients send; the HTTP response also carries
+	// details field "boundary" and reason "boundary_required".
+	ErrUATProjectIDEmpty = errors.New("project ID is required")
 
-	// ErrUATProjectIDEmpty is the project ID shorthand form of
-	// ErrUATBoundaryRequired: a request with neither a boundary nor a
-	// project ID.
-	ErrUATProjectIDEmpty = ErrUATBoundaryRequired
+	// ErrUATBoundaryRequired is the boundary name for ErrUATProjectIDEmpty:
+	// the same error value. A missing boundary is never read as a hub
+	// boundary.
+	ErrUATBoundaryRequired = ErrUATProjectIDEmpty
 
 	// ErrUATBoundaryInvalid is returned when a token request names a
 	// boundary that is not a valid project or hub boundary, or names a
@@ -243,8 +245,12 @@ type CreateTokenParams struct {
 // resolveTokenBoundary returns the boundary a token request names, from
 // either the explicit boundary or the project ID shorthand. A request that
 // names neither is rejected; a request whose two forms disagree, or whose
-// boundary is not valid, is rejected.
+// boundary is not valid, is rejected. A project ID that is present but
+// blank, in either form, is invalid.
 func resolveTokenBoundary(boundary TokenBoundary, projectID string) (TokenBoundary, error) {
+	if isBlankPresent(projectID) || isBlankPresent(boundary.ProjectID) {
+		return TokenBoundary{}, ErrUATBoundaryInvalid
+	}
 	if boundary == (TokenBoundary{}) {
 		if projectID == "" {
 			return TokenBoundary{}, ErrUATBoundaryRequired
@@ -258,6 +264,12 @@ func resolveTokenBoundary(boundary TokenBoundary, projectID string) (TokenBounda
 		return TokenBoundary{}, ErrUATBoundaryInvalid
 	}
 	return boundary, nil
+}
+
+// isBlankPresent reports whether v is non-empty but contains only white
+// space.
+func isBlankPresent(v string) bool {
+	return v != "" && strings.TrimSpace(v) == ""
 }
 
 // CreateToken generates a new user access token with issuer ceiling,

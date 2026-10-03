@@ -267,7 +267,8 @@ func TestCreateTokenAPI_BoundaryForms(t *testing.T) {
 }
 
 // TestCreateTokenAPI_RejectsMissingOrConflictingBoundary pins that a token
-// request must name exactly one boundary: no boundary, a blank project ID,
+// request must name exactly one boundary: no boundary, a blank project ID
+// in either form,
 // a boundary without a kind, an unknown kind, a project boundary without a
 // project, disagreeing forms, and a hub boundary with any project ID are
 // each rejected with 400 and create no token.
@@ -296,6 +297,8 @@ func TestCreateTokenAPI_RejectsMissingOrConflictingBoundary(t *testing.T) {
 		{"project boundary disagreeing with shorthand", map[string]interface{}{"projectId": otherProject, "boundary": map[string]string{"kind": "project", "projectId": projectID}}, "boundary_invalid"},
 		{"hub boundary with shorthand project ID", map[string]interface{}{"projectId": projectID, "boundary": map[string]string{"kind": "hub"}}, "boundary_invalid"},
 		{"hub boundary with nested project ID", map[string]interface{}{"boundary": map[string]string{"kind": "hub", "projectId": projectID}}, "boundary_invalid"},
+		{"project boundary with blank project ID", map[string]interface{}{"boundary": map[string]string{"kind": "project", "projectId": "   "}}, "boundary_invalid"},
+		{"hub boundary with blank project ID", map[string]interface{}{"boundary": map[string]string{"kind": "hub", "projectId": "   "}}, "boundary_invalid"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -379,6 +382,9 @@ func TestResolveTokenBoundary(t *testing.T) {
 		{"hub carrying project", TokenBoundary{Kind: BoundaryKindHub, ProjectID: p}, "", TokenBoundary{}, ErrUATBoundaryInvalid},
 		{"project without ID", TokenBoundary{Kind: BoundaryKindProject}, "", TokenBoundary{}, ErrUATBoundaryInvalid},
 		{"unknown kind", TokenBoundary{Kind: "org"}, "", TokenBoundary{}, ErrUATBoundaryInvalid},
+		{"blank shorthand", TokenBoundary{}, "   ", TokenBoundary{}, ErrUATBoundaryInvalid},
+		{"project with blank ID", TokenBoundary{Kind: BoundaryKindProject, ProjectID: " \t"}, "", TokenBoundary{}, ErrUATBoundaryInvalid},
+		{"explicit project with blank shorthand", proj, "  ", TokenBoundary{}, ErrUATBoundaryInvalid},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

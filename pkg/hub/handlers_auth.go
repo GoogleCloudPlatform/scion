@@ -986,13 +986,10 @@ func tokenToResponse(t store.UserAccessToken) TokenResponse {
 
 // tokenCreateBoundary returns the explicit boundary named by req, or the
 // zero boundary when req uses only the project ID shorthand. A boundary
-// object without a kind, or a project ID that is present but blank, is
-// rejected. CreateTokenWithParams applies the remaining rules (a request
-// naming no boundary, disagreeing forms, invalid boundaries).
+// object without a kind is rejected. CreateTokenWithParams applies the
+// remaining rules (a request naming no boundary, a blank project ID in
+// either form, disagreeing forms, invalid boundaries).
 func tokenCreateBoundary(req TokenCreateRequest) (TokenBoundary, error) {
-	if req.ProjectID != "" && strings.TrimSpace(req.ProjectID) == "" {
-		return TokenBoundary{}, ErrUATBoundaryInvalid
-	}
 	if req.Boundary == nil {
 		return TokenBoundary{}, nil
 	}
