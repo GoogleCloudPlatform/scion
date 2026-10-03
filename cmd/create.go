@@ -211,17 +211,45 @@ func createNotStartedHint(agentName string) string {
 	return fmt.Sprintf("Agent '%s' is provisioned but not started. Run '%s' to start it.", agentName, createStartCommand(agentName))
 }
 
+// createNotProvisionedHint is the line printed instead of
+// createNotStartedHint when the Hub kept the agent record but the runtime
+// broker could not provision it.
+func createNotProvisionedHint(agentName string) string {
+	return fmt.Sprintf("Agent '%s' was not fully provisioned (see the warning). Run '%s' to retry provisioning and start it.", agentName, createStartCommand(agentName))
+}
+
+// createHint returns the closing line of a scion create output.
+func createHint(agentName string, provisioned bool) string {
+	if provisioned {
+		return createNotStartedHint(agentName)
+	}
+	return createNotProvisionedHint(agentName)
+}
+
+// hubCreateProvisioned reports whether a Hub create provisioned the agent,
+// that is, whether none of the warnings says provisioning failed.
+func hubCreateProvisioned(warnings []string) bool {
+	for _, w := range warnings {
+		if strings.HasPrefix(w, api.ProvisionFailedWarningPrefix) {
+			return false
+		}
+	}
+	return true
+}
+
 // addCreateNotStartedDetails records in JSON output details that the agent
-// was not started and the command that starts it.
-func addCreateNotStartedDetails(details map[string]interface{}, agentName string) {
+// was not started, whether it was provisioned, and the command that starts
+// it.
+func addCreateNotStartedDetails(details map[string]interface{}, agentName string, provisioned bool) {
 	details["started"] = false
+	details["provisioned"] = provisioned
 	details["startCommand"] = createStartCommand(agentName)
 }
 
 // localCreateResult is the JSON result of a local scion create.
 func localCreateResult(agentName string) ActionResult {
 	details := map[string]interface{}{}
-	addCreateNotStartedDetails(details, agentName)
+	addCreateNotStartedDetails(details, agentName, true)
 	return ActionResult{
 		Status:  "success",
 		Command: "create",
@@ -234,6 +262,64 @@ func localCreateResult(agentName string) ActionResult {
 // writeLocalCreateResult prints the text result of a local scion create.
 func writeLocalCreateResult(w io.Writer, agentName string) {
 	_, _ = fmt.Fprintf(w, "Agent '%s' created successfully.\n%s\n", agentName, createNotStartedHint(agentName))
+}
+
+// hubCreateResult is the JSON result of a scion create through a Hub.
+func hubCreateResult(agentName string, resp *hubclient.CreateAgentResponse) ActionResult {
+	provisioned := hubCreateProvisioned(resp.Warnings)
+	result := ActionResult{
+		Status:   "success",
+		Command:  "create",
+		Agent:    agentName,
+		Message:  fmt.Sprintf("Agent '%s' created via Hub. ", agentName) + createHint(agentName, provisioned),
+		Warnings: resp.Warnings,
+		Details:  map[string]interface{}{},
+	}
+	addCreateNotStartedDetails(result.Details, agentName, provisioned)
+	if resp.Agent != nil {
+		result.Details["slug"] = resp.Agent.Slug
+		phase, activity := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
+		result.Details["phase"] = phase
+		if activity != "" {
+			result.Details["activity"] = activity
+		}
+		if resp.Agent.RuntimeBrokerID != "" {
+			result.Details["runtimeBrokerId"] = resp.Agent.RuntimeBrokerID
+		}
+		if resp.Agent.RuntimeBrokerName != "" {
+			result.Details["runtimeBrokerName"] = resp.Agent.RuntimeBrokerName
+		}
+	}
+	return result
+}
+
+// writeHubCreateText prints the text result of a scion create through a
+// Hub: the agent summary, any warnings, then the closing hint. agentDir is
+// printed when not empty.
+func writeHubCreateText(w io.Writer, agentName string, resp *hubclient.CreateAgentResponse, agentDir string) {
+	var b strings.Builder
+	if resp.Agent != nil {
+		brokerInfo := ""
+		if resp.Agent.RuntimeBrokerName != "" {
+			brokerInfo = fmt.Sprintf(" on broker %s", resp.Agent.RuntimeBrokerName)
+		} else if resp.Agent.RuntimeBrokerID != "" {
+			brokerInfo = fmt.Sprintf(" on broker %s", resp.Agent.RuntimeBrokerID)
+		}
+		fmt.Fprintf(&b, "Agent '%s' created via Hub%s.\n", agentName, brokerInfo)
+		fmt.Fprintf(&b, "Agent Slug: %s\n", resp.Agent.Slug)
+		phase, _ := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
+		fmt.Fprintf(&b, "Phase: %s\n", phase)
+		if agentDir != "" {
+			fmt.Fprintf(&b, "Agent directory: %s\n", agentDir)
+		}
+	} else {
+		fmt.Fprintf(&b, "Agent '%s' created via Hub.\n", agentName)
+	}
+	for _, warning := range resp.Warnings {
+		fmt.Fprintf(&b, "Warning: %s\n", warning)
+	}
+	fmt.Fprintf(&b, "%s\n", createHint(agentName, hubCreateProvisioned(resp.Warnings)))
+	_, _ = io.WriteString(w, b.String())
 }
 
 func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error {
@@ -328,56 +414,16 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	printAutoResolvedBroker(ctx, hubCtx, runtimeBrokerID, req.RuntimeBrokerID, resp)
 
 	if isJSONOutput() {
-		result := ActionResult{
-			Status:   "success",
-			Command:  "create",
-			Agent:    agentName,
-			Message:  fmt.Sprintf("Agent '%s' created via Hub. ", agentName) + createNotStartedHint(agentName),
-			Warnings: resp.Warnings,
-			Details:  map[string]interface{}{},
-		}
-		addCreateNotStartedDetails(result.Details, agentName)
-		if resp.Agent != nil {
-			result.Details["slug"] = resp.Agent.Slug
-			phase, activity := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
-			result.Details["phase"] = phase
-			if activity != "" {
-				result.Details["activity"] = activity
-			}
-			if resp.Agent.RuntimeBrokerID != "" {
-				result.Details["runtimeBrokerId"] = resp.Agent.RuntimeBrokerID
-			}
-			if resp.Agent.RuntimeBrokerName != "" {
-				result.Details["runtimeBrokerName"] = resp.Agent.RuntimeBrokerName
-			}
-		}
-		return outputJSON(result)
+		return outputJSON(hubCreateResult(agentName, resp))
 	}
 
-	if resp.Agent != nil {
-		brokerInfo := ""
-		if resp.Agent.RuntimeBrokerName != "" {
-			brokerInfo = fmt.Sprintf(" on broker %s", resp.Agent.RuntimeBrokerName)
-		} else if resp.Agent.RuntimeBrokerID != "" {
-			brokerInfo = fmt.Sprintf(" on broker %s", resp.Agent.RuntimeBrokerID)
-		}
-		statusf("Agent '%s' created via Hub%s.\n", agentName, brokerInfo)
-		statusf("Agent Slug: %s\n", resp.Agent.Slug)
-		phase, _ := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
-		statusf("Phase: %s\n", phase)
-
-		// For local broker, print the agent directory path so the user can inspect/tweak files
-		if hubCtx.BrokerID != "" && hubCtx.ProjectPath != "" {
-			agentDir := filepath.Join(hubCtx.ProjectPath, "agents", agentName)
-			statusf("Agent directory: %s\n", agentDir)
-		}
-	} else {
-		statusf("Agent '%s' created via Hub.\n", agentName)
+	// For a local broker, print the agent directory path so the user can
+	// inspect or tweak its files.
+	agentDir := ""
+	if resp.Agent != nil && hubCtx.BrokerID != "" && hubCtx.ProjectPath != "" {
+		agentDir = filepath.Join(hubCtx.ProjectPath, "agents", agentName)
 	}
-	for _, w := range resp.Warnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
-	}
-	statusf("%s\n", createNotStartedHint(agentName))
+	writeHubCreateText(os.Stderr, agentName, resp, agentDir)
 
 	return nil
 }

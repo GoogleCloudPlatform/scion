@@ -2076,7 +2076,7 @@ func (s *Server) createAgentInProject(
 					dispatchCreateErrorResponse(w, err)
 					return
 				}
-				warnings = append(warnings, "Failed to provision on runtime broker: "+err.Error())
+				warnings = append(warnings, api.ProvisionFailedWarningPrefix+err.Error())
 			} else {
 				agent.Phase = string(state.PhaseCreated)
 				if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {

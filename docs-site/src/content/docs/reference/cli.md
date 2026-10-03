@@ -71,8 +71,12 @@ with no container. It is not started even when you pass a task. Run
 `scion start <agent-name>` to start it.
 
 The output says that the agent is provisioned but not started, and gives the
-`scion start` command. With `--format json`, `details.started` is `false` and
-`details.startCommand` holds that command.
+`scion start` command. If a Hub created the agent record but the runtime broker
+could not provision it, the output shows the provisioning warning and says the
+agent was not fully provisioned; `scion start` retries provisioning and starts
+the agent. With `--format json`, `details.started` is `false`,
+`details.provisioned` says whether the agent was provisioned, and
+`details.startCommand` holds the start command.
 
 **Usage:** `scion create <agent-name> [task] [flags]`
 

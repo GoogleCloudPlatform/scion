@@ -18,8 +18,11 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -105,15 +108,80 @@ func TestCreateOutput_SaysNotStarted(t *testing.T) {
 		assert.Equal(t, name, r.Agent)
 		assert.Contains(t, r.Message, startCmd)
 		assert.Equal(t, false, r.Details["started"])
+		assert.Equal(t, true, r.Details["provisioned"])
 		assert.Equal(t, startCmd, r.Details["startCommand"])
 	})
 
 	t.Run("hub json details", func(t *testing.T) {
 		details := map[string]interface{}{"phase": "created"}
-		addCreateNotStartedDetails(details, name)
+		addCreateNotStartedDetails(details, name, true)
 		assert.Equal(t, false, details["started"])
+		assert.Equal(t, true, details["provisioned"])
 		assert.Equal(t, startCmd, details["startCommand"])
 		assert.Equal(t, "created", details["phase"], "existing details are kept")
+	})
+}
+
+// TestCreateOutput_Hub checks the text and JSON results of a create through a
+// Hub, with and without a provisioning failure warning.
+func TestCreateOutput_Hub(t *testing.T) {
+	const name = "my-agent"
+	const startCmd = "scion start my-agent"
+	agent := &hubclient.Agent{Slug: name, Phase: "created", RuntimeBrokerName: "broker-a"}
+	provisionWarning := api.ProvisionFailedWarningPrefix + "connection refused"
+
+	t.Run("text provisioned", func(t *testing.T) {
+		var buf bytes.Buffer
+		writeHubCreateText(&buf, name, &hubclient.CreateAgentResponse{
+			Agent:    agent,
+			Warnings: []string{"some other warning"},
+		}, "/p/agents/my-agent")
+		out := buf.String()
+		assert.Contains(t, out, "Agent 'my-agent' created via Hub on broker broker-a.")
+		assert.Contains(t, out, "Agent directory: /p/agents/my-agent")
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		require.GreaterOrEqual(t, len(lines), 2)
+		assert.Equal(t, "Warning: some other warning", lines[len(lines)-2])
+		assert.Equal(t, createNotStartedHint(name), lines[len(lines)-1], "the hint comes last, after the warnings")
+	})
+
+	t.Run("text not provisioned", func(t *testing.T) {
+		var buf bytes.Buffer
+		writeHubCreateText(&buf, name, &hubclient.CreateAgentResponse{
+			Agent:    agent,
+			Warnings: []string{provisionWarning},
+		}, "")
+		out := buf.String()
+		assert.NotContains(t, out, "is provisioned")
+		assert.NotContains(t, out, "Agent directory:")
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		assert.Equal(t, "Warning: "+provisionWarning, lines[len(lines)-2])
+		assert.Equal(t, createNotProvisionedHint(name), lines[len(lines)-1])
+		assert.Contains(t, lines[len(lines)-1], startCmd)
+	})
+
+	t.Run("text without agent", func(t *testing.T) {
+		var buf bytes.Buffer
+		writeHubCreateText(&buf, name, &hubclient.CreateAgentResponse{}, "")
+		assert.Equal(t, "Agent 'my-agent' created via Hub.\n"+createNotStartedHint(name)+"\n", buf.String())
+	})
+
+	t.Run("json provisioned", func(t *testing.T) {
+		r := hubCreateResult(name, &hubclient.CreateAgentResponse{Agent: agent})
+		assert.Contains(t, r.Message, "is provisioned but not started")
+		assert.Equal(t, false, r.Details["started"])
+		assert.Equal(t, true, r.Details["provisioned"])
+		assert.Equal(t, startCmd, r.Details["startCommand"])
+		assert.Equal(t, name, r.Details["slug"])
+		assert.Equal(t, "broker-a", r.Details["runtimeBrokerName"])
+	})
+
+	t.Run("json not provisioned", func(t *testing.T) {
+		r := hubCreateResult(name, &hubclient.CreateAgentResponse{Agent: agent, Warnings: []string{provisionWarning}})
+		assert.NotContains(t, r.Message, "is provisioned")
+		assert.Contains(t, r.Message, "not fully provisioned")
+		assert.Equal(t, false, r.Details["provisioned"])
+		assert.Equal(t, []string{provisionWarning}, r.Warnings)
 	})
 }
 
