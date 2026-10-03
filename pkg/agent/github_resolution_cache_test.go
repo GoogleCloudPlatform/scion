@@ -1152,3 +1152,101 @@ func TestMaxJitteredTTL_NeverExceeded(t *testing.T) {
 		}
 	}
 }
+
+// TestGitHubResolutionCache_PutEntryJittersExpiry reads back stored entries
+// and checks the TTL was jittered on write: each entry's ExpiresAt is
+// within +/-ttlJitterFraction of the nominal TTL after its CachedAt, and
+// the entries do not all sit exactly on the nominal TTL.
+func TestGitHubResolutionCache_PutEntryJittersExpiry(t *testing.T) {
+	const ttl = 30 * time.Minute
+	cache, err := newTestResolutionCache(t.TempDir(), ttl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spread := time.Duration(float64(ttl) * ttlJitterFraction)
+
+	const n = 8
+	for i := 0; i < n; i++ {
+		cache.putEntry(fmt.Sprintf("gh://o/r/s%d@main", i), ResolvedSkill{Name: "s"}, true)
+	}
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if len(cache.entries) != n {
+		t.Fatalf("got %d entries, want %d", len(cache.entries), n)
+	}
+	offNominal := 0
+	for key, e := range cache.entries {
+		got := e.ExpiresAt.Sub(e.CachedAt)
+		if got < ttl-spread || got > ttl+spread {
+			t.Errorf("%s: stored TTL %v outside +/-%v of %v", key, got, spread, ttl)
+		}
+		if got != ttl {
+			offNominal++
+		}
+	}
+	if offNominal == 0 {
+		t.Errorf("all %d entries store exactly the nominal TTL %v; expiry is not jittered on write", n, ttl)
+	}
+}
+
+// TestGitHubResolutionCache_SharedCredentialSlotOutlivesFirstRelease checks
+// that when two callers hold slots for the same credential, the first
+// release does not drop the credential's semaphore: the second holder's
+// slot is still counted, so the cap still applies, and the entry is removed
+// only after the last release.
+func TestGitHubResolutionCache_SharedCredentialSlotOutlivesFirstRelease(t *testing.T) {
+	cache, err := newTestResolutionCache(t.TempDir(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	const cred = "shared-cred"
+
+	releaseA, err := cache.acquireCredentialSlot(ctx, cred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseB, err := cache.acquireCredentialSlot(ctx, cred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.credMu.Lock()
+	slot := cache.credSlots[cred]
+	cache.credMu.Unlock()
+
+	releaseA()
+
+	cache.credMu.Lock()
+	after := cache.credSlots[cred]
+	cache.credMu.Unlock()
+	if after != slot {
+		t.Fatalf("credential slot entry replaced or removed after the first release while another caller still holds it")
+	}
+
+	// B's slot is still counted: only maxInFlightPerCredential-1 more fit.
+	var more []func()
+	for i := 0; i < maxInFlightPerCredential-1; i++ {
+		r, err := cache.acquireCredentialSlot(ctx, cred)
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i, err)
+		}
+		more = append(more, r)
+	}
+	full, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if r, err := cache.acquireCredentialSlot(full, cred); err == nil {
+		r()
+		t.Fatal("acquired a slot beyond the per-credential cap; the remaining holder's slot was not counted")
+	}
+
+	releaseB()
+	for _, r := range more {
+		r()
+	}
+	cache.credMu.Lock()
+	defer cache.credMu.Unlock()
+	if _, ok := cache.credSlots[cred]; ok {
+		t.Fatal("credential slot entry still present after every holder released")
+	}
+}
