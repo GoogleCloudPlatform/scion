@@ -166,3 +166,32 @@ func TestSendMessage_PlainNormalInterruptUnaffected(t *testing.T) {
 		})
 	}
 }
+
+// TestSendMessage_OversizedBodyRejected pins the 2 MiB bound on the
+// buffered /message body read: an oversized body gets 413
+// payload_too_large and reaches no delivery primitive and no message log.
+func TestSendMessage_OversizedBodyRejected(t *testing.T) {
+	mgr := &recordingMessageManager{mockManager: &mockManager{}}
+	srv := newTestServerWithManager(t, mgr)
+	messageLogSpy := &spyLogHandler{}
+	srv.messageLog = slog.New(messageLogSpy)
+
+	body := `{"message":"` + strings.Repeat("x", maxMessageBodyBytes) + `"}`
+	w := postRawBrokerMessage(t, srv, body)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413; body: %.300s", w.Code, w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if resp.Error.Code != "payload_too_large" {
+		t.Errorf("code = %q, want payload_too_large", resp.Error.Code)
+	}
+	if msgs, keys := mgr.calls(); msgs != 0 || keys != 0 {
+		t.Errorf("delivery calls = (message %d, keys %d), want zero", msgs, keys)
+	}
+	if messageLogSpy.records != 0 {
+		t.Errorf("message log written on rejection: %d", messageLogSpy.records)
+	}
+}

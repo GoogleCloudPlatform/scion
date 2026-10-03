@@ -3166,7 +3166,7 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	// before decoding, so no sender is stamped, no target is computed and
 	// nothing is published.
 	if s.rejectRetiredRawMessageBody(w, r, rawIngressBroadcast,
-		agentKeysAuditTarget{ProjectID: projectID}, "", 0, "structured_message") {
+		agentKeysAuditTarget{ProjectID: projectID}, "", rawTombstonePreAuthMaxBodyBytes, "structured_message") {
 		return
 	}
 

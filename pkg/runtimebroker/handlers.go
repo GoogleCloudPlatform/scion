@@ -2688,6 +2688,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	})
 }
 
+// maxMessageBodyBytes bounds the buffered body read of the /message
+// handler. The Hub caps every message ingress at 2 MiB before forwarding,
+// so a legitimate Hub request never approaches it.
+const maxMessageBodyBytes = 2 * 1024 * 1024
+
 func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
@@ -2699,8 +2704,15 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 		BadRequest(w, "Invalid request body: empty request body")
 		return
 	}
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxMessageBodyBytes))
 	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			span.SetStatus(codes.Error, "payload_too_large")
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+				"request body exceeds the maximum size", nil)
+			return
+		}
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}

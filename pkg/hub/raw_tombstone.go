@@ -64,11 +64,13 @@ import (
 // (pkg/runtimebroker), so a hub that never sends raw is not the only
 // defence on the broker side.
 
-// rawTombstonePreAuthMaxBodyBytes bounds the pre-authorization body read on
-// the two public /message routes. The removed raw bridge introduced this 2
-// MiB bound (contract §6.1/§6.4, AK-52) because it buffered the body before
-// authorization ran; the tombstone buffers at the same point, so it keeps
-// the same bound. A larger body gets a generic 413 that is not a keys
+// rawTombstonePreAuthMaxBodyBytes bounds the buffered body read of every
+// message ingress the tombstone probes: the two public /message routes,
+// project broadcast, and broker inbound/routed. The removed raw bridge
+// introduced this 2 MiB bound on the /message routes (contract §6.1/§6.4,
+// AK-52) because it buffered the body before authorization ran; the
+// tombstone buffers at the same point on every ingress, so every ingress
+// keeps a bound. A larger body gets a generic 413 that is not a keys
 // outcome.
 const rawTombstonePreAuthMaxBodyBytes = 2 * 1024 * 1024
 
@@ -86,9 +88,15 @@ const (
 )
 
 // rawInputRemovedReplacement is the generic replacement named in a
-// raw_input_removed response when the request does not identify one
-// concrete target agent.
+// raw_input_removed response. The responses never name a resolved target:
+// the message routes reject the retired field before message
+// authorization, so echoing the target's ID would map a slug to a UUID for
+// a caller who may have no authority on that agent.
 const rawInputRemovedReplacement = "POST /api/v1/agents/{id}/keys"
+
+// rawInputRemovedProjectReplacement is the generic replacement named by the
+// project-scoped message route.
+const rawInputRemovedProjectReplacement = "POST /api/v1/projects/{projectId}/agents/{agentIdOrSlug}/keys"
 
 // rejectRetiredRawMessageBody buffers r.Body (bounded by maxBytes when it is
 // positive), restores it byte-for-byte for the caller's own decode, and

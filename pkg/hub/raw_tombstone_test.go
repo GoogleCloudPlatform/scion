@@ -30,6 +30,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -137,7 +138,7 @@ var messageRouteCases = []messageRouteCase{
 		name:        "top-level",
 		ingress:     rawIngressAgentMessage,
 		path:        func(a *store.Agent) string { return "/api/v1/agents/" + a.ID + "/message" },
-		replacement: func(a *store.Agent) string { return "POST /api/v1/agents/" + a.ID + "/keys" },
+		replacement: func(*store.Agent) string { return rawInputRemovedReplacement },
 	},
 	{
 		name:    "project-scoped",
@@ -145,9 +146,7 @@ var messageRouteCases = []messageRouteCase{
 		path: func(a *store.Agent) string {
 			return "/api/v1/projects/" + a.ProjectID + "/agents/" + a.Slug + "/message"
 		},
-		replacement: func(a *store.Agent) string {
-			return "POST /api/v1/projects/" + a.ProjectID + "/agents/" + a.ID + "/keys"
-		},
+		replacement: func(*store.Agent) string { return rawInputRemovedProjectReplacement },
 	},
 }
 
@@ -222,6 +221,29 @@ func TestMessageRoutes_RetiredRawRejectedForAgentCaller(t *testing.T) {
 			assert.Equal(t, 0, d.callCount())
 			assert.Empty(t, d.messages)
 			assertNoKeysSideEffects(t, storeSpy, events)
+		})
+	}
+}
+
+// TestMessageRoutes_RetiredRawResponseNamesNoTarget pins that the 422 never
+// discloses the resolved target: on either route (the project-scoped one
+// addressed by slug), the response carries no UUID other than its own
+// operation ID, and in particular not the agent's ID.
+func TestMessageRoutes_RetiredRawResponseNamesNoTarget(t *testing.T) {
+	uuidRE := regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+	for _, route := range messageRouteCases {
+		t.Run(route.name, func(t *testing.T) {
+			f, _, _, _ := newExecuteAgentKeysFixture(t)
+			token := userBearerToken(t, f.srv, f.owner)
+			// The project-scoped route addresses the agent by slug; the
+			// top-level route takes the ID, which must not be echoed either.
+			rec := postRawTombstoneBody(t, f.srv, route.path(f.agentInA), token, []byte(`{"message":"x","raw":true}`))
+			assertRawInputRemoved(t, rec, route.ingress, route.replacement(f.agentInA))
+			env := decodeKeysError(t, rec.Body.Bytes())
+			opID, _ := env.Details["operation_id"].(string)
+			body := strings.ReplaceAll(rec.Body.String(), opID, "")
+			assert.NotContains(t, body, f.agentInA.ID, "the response must not name the resolved agent ID")
+			assert.Empty(t, uuidRE.FindAllString(body, -1), "no UUID other than the operation ID: %s", rec.Body.String())
 		})
 	}
 }
@@ -616,4 +638,43 @@ func TestBrokerInbound_RetiredRawLogsAreContentFree(t *testing.T) {
 	assertRawInputRemoved(t, rec, rawIngressBrokerInbound, rawInputRemovedReplacement)
 	requireLogCaptureLive(t, buf, "agent keys audit")
 	assert.NotContains(t, buf.String(), rawTombstoneSecret)
+}
+
+// TestRetiredRawIngress_BodyCap pins the 2 MiB bound on the buffered body
+// read of project broadcast and both plugin inbound routes: an oversized
+// body is refused with a generic 413 (no operation ID, not a keys outcome)
+// before any decode, sender synthesis or dispatch.
+func TestRetiredRawIngress_BodyCap(t *testing.T) {
+	oversizedMsg := strings.Repeat("x", rawTombstonePreAuthMaxBodyBytes)
+	cases := []struct {
+		name string
+		do   func(f *brokerInboundFixture) *httptest.ResponseRecorder
+	}{
+		{"broadcast", func(f *brokerInboundFixture) *httptest.ResponseRecorder {
+			token := userBearerToken(t, f.srv, f.user)
+			return postRawTombstoneBody(t, f.srv, "/api/v1/projects/"+f.project.ID+"/broadcast", token,
+				[]byte(`{"structured_message":{"msg":"`+oversizedMsg+`","type":"instruction"}}`))
+		}},
+		{"broker inbound", func(f *brokerInboundFixture) *httptest.ResponseRecorder {
+			return f.post(t, "/api/v1/broker/inbound",
+				[]byte(`{"topic":"scion.project.`+f.project.ID+`.agent.`+f.agent.Slug+`.messages","message":{"sender":"user:`+f.user.Email+`","msg":"`+oversizedMsg+`"}}`))
+		}},
+		{"broker inbound routed", func(f *brokerInboundFixture) *httptest.ResponseRecorder {
+			return f.post(t, "/api/v1/broker/inbound/routed",
+				[]byte(`{"project_id":"`+f.project.ID+`","default_agent":"`+f.agent.Slug+`","message":{"sender":"user:`+f.user.Email+`","msg":"`+oversizedMsg+`"}}`))
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newBrokerInboundFixture(t)
+			usersBefore := countAllUsers(t, f.store)
+			convsBefore := countAllConversations(t, f.store)
+			rec := tc.do(f)
+			require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "body: %.300s", rec.Body.String())
+			env := decodeKeysError(t, rec.Body.Bytes())
+			assert.Equal(t, "payload_too_large", env.Code)
+			assert.NotContains(t, env.Details, "operation_id")
+			f.assertNoInboundSideEffects(t, usersBefore, convsBefore)
+		})
+	}
 }

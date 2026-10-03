@@ -92,7 +92,7 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 	// rejected before decoding, so no sender identity is synthesized and no
 	// routing, conversation, mention or dispatch work runs. Trusted
 	// Hub-to-runtime-broker keys dispatch is a separate operation.
-	if s.rejectRetiredRawMessageBody(w, r, rawIngressBrokerInboundRouted, agentKeysAuditTarget{}, "", 0, "message") {
+	if s.rejectRetiredRawMessageBody(w, r, rawIngressBrokerInboundRouted, agentKeysAuditTarget{}, "", rawTombstonePreAuthMaxBodyBytes, "message") {
 		return
 	}
 

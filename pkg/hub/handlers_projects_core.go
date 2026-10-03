@@ -2652,7 +2652,7 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		// the matching tombstone on the top-level route.
 		if s.rejectRetiredRawMessageBody(w, r, rawIngressProjectAgentMessage,
 			agentKeysAuditTarget{AgentID: agent.ID, ProjectID: agent.ProjectID},
-			"POST /api/v1/projects/"+projectID+"/agents/"+agent.ID+"/keys", rawTombstonePreAuthMaxBodyBytes, "structured_message") {
+			rawInputRemovedProjectReplacement, rawTombstonePreAuthMaxBodyBytes, "structured_message") {
 			return
 		}
 

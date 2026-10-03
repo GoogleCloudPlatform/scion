@@ -3688,7 +3688,7 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 		// falls through with its bytes restored.
 		if s.rejectRetiredRawMessageBody(w, r, rawIngressAgentMessage,
 			agentKeysAuditTarget{AgentID: targetAgent.ID, ProjectID: targetAgent.ProjectID},
-			"POST /api/v1/agents/"+targetAgent.ID+"/keys", rawTombstonePreAuthMaxBodyBytes, "structured_message") {
+			rawInputRemovedReplacement, rawTombstonePreAuthMaxBodyBytes, "structured_message") {
 			return
 		}
 
