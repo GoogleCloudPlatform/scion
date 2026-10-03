@@ -116,6 +116,28 @@ const JUMP_SCROLL_VIEW_TOLERANCE_PX = 24;
 /** Jump-to-message re-check: cap on corrective re-scrolls to avoid a loop. */
 const JUMP_SCROLL_MAX_RECHECKS = 2;
 
+/** The hub rejects agent names longer than this many runes. */
+const MAX_AGENT_NAME_LENGTH = 63;
+
+/** Length of the random suffix in a default /spawn name. */
+const SPAWN_SUFFIX_LENGTH = 4;
+
+/**
+ * Default /spawn name: `<template>-<suffix>`. The template part is
+ * truncated so the whole name fits the hub's length limit, and trailing
+ * hyphens are dropped so the result stays a valid slug. The suffix is a
+ * random integer below 36^length in base36, left-padded with zeros, so
+ * it is always exactly SPAWN_SUFFIX_LENGTH characters of [0-9a-z].
+ */
+function defaultSpawnName(template: string): string {
+  const suffix = Math.floor(Math.random() * 36 ** SPAWN_SUFFIX_LENGTH)
+    .toString(36)
+    .padStart(SPAWN_SUFFIX_LENGTH, '0');
+  const maxBase = MAX_AGENT_NAME_LENGTH - SPAWN_SUFFIX_LENGTH - 1;
+  const base = Array.from(template).slice(0, maxBase).join('').replace(/-+$/, '');
+  return `${base}-${suffix}`;
+}
+
 /**
  * /status: safety bound on agent-list pages followed via `nextCursor`. At the
  * server's 500-per-page cap this covers 10,000 agents; past it the listing
@@ -3860,26 +3882,44 @@ export class ScionChatThread extends LitElement {
       '  /status — Show project agent status',
       '  /clear — Clear the conversation view',
       '  /help — Show this help message',
-      '  /spawn <template> — Spawn a new agent from a template',
+      '  /spawn <template> [name] — Spawn a new agent from a template',
       '  /stop <agent> — Stop a running agent',
       '  /default <agent|clear> — Set or clear the thread default agent',
     ].join('\n');
     this.insertLocalSystemMessage(helpText);
   }
 
-  /** /spawn <template> — Spawn a new agent. */
+  /**
+   * /spawn <template> [name] — Create and start a new agent.
+   *
+   * The hub's create handler requires both `name` and `projectId`, so an
+   * omitted name defaults to the template plus a short random suffix (the
+   * hub rejects a name already taken in the project; see
+   * `defaultSpawnName`). The response wraps the created agent as
+   * `{ agent }`.
+   *
+   * Like /stop, a DM resolves the peer agent's project: a DM's
+   * `this.projectId` is only the inherited project (whatever the user was
+   * viewing before opening the DM), so spawning there would create the
+   * agent in an unrelated project.
+   */
   private async handleSlashSpawn(args: string): Promise<void> {
-    const template = args.trim();
-    if (!template) {
-      this.insertLocalSystemMessage('Usage: /spawn <template>');
+    const parts = args.trim().split(/\s+/).filter(Boolean);
+    const template = parts[0];
+    if (!template || parts.length > 2) {
+      this.insertLocalSystemMessage('Usage: /spawn <template> [name]');
+      return;
+    }
+    const name = parts[1] || defaultSpawnName(template);
+
+    const projectId = this.isDM ? this.peerAgentProjectId() : this.projectId;
+    if (!projectId) {
+      this.insertLocalSystemMessage('No project context available.');
       return;
     }
 
     try {
-      const body: Record<string, unknown> = {
-        template,
-        project_id: this.projectId,
-      };
+      const body = { name, projectId, template };
       const res = await apiFetch('/api/v1/agents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3892,9 +3932,9 @@ export class ScionChatThread extends LitElement {
         return;
       }
 
-      const data = (await res.json()) as { name?: string; slug?: string };
-      const name = data?.slug || data?.name || template;
-      this.insertLocalSystemMessage(`Agent "${name}" spawned successfully.`);
+      const data = (await res.json()) as { agent?: { name?: string; slug?: string } };
+      const spawned = data?.agent?.slug || data?.agent?.name || name;
+      this.insertLocalSystemMessage(`Agent "${spawned}" spawned successfully.`);
     } catch (err) {
       this.insertLocalSystemMessage(
         `Failed to spawn agent: ${err instanceof Error ? err.message : 'unknown error'}`
