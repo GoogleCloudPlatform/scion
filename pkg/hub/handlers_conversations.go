@@ -396,6 +396,12 @@ func (s *Server) handleConvListMessages(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	if GetAgentIdentityFromContext(ctx) != nil {
+		for i := range result.Items {
+			scopeProvenanceToDMParties(conv, &result.Items[i])
+		}
+	}
+
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -454,7 +460,31 @@ func (s *Server) handleGetConversationMessage(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	if GetAgentIdentityFromContext(ctx) != nil {
+		scopeProvenanceToDMParties(conv, msg)
+	}
+
 	writeJSON(w, http.StatusOK, msg)
+}
+
+// scopeProvenanceToDMParties limits the SenderProjectID/RecipientProjectID
+// provenance fields returned to agent callers to rows whose sender and
+// recipient are both named in the conversation's DM key — the same
+// row-party rule peerProjectFromRow applies. For any other row (a party
+// outside the key, or a non-direct conversation, which has no DM key) both
+// fields are cleared before the row is written to the response. Call only
+// after any authorization that reads the stamps.
+func scopeProvenanceToDMParties(conv *store.Conversation, msg *store.Message) {
+	if msg == nil || (msg.SenderProjectID == nil && msg.RecipientProjectID == nil) {
+		return
+	}
+	if conv != nil && conv.Kind == "direct" &&
+		isCanonicalDMParticipant(conv.ExternalRef, messages.SenderPrefix(msg.Sender), msg.SenderID) &&
+		isCanonicalDMParticipant(conv.ExternalRef, messages.SenderPrefix(msg.Recipient), msg.RecipientID) {
+		return
+	}
+	msg.SenderProjectID = nil
+	msg.RecipientProjectID = nil
 }
 
 // handleCreateConversation handles POST /api/v1/conversations.

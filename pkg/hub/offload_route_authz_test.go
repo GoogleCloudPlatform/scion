@@ -25,6 +25,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -306,4 +307,117 @@ func TestU12_ExecuteAgentDM_CallsGetConversationWhenQualifying(t *testing.T) {
 	require.Equal(t, AgentDMAccepted, result.Outcome)
 	assert.Equal(t, 1, counting.calls, "a qualifying message must look the conversation up exactly once")
 	_ = messaging.MetaBodyOffloaded // keep the messaging import meaningful if trimmed later
+}
+
+// listConvMessages calls GET /api/v1/conversations/{id}/messages as an agent.
+func listConvMessages(srv *Server, callerID, callerProject, convID string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+convID+"/messages", nil)
+	req = req.WithContext(agentContext(callerID, callerProject))
+	rr := httptest.NewRecorder()
+	srv.handleConvListMessages(rr, req, convID)
+	return rr
+}
+
+// createStampedRow persists a row in conv with both provenance stamps set.
+func createStampedRow(t *testing.T, s store.Store, conv *store.Conversation, name string, sender, recipient *store.Agent) *store.Message {
+	t.Helper()
+	senderProj, recipientProj := sender.ProjectID, recipient.ProjectID
+	msg := &store.Message{
+		ID: tid(name), ProjectID: sender.ProjectID,
+		Sender: "agent:" + sender.Slug, SenderID: sender.ID, SenderProjectID: &senderProj,
+		Recipient: "agent:" + recipient.Slug, RecipientID: recipient.ID, RecipientProjectID: &recipientProj,
+		Msg: "hello", Type: messages.TypeInstruction, ConversationID: conv.ID,
+	}
+	require.NoError(t, s.CreateMessage(context.Background(), msg))
+	return msg
+}
+
+// Provenance fields reach an agent caller only on rows whose sender and
+// recipient are both named in the conversation's DM key (ptone/scion#2282).
+func TestConvMessages_AgentCaller_ProvenanceScopedToDMParties(t *testing.T) {
+	srv, s, conv, agentA, agentB, agentZ := routeAuthzSetup(t)
+	enableCPM(t, srv, s) // A (P1) and B (P2) are cross-project
+
+	keyRow := createStampedRow(t, s, conv, "provenance-a-to-b", agentA, agentB)
+	nonKeyRow := createStampedRow(t, s, conv, "provenance-a-to-z", agentA, agentZ)
+
+	t.Run("get: both parties in key keeps fields", func(t *testing.T) {
+		rr := getConvMessage(srv, agentB.ID, agentB.ProjectID, conv.ID, keyRow.ID)
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+		var got store.Message
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+		require.NotNil(t, got.SenderProjectID)
+		require.NotNil(t, got.RecipientProjectID)
+		assert.Equal(t, agentA.ProjectID, *got.SenderProjectID)
+		assert.Equal(t, agentB.ProjectID, *got.RecipientProjectID)
+	})
+
+	t.Run("get: party outside key omits fields", func(t *testing.T) {
+		rr := getConvMessage(srv, agentB.ID, agentB.ProjectID, conv.ID, nonKeyRow.ID)
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+		assert.NotContains(t, rr.Body.String(), "senderProjectId")
+		assert.NotContains(t, rr.Body.String(), "recipientProjectId")
+	})
+
+	t.Run("list: scoped per row", func(t *testing.T) {
+		rr := listConvMessages(srv, agentB.ID, agentB.ProjectID, conv.ID)
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+		var got store.ListResult[store.Message]
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+		require.Len(t, got.Items, 2)
+		for _, m := range got.Items {
+			switch m.ID {
+			case keyRow.ID:
+				require.NotNil(t, m.SenderProjectID)
+				require.NotNil(t, m.RecipientProjectID)
+				assert.Equal(t, agentA.ProjectID, *m.SenderProjectID)
+				assert.Equal(t, agentB.ProjectID, *m.RecipientProjectID)
+			case nonKeyRow.ID:
+				assert.Nil(t, m.SenderProjectID)
+				assert.Nil(t, m.RecipientProjectID)
+			default:
+				t.Fatalf("unexpected row %s", m.ID)
+			}
+		}
+	})
+
+	t.Run("stored row is unchanged", func(t *testing.T) {
+		stored, err := s.GetMessage(context.Background(), nonKeyRow.ID)
+		require.NoError(t, err)
+		require.NotNil(t, stored.RecipientProjectID)
+		assert.Equal(t, agentZ.ProjectID, *stored.RecipientProjectID)
+	})
+}
+
+func TestScopeProvenanceToDMParties(t *testing.T) {
+	aID, uID, zID := tid("scope-prov-a"), tid("scope-prov-u"), tid("scope-prov-z")
+	key, err := messages.DMConversationKey("agent", aID, "user", uID)
+	require.NoError(t, err)
+	direct := &store.Conversation{Kind: "direct", ExternalRef: key}
+	p1, p2 := "p1", "p2"
+	row := func(sender, senderID, recipient, recipientID string) *store.Message {
+		s1, s2 := p1, p2
+		return &store.Message{Sender: sender, SenderID: senderID, Recipient: recipient, RecipientID: recipientID,
+			SenderProjectID: &s1, RecipientProjectID: &s2}
+	}
+
+	m := row("agent:a", aID, "user:u@example.com", uID)
+	scopeProvenanceToDMParties(direct, m)
+	assert.NotNil(t, m.SenderProjectID, "both parties in key: kept")
+
+	m = row("agent:a", aID, "agent:z", zID)
+	scopeProvenanceToDMParties(direct, m)
+	assert.Nil(t, m.SenderProjectID)
+	assert.Nil(t, m.RecipientProjectID)
+
+	m = row("agent:u", uID, "agent:a", aID) // right ID, wrong kind
+	scopeProvenanceToDMParties(direct, m)
+	assert.Nil(t, m.SenderProjectID)
+
+	m = row("agent:a", aID, "user:u@example.com", uID)
+	scopeProvenanceToDMParties(&store.Conversation{Kind: "group"}, m)
+	assert.Nil(t, m.SenderProjectID, "non-direct conversation has no DM key")
+	assert.Nil(t, m.RecipientProjectID)
+
+	scopeProvenanceToDMParties(direct, nil) // no panic
 }
