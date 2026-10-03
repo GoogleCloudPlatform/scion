@@ -34,7 +34,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 66
+const expectedTableCount = 69
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -111,6 +111,22 @@ func TestFixtureLoadable(t *testing.T) {
 	require.NoError(t, err, "user_terminal_workspaces fixture row must be readable via UserTerminalWorkspaceStore")
 	assert.Equal(t, []string{agentID}, workspace.AgentIDs)
 	assert.Equal(t, agentID, workspace.FrontmostAgentID)
+
+	// The conduit session rows must decode through the real registry store
+	// (capabilities JSON, NULL project/exec_scope, relay join).
+	conduit := entadapter.NewConduitRegistryStore(client)
+	ps, found, err := conduit.ListPrincipalSessionsBySession(ctx, "cs000000-0000-0000-0000-000000000001")
+	require.NoError(t, err, "conduit_sessions fixture row must be readable via ConduitRegistryStore")
+	require.True(t, found)
+	require.Len(t, ps.Sessions, 1)
+	assert.Equal(t, "launch_id", ps.Sessions[0].Session.Capabilities.IncarnationSource)
+	assert.Equal(t, int64(1), ps.CurrentEpoch)
+	require.NotNil(t, ps.Sessions[0].Relay)
+	ps, found, err = conduit.ListPrincipalSessionsBySession(ctx, "cs000000-0000-0000-0000-000000000002")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Empty(t, ps.Sessions[0].Session.ProjectID)
+	assert.Empty(t, ps.Sessions[0].Session.ExecScope)
 }
 
 // TestFixtureDeterministic verifies the spec produces a stable set of row
