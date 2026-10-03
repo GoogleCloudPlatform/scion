@@ -254,6 +254,32 @@ func (vs *VersionedSettings) ResolveProfileSetting(profileName, key string,
 	return ResolveProfileValue(vs, profileName, key, fromProfile, fromRuntime)
 }
 
+// ResolveAgentLimit returns the max_agents limit that applies to agents
+// using profileName: the profile's own max_agents, else the one on its
+// runtime entry. source is "profiles.NAME.max_agents" or
+// "runtimes.NAME.max_agents"; limit 0 with an empty source means no own
+// limit, so the agents count toward max_agents_per_broker. A negative
+// value is treated as unset (the schema rejects it). Unlike
+// ResolveProfileValue, an empty profileName resolves to no limit rather
+// than to vs.ActiveProfile: the hub must not guess a broker's profile
+// from its own active profile.
+//
+// Call it on global settings only, never on project-merged settings.
+func (vs *VersionedSettings) ResolveAgentLimit(profileName string) (limit int, source string) {
+	if profileName == "" {
+		return 0, ""
+	}
+	nonNegative := func(v int) int {
+		if v < 0 {
+			return 0
+		}
+		return v
+	}
+	return ResolveProfileValue(vs, profileName, "max_agents",
+		func(p V1ProfileConfig) int { return nonNegative(p.MaxAgents) },
+		func(r V1RuntimeConfig) int { return nonNegative(r.MaxAgents) })
+}
+
 // SharedDirStorageGlobalSource is the source key ResolveSharedDirStorage
 // returns when no profile or runtime entry overrides the backend.
 const SharedDirStorageGlobalSource = "server.shared_dir_storage.backend"
@@ -1694,6 +1720,12 @@ type V1RuntimeConfig struct {
 	// server.shared_dir_storage.nfs. Read from global settings only; see
 	// ResolveSharedDirStorage.
 	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// MaxAgents is the hub's per-broker limit on concurrently live agents
+	// for every profile that uses this runtime entry and sets no
+	// max_agents of its own. Those agents count against this limit, not
+	// against max_agents_per_broker. 0 means no own limit. Read by the hub
+	// from global settings only; see ResolveAgentLimit.
+	MaxAgents int `json:"max_agents,omitempty" yaml:"max_agents,omitempty" koanf:"max_agents"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
 	CloudRun *CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
@@ -1922,6 +1954,13 @@ type V1ProfileConfig struct {
 	// from server.shared_dir_storage.nfs. Read from global settings only;
 	// see ResolveSharedDirStorage.
 	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// MaxAgents is the hub's per-broker limit on concurrently live agents
+	// using this profile. It wins over the runtime entry's max_agents.
+	// Those agents count against this limit, not against
+	// max_agents_per_broker. 0 means no own limit, so the runtime entry's
+	// limit (if any) applies. Read by the hub from global settings only;
+	// see ResolveAgentLimit.
+	MaxAgents int `json:"max_agents,omitempty" yaml:"max_agents,omitempty" koanf:"max_agents"`
 }
 
 // resolveEffectiveProjectPath resolves the effective project path for settings loading.

@@ -367,6 +367,11 @@
           "type": "string",
           "enum": ["", "local", "nfs"],
           "description": "Shared-dir storage backend for agents whose profile uses this runtime entry. Overrides server.shared_dir_storage.backend; a profile value wins over this. nfs uses the server.shared_dir_storage.nfs block. Read from the global settings file only."
+        },
+        "max_agents": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Hub only. Maximum concurrently live agents per runtime broker for all profiles that use this runtime entry and set no max_agents of their own. Those agents count against this limit instead of max_agents_per_broker. 0 or unset means no own limit. Read from the hub's global settings only."
         }
       },
       "additionalProperties": false
@@ -837,6 +842,11 @@
           "type": "string",
           "enum": ["", "local", "nfs"],
           "description": "Shared-dir storage backend for agents using this profile. Wins over the runtime entry's value and server.shared_dir_storage.backend. nfs uses the server.shared_dir_storage.nfs block. Read from the global settings file only."
+        },
+        "max_agents": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Hub only. Maximum concurrently live agents per runtime broker for this profile. Wins over the runtime entry's max_agents. Those agents count against this limit instead of max_agents_per_broker. 0 or unset means no own limit (the runtime entry's limit, if any, still applies). Read from the hub's global settings only."
         }
       },
       "additionalProperties": false
