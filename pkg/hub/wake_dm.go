@@ -69,6 +69,17 @@ type WakeResult struct {
 func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeResult, *AgentDMError) {
 	phase := state.Phase(agent.Phase)
 
+	// A create launch in flight or left incomplete skips the wake in any
+	// phase. The answer comes from the start gate, so a delete in progress
+	// still wins over the launch refusal.
+	if launchStartRefusal(agent, time.Now()).refuses() {
+		if ref := s.startGate(ctx, agent, startEntryWake); ref.refuses() {
+			s.messageLog.Info("wake: skipped by the start gate",
+				"agent_id", agent.ID, "code", ref.Code)
+			return nil, ref.dmError()
+		}
+	}
+
 	switch phase {
 	case state.PhaseSuspended:
 		// Start gate (design ptone/scion#2483 §2.1): a delete in progress,
