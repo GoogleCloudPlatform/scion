@@ -35,9 +35,11 @@ import (
 //
 // Relay-peer requests are signed in all modes. Every request carries an
 // HMAC signature over the method, request URI, timestamp, nonce, caller id,
-// body digest and Want header, keyed with an HKDF derivation of the hub's
-// shared signing secret (relay.NewHMACPeerAuthFromSecret), and the serving
-// relay refuses a stale timestamp or a replayed nonce. On GCP (peer_auth
+// body digest, Want header and target relay (instance id and generation),
+// keyed with an HKDF derivation of the hub's shared signing secret
+// (relay.NewHMACPeerAuthFromSecret). The serving relay refuses a stale
+// timestamp, a replayed nonce, and a request signed for another relay
+// instance or generation. On GCP (peer_auth
 // "oidc", or "auto" on GCP) the caller also presents a Google-signed OIDC
 // ID token for its service account, checked in addition to the signature.
 //

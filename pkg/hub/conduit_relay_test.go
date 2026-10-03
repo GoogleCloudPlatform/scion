@@ -422,10 +422,13 @@ func TestConduitInternalHandler_SignedInAllModes(t *testing.T) {
 	rpcBody, err := proto.Marshal(&conduitv1.RpcRequest{RequestId: "r1"})
 	require.NoError(t, err)
 
+	rt := f.srv.conduit.Load()
+	require.NotNil(t, rt)
 	newReq := func(t *testing.T, method, url string, body []byte) *http.Request {
 		t.Helper()
 		req, err := http.NewRequest(method, url, bytes.NewReader(body))
 		require.NoError(t, err)
+		relay.SetPeerTarget(req, rt.relay.InstanceID(), rt.relay.Generation())
 		if body != nil {
 			sum := sha256.Sum256(body)
 			req.Header.Set(relay.HeaderBodySHA256, hex.EncodeToString(sum[:]))
@@ -445,6 +448,18 @@ func TestConduitInternalHandler_SignedInAllModes(t *testing.T) {
 		req := newReq(t, http.MethodGet, base+"self", nil)
 		require.NoError(t, caller.Sign(req))
 		assert.Equal(t, http.StatusOK, do(t, req))
+	})
+	t.Run("signed for another generation is refused", func(t *testing.T) {
+		req := newReq(t, http.MethodGet, base+"self", nil)
+		relay.SetPeerTarget(req, rt.relay.InstanceID(), rt.relay.Generation()-1)
+		require.NoError(t, caller.Sign(req))
+		assert.Equal(t, http.StatusConflict, do(t, req))
+	})
+	t.Run("signed for another instance is refused", func(t *testing.T) {
+		req := newReq(t, http.MethodGet, base+"self", nil)
+		relay.SetPeerTarget(req, "hub-c", rt.relay.Generation())
+		require.NoError(t, caller.Sign(req))
+		assert.Equal(t, http.StatusConflict, do(t, req))
 	})
 	t.Run("ID token alone is refused", func(t *testing.T) {
 		req := newReq(t, http.MethodGet, base+"self", nil)
