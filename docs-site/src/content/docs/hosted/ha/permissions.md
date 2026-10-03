@@ -107,6 +107,8 @@ On any authorization request (evaluated via the Hub's `Decide` endpoint):
 
 The Hub API and Web UI utilize a capability gating system. Resource responses from the API include `_capabilities` annotations. These annotations explicitly state the actions the authenticated user is permitted to perform on that specific resource. This ensures granular UI controls (e.g., disabling the "Delete" button if the user lacks permission) and provides a secondary layer of API-level enforcement.
 
+The skills list (`GET /api/v1/skills`) also returns a list-level `_capabilities` object. It includes `create` when the caller can create a skill in at least one scope the request covers: any scope when no `scope` filter is given (every signed-in user can create in their own user scope), otherwise only the filtered scope and `scopeId`. Listing itself is not reported as a capability, because a successful response already means the caller may list.
+
 ## GCP Service Account Assignment Gates
 
 To prevent lateral privilege escalation—where an agent with low privileges creates a child agent with high privileges, or a user assigns a highly privileged GCP service account they shouldn't have access to—Scion implements a secure, **two-layer gate** for binding a GCP service account to any agent:

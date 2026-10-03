@@ -346,7 +346,7 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 
 	var scopeCap *Capabilities
 	if identity != nil {
-		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "skill")
+		scopeCap = s.skillListCapabilities(ctx, filter.Scope, filter.ScopeID, scopeResult.Scopes)
 	}
 
 	writeJSON(w, http.StatusOK, ListSkillsResponse{
@@ -355,6 +355,73 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		TotalCount:   result.TotalCount,
 		Capabilities: scopeCap,
 	})
+}
+
+// skillListCapabilities returns the list-level capabilities for a skills
+// list request. "create" is reported when the caller can create a skill in
+// at least one scope the request covers: any scope when no scope filter is
+// given, otherwise only the filtered scope (and, for project and user
+// scopes, the filtered scopeId when one is set). Each scope is checked the
+// same way createSkill authorizes a create in it. Listing is not reported
+// as a capability: a 200 response already means the caller may list.
+//
+// projects is the caller's project list scope from ResolveListScopes; it
+// supplies the candidate projects for a project-scope check without a
+// scopeId.
+func (s *Server) skillListCapabilities(ctx context.Context, scopeFilter, scopeIDFilter string, projects ScopeSet) *Capabilities {
+	scopes := []string{scopeFilter}
+	if scopeFilter == "" {
+		scopes = []string{store.SkillScopeUser, store.SkillScopeProject, store.SkillScopeGlobal, store.SkillScopeCore}
+	}
+	for _, scope := range scopes {
+		if s.canCreateSkillInScope(ctx, scope, scopeIDFilter, projects) {
+			return &Capabilities{Actions: []string{string(ActionCreate)}}
+		}
+	}
+	return &Capabilities{Actions: []string{}}
+}
+
+// canCreateSkillInScope reports whether the caller in ctx could create a
+// skill in scope (restricted to scopeID when it is set), following the
+// authorization branches of createSkill.
+func (s *Server) canCreateSkillInScope(ctx context.Context, scope, scopeID string, projects ScopeSet) bool {
+	switch scope {
+	case store.SkillScopeUser:
+		// createSkill always places a user-scoped skill in the caller's own
+		// user scope, so another user's scope is never creatable.
+		userIdent := GetUserIdentityFromContext(ctx)
+		return userIdent != nil && (scopeID == "" || scopeID == userIdent.ID())
+	case store.SkillScopeGlobal, store.SkillScopeCore:
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			return false
+		}
+		return s.authzService.CheckAccess(ctx, userIdent, skillScopeResource(scope, ""), globalWriteAction(scope, ActionCreate)).Allowed
+	case store.SkillScopeProject:
+		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			own := agentIdent.ProjectID()
+			return own != "" && agentIdent.HasScope(ScopeAgentCreate) && (scopeID == "" || scopeID == own)
+		}
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			return false
+		}
+		candidates := projects.ProjectIDs()
+		switch {
+		case scopeID != "":
+			candidates = []string{scopeID}
+		case projects.IsAll():
+			// An unrestricted caller's project list is not enumerated; ask
+			// whether it may create in project scope at all.
+			candidates = []string{""}
+		}
+		for _, projectID := range candidates {
+			if s.authzService.CheckAccess(ctx, userIdent, skillScopeResource(store.SkillScopeProject, projectID), ActionCreate).Allowed {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // agentSkillAccessScope derives an agent's list predicate from the same
