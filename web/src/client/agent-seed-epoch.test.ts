@@ -119,6 +119,23 @@ describe('AgentSeedEpoch', () => {
     expect(openEpochs(sm)).toBe(0);
   });
 
+  it('unknownPhaseChanges lists the latest live phase of IDs not in the store, minus deletes', () => {
+    const sm = newState();
+    sm.seedAgents([makeAgent('a')]);
+    const epoch = new AgentSeedEpoch(sm);
+    emit(sm, 'agent.x.status', { agentId: 'x', phase: 'running' });
+    emit(sm, 'agent.y.status', { agentId: 'y', phase: 'running' });
+    emit(sm, 'agent.z.status', { agentId: 'z', activity: 'thinking' });
+    emit(sm, 'agent.a.status', { phase: 'stopped' });
+    emit(sm, 'agent.x.status', { agentId: 'x', phase: 'stopped' });
+    emit(sm, 'agent.y.deleted', { agentId: 'y' });
+    expect(epoch.unknownPhaseChanges).toEqual([['x', 'stopped']]);
+    expect(epoch.changedIds).toEqual(['a']);
+    epoch.close();
+    emit(sm, 'agent.w.status', { agentId: 'w', phase: 'running' });
+    expect(epoch.unknownPhaseChanges).toEqual([['x', 'stopped']]);
+  });
+
   it('close without seeding still ends the store epoch and stops recording', () => {
     const sm = newState();
     const epoch = new AgentSeedEpoch(sm);

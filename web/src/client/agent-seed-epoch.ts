@@ -27,10 +27,12 @@
  * - records the IDs created live, so a create that the response predates
  *   is still part of the membership a page renders;
  * - records every ID upserted live, so a page that adopts a fresh member
- *   index or server page can replay those changes into it.
+ *   index or server page can replay those changes into it;
+ * - records the latest phase of every ID changed live while not in the
+ *   store, so a page whose counts come from the response can replay it.
  */
 import type { Agent } from '../shared/types.js';
-import type { SeedEpochToken, StateManager } from './state.js';
+import type { AgentsChangedDetail, SeedEpochToken, StateManager } from './state.js';
 import { stateManager } from './state.js';
 
 /** The state-store surface the protocol needs (injectable for tests). */
@@ -77,6 +79,7 @@ export class AgentSeedEpoch {
   private readonly token: SeedEpochToken;
   private readonly createdIds = new Set<string>();
   private readonly upsertedIds = new Set<string>();
+  private readonly unknownPhases = new Map<string, string>();
   private closed = false;
 
   private readonly onCreated = (e: Event): void => {
@@ -85,8 +88,11 @@ export class AgentSeedEpoch {
   };
 
   private readonly onChanged = (e: Event): void => {
-    const upserted = (e as CustomEvent<{ data?: { upserted?: string[] } }>).detail?.data?.upserted;
-    for (const id of upserted ?? []) this.upsertedIds.add(id);
+    const data = (e as CustomEvent<{ data?: Partial<AgentsChangedDetail> }>).detail?.data;
+    for (const id of data?.upserted ?? []) this.upsertedIds.add(id);
+    for (const [id, delta] of data?.unknown ?? []) {
+      if (delta.phase) this.unknownPhases.set(id, delta.phase);
+    }
   };
 
   /** Opens the epoch and starts recording. */
@@ -104,6 +110,16 @@ export class AgentSeedEpoch {
   get changedIds(): string[] {
     const tombstones = this.state.getDeletedAgentIds();
     return Array.from(this.upsertedIds).filter((id) => !tombstones.has(id));
+  }
+
+  /**
+   * The latest live phase of each ID that changed while not in the store
+   * (an unknown-ID delta) since the epoch opened, minus those deleted
+   * since. Recording stops at {@link close}.
+   */
+  get unknownPhaseChanges(): Array<[string, string]> {
+    const tombstones = this.state.getDeletedAgentIds();
+    return Array.from(this.unknownPhases).filter(([id]) => !tombstones.has(id));
   }
 
   /**
