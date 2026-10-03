@@ -109,35 +109,50 @@ func agentQuotaProfile(agent *store.Agent) string {
 // hub's global settings file plus the DB settings overlay, never a
 // project's settings. When the hub keeps its settings in the database, the
 // runtimes and profiles sections come from the current DB snapshot, which
-// is what the overlay carries in co-located mode. A load failure is logged
-// and yields nil, so every agent counts toward the broker-wide total
-// (which stays enforced) rather than going uncounted; ok is false so the
-// reconcile pass knows not to move reservations on that basis.
+// is what the overlay carries in co-located mode. A settings file load
+// failure is logged. ok is false when the limits could not be read, so the
+// reconcile pass does not move reservations on that basis and the usage
+// view reports the limits as unknown; see overlayAgentLimitSettings.
 func (s *Server) agentLimitSettings(ctx context.Context) (vs *config.VersionedSettings, ok bool) {
 	if s.agentLimitSettingsFn != nil {
 		return s.agentLimitSettingsFn()
 	}
-	ok = true
 	vs, _, err := config.LoadGlobalSettingsWithOverlay()
 	if err != nil {
-		s.agentLifecycleLog.WarnContext(ctx, "quota: failed to load global settings for per-profile max_agents; using the broker-wide limit", "error", err)
-		vs, ok = nil, false
+		s.agentLifecycleLog.WarnContext(ctx, "quota: failed to load global settings for per-profile max_agents", "error", err)
+		vs = nil
 	}
+	var runtimes map[string]config.V1RuntimeConfig
+	var profiles map[string]config.V1ProfileConfig
 	if ops := s.GetOperationalSettings(); ops != nil {
 		snap := ops.Snapshot()
-		if snap.Runtimes != nil || snap.Profiles != nil {
-			if vs == nil {
-				vs = &config.VersionedSettings{}
-			}
-			if snap.Runtimes != nil {
-				vs.Runtimes = snap.Runtimes
-			}
-			if snap.Profiles != nil {
-				vs.Profiles = snap.Profiles
-			}
+		runtimes, profiles = snap.Runtimes, snap.Profiles
+	}
+	return overlayAgentLimitSettings(vs, err == nil, runtimes, profiles)
+}
+
+// overlayAgentLimitSettings applies the DB snapshot's runtimes and profiles
+// sections (nil when absent) over the settings file's vs (nil when it
+// failed to load; fileOK reports whether it loaded). The result is usable
+// (ok) when the file loaded, or when the snapshot supplies both sections,
+// since every max_agents value is then read from the database. When the
+// file failed and the snapshot supplies only one section, ok is false:
+// limits from the other section cannot be read, and with vs nil an agent
+// that would have its own limit counts toward the broker-wide total, which
+// stays enforced.
+func overlayAgentLimitSettings(vs *config.VersionedSettings, fileOK bool, runtimes map[string]config.V1RuntimeConfig, profiles map[string]config.V1ProfileConfig) (*config.VersionedSettings, bool) {
+	if runtimes != nil || profiles != nil {
+		if vs == nil {
+			vs = &config.VersionedSettings{}
+		}
+		if runtimes != nil {
+			vs.Runtimes = runtimes
+		}
+		if profiles != nil {
+			vs.Profiles = profiles
 		}
 	}
-	return vs, ok
+	return vs, fileOK || (runtimes != nil && profiles != nil)
 }
 
 // agentBrokerQuotaScope returns the scope agent's reservation belongs in
@@ -210,7 +225,10 @@ func (s *Server) reserveBrokerQuota(ctx context.Context, agent *store.Agent) (cr
 // still unset and touches nothing else, so it is safe alongside the
 // caller's own later writes. A failed write is logged; the in-memory value
 // is still used for this reservation. On the create path the agent row does
-// not exist yet and the write is a no-op; the create stores it.
+// not exist yet and the write is a no-op; the create stores it. An
+// UpdateAgent from a copy read before the write can drop the stored value
+// (see store.AgentStore.SetAgentQuotaProfile); the next reservation then
+// records it again from the then-current settings.
 func (s *Server) ensureAgentQuotaProfile(ctx context.Context, agent *store.Agent) {
 	if agent == nil || agent.RuntimeBrokerID == "" {
 		return
@@ -251,10 +269,11 @@ func brokerQuotaExceededMessage(err error) string {
 
 // brokerQuotaLaunchInFlight reports whether agent has a launch in flight
 // at now: an async launch that is active and not past its deadline, or a
-// phase on the way to running. A launch past its deadline is no longer in
-// flight (the launch sweeper ends it). The reconcile pass never moves an
-// in-flight agent's reservation between scopes; it is handled on a later
-// pass once the launch settles.
+// phase on the way to running. An active launch past its deadline is
+// treated as settled here, whatever its phase; nothing else ends it on
+// that basis for phases outside store.InFlightPhases. The reconcile pass
+// never moves an in-flight agent's reservation between scopes; it is
+// handled on a later pass once the launch settles.
 func brokerQuotaLaunchInFlight(agent *store.Agent, now time.Time) bool {
 	if agent.LaunchState == store.LaunchStateActive && (agent.LaunchDeadline.IsZero() || now.Before(agent.LaunchDeadline)) {
 		return true

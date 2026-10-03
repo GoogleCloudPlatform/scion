@@ -413,6 +413,14 @@ type AgentStore interface {
 	// column, and not state_version. It returns written=false, with no
 	// error, when a profile is already recorded, profile is empty, the
 	// applied config changed concurrently, or the agent does not exist.
+	//
+	// Because state_version is not bumped, an UpdateAgent from a copy read
+	// before this write still succeeds and rewrites the applied config
+	// without the key. Callers accept that: the next reservation records
+	// the profile again, releases match on the agent ID in any scope, and
+	// the quota reconcile pass moves the reservation to the scope that
+	// applies. Not bumping is what lets the caller's own later UpdateAgent,
+	// which carries the same value, succeed.
 	SetAgentQuotaProfile(ctx context.Context, id, profile string) (written bool, err error)
 
 	// FindOrphanedAgents returns agents whose RuntimeBrokerID references a broker

@@ -618,3 +618,29 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	defer l.mu.Unlock()
 	return l.w.Write(p)
 }
+
+// In database-settings mode the runtimes and profiles sections come from
+// the DB snapshot, so a settings file load failure leaves the limits
+// readable when the snapshot supplies both sections, and unknown when it
+// supplies only one.
+func TestOverlayAgentLimitSettings(t *testing.T) {
+	runtimes := map[string]config.V1RuntimeConfig{"k8s": {Type: "kubernetes", MaxAgents: 3}}
+	profiles := map[string]config.V1ProfileConfig{"gke": {Runtime: "k8s", MaxAgents: 2}}
+
+	vs, ok := overlayAgentLimitSettings(nil, false, runtimes, profiles)
+	assert.True(t, ok, "both sections from the database: limits are readable")
+	assert.Equal(t, store.QuotaScopeBrokerProfile, brokerQuotaScopeFor(vs, "B", "gke").ScopeType)
+
+	vs, ok = overlayAgentLimitSettings(nil, false, nil, profiles)
+	assert.False(t, ok, "runtime entry limits cannot be read")
+	assert.EqualValues(t, 2, brokerQuotaScopeFor(vs, "B", "gke").Limit)
+
+	vs, ok = overlayAgentLimitSettings(nil, false, nil, nil)
+	assert.False(t, ok)
+	assert.Nil(t, vs)
+
+	file := &config.VersionedSettings{Profiles: map[string]config.V1ProfileConfig{"gke": {Runtime: "docker", MaxAgents: 5}}}
+	vs, ok = overlayAgentLimitSettings(file, true, nil, profiles)
+	assert.True(t, ok)
+	assert.EqualValues(t, 2, brokerQuotaScopeFor(vs, "B", "gke").Limit, "the DB section replaces the file's")
+}
