@@ -179,4 +179,7 @@ func TestSkillWriteBody_BodyTooLarge(t *testing.T) {
 		`","description":"` + strings.Repeat("x", maxSettingsBodySize) + `"}`
 	rec := doRawJSONRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills", big)
 	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "got: %s", rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), "body: %s", rec.Body.String())
+	assert.Equal(t, "payload_too_large", resp.Error.Code)
 }

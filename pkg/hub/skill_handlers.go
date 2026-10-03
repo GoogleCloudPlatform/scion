@@ -416,7 +416,7 @@ func readSkillWriteBody(w http.ResponseWriter, r *http.Request, v interface{}) b
 	body, err := readRawBody(w, r)
 	if err != nil {
 		if isMaxBytesError(err) {
-			writeError(w, http.StatusRequestEntityTooLarge, ErrCodeInvalidRequest, "Request body too large", nil)
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "Request body too large", nil)
 			return false
 		}
 		BadRequest(w, "Invalid request body: "+err.Error())
