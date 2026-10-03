@@ -109,8 +109,10 @@ func (s *AgentStore) updateAgentDeletionOnce(ctx context.Context, uid uuid.UUID,
 	now := time.Now()
 	upd := tx.Agent.Update().
 		Where(agent.IDEQ(uid), agent.StateVersionEQ(row.StateVersion)).
-		SetStateVersion(row.StateVersion + 1).
-		SetUpdated(now)
+		SetStateVersion(row.StateVersion + 1)
+	if !set.KeepUpdated {
+		upd.SetUpdated(now)
+	}
 	if set.State != nil {
 		upd.SetDeletionState(*set.State)
 	}
@@ -148,6 +150,9 @@ func (s *AgentStore) updateAgentDeletionOnce(ctx context.Context, uid uuid.UUID,
 	}
 	if set.Activity != nil {
 		upd.SetActivity(*set.Activity)
+	}
+	if set.DeletedAt != nil {
+		upd.SetDeletedAt(*set.DeletedAt)
 	}
 
 	n, err := upd.Save(ctx)
