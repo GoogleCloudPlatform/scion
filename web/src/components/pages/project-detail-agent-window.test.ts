@@ -1752,27 +1752,27 @@ describe('project-detail — agent list window', () => {
     // size change, label typing, a label commit or clear (sl-change or
     // sl-clear), a lifecycle or stop-all refresh, a reconnect, and the chip.
     const steps: Step[] = [
-      ['grid', (el) => setView(el, 'grid')],
-      ['list', (el) => setView(el, 'list'), rowsMatch(() => true)],
-      ['dir flip', (el) => internals(el).toggleSort('updated')],
-      ['created sort', (el) => internals(el).toggleSort('created')],
-      ['updated sort', (el) => internals(el).toggleSort('updated')],
+      ['switch to grid view', (el) => setView(el, 'grid')],
+      ['switch to list view', (el) => setView(el, 'list'), rowsMatch(() => true)],
+      ['flip the updated sort direction', (el) => internals(el).toggleSort('updated')],
+      ['sort by created', (el) => internals(el).toggleSort('created')],
+      ['sort by updated after created', (el) => internals(el).toggleSort('updated')],
       [
-        'phase',
+        'filter phase running',
         (el) => internals(el).setPhaseFilter('running'),
         rowsMatch((a) => a.phase === 'running'),
       ],
-      ['phase clear', (el) => internals(el).setPhaseFilter(''), rowsMatch(() => true)],
+      ['clear the phase filter', (el) => internals(el).setPhaseFilter(''), rowsMatch(() => true)],
       [
         'next page',
         (el) => internals(el).agentWindow.next(),
         (el, agents) => onPage(agents.length > 25 ? 1 : 0)(el, agents),
       ],
-      ['prev page', (el) => internals(el).agentWindow.prev(), onPage(0)],
-      ['page size change', (el) => internals(el).onPagerSizeChange(50), rowsMatch(() => true)],
-      ['page size back', (el) => internals(el).onPagerSizeChange(25), rowsMatch(() => true)],
+      ['previous page', (el) => internals(el).agentWindow.prev(), onPage(0)],
+      ['page size 50', (el) => internals(el).onPagerSizeChange(50), rowsMatch(() => true)],
+      ['page size back to 25', (el) => internals(el).onPagerSizeChange(25), rowsMatch(() => true)],
       [
-        'label typing',
+        'type a label without committing it',
         (el) => {
           const input = labelInput(el)!;
           input.value = 'env=pr';
@@ -1780,34 +1780,40 @@ describe('project-detail — agent list window', () => {
         },
       ],
       [
-        'label commit',
+        'commit label env=prod',
         (el) => commitLabel(el, 'env=prod'),
         rowsMatch((a) => a.labels?.env === 'prod'),
       ],
-      ['label clear', (el) => clearLabel(el), rowsMatch(() => true)],
+      ['clear label env=prod with sl-clear', (el) => clearLabel(el), rowsMatch(() => true)],
       [
-        'bare-key label commit',
+        'commit bare-key label team',
         (el) => commitLabel(el, 'team'),
         rowsMatch((a) => a.labels?.team !== undefined),
       ],
-      ['bare-key label clear', (el) => clearLabel(el), rowsMatch(() => true)],
+      ['clear bare-key label team with sl-clear', (el) => clearLabel(el), rowsMatch(() => true)],
       ['lifecycle refresh', (el) => internals(el).backgroundRefresh('lifecycle-refresh')],
       ['stop-all refresh', stopAll],
-      ['reconnect', reconnect, signalsReconnect],
-      ['tree', (el) => setView(el, 'graph')],
-      ['list again', (el) => setView(el, 'list')],
-      ['name sort', (el) => internals(el).toggleSort('name')],
-      ['updated sort again', (el) => internals(el).toggleSort('updated')],
-      ['dir flip again', (el) => internals(el).toggleSort('updated')],
+      ['live connection reconnect', reconnect, signalsReconnect],
+      ['switch to tree view', (el) => setView(el, 'graph')],
+      ['switch from tree back to list view', (el) => setView(el, 'list')],
+      ['sort by name', (el) => internals(el).toggleSort('name')],
+      ['sort by updated after the name sort', (el) => internals(el).toggleSort('updated')],
       [
-        'phase again',
+        'flip the updated sort direction after the tree',
+        (el) => internals(el).toggleSort('updated'),
+      ],
+      [
+        'filter phase running after the tree',
         (el) => internals(el).setPhaseFilter('running'),
         rowsMatch((a) => a.phase === 'running'),
       ],
-      ['next page again', (el) => internals(el).agentWindow.next()],
-      ['lifecycle refresh again', (el) => internals(el).backgroundRefresh('lifecycle-refresh')],
-      ['stop-all refresh again', stopAll],
-      ['chip', (el) => internals(el).backgroundRefresh('chip')],
+      ['next page after the tree', (el) => internals(el).agentWindow.next()],
+      [
+        'lifecycle refresh after the tree',
+        (el) => internals(el).backgroundRefresh('lifecycle-refresh'),
+      ],
+      ['stop-all refresh after the tree', stopAll],
+      ['counts chip click', (el) => internals(el).backgroundRefresh('chip')],
     ];
 
     /** Every third agent stopped; even agents env=prod, odd env=dev; every fifth also has a bare `team` key. */
@@ -4121,6 +4127,193 @@ describe('project-detail — agent list window', () => {
       await el.updateComplete;
       expect(requests.length).toBe(n);
       expect(internals(el).agentWindow.items.every((a) => a.labels?.env === 'prod')).toBe(true);
+    });
+  });
+
+  describe('page-level agents requests the tests hold, fail or answer', () => {
+    /**
+     * Mounts the page over the realistic handler. `ctl.holdNext()` holds
+     * the next agents GET open until `ctl.release()`; `ctl.failAgents` and
+     * `ctl.failProjectOnce` answer 500. Every agents GET is recorded with
+     * its signal.
+     */
+    function controlledFetch(projectId: string, agents: Agent[]) {
+      const requests: AgentsRequest[] = [];
+      const inner = createRealisticFetchHandler({
+        projectId,
+        projectCaps: { actions: ['read'] },
+        agents,
+        requests,
+      });
+      const sent: Array<{ url: string; signal: AbortSignal | undefined }> = [];
+      const gates: Array<() => void> = [];
+      const ctl = {
+        requests,
+        sent,
+        toHold: 0,
+        failAgents: false,
+        failProjectOnce: false,
+        holdNext(): void {
+          ctl.toHold++;
+        },
+        get heldCount(): number {
+          return gates.length;
+        },
+        release(): void {
+          for (const open of gates.splice(0)) open();
+        },
+      };
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+          const raw =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(raw, 'http://localhost');
+          const signal = init?.signal ?? undefined;
+          if (u.pathname === `/api/v1/projects/${projectId}` && ctl.failProjectOnce) {
+            ctl.failProjectOnce = false;
+            return jsonResponse({ error: { message: 'project boom' } }, 500);
+          }
+          if (u.pathname === `/api/v1/projects/${projectId}/agents`) {
+            sent.push({ url: raw, signal });
+            // The response is computed now, so it predates any live event
+            // the test emits while it is held.
+            const res = ctl.failAgents
+              ? (requests.push({ url: raw }), jsonResponse({ error: { message: 'boom' } }, 500))
+              : await inner(input, init);
+            if (ctl.toHold > 0) {
+              ctl.toHold--;
+              await new Promise<void>((resolve, reject) => {
+                gates.push(resolve);
+                signal?.addEventListener(
+                  'abort',
+                  () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+                  { once: true }
+                );
+              });
+            }
+            if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+            return res;
+          }
+          return inner(input, init);
+        })
+      );
+      return ctl;
+    }
+
+    const commitLabel = (el: TestEl, value: string) => {
+      const input = labelInput(el)!;
+      input.value = value;
+      input.dispatchEvent(new Event('sl-input'));
+      input.dispatchEvent(new Event('sl-change'));
+    };
+
+    const emitLabelledCreate = (projectId: string, id: string, env: string) =>
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.created`,
+        data: {
+          agentId: id,
+          id,
+          name: id,
+          projectId,
+          template: 't',
+          phase: 'running',
+          created: '2026-03-01T00:00:00Z',
+          updated: '2026-03-01T00:00:00Z',
+          messageMode: 'project',
+          labels: { env },
+        },
+      });
+
+    for (const path of [
+      { name: 'a complete fit request', view: 'list', count: 10 },
+      { name: 'a drain (the tree view)', view: 'graph', count: 1200 },
+    ]) {
+      it(`a live create during ${path.name} under a committed k=v label joins only if it matches the label`, async () => {
+        const projectId = `p-label-create-${path.view}`;
+        localStorage.setItem('scion-view-project-agents', path.view);
+        const agents = Array.from({ length: path.count }, (_, i) =>
+          makeAgent(i, { projectId, labels: { env: i % 2 === 0 ? 'prod' : 'dev' } })
+        );
+        const ctl = controlledFetch(projectId, agents);
+        const el = await createComponent(projectId);
+        await settle(el);
+        const n = ctl.sent.length;
+        ctl.holdNext();
+        commitLabel(el, 'env=prod');
+        await vi.waitFor(() => expect(ctl.heldCount).toBe(1));
+        const q = new URL(ctl.sent[n].url, 'http://x').searchParams;
+        expect(q.get('label')).toBe('env=prod');
+        expect(q.has('sort')).toBe(path.view === 'list');
+
+        emitLabelledCreate(projectId, 'live-prod', 'prod');
+        emitLabelledCreate(projectId, 'live-dev', 'dev');
+        await flushLive(el);
+        ctl.release();
+        await settle(el);
+
+        const expected = agents.filter((a) => a.labels?.env === 'prod').length + 1;
+        const ids = new Set(internals(el).agents.map((a) => a.id));
+        expect(ids.has('live-prod')).toBe(true);
+        expect(ids.has('live-dev')).toBe(false);
+        expect(internals(el).agentWindow.state).toBe(path.view === 'list' ? 'small' : 'held');
+        expect(internals(el).agentStats.total).toBe(expected);
+        expect(internals(el).agentWindow.display.every((a) => a.labels?.env === 'prod')).toBe(true);
+      });
+    }
+
+    it('removing the element during a drain aborts its page fetch and sends no further page request', async () => {
+      const projectId = 'p-remove-drain';
+      localStorage.setItem('scion-view-project-agents', 'graph');
+      const agents = Array.from({ length: 1200 }, (_, i) => makeAgent(i, { projectId }));
+      const ctl = controlledFetch(projectId, agents);
+      ctl.holdNext();
+      const el = await createComponent(projectId, { holdsFirstLoad: true });
+      await vi.waitFor(() => expect(ctl.heldCount).toBe(1));
+      expect(ctl.sent).toHaveLength(1);
+      // The tree view drains from the first request.
+      expect(new URL(ctl.sent[0].url, 'http://x').searchParams.has('sort')).toBe(false);
+      expect(ctl.sent[0].signal?.aborted).toBe(false);
+
+      // Removing the element alone does not change the store's scope.
+      el.remove();
+      expect(ctl.sent[0].signal?.aborted).toBe(true);
+      ctl.release();
+      for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+      expect(ctl.sent).toHaveLength(1);
+      expect(stateManager.getAgents().filter((a) => a.projectId === projectId)).toHaveLength(0);
+    });
+
+    it('a failed page load that follows earlier data empties the agents instead of keeping the old rows', async () => {
+      const projectId = 'p-page-load-fails';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 10 }, (_, i) => makeAgent(i, { projectId }));
+      const ctl = controlledFetch(projectId, agents);
+      // The project request fails once while the agents request succeeds.
+      ctl.failProjectOnce = true;
+      const el = await createComponent(projectId);
+      await settle(el);
+      expect(internals(el).agents).toHaveLength(10);
+      expect(internals(el).agentWindow.state).toBe('small');
+      const retry = Array.from(el.shadowRoot!.querySelectorAll('sl-button')).find((b) =>
+        b.textContent?.includes('Retry')
+      ) as HTMLElement | undefined;
+      expect(retry).toBeDefined();
+
+      // Retry loads the page again; this time its agents request fails.
+      ctl.failAgents = true;
+      const n = ctl.requests.length;
+      retry!.click();
+      await vi.waitFor(() => expect(ctl.requests.length).toBe(n + 1));
+      await vi.waitFor(() => expect(el.shadowRoot!.textContent).toContain('Window Project'));
+      await settle(el);
+      expect(new URL(ctl.requests[n].url, 'http://x').searchParams.get('sort')).toBe('updated');
+      expect(internals(el).agents).toEqual([]);
+      expect(internals(el).agentWindow.state).toBe('small');
+      expect(internals(el).agentStats.total).toBe(0);
+      expect(el.shadowRoot!.querySelectorAll('.agent-table-container tbody tr')).toHaveLength(0);
     });
   });
 });

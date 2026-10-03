@@ -567,7 +567,9 @@ describe('AgentDrainRunner (seed-epoch protocol)', () => {
     const result = await runner.run({ url: '/x', view: 'full', isMember: () => true });
     expect(result?.complete).toBe(true);
     expect(sm.getAgent(stored.id)).toBeDefined();
-    expect((sm.getAgent(stored.id) as Agent & { taskSummary?: string }).taskSummary).toBeUndefined();
+    expect(
+      (sm.getAgent(stored.id) as Agent & { taskSummary?: string }).taskSummary
+    ).toBeUndefined();
     expect((result?.agents[0] as Agent & { taskSummary?: string }).taskSummary).toBeUndefined();
   });
 

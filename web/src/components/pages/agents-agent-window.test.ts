@@ -1354,11 +1354,7 @@ describe('scion-page-agents — agent list window', () => {
         expectRows((a) => a.labels?.env === 'prod', 'asc'),
       ],
       ['lifecycle refresh', (el) => internals(el).backgroundRefresh('lifecycle-refresh')],
-      [
-        'stop-all refresh',
-        stopAll,
-        expectRows((a) => a.labels?.env === 'prod', 'asc'),
-      ],
+      ['stop-all refresh', stopAll, expectRows((a) => a.labels?.env === 'prod', 'asc')],
       ['live connection reconnect', () => reconnect(), signalsReconnect],
       ['clear label env=prod', (el) => commitLabel(el, '')],
       [
@@ -1375,10 +1371,7 @@ describe('scion-page-agents — agent list window', () => {
       ['clear the mode filter', (el) => internals(el).setModeFilter('')],
       ['sort by name', (el) => internals(el).toggleSort('name')],
       ['sort by updated after the name sort', (el) => internals(el).toggleSort('updated')],
-      [
-        'filter phase running after the tree',
-        (el) => internals(el).setPhaseFilter('running'),
-      ],
+      ['filter phase running after the tree', (el) => internals(el).setPhaseFilter('running')],
       ['next page after the tree', (el) => internals(el).agentWindow.next()],
       [
         'lifecycle refresh after the tree',
