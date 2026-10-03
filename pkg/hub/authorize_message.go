@@ -298,6 +298,18 @@ func (s *Server) authorizeUserToAgent(
 
 	targetResource := agentResource(targetAgent)
 
+	// A UAT-backed sender is confined by its token before any allow below,
+	// including ancestry and project-owner piercing: the token boundary
+	// must allow the target's project, the ceiling must allow
+	// agent.message, and the holder must currently have access to the
+	// target's project. The project and hub branch below applies the same
+	// gate again through CheckAccess.
+	if scoped, ok := userIdent.(*ScopedUserIdentity); ok {
+		if denied := s.authzService.uatMessageGate(ctx, scoped, targetResource); denied != nil {
+			return false, "agent.message permission denied: " + denied.Reason
+		}
+	}
+
 	// D6 UAT caveat: piercing applies only when the token carries agent:message.
 	// Full-session users (non-UAT) always have piercing ability.
 	uatDeniesMessage := false
@@ -837,4 +849,17 @@ func (s *Server) isProjectOwner(ctx context.Context, userID, projectID string) b
 		return false
 	}
 	return membership.Role == store.ProjectRoleOwner
+}
+
+// uatMessageGate runs the bearer gate for agent.message on target for a
+// UAT-backed sender: the boundary is valid and allows the target's scope,
+// the ceiling allows agent.message, and for a project target the holder
+// currently has access to that project. It returns nil when every stage
+// passes. User message authorization calls it before any ancestry or
+// project-owner allow, so no messaging allow reaches a target outside the
+// token's boundary or the holder's current project access.
+func (a *AuthzService) uatMessageGate(ctx context.Context, scoped *ScopedUserIdentity, target Resource) *Decision {
+	principal := principalContextForIdentity(scoped)
+	in, _ := bearerGateInputsFor(principal, CredentialContext{})
+	return a.evaluateBearerGate(ctx, principal, in, target, TargetScopeEvidence{}, ActionMessage, "agent.message", nil, nil)
 }
