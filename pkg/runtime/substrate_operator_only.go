@@ -15,11 +15,38 @@
 package runtime
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
+
+// ErrSubstrateProfileInvalid marks a substrate runtime that GetRuntime could
+// not construct: the profile failed ValidateOperatorOnlySubstrateProfile, or
+// its operator-defined runtime block was rejected by NewSubstrateRuntime. The
+// *ErrorRuntime GetRuntime returns in either case carries an error matching
+// this sentinel under errors.Is, so a caller can tell a misconfigured
+// substrate profile apart from any other runtime construction failure.
+var ErrSubstrateProfileInvalid = errors.New("substrate profile invalid")
+
+// substrateProfileError tags a substrate construction failure with
+// ErrSubstrateProfileInvalid while keeping the underlying error's own text
+// and its errors.Is/As chain intact.
+type substrateProfileError struct {
+	err error
+}
+
+func (e *substrateProfileError) Error() string { return e.err.Error() }
+
+func (e *substrateProfileError) Unwrap() []error {
+	return []error{ErrSubstrateProfileInvalid, e.err}
+}
+
+// substrateProfileInvalid wraps err so it matches ErrSubstrateProfileInvalid.
+func substrateProfileInvalid(err error) error {
+	return &substrateProfileError{err: err}
+}
 
 // ValidateOperatorOnlySubstrateProfile enforces that a profile resolving to
 // a substrate runtime is entirely operator-defined. effectiveVS is whatever

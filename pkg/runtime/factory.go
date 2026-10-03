@@ -247,12 +247,12 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		// ValidateOperatorOnlySubstrateProfile's doc comment for why.
 		if verr := ValidateOperatorOnlySubstrateProfile(vs, profileName); verr != nil {
 			util.Debugf("GetRuntime: substrate profile failed operator-only validation: %v", verr)
-			return &ErrorRuntime{Err: verr}
+			return &ErrorRuntime{Err: substrateProfileInvalid(verr)}
 		}
 		rt, err := NewSubstrateRuntime(rtConfig.Substrate)
 		if err != nil {
 			util.Debugf("GetRuntime: failed to create substrate runtime: %v", err)
-			return &ErrorRuntime{Err: err}
+			return &ErrorRuntime{Err: substrateProfileInvalid(err)}
 		}
 		return rt
 	}

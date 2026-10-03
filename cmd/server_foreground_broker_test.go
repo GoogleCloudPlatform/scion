@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -159,28 +160,118 @@ func TestResolveBrokerIDPrefersConfiguredIDOverDefault(t *testing.T) {
 	assert.Equal(t, "configured-broker", got)
 }
 
-// TestRefuseErrorRuntimeAtStartup_FailedRuntimeRefusesStart is the
-// regression test for A5: the broker's own default runtime is resolved
-// once at startup (startRuntimeBroker's runtime.GetRuntime("", "") call),
-// and a construction/validation failure there must not be allowed to start
-// a broker that silently can never serve a single Run/Exec/List
-// successfully against it.
-func TestRefuseErrorRuntimeAtStartup_FailedRuntimeRefusesStart(t *testing.T) {
-	failure := assert.AnError
-	err := refuseErrorRuntimeAtStartup(&scionruntime.ErrorRuntime{Err: failure})
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, failure)
+// writeBrokerRuntimeSettings isolates HOME (no operator settings at all)
+// and writes projectSettings as a project's .scion/settings.json, returning
+// the project directory for runtime.GetRuntime.
+func writeBrokerRuntimeSettings(t *testing.T, projectSettings string) string {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	projectDir := t.TempDir()
+	scionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.json"), []byte(projectSettings), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return projectDir
 }
 
-// TestRefuseErrorRuntimeAtStartup_HealthyRuntimeStartsNormally is the
-// control for the test above: a runtime that is not an *ErrorRuntime at
-// all (the ordinary case, every healthy broker startup) must not be
-// refused.
-func TestRefuseErrorRuntimeAtStartup_HealthyRuntimeStartsNormally(t *testing.T) {
-	rt := scionruntime.GetRuntime("docker", "")
-	if _, isErrorRuntime := rt.(*scionruntime.ErrorRuntime); isErrorRuntime {
-		t.Fatalf("test setup: GetRuntime(\"docker\", \"\") unexpectedly returned an *ErrorRuntime: %v", rt)
+// getRuntimeFor returns a getRuntime function for resolveBrokerDefaultRuntime
+// that resolves the default runtime against projectDir's settings.
+func getRuntimeFor(projectDir string) func(string, string) scionruntime.Runtime {
+	return func(string, string) scionruntime.Runtime {
+		return scionruntime.GetRuntime(projectDir, "")
 	}
-	err := refuseErrorRuntimeAtStartup(rt)
+}
+
+// TestResolveBrokerDefaultRuntime_InvalidSubstrateProfileRefusesStart: a
+// default runtime that resolves to a substrate profile the operator never
+// defined comes back from GetRuntime as an *ErrorRuntime matching
+// ErrSubstrateProfileInvalid, and the broker must refuse to start rather
+// than come up unable to serve a single Run/Exec/List.
+func TestResolveBrokerDefaultRuntime_InvalidSubstrateProfileRefusesStart(t *testing.T) {
+	projectDir := writeBrokerRuntimeSettings(t, `{
+		"schema_version": "1",
+		"active_profile": "substrate",
+		"runtimes": {
+			"substrate-prod": {
+				"type": "substrate",
+				"substrate": {
+					"api_endpoint": "attacker.net:443",
+					"router_endpoint": "http://attacker.net:80"
+				}
+			}
+		},
+		"profiles": {"substrate": {"runtime": "substrate-prod"}}
+	}`)
+
+	var logged []string
+	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	rt, err := resolveBrokerDefaultRuntime(getRuntimeFor(projectDir), logf)
+	if err == nil {
+		t.Fatalf("expected startup to be refused, got runtime %q", rt.Name())
+	}
+	assert.ErrorIs(t, err, scionruntime.ErrSubstrateProfileInvalid)
+	assert.Contains(t, err.Error(), "substrate-prod")
+	assert.Nil(t, rt)
+	assert.Empty(t, logged, "a refused startup must not log a runtime as in use")
+}
+
+// TestResolveBrokerDefaultRuntime_NonSubstrateErrorRuntimeStartsDegraded is
+// the positive control for the substrate-only scope of the refusal: a
+// Kubernetes default runtime whose client cannot be constructed is also an
+// *ErrorRuntime, but it must not block startup. The broker starts degraded
+// and logs the "error" runtime name, as it always has.
+func TestResolveBrokerDefaultRuntime_NonSubstrateErrorRuntimeStartsDegraded(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "missing-kubeconfig"))
+	projectDir := writeBrokerRuntimeSettings(t, `{
+		"schema_version": "1",
+		"active_profile": "k8s",
+		"runtimes": {
+			"k8s": {"type": "kubernetes", "context": "no-such-context"}
+		},
+		"profiles": {"k8s": {"runtime": "k8s"}}
+	}`)
+
+	var logged []string
+	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	rt, err := resolveBrokerDefaultRuntime(getRuntimeFor(projectDir), logf)
+	if err != nil {
+		t.Fatalf("a non-substrate runtime failure must not refuse startup, got: %v", err)
+	}
+	er, ok := rt.(*scionruntime.ErrorRuntime)
+	if !ok {
+		t.Fatalf("test setup: expected an *ErrorRuntime for an unloadable kubeconfig, got %T", rt)
+	}
+	assert.NotErrorIs(t, er.Err, scionruntime.ErrSubstrateProfileInvalid)
+	assert.Equal(t, []string{"Runtime broker using runtime: error"}, logged)
+}
+
+// TestResolveBrokerDefaultRuntime_HealthyRuntimeStartsNormally: an ordinary
+// runtime is returned as-is and logged.
+func TestResolveBrokerDefaultRuntime_HealthyRuntimeStartsNormally(t *testing.T) {
+	healthy := scionruntime.NewDockerRuntime()
+	var logged []string
+	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	rt, err := resolveBrokerDefaultRuntime(func(string, string) scionruntime.Runtime { return healthy }, logf)
 	assert.NoError(t, err)
+	assert.Same(t, healthy, rt)
+	assert.Equal(t, []string{"Runtime broker using runtime: " + healthy.Name()}, logged)
+}
+
+// TestRefuseErrorRuntimeAtStartup_OnlySubstrateFailuresRefuse pins the
+// helper's scope directly: only an *ErrorRuntime whose error matches
+// ErrSubstrateProfileInvalid is refused, and the refusal keeps the
+// underlying error in its chain.
+func TestRefuseErrorRuntimeAtStartup_OnlySubstrateFailuresRefuse(t *testing.T) {
+	substrateErr := fmt.Errorf("wrapped: %w", scionruntime.ErrSubstrateProfileInvalid)
+	err := refuseErrorRuntimeAtStartup(&scionruntime.ErrorRuntime{Err: substrateErr})
+	assert.ErrorIs(t, err, scionruntime.ErrSubstrateProfileInvalid)
+
+	assert.NoError(t, refuseErrorRuntimeAtStartup(&scionruntime.ErrorRuntime{Err: assert.AnError}))
+	assert.NoError(t, refuseErrorRuntimeAtStartup(scionruntime.NewDockerRuntime()))
 }
