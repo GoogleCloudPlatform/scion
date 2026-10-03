@@ -17,6 +17,7 @@ package hub
 import (
 	"bufio"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -133,12 +134,25 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if err := s.store.DeleteUser(r.Context(), existingUser.ID); err != nil {
-		if err == store.ErrNotFound {
-			writeError(w, http.StatusNotFound, ErrCodeNotFound, "email not found in allow list", nil)
-			return
+	// Same last-project-owner guard and role-binding cascade as
+	// DELETE /api/v1/users/{id} (ptone/scion#2598): an invited user may hold
+	// bindings if they were pre-added to a project.
+	err = s.store.WithTx(r.Context(), func(tx store.Store) error {
+		if err := guardAndCascadeUserRoleBindingsTx(r.Context(), tx, existingUser.ID, time.Now()); err != nil {
+			return err
 		}
-		InternalError(w)
+		return tx.DeleteUser(r.Context(), existingUser.ID)
+	})
+	if err != nil {
+		var lastOwnerErr *lastProjectOwnerDeleteError
+		switch {
+		case errors.As(err, &lastOwnerErr):
+			writeLastProjectOwnerDeleteError(w, lastOwnerErr)
+		case errors.Is(err, store.ErrNotFound):
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, "email not found in allow list", nil)
+		default:
+			InternalError(w)
+		}
 		return
 	}
 

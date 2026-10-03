@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1173,6 +1174,14 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 			return err
 		}
 
+		// Last-project-owner guard plus role-binding cascade
+		// (ptone/scion#2598). Runs before the user row is deleted, in the
+		// same transaction, so a concurrent membership change cannot leave
+		// a project ownerless.
+		if err := guardAndCascadeUserRoleBindingsTx(ctx, tx, user.ID, time.Now()); err != nil {
+			return err
+		}
+
 		// Clean up user-scoped skill injections.
 		if _, err := tx.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeUser, id); err != nil {
 			return fmt.Errorf("delete skill injections: %w", err)
@@ -1200,9 +1209,12 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	})
 
 	if err != nil {
+		var lastOwnerErr *lastProjectOwnerDeleteError
 		if errors.Is(err, errLastSuperAdmin) {
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"cannot delete the last super-admin; promote another user first", nil)
+		} else if errors.As(err, &lastOwnerErr) {
+			writeLastProjectOwnerDeleteError(w, lastOwnerErr)
 		} else {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"user deletion failed: "+err.Error(), nil)
@@ -1211,4 +1223,107 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// lastOwnerProjectRef identifies a project that deleting a user would leave
+// without an owner.
+type lastOwnerProjectRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// lastProjectOwnerDeleteError is returned by
+// guardAndCascadeUserRoleBindingsTx when the user is the last owner of one
+// or more projects. The surrounding transaction rolls back, so neither the
+// user nor any binding is changed.
+type lastProjectOwnerDeleteError struct {
+	projects []lastOwnerProjectRef
+}
+
+func (e *lastProjectOwnerDeleteError) Error() string {
+	return lastProjectOwnerDeleteMessage
+}
+
+const lastProjectOwnerDeleteMessage = "cannot delete the last owner of a project — transfer ownership or add another active direct user owner first"
+
+// writeLastProjectOwnerDeleteError writes the 409 last_owner response for a
+// denied user deletion. The code and status match the members API last-owner
+// denial; details.projects lists the projects that would be left ownerless.
+func writeLastProjectOwnerDeleteError(w http.ResponseWriter, e *lastProjectOwnerDeleteError) {
+	writeError(w, http.StatusConflict, ErrCodeLastOwner, lastProjectOwnerDeleteMessage,
+		map[string]interface{}{"projects": e.projects})
+}
+
+// guardAndCascadeUserRoleBindingsTx enforces the last-project-owner rule for
+// a user that is about to be deleted, then deletes every role binding held by
+// that user (system, hub and project scope). It must run inside WithTx before
+// the user row is deleted (ptone/scion#2598).
+//
+// For each project where userID holds a project-owner binding — including an
+// expired or not-yet-active one, since deleting it could otherwise take the
+// project to zero owner bindings and let the startup backfill re-grant the
+// creator — the deletion is denied unless at least one OTHER active direct
+// user owner remains. Each such project is locked with
+// LockProjectForMembership (in ID order) before counting, which serializes
+// against concurrent members-API mutations, so the check is TOCTOU-safe.
+//
+// On denial it returns *lastProjectOwnerDeleteError listing every affected
+// project. role_bindings.principal_id has no foreign key, so without the
+// cascade the bindings would dangle after the user is deleted.
+func guardAndCascadeUserRoleBindingsTx(ctx context.Context, tx store.Store, userID string, now time.Time) error {
+	bindings, err := tx.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return fmt.Errorf("list role bindings: %w", err)
+	}
+
+	var ownerProjectIDs []string
+	if len(bindings) > 0 {
+		ownerRD, err := tx.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+		if err != nil {
+			return fmt.Errorf("resolve project-owner role definition: %w", err)
+		}
+		seen := make(map[string]bool)
+		for _, b := range bindings {
+			if b.ScopeType != store.RoleScopeProject || b.RoleDefinitionID != ownerRD.ID || seen[b.ScopeID] {
+				continue
+			}
+			seen[b.ScopeID] = true
+			ownerProjectIDs = append(ownerProjectIDs, b.ScopeID)
+		}
+		sort.Strings(ownerProjectIDs)
+	}
+
+	var orphaned []lastOwnerProjectRef
+	for _, projectID := range ownerProjectIDs {
+		if err := tx.LockProjectForMembership(ctx, projectID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// Binding on a project that no longer exists: nothing to
+				// orphan, the cascade below removes the stale binding.
+				continue
+			}
+			return fmt.Errorf("lock project %s: %w", projectID, err)
+		}
+		others, err := countActiveDirectProjectOwners(ctx, tx, projectID, now, userID)
+		if err != nil {
+			return fmt.Errorf("count owners of project %s: %w", projectID, err)
+		}
+		if others > 0 {
+			continue
+		}
+		ref := lastOwnerProjectRef{ID: projectID}
+		if p, err := tx.GetProject(ctx, projectID); err == nil && p != nil {
+			ref.Name = p.Name
+		}
+		orphaned = append(orphaned, ref)
+	}
+	if len(orphaned) > 0 {
+		return &lastProjectOwnerDeleteError{projects: orphaned}
+	}
+
+	if len(bindings) > 0 {
+		if _, err := tx.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID); err != nil {
+			return fmt.Errorf("delete role bindings: %w", err)
+		}
+	}
+	return nil
 }
