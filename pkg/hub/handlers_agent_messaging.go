@@ -154,6 +154,35 @@ type routingResult struct {
 	Def152DerivedRecipient bool
 }
 
+// outboundThreadConversationExists reports whether a free-text thread key
+// (extRef = "thread:<project>:<threadID>") already names a conversation that
+// ResolveOrCreateConversationByKey would reuse rather than mint: a webchat
+// topic for threadID (when tl is set), or a native conversation whose
+// external_ref is extRef. A topic that exists but has no conversation_id yet
+// counts as existing; the resolver refuses to mint for it and reports its own
+// error. Lookup failures other than "not found" are returned as errors.
+func outboundThreadConversationExists(
+	ctx context.Context,
+	cr messaging.ConversationReader,
+	tl messaging.TopicConversationLookup,
+	extRef, threadID string,
+) (bool, error) {
+	if tl != nil {
+		if _, err := tl.GetTopicConversationIDIncludingDeleted(ctx, threadID); err == nil {
+			return true, nil
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return false, fmt.Errorf("topic lookup: %w", err)
+		}
+	}
+	if _, err := cr.GetConversationByExternalRef(ctx, "native", extRef); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("conversation lookup: %w", err)
+	}
+	return true, nil
+}
+
 // resolveOutboundRouting consolidates recipient resolution, conversation
 // authorization, and transport selection into a single routing decision.
 // Returns a routingResult that the handler uses to build the message envelope
@@ -542,6 +571,33 @@ func (s *Server) resolveOutboundRouting(
 			s.mu.RLock()
 			wcs := s.webChatStore
 			s.mu.RUnlock()
+			// #2026: a free-text (non-dm:) thread_id may only address a thread
+			// conversation that already exists. Minting one here would create a
+			// participant-less group conversation that the recipient never
+			// sees, while the sender is told "sent". Reject instead, before any
+			// conversation or message row is written.
+			if kind == "group" {
+				var tl messaging.TopicConversationLookup
+				if wcs != nil {
+					tl = wcs
+				}
+				exists, existsErr := outboundThreadConversationExists(ctx, s.store, tl, extRef, req.ThreadID)
+				if existsErr != nil {
+					s.messageLog.Error("thread conversation lookup failed",
+						"thread_id", req.ThreadID, "agent_id", agent.ID, "error", existsErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"thread conversation lookup failed", nil)
+					return nil, existsErr
+				}
+				if !exists {
+					err := fmt.Errorf("thread %q does not resolve to an existing conversation", req.ThreadID)
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
+						fmt.Sprintf("thread_id %q does not match an existing conversation in this project; "+
+							"address the conversation with conv:<uuid> (see 'scion conversation list'), "+
+							"or omit thread_id to message the recipient directly", req.ThreadID), nil)
+					return nil, err
+				}
+			}
 			if wcs != nil {
 				keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 			}
@@ -1330,6 +1386,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		"status":       "sent",
 		"recipient":    result.Recipient,
 		"recipient_id": result.RecipientID,
+	}
+	// #2026: report the conversation the message landed in, so a caller
+	// that addressed a thread or a user can tell where it went.
+	if result.ConversationID != "" {
+		respBody["conversation_id"] = result.ConversationID
 	}
 	if len(mentionResults) > 0 {
 		respBody["mention_results"] = mentionResults

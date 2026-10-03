@@ -42,6 +42,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -623,6 +624,13 @@ func TestMentionFanout_FreeTextThreadIDNeverCopiedOntoMentionRow(t *testing.T) {
 			require.NoError(t, err)
 
 			threadID := tc.threadID(sender, owner.ID)
+			if !strings.HasPrefix(threadID, "dm:") {
+				// ptone/scion#2026: a free-text thread_id must name an
+				// existing thread conversation, or the hub rejects the send
+				// before fan-out. Seed it so the send reaches fan-out; the
+				// assertion below is about the mention row, not the thread.
+				seedThreadConversation(t, s, project.ID, threadID)
+			}
 			body, _ := json.Marshal(OutboundMessageRequest{
 				Recipient: "user:" + owner.Email,
 				Msg:       "done — @" + mentionBystanderSlug + " please deploy",
