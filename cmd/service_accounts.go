@@ -21,6 +21,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
@@ -375,7 +376,7 @@ func runSAScopedShow(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("  Verified:    %v\n", sa.Verified)
 	if !sa.VerifiedAt.IsZero() {
-		fmt.Printf("  Verified At: %s\n", sa.VerifiedAt.Format(time.RFC3339))
+		fmt.Printf("  Verified At: %s\n", clitime.Format(sa.VerifiedAt, clitime.Full))
 	}
 	if sa.VerificationError != "" {
 		fmt.Printf("  Error:       %s\n", sa.VerificationError)
@@ -418,7 +419,7 @@ func runSAScopedVerify(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Scope:       %s\n", sa.Scope)
 	fmt.Printf("  Verified:    %v\n", sa.Verified)
 	if !sa.VerifiedAt.IsZero() {
-		fmt.Printf("  Verified At: %s\n", sa.VerifiedAt.Format(time.RFC3339))
+		fmt.Printf("  Verified At: %s\n", clitime.Format(sa.VerifiedAt, clitime.Full))
 	}
 
 	return nil

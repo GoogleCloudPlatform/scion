@@ -1011,6 +1011,10 @@ func mergeKubernetesConfig(base, override *api.KubernetesConfig) *api.Kubernetes
 	if override.SharedDirSize != "" {
 		result.SharedDirSize = override.SharedDirSize
 	}
+	if override.SafeToEvict != nil {
+		v := *override.SafeToEvict
+		result.SafeToEvict = &v
+	}
 
 	return &result
 }

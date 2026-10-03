@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -392,14 +393,12 @@ func parseJWTExpiry(tokenString string) *time.Time {
 
 // printTokenExpiry prints the token expiry in a human-friendly format.
 func printTokenExpiry(expiry time.Time) {
-	now := time.Now()
-	if now.After(expiry) {
-		ago := now.Sub(expiry).Truncate(time.Minute)
-		fmt.Printf("Expires:    %s (EXPIRED %s ago)\n", expiry.Format("2006-01-02 15:04:05 MST"), ago)
-	} else {
-		remaining := expiry.Sub(now).Truncate(time.Minute)
-		fmt.Printf("Expires:    %s (in %s)\n", expiry.Format("2006-01-02 15:04:05 MST"), remaining)
+	when := clitime.Format(expiry, clitime.Full)
+	if !expiry.After(clitime.Now()) {
+		fmt.Printf("Expires:    %s (EXPIRED %s)\n", when, clitime.Ago(expiry))
+		return
 	}
+	fmt.Printf("Expires:    %s (%s)\n", when, clitime.Relative(expiry))
 }
 
 func isLocalhostEndpoint(endpoint string) bool {
@@ -781,7 +780,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 
 					// Add OAuth expiration if applicable
 					if authInfo.HasOAuth && authInfo.OAuthCreds != nil && !authInfo.OAuthCreds.ExpiresAt.IsZero() {
-						status["authExpires"] = authInfo.OAuthCreds.ExpiresAt.Format(time.RFC3339)
+						status["authExpires"] = authInfo.OAuthCreds.ExpiresAt.UTC().Format(time.RFC3339)
 					}
 
 					// Add project context to JSON output
@@ -879,9 +878,9 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 			}
 			if authInfo.HasOAuth && authInfo.OAuthCreds != nil && !authInfo.OAuthCreds.ExpiresAt.IsZero() {
 				if time.Now().After(authInfo.OAuthCreds.ExpiresAt) {
-					fmt.Printf("Expires:    %s (EXPIRED)\n", authInfo.OAuthCreds.ExpiresAt.Format(time.RFC3339))
+					fmt.Printf("Expires:    %s (EXPIRED)\n", clitime.Format(authInfo.OAuthCreds.ExpiresAt, clitime.Full))
 				} else {
-					fmt.Printf("Expires:    %s\n", authInfo.OAuthCreds.ExpiresAt.Format(time.RFC3339))
+					fmt.Printf("Expires:    %s\n", clitime.Format(authInfo.OAuthCreds.ExpiresAt, clitime.Full))
 				}
 			}
 			if authInfo.TokenExpiry != nil {
@@ -1353,9 +1352,9 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Git Remote:  %s\n", project.GitRemote)
 	}
 	fmt.Printf("Agents:      %d\n", project.AgentCount)
-	fmt.Printf("Created:     %s\n", project.Created.Format(time.RFC3339))
+	fmt.Printf("Created:     %s\n", clitime.Format(project.Created, clitime.Full))
 	if !project.Updated.IsZero() && project.Updated != project.Created {
-		fmt.Printf("Updated:     %s\n", project.Updated.Format(time.RFC3339))
+		fmt.Printf("Updated:     %s\n", clitime.Format(project.Updated, clitime.Full))
 	}
 	// TODO: Resolve owner ID to display name when user lookup is available
 	if project.OwnerID != "" {
@@ -1763,7 +1762,7 @@ func runHubBrokers(cmd *cobra.Command, args []string) error {
 	for _, h := range resp.Brokers {
 		lastSeen := "-"
 		if !h.LastHeartbeat.IsZero() {
-			lastSeen = formatRelativeTime(h.LastHeartbeat)
+			lastSeen = clitime.Ago(h.LastHeartbeat)
 		}
 		autoProvide := "no"
 		if h.AutoProvide {
@@ -1873,15 +1872,15 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Version:     %s\n", broker.Version)
 	}
 	if !broker.LastHeartbeat.IsZero() {
-		fmt.Printf("Last Seen:   %s (%s)\n", formatRelativeTime(broker.LastHeartbeat), broker.LastHeartbeat.Format(time.RFC3339))
+		fmt.Printf("Last Seen:   %s (%s)\n", clitime.Ago(broker.LastHeartbeat), clitime.Format(broker.LastHeartbeat, clitime.Full))
 	}
 	if broker.Endpoint != "" {
 		fmt.Printf("Endpoint:    %s\n", broker.Endpoint)
 	}
 	fmt.Printf("Auto-Provide: %v\n", broker.AutoProvide)
-	fmt.Printf("Created:     %s\n", broker.Created.Format(time.RFC3339))
+	fmt.Printf("Created:     %s\n", clitime.Format(broker.Created, clitime.Full))
 	if !broker.Updated.IsZero() && broker.Updated != broker.Created {
-		fmt.Printf("Updated:     %s\n", broker.Updated.Format(time.RFC3339))
+		fmt.Printf("Updated:     %s\n", clitime.Format(broker.Updated, clitime.Full))
 	}
 
 	// Show capabilities
@@ -2039,23 +2038,6 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
-}
-
-func formatRelativeTime(t time.Time) string {
-	if t.IsZero() {
-		return "never"
-	}
-	d := time.Since(t)
-	if d < time.Minute {
-		return "just now"
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	}
-	if d < 24*time.Hour {
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	}
-	return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 }
 
 func runHubEnable(cmd *cobra.Command, args []string) error {

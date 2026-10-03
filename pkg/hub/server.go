@@ -3739,7 +3739,7 @@ func (s *Server) messageEventHandler() EventHandler {
 				"eventID", evt.ID,
 				"agentName", payload.AgentName,
 				"agent_id", payload.AgentID,
-				"scheduledFor", evt.FireAt.Format(time.RFC3339),
+				"scheduledFor", evt.FireAt.UTC().Format(time.RFC3339),
 				"staleness", staleness.Truncate(time.Second).String())
 		}
 
@@ -4186,7 +4186,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			slog.Warn("Scheduler: firing stale dispatch_agent event",
 				"eventID", evt.ID,
 				"agentName", payload.AgentName,
-				"scheduledFor", evt.FireAt.Format(time.RFC3339),
+				"scheduledFor", evt.FireAt.UTC().Format(time.RFC3339),
 				"staleness", staleness.Truncate(time.Second).String())
 		}
 

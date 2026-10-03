@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -2579,8 +2580,30 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		pod.Spec.PriorityClassName = effectivePriorityClass
 	}
 
+	// safe-to-evict: only an explicit false (resolved from the
+	// template/agent kubernetes.safeToEvict, else the profile's, else the
+	// runtime entry's safe_to_evict) adds the annotation. Nil and true add
+	// nothing. The resolved value is authoritative for this key. The map
+	// is cloned so the caller's config.Annotations is not modified.
+	if k := config.Kubernetes; k != nil && k.SafeToEvict != nil && !*k.SafeToEvict {
+		annotations := maps.Clone(pod.Annotations)
+		if annotations == nil {
+			annotations = make(map[string]string, 1)
+		}
+		if prev, ok := annotations[annotationSafeToEvict]; ok && prev != "false" {
+			runtimeLog.Debug("buildPod: safeToEvict=false replaces the annotation from config", "pod", config.Name, "annotation", annotationSafeToEvict, "previous", prev)
+		}
+		annotations[annotationSafeToEvict] = "false"
+		pod.Annotations = annotations
+	}
+
 	return pod, nil
 }
+
+// annotationSafeToEvict is the cluster-autoscaler pod annotation. "false"
+// keeps the autoscaler from removing the node while the pod runs and, on GKE
+// Autopilot, requests extended run duration for the pod.
+const annotationSafeToEvict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 
 // classifyTerminalWaitingReason turns a terminal (non-retryable)
 // ContainerStateWaiting reason into an error, or returns nil if reason is

@@ -64,6 +64,10 @@ type Agent struct {
 	StateVersion int64    `json:"stateVersion,omitempty"`
 	ExitCode     *int     `json:"exitCode,omitempty"`
 	ExitReason   string   `json:"exitReason,omitempty"`
+	// Deletion is the hub's view of an active or failed delete of this agent
+	// (design ptone/scion#2483 §2.2). It is nil when no delete is active or
+	// failed.
+	Deletion *DeletionInfo `json:"deletion,omitempty"`
 }
 
 // AgentConfig represents agent configuration.
