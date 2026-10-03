@@ -106,7 +106,10 @@ func (env *notificationTestEnv) countUserMessageSSE(t *testing.T, userID string)
 func (c *userMessageSSECounter) count() int {
 	for {
 		select {
-		case <-c.ch:
+		case _, ok := <-c.ch:
+			if !ok { // publisher closed: a closed channel never blocks
+				return c.n
+			}
 			c.n++
 		default:
 			return c.n

@@ -363,7 +363,10 @@ func subscribeAgentMessageEvents(t *testing.T, srv *Server, agentID string) func
 		var out []UserMessageEvent
 		for {
 			select {
-			case e := <-ch:
+			case e, ok := <-ch:
+				if !ok { // publisher closed: a closed channel never blocks
+					return out
+				}
 				var evt UserMessageEvent
 				require.NoError(t, json.Unmarshal(e.Data, &evt))
 				out = append(out, evt)
