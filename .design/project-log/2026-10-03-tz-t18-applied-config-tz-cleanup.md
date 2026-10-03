@@ -37,3 +37,10 @@ Asia/Kathmandu. Scoped golangci-lint reports 0 issues.
 ## Follow-ups (not done)
 - Reincarnation snapshots are not swept. Reincarnate already adopts on the
   old config before it builds the new one.
+
+## Review round 1
+Closed four findings. The fixture now includes a soft-deleted agent (adopted)
+and an unpinned agent with a reappeared env TZ (stripped, stays unpinned):
+9 scanned, 5 adopted, 3 stripped. The skip wording now says it matters only
+relative to applied-config-env-cleanup, and the log counts stripped agents,
+not records. Targeted tests pass under UTC, Asia/Tokyo and Asia/Kathmandu.
