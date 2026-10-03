@@ -293,6 +293,57 @@ func TestK8sHomeLinkVerifyScript(t *testing.T) {
 		}
 	})
 
+	t.Run("recorded_skip_user_symlink", func(t *testing.T) {
+		home, links := setup(t)
+		target := filepath.Join(home, ".ssh/id_rsa")
+		if err := os.Symlink("/user/own/key", target); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := runLinkVerify(t, home, links, map[string]bool{".ssh/id_rsa": true}); err != nil {
+			t.Errorf("recorded skip of a user symbolic link refused: %v %s", err, out)
+		}
+	})
+
+	t.Run("symlinked_parent", func(t *testing.T) {
+		home, links := setup(t)
+		ssh := filepath.Join(home, ".ssh")
+		other := filepath.Join(filepath.Dir(home), "other")
+		if err := os.Rename(ssh, other); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(links[0].Source, filepath.Join(other, "id_rsa")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(other, ssh); err != nil {
+			t.Fatal(err)
+		}
+		for _, skipped := range []bool{false, true} {
+			out, err := runLinkVerify(t, home, links, map[string]bool{".ssh/id_rsa": skipped})
+			if err == nil {
+				t.Fatalf("skipped=%v: expected verification to fail", skipped)
+			}
+			if want := "home file check failed at " + ssh + ": parent directory is a symbolic link"; !strings.Contains(out, want) {
+				t.Errorf("skipped=%v: output = %q, want %q", skipped, out, want)
+			}
+		}
+	})
+
+	t.Run("nested_parents_checked_once", func(t *testing.T) {
+		links := []k8sHomeLink{{Target: "a/b/one"}, {Target: "a/b/two"}, {Target: "top"}}
+		script := k8sHomeLinkVerifyScript("/h", links, nil)
+		for _, dir := range []string{"'/h/a'", "'/h/a/b'"} {
+			if n := strings.Count(script, "parent "+dir+"\n"); n != 1 {
+				t.Errorf("parent %s checked %d times, want 1:\n%s", dir, n, script)
+			}
+		}
+		if strings.Contains(script, "parent '/h'\n") {
+			t.Errorf("home itself checked as a parent:\n%s", script)
+		}
+		if strings.Index(script, "parent '/h/a'\n") > strings.Index(script, "parent '/h/a/b'\n") {
+			t.Errorf("parents not checked outermost first:\n%s", script)
+		}
+	})
+
 	fails := []struct {
 		name    string
 		prep    func(t *testing.T, target, src string)
@@ -314,7 +365,8 @@ func TestK8sHomeLinkVerifyScript(t *testing.T) {
 			if err := os.Mkdir(target, 0o700); err != nil {
 				t.Fatal(err)
 			}
-		}, true, "expected a symbolic link to the staged file"},
+		}, true, "expected a symbolic link to the staged file or a user file, found a directory"},
+		{"skip_recorded_but_missing", func(*testing.T, string, string) {}, true, "missing"},
 	}
 	for _, tc := range fails {
 		t.Run(tc.name, func(t *testing.T) {

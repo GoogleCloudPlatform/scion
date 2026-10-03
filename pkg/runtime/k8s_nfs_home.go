@@ -221,23 +221,38 @@ type k8sHomeLinkResult struct {
 const k8sHomeLinkSkipped = "skipped"
 
 // k8sHomeLinkVerifyScript returns a POSIX shell script that checks each
-// link target under home without following links: a symbolic link must
-// point to its staged source; a target in skipped must be a regular file;
-// anything else fails, naming the target. The script reads and writes
-// nothing else.
+// link target under home without following links. Every directory between
+// home and a target must not be a symbolic link. A target that is not in
+// skipped must be a symbolic link to its staged source. A target in skipped
+// holds a user file the link step kept, and may be any entry except a
+// directory (a regular file, or the user's own symbolic link). Anything else
+// fails, naming the path. The script reads and writes nothing else.
 func k8sHomeLinkVerifyScript(home string, links []k8sHomeLink, skipped map[string]bool) string {
 	var b strings.Builder
 	b.WriteString(`fail() {
 	echo "home file check failed at $1: $2" >&2
 	exit 1
 }
+parent() {
+	if [ -L "$1" ]; then
+		fail "$1" "parent directory is a symbolic link"
+	fi
+}
 check() {
 	t=$1; src=$2; skip=$3
+	if [ "$skip" = 1 ]; then
+		if [ -L "$t" ]; then
+			return 0
+		elif [ -d "$t" ]; then
+			fail "$t" "expected a symbolic link to the staged file or a user file, found a directory"
+		elif [ -e "$t" ]; then
+			return 0
+		fi
+		fail "$t" "missing"
+	fi
 	if [ -L "$t" ]; then
 		l=$(readlink "$t") || fail "$t" "cannot read symbolic link"
 		[ "$l" = "$src" ] || fail "$t" "symbolic link does not point to the staged file"
-	elif [ "$skip" = 1 ] && [ -f "$t" ]; then
-		:
 	elif [ -e "$t" ]; then
 		fail "$t" "expected a symbolic link to the staged file"
 	else
@@ -245,7 +260,14 @@ check() {
 	fi
 }
 `)
+	seen := map[string]bool{}
 	for _, l := range links {
+		for _, dir := range homeLinkParents(l.Target) {
+			if !seen[dir] {
+				seen[dir] = true
+				fmt.Fprintf(&b, "parent %s\n", shellQuote(path.Join(home, dir)))
+			}
+		}
 		skip := "0"
 		if skipped[l.Target] {
 			skip = "1"
@@ -253,6 +275,18 @@ check() {
 		fmt.Fprintf(&b, "check %s %s %s\n", shellQuote(path.Join(home, l.Target)), shellQuote(l.Source), skip)
 	}
 	return b.String()
+}
+
+// homeLinkParents returns the directories between the home and the
+// home-relative target, outermost first: "a/b/c" gives "a" and "a/b".
+func homeLinkParents(target string) []string {
+	var out []string
+	dir := path.Dir(path.Clean(target))
+	for dir != "." && dir != "/" {
+		out = append([]string{dir}, out...)
+		dir = path.Dir(dir)
+	}
+	return out
 }
 
 // k8sHomeLinksResultCommand prints k8sHomeLinksResultFile if it exists.
