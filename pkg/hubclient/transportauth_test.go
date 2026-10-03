@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -155,6 +156,8 @@ func TestWithTransportAuth_WithAgentToken(t *testing.T) {
 // WithTransportAuth is provided.
 func TestAutoDetection_FromEnv(t *testing.T) {
 	token := makeTestJWT(time.Now().Add(1 * time.Hour))
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", "")
 	t.Setenv("SCION_TRANSPORT_TOKEN", token)
 
 	var receivedAuth string
@@ -186,6 +189,8 @@ func TestAutoDetection_FromEnv(t *testing.T) {
 // auto-detection, even when SCION_TRANSPORT_TOKEN is set.
 func TestAutoDetection_OptOut(t *testing.T) {
 	token := makeTestJWT(time.Now().Add(1 * time.Hour))
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", "")
 	t.Setenv("SCION_TRANSPORT_TOKEN", token)
 
 	var receivedAuth string
@@ -218,6 +223,7 @@ func TestNoAuthHeader_WhenEnvUnset(t *testing.T) {
 	// Ensure transport env vars are cleared
 	for _, key := range []string{
 		"SCION_TRANSPORT_TOKEN",
+		"SCION_TRANSPORT_TOKEN_FILE",
 		"SCION_TRANSPORT_AUDIENCE",
 		"SCION_TRANSPORT_TOKEN_EXPIRY",
 		"SCION_TRANSPORT_MODE",
@@ -268,7 +274,7 @@ func TestWithTransportAuth_FailedIAP_ReturnsHTMLError(t *testing.T) {
 	defer server.Close()
 
 	// Ensure no transport env vars
-	for _, key := range []string{"SCION_TRANSPORT_TOKEN", "SCION_TRANSPORT_AUDIENCE", "SCION_HUB_OIDC_AUDIENCE"} {
+	for _, key := range []string{"SCION_TRANSPORT_TOKEN", "SCION_TRANSPORT_TOKEN_FILE", "SCION_TRANSPORT_AUDIENCE", "SCION_HUB_OIDC_AUDIENCE"} {
 		_ = os.Unsetenv(key)
 	}
 	orig := transportauth.IsOnGCEFunc
@@ -284,5 +290,41 @@ func TestWithTransportAuth_FailedIAP_ReturnsHTMLError(t *testing.T) {
 	_, err = c.Health(context.Background())
 	if err == nil {
 		t.Error("expected error when IAP blocks request without transport token")
+	}
+}
+
+// TestAutoDetection_PrefersRefreshedFile verifies that a client built inside
+// an agent after the transport credential was refreshed uses the refreshed
+// file rather than the expired bootstrap env value.
+func TestAutoDetection_PrefersRefreshedFile(t *testing.T) {
+	expired := makeTestJWT(time.Now().Add(-1 * time.Hour))
+	fresh := makeTestJWT(time.Now().Add(1 * time.Hour))
+	path := filepath.Join(t.TempDir(), "transport-token")
+	if err := os.WriteFile(path, []byte(fresh), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_TRANSPORT_TOKEN", expired)
+	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", path)
+	t.Setenv("SCION_TRANSPORT_MODE", "")
+
+	var receivedAuth string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(HealthResponse{Status: "ok"})
+	})
+	server := httptest.NewServer(iapMiddleware(fresh, handler))
+	defer server.Close()
+
+	c, err := New(server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := c.Health(context.Background()); err != nil {
+		t.Fatalf("Health with refreshed transport credential failed: %v", err)
+	}
+	if receivedAuth != "Bearer "+fresh {
+		t.Error("client did not send the refreshed transport credential from the file")
 	}
 }

@@ -42,6 +42,8 @@ var hubEnvVars = []string{
 	"SCION_AUTH_TOKEN",
 	"SCION_AGENT_ID",
 	"SCION_AGENT_MODE",
+	"SCION_TRANSPORT_TOKEN",
+	"SCION_TRANSPORT_TOKEN_FILE",
 }
 
 // scrubHubEnv clears all Hub-related environment variables for the
