@@ -661,11 +661,16 @@ func ResolveWorkspaceSharingMode(label string) WorkspaceSharingMode {
 
 // ResolveProjectSharingMode is the single source of truth mapping a project's
 // workspace-mode label and git-ness to the canonical WorkspaceSharingMode.
-// For git projects it matches ResolveWorkspaceSharingMode. For non-git
+// For git projects it matches ResolveWorkspaceSharingMode, except that a raw
+// "empty-per-agent" label (a non-git-only mode) resolves to
+// SharingModeSharedPlain like any other unrecognized value. For non-git
 // projects, "per-agent" (or the canonical "empty-per-agent") resolves to
 // SharingModeEmptyPerAgent and everything else to SharingModeSharedPlain.
 func ResolveProjectSharingMode(label string, isGit bool) WorkspaceSharingMode {
 	if isGit {
+		if label == string(SharingModeEmptyPerAgent) {
+			return SharingModeSharedPlain
+		}
 		return ResolveWorkspaceSharingMode(label)
 	}
 	switch label {
@@ -764,9 +769,10 @@ func (p *Project) SharingMode() WorkspaceSharingMode {
 }
 
 // IsEmptyPerAgent returns true if this is a non-git project configured so
-// each agent gets its own empty, private workspace directory.
+// each agent gets its own empty, private workspace directory. It is defined
+// via SharingMode so the two can never disagree.
 func (p *Project) IsEmptyPerAgent() bool {
-	return p.GitRemote == "" && p.Labels[LabelWorkspaceMode] == WorkspaceModePerAgent
+	return p != nil && p.SharingMode() == SharingModeEmptyPerAgent
 }
 
 // IsTemplate returns true if this project is marked as a project template.

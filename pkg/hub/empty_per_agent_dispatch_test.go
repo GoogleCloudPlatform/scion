@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -147,6 +148,9 @@ func TestEmptyPerAgent_DispatchFailsClosedWithoutCapability(t *testing.T) {
 		{"provision", func(f *emptyPerAgentFixture) error {
 			return f.dispatcher.DispatchAgentProvision(context.Background(), f.agent)
 		}},
+		{"finalize-env", func(f *emptyPerAgentFixture) error {
+			return f.dispatcher.DispatchFinalizeEnv(context.Background(), f.agent, map[string]string{"K": "v"})
+		}},
 		{"start", func(f *emptyPerAgentFixture) error {
 			return f.dispatcher.DispatchAgentStart(context.Background(), f.agent, "", false)
 		}},
@@ -171,6 +175,44 @@ func TestEmptyPerAgent_DispatchFailsClosedWithoutCapability(t *testing.T) {
 		f := newEmptyPerAgentFixture(t, "nocap-stop", false)
 		if err := f.dispatcher.DispatchAgentStop(context.Background(), f.agent); err != nil {
 			t.Fatalf("DispatchAgentStop: %v", err)
+		}
+	})
+}
+
+// projectLookupErrorStore makes GetProject fail with a non-NotFound error, to
+// prove the capability gate fails closed on a transient lookup error.
+type projectLookupErrorStore struct {
+	store.Store
+	err error
+}
+
+func (s *projectLookupErrorStore) GetProject(context.Context, string) (*store.Project, error) {
+	return nil, s.err
+}
+
+// TestEmptyPerAgent_GateFailsClosedOnProjectLookupError: a project lookup
+// error must abort the provisioning dispatch (design #2703 D3), while a
+// deleted project (ErrNotFound) has nothing to gate.
+func TestEmptyPerAgent_GateFailsClosedOnProjectLookupError(t *testing.T) {
+	t.Run("transient error fails closed", func(t *testing.T) {
+		f := newEmptyPerAgentFixture(t, "lookup-err", false)
+		failing := &projectLookupErrorStore{Store: f.store, err: errors.New("db unavailable")}
+		d := NewHTTPAgentDispatcherWithClient(failing, f.client, false, slog.Default())
+		_, err := d.getProvisioningBrokerEndpoint(context.Background(), f.agent)
+		if err == nil || !strings.Contains(err.Error(), "failed to load project for capability check") {
+			t.Fatalf("err = %v, want project lookup failure", err)
+		}
+	})
+	t.Run("not found skips the check", func(t *testing.T) {
+		f := newEmptyPerAgentFixture(t, "lookup-nf", false)
+		missing := &projectLookupErrorStore{Store: f.store, err: store.ErrNotFound}
+		d := NewHTTPAgentDispatcherWithClient(missing, f.client, false, slog.Default())
+		endpoint, err := d.getProvisioningBrokerEndpoint(context.Background(), f.agent)
+		if err != nil {
+			t.Fatalf("err = %v, want nil for a deleted project", err)
+		}
+		if endpoint == "" {
+			t.Error("expected the broker endpoint")
 		}
 	})
 }

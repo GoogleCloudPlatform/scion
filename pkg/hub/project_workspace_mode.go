@@ -100,6 +100,24 @@ func mergePatchWorkspaceModeLabel(stored, updates map[string]string) (map[string
 	return out, nil
 }
 
+// deriveCloneWorkspaceMode returns the workspace-mode label a project clone
+// gets from its source's label: the source's mode is carried when it is
+// valid for the CLONE's git-ness (i.e. after any gitRemote override), and
+// dropped ("") otherwise. A non-git per-agent (empty-per-agent) template
+// stays per-agent; with a git-remote override it becomes git per-agent
+// (clone-per-agent). A legacy raw canonical "empty-per-agent" label (which
+// Project.IsEmptyPerAgent honours) is normalised to "per-agent". Unknown
+// values are dropped defensively.
+func deriveCloneWorkspaceMode(srcLabel string, cloneIsGit bool) string {
+	if srcLabel == string(store.SharingModeEmptyPerAgent) {
+		srcLabel = store.WorkspaceModePerAgent
+	}
+	if srcLabel == "" || store.ValidateWorkspaceMode(srcLabel, cloneIsGit) != nil {
+		return ""
+	}
+	return srcLabel
+}
+
 // syncsHubProjectWorkspace reports whether agents of project mount the hub's
 // project workspace directory, so the hub keeps it in sync with remote
 // brokers (GCS upload on create, sync-back on stop/sync). True for
@@ -112,6 +130,10 @@ func syncsHubProjectWorkspace(project *store.Project) bool {
 	}
 	return project.GitRemote == "" || project.IsSharedWorkspace()
 }
+
+// emptyPerAgentWorkspaceFilesIgnoredWarning is returned in the agent create
+// response when workspaceFiles are sent for an empty-per-agent project.
+const emptyPerAgentWorkspaceFilesIgnoredWarning = "workspace files were ignored: this project gives each agent an empty workspace directory"
 
 // errBrokerLacksEmptyPerAgent is returned when an empty-per-agent agent would
 // be dispatched to a runtime broker that does not advertise the
@@ -173,4 +195,23 @@ func (s *Server) requireEmptyPerAgentBrokerCapability(ctx context.Context, w htt
 		return false
 	}
 	return !writeEmptyPerAgentCapabilityError(w, checkEmptyPerAgentBrokerCapability(project, broker))
+}
+
+// requireEmptyPerAgentBrokerCapabilityForAgent is
+// requireEmptyPerAgentBrokerCapability for an existing agent: it loads the
+// agent's project and checks its assigned broker. A project lookup error
+// fails closed; a missing project has nothing to gate.
+func (s *Server) requireEmptyPerAgentBrokerCapabilityForAgent(ctx context.Context, w http.ResponseWriter, agent *store.Agent) bool {
+	if agent.ProjectID == "" {
+		return true
+	}
+	project, err := s.store.GetProject(ctx, agent.ProjectID)
+	if errors.Is(err, store.ErrNotFound) {
+		return true
+	}
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	return s.requireEmptyPerAgentBrokerCapability(ctx, w, project, agent.RuntimeBrokerID)
 }

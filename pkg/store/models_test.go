@@ -264,6 +264,9 @@ func TestResolveProjectSharingMode(t *testing.T) {
 		{"per-agent", true, SharingModeClonePerAgent},
 		{"worktree-per-agent", true, SharingModeWorktreePerAgent},
 		{"bogus", true, SharingModeSharedPlain},
+		// empty-per-agent is non-git only: a legacy raw label on a git
+		// project must not resolve to a mode without git env.
+		{"empty-per-agent", true, SharingModeSharedPlain},
 
 		// Non-git projects: per-agent means an empty private dir.
 		{"", false, SharingModeSharedPlain},
@@ -299,6 +302,14 @@ func TestProjectSharingModeHelpers(t *testing.T) {
 		{"non-git per-agent", Project{Labels: map[string]string{LabelWorkspaceMode: "per-agent"}}, SharingModeEmptyPerAgent, true},
 		{"git per-agent", Project{GitRemote: "github.com/a/b", Labels: map[string]string{LabelWorkspaceMode: "per-agent"}}, SharingModeClonePerAgent, false},
 		{"git worktree", Project{GitRemote: "github.com/a/b", Labels: map[string]string{LabelWorkspaceMode: "worktree-per-agent"}}, SharingModeWorktreePerAgent, false},
+		// Legacy raw canonical label (accepted verbatim before #2703): the
+		// helpers must agree with each other.
+		{"non-git legacy empty-per-agent label", Project{Labels: map[string]string{LabelWorkspaceMode: "empty-per-agent"}}, SharingModeEmptyPerAgent, true},
+		{"git legacy empty-per-agent label", Project{GitRemote: "github.com/a/b", Labels: map[string]string{LabelWorkspaceMode: "empty-per-agent"}}, SharingModeSharedPlain, false},
+	}
+	var nilProject *Project
+	if nilProject.IsEmptyPerAgent() {
+		t.Error("nil project must not be empty-per-agent")
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -171,17 +171,12 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		}
 	}
 
-	// Re-derive workspace mode from the source (design #2703 §2.4): carry the
-	// source's mode when it is valid for the CLONE's git-ness (i.e. after any
-	// gitRemote override). A non-git per-agent (empty-per-agent) template
-	// stays per-agent; with a git-remote override it becomes git per-agent
-	// (clone-per-agent). Unknown values are dropped defensively.
-	if srcMode := src.Labels[store.LabelWorkspaceMode]; srcMode != "" &&
-		store.ValidateWorkspaceMode(srcMode, clone.GitRemote != "") == nil {
+	// Re-derive workspace mode from the source (design #2703 §2.4).
+	if mode := deriveCloneWorkspaceMode(src.Labels[store.LabelWorkspaceMode], clone.GitRemote != ""); mode != "" {
 		if clone.Labels == nil {
 			clone.Labels = make(map[string]string)
 		}
-		clone.Labels[store.LabelWorkspaceMode] = srcMode
+		clone.Labels[store.LabelWorkspaceMode] = mode
 	}
 
 	// ── asTemplate: mark clone as a project template ─────────────────────

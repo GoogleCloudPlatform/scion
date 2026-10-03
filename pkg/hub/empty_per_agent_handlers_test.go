@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/require"
 )
 
@@ -118,6 +120,34 @@ func TestCreateAgent_EmptyPerAgent_NoSharedWorkspaceOrStorage(t *testing.T) {
 	require.Empty(t, cfg.WorkspaceStoragePath, "empty-per-agent must not upload the project workspace")
 }
 
+// TestCreateAgent_EmptyPerAgent_IgnoresWorkspaceFiles: workspace bootstrap
+// files are ignored with a warning (not a 400), so no upload URLs are issued
+// and no per-agent storage path is set (review #2717 N2). Without the skip,
+// this server has no storage configured and would fail the bootstrap.
+func TestCreateAgent_EmptyPerAgent_IgnoresWorkspaceFiles(t *testing.T) {
+	srv, s := testServer(t)
+	project, _ := newEmptyPerAgentHandlerProject(t, s, "files", true)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:           "files-agent",
+		ProjectID:      project.ID,
+		Task:           "do something",
+		WorkspaceFiles: []transfer.FileInfo{{Path: "main.go", Size: 10, Hash: "sha256:abc"}},
+	})
+	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, rec.Code, rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Contains(t, resp.Warnings, emptyPerAgentWorkspaceFilesIgnoredWarning)
+	require.Empty(t, resp.UploadURLs, "no bootstrap upload for empty-per-agent")
+
+	agents := listProjectAgents(t, s, project.ID)
+	require.Len(t, agents, 1)
+	if cfg := agents[0].AppliedConfig; cfg != nil {
+		require.Empty(t, cfg.WorkspaceStoragePath)
+	}
+}
+
 func TestSyncsHubProjectWorkspace(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -156,4 +186,31 @@ func TestStartAgent_EmptyPerAgent_BrokerWithoutCapability_412(t *testing.T) {
 	require.Equal(t, http.StatusPreconditionFailed, rec.Code, rec.Body.String())
 	require.True(t, strings.Contains(rec.Body.String(), ErrCodeUnsupportedCapability), rec.Body.String())
 	require.False(t, client.startCalled || client.createCalled, "broker must not be called")
+
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(state.PhaseStopped), got.Phase, "a refused start must not change the agent phase")
+}
+
+// TestRestartAgent_EmptyPerAgent_BrokerWithoutCapability_412: restart is
+// refused before its stop leg, so the running agent is not stopped
+// (review #2717 N3).
+func TestRestartAgent_EmptyPerAgent_BrokerWithoutCapability_412(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	project, broker := newEmptyPerAgentHandlerProject(t, s, "restart", false)
+	agent := newQuotaTestAgent(t, s, broker, project, "epah-restart", state.PhaseRunning)
+
+	client := &mockRuntimeBrokerClient{}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
+	require.Equal(t, http.StatusPreconditionFailed, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), ErrCodeUnsupportedCapability)
+	require.False(t, client.stopCalled, "restart must not stop the agent when the start would be refused")
+	require.False(t, client.startCalled || client.restartCalled, "broker must not be started")
+
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(state.PhaseRunning), got.Phase)
 }

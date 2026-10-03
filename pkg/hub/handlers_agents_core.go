@@ -1838,6 +1838,18 @@ func (s *Server) createAgentInProject(
 		s.createNotifySubscription(ctx, agent.ID, projectID, notifySubscriberType, notifySubscriberID, createdBy)
 	}
 
+	// Empty-per-agent agents start in an empty private directory (design
+	// #2703), so a workspace bootstrap upload from the CLI's local directory
+	// is ignored with a warning rather than rejected: a 400 would break
+	// `scion start` run from a linked non-git directory.
+	var warnings []string
+	if project.IsEmptyPerAgent() && len(req.WorkspaceFiles) > 0 {
+		s.agentLifecycleLog.Warn("Ignoring workspace files for empty-per-agent project",
+			"agent_id", agent.ID, "project_id", project.ID, "files", len(req.WorkspaceFiles))
+		warnings = append(warnings, emptyPerAgentWorkspaceFilesIgnoredWarning)
+		req.WorkspaceFiles = nil
+	}
+
 	// Workspace bootstrap mode: if WorkspaceFiles are provided with a task,
 	// generate signed upload URLs instead of dispatching immediately.
 	// The CLI will upload files, then call finalize to trigger dispatch.
@@ -1889,7 +1901,6 @@ func (s *Server) createAgentInProject(
 			expires := time.Now().Add(SignedURLExpiry)
 			s.enrichAgent(ctx, agent, project, nil)
 
-			var warnings []string
 			if len(existingFiles) > 0 {
 				s.agentLifecycleLog.Debug("Workspace bootstrap: files already in storage", "agent_id", agent.ID, "count", len(existingFiles))
 			}
@@ -1994,7 +2005,6 @@ func (s *Server) createAgentInProject(
 	}
 	s.agentLifecycleLog.Info("Hub: pre-dispatch setup complete",
 		preDispatchAttrs...)
-	var warnings []string
 	if dispatcher := s.GetDispatcher(); dispatcher != nil {
 		if !req.ProvisionOnly {
 			// Use env-gather dispatch if requested

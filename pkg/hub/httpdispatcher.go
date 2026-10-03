@@ -483,11 +483,13 @@ func (d *HTTPAgentDispatcher) getBrokerEndpoint(ctx context.Context, brokerID st
 }
 
 // getProvisioningBrokerEndpoint is getBrokerEndpoint for dispatches that
-// (re-)provision or start an agent (create, provision, start, restart). It
-// additionally fails closed when the agent's project is empty-per-agent and
-// the broker does not advertise the emptyPerAgentWorkspace capability
-// (design #2703 D3), so an old broker never receives the mode. Stop, delete
-// and other non-provisioning dispatches keep using getBrokerEndpoint.
+// (re-)provision or start an agent (create, provision, finalize-env, start,
+// restart). It additionally fails closed when the agent's project is
+// empty-per-agent and the broker does not advertise the
+// emptyPerAgentWorkspace capability (design #2703 D3), so an old broker never
+// receives the mode. A project lookup error also fails closed; only a
+// missing project skips the check. Stop, delete and other non-provisioning
+// dispatches keep using getBrokerEndpoint.
 func (d *HTTPAgentDispatcher) getProvisioningBrokerEndpoint(ctx context.Context, agent *store.Agent) (string, error) {
 	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -495,7 +497,14 @@ func (d *HTTPAgentDispatcher) getProvisioningBrokerEndpoint(ctx context.Context,
 	}
 	if agent.ProjectID != "" {
 		project, err := d.store.GetProject(ctx, agent.ProjectID)
-		if err == nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			// A deleted project cannot be empty-per-agent; nothing to gate.
+		case err != nil:
+			// Fail closed: a transient lookup error must not skip the gate
+			// (design #2703 D3).
+			return "", fmt.Errorf("failed to load project for capability check: %w", err)
+		default:
 			if err := checkEmptyPerAgentBrokerCapability(project, broker); err != nil {
 				return "", err
 			}
@@ -1625,7 +1634,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 		return err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		return err
 	}

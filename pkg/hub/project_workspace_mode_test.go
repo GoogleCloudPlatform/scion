@@ -290,3 +290,38 @@ func TestCheckEmptyPerAgentBrokerCapability(t *testing.T) {
 	assert.Contains(t, err.Error(), "old-broker")
 	require.ErrorIs(t, checkEmptyPerAgentBrokerCapability(empty, noCap), errBrokerLacksEmptyPerAgent)
 }
+
+// TestDeriveCloneWorkspaceMode covers the clone re-derivation rule without
+// the network clone a git shared-workspace clone triggers (review #2717 N6).
+func TestDeriveCloneWorkspaceMode(t *testing.T) {
+	cases := []struct {
+		name       string
+		srcLabel   string
+		cloneIsGit bool
+		want       string
+		wantMode   store.WorkspaceSharingMode
+	}{
+		{"no label", "", false, "", store.SharingModeSharedPlain},
+		{"no label + git override", "", true, "", store.SharingModeSharedPlain},
+		{"non-git shared", "shared", false, "shared", store.SharingModeSharedPlain},
+		{"non-git shared + git override", "shared", true, "shared", store.SharingModeSharedPlain},
+		{"non-git per-agent", "per-agent", false, "per-agent", store.SharingModeEmptyPerAgent},
+		{"non-git per-agent + git override", "per-agent", true, "per-agent", store.SharingModeClonePerAgent},
+		{"git worktree", "worktree-per-agent", true, "worktree-per-agent", store.SharingModeWorktreePerAgent},
+		{"worktree on non-git clone dropped", "worktree-per-agent", false, "", store.SharingModeSharedPlain},
+		{"unknown dropped", "bogus", true, "", store.SharingModeSharedPlain},
+		{"legacy canonical value normalised", "empty-per-agent", false, "per-agent", store.SharingModeEmptyPerAgent},
+		{"legacy canonical value + git override", "empty-per-agent", true, "per-agent", store.SharingModeClonePerAgent},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := deriveCloneWorkspaceMode(tc.srcLabel, tc.cloneIsGit)
+			if got != tc.want {
+				t.Fatalf("deriveCloneWorkspaceMode(%q, git=%v) = %q, want %q", tc.srcLabel, tc.cloneIsGit, got, tc.want)
+			}
+			if mode := store.ResolveProjectSharingMode(got, tc.cloneIsGit); mode != tc.wantMode {
+				t.Errorf("resolved mode = %q, want %q", mode, tc.wantMode)
+			}
+		})
+	}
+}

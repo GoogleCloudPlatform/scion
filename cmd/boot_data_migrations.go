@@ -79,6 +79,10 @@ func runBootDataMigrations(ctx context.Context, s store.Store) {
 
 	// Split the residual report into reachable/unreachable (M6, §4.6).
 	reportResidualUnattributed(ctx, s)
+
+	// Read-only: surface non-git projects that now resolve to the
+	// empty-per-agent workspace mode (design #2703).
+	runMigrationSafe(ctx, s, "Empty-per-agent report", reportEmptyPerAgentProjects)
 }
 
 // runMigrationSafe calls fn inside a deferred recover. A panic is logged at
