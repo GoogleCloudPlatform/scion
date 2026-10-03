@@ -252,9 +252,13 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 
 	// The project members group marker keys are system-written only
 	// (ptone/scion#2599): createProjectMembersGroup and the entadapter set
-	// them directly through the store, never through this handler. Reject
-	// them here as updateGroup does on PATCH, so an API-created group cannot
-	// carry a marker that the PATCH immutability guard would then lock in.
+	// them directly through the store, never through this handler. This
+	// guard is hygiene, not a fix for a reachable state: CreateGroupRequest
+	// has no ProjectID, and every marker consumer requires one, so a
+	// POST-created group is never treated as a members group. Rejecting the
+	// keys here, as updateGroup does on PATCH, keeps "markers are
+	// system-written only" true on every group API path, and stops a stray
+	// marker from becoming meaningful if a group ever gains a ProjectID.
 	if setsProjectMembersGroupMarkerKey(nil, req.Annotations) {
 		ValidationError(w, "project members group marker annotations are system-written and cannot be added", nil)
 		return
@@ -442,9 +446,10 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	// The markers are system-written only: createProjectMembersGroup and the
 	// entadapter set them directly through the store, never through the
 	// group API. createGroup rejects them on POST, and a PATCH may not add
-	// either marker key to an unmarked group either; otherwise a mistaken
-	// request would become irreversible through the API once the
-	// immutability check above applied to it.
+	// either marker key to an unmarked group either. On a group that has a
+	// ProjectID, a mistaken request adding a marker would otherwise become
+	// irreversible through the API once the immutability check above
+	// applied to it.
 	if req.Annotations != nil && changesProjectMembersGroupMarker(group.Annotations, req.Annotations) {
 		if hasProjectMembersGroupMarker(group) {
 			ValidationError(w, "project members group marker annotations cannot be removed or changed", nil)
