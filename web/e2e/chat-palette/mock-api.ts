@@ -183,6 +183,64 @@ export const DOC_BINARY_ATTACHMENT = {
   sentAt: '2026-09-28T13:00:00Z',
 };
 
+declare global {
+  interface Window {
+    __fixtureEventSources: Array<EventTarget & { readyState: number }>;
+  }
+}
+
+/**
+ * Stand-in for the hub's `/events` stream, which the fixture server does not
+ * serve. Each `EventSource` opens on the next microtask, so the agent store's
+ * feed connects at once instead of waiting out its connect timeout. Streams
+ * are kept on `window.__fixtureEventSources`; {@link emitAgentEvent} delivers
+ * a hub update on the open ones.
+ */
+export async function stubEventSource(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    class FixtureEventSource extends EventTarget {
+      readonly url: string;
+      readyState = 0;
+      onopen: ((event: Event) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      constructor(url: string | URL) {
+        super();
+        this.url = String(url);
+        window.__fixtureEventSources.push(this);
+        queueMicrotask(() => {
+          if (this.readyState !== 0) return;
+          this.readyState = 1;
+          this.onopen?.(new Event('open'));
+        });
+      }
+      close(): void {
+        this.readyState = 2;
+      }
+    }
+    window.__fixtureEventSources = [];
+    window.EventSource = FixtureEventSource as unknown as typeof EventSource;
+  });
+}
+
+/** Deliver `project.<projectId>.agent.<type>` on every open fixture stream. */
+export async function emitAgentEvent(
+  page: Page,
+  projectId: string,
+  type: string,
+  data: Record<string, unknown>
+): Promise<void> {
+  await page.evaluate(
+    ({ subject, data }) => {
+      for (const es of window.__fixtureEventSources) {
+        if (es.readyState !== 1) continue;
+        es.dispatchEvent(new MessageEvent('update', { data: JSON.stringify({ subject, data }) }));
+      }
+    },
+    { subject: `project.${projectId}.agent.${type}`, data }
+  );
+}
+
 /**
  * Endpoint-shaped request interception for the chat palette fixture: every
  * `/api/v1/**` request is intercepted (no live Hub), with the specific
@@ -197,6 +255,7 @@ export async function setupApiMocks(
 ): Promise<TrackedRequest[]> {
   const requests: TrackedRequest[] = [];
   await stubMainClientModule(page);
+  await stubEventSource(page);
 
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request();

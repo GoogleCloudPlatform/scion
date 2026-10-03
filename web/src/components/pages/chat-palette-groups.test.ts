@@ -37,7 +37,18 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import { apiFetch } from '../../client/api.js';
 import { navigateTo } from '../../client/main.js';
 import type { PaletteCandidate, PaletteTarget } from '../../client/chat-palette-types.js';
-import { AGENTS_IDLE_TIMEOUT_MS, PaletteLoadError } from '../../client/chat-palette-data.js';
+import {
+  AGENT_DMS_CACHE_MS,
+  AGENTS_IDLE_TIMEOUT_MS,
+  ChatPaletteDataController,
+  PaletteLoadError,
+} from '../../client/chat-palette-data.js';
+import { agentStore } from '../../client/agent-store.js';
+import {
+  FakeEventSource,
+  agent,
+  createHarness,
+} from '../../client/__fixtures__/agent-store-harness.js';
 import { chatRecentFiles } from '../../client/chat-recent-files.js';
 import type { RecentFile, RecentFilesSnapshot } from '../../client/chat-recent-files.js';
 
@@ -63,6 +74,9 @@ vi.mock('../../client/api.js', async (importOriginal) => {
 let ScionPageChat: any;
 
 beforeAll(async () => {
+  // A connected page retains the agent store's hub entry, which opens the
+  // store's feed; it never connects here.
+  vi.stubGlobal('EventSource', FakeEventSource);
   const mod = await import('./chat.js');
   ScionPageChat = mod.ScionPageChat;
   // Connecting a page (`document.body.appendChild`, used only by the
@@ -1584,6 +1598,12 @@ describe('a cancelled or superseded load publishes nothing (page level)', () => 
   });
 });
 
+const NAMES = ['Alice', 'Bob', 'Carol'];
+
+function viableAgent(id: string, name: string): any {
+  return agent(id, { name, _capabilities: { actions: ['attach'] } } as any);
+}
+
 function agentCandidate(id: string, label: string): PaletteCandidate {
   return {
     id: JSON.stringify(['dm', 'agent', id]),
@@ -1695,17 +1715,17 @@ describe('_loadPaletteAgents: a refresh does not shrink an already-ready list, a
     expect(el.v2PaletteGroups.agents.candidates).toEqual([agentCandidate('a1', 'Alice')]);
   });
 
-  // The next two use the real `ChatPaletteDataController` (only `apiFetch`
-  // itself is mocked), unlike the spied-`loadAgentsGroup` tests above:
-  // completeness must not depend on the group's current `status`, which a
-  // cancelled or failed refresh leaves as `loading`/`error` while
-  // `candidates` still holds the last complete, DM-ranked snapshot. A test
-  // that mocks `loadAgentsGroup` directly cannot exercise the real `status`
-  // transitions (`loading` after a refresh starts, `error` after one fails)
-  // this needs to prove.
+  // The next two run the real `ChatPaletteDataController` over a real agent
+  // store (in-memory agent server, fake feed connection), unlike the
+  // spied-`loadAgentsGroup` tests above, so the group's real `status`
+  // transitions are exercised.
 
-  it('closing and reopening the palette mid-refresh does not shrink the complete list to page one', async () => {
+  it('closing and reopening the palette mid-refresh keeps the complete list, answered from the store', async () => {
+    vi.useFakeTimers();
+    const h = createHarness(['a1', 'a2', 'a3'].map((id, i) => viableAgent(id, NAMES[i]!)));
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({ dms: [] }));
     const el = createPage();
+    el._paletteDataController = new ChatPaletteDataController(h.store);
     el.v2PaletteOpen = true;
     const fullList = [
       agentCandidate('a1', 'Alice'),
@@ -1713,96 +1733,204 @@ describe('_loadPaletteAgents: a refresh does not shrink an already-ready list, a
       agentCandidate('a3', 'Carol'),
     ];
 
-    // Reach the complete snapshot through a real load — not by seeding
-    // `_agentsSnapshotComplete` directly — so this also proves a real load is
-    // what actually marks it complete.
-    vi.mocked(apiFetch).mockImplementation((url: string) => {
-      if (url.includes('/api/v1/agents')) {
-        return Promise.resolve(
-          jsonResponse({
-            agents: [
-              { id: 'a1', name: 'Alice', _capabilities: { actions: ['attach'] } },
-              { id: 'a2', name: 'Bob', _capabilities: { actions: ['attach'] } },
-              { id: 'a3', name: 'Carol', _capabilities: { actions: ['attach'] } },
-            ],
-          })
-        );
-      }
-      return Promise.resolve(jsonResponse({ dms: [] }));
-    });
-    await el._loadPaletteAgents();
+    const first = el._loadPaletteAgents();
+    await h.connect();
+    await first;
     expect(el.v2PaletteGroups.agents.status).toBe('ready');
     expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
 
+    // The refresh's DM fetch hangs; the full list stays on screen.
     vi.mocked(apiFetch).mockImplementation(
-      (url: string, options?: { signal?: AbortSignal }) =>
+      (_url: string, options?: { signal?: AbortSignal | null }) =>
         new Promise((_resolve, reject) => {
           options?.signal?.addEventListener('abort', () =>
             reject(new DOMException('aborted', 'AbortError'))
           );
         })
     );
-
-    // A refresh starts: status flips to `loading`, but the full list is kept
-    // on screen (not replaced by a partial page) because the group already
-    // holds a complete snapshot.
     const refresh = el._loadPaletteAgents();
-    expect(el.v2PaletteGroups.agents.status).toBe('loading');
     expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
-
-    // Close cancels the in-flight refresh — its own fetch rejects with an
-    // AbortError, which `_loadPaletteAgents` returns from silently.
     el._closePaletteAndCancelLoad();
     await refresh;
     expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
 
-    // Reopen starts a brand new refresh, with a *two*-page agents response —
-    // if completeness were keyed on the (now `loading`, not `ready`) status
-    // instead of a persistent flag, this would wire `onProgress`, and the
-    // check right after page one resolves (below) would catch the list
-    // shrinking to that single page before page two ever arrives. (A
-    // single-page mock would not catch this: the final `ready` result looks
-    // the same either way once the whole load finishes, so the regression is
-    // only observable mid-load.)
     el.v2PaletteOpen = true;
-    let resolvePage1!: (v: Response) => void;
-    let resolvePage2!: (v: Response) => void;
-    let page2Requested = false;
-    vi.mocked(apiFetch).mockImplementation((url: string) => {
-      if (url.includes('/api/v1/agents')) {
-        if (url.includes('cursor')) {
-          page2Requested = true;
-          return new Promise((resolve) => {
-            resolvePage2 = resolve;
-          });
-        }
-        return new Promise((resolve) => {
-          resolvePage1 = resolve;
-        });
-      }
-      return Promise.resolve(jsonResponse({ dms: [] }));
-    });
-    const reopen = el._loadPaletteAgents();
-    expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
-
-    resolvePage1(
-      jsonResponse({
-        agents: [{ id: 'a4', name: 'Dave', _capabilities: { actions: ['attach'] } }],
-        nextCursor: 'c1',
-      })
-    );
-    await vi.waitFor(() => expect(page2Requested).toBe(true));
-    // Page one has landed and page two is still in flight — the full list
-    // must still be on screen, not shrunk to just Dave.
-    expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
-
-    resolvePage2(jsonResponse({ agents: [] }));
-    await reopen;
-    expect(el.v2PaletteGroups.agents.candidates).toEqual([agentCandidate('a4', 'Dave')]);
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({ dms: [] }));
+    await el._loadPaletteAgents();
+    expect(el.v2PaletteGroups.agents).toEqual({ status: 'ready', candidates: fullList });
+    expect(h.server.walks()).toBe(1);
+    h.store.destroy();
   });
 
-  it('retrying after a refresh error does not shrink the complete list to page one', async () => {
+  it('reopening within the DM cache shows the list as ready at once, with no request', async () => {
+    vi.useFakeTimers();
+    const h = createHarness(['a1', 'a2'].map((id, i) => viableAgent(id, NAMES[i]!)));
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({ dms: [] }));
     const el = createPage();
+    el._paletteDataController = new ChatPaletteDataController(h.store);
+    el.v2PaletteOpen = true;
+    const first = el._loadPaletteAgents();
+    await h.connect();
+    await first;
+    el._closePaletteAndCancelLoad();
+    el.v2PaletteGroups = { ...el.v2PaletteGroups, agents: { status: 'loading', candidates: [] } };
+
+    el.v2PaletteOpen = true;
+    const reopen = el._loadPaletteAgents();
+    expect(el.v2PaletteGroups.agents).toEqual({
+      status: 'ready',
+      candidates: [agentCandidate('a1', 'Alice'), agentCandidate('a2', 'Bob')],
+    });
+    await reopen;
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(1);
+    expect(h.server.walks()).toBe(1);
+    h.store.destroy();
+  });
+
+  it('reopening after the DM cache expires shows loading until the DMs return', async () => {
+    vi.useFakeTimers();
+    const h = createHarness([viableAgent('a1', 'Alice')]);
+    vi.mocked(apiFetch).mockImplementation(() => Promise.resolve(jsonResponse({ dms: [] })));
+    const el = createPage();
+    el._paletteDataController = new ChatPaletteDataController(h.store);
+    el.v2PaletteOpen = true;
+    const first = el._loadPaletteAgents();
+    await h.connect();
+    await first;
+    el._closePaletteAndCancelLoad();
+    el.v2PaletteGroups = { ...el.v2PaletteGroups, agents: { status: 'loading', candidates: [] } };
+    vi.advanceTimersByTime(AGENT_DMS_CACHE_MS);
+
+    el.v2PaletteOpen = true;
+    const reopen = el._loadPaletteAgents();
+    expect(el.v2PaletteGroups.agents.status).toBe('loading');
+    await reopen;
+    expect(el.v2PaletteGroups.agents).toEqual({
+      status: 'ready',
+      candidates: [agentCandidate('a1', 'Alice')],
+    });
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(2);
+    h.store.destroy();
+  });
+
+  it('a chat message while the palette is open re-reads the DMs, keeping the list ready', async () => {
+    vi.useFakeTimers();
+    const h = createHarness([viableAgent('a1', 'Alice')]);
+    const at = '2026-01-02T03:04:05Z';
+    let dms: unknown[] = [];
+    vi.mocked(apiFetch).mockImplementation(() => Promise.resolve(jsonResponse({ dms })));
+    const el = createPage();
+    // The unread-dot refresh reads the DM list on its own; only palette reads count here.
+    vi.spyOn(el, 'loadUnreadDMPeers').mockResolvedValue(undefined);
+    vi.spyOn(el, '_loadPalettePeople').mockResolvedValue(undefined);
+    vi.spyOn(el, '_loadPaletteThreads').mockResolvedValue(undefined);
+    el._paletteDataController = new ChatPaletteDataController(h.store);
+    el.v2PaletteOpen = true;
+    const first = el._loadPaletteAgents();
+    await h.connect();
+    await first;
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(1);
+
+    dms = [{ conversationKey: 'k', peerId: 'a1', peerKind: 'agent', lastActivityAt: at }];
+    const agentLoads = vi.spyOn(el, '_loadPaletteAgents');
+    el.handleChatMessage(new CustomEvent('chat-message-received', { detail: {} }));
+    await vi.advanceTimersByTimeAsync(499);
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1);
+    expect(el.v2PaletteGroups.agents.status).toBe('ready');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(2);
+    expect(el.v2PaletteGroups.agents).toEqual({
+      status: 'ready',
+      candidates: [{ ...agentCandidate('a1', 'Alice'), activityMs: Date.parse(at) }],
+    });
+    expect(h.server.walks()).toBe(1);
+
+    // A later refresh for another group does not re-read the DMs again.
+    el.handleChatTopic(new CustomEvent('chat-topic-updated', { detail: {} }));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(agentLoads).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(2);
+    h.store.destroy();
+  });
+
+  it('a chat message while the palette is closed re-reads the DMs only on the next open', async () => {
+    vi.useFakeTimers();
+    const h = createHarness([viableAgent('a1', 'Alice')]);
+    vi.mocked(apiFetch).mockImplementation(() => Promise.resolve(jsonResponse({ dms: [] })));
+    const el = createPage();
+    // The unread-dot refresh reads the DM list on its own; only palette reads count here.
+    vi.spyOn(el, 'loadUnreadDMPeers').mockResolvedValue(undefined);
+    el._paletteDataController = new ChatPaletteDataController(h.store);
+    el.v2PaletteOpen = true;
+    const first = el._loadPaletteAgents();
+    await h.connect();
+    await first;
+    el._closePaletteAndCancelLoad();
+
+    el.handleChatMessage(new CustomEvent('chat-message-received', { detail: {} }));
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(1);
+
+    el.v2PaletteOpen = true;
+    await el._loadPaletteAgents();
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(2);
+    h.store.destroy();
+  });
+
+  it('marking the agent DMs stale on its own refreshes them while the palette is open', () => {
+    const el = createPage();
+    vi.useFakeTimers();
+    el.v2PaletteOpen = true;
+    const agentsSpy = vi.spyOn(el, '_loadPaletteAgents').mockResolvedValue(undefined);
+
+    el._markAgentDmsStale();
+    vi.advanceTimersByTime(500);
+
+    expect(agentsSpy).toHaveBeenCalledTimes(1);
+    expect(agentsSpy).toHaveBeenCalledWith({ keepReady: true });
+  });
+
+  it('a chat message during an Agents load re-reads the DMs once that load settles', async () => {
+    const el = createPage();
+    vi.useFakeTimers();
+    el.v2PaletteOpen = true;
+    let finish = (): void => {};
+    const agentsSpy = vi.spyOn(el, '_loadPaletteAgents').mockImplementation(() => {
+      const token = {};
+      el._paletteGroupLoadToken.agents = token;
+      el._agentDmsRefreshPending = false;
+      return new Promise<void>((resolve) => {
+        finish = (): void => {
+          delete el._paletteGroupLoadToken.agents;
+          resolve();
+        };
+      });
+    });
+    vi.spyOn(el, '_loadPalettePeople').mockResolvedValue(undefined);
+    vi.spyOn(el, '_loadPaletteThreads').mockResolvedValue(undefined);
+    void el._loadPaletteAgents();
+    expect(agentsSpy).toHaveBeenCalledTimes(1);
+
+    el.handleChatMessage(new CustomEvent('chat-message-received', { detail: {} }));
+    vi.advanceTimersByTime(500);
+    expect(agentsSpy).toHaveBeenCalledTimes(1);
+
+    finish();
+    vi.advanceTimersByTime(500);
+    expect(agentsSpy).toHaveBeenCalledTimes(2);
+    expect(agentsSpy).toHaveBeenLastCalledWith({ keepReady: true });
+    vi.advanceTimersByTime(5_000);
+    expect(agentsSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('retrying after an agent-list error keeps the list on screen and publishes the store result', async () => {
+    vi.useFakeTimers();
+    const h = createHarness([viableAgent('a1', 'Alice'), viableAgent('a2', 'Bob')]);
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({ dms: [] }));
+    const el = createPage();
+    el._paletteDataController = new ChatPaletteDataController(h.store);
     const fullList = [agentCandidate('a1', 'Alice'), agentCandidate('a2', 'Bob')];
     el.v2PaletteGroups = {
       ...el.v2PaletteGroups,
@@ -1810,52 +1938,126 @@ describe('_loadPaletteAgents: a refresh does not shrink an already-ready list, a
     };
     el._agentsSnapshotComplete = true;
 
-    // The refresh's own agents fetch fails outright.
-    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}, 500));
-    await el._loadPaletteAgents();
+    h.server.status = 500;
+    const failing = el._loadPaletteAgents();
+    await h.connect();
+    await failing;
     expect(el.v2PaletteGroups.agents.status).toBe('error');
     expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
 
-    // Retry (routed through `_handlePaletteRetry` in production; calling the
-    // loader directly is equivalent), with a two-page response so the
-    // mid-load state is actually observable: a single-page mock would not
-    // catch this, since the final `ready` result looks the same either way
-    // once the whole load finishes, and the regression is only observable
-    // mid-load. If completeness were keyed on the (now `error`, not `ready`)
-    // status, page one landing below would shrink the list before page two
-    // ever arrives.
-    let resolvePage1!: (v: Response) => void;
-    let resolvePage2!: (v: Response) => void;
-    let page2Requested = false;
-    vi.mocked(apiFetch).mockImplementation((url: string) => {
-      if (url.includes('/api/v1/agents')) {
-        if (url.includes('cursor')) {
-          page2Requested = true;
-          return new Promise((resolve) => {
-            resolvePage2 = resolve;
-          });
-        }
-        return new Promise((resolve) => {
-          resolvePage1 = resolve;
-        });
-      }
-      return Promise.resolve(jsonResponse({ dms: [] }));
+    h.server.status = 200;
+    h.server.agents.push(viableAgent('a4', 'Dave'));
+    await el._loadPaletteAgents();
+    expect(el.v2PaletteGroups.agents).toEqual({
+      status: 'ready',
+      candidates: [...fullList, agentCandidate('a4', 'Dave')],
     });
-    const retry = el._loadPaletteAgents();
-    expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
+    h.store.destroy();
+  });
+});
 
-    resolvePage1(
-      jsonResponse({
-        agents: [{ id: 'a4', name: 'Dave', _capabilities: { actions: ['attach'] } }],
-        nextCursor: 'c1',
-      })
+describe('Agents group follows the agent store', () => {
+  it('connecting retains the hub entry once and disconnecting releases it', () => {
+    const release = vi.fn();
+    const retain = vi.spyOn(agentStore, 'retain').mockReturnValue(release);
+    const el = createPage();
+    document.body.appendChild(el);
+    expect(retain).toHaveBeenCalledTimes(1);
+    expect(retain.mock.calls[0]?.[0]).toEqual({ scope: 'hub' });
+
+    el.remove();
+    expect(release).toHaveBeenCalledTimes(1);
+    retain.mockRestore();
+  });
+
+  it('an SSE status change re-derives the loaded Agents group with no request', async () => {
+    vi.useFakeTimers();
+    const h = createHarness([viableAgent('a1', 'Alice'), viableAgent('a2', 'Bob')]);
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({ dms: [] }));
+    const el = createPage();
+    el._paletteDataController = new ChatPaletteDataController(h.store);
+    const release = h.store.retain({ scope: 'hub' }, (snapshot) =>
+      el._handlePaletteAgentSnapshot(snapshot)
     );
-    await vi.waitFor(() => expect(page2Requested).toBe(true));
-    expect(el.v2PaletteGroups.agents.candidates).toEqual(fullList);
+    el.v2PaletteOpen = true;
+    const load = el._loadPaletteAgents();
+    await h.connect();
+    await load;
+    const dmRequests = vi.mocked(apiFetch).mock.calls.length;
 
-    resolvePage2(jsonResponse({ agents: [] }));
-    await retry;
-    expect(el.v2PaletteGroups.agents.candidates).toEqual([agentCandidate('a4', 'Dave')]);
+    // A messageability change removes Bob; a created agent adds Carol.
+    await h.emitAgent('status', {
+      agentId: 'a2',
+      _messageability: { canMessage: false },
+    });
+    await h.emitAgent('created', {
+      agentId: 'a3',
+      projectId: 'p1',
+      name: 'Carol',
+      phase: 'running',
+      _capabilities: { actions: ['attach'] },
+    });
+
+    expect(el.v2PaletteGroups.agents).toEqual({
+      status: 'ready',
+      candidates: [agentCandidate('a1', 'Alice'), agentCandidate('a3', 'Carol')],
+    });
+    expect(h.server.requests).toHaveLength(1);
+    expect(vi.mocked(apiFetch).mock.calls.length).toBe(dmRequests);
+    release();
+    h.store.destroy();
+  });
+
+  it('ignores store snapshots while the palette is closed', () => {
+    const el = createPage();
+    el.v2PaletteOpen = false;
+    const derive = vi
+      .spyOn(el._paletteDataController, 'deriveAgentCandidates')
+      .mockReturnValue([agentCandidate('a1', 'Alice')]);
+    el.v2PaletteGroups = {
+      ...el.v2PaletteGroups,
+      agents: { status: 'ready', candidates: [] },
+    };
+    el._handlePaletteAgentSnapshot({
+      key: 'hub',
+      agents: [viableAgent('a1', 'Alice')],
+      status: 'ready',
+      complete: true,
+      version: 2,
+    });
+    expect(derive).not.toHaveBeenCalled();
+    expect(el.v2PaletteGroups.agents).toEqual({ status: 'ready', candidates: [] });
+  });
+
+  it('ignores store snapshots before the first load, while a load is in flight, and while loading', async () => {
+    const el = createPage();
+    el.v2PaletteOpen = true;
+    const ready = {
+      key: 'hub',
+      agents: [viableAgent('a1', 'Alice')],
+      status: 'ready',
+      complete: true,
+      version: 2,
+    };
+    el._handlePaletteAgentSnapshot(ready);
+    expect(el.v2PaletteGroups.agents).toEqual({ status: 'loading', candidates: [] });
+
+    const derive = vi
+      .spyOn(el._paletteDataController, 'deriveAgentCandidates')
+      .mockReturnValue([agentCandidate('a1', 'Alice')]);
+    el._handlePaletteAgentSnapshot({ ...ready, status: 'loading' });
+    expect(derive).not.toHaveBeenCalled();
+
+    el._paletteGroupLoadToken.agents = {};
+    el._handlePaletteAgentSnapshot(ready);
+    expect(derive).not.toHaveBeenCalled();
+
+    delete el._paletteGroupLoadToken.agents;
+    el._handlePaletteAgentSnapshot(ready);
+    expect(el.v2PaletteGroups.agents).toEqual({
+      status: 'ready',
+      candidates: [agentCandidate('a1', 'Alice')],
+    });
   });
 });
 
@@ -1939,7 +2141,7 @@ describe('palette group cache: 30s freshness window', () => {
     expect(el._shouldUseCachedPaletteGroup('agents')).toBe(false);
   });
 
-  it('_loadPaletteGroupsOnOpen skips a fresh cached group but reloads a dirty one', () => {
+  it('_loadPaletteGroupsOnOpen skips a fresh cached group but reloads a dirty one, and always loads Agents from the store', () => {
     const el = createPage();
     el.v2PaletteGroups = {
       agents: { status: 'ready', candidates: [] },
@@ -1956,22 +2158,20 @@ describe('palette group cache: 30s freshness window', () => {
 
     el._loadPaletteGroupsOnOpen();
 
-    expect(agentsSpy).not.toHaveBeenCalled();
+    expect(agentsSpy).toHaveBeenCalledTimes(1);
     expect(threadsSpy).not.toHaveBeenCalled();
     expect(peopleSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('a successful load records a fresh cache timestamp and clears dirty', async () => {
+  it('an Agents load keeps no cache timestamp or dirty flag: the agent store keeps that group current', async () => {
     const el = createPage();
-    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}, 500)); // fails fast, but the *attempt* still clears dirty only on success
-    el._paletteGroupDirty.agents = true;
-    // Force a successful path: stub the controller directly.
     vi.spyOn(el._paletteDataController, 'loadAgentsGroup').mockResolvedValue([]);
 
     await el._loadPaletteAgents();
 
-    expect(el._paletteGroupDirty.agents).toBe(false);
-    expect(el._paletteGroupCacheAt.agents).toBeGreaterThan(0);
+    expect(el.v2PaletteGroups.agents.status).toBe('ready');
+    expect(el._paletteGroupDirty.agents).toBeUndefined();
+    expect(el._paletteGroupCacheAt.agents).toBeUndefined();
   });
 
   it('a successful People load clears People dirty specifically', async () => {
@@ -2048,20 +2248,21 @@ describe('palette group dirty-marking: SSE invalidation', () => {
     expect(el._paletteGroupDirty.people).toBeFalsy();
   });
 
-  it('_handleAgentCreated and _handleAgentsUpdated mark Agents dirty', () => {
+  it('_handleAgentCreated and _handleAgentsUpdated mark nothing dirty and schedule no refresh', () => {
     const el = createPage();
+    el.v2PaletteOpen = true;
     el._handleAgentCreated(new CustomEvent('agent-created', { detail: {} }));
-    expect(el._paletteGroupDirty.agents).toBe(true);
-
-    el._paletteGroupDirty.agents = false;
     el._handleAgentsUpdated();
-    expect(el._paletteGroupDirty.agents).toBe(true);
+    expect(el._paletteGroupDirty).toEqual({});
+    expect(el._paletteRefreshDebounce).toBeNull();
   });
 
-  it('handleChatMessage and handleDMPromoted mark all three groups dirty', () => {
+  it('handleChatMessage and handleDMPromoted mark People and Threads dirty, not Agents, and mark agent DMs stale', () => {
     const el = createPage();
+    const stale = vi.spyOn(el._paletteDataController, 'markAgentDmsStale');
     el.handleChatMessage(new CustomEvent('chat-message-received', { detail: {} }));
-    expect(el._paletteGroupDirty).toMatchObject({ agents: true, people: true, threads: true });
+    expect(el._paletteGroupDirty).toEqual({ people: true, threads: true });
+    expect(stale).toHaveBeenCalledTimes(1);
 
     el._paletteGroupDirty = {};
     el.handleDMPromoted(
@@ -2069,7 +2270,8 @@ describe('palette group dirty-marking: SSE invalidation', () => {
         detail: { oldConversationKey: 'dm:x', newTopic: { id: 't1', projectId: 'p1', name: 'x' } },
       })
     );
-    expect(el._paletteGroupDirty).toMatchObject({ agents: true, people: true, threads: true });
+    expect(el._paletteGroupDirty).toEqual({ people: true, threads: true });
+    expect(stale).toHaveBeenCalledTimes(2);
   });
 
   it('marking a group dirty while the palette is open schedules a debounced refresh', () => {
@@ -2173,21 +2375,19 @@ describe('palette group dirty-marking: SSE invalidation', () => {
     expect(peopleSpy).not.toHaveBeenCalled();
   });
 
-  it('a debounced refresh reloads only the group an SSE event actually invalidated (Agents), leaving Threads and People untouched', () => {
+  it('agent SSE events while the palette is open never reload the Agents group', () => {
     const el = createPage();
     vi.useFakeTimers();
     el.v2PaletteOpen = true;
     const agentsSpy = vi.spyOn(el, '_loadPaletteAgents').mockResolvedValue(undefined);
-    const peopleSpy = vi.spyOn(el, '_loadPalettePeople').mockResolvedValue(undefined);
-    const threadsSpy = vi.spyOn(el, '_loadPaletteThreads').mockResolvedValue(undefined);
+    vi.spyOn(el, '_loadPalettePeople').mockResolvedValue(undefined);
+    vi.spyOn(el, '_loadPaletteThreads').mockResolvedValue(undefined);
 
-    // _handleAgentCreated marks only Agents dirty.
     el._handleAgentCreated(new CustomEvent('agent-created', { detail: {} }));
-    vi.advanceTimersByTime(500);
+    el._handleAgentsUpdated();
+    vi.advanceTimersByTime(5_000);
 
-    expect(agentsSpy).toHaveBeenCalledTimes(1);
-    expect(threadsSpy).not.toHaveBeenCalled();
-    expect(peopleSpy).not.toHaveBeenCalled();
+    expect(agentsSpy).not.toHaveBeenCalled();
   });
 
   it('a debounced refresh reloads only the group marked dirty (People), leaving Agents and Threads untouched', () => {
@@ -2263,30 +2463,30 @@ describe('palette group invalidation during an in-flight load', () => {
 });
 
 describe('palette group refresh: a dirty-mark debounce firing mid-load defers instead of aborting/restarting it', () => {
-  it('Agents: the debounce does not re-enter the controller while its fetch is still in flight; it reloads exactly once the fetch frees up', async () => {
+  it('Threads: the debounce does not re-enter the controller while its fetch is still in flight; it reloads exactly once the fetch frees up', async () => {
     const el = createPage();
     el.v2PaletteOpen = true;
     vi.useFakeTimers();
 
-    let resolveLoad!: (v: PaletteCandidate[]) => void;
+    let resolveLoad!: (v: { candidates: PaletteCandidate[]; incomplete: boolean }) => void;
     const controller = el._paletteDataController;
     const loadSpy = vi
-      .spyOn(controller, 'loadAgentsGroup')
+      .spyOn(controller, 'loadThreadsGroup')
       .mockImplementation(() => new Promise((resolve) => (resolveLoad = resolve)));
 
-    const firstLoad = el._loadPaletteAgents();
+    const firstLoad = el._loadPaletteThreads();
     expect(loadSpy).toHaveBeenCalledTimes(1);
 
-    el._handleAgentsUpdated();
-    expect(el._paletteGroupDirty.agents).toBe(true);
+    el._markPaletteGroupsDirty('threads');
+    expect(el._paletteGroupDirty.threads).toBe(true);
 
     vi.advanceTimersByTime(500);
     expect(loadSpy).toHaveBeenCalledTimes(1);
 
-    resolveLoad([]);
+    resolveLoad({ candidates: [], incomplete: false });
     await firstLoad;
-    expect(el.v2PaletteGroups.agents?.status).toBe('ready');
-    expect(el._paletteGroupDirty.agents).toBe(true);
+    expect(el.v2PaletteGroups.threads?.status).toBe('ready');
+    expect(el._paletteGroupDirty.threads).toBe(true);
 
     vi.advanceTimersByTime(500);
     expect(loadSpy).toHaveBeenCalledTimes(2);
