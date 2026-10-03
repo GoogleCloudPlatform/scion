@@ -141,7 +141,10 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Delete in progress (design ptone/scion#2483 §2.1).
+	// Start gate (design ptone/scion#2483 §2.1): a delete in progress, an
+	// incomplete create or an in-flight launch is refused, the last with
+	// 409 agent_launching, since the worker would stop and reprovision a
+	// launching agent.
 	if ref := s.startGate(ctx, agent, startEntryReincarnate); ref.refuses() {
 		ref.write(w)
 		return
@@ -288,14 +291,6 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// real request could invalidate before the caller ever acts on it.
 	if agent.ReincarnationState != store.ReincarnationStateNone && agent.ReincarnationState != store.ReincarnationStateFailed {
 		Conflict(w, "a reincarnation is already pending for this agent")
-		return
-	}
-
-	// Start guard entry check, before the reincarnation is claimed: the
-	// worker stops and reprovisions the agent, so an agent whose create is
-	// in flight or did not complete is refused here.
-	if refusal := launchStartRefusal(agent, time.Now()); refusal != nil {
-		refusal.write(w)
 		return
 	}
 

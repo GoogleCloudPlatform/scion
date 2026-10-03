@@ -344,9 +344,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// Delete in progress (design ptone/scion#2483 §2.1). Authz already ran
-	// in the caller. This runs before the managed-runtime branch so managed
-	// agents get the same answers.
+	// Start gate (design ptone/scion#2483 §2.1). Authz already ran in the
+	// caller. This runs before the managed-runtime branch so managed agents
+	// get the same answers. Restart is checked here, before its stop leg,
+	// so a launching agent is not stopped; the dispatcher guard is the
+	// backstop for the start leg. An in-flight launch is answered with 200
+	// and the current agent.
 	switch action {
 	case api.AgentActionStart, api.AgentActionRestart:
 		entry := startEntryStart
@@ -354,7 +357,17 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			entry = startEntryRestart
 		}
 		if ref := s.startGate(ctx, agent, entry); ref.refuses() {
-			ref.write(w)
+			if !ref.InFlight {
+				ref.write(w)
+				return
+			}
+			var warnings []string
+			if action == api.AgentActionRestart {
+				warnings = []string{launchRestartNotPerformedWarning}
+			} else if lifecycleStartHasInputs(r) {
+				warnings = []string{launchInFlightInputsWarning}
+			}
+			s.writeLaunchingAgent(ctx, w, agent, warnings)
 			return
 		}
 	case api.AgentActionStop:
@@ -372,26 +385,6 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	if isManagedAgentRuntime(agent.Runtime) {
 		s.handleManagedAgentLifecycle(w, r, agent, action)
 		return
-	}
-
-	// Start guard entry checks. Restart is checked here, before its stop
-	// leg, so a launching agent is not stopped; the dispatcher guard is the
-	// backstop for the start leg.
-	if action == api.AgentActionStart || action == api.AgentActionRestart {
-		if refusal := launchStartRefusal(agent, time.Now()); refusal != nil {
-			if !refusal.InFlight {
-				refusal.write(w)
-				return
-			}
-			var warnings []string
-			if action == api.AgentActionRestart {
-				warnings = []string{launchRestartNotPerformedWarning}
-			} else if lifecycleStartHasInputs(r) {
-				warnings = []string{launchInFlightInputsWarning}
-			}
-			s.writeLaunchingAgent(ctx, w, agent, warnings)
-			return
-		}
 	}
 
 	if !s.checkBrokerAvailability(w, r, agent) {

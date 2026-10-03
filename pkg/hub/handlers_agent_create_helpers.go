@@ -1041,10 +1041,16 @@ func (s *Server) handleExistingAgent(
 		return existingAgentConflict
 	}
 
-	// Delete in progress (design ptone/scion#2483 §2.1): every branch below
+	// Start gate (design ptone/scion#2483 §2.1): every branch below
 	// starts, resumes, restarts or recreates existingAgent, so the shared
-	// start gate runs first, after the lifecycle authz above.
+	// start gate runs first, after the lifecycle authz above. An agent whose
+	// create is in flight is returned as it is, without applying the
+	// request.
 	if ref := s.startGate(ctx, existingAgent, startEntryCreateExisting); ref.refuses() {
+		if ref.InFlight {
+			s.writeExistingAgentLaunching(ctx, w, existingAgent, project, req)
+			return existingAgentStarted
+		}
 		ref.write(w)
 		return existingAgentErrored
 	}
@@ -1059,18 +1065,6 @@ func (s *Server) handleExistingAgent(
 	cleanupMode := req.CleanupMode
 	if cleanupMode == "" {
 		cleanupMode = "strict"
-	}
-
-	// Start guard entry checks, before Phase 1 and Phase 2: an incomplete
-	// create is refused, and an agent whose create is in flight is returned
-	// as it is, without applying the request.
-	if refusal := launchStartRefusal(existingAgent, time.Now()); refusal != nil {
-		if !refusal.InFlight {
-			refusal.write(w)
-			return existingAgentErrored
-		}
-		s.writeExistingAgentLaunching(ctx, w, existingAgent, project, req)
-		return existingAgentStarted
 	}
 
 	// Suspended agents are restarted in-place (not deleted), preserving harness state.

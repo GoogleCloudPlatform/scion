@@ -73,24 +73,6 @@ func (e *AgentCreateIncompleteError) Is(target error) bool {
 	return target == ErrAgentCreateIncomplete
 }
 
-// launchRefusal is the answer of a start-path entry check. A nil refusal
-// means "proceed".
-type launchRefusal struct {
-	HTTPStatus int
-	Code       string
-	Message    string
-	Details    map[string]interface{}
-	// InFlight is true for an in-flight launch (as opposed to an
-	// incomplete create); HTTP callers that answer 200 with the current
-	// agent use it.
-	InFlight bool
-}
-
-// write sends the refusal as an API error.
-func (r *launchRefusal) write(w http.ResponseWriter) {
-	writeError(w, r.HTTPStatus, r.Code, r.Message, r.Details)
-}
-
 // launchInFlightBeforeDeadline reports whether a's create launch is in
 // flight and has not passed its deadline. Past the deadline the launch is
 // being reaped or superseded, so start may proceed.
@@ -129,7 +111,7 @@ func incompleteCreateMessage(a *store.Agent) string {
 
 // incompleteCreateRefusal returns the 409 agent_create_incomplete refusal
 // when a matches the incomplete-create predicate, or nil.
-func incompleteCreateRefusal(a *store.Agent) *launchRefusal {
+func incompleteCreateRefusal(a *store.Agent) *startRefusal {
 	if a == nil || !a.IsIncompleteCreate() {
 		return nil
 	}
@@ -140,32 +122,35 @@ func incompleteCreateRefusal(a *store.Agent) *launchRefusal {
 	if a.AppliedConfig != nil {
 		details["task"] = a.AppliedConfig.Task
 	}
-	return &launchRefusal{
+	return &startRefusal{
 		HTTPStatus: http.StatusConflict,
 		Code:       ErrCodeAgentCreateIncomplete,
 		Message:    incompleteCreateMessage(a),
 		Details:    details,
+		launch:     true,
 	}
 }
 
 // inFlightRefusal returns the 409 agent_launching refusal when a's create
 // launch is in flight and before its deadline, or nil. Callers that answer
 // 200 with the current agent check InFlight and do not write it.
-func inFlightRefusal(a *store.Agent, now time.Time) *launchRefusal {
+func inFlightRefusal(a *store.Agent, now time.Time) *startRefusal {
 	if !launchInFlightBeforeDeadline(a, now) {
 		return nil
 	}
-	return &launchRefusal{
+	return &startRefusal{
 		HTTPStatus: http.StatusConflict,
 		Code:       ErrCodeAgentLaunching,
 		Message:    launchInFlightMessage,
 		InFlight:   true,
+		launch:     true,
 	}
 }
 
-// launchStartRefusal runs the entry checks in order: incomplete create, then
-// in flight.
-func launchStartRefusal(a *store.Agent, now time.Time) *launchRefusal {
+// launchStartRefusal runs startGate's launch steps in order: incomplete
+// create, then in flight. Call startGate rather than this directly, so the
+// delete check runs first.
+func launchStartRefusal(a *store.Agent, now time.Time) *startRefusal {
 	if r := incompleteCreateRefusal(a); r != nil {
 		return r
 	}
@@ -219,14 +204,15 @@ func (d *HTTPAgentDispatcher) deferredLaunchGuardError(ctx context.Context, agen
 // launchRefusalFromError maps a dispatcher guard error onto the HTTP
 // refusal, re-reading the agent for the incomplete-create details. It
 // returns nil for any other error.
-func (s *Server) launchRefusalFromError(ctx context.Context, agentID string, err error) *launchRefusal {
+func (s *Server) launchRefusalFromError(ctx context.Context, agentID string, err error) *startRefusal {
 	switch {
 	case errors.Is(err, ErrLaunchInFlight):
-		return &launchRefusal{
+		return &startRefusal{
 			HTTPStatus: http.StatusConflict,
 			Code:       ErrCodeAgentLaunching,
 			Message:    launchInFlightMessage,
 			InFlight:   true,
+			launch:     true,
 		}
 	case errors.Is(err, ErrAgentCreateIncomplete):
 		if fresh, gerr := s.store.GetAgent(ctx, agentID); gerr == nil {
@@ -234,10 +220,11 @@ func (s *Server) launchRefusalFromError(ctx context.Context, agentID string, err
 				return r
 			}
 		}
-		return &launchRefusal{
+		return &startRefusal{
 			HTTPStatus: http.StatusConflict,
 			Code:       ErrCodeAgentCreateIncomplete,
 			Message:    err.Error(),
+			launch:     true,
 		}
 	}
 	return nil
@@ -326,14 +313,4 @@ func (s *Server) writeExistingAgentGuardError(ctx context.Context, w http.Respon
 	}
 	s.writeExistingAgentLaunching(ctx, w, agent, project, req)
 	return existingAgentStarted, true
-}
-
-// launchRefusalDMError maps a start-guard refusal onto wake-DM's existing
-// runtime-error shape.
-func launchRefusalDMError(r *launchRefusal) *AgentDMError {
-	return &AgentDMError{
-		Code:       ErrCodeRuntimeError,
-		Message:    r.Message,
-		HTTPStatus: http.StatusBadGateway,
-	}
 }
