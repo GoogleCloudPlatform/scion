@@ -426,14 +426,19 @@ func TestDeleteUser_ConcurrentBindingChangeAbortsWithConflict(t *testing.T) {
 // bindingSwapStore simulates a members-API role change on project `other`
 // that commits between the guard's binding list and the cascade
 // (ptone/scion#2770 review r2 M1/L2, PG READ COMMITTED). It fires inside
-// the delete transaction on the first binding delete issued for the target,
-// whether by ID or by principal, so it models a commit before the cascade
-// starts on both the count-only and the set-check implementations.
+// the delete transaction on the first by-ID re-read (GetRoleBinding) or
+// delete of a binding whose principal is the target, or on the first
+// delete by principal for the target, whichever comes first, so it models a
+// commit before the cascade starts on the count-only, the set-check and the
+// re-read implementations.
 //   - mode "transfer": TransferOwnership(other -> target). The target's
 //     member binding is replaced by an owner binding, and the previous
 //     owner's (bob's) owner binding is replaced by a member binding. The
 //     target's binding count is unchanged.
 //   - mode "revoke": the target's member binding on `other` is removed.
+//   - mode "sameid": like "transfer", but the target's new owner binding
+//     reuses the ID of its member binding, modelling an in-place role
+//     UPDATE under the same ID (ptone/scion#2770 review r3 L1).
 type bindingSwapStore struct {
 	store.Store
 	target, bob, other string
@@ -470,19 +475,28 @@ func (c *bindingSwapTx) inject(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	swap := p.mode == "transfer" || p.mode == "sameid"
+	var targetBindingID string
 	for _, b := range bs {
-		if b.PrincipalID == p.target || (p.mode == "transfer" && b.PrincipalID == p.bob) {
+		if b.PrincipalID == p.target || (swap && b.PrincipalID == p.bob) {
+			if b.PrincipalID == p.target {
+				targetBindingID = b.ID
+			}
 			if err := c.Store.DeleteRoleBinding(ctx, b.ID); err != nil {
 				return err
 			}
 		}
 	}
-	if p.mode != "transfer" {
+	if !swap {
 		return nil
 	}
-	for _, nb := range []struct{ who, rd string }{{p.target, ownerRD.ID}, {p.bob, memberRD.ID}} {
+	newTargetID := ""
+	if p.mode == "sameid" {
+		newTargetID = targetBindingID
+	}
+	for _, nb := range []struct{ id, who, rd string }{{newTargetID, p.target, ownerRD.ID}, {"", p.bob, memberRD.ID}} {
 		if _, err := c.CreateRoleBinding(ctx, &store.RoleBinding{
-			RoleDefinitionID: nb.rd, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: nb.who,
+			ID: nb.id, RoleDefinitionID: nb.rd, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: nb.who,
 			ScopeType: store.RoleScopeProject, ScopeID: p.other, CreatedBy: "concurrent-transfer",
 		}); err != nil {
 			return err
@@ -491,8 +505,30 @@ func (c *bindingSwapTx) inject(ctx context.Context) error {
 	return nil
 }
 
+// injectIfTargetBinding fires the injection only when binding id belongs
+// to the target, so a by-ID call for any other principal is not mistaken
+// for the start of the target's cascade.
+func (c *bindingSwapTx) injectIfTargetBinding(ctx context.Context, id string) error {
+	if c.parent.injected {
+		return nil
+	}
+	// A lookup error (for example, the binding is gone) is left for the
+	// real call to report.
+	if b, err := c.Store.GetRoleBinding(ctx, id); err == nil && b.PrincipalID == c.parent.target {
+		return c.inject(ctx)
+	}
+	return nil
+}
+
+func (c *bindingSwapTx) GetRoleBinding(ctx context.Context, id string) (*store.RoleBinding, error) {
+	if err := c.injectIfTargetBinding(ctx, id); err != nil {
+		return nil, err
+	}
+	return c.Store.GetRoleBinding(ctx, id)
+}
+
 func (c *bindingSwapTx) DeleteRoleBinding(ctx context.Context, id string) error {
-	if err := c.inject(ctx); err != nil {
+	if err := c.injectIfTargetBinding(ctx, id); err != nil {
 		return err
 	}
 	return c.Store.DeleteRoleBinding(ctx, id)
@@ -576,6 +612,34 @@ func TestDeleteUser_ConcurrentBindingSwapAbortsWithConflict(t *testing.T) {
 				"aborted delete must not leave the project without an owner")
 			after := allBindingsFor(t, s, target.ID)
 			assert.NotEmpty(t, after, "aborted delete must keep the target's bindings")
+		})
+	}
+}
+
+// A listed binding changed in place under the same ID (its member role on an
+// unchecked project replaced by project-owner, with bob demoted) must abort
+// the delete with 409 and change nothing. No production path does this today
+// (role bindings are immutable), but without the by-ID re-read the delete
+// would succeed and leave `other` with no owner (ptone/scion#2770 review r3
+// L1).
+func TestDeleteUser_ConcurrentBindingInPlaceChangeAbortsWithConflict(t *testing.T) {
+	for _, path := range []string{"users", "allow-list"} {
+		t.Run(path, func(t *testing.T) {
+			srv, s, target, bob, other, url := setupBindingSwap(t, path)
+			ctx := context.Background()
+
+			raced := &bindingSwapStore{Store: s, target: target.ID, bob: bob.ID, other: other.ID, mode: "sameid"}
+			srv.store = raced
+			rec := doRequest(t, srv, http.MethodDelete, url, nil)
+			srv.store = s
+			require.True(t, raced.injected, "precondition: the in-place change was injected")
+			requireConflictRetry(t, rec)
+
+			_, err := s.GetUser(ctx, target.ID)
+			require.NoError(t, err, "aborted delete must keep the user")
+			assert.Equal(t, []string{bob.ID}, projectOwnerIDs(t, s, other.ID),
+				"rollback must restore bob as the sole owner")
+			assert.NotEmpty(t, allBindingsFor(t, s, target.ID), "aborted delete must keep the target's bindings")
 		})
 	}
 }

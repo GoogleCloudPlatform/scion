@@ -1176,9 +1176,10 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 
 		// Last-project-owner guard plus role-binding cascade
 		// (ptone/scion#2598). Runs before the user row is deleted, in the
-		// same transaction; a concurrent change to the user's bindings
-		// that commits before the cascade aborts the delete with 409
-		// conflict (residual race: ptone/scion#2769).
+		// same transaction; a concurrent grant or role change to the
+		// user's bindings that commits before the cascade aborts the
+		// delete with 409 conflict (a concurrent revoke does not; residual
+		// race: ptone/scion#2769).
 		if err := guardAndCascadeUserRoleBindingsTx(ctx, tx, user.ID, s.membershipNow()); err != nil {
 			return err
 		}
@@ -1282,8 +1283,30 @@ func writeLastProjectOwnerDeleteError(w http.ResponseWriter, e *lastProjectOwner
 // function returns errUserRoleBindingsChanged and the caller rolls back the
 // whole transaction (409 conflict, retry).
 //
-// What is guaranteed: a concurrent change to the user's bindings that
-// commits before the predicate delete aborts the delete with 409. A grant
+// The by-ID pass relies on role bindings being immutable: a change to a
+// binding's role, principal or scope is always a delete plus a create with a
+// new ID (replaceBindingTx, SetMemberRoles and TransferOwnership all work this
+// way, and the store has no UpdateRoleBinding). The only in-place UPDATE of
+// role_bindings today is the startup membership_kind backfill in
+// runMembershipMigration, which runs before the server serves requests and
+// changes neither role, principal nor scope, so it is harmless. As hardening,
+// each listed binding is re-read in the transaction just before its by-ID
+// delete; if its role definition, principal or scope no longer matches the
+// listed one (an in-place change under the same ID), the function returns
+// errUserRoleBindingsChanged instead of deleting a binding the guard never
+// checked. On PostgreSQL an in-place change that commits between that re-read
+// and the delete is still not detected, so the immutability invariant remains
+// the primary guarantee.
+//
+// The by-ID pass deletes in binding ID order. On PostgreSQL a concurrent
+// change that deletes several of the user's bindings (for example
+// replaceBindingTx on a multi-role member) can still deadlock with this pass;
+// the database aborts one side, so either the delete returns 500 or the
+// other change fails, and no data is corrupted.
+//
+// What is guaranteed: a concurrent grant or role change to the user's
+// bindings that commits before the predicate delete aborts the delete with
+// 409 (a concurrent revoke is ignored and the delete proceeds). A grant
 // that commits after that statement but before the delete transaction
 // commits is not detected and can leave a stale binding on the deleted user;
 // that residual race is tracked in ptone/scion#2769.
@@ -1348,7 +1371,23 @@ func guardAndCascadeUserRoleBindingsTx(ctx context.Context, tx store.Store, user
 	// find nothing: any row it removes is a binding the guard never saw.
 	// Always run the predicate delete, even when the list was empty, so a
 	// binding granted concurrently after the list is detected.
+	// Deterministic lock order for the by-ID pass (see the doc comment).
+	sort.Slice(bindings, func(i, j int) bool { return bindings[i].ID < bindings[j].ID })
 	for _, b := range bindings {
+		// Re-read the binding so an in-place change under the same ID is
+		// not deleted unchecked (see the immutability note above).
+		cur, err := tx.GetRoleBinding(ctx, b.ID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// Revoked concurrently; see below.
+				continue
+			}
+			return fmt.Errorf("re-read role binding %s: %w", b.ID, err)
+		}
+		if cur.RoleDefinitionID != b.RoleDefinitionID || cur.ScopeType != b.ScopeType ||
+			cur.ScopeID != b.ScopeID || cur.PrincipalType != b.PrincipalType || cur.PrincipalID != b.PrincipalID {
+			return fmt.Errorf("%w: binding %s changed in place", errUserRoleBindingsChanged, b.ID)
+		}
 		if err := tx.DeleteRoleBinding(ctx, b.ID); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				// Revoked concurrently; it can only be on a project the
