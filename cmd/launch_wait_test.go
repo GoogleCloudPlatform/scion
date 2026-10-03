@@ -149,7 +149,7 @@ func TestWaitForAgentLaunch_TerminalStates(t *testing.T) {
 			wantContains: []string{
 				"agent 'a1' create did not complete (image_pull_failed): image pull failed for example.com/img:bad",
 				"Template: claude", "Task: fix the tests",
-				"scion delete a1", "scion start a1",
+				"scion delete a1", "scion start a1", "force=true or purged",
 			},
 			wantMissing: []string{"scion logs"},
 		},
@@ -285,10 +285,16 @@ func TestWaitForAgentLaunch_DeletedWhileWaiting(t *testing.T) {
 	assert.Contains(t, err.Error(), "agent 'a1' no longer exists")
 }
 
+// p1b3IncompleteCreateMessage is the Hub's agent_create_incomplete message
+// (pkg/hub/launch_guard.go incompleteCreateMessage).
+const p1b3IncompleteCreateMessage = "agent a1 cannot be started: its create did not complete (image_pull_failed); " +
+	"delete it and create it again; if soft-delete retention is enabled, the name stays reserved until the agent is " +
+	"deleted with force=true or purged"
+
 func TestIncompleteCreateError(t *testing.T) {
 	apiErr := &apiclient.APIError{
 		StatusCode: http.StatusConflict, Code: "agent_create_incomplete",
-		Message: "the agent's create did not complete (image_pull_failed); run scion delete a1 and create it again",
+		Message: p1b3IncompleteCreateMessage,
 		Details: map[string]interface{}{"template": "claude", "task": "fix the tests"},
 	}
 	got, ok := asIncompleteCreate(apiErr)
@@ -299,11 +305,17 @@ func TestIncompleteCreateError(t *testing.T) {
 	assert.True(t, strings.HasPrefix(msg, apiErr.Message))
 	assert.Contains(t, msg, "Template: claude")
 	assert.Contains(t, msg, "Task: fix the tests")
-	assert.Equal(t, 1, strings.Count(msg, "scion delete a1"), "the recreate hint is shown once: %q", msg)
+	assert.True(t, err.HubOwnsHint)
+	assert.Equal(t, 1, strings.Count(msg, "create it again"), "the recreate instruction is shown once: %q", msg)
+	assert.Equal(t, 1, strings.Count(msg, "force=true or purged"), msg)
+	assert.NotContains(t, msg, "Delete the agent and create it again", "the CLI hint is not added to the Hub's")
 
-	// Without a recreate instruction in the Hub message, the CLI adds one.
-	err = incompleteCreateError("a1", &apiclient.APIError{Code: "agent_create_incomplete", Message: "create did not complete"})
-	assert.Equal(t, 1, strings.Count(err.Error(), "scion delete a1"))
+	// Without a Hub message, the CLI states the instruction itself.
+	err = incompleteCreateError("a1", &apiclient.APIError{Code: "agent_create_incomplete"})
+	assert.False(t, err.HubOwnsHint)
+	assert.Equal(t, 1, strings.Count(err.Error(), "create it again"))
+	assert.Contains(t, err.Error(), "scion delete a1")
+	assert.Contains(t, err.Error(), "force=true or purged")
 
 	_, ok = asIncompleteCreate(&apiclient.APIError{StatusCode: http.StatusConflict, Code: "conflict"})
 	assert.False(t, ok)
@@ -538,7 +550,7 @@ func TestStartAgentViaHub_CreateIncomplete409(t *testing.T) {
 	hub := &launchMockHub{t: t, createStatus: http.StatusConflict, createBody: map[string]interface{}{
 		"error": map[string]interface{}{
 			"code":    "agent_create_incomplete",
-			"message": "the agent's create did not complete (image_pull_failed); run scion delete a1 and create it again",
+			"message": p1b3IncompleteCreateMessage,
 			"details": map[string]interface{}{"template": "claude", "task": "fix the tests"},
 		},
 	}}
@@ -553,7 +565,8 @@ func TestStartAgentViaHub_CreateIncomplete409(t *testing.T) {
 	assert.Contains(t, err.Error(), "Template: claude")
 	assert.Contains(t, err.Error(), "Task: fix the tests")
 	assert.NotContains(t, err.Error(), "scion hub disable")
-	assert.Equal(t, 1, strings.Count(err.Error(), "scion delete a1"))
+	assert.Equal(t, 1, strings.Count(err.Error(), "create it again"), err.Error())
+	assert.NotContains(t, err.Error(), "Delete the agent and create it again")
 	assert.Equal(t, 0, hub.getsAfterCR)
 }
 
@@ -789,4 +802,103 @@ func TestStartAgentViaHub_AttachWithJSONDoesNotWait(t *testing.T) {
 	var result ActionResult
 	require.NoError(t, json.Unmarshal([]byte(stdout), &result))
 	assert.Equal(t, "provisioning", result.Details["phase"])
+}
+
+func TestStartAgentViaHub_NoWaitJSONIncludesLaunch(t *testing.T) {
+	deadline := time.Date(2026, 10, 3, 4, 0, 0, 0, time.UTC)
+	resp := asyncCreateResponse()
+	resp.Agent.Launch = activeLaunch("", 2, &deadline)
+	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: resp}
+	hubCtx := setupLaunchStartTest(t, hub)
+	startNoWait, outputFormat = true, "json"
+	var err error
+	var stdout string
+	_ = captureStderr(t, func() {
+		stdout = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
+	})
+	require.NoError(t, err)
+	var result ActionResult
+	require.NoError(t, json.Unmarshal([]byte(stdout), &result), stdout)
+	assert.Equal(t, "Agent 'a1' accepted by Hub and launching.", result.Message)
+	assert.Equal(t, "launch-1", result.Details["launchId"])
+	assert.Equal(t, "2026-10-03T04:00:00Z", result.Details["launchDeadline"])
+	assert.Equal(t, "provisioning", result.Details["phase"])
+}
+
+// recordSignalRegistration replaces signalNotify/signalStop with recorders.
+func recordSignalRegistration(t *testing.T) (notified, stopped *[]chan<- os.Signal) {
+	t.Helper()
+	origNotify, origStop := signalNotify, signalStop
+	t.Cleanup(func() { signalNotify, signalStop = origNotify, origStop })
+	var n, s []chan<- os.Signal
+	var mu sync.Mutex
+	signalNotify = func(c chan<- os.Signal, sig ...os.Signal) {
+		mu.Lock()
+		defer mu.Unlock()
+		n = append(n, c)
+	}
+	signalStop = func(c chan<- os.Signal) {
+		mu.Lock()
+		defer mu.Unlock()
+		s = append(s, c)
+	}
+	return &n, &s
+}
+
+func TestStartAgentViaHub_WaitReleasesSignalHandler(t *testing.T) {
+	cases := []struct {
+		name    string
+		after   hubclient.Agent
+		wantErr bool
+	}{
+		{"running", hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running"}, false},
+		{"failed", hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "error"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			notified, stopped := recordSignalRegistration(t)
+			hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
+				afterCreate: []interface{}{tc.after}}
+			hubCtx := setupLaunchStartTest(t, hub)
+			var err error
+			_ = captureStderr(t, func() {
+				_ = captureStdout(t, func() { err = startAgentViaHub(hubCtx, "a1", "", false, nil) })
+			})
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Len(t, *notified, 1, "the wait registers one signal handler")
+			require.Len(t, *stopped, 1, "the signal handler is released when the wait ends")
+			assert.Equal(t, (*notified)[0], (*stopped)[0])
+		})
+	}
+}
+
+func TestFinishHubStart_JSONAttachAfterFinalizeAttaches(t *testing.T) {
+	clearAppTokenSources(t)
+	orig := resolveAttachTransportFn
+	resolveAttachTransportFn = func() (transportauth.TokenSource, transportauth.HeaderMode, error) {
+		return nil, transportauth.HeaderAuthorization, nil
+	}
+	t.Cleanup(func() { resolveAttachTransportFn = orig })
+
+	hub := &launchMockHub{t: t, created: true, afterCreate: []interface{}{
+		hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running", RuntimeBrokerID: mockAttachBrokerID},
+	}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	attach, outputFormat = true, "json"
+	var err error
+	var stdout string
+	_ = captureStderr(t, func() {
+		stdout = captureStdout(t, func() {
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, finalizeCreateResponse(nil), true)
+		})
+	})
+	// The attach step stops at the token gate in this test.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no access token found for Hub")
+	assert.Equal(t, 1, hub.getsAfterCR)
+	assert.Empty(t, stdout, "no JSON document before the attach")
 }

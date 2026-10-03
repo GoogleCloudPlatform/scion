@@ -257,9 +257,23 @@ type launchFailedError struct {
 	// record stays on the Hub; it can only be recreated (delete, then start).
 	Incomplete bool
 	// Reason is the first line of the message.
-	Reason   string
-	Template string
-	Task     string
+	Reason string
+	// HubOwnsHint is true when Reason is the Hub's agent_create_incomplete
+	// message, which carries the recovery instruction itself.
+	HubOwnsHint bool
+	Template    string
+	Task        string
+}
+
+// recreateHint is the recovery instruction for an incomplete create. It
+// follows the Hub's wording: with soft-delete retention a plain delete keeps
+// the name reserved.
+func recreateHint(name string) string {
+	return fmt.Sprintf("The create did not complete. Delete the agent and create it again with the same template and task:\n"+
+		"  scion delete %s\n"+
+		"  scion start %s ...\n"+
+		"If soft-delete retention is enabled on the Hub, the name stays reserved until the agent is deleted with force=true or purged; until then, use a new name.",
+		name, name)
 }
 
 func newLaunchFailedError(name string, a *hubclient.Agent) *launchFailedError {
@@ -295,7 +309,7 @@ func newLaunchFailedError(name string, a *hubclient.Agent) *launchFailedError {
 // incompleteCreateError builds the error for a Hub 409
 // agent_create_incomplete answer to a start.
 func incompleteCreateError(name string, apiErr *apiclient.APIError) *launchFailedError {
-	e := &launchFailedError{Agent: name, Incomplete: true, Reason: apiErr.Message}
+	e := &launchFailedError{Agent: name, Incomplete: true, Reason: apiErr.Message, HubOwnsHint: apiErr.Message != ""}
 	if e.Reason == "" {
 		e.Reason = fmt.Sprintf("agent '%s' create did not complete", name)
 	}
@@ -322,11 +336,11 @@ func (e *launchFailedError) Error() string {
 			fmt.Fprintf(&b, "\nTask: %s", e.Task)
 		}
 	}
-	if strings.Contains(e.Reason, "scion delete") {
-		// The Hub's message already carries the recreate instruction.
+	if e.HubOwnsHint {
 		return b.String()
 	}
-	fmt.Fprintf(&b, "\n\nThe create did not complete. Recreate the agent with:\n  scion delete %s\n  scion start %s ... (with the same template and task)", e.Agent, e.Agent)
+	b.WriteString("\n\n")
+	b.WriteString(recreateHint(e.Agent))
 	return b.String()
 }
 
@@ -383,12 +397,28 @@ func waitSignalOf(ctx context.Context) os.Signal {
 	return nil
 }
 
+// signalNotify and signalStop are the signal registration functions used by
+// signalWaitContext; tests replace them to observe registration.
+var (
+	signalNotify = signal.Notify
+	signalStop   = signal.Stop
+)
+
+// waitForAgentLaunchWithSignals runs waitForAgentLaunch under a context
+// cancelled by SIGINT or SIGTERM, and releases the signal handler when the
+// wait ends on any path.
+func waitForAgentLaunchWithSignals(o launchWaitOptions) (*hubclient.Agent, error) {
+	ctx, stop := signalWaitContext()
+	defer stop()
+	return waitForAgentLaunch(ctx, o)
+}
+
 // signalWaitContext returns a context cancelled by SIGINT or SIGTERM, with
 // the signal recorded as the cause. stop releases the signal handler.
 func signalWaitContext() (ctx context.Context, stop func()) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	signalNotify(ch, os.Interrupt, syscall.SIGTERM)
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -398,7 +428,7 @@ func signalWaitContext() (ctx context.Context, stop func()) {
 		}
 	}()
 	return ctx, func() {
-		signal.Stop(ch)
+		signalStop(ch)
 		close(done)
 		cancel(nil)
 	}
