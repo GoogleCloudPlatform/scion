@@ -123,10 +123,6 @@ func (m *protocolMockManager) List(ctx context.Context, filter map[string]string
 func (m *protocolMockManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
 	return nil
 }
-func (m *protocolMockManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
-	return nil
-}
-
 func (m *protocolMockManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
 	return nil
 }

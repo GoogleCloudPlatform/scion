@@ -76,10 +76,6 @@ func (m *mockAgentManager) Message(ctx context.Context, name, projectID, message
 	return nil
 }
 
-func (m *mockAgentManager) MessageRaw(ctx context.Context, name, projectID string, keys string) error {
-	return nil
-}
-
 func (m *mockAgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
 	return nil
 }

@@ -43,7 +43,6 @@ const (
 	MessageDenialCrossProjectUnsupported         MessageDenialCode = "cross_project_surface_unsupported"
 	MessageDenialCrossProjectGroupsUnsupported   MessageDenialCode = "cross_project_groups_unsupported"
 	MessageDenialCrossProjectAttachUnsupported   MessageDenialCode = "cross_project_attachment_unsupported"
-	MessageDenialCrossProjectRawUnsupported      MessageDenialCode = "cross_project_raw_unsupported"
 	MessageDenialCrossProjectScheduledDenied     MessageDenialCode = "cross_project_scheduled_denied"
 	MessageDenialCrossProjectScheduledDisabled   MessageDenialCode = "cross_project_scheduled_disabled"
 	MessageDenialCrossProjectScheduledTarget     MessageDenialCode = "cross_project_scheduled_target" // reserved: scheduled message target validation
@@ -56,23 +55,6 @@ const (
 	MessageDenialAttachmentUnauthorized          MessageDenialCode = "attachment_unauthorized"
 	MessageDenialDeliveryDuplicate               MessageDenialCode = "delivery_duplicate" // reserved: delivery deduplication guard
 
-	// Phase 0.2 (ptone/scion#2192): raw messaging containment. Raw remains a
-	// guard-only, temporary compatibility path (ptone/scion#2184) supporting
-	// only an unadorned direct single-agent message; every other combination
-	// is rejected before conversation resolution, mention work, attachment
-	// ingestion, wake/lifecycle calls or dispatch of any kind.
-	MessageDenialRawPlainConflict            MessageDenialCode = "raw_plain_conflict"
-	MessageDenialRawGroupUnsupported         MessageDenialCode = "raw_group_unsupported"
-	MessageDenialRawBroadcastUnsupported     MessageDenialCode = "raw_broadcast_unsupported"
-	MessageDenialRawMentionsUnsupported      MessageDenialCode = "raw_mentions_unsupported"
-	MessageDenialRawAttachUnsupported        MessageDenialCode = "raw_attachment_unsupported"
-	MessageDenialRawSchedulingUnsupported    MessageDenialCode = "raw_scheduling_unsupported"
-	MessageDenialRawWakeUnsupported          MessageDenialCode = "raw_wake_unsupported"
-	MessageDenialRawInterruptUnsupported     MessageDenialCode = "raw_interrupt_unsupported"
-	MessageDenialRawObserverUnsupported      MessageDenialCode = "raw_observer_unsupported"
-	MessageDenialRawConversationUnsupported  MessageDenialCode = "raw_conversation_unsupported"
-	MessageDenialRawManagedUnsupported       MessageDenialCode = "raw_managed_backend_unsupported"
-	MessageDenialRawBrokerIngressUnsupported MessageDenialCode = "raw_broker_ingress_unsupported"
 )
 
 // MessageDecision captures the outcome of an agent message authorization

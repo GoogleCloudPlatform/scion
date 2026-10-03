@@ -232,10 +232,10 @@ const (
 
 // agentKeysRoute distinguishes which public surface produced an agent-keys
 // audit record. Contract §5 ("Audit and limits") requires this on every
-// admission and outcome event ("route (keys or transitional raw)"), even
-// though the direct /keys routes and the temporary message-raw bridge (task
-// 2.3) otherwise produce identical auth/quota/dispatch outcomes for
-// identical inputs (contract §6.1's auth-parity requirement, AK-24/AK-25).
+// admission and outcome event ("route (keys or transitional raw)"). The
+// transitional raw bridge has been removed, so the only routes left are the
+// direct /keys routes and the raw_input_removed rejection of a message
+// request that still carries the retired raw field.
 type agentKeysRoute string
 
 const (
@@ -243,10 +243,10 @@ const (
 	// POST .../keys routes (handleAgentActionKeysTopLevel/ProjectScoped).
 	agentKeysRouteKeys agentKeysRoute = "keys"
 
-	// agentKeysRouteRawBridge tags every audit record produced by the
-	// temporary legacy-raw message bridge (task 2.3,
-	// agent_keys_message_bridge.go) — #2184's "transitional raw" route.
-	agentKeysRouteRawBridge agentKeysRoute = "message_raw_bridge"
+	// agentKeysRouteRawRemoved tags the audit record for a message request
+	// rejected with raw_input_removed because it still carries the retired
+	// raw field (raw_tombstone.go). Nothing is ever delivered on this route.
+	agentKeysRouteRawRemoved agentKeysRoute = "message_raw_removed"
 )
 
 // finishAgentKeysNotFound writes and audits keys' own not_found outcome
@@ -254,9 +254,7 @@ const (
 // resolver's different 404 code/shape just because it is convenient to call
 // into.
 func (s *Server) finishAgentKeysNotFound(w http.ResponseWriter, r *http.Request, operationID string, audit agentKeysAuditTarget, inputBytes int) {
-	// Only ever reached by the direct /keys handlers (contract §6.1: "no
-	// bridge-specific not_found case exists" -- the bridge reuses whichever
-	// target the surrounding message-dispatch code already resolved).
+	// Only ever reached by the direct /keys handlers.
 	s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, agentkeys.OutcomeNotFound, inputBytes, 0, agentKeysRouteKeys)
 	writeAgentKeysOutcome(w, agentkeys.OutcomeNotFound, operationID, agentKeysOutcomeMessage(agentkeys.OutcomeNotFound), 0)
 }
@@ -314,12 +312,7 @@ func (s *Server) finishAgentKeysDenied(w http.ResponseWriter, r *http.Request, o
 // finishAgentKeysDeniedDecision is finishAgentKeysDenied's variant for a
 // denial reached before any target agent was resolved (the project-scoped
 // route's pre-lookup cross-project refusal, AK-21c), where only the URL
-// project ID is known. It also serves the message-raw bridge's (task 2.3)
-// own pre-authorization denials (the cross-project and unsupported-
-// combination rejections in agent_keys_message_bridge.go), which likewise
-// have an already-resolved target but reach their outcome before
-// authorizeAgentKeys ever runs -- route distinguishes these in the audit
-// trail (contract §5) even though the HTTP/outcome shape is identical.
+// project ID is known. route tags the audit record (contract §5).
 func (s *Server) finishAgentKeysDeniedDecision(w http.ResponseWriter, r *http.Request, operationID string, audit agentKeysAuditTarget, inputBytes int, decision KeysAuthzDecision, route agentKeysRoute) {
 	s.logAgentKeysAudit(r, agentKeysAuditEventOutcome, operationID, audit, decision.Outcome, inputBytes, 0, route)
 	writeAgentKeysOutcome(w, decision.Outcome, operationID, agentKeysOutcomeMessage(decision.Outcome), 0)
@@ -659,8 +652,6 @@ func agentKeysOutcomeMessage(outcome agentkeys.Outcome) string {
 		return "Insufficient permissions"
 	case agentkeys.OutcomeCrossProjectKeysUnsupported:
 		return "Cross-project keys access is not supported for agent callers"
-	case agentkeys.OutcomeRawCombinationUnsupported:
-		return "This legacy request combination is not supported for keys delivery"
 	case agentkeys.OutcomeNotFound:
 		return "Agent not found"
 	case agentkeys.OutcomeAgentNotRunning:

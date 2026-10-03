@@ -259,10 +259,8 @@ func (e *BrokerOutcomeError) Error() string {
 //
 //	SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error
 //
-// renaming and replacing today's MessageRaw(ctx, agentID, projectID,
-// keys string) error (pkg/agent/manager.go:72,309) once 1.1 ships it — 0.1
-// does not touch pkg/agent/manager.go itself (see the contract doc's
-// "Deliberately not touched by this task" list).
+// It replaced the former raw message manager method, which has since been
+// removed.
 //
 // SendKeys must resolve the target container by (projectID, agentSlug),
 // check its "agent_id" label against expectedAgentID, and Exec on that same
@@ -270,9 +268,8 @@ func (e *BrokerOutcomeError) Error() string {
 // step in between the check and the Exec. This is the identity-binding
 // requirement from §4.1 stated at the one call site that can actually
 // enforce it atomically: a caller that checks the label via one lookup and
-// then invokes a *different* method that re-resolves by slug alone (the way
-// today's MessageRaw does — filter by name+project, List, Exec on the
-// result) reopens exactly the recreate-inside-the-window gap identity
+// then invokes a *different* method that re-resolves by slug alone (filter
+// by name+project, List, Exec on the result) reopens exactly the recreate-inside-the-window gap identity
 // binding exists to close, because the container found on the second lookup
 // is not guaranteed to be the one the first lookup checked.
 //

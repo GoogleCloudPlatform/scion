@@ -42,8 +42,8 @@ with no trailing Enter. Supports control keys like arrows, Escape, etc.
 This is useful for interacting with interactive TUI applications running
 inside an agent's terminal session.
 
-In Hub mode, keys are delivered through the Hub's dedicated keys operation,
-the same one 'message --raw' temporarily aliases to. When run by an agent,
+In Hub mode, keys are delivered through the Hub's dedicated keys operation.
+This replaces the removed 'scion message --raw' flag. When run by an agent,
 this only works within the agent's own project; cross-project targets are
 refused. A human operator using --project can still target other projects.
 
@@ -247,11 +247,25 @@ func classifyHubKeysError(err error) keysResult {
 	if apiErr.StatusCode == http.StatusServiceUnavailable && apiErr.Code == string(agentkeys.OutcomeKeysUnavailable) {
 		isDefiniteRejection = true
 	}
-	if !isDefiniteRejection {
-		return keysResult{Outcome: keysOutcomeUnknown, Code: apiErr.Code, OperationID: opID, Message: apiErr.Message, RetryAfterSeconds: apiErr.RetryAfterSeconds}
+	// The Hub's dispatch-error classifier never returns an empty code, but a
+	// proxy or load balancer between the CLI and the Hub can produce an
+	// error with none (e.g. a bodyless 502). Never surface an empty code:
+	// fall back to a code that states what is known.
+	code := apiErr.Code
+	message := apiErr.Message
+	if message == "" {
+		message = fmt.Sprintf("HTTP %d %s with no error body", apiErr.StatusCode, http.StatusText(apiErr.StatusCode))
 	}
-
-	return keysResult{Outcome: keysOutcomeRejected, Code: apiErr.Code, OperationID: opID, Message: apiErr.Message, RetryAfterSeconds: apiErr.RetryAfterSeconds}
+	if !isDefiniteRejection {
+		if code == "" {
+			code = string(agentkeys.OutcomeKeysOutcomeUnknown)
+		}
+		return keysResult{Outcome: keysOutcomeUnknown, Code: code, OperationID: opID, Message: message, RetryAfterSeconds: apiErr.RetryAfterSeconds}
+	}
+	if code == "" {
+		code = fmt.Sprintf("http_%d", apiErr.StatusCode)
+	}
+	return keysResult{Outcome: keysOutcomeRejected, Code: code, OperationID: opID, Message: message, RetryAfterSeconds: apiErr.RetryAfterSeconds}
 }
 
 // classifyLocalKeysError turns an agent.Manager.SendKeys/SendKeysLocal error
@@ -312,9 +326,7 @@ func rejectInvalidKeys(agentName, keys string) (err error, ok bool) {
 // sendKeysViaHub delivers keystrokes to a hub-managed agent through the
 // dedicated agent-keys operation (.design/agent-keys-contract.md): it POSTs
 // {"keys": ...} to the project-scoped /keys route via
-// AgentService.SendKeys, never building a Raw StructuredMessage and never
-// going through /message. `message --raw` aliases to this same function
-// (see cmd/message.go) so both emit identical operations.
+// AgentService.SendKeys and never goes through /message.
 func sendKeysViaHub(hubCtx *HubContext, agentName, keys string) error {
 	if err, ok := rejectInvalidKeys(agentName, keys); !ok {
 		return err

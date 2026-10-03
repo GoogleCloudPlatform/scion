@@ -40,7 +40,6 @@ var msgInterrupt bool
 var msgIn string
 var msgAt string
 var msgPlain bool
-var msgRaw bool
 var msgAttach []string
 var msgNotify bool
 var msgWake bool
@@ -48,6 +47,10 @@ var msgChannel string
 var msgThreadID string
 var msgCC []string
 var msgBodyFile string
+
+// errRawFlagRemoved is returned for any use of the removed --raw flag.
+var errRawFlagRemoved = fmt.Errorf("--raw has been removed from 'scion message': raw keystroke delivery through messages is no longer supported; " +
+	"send keystrokes with 'scion keys <agent-name> <keystrokes>' instead (see 'scion keys --help')")
 
 // emitDeprecationWarning prints a deprecation notice to stderr.
 func emitDeprecationWarning(flag, replacement string) {
@@ -61,7 +64,6 @@ var deprecationReplacements = []struct {
 	Flag    string
 	Message string
 }{
-	{"raw", "use 'scion keys' instead"},
 	{"plain", "--plain is deprecated and will be removed"},
 	{"notify", "use 'scion notifications subscribe' instead"},
 	{"in", "use 'scion schedule create --in' instead"},
@@ -111,6 +113,12 @@ Examples:
   scion message my-agent --body-file /path/to/message.txt
   echo "message with backticks" | scion message my-agent -`,
 	Args: func(cmd *cobra.Command, args []string) error {
+		// --raw is removed. Reject it here, in argument validation, so the
+		// command fails before any hook, project resolution or network call
+		// runs: a --raw invocation never reaches the wire.
+		if cmd.Flags().Changed("raw") {
+			return errRawFlagRemoved
+		}
 		// --body-file provides the message, so we only need recipient
 		bodyFile, _ := cmd.Flags().GetString("body-file")
 		if bodyFile != "" {
@@ -212,7 +220,7 @@ Examples:
 		}
 
 		// Ensure we have a message body
-		if message == "" && !msgRaw {
+		if message == "" {
 			return fmt.Errorf("message body is empty; provide a message via positional args, --body-file, or pipe to stdin with '-'")
 		}
 
@@ -226,57 +234,11 @@ Examples:
 			return fmt.Errorf("--thread-id requires --channel to be set")
 		}
 
-		// Validate --raw restrictions. --raw is a thin alias of the keys
-		// client (sendKeysViaHub/sendKeysLocal, shared with `scion keys`):
-		// anything keys itself does not support must be rejected here,
-		// before any send is attempted, exactly like every other
-		// invalid-combination check in this block.
-		if msgRaw {
-			if msgPlain {
-				return fmt.Errorf("--raw and --plain are mutually exclusive")
-			}
-			if msgIn != "" || msgAt != "" {
-				return fmt.Errorf("--raw cannot be combined with --in or --at")
-			}
-			if len(msgAttach) > 0 {
-				return fmt.Errorf("--raw cannot be combined with --attach")
-			}
-			if msgNotify {
-				return fmt.Errorf("--raw cannot be combined with --notify")
-			}
-			if msgInterrupt {
-				return fmt.Errorf("--raw cannot be combined with --interrupt; keys has no interrupt step")
-			}
-			// --thread-id checked before --channel: --thread-id requires
-			// --channel to be set at all (checked earlier, unconditionally),
-			// so the only way to reach this block with --thread-id set is
-			// with --channel also set — checking thread-id first lets its
-			// own, more specific message fire instead of being masked by
-			// the channel check.
-			if msgThreadID != "" {
-				return fmt.Errorf("--raw cannot be combined with --thread-id")
-			}
-			if msgChannel != "" {
-				return fmt.Errorf("--raw cannot be combined with --channel")
-			}
-			// Only a same-project @agent reference is an alias for `scion
-			// keys` (routed below, in place of sendMessageViaConversation);
-			// conv:/#thread/@email have no single-agent-keys equivalent and
-			// must not reach the legacy Raw StructuredMessage path that
-			// sendMessageViaConversation would otherwise use for them.
-			if convRef != nil && convRef.Kind != messaging.RefAgent {
-				return fmt.Errorf("--raw cannot be used with %s addressing; target the agent directly instead (e.g. 'scion keys <agent> ...')", convRef.Raw)
-			}
-		}
-
 		// Validate --cc restrictions: parse first so empty-string values
 		// (e.g. --cc "") are handled correctly instead of triggering
 		// false-positive validation errors.
 		parsedCC := parseCCFlag(msgCC)
 		if len(parsedCC) > 0 {
-			if msgRaw {
-				return fmt.Errorf("--cc cannot be combined with --raw")
-			}
 			if msgIn != "" || msgAt != "" {
 				return fmt.Errorf("--cc cannot be combined with --in or --at")
 			}
@@ -287,9 +249,6 @@ Examples:
 
 		// Validate user-recipient restrictions
 		if userRecipient != "" {
-			if msgRaw {
-				return fmt.Errorf("--raw cannot be used with user recipients")
-			}
 			if msgIn != "" || msgAt != "" {
 				return fmt.Errorf("--in/--at cannot be used with user recipients")
 			}
@@ -297,9 +256,6 @@ Examples:
 
 		// Validate group recipient restrictions
 		if len(groupRecipients) > 0 {
-			if msgRaw {
-				return fmt.Errorf("--raw cannot be used with group[] recipients")
-			}
 			if msgIn != "" || msgAt != "" {
 				return fmt.Errorf("--in/--at cannot be used with group[] recipients")
 			}
@@ -312,9 +268,6 @@ Examples:
 		if msgWake {
 			if msgIn != "" || msgAt != "" {
 				return fmt.Errorf("--wake cannot be combined with --in or --at")
-			}
-			if msgRaw {
-				return fmt.Errorf("--wake cannot be combined with --raw")
 			}
 			if userRecipient != "" {
 				return fmt.Errorf("--wake cannot be used with user recipients")
@@ -366,15 +319,6 @@ Examples:
 			if crossProjectTarget != "" {
 				senderProjectPath = "" // let hub context resolve from agent's own config
 			}
-		}
-
-		// --raw cannot cross a project boundary: the deprecated keystroke
-		// path skips the wrapped envelope, so a cross-project send must
-		// refuse it the same way `scion keys` refuses cross-project targets
-		// outright. This CLI check is UX only; the authoritative refusal is
-		// hub-side (ExecuteAgentKeys, via authorizeAgentKeys).
-		if crossProjectTarget != "" && msgRaw {
-			return fmt.Errorf("--raw cannot be used with a cross-project target; message the agent from within its own project")
 		}
 
 		// conv:<id> with explicit --project mismatch in agent mode: reject.
@@ -473,16 +417,6 @@ Examples:
 
 		// Conversation-reference messages: resolve and send via Hub
 		if convRef != nil {
-			if msgRaw {
-				// Validated above: only RefAgent (same-project @agent) can
-				// still be msgRaw here. It is a plain alias for `scion
-				// keys` against that same agent slug — never
-				// sendMessageViaConversation, which would otherwise build a
-				// Raw StructuredMessage for it. Slugify like every other
-				// keys entry point so `@Builder` and `Builder` address the
-				// same agent.
-				return sendKeysViaHub(hubCtx, api.Slugify(convRef.Value), message)
-			}
 			return sendMessageViaConversation(hubCtx, convRef, message, msgInterrupt, msgWake, msgAttach)
 		}
 
@@ -497,12 +431,6 @@ Examples:
 		}
 
 		if hubCtx != nil {
-			if msgRaw {
-				// The temporary --raw alias: identical operation to `scion
-				// keys`, through the same dedicated /keys client path —
-				// never /message, never a Raw StructuredMessage.
-				return sendKeysViaHub(hubCtx, agentName, message)
-			}
 			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgNotify, msgWake)
 		}
 
@@ -516,13 +444,6 @@ Examples:
 		// and cannot transfer files.
 		if len(msgAttach) > 0 {
 			return fmt.Errorf("--attach requires Hub mode (use 'scion hub enable' first); in local mode, include the file contents in the message text")
-		}
-
-		// The temporary --raw alias in local mode: the same project-scoped,
-		// ambiguity-safe keys path `scion keys` uses (sendKeysLocal), never
-		// the legacy MessageRaw primitive.
-		if msgRaw {
-			return sendKeysLocal(agentName, message)
 		}
 
 		// Local mode — structured messages are only available in Hub mode,
@@ -570,14 +491,12 @@ func resolveSenderIdentity(hubCtx *HubContext) string {
 }
 
 // buildStructuredMessage constructs a StructuredMessage from CLI parameters.
-// raw, plain and urgent are passed explicitly (rather than read from the
-// message-command package globals) so non-`scion message` callers — e.g.
-// `scion keys`, which always wants Raw=true and never sets the message
-// package's flag globals — can reuse this helper without forking it.
-func buildStructuredMessage(sender, recipient, message string, attachments []string, raw, plain, urgent bool) *messages.StructuredMessage {
+// plain and urgent are passed explicitly rather than read from the
+// message-command flag globals; channel and thread ID still come from the
+// deprecated --channel/--thread-id globals.
+func buildStructuredMessage(sender, recipient, message string, attachments []string, plain, urgent bool) *messages.StructuredMessage {
 	msg := messages.NewInstruction(sender, recipient, message)
 	msg.Plain = plain
-	msg.Raw = raw
 	msg.Urgent = urgent
 	if len(attachments) > 0 {
 		msg.Attachments = attachments
@@ -616,7 +535,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	msg := buildStructuredMessage(sender, "agent:"+agentName, message, msgAttach, msgRaw, msgPlain, interrupt)
+	msg := buildStructuredMessage(sender, "agent:"+agentName, message, msgAttach, msgPlain, interrupt)
 	// Validate through the new envelope choke point (Phase 7, AC-8).
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
@@ -692,7 +611,7 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 
 	// Step 2: Build the structured message with the sender's identity.
 	sender := resolveSenderIdentity(hubCtx)
-	msg := buildStructuredMessage(sender, "agent:"+agentSlug, message, attachments, msgRaw, msgPlain, interrupt)
+	msg := buildStructuredMessage(sender, "agent:"+agentSlug, message, attachments, msgPlain, interrupt)
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
@@ -768,7 +687,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		// and the orphan rows.
 		if ref.Kind == messaging.RefAgent {
 			sender := "agent:" + senderAgent
-			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments, msgRaw, msgPlain, interrupt)
+			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments, msgPlain, interrupt)
 			if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 				return fmt.Errorf("message validation failed: %w", err)
 			}
@@ -882,7 +801,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	// message endpoint. The server derives the conversation from the
 	// sender/recipient principals (DEF-138 Rule 3).
 	sender := resolveSenderIdentity(hubCtx)
-	agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments, msgRaw, msgPlain, interrupt)
+	agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments, msgPlain, interrupt)
 	if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
@@ -1033,7 +952,7 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 			switch recip.Kind {
 			case messages.RecipientAgent:
 				slug := api.Slugify(recip.Name)
-				msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach, msgRaw, msgPlain, interrupt)
+				msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach, msgPlain, interrupt)
 				msg.Type = messages.TypeGroupSet
 				msg.Recipients = recipientsStr
 				msg.Metadata = map[string]string{"group_id": groupID}
@@ -1503,7 +1422,9 @@ func init() {
 	messageCmd.Flags().StringVar(&msgIn, "in", "", "Deprecated: use 'scion schedule create --in' instead")
 	messageCmd.Flags().StringVar(&msgAt, "at", "", "Deprecated: use 'scion schedule create --at' instead")
 	messageCmd.Flags().BoolVar(&msgPlain, "plain", false, "Deprecated: --plain is deprecated and will be removed")
-	messageCmd.Flags().BoolVar(&msgRaw, "raw", false, "Deprecated: use 'scion keys' instead")
+	// --raw is removed; the flag is kept (hidden) only so its use gets
+	// actionable guidance instead of an unknown-flag error. See Args.
+	messageCmd.Flags().Bool("raw", false, "Removed: use 'scion keys' instead")
 	messageCmd.Flags().BoolVar(&msgNotify, "notify", false, "Deprecated: use 'scion notifications subscribe' instead")
 	messageCmd.Flags().StringVar(&msgChannel, "channel", "", "Deprecated: use conversation references instead")
 	messageCmd.Flags().StringVar(&msgThreadID, "thread-id", "", "Deprecated: use conversation references instead")
