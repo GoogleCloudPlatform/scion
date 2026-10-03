@@ -39,6 +39,7 @@ import {
   getAgentDisplayStatus,
   isAgentRunning,
   isTerminalAvailable,
+  isEmptyPerAgentWorkspace,
   isSharedWorkspace,
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
   lifecycleActionRequestInit,
@@ -1438,16 +1439,12 @@ export class ScionPageProjectDetail extends LitElement {
       }
 
       // Pre-create data sources for file tabs (the component loads files on connect)
-      if (this.project && (!this.project.gitRemote || isSharedWorkspace(this.project))) {
+      if (this.hasProjectWorkspace()) {
         this.getTabDataSource('workspace');
       }
-      // For git-based projects (non-shared) with shared dirs, activate the first shared dir
-      if (
-        this.project &&
-        this.project.gitRemote &&
-        !isSharedWorkspace(this.project) &&
-        this.project.sharedDirs?.length
-      ) {
+      // Without a project workspace (per-agent git, empty per agent), activate
+      // the first shared dir
+      if (this.project && !this.hasProjectWorkspace() && this.project.sharedDirs?.length) {
         this.activeFileTab = this.project.sharedDirs[0].name;
         this.getTabDataSource(this.project.sharedDirs[0].name);
       }
@@ -2813,18 +2810,28 @@ export class ScionPageProjectDetail extends LitElement {
     `;
   }
 
+  /**
+   * Whether the project has a project-level workspace directory to browse:
+   * hub-native shared workspaces and shared-workspace git projects. Per-agent
+   * git projects and empty-per-agent projects (#2703 D5) have none.
+   */
+  private hasProjectWorkspace(): boolean {
+    if (!this.project) return false;
+    if (isEmptyPerAgentWorkspace(this.project)) return false;
+    return !this.project.gitRemote || isSharedWorkspace(this.project);
+  }
+
   private shouldShowFilesSection(): boolean {
     if (!this.project) return false;
-    // Hub-native projects and shared-workspace git projects always show files
-    if (!this.project.gitRemote || isSharedWorkspace(this.project)) return true;
-    // Per-agent git projects show only when shared dirs exist
+    if (this.hasProjectWorkspace()) return true;
+    // Otherwise show files only when shared dirs exist
     return (this.project.sharedDirs?.length ?? 0) > 0;
   }
 
   private getFileTabs(): Array<{ key: string; label: string }> {
     const tabs: Array<{ key: string; label: string }> = [];
-    // Hub-native projects and shared-workspace git projects get a workspace tab
-    if (this.project && (!this.project.gitRemote || isSharedWorkspace(this.project))) {
+    // Only projects with a project-level workspace get a workspace tab
+    if (this.hasProjectWorkspace()) {
       tabs.push({ key: 'workspace', label: 'workspace' });
     }
     // Add one tab per shared dir

@@ -84,6 +84,13 @@ func TestListAgentsLegacy_ResponseBodyMatchesGolden(t *testing.T) {
 		{"global filtered", "/api/v1/agents?phase=stopped&label=team=a", legacyGoldenGlobalFilteredBody},
 		{"project", "/api/v1/projects/" + projectID + "/agents", legacyGoldenProjectBody},
 		{"global invalid label", "/api/v1/agents?label=noequals", legacyGoldenInvalidLabelBody},
+		// Without sort, view values other than compact are ignored.
+		{"global view=full", "/api/v1/agents?view=full", legacyGoldenGlobalBody},
+		{"global view=bogus", "/api/v1/agents?view=bogus", legacyGoldenGlobalBody},
+		{"global filtered view=full", "/api/v1/agents?phase=stopped&label=team=a&view=full", legacyGoldenGlobalFilteredBody},
+		{"project view=full", "/api/v1/projects/" + projectID + "/agents?view=full", legacyGoldenProjectBody},
+		{"project view=bogus", "/api/v1/projects/" + projectID + "/agents?view=bogus", legacyGoldenProjectBody},
+		{"global invalid label view=bogus", "/api/v1/agents?label=noequals&view=bogus", legacyGoldenInvalidLabelBody},
 	} {
 		rec := doRequestAsUser(t, srv, user, http.MethodGet, tc.path, nil)
 		got := string(rawBodyWithoutServerTime(rec))
