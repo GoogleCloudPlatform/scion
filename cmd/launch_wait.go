@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -128,7 +130,8 @@ type launchWaitOptions struct {
 // interval until it is running (returned with a nil error), reaches error or
 // stopped (*launchFailedError), is deleted, the wait budget runs out
 // (*launchWaitTimeoutError), or ctx is cancelled (*launchWaitInterruptedError).
-// Transient fetch errors are retried. It never changes the agent.
+// Transient fetch errors (network, 5xx, 408, 429) are retried; other 4xx
+// answers end the wait with the Hub's error. It never changes the agent.
 func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Agent, error) {
 	interval := o.PollInterval
 	if interval <= 0 {
@@ -148,6 +151,9 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 		if err != nil {
 			if apiclient.IsNotFoundError(err) {
 				return true, fmt.Errorf("agent '%s' no longer exists; it was deleted while launching", o.AgentName)
+			}
+			if isTerminalFetchError(err) {
+				return true, launchFetchRejectedError(o.AgentName, err)
 			}
 			return false, nil // transient: retry on the next tick
 		}
@@ -304,6 +310,30 @@ func newLaunchFailedError(name string, a *hubclient.Agent) *launchFailedError {
 		e.Reason += ": " + a.Message
 	}
 	return e
+}
+
+// isTerminalFetchError reports whether a status fetch failed with a client
+// error that a retry will not fix: any 4xx except 408 and 429.
+func isTerminalFetchError(err error) bool {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	code := apiErr.StatusCode
+	if code < 400 || code >= 500 {
+		return false
+	}
+	return code != http.StatusRequestTimeout && code != http.StatusTooManyRequests
+}
+
+// launchFetchRejectedError reports a status fetch the Hub refused. The launch
+// itself is not affected.
+func launchFetchRejectedError(name string, err error) error {
+	hint := ""
+	if (apiclient.IsUnauthorizedError(err) || apiclient.IsForbiddenError(err)) && !config.IsHubManagedAgent() {
+		hint = "; check your Hub login with 'scion hub auth login'"
+	}
+	return fmt.Errorf("stopped waiting for agent '%s': the Hub refused the status request%s; the launch continues on the Hub: %w", name, hint, err)
 }
 
 // incompleteCreateError builds the error for a Hub 409

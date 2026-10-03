@@ -902,3 +902,61 @@ func TestFinishHubStart_JSONAttachAfterFinalizeAttaches(t *testing.T) {
 	assert.Equal(t, 1, hub.getsAfterCR)
 	assert.Empty(t, stdout, "no JSON document before the attach")
 }
+
+func TestWaitForAgentLaunch_ClientErrorStopsAtOnce(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		agentID  string
+		wantHint bool
+	}{
+		{"401 user", http.StatusUnauthorized, "", true},
+		{"403 user", http.StatusForbidden, "", true},
+		{"401 hub-managed agent", http.StatusUnauthorized, "agent-123", false},
+		{"400", http.StatusBadRequest, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shortenLaunchWaitTimings(t)
+			t.Setenv("SCION_AGENT_ID", tc.agentID)
+			apiErr := &apiclient.APIError{StatusCode: tc.status, Code: "rejected", Message: "request rejected"}
+			seq := &agentSequence{results: []func() (*hubclient.Agent, error){
+				errResult(apiErr),
+				agentResult(&hubclient.Agent{Phase: "running"}),
+			}}
+			_, err := waitForAgentLaunch(context.Background(), launchWaitOptions{
+				AgentName: "a1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 3 * time.Second,
+			})
+			require.Error(t, err)
+			assert.Equal(t, 1, seq.calls, "a client error is not retried")
+			assert.ErrorIs(t, err, apiErr, "the Hub's error is kept")
+			assert.Contains(t, err.Error(), "stopped waiting for agent 'a1': the Hub refused the status request")
+			assert.Contains(t, err.Error(), "the launch continues on the Hub")
+			if tc.wantHint {
+				assert.Contains(t, err.Error(), "scion hub auth login")
+			} else {
+				assert.NotContains(t, err.Error(), "scion hub auth login")
+			}
+			assert.Equal(t, 1, exitCodeFor(err))
+		})
+	}
+}
+
+func TestWaitForAgentLaunch_RetryableErrorsKeepPolling(t *testing.T) {
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusInternalServerError, http.StatusTooManyRequests, http.StatusRequestTimeout} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			shortenLaunchWaitTimings(t)
+			seq := &agentSequence{results: []func() (*hubclient.Agent, error){
+				errResult(&apiclient.APIError{StatusCode: status, Code: "retry", Message: "try again"}),
+				agentResult(&hubclient.Agent{Phase: "running"}),
+			}}
+			a, err := waitForAgentLaunch(context.Background(), launchWaitOptions{
+				AgentName: "a1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 3 * time.Second,
+			})
+			require.NoError(t, err)
+			require.NotNil(t, a)
+			assert.Equal(t, "running", a.Phase)
+			assert.Equal(t, 2, seq.calls)
+		})
+	}
+}
