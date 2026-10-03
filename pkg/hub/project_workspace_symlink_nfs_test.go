@@ -301,8 +301,9 @@ func TestSymlinkNFS_Delete(t *testing.T) {
 // Because the victim side is a fully-formed, real leaf, a successful open
 // (a 200, or a removed victim file) is possible in principle -- only the
 // intended protection (the dev/ino check, or DeleteSharedDir's fd walk)
-// prevents it. Each test also asserts the loop actually reached the real
-// leaf at least once, so a protection that accidentally refused EVERYTHING
+// prevents it. Each test also asserts the real leaf was actually reached at
+// least once (the PUT test does so deterministically, with no swap in
+// flight; see its doc comment), so a protection that accidentally refused EVERYTHING
 // (which would trivially "pass" by never touching the victim either)
 // couldn't hide behind these assertions.
 
@@ -311,6 +312,7 @@ type nfsRenameExchangeRace struct {
 	pid           string // hostBase/projects/<pid>: real directory, holds the actual leaf
 	alt           string // hostBase/projects/alt: symlink to victim
 	victim        string
+	dirName       string // the shared dir declared on the project; its leaf is <pid>/shared-dirs/<dirName>
 	filesURL      string
 	sharedDirsURL string
 }
@@ -346,6 +348,7 @@ func setupNFSRenameExchangeRace(t *testing.T, dirName string) *nfsRenameExchange
 		pid:           pid,
 		alt:           alt,
 		victim:        victim,
+		dirName:       dirName,
 		filesURL:      fmt.Sprintf("/api/v1/projects/%s/shared-dirs/%s/files", project.ID, dirName),
 		sharedDirsURL: fmt.Sprintf("/api/v1/projects/%s/shared-dirs", project.ID),
 	}
@@ -414,12 +417,22 @@ func TestRenameExchangeRaceNFS_Get_NeverLeaksVictim(t *testing.T) {
 	victimTree.assertIntact(t, before)
 }
 
+// TestRenameExchangeRaceNFS_Put_NeverWritesVictim: a racing PUT holds the
+// path open across several resolution steps, so under a fast swapper the
+// fraction of PUTs that land between two swaps depends heavily on scheduler
+// timing and can legitimately be zero. The proof that a PUT reaches the real
+// leaf is therefore taken deterministically, with no swap in flight, both
+// before the race and after it (once the real leaf is back at race.pid), and
+// checked on disk. The racing loop in between is what exercises the
+// never-writes-the-victim property; its success count is logged only.
 func TestRenameExchangeRaceNFS_Put_NeverWritesVictim(t *testing.T) {
 	race := setupNFSRenameExchangeRace(t, "scratch")
 	race.skipIfRenameExchangeUnsupported(t)
 
 	victimTree := &outsideTree{dir: race.victim}
 	before := victimTree.snapshot(t)
+
+	race.requirePutReachesRealLeaf(t, "written before the race")
 
 	stop, swaps := race.startSwapper()
 	const iterations = 1000
@@ -433,12 +446,43 @@ func TestRenameExchangeRaceNFS_Put_NeverWritesVictim(t *testing.T) {
 		}
 	}
 	stop()
+	t.Logf("swaps=%d putsOK=%d (racing PUT successes are timing-dependent and not asserted)", swaps.Load(), puts)
 
-	t.Logf("swaps=%d putsOK=%d", swaps.Load(), puts)
-	assert.Positive(t, puts, "the race must actually have reached the real leaf at least once, or this test proves nothing")
+	race.restoreRealOrientation(t)
+	race.requirePutReachesRealLeaf(t, "written after the race")
+
 	victimTree.assertIntact(t, before)
-	_, err := os.Lstat(filepath.Join(race.victim, "shared-dirs", "scratch", "planted.txt"))
+	_, err := os.Lstat(filepath.Join(race.victim, "shared-dirs", race.dirName, "planted.txt"))
 	assert.True(t, os.IsNotExist(err), "the victim must never receive the planted file")
+}
+
+// restoreRealOrientation puts the real leaf back at r.pid (and the victim
+// symlink back at r.alt) after a swapper has stopped in either orientation.
+func (r *nfsRenameExchangeRace) restoreRealOrientation(t *testing.T) {
+	t.Helper()
+	if !realLeafContentAt(r.pid) {
+		require.NoError(t, r.trySwap(), "swap back to the original orientation")
+	}
+	require.True(t, realLeafContentAt(r.pid), "the real leaf must be at the project path")
+	info, err := os.Lstat(r.alt)
+	require.NoError(t, err)
+	require.NotZero(t, info.Mode()&os.ModeSymlink, "the victim symlink must be at the alt path")
+}
+
+// requirePutReachesRealLeaf issues one PUT of planted.txt with no swap in
+// flight and requires that it succeeds and that the content lands in the
+// real leaf under r.pid. This is the deterministic proof that the protection
+// does not refuse every PUT (which would trivially never write the victim).
+func (r *nfsRenameExchangeRace) requirePutReachesRealLeaf(t *testing.T, content string) {
+	t.Helper()
+	rec := doRequest(t, r.srv, http.MethodPut, r.filesURL+"/planted.txt",
+		ProjectWorkspaceWriteRequest{Content: content})
+	assertNotLeaked(t, rec)
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a PUT with no swap in flight must reach the real leaf, or this test proves nothing; body: %s", rec.Body.String())
+	got, err := os.ReadFile(filepath.Join(r.pid, "shared-dirs", r.dirName, "planted.txt"))
+	require.NoError(t, err, "the PUT must have written into the real leaf")
+	require.Equal(t, content, string(got))
 }
 
 // realLeafContentAt reports whether path is currently a REAL directory (not

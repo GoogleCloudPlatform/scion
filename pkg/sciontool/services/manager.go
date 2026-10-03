@@ -179,11 +179,12 @@ func New(gracePeriod time.Duration) *Manager {
 // closed before Start returns — a dropped service never reaches m.services,
 // so Manager.Shutdown would otherwise never close them.
 //
-// requirePrivilegeDrop is the caller's own opts.RequirePrivilegeDrop; see
-// openLogs' doc comment for what it gates there, and managedService.start's
-// Credential block for the exec-time fail-closed guarantee it gates here:
-// a service whose uid/gid do not both pass the Credential predicate returns
-// ErrPrivilegeDropRequired instead of starting with no Credential.
+// requirePrivilegeDrop is the caller's own opts.RequirePrivilegeDrop (true
+// only for substrate); see openLogs' doc comment for what it gates there,
+// and managedService.start's Credential block for the exec-time fail-closed
+// guarantee it gates here: a service whose uid/gid do not both pass the
+// Credential predicate returns ErrPrivilegeDropRequired instead of starting
+// with no Credential.
 func (m *Manager) Start(ctx context.Context, specs []api.ServiceSpec, uid, gid int, username string, requirePrivilegeDrop bool) error {
 	home := os.Getenv("HOME")
 	scionDir := filepath.Join(home, ".scion")
@@ -543,18 +544,17 @@ func (m *Manager) monitorService(ctx context.Context, svc *managedService) {
 // symlink-safe path) with no legitimate case that depends on the old,
 // symlink-following behaviour.
 //
-// requirePrivilegeDrop (the caller's own opts.RequirePrivilegeDrop)
-// additionally gates a hard-link guard: when true, a log path that resolves
-// to a regular file with more than one hard link is also refused. A
-// workload process can pre-plant a hard link to a file it does not own
-// (hard-linking only needs write access to the directory the link is
-// created in, not ownership of the target), so without this guard root
-// could be tricked into opening and appending to an unrelated (possibly
-// root-owned) file that merely happens to still be a "regular file". This
-// is new, security-motivated behaviour, not a compatibility fix, so it is
-// scoped to the enforced privilege-drop mode: a legitimately hard-linked
-// log file under an unenforced container's home directory must keep
-// working.
+// requirePrivilegeDrop (the caller's own opts.RequirePrivilegeDrop, true
+// only for substrate) additionally gates a hard-link guard: when true, a
+// log path that resolves to a regular file with more than one hard link is
+// also refused. A workload process can pre-plant a hard link to a file it
+// does not own (hard-linking only needs write access to the directory the
+// link is created in, not ownership of the target), so without this guard
+// root could be tricked into opening and appending to an unrelated
+// (possibly root-owned) file that merely happens to still be a "regular
+// file". This is new, security-motivated behaviour, not a compatibility
+// fix, so it is scoped to substrate: a legitimately hard-linked log file
+// under a non-substrate container's home directory must keep working.
 func (svc *managedService) openLogs(logDirFd int, requirePrivilegeDrop bool) error {
 	flags := syscall.O_APPEND | syscall.O_CREAT | syscall.O_WRONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
 

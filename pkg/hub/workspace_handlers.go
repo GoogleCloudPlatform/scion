@@ -670,8 +670,9 @@ func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.A
 		return
 	}
 
-	// Only applies to hub-managed and shared-workspace projects
-	if project.GitRemote != "" && !project.IsSharedWorkspace() {
+	// Only applies to hub-managed and shared-workspace projects. Empty-per-agent
+	// projects have no shared project workspace to keep in sync (design #2703).
+	if !syncsHubProjectWorkspace(project) {
 		return
 	}
 

@@ -23,6 +23,7 @@
  */
 
 import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest';
+import { setPreferredTimeZone } from '../../utils/time.js';
 
 // ---------------------------------------------------------------------------
 // Mock data
@@ -368,6 +369,28 @@ describe('admin-role-detail', () => {
     // Should show 2 bindings for role-custom-1, not 3
     const bindingCount = el.shadowRoot?.querySelector('.binding-count');
     expect(bindingCount?.textContent?.trim()).toContain('2 binding');
+  });
+
+  it('renders binding creation times in the display zone, 24-hour, with a zone label', async () => {
+    setPreferredTimeZone('Asia/Tokyo');
+    try {
+      const handler = createFetchHandler({
+        role: CUSTOM_ROLE,
+        // Midnight in Tokyo (UTC+9); the browser zone is pinned to UTC.
+        bindings: [{ ...BINDINGS[0], createdAt: '2026-08-09T15:00:00Z' }],
+      });
+      el = await createElement(handler);
+      const tabs = el.shadowRoot?.querySelectorAll('sl-tab');
+      [...(tabs ?? [])].find((t) => t.textContent?.includes('Bindings'))?.click();
+      await new Promise((r) => setTimeout(r, 50));
+
+      const cells = [...(el.shadowRoot?.querySelectorAll('td.hide-mobile') ?? [])].map((c) =>
+        c.textContent?.trim()
+      );
+      expect(cells).toContain('Aug 10, 2026, 00:00 (Asia/Tokyo)');
+    } finally {
+      setPreferredTimeZone('');
+    }
   });
 
   it('shows empty state when no bindings exist', async () => {

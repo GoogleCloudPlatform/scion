@@ -31,7 +31,9 @@
 import { LitElement, html, css, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
+import { formatInstantWithZone } from '../../utils/time.js';
 import { srOnlyStyles } from '../shared/styles.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 // ---------------------------------------------------------------------------
 // Types — mirror pkg/hub/admin_experiments.go response shapes exactly.
@@ -67,18 +69,11 @@ function issueUrl(issue: string): string | null {
   return m ? `https://github.com/${m[1]}/issues/${m[2]}` : null;
 }
 
-/**
- * Formats an ISO timestamp for display (e.g. "10/1/2026, 2:36:56 AM"),
- * falling back to the raw string if it doesn't parse as a date. The full
- * ISO value is always also shown in a `title` attribute by the caller.
- */
-function formatAttributionTime(iso: string): string {
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
-}
-
 @customElement('scion-admin-experiments')
 export class ScionAdminExperiments extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /** Set by the parent tab panel; the component fetches on the first `true`. */
   @property({ type: Boolean }) active = false;
 
@@ -317,7 +312,9 @@ export class ScionAdminExperiments extends LitElement {
     if (!this.updatedAt) return nothing;
     return html`<p class="attribution">
       Last changed by ${this.updatedBy || 'unknown'} at
-      <span title=${this.updatedAt}>${formatAttributionTime(this.updatedAt)}</span>
+      <span title=${this.updatedAt}
+        >${formatInstantWithZone(this.updatedAt) || this.updatedAt}</span
+      >
     </p>`;
   }
 

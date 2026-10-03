@@ -42,7 +42,7 @@ permissions). Available scopes:
 | `agent:delete` | Delete agents |
 | `agent:message` | Send messages to agents |
 | `agent:attach` | Attach to agent sessions (terminal, exec, env, reset-auth) — your own agents and their descendants |
-| `agent:port_access` | Access agent forwarded ports — your own agents and their descendants |
+| `agent:port_access` | Access agent forwarded ports — your own agents and their descendants, plus agents in projects where your role grants `agent.port_access` (project owners and admins) |
 | `agent:manage` | All agent scopes except `agent:attach` and `agent:port_access` (convenience alias) |
 
 In addition to project and agent scopes, Scion supports UAT scopes for 7 other resource types: `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. Each resource type provides a `*:manage` convenience alias (e.g., `skill:manage`, `template:manage`) that grants all available actions for that resource.
@@ -67,8 +67,10 @@ authority on the specific target, every time the token is used.
 
 This matters most for `agent:attach` and `agent:port_access`: you may select either scope for a
 project before you have created a single agent in it. The token gains no access from selection
-alone — each later attach or port request is independently checked against the specific agent,
-and succeeds only for your own agents and their descendants. Losing project access (for example,
+alone — each later attach or port request is independently checked against the specific agent.
+An attach request succeeds only for your own agents and their descendants. A port request also
+succeeds for any agent in a project where your role grants `agent.port_access`, which the
+built-in `project-owner` and `project-admin` roles do. Losing project access (for example,
 being removed from the project) makes every request against that project fail immediately, even
 though the token itself is still otherwise valid.
 
@@ -86,6 +88,11 @@ Or via the API:
 curl -H "Authorization: Bearer $SCION_HUB_TOKEN" \
      "https://scion.example.com/api/v1/auth/scopes?projectId=<project-id>"
 ```
+
+Each scope in the response reports `eligible` and, when it is not, a machine-readable
+`eligibilityReason` (for an alias such as `agent:manage`, also which member scopes are
+ineligible). The **Create Token** form in the web UI uses the same information: once you pick a
+project, scopes you cannot select are shown with the reason.
 
 This answers only "may I select this restriction" — it never lists which agents or other targets
 the resulting token could reach. If you request eligibility for a project you cannot access, or
@@ -119,9 +126,12 @@ The purpose and labels are descriptive only: they grant no permissions and canno
 after the token is created. The Hub records them, along with the token's identity, in request
 logs, authorization decisions and audit records, so you can tell which automation made a call.
 
-The command prints the token value **once**. Store it securely — it cannot be retrieved later. If
-a requested scope is denied, the error names the scope and the reason; run `scion hub token
-scopes --project <project>` to see the full picture before retrying.
+The command prints the token value **once**. Store it securely — it cannot be retrieved later.
+Each requested scope is checked against your live authority in the project before the token is
+written. If a requested scope is denied, the Hub returns `403` with error code
+`scope_violation`, with `details.selector` and `details.reason` naming the scope and the reason;
+nothing is created. Run `scion hub token scopes --project <project>` to see the full picture
+before retrying.
 
 ## Using a token
 

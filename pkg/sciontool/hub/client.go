@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/user"
@@ -37,6 +38,7 @@ import (
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
@@ -165,6 +167,7 @@ type Client struct {
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
 	oidcSource     transportauth.TokenSource // transport-layer OIDC token source (nil = disabled)
+	oidcMode       transportauth.HeaderMode  // header carrying the transport token
 	// tokenChownUID and tokenChownGID are the ownership StartTokenRefresh
 	// applies (via WriteTokenFile) to the token file after every refresh.
 	// Guarded by tokenMu alongside token itself. Set once, before the
@@ -780,26 +783,53 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	// Process the generalized tokens[] array if present.
 	// Apply each entry to the appropriate subsystem by layer/type.
 	if len(result.Tokens) > 0 {
-		c.applyRefreshTokens(result.Tokens)
+		c.applyRefreshTokens(result.Tokens, chownUID, chownGID)
 	}
 
 	return result.Token, expiresAt, nil
 }
 
 // applyRefreshTokens processes the tokens[] array from a refresh response,
-// applying each entry to the appropriate subsystem.
-func (c *Client) applyRefreshTokens(tokens []RefreshTokenEntry) {
+// applying each entry to the appropriate subsystem. A refreshed transport
+// token is also persisted to the transport token file (owned by uid:gid
+// when uid > 0) so that every other hub client in the container — hooks,
+// sciontool subcommands, the scion CLI — uses it instead of the original
+// injected value, which expires after about an hour.
+func (c *Client) applyRefreshTokens(tokens []RefreshTokenEntry, uid, gid int) {
 	for _, entry := range tokens {
 		switch {
 		case entry.Layer == "transport" && entry.Type == "google_oidc":
-			// Update the OIDC transport's token source
+			if entry.Value == "" {
+				continue
+			}
+			entryExpiry := time.Now().Add(time.Duration(entry.ExpiresIn) * time.Second)
+			// Update the OIDC transport's token source and, when that
+			// source is hub-provided, share the value through the file.
+			// Clients without a hub-provided source (none, or the
+			// metadata server) leave the file alone.
 			if c.oidcSource != nil {
-				entryExpiry := time.Now().Add(time.Duration(entry.ExpiresIn) * time.Second)
 				c.oidcSource.SetToken(entry.Value, entryExpiry)
+			}
+			if !c.hasHubProvidedTransport() {
+				continue
+			}
+			if err := WriteTransportTokenFile(entry.Value, uid, gid); err != nil {
+				log.Error("Failed to persist refreshed transport token: %v", err)
 			}
 			// app/scion_access is already handled via the legacy token field above
 		}
 	}
+}
+
+// hasHubProvidedTransport reports whether the client's transport source is
+// a hub-provided token (injected or file-backed), as opposed to none or a
+// self-refreshing metadata source.
+func (c *Client) hasHubProvidedTransport() bool {
+	switch c.oidcSource.(type) {
+	case *transportauth.InjectedSource, *transportauth.FileSource:
+		return true
+	}
+	return false
 }
 
 // adjustRefreshForTransportTokens checks if the OIDC source has a shorter
@@ -811,9 +841,11 @@ func (c *Client) adjustRefreshForTransportTokens(proposed time.Time) time.Time {
 		return proposed
 	}
 
-	// MetadataSource self-refreshes; only InjectedSource needs refresh
-	// driven from here.
-	if _, ok := c.oidcSource.(*transportauth.InjectedSource); !ok {
+	// MetadataSource self-refreshes; only hub-provided (injected or
+	// file-backed) sources need refresh driven from here.
+	switch c.oidcSource.(type) {
+	case *transportauth.InjectedSource, *transportauth.FileSource:
+	default:
 		return proposed
 	}
 
@@ -1240,7 +1272,8 @@ var fchownFn = syscall.Fchown
 // enforces InitRunOptions.RequirePrivilegeDrop always has an actual,
 // less-privileged workload user to defend the token file against, and
 // calls EnforceTokenFileOwnerChecks(true) once, early, with that same
-// value (see InitRunOptions.RequirePrivilegeDrop). Gating it here, rather than
+// value; substrate is the current example (see
+// InitRunOptions.RequirePrivilegeDrop). Gating it here, rather than
 // proving byte-identical behaviour across every other token-provisioning
 // path, makes the default case provably unchanged: the check simply never
 // runs unless this is called with true.
@@ -1533,6 +1566,93 @@ func WriteTokenFile(token string, uid, gid int) error {
 	return nil
 }
 
+// TransportTokenFilePath returns the path of the transport token file, a
+// sibling of the agent credential file. Like TokenFilePath it resolves to
+// the scion user's home so that root (sciontool init) and the scion user
+// (child processes) agree on the same path.
+func TransportTokenFilePath() string {
+	return filepath.Join(tokenHomeResolver(), ".scion", transportauth.TransportTokenFileName)
+}
+
+// WriteTransportTokenFile persists the hub-provided transport token to the
+// transport token file, mode 0600, through the same fchown-then-rename
+// path WriteTokenFile uses. uid <= 0 skips the chown.
+func WriteTransportTokenFile(token string, uid, gid int) error {
+	if testing.Testing() && !tokenHomeOverridden {
+		panic("scion/hub: WriteTransportTokenFile called during a test without SetTokenHome(); " +
+			"call SetTokenHome(t.TempDir()) so tests never overwrite the real ~/.scion/transport-token")
+	}
+
+	path := TransportTokenFilePath()
+	d, err := dirfd.EnsureDirNoFollow(filepath.Dir(path), 0700)
+	if err != nil {
+		return fmt.Errorf("failed to create transport token file directory: %w", err)
+	}
+	_ = d.Close()
+
+	if err := WriteFileNoFollowChown(path, []byte(token), tokenFileMode, uid, gid); err != nil {
+		return fmt.Errorf("failed to write transport token file: %w", err)
+	}
+	return nil
+}
+
+// SeedTransportTokenFile writes the injected bootstrap transport token to
+// the transport token file unless the file already holds a token that
+// expires later (for example after an in-place container restart, where
+// the bootstrap value is older than the last refresh). Returns the path.
+func SeedTransportTokenFile(token string, uid, gid int) (string, error) {
+	path := TransportTokenFilePath()
+	if existing, err := readTransportTokenFile(path); err == nil {
+		existing = strings.TrimSpace(existing)
+		if existing != "" {
+			fileExp, ferr := transportauth.ParseTokenExpiry(existing)
+			envExp, eerr := transportauth.ParseTokenExpiry(token)
+			if ferr == nil && eerr == nil && fileExp.After(envExp) {
+				return path, nil
+			}
+		}
+	}
+	return path, WriteTransportTokenFile(token, uid, gid)
+}
+
+// RemoveTransportTokenFile removes the transport token file, resolving its
+// parent directories without following symlinks. A missing file is not an
+// error. It returns true if a file was removed.
+func RemoveTransportTokenFile() (bool, error) {
+	if testing.Testing() && !tokenHomeOverridden {
+		panic("scion/hub: RemoveTransportTokenFile called during a test without SetTokenHome()")
+	}
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(TransportTokenFilePath())
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+	if err := dirfd.UnlinkAt(dirFd, leaf); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// readTransportTokenFile reads the transport token file through the same
+// symlink-safe, single-link-regular-file guard ReadTokenFile uses, since
+// sciontool init (root) reads it from a directory the workload owns.
+//
+// Under go test without SetTokenHome it refuses to read the default path,
+// because the token home resolves to the real agent user's home (not
+// $HOME) and tests must never pick up a live transport token.
+func readTransportTokenFile(path string) (string, error) {
+	if testing.Testing() && !tokenHomeOverridden && path == TransportTokenFilePath() {
+		return "", fmt.Errorf("scion/hub: refusing to read %s during a test without SetTokenHome()", path)
+	}
+	return readTokenFileGuarded(path)
+}
+
 // ChownTokenFile fixes the ownership of an already-written token file to
 // uid:gid — used when the token file was written by another process (the
 // host-side agent manager, before this container started) and this
@@ -1548,11 +1668,11 @@ func WriteTokenFile(token string, uid, gid int) error {
 // chown is fchown on that open fd, never a path-based chown that a symlink
 // swapped in afterwards could redirect.
 //
-// When EnforceTokenFileOwnerChecks(true) has been called, it additionally
-// requires the file's current owner to be root or the containing
-// directory's own owner before chowning it — the same rule
+// When EnforceTokenFileOwnerChecks(true) has been called (substrate only),
+// it additionally requires the file's current owner to be root or the
+// containing directory's own owner before chowning it — the same rule
 // readTokenFileGuarded applies, gated the same way and for the same
-// reason: it isn't provably safe to require on every caller's
+// reason: it isn't provably safe to require on every runtime's
 // token-provisioning path, only on the one that requires privilege drop.
 func ChownTokenFile(uid, gid int) error {
 	path := TokenFilePath()
@@ -1621,8 +1741,8 @@ func ReadTokenFile() string {
 // hardlink to some unrelated file (Nlink>1) is refused instead of read.
 // This check always applies, on every runtime.
 //
-// When EnforceTokenFileOwnerChecks(true) has been called (see its doc
-// comment), it additionally requires the owner to be root or
+// When EnforceTokenFileOwnerChecks(true) has been called (substrate only —
+// see its doc comment), it additionally requires the owner to be root or
 // the containing directory's own owner, the only two legitimate states for
 // the token file: the host-side agent manager writes it before the
 // container starts (commonly as root or whatever uid the host process runs

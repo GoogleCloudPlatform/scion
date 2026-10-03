@@ -227,7 +227,14 @@ func checkTransportAuth() transportauth.TokenSource {
 		return nil
 	}
 
-	switch src.(type) {
+	switch s := src.(type) {
+	case *transportauth.FileSource:
+		st := s.Status()
+		if st.Expiry.IsZero() {
+			fmt.Printf("[ OK ] Transport Auth: injected (source: %s)\n", st.InUse)
+		} else {
+			fmt.Printf("[ OK ] Transport Auth: injected (source: %s, expires %s)\n", st.InUse, st.Expiry.Format(time.RFC3339))
+		}
 	case *transportauth.InjectedSource:
 		expiry := src.Expiry()
 		if expiry.IsZero() {

@@ -64,6 +64,8 @@ func scrubHubEnv(t *testing.T) {
 		EnvHubToken,
 		EnvAgentID,
 		EnvAgentMode,
+		transportauth.EnvTransportToken,
+		transportauth.EnvTransportTokenFile,
 	} {
 		t.Setenv(key, "")
 	}
@@ -1131,7 +1133,7 @@ func TestReadTokenFile_Hardening(t *testing.T) {
 // TestEnforceTokenFileOwnerChecks_DefaultIsOff proves ReadTokenFile and
 // ChownTokenFile work against a host-written token file without ever
 // calling EnforceTokenFileOwnerChecks: the owner check it gates defaults
-// to off, which is the state every unenforced caller runs in.
+// to off, which is the state every non-substrate runtime runs in.
 func TestEnforceTokenFileOwnerChecks_DefaultIsOff(t *testing.T) {
 	home := t.TempDir()
 	cleanup := SetTokenHome(home)
@@ -1146,11 +1148,11 @@ func TestEnforceTokenFileOwnerChecks_DefaultIsOff(t *testing.T) {
 }
 
 // TestEnforceTokenFileOwnerChecks_TogglesWithoutBreakingTheLegitimateCase
-// proves turning the owner check on (an enforced caller's path) doesn't
+// proves turning the owner check on (the substrate-only path) doesn't
 // disturb the always-on checks (symlink, hardlink, FIFO, directory
 // refusals — none of which depend on the owner) and still accepts the
-// legitimate same-owner case, which is what a real enforced-caller token
-// file looks like once the host has written it or ChownTokenFile has run.
+// legitimate same-owner case, which is what a real substrate token file
+// looks like once the host has written it or ChownTokenFile has run.
 // Genuinely mismatched ownership can't be constructed without root (chown
 // to an arbitrary uid requires it), so that specific branch is exercised
 // by code reading rather than by a non-root test — the same limitation
