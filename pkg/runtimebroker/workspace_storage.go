@@ -15,6 +15,8 @@
 package runtimebroker
 
 import (
+	"strings"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -31,6 +33,8 @@ import (
 // share is described. shareHealthy reports the last health check of a share
 // by ID; nil reports the share as unhealthy.
 func BuildWorkspaceStorageDescriptor(backend string, nfs *config.V1NFSConfig, shareHealthy func(shareID string) bool) *api.BrokerWorkspaceStorage {
+	// Backend names are case-insensitive, as in config.ApplyNFSDefaults.
+	backend = strings.ToLower(strings.TrimSpace(backend))
 	if backend == "" {
 		backend = api.WorkspaceStorageBackendLocal
 	}
@@ -39,10 +43,15 @@ func BuildWorkspaceStorageDescriptor(backend string, nfs *config.V1NFSConfig, sh
 		return desc
 	}
 	share := nfs.Shares[0]
+	// An unset sub-path root resolves to "projects", as in nfsBackend.
+	subPathRoot := nfs.SubPathRoot
+	if subPathRoot == "" {
+		subPathRoot = "projects"
+	}
 	desc.NFS = &api.BrokerNFSWorkspaceStorage{
 		Server:      share.Server,
 		Export:      share.Export,
-		SubPathRoot: nfs.SubPathRoot,
+		SubPathRoot: subPathRoot,
 		Healthy:     shareHealthy != nil && shareHealthy(share.ID),
 	}
 	return desc
