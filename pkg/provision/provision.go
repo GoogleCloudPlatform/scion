@@ -2110,12 +2110,12 @@ func SafeGitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd,
 		return nil, fmt.Errorf("%w: %s", ErrCommondirPresent, commondirFile)
 	}
 
-	hardened := []string{
+	safeArgs := []string{
 		"-c", "core.fsmonitor=false",
 		"-c", "core.fsmonitor=",
 		"-c", "core.pager=cat",
 	}
-	fullArgs := append(hardened, args...)
+	fullArgs := append(safeArgs, args...)
 	cmd := exec.CommandContext(ctx, "git", fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_COMMON_DIR="+filepath.Join(dir, ".git"))
