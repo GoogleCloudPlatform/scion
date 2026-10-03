@@ -21,8 +21,10 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -826,8 +828,8 @@ func contextWithFlightCause(ctx context.Context, f *flightCause) context.Context
 }
 
 // recordAttemptCause records cause as the latest attempt failure of the
-// shared fetch running under ctx, if any. cause.msg may reach a caller, so
-// it must not carry credential material.
+// shared fetch running under ctx, if any; a nil cause clears it. cause.msg
+// may reach a caller, so it must not carry credential material.
 func recordAttemptCause(ctx context.Context, cause *githubResolveError) {
 	if f, ok := ctx.Value(flightCauseKey{}).(*flightCause); ok {
 		f.set(cause)
@@ -853,6 +855,21 @@ func (c *GitHubResolutionCache) beginFlightCause(flightKey string) (*flightCause
 		}
 		c.causeMu.Unlock()
 	}
+}
+
+// usableRetryAfter reports whether v is worth passing on to a caller as a
+// Retry-After: a positive number of seconds or an HTTP date. A "0" (or an
+// unparseable value) tells the caller nothing.
+func usableRetryAfter(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return false
+	}
+	if secs, err := strconv.ParseInt(v, 10, 64); err == nil {
+		return secs > 0
+	}
+	_, err := http.ParseTime(v)
+	return err == nil
 }
 
 // lastFlightCause returns the latest attempt failure recorded by the flight
@@ -982,7 +999,9 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 			}
 			if last := c.lastFlightCause(flightKey); last != nil {
 				werr.code = last.code
-				werr.retryAfter = last.retryAfter
+				if usableRetryAfter(last.retryAfter) {
+					werr.retryAfter = last.retryAfter
+				}
 				werr.msg = fmt.Sprintf("timed out waiting for GitHub skill resolution of %s, still retrying after: %s", logRef, last.msg)
 			}
 			return ResolvedSkill{}, fmt.Errorf("%w: %w", werr, ctx.Err())

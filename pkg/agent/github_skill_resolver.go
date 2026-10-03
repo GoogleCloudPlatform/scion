@@ -1185,7 +1185,8 @@ func (r *GitHubSkillResolver) doOnce(ctx context.Context, req *http.Request, att
 //
 // Each failed attempt is also recorded as the latest cause of the shared
 // fetch running under ctx (see recordAttemptCause), so a caller that stops
-// waiting for that fetch on its own deadline can report it.
+// waiting for that fetch on its own deadline can report it. A non-retryable
+// response clears it again: the fetch has moved past that failure.
 func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request, attemptTimeout time.Duration, token string) (*http.Response, error) {
 	identity := GitHubCooldownIdentity(token)
 	var lastResp *http.Response
@@ -1287,6 +1288,9 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 		}
 
 		if !isRetryableResponse(resp) {
+			// This request got its answer, so the fetch is no longer
+			// retrying past any earlier failure.
+			recordAttemptCause(ctx, nil)
 			return resp, nil
 		}
 

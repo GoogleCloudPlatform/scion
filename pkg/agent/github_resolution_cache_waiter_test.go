@@ -180,3 +180,101 @@ func TestGitHubSkillResolver_WaiterReportsUpstreamCause(t *testing.T) {
 		t.Errorf("message %q does not name the last failure", e.Message)
 	}
 }
+
+// TestGitHubSkillResolver_WaiterAfterRecoveryIsTimeout checks that a cause
+// recorded for a request that later succeeded is not reported: the commit
+// lookup fails once with a 503 and then answers, the listing that follows
+// is slow, and a caller whose deadline expires during the listing gets a
+// plain timeout, not the earlier 503.
+func TestGitHubSkillResolver_WaiterAfterRecoveryIsTimeout(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+	var commitCalls atomic.Int32
+	mux.HandleFunc("/repos/acme/flaky/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		if commitCalls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(strings.Repeat("a", 40)))
+	})
+	listing := make(chan struct{}, 1)
+	release := make(chan struct{})
+	mux.HandleFunc("/repos/acme/flaky/contents/skills/s", func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case listing <- struct{}{}:
+		default:
+		}
+		<-release
+		http.Error(w, "gone", http.StatusNotFound)
+	})
+	// Registered after the server's own cleanup, so it runs first.
+	t.Cleanup(func() { close(release) })
+
+	cache, err := newTestResolutionCache(t.TempDir(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newTestGitHubResolver(server)
+	r.resolutionCache = cache
+
+	// Expire the caller's deadline only once the fetch is in the listing,
+	// past the recovered commit lookup.
+	dctx := &deadlineOnSignal{Context: context.Background(), done: make(chan struct{})}
+	go func() {
+		<-listing
+		close(dctx.done)
+	}()
+
+	res, err := r.Resolve(dctx, []api.SkillReference{{URI: "gh://acme/flaky/s@main"}}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(res.Errors) != 1 {
+		t.Fatalf("errors = %+v, want one", res.Errors)
+	}
+	e := res.Errors[0]
+	if e.Code != SkillErrCodeTimeout || e.RetryAfter != "" {
+		t.Errorf("error = %+v, want a timeout with no Retry-After", e)
+	}
+	if strings.Contains(e.Message, "503") {
+		t.Errorf("message %q reports the recovered 503", e.Message)
+	}
+	if got := commitCalls.Load(); got != 2 {
+		t.Errorf("commit lookups = %d, want 2 (one 503, one success)", got)
+	}
+}
+
+// deadlineOnSignal is a context that reports DeadlineExceeded once done is
+// closed, so a test can expire a caller's deadline at a chosen point.
+type deadlineOnSignal struct {
+	context.Context
+	done chan struct{}
+}
+
+func (d *deadlineOnSignal) Done() <-chan struct{} { return d.done }
+
+func (d *deadlineOnSignal) Err() error {
+	select {
+	case <-d.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func TestUsableRetryAfter(t *testing.T) {
+	cases := map[string]bool{
+		"":                              false,
+		"0":                             false,
+		"-3":                            false,
+		"soon":                          false,
+		"1":                             true,
+		" 30 ":                          true,
+		"Wed, 21 Oct 2015 07:28:00 GMT": true,
+	}
+	for v, want := range cases {
+		if got := usableRetryAfter(v); got != want {
+			t.Errorf("usableRetryAfter(%q) = %v, want %v", v, got, want)
+		}
+	}
+}
