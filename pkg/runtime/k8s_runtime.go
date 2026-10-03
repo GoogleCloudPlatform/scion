@@ -1794,10 +1794,31 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 	// The agent container's workspace mounts and working directory. The
-	// provisioning init container always mounts workspaceVolumeMount (the
-	// project's shared checkout on NFS).
+	// provisioning init container mounts initWorkspaceMount: the project's
+	// shared checkout on NFS, or the agent's directory in clone-per-agent
+	// mode.
 	agentVolumeMounts := []corev1.VolumeMount{workspaceVolumeMount}
 	agentWorkingDir := "/workspace"
+	initWorkspaceMount := workspaceVolumeMount
+	nfsAgentDir := config.NFSAgentDirName != "" && nfsInitContainerInjected(config)
+	if nfsAgentDir && nfsWorktree {
+		return nil, fmt.Errorf("an agent cannot use both a worktree and its own workspace on the NFS workspace")
+	}
+	if nfsAgentDir {
+		// Clone-per-agent: the agent's own workspace at
+		// <project>/agents/<agent name>/workspace, mounted at /workspace as
+		// on the local runtimes; the agent container clones into it. The
+		// init container mounts the agent's directory, so its lock and
+		// sentinel stay outside the workspace.
+		agentDirSubPath, err := NFSAgentDirSubPath(config.NFSSubPath, config.NFSAgentDirName)
+		if err != nil {
+			return nil, err
+		}
+		agentVolumeMounts = []corev1.VolumeMount{
+			{Name: "workspace", MountPath: "/workspace", SubPath: filepath.Join(agentDirSubPath, provision.AgentWorkspaceDir)},
+		}
+		initWorkspaceMount = corev1.VolumeMount{Name: "workspace", MountPath: "/workspace", SubPath: agentDirSubPath}
+	}
 	if nfsWorktree {
 		// Same layout as the local runtimes: the shared .git at
 		// /repo-root/.git and the agent's worktree at
@@ -1890,7 +1911,15 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// provisions, because each agent adds its own worktree; the
 		// provisioning lock on the export serializes the clone and every
 		// worktree add.
-		waitOnly := config.nfsProvisionLockLost && !nfsWorktree
+		// The same holds in clone-per-agent mode, where each pod prepares
+		// its own agent directory.
+		waitOnly := config.nfsProvisionLockLost && !nfsWorktree && !nfsAgentDir
+		// Clone-per-agent: the agent container clones, so the init
+		// container gets no clone settings.
+		initGitClone := config.GitCloneForInit
+		if nfsAgentDir {
+			initGitClone = nil
+		}
 		var initCommand []string
 		if waitOnly {
 			// Lock loser: wait for the sentinel written by the winning node's
@@ -1904,7 +1933,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			// RunAsUser the agent runs as, gid is the NFS fsGroup. The
 			// configured NFS uid is not applied to RunAsUser, so it is not
 			// passed here either.
-			initCommand = nfsProvisionCommand(config.GitCloneForInit, containerUID, fsGroupGID)
+			initCommand = nfsProvisionCommand(initGitClone, containerUID, fsGroupGID)
 		}
 
 		// F-111: shared dirs served from the workspace PVC by subPath
@@ -1917,7 +1946,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// scope here: server.shared_dir_storage's own NFS mechanism
 		// (sharedDirStorageNFS below) — a separate subsystem, not implicated
 		// in F-111.
-		initVolumeMounts := []corev1.VolumeMount{workspaceVolumeMount}
+		initVolumeMounts := []corev1.VolumeMount{initWorkspaceMount}
 		// F-111 review (tf-lead nit): SCION_SHARED_DIR_PATHS carries
 		// "name=mountPath" pairs, comma-joined — keyed explicitly by each
 		// shared dir's own name (nfsSharedDirMount.Name), not derived from
@@ -1936,7 +1965,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			sharedDirPairs = append(sharedDirPairs, sm.Name+"="+sm.Mount.MountPath)
 		}
 
-		initEnv := nfsProvisionEnv(config.GitCloneForInit)
+		initEnv := nfsProvisionEnv(initGitClone)
 		// SCION_PROJECT_ID lets the init container's own provisioning logs
 		// (cmd/sciontool/commands/provision.go) identify which project they're
 		// provisioning, instead of falling back to "unknown" — unconditional
@@ -1962,6 +1991,17 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 				corev1.EnvVar{Name: "SCION_WORKSPACE_MODE", Value: string(store.SharingModeWorktreePerAgent)},
 				corev1.EnvVar{Name: "SCION_AGENT_SLUG", Value: config.NFSWorktreeName},
 				corev1.EnvVar{Name: "SCION_AGENT_BRANCH", Value: config.NFSWorktreeBranch},
+			)
+		}
+		// Clone-per-agent: tell sciontool provision to prepare this agent's
+		// directory instead of the shared checkout. An older sciontool
+		// ignores these and, with no clone settings, only creates and
+		// chowns the agent's directory; the agent container then clones.
+		if nfsAgentDir {
+			initEnv = append(initEnv,
+				corev1.EnvVar{Name: "SCION_WORKSPACE_MODE", Value: string(store.SharingModeClonePerAgent)},
+				corev1.EnvVar{Name: "SCION_AGENT_SLUG", Value: config.NFSAgentDirName},
+				corev1.EnvVar{Name: "SCION_AGENT_BRANCH", Value: config.NFSAgentBranch},
 			)
 		}
 		// When the broker created the workspace (and claim shared-dir)
@@ -3700,6 +3740,21 @@ func nfsWorktreeSubPaths(workspaceSubPath, name string) (gitSubPath, worktreeSub
 	}
 	// A Kubernetes subPath always uses forward slashes, whatever the OS.
 	return path.Join(workspaceSubPath, ".git"), path.Join(workspaceSubPath, "worktrees", name), nil
+}
+
+// NFSAgentDirSubPath returns the export-relative path of a clone-per-agent
+// agent's directory, <project>/agents/<agent name>, a sibling of the
+// project's workspace path workspaceSubPath (<project>/workspace). name must
+// be the agent's slug (lower-case letters, digits and dashes), so it is
+// always a single path segment.
+func NFSAgentDirSubPath(workspaceSubPath, name string) (string, error) {
+	if slug, err := api.ValidateAgentName(name); err != nil || slug != name {
+		return "", fmt.Errorf("clone-per-agent: agent name %q is not an agent slug", name)
+	}
+	if workspaceSubPath == "" || !filepath.IsLocal(workspaceSubPath) || filepath.Base(workspaceSubPath) != "workspace" || filepath.Dir(workspaceSubPath) == "." {
+		return "", fmt.Errorf("clone-per-agent: unexpected NFS workspace subPath %q", workspaceSubPath)
+	}
+	return filepath.Join(filepath.Dir(workspaceSubPath), "agents", name), nil
 }
 
 // nfsInitContainerInjected reports whether buildPod would add the

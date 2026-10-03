@@ -103,6 +103,18 @@ type RunConfig struct {
 	// NFSWorktreeBranch is the branch the agent's worktree is created on.
 	// Only used with NFSWorktreeName.
 	NFSWorktreeBranch string
+	// NFSAgentDirName is set to the agent's slug for clone-per-agent git
+	// projects on the NFS backend. NFSSubPath still names the project's
+	// workspace path, and the agent gets its own directory next to it at
+	// <project>/agents/<agent name> (NFSAgentDirSubPath): the provisioning
+	// init container mounts that directory and prepares its workspace/
+	// directory without cloning, and the agent container mounts
+	// <project>/agents/<agent name>/workspace at /workspace and clones the
+	// repository into it, as on the local runtimes.
+	NFSAgentDirName string
+	// NFSAgentBranch is the branch the agent's workspace is created for,
+	// recorded by the init container. Only used with NFSAgentDirName.
+	NFSAgentBranch string
 	// NFSStorageClass is the K8s StorageClass for NFS-backed PVCs.
 	// Used when creating shared-dir PVCs on NFS. Empty uses cluster default.
 	NFSStorageClass string

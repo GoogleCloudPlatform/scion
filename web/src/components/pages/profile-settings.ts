@@ -23,6 +23,7 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { keyed } from 'lit/directives/keyed.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import {
@@ -34,7 +35,10 @@ import {
   type PushPermissionState,
 } from '../../client/push-preference.js';
 import { isChimeEnabled, setChimeEnabled } from '../../utils/audio.js';
+import { setPreferredTimeZone, browserTimeZone } from '../../utils/time.js';
 import '../shared/subscription-manager.js';
+import '../shared/timezone-picker.js';
+import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 
 /**
  * Minimal shape of a runtime profile as returned by
@@ -90,6 +94,43 @@ export class ScionPageProfileSettings extends LitElement {
   private _activeProfileName = '';
   private _profiles: Record<string, AgentProfile> = {};
   private _savedTimezone = '';
+
+  // Display timezone (`preferences.timezone`, design.md §3 A "Fate of the
+  // card"). Visible to every signed-in user, unlike the agent-execution
+  // "Agent timezone" section above: it only affects how this user *sees*
+  // times, never agent containers.
+  @state()
+  private _userId = '';
+
+  @state()
+  private _displayTimezone = '';
+
+  @state()
+  private _displayTimezoneSaving = false;
+
+  @state()
+  private _displayTimezoneError: string | null = null;
+
+  @state()
+  private _displayTimezoneSaved = false;
+
+  /**
+   * Bumped to force the picker to remount after a failed PATCH or the
+   * no-user-id case (review R2-2, replacing R1-5's `@query`-ref approach).
+   *
+   * Task 12's `<scion-timezone-picker>` never mutates its own `value`
+   * property on selection — only its internal, unexported `searchQuery`
+   * text — so even a direct `picker.value = x` write (bypassing Lit's
+   * property-binding diff) changes a property the picker doesn't read back
+   * into what it displays. There is no supported way to ask the picker to
+   * resync from outside without either modifying it (out of bounds for
+   * this PR — task 12 owns that file) or relying on its private internals.
+   * `keyed()` sidesteps both: bumping the key unmounts the stale instance
+   * and mounts a fresh one, which always initializes its display from
+   * `.value` in `willUpdate`'s `!this.hasUpdated` branch.
+   */
+  @state()
+  private _pickerRevision = 0;
 
   static override styles = css`
     :host {
@@ -220,6 +261,12 @@ export class ScionPageProfileSettings extends LitElement {
       flex: 1;
       max-width: 22rem;
     }
+
+    scion-timezone-picker {
+      display: block;
+      width: 18rem;
+      max-width: 100%;
+    }
   `;
 
   private readonly _onPushPreferenceChanged = (): void => this._initNotificationState();
@@ -232,6 +279,7 @@ export class ScionPageProfileSettings extends LitElement {
     window.addEventListener(PUSH_PREFERENCE_EVENT, this._onPushPreferenceChanged);
     void this._loadSystemStatus();
     void this._loadTimezoneSettings();
+    void this._loadDisplayTimezone();
   }
 
   override disconnectedCallback(): void {
@@ -350,6 +398,79 @@ export class ScionPageProfileSettings extends LitElement {
     } finally {
       this._timezoneSaving = false;
     }
+  }
+
+  /**
+   * Loads the signed-in user's id and display-timezone preference from
+   * `/auth/me`, which returns `preferences` live (no session caching) for
+   * the authenticated caller only.
+   */
+  private async _loadDisplayTimezone(): Promise<void> {
+    try {
+      const res = await apiFetch('/auth/me');
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        id?: string;
+        preferences?: { timezone?: string };
+      };
+      this._userId = data.id ?? '';
+      this._displayTimezone = data.preferences?.timezone ?? '';
+    } catch {
+      // Non-critical — the card still renders; saving just has nothing to
+      // PATCH against until a reload succeeds.
+    }
+  }
+
+  /**
+   * Saves the display-timezone preference via a per-key `preferences`
+   * merge (backend contract: tz-refactor task 10, ptone/scion#2526) and
+   * applies it to the effective-zone store immediately, with no reload
+   * (AC4/AC5). On failure — including when `_userId` hasn't loaded yet —
+   * resets the picker's displayed value back to the last-saved preference
+   * (review R1-5/R2-2), since the picker already updated its own
+   * typed/selected text before this handler ran.
+   */
+  private async _handleZoneChange(e: CustomEvent<TimezoneChangeDetail>): Promise<void> {
+    const value = e.detail.timezone;
+    if (!this._userId) {
+      this._resetPickerDisplay();
+      return;
+    }
+
+    this._displayTimezoneSaving = true;
+    this._displayTimezoneError = null;
+    this._displayTimezoneSaved = false;
+
+    try {
+      const res = await apiFetch(`/api/v1/users/${encodeURIComponent(this._userId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preferences: { timezone: value } }),
+      });
+      if (!res.ok) {
+        this._displayTimezoneError = await extractApiError(res, 'Failed to update timezone');
+        this._resetPickerDisplay();
+        return;
+      }
+      this._displayTimezone = value;
+      setPreferredTimeZone(value);
+      this._displayTimezoneSaved = true;
+    } catch {
+      this._displayTimezoneError = 'Failed to update timezone';
+      this._resetPickerDisplay();
+    } finally {
+      this._displayTimezoneSaving = false;
+    }
+  }
+
+  /**
+   * Forces the picker to remount (review R2-2) so it re-displays the
+   * last-saved `_displayTimezone` instead of whatever the user just typed
+   * or selected — see `_pickerRevision`'s doc comment for why a property
+   * write alone can't do this for task 12's picker.
+   */
+  private _resetPickerDisplay(): void {
+    this._pickerRevision++;
   }
 
   private _initNotificationState(): void {
@@ -482,6 +603,58 @@ export class ScionPageProfileSettings extends LitElement {
             </sl-switch>
           </div>
         </div>
+      </div>
+
+      <div class="settings-card">
+        <h2 class="section-title">
+          <sl-icon name="clock"></sl-icon>
+          Display timezone
+        </h2>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <p class="setting-label">Times shown in</p>
+            <p class="setting-description">
+              Controls how times are displayed and how date/time inputs are interpreted in
+              native chat and scheduling forms, and the rest of the UI follows over time. Choose
+              "Auto" to follow your browser's zone (currently ${browserTimeZone()}); this never
+              changes how agent containers are configured.
+            </p>
+          </div>
+          <div class="setting-control">
+            ${keyed(
+              this._pickerRevision,
+              html`
+                <scion-timezone-picker
+                  empty-label="Auto"
+                  label="Display timezone"
+                  .value=${this._displayTimezone}
+                  ?disabled=${this._displayTimezoneSaving}
+                  @timezone-change=${(e: CustomEvent<TimezoneChangeDetail>): void => {
+                    void this._handleZoneChange(e);
+                  }}
+                ></scion-timezone-picker>
+              `
+            )}
+          </div>
+        </div>
+
+        ${this._displayTimezoneError
+          ? html`
+              <div class="permission-status status-denied">
+                <sl-icon name="exclamation-triangle"></sl-icon>
+                ${this._displayTimezoneError}
+              </div>
+            `
+          : nothing}
+        ${this._displayTimezoneSaved
+          ? html`
+              <div class="permission-status status-granted">
+                <sl-icon name="check-circle"></sl-icon>
+                Display timezone updated.
+              </div>
+            `
+          : nothing}
       </div>
 
       ${this._timezoneSectionAvailable

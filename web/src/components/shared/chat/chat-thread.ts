@@ -54,6 +54,7 @@ import './chat-system-line.js';
 import './chat-composer.js';
 import './chat-interagent-marker.js';
 import { formatChatDate, renderDateDivider, chatDateDividerStyles } from './chat-date-divider.js';
+import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
 import './chat-file-preview.js';
@@ -304,6 +305,12 @@ export { parseContainerPath, buildFileApiUrl, type PathLinkTarget };
 
 @customElement('scion-chat-thread')
 export class ScionChatThread extends LitElement {
+  /**
+   * Re-renders the thread (date dividers, any inline times) when the
+   * effective display zone changes (review R2-1).
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   // DEPRECATED(wave-1): agentId-based mode — remove after v2 is stable and flag is permanently ON.
   @property()
   agentId = '';
@@ -2091,8 +2098,16 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const { text, mentions, attachmentIds, replyToId, replyToContent, onSuccess, onError } =
-      e.detail;
+    const {
+      text,
+      interrupt,
+      mentions,
+      attachmentIds,
+      replyToId,
+      replyToContent,
+      onSuccess,
+      onError,
+    } = e.detail;
     const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
     if (!hasContent || this.sending) return;
 
@@ -2154,6 +2169,11 @@ export class ScionChatThread extends LitElement {
       };
       if (mentions && mentions.length > 0) {
         body.mentions = mentions;
+      }
+      // "Send with interruption": only sent when requested so ordinary sends
+      // keep the minimal body.
+      if (interrupt) {
+        body.interrupt = true;
       }
       // W7: Include attachment IDs.
       if (attachmentIds && attachmentIds.length > 0) {

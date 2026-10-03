@@ -80,6 +80,7 @@ type ChatAgentMember = import('./chat-members.js').ChatAgentMember;
 
 import { chatRecentFiles } from '../../../client/chat-recent-files.js';
 import { agentGraphHref, terminalHref } from '../../../client/open-terminal.js';
+import { setPreferredTimeZone } from '../../../utils/time.js';
 
 const CONVERSATION_KEY = 'topic-1';
 
@@ -376,6 +377,62 @@ describe('scion-chat-thread reply send payload (nc-reply-recipient)', () => {
     const body = JSON.parse(String((sendCall![1] as RequestInit).body));
     expect(body.reply_to_id).toBe('orig-msg-1');
     expect(body).not.toHaveProperty('reply_to_agent');
+  });
+});
+
+// "Send with interruption": the composer's interrupt flag must reach the v2
+// send body, and only when requested.
+describe('scion-chat-thread interrupt send payload', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  async function sendAndGetBody(interrupt: boolean): Promise<Record<string, unknown>> {
+    const el = await mount();
+    const internals = el as unknown as {
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    apiFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ id: 'sent-1' }),
+    } as unknown as Response);
+
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'stop and look at this',
+          plain: false,
+          interrupt,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    const sendCall = apiFetch.mock.calls.find(
+      (c) =>
+        String(c[0]).endsWith('/messages') && (c[1] as RequestInit | undefined)?.method === 'POST'
+    );
+    expect(sendCall).toBeDefined();
+    return JSON.parse(String((sendCall![1] as RequestInit).body)) as Record<string, unknown>;
+  }
+
+  it('sends interrupt: true when the composer requests interruption', async () => {
+    const body = await sendAndGetBody(true);
+    expect(body.interrupt).toBe(true);
+  });
+
+  it('omits interrupt on an ordinary send', async () => {
+    const body = await sendAndGetBody(false);
+    expect(body).not.toHaveProperty('interrupt');
   });
 });
 
@@ -3873,6 +3930,29 @@ describe('scion-chat-thread inter-agent day-split markers', () => {
     expect(markers.length).toBe(2);
     for (const marker of markers) {
       expect((marker as unknown as { messageCount: number }).messageCount).toBe(1);
+    }
+  });
+
+  // Review round 3, R3-3: the thread's DisplayZoneController re-renders the
+  // date divider when the preference changes after mount — pin it, since
+  // deleting the controller left every other test in this suite green.
+  it('re-renders the date divider zone label after a mounted thread outlives a preference change', async () => {
+    try {
+      const el = await mountAgentDM({
+        interagent: [makeIaMessage({ id: 'ia-1', createdAt: '2026-09-23T15:00:00Z' })],
+      });
+
+      const dividerBefore = el.shadowRoot!.querySelector('.date-divider');
+      expect(dividerBefore?.textContent).toContain('UTC'); // Auto, pinned ambient zone
+
+      setPreferredTimeZone('Asia/Tokyo');
+      await el.updateComplete;
+
+      const dividerAfter = el.shadowRoot!.querySelector('.date-divider');
+      expect(dividerAfter?.textContent).toContain('Asia/Tokyo');
+      expect(dividerAfter?.textContent).not.toContain('UTC');
+    } finally {
+      setPreferredTimeZone('');
     }
   });
 });

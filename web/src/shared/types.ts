@@ -24,6 +24,20 @@
 export type UserRole = 'admin' | 'member' | 'viewer';
 
 /**
+ * Personal, non-admin-controlled user preferences (tz-refactor task 11,
+ * design.md §3 A "Storage and API"). Present only on the authenticated
+ * caller's own user object — `GET /auth/me` / `GET /api/v1/auth/me` — never
+ * on a listing or another user's record.
+ */
+export interface UserPreferences {
+  /**
+   * IANA display-timezone name, or `''`/absent for Auto (follow the
+   * browser's zone). See `web/src/utils/time.ts`'s `effectiveTimeZone`.
+   */
+  timezone?: string | undefined;
+}
+
+/**
  * User information
  */
 export interface User {
@@ -32,6 +46,7 @@ export interface User {
   name: string;
   avatar?: string | undefined;
   role?: UserRole | undefined;
+  preferences?: UserPreferences | undefined;
 }
 
 /**
@@ -1018,6 +1033,71 @@ export interface MembershipCapabilities {
   canManageOwners: boolean;
   canTransfer: boolean;
   actions: string[];
+  /**
+   * Whether the actor may grant and remove custom project roles
+   * (ptone/scion#2529). Decided server-side by the same authority function
+   * the members PUT uses; the UI never infers it from owner authority.
+   * Optional: absent means false.
+   */
+  canManageCustomRoles?: boolean;
+}
+
+/**
+ * One project-scope role binding as returned by the project members API,
+ * enriched with role and display names.
+ */
+export interface ProjectMemberBinding {
+  id: string;
+  roleDefinitionId: string;
+  roleName: string;
+  principalType: string;
+  principalId: string;
+  principalDisplayName?: string;
+  scopeType: string;
+  scopeId: string;
+  createdAt: string;
+  notBefore?: string;
+  expiresAt?: string;
+  /** 'direct' for direct bindings, otherwise the group it is inherited through. */
+  source: string;
+  sourceGroupName?: string;
+  /** 'builtin' (owner/admin/member) or 'custom'. */
+  roleKind?: 'builtin' | 'custom';
+}
+
+/**
+ * One principal's project membership: the item type of
+ * `GET /api/v1/projects/{id}/members?groupBy=principal` and the body of
+ * `PUT /api/v1/projects/{id}/members/principals/{type}/{id}`.
+ */
+export interface ProjectMemberGroup {
+  principalType: string;
+  principalId: string;
+  principalDisplayName?: string;
+  /** The built-in membership role name, or '' when the principal holds none. */
+  builtInRoleName: string;
+  /** Built-in binding first, then custom bindings by role name. */
+  bindings: ProjectMemberBinding[];
+  /** PUT responses only. */
+  changed?: boolean;
+}
+
+/**
+ * A project-scoped role the members dialog can offer, from
+ * `GET /api/v1/projects/{id}/members/assignable-roles`. `grantable` is the
+ * members PUT's decision for newly creating the role on a principal that
+ * does not hold it (principal-agnostic, op=add).
+ */
+export interface AssignableProjectRole {
+  id: string;
+  name: string;
+  description: string;
+  roleKind: 'builtin' | 'custom';
+  grantable: boolean;
+  /** Empty when grantable; otherwise the PUT's refusal reason. */
+  reason: string;
+  denialCode?: string;
+  details?: Record<string, unknown>;
 }
 
 /**

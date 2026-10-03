@@ -23,7 +23,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -167,19 +166,18 @@ type ListAgentsResponse struct {
 	Agents     []AgentWithCapabilities `json:"agents"`
 	NextCursor string                  `json:"nextCursor,omitempty"`
 	TotalCount int                     `json:"totalCount"`
-	// Sort and Dir echo the request's sort mode (design lists-graph.md 4.6).
-	// Both are omitted unless the request supplied "sort" (4.1, 4.6):
-	// legacy-mode responses never set these.
+	// Sort and Dir echo the request's sort mode. Both are omitted unless
+	// the request supplied "sort": legacy-mode responses never set these.
 	Sort string `json:"sort,omitempty"`
 	Dir  string `json:"dir,omitempty"`
 	// Complete is set only when the request supplied "fit" (sorted mode): true
 	// iff the unphased candidate set had at most fit members, in which case
-	// Agents is its whole readable subset (design 4.6, 4.1 "fit"). A pointer
+	// Agents is its whole readable subset. A pointer
 	// so "fit not sent" (nil, omitted) is distinguishable from "fit sent,
 	// complete: false".
 	Complete *bool `json:"complete,omitempty"`
-	// Stats is populated only when the request supplied "stats=1" (design
-	// 4.6). It is computed over the request filter with Phase cleared, kept
+	// Stats is populated only when the request supplied "stats=1". It is
+	// computed over the request filter with Phase cleared, kept
 	// label/scope/projectId/broker/includeDeleted, and (project user path)
 	// read-filtered the same way the page is.
 	Stats        *ListAgentsStats `json:"stats,omitempty"`
@@ -187,20 +185,26 @@ type ListAgentsResponse struct {
 	Capabilities *Capabilities    `json:"_capabilities,omitempty"`
 }
 
-// ListAgentsStats is the sorted-mode "stats" response block (design
-// lists-graph.md 4.6).
+// ListAgentsStats is the sorted-mode "stats" response block.
 type ListAgentsStats struct {
 	// Total is the exact readable, label(k=v)-filtered count, phase NOT
-	// applied (design 4.6).
+	// applied.
 	Total int `json:"total"`
 	// Running is the count of phase == "running" among the same population,
 	// always present regardless of the request's own phase filter.
 	Running int `json:"running"`
-	// Agents is exactly the counted population as [id, phase] pairs. The
-	// project endpoint is already bounded by the 2,000 candidate ceiling
-	// (design 5.3), so it is never omitted here — the >2000 omission rule
-	// applies only to the global endpoint (P2 scope).
-	Agents [][2]string `json:"agents"`
+	// Agents is exactly the counted population as [id, phase] pairs, EXCEPT
+	// on the global endpoint when Total exceeds 2,000, where it is nil and
+	// so omitted from the response entirely. The project
+	// endpoint is already bounded by the 2,000 candidate ceiling,
+	// so it is never omitted there.
+	//
+	// A *slice, not a slice: encoding/json's omitempty on a plain slice
+	// can't distinguish "intentionally empty" (Total == 0, an empty but
+	// present array) from "omitted" (Total > 2000) — both have len 0.
+	// omitempty on a pointer checks only nilness, which is exactly the
+	// distinction this field needs.
+	Agents *[][2]string `json:"agents,omitempty"`
 }
 
 type CreateAgentRequest struct {
@@ -326,13 +330,37 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	identity := GetIdentityFromContext(ctx)
 
+	// Sorted mode validates sort and dir before either short-circuit below,
+	// so an invalid value is a 400 for every caller and the short-circuit
+	// echo only ever carries validated values. Without sort, nothing here
+	// runs and both short-circuits return the legacy empty list.
+	sorted := isSortedModeRequest(query)
+	var sortParam, dirParam string
+	if sorted {
+		var ok bool
+		if sortParam, dirParam, ok = parseSortAndDir(w, query); !ok {
+			return
+		}
+	}
+
+	// writeShortCircuit writes the empty list for an unauthenticated or
+	// None-scope caller. In sorted mode it first validates the remaining
+	// sorted parameters (fit, cursor exclusion), so an invalid fit is a 400
+	// for these callers exactly as for a caller with scope.
+	writeShortCircuit := func() {
+		var p agentListParams
+		if sorted {
+			var ok bool
+			if p, ok = parseAgentListParamsAfterSortDir(w, query, agentListLimit(query), sortParam, dirParam); !ok {
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, sortedShortCircuitResponse(p))
+	}
+
 	// RS2: Unauthenticated callers get an empty list immediately.
 	if identity == nil {
-		writeJSON(w, http.StatusOK, ListAgentsResponse{
-			Agents:     []AgentWithCapabilities{},
-			TotalCount: 0,
-			ServerTime: time.Now().UTC(),
-		})
+		writeShortCircuit()
 		return
 	}
 
@@ -350,11 +378,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	if scopeResult.Scopes.IsNone() {
 		// Legitimate no-authority result. Return empty list without querying
 		// the store. No broad resource query is issued for None.
-		writeJSON(w, http.StatusOK, ListAgentsResponse{
-			Agents:     []AgentWithCapabilities{},
-			TotalCount: 0,
-			ServerTime: time.Now().UTC(),
-		})
+		writeShortCircuit()
 		return
 	}
 
@@ -432,12 +456,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	filter.MemberProjectIDs = classification.SharedProjectIDs
 	filter.ExcludedProjectIDs = append(filter.ExcludedProjectIDs, classification.ExcludedOwnedProjectIDs...)
 
-	limit := 500
-	if l := query.Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
+	limit := agentListLimit(query)
 
 	// Finding 8: Canonicalize all set-like filter fields before hashing.
 	if len(filter.ExcludedProjectIDs) > 0 {
@@ -448,6 +467,25 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(filter.MemberProjectIDs) > 1 {
 		filter.MemberProjectIDs = canonicalizeStringSlice(filter.MemberProjectIDs)
+	}
+
+	if sorted {
+		// Sorted mode: pure SQL, race-free,
+		// no per-item read filter -- the SQL scope predicate already baked
+		// into filter above (AuthorizedProjectIDs, classification, etc.) is
+		// the authorization, exactly as the legacy branch below relies on.
+		// Dispatched after every gate and filter-building step above, so
+		// caps/messageability for returned rows run through the same
+		// identity and filter the legacy branch uses.
+		// sort and dir were already validated above; only the remaining
+		// parameters are parsed here, at the same point in the request as
+		// before, so the order of 400s is unchanged.
+		params, ok := parseAgentListParamsAfterSortDir(w, query, limit, sortParam, dirParam)
+		if !ok {
+			return
+		}
+		s.listAgentsSorted(w, r, filter, params, identity)
+		return
 	}
 
 	// RS2: Cursor binding computed AFTER authorization scope and all caller
@@ -470,28 +508,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	items, nextCursor, totalCount := result.Items, result.NextCursor, result.TotalCount
 
-	// RS2: Enrichment runs only after the authorized store result is obtained.
-	s.enrichAgents(ctx, items)
-
-	// Compute per-item and scope capabilities for authorized items.
-	agents := make([]AgentWithCapabilities, 0, len(items))
-	resources := make([]Resource, len(items))
-	for i := range items {
-		resources[i] = agentResource(&items[i])
-	}
-	for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent") {
-		item := items[i]
-		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, cap))
-		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: cap})
-	}
-
-	// Compute messageability for each agent relative to the viewer.
-	for i := range agents {
-		agents[i].Messageability = s.ComputeMessageability(ctx, identity, &agents[i].Agent)
-	}
-
-	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
-	s.addAgentCreateIfAnyProjectAllows(ctx, identity, scopeCap)
+	agents, scopeCap := s.buildGlobalAgentPage(ctx, identity, items)
 
 	writeJSON(w, http.StatusOK, ListAgentsResponse{
 		Agents:       agents,
