@@ -35,6 +35,7 @@ import {
   fakeFetch,
   holdable,
   isGlobalAgentsList,
+  jsonResponse,
   makeAgent,
   type Fake,
 } from './__fixtures__/global-agents-endpoint.js';
@@ -97,16 +98,29 @@ async function settle(el: TestEl, allowPending: () => number = () => 0): Promise
   }
 }
 
-async function mountPage(
-  tag: 'scion-page-home' | 'scion-page-agents',
-  allowPending?: () => number
-): Promise<TestEl> {
+type PageTag =
+  | 'scion-page-home'
+  | 'scion-page-agents'
+  | 'scion-page-projects'
+  | 'scion-page-project-detail';
+
+const PAGE_PATHS: Record<PageTag, string> = {
+  'scion-page-home': '/',
+  'scion-page-agents': '/agents',
+  'scion-page-projects': '/projects',
+  'scion-page-project-detail': '/projects/p-1',
+};
+
+async function mountPage(tag: PageTag, allowPending?: () => number): Promise<TestEl> {
   const el = document.createElement(tag) as TestEl;
   (el as unknown as { pageData: unknown }).pageData = {
-    path: tag === 'scion-page-home' ? '/' : '/agents',
+    path: PAGE_PATHS[tag],
     title: 'Page',
     user: USER,
   };
+  if (tag === 'scion-page-project-detail') {
+    (el as unknown as { projectId: string }).projectId = 'p-1';
+  }
   document.body.appendChild(el);
   await el.updateComplete;
   await settle(el, allowPending);
@@ -114,7 +128,7 @@ async function mountPage(
 }
 
 /** Mount a page, let it load, and leave it (a client navigation away). */
-async function visit(tag: 'scion-page-home' | 'scion-page-agents'): Promise<TestEl> {
+async function visit(tag: PageTag): Promise<TestEl> {
   const el = await mountPage(tag);
   el.remove();
   return el;
@@ -138,6 +152,39 @@ function visitProjects(fake: Fake): void {
 /** A project detail page: a project scope, which clears the state store. */
 function visitProjectPage(): void {
   stateManager.setScope({ type: 'project', projectId: 'p-1' });
+}
+
+/**
+ * Adds the project page's own endpoints for project p-1 (the project, and
+ * a complete sorted answer for its agents) in front of `inner`; every
+ * project agents request is recorded in `projectAgentRequests`.
+ */
+function withProjectPage(
+  inner: ReturnType<typeof fakeFetch>,
+  fake: Fake,
+  projectAgentRequests: string[]
+): ReturnType<typeof fakeFetch> {
+  return (input, init) => {
+    const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const u = new URL(raw, 'http://localhost');
+    const method = (init?.method ?? 'GET').toUpperCase();
+    if (u.pathname === '/api/v1/projects/p-1' && method === 'GET') {
+      return Promise.resolve(jsonResponse({ id: 'p-1', name: 'P1', slug: 'p1' }));
+    }
+    if (u.pathname === '/api/v1/projects/p-1/agents' && method === 'GET') {
+      projectAgentRequests.push(raw);
+      const agents = fake.agents.filter((a) => a.projectId === 'p-1');
+      return Promise.resolve(
+        jsonResponse({
+          agents,
+          totalCount: agents.length,
+          complete: true,
+          _capabilities: SCOPE_CAPS,
+        })
+      );
+    }
+    return inner(input, init);
+  };
 }
 
 function commitLabel(el: TestEl, value: string): void {
@@ -208,6 +255,8 @@ describe('home agent counts and the shared completeness flag', () => {
   beforeAll(async () => {
     await import('./home.js');
     await import('./agents.js');
+    await import('./projects.js');
+    await import('./project-detail.js');
   }, 60_000);
 
   beforeEach(() => {
@@ -220,7 +269,11 @@ describe('home agent counts and the shared completeness flag', () => {
   });
 
   afterEach(() => {
-    document.body.querySelectorAll('scion-page-home, scion-page-agents').forEach((n) => n.remove());
+    document.body
+      .querySelectorAll(
+        'scion-page-home, scion-page-agents, scion-page-projects, scion-page-project-detail'
+      )
+      .forEach((n) => n.remove());
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     localStorage.clear();
@@ -305,6 +358,68 @@ describe('home agent counts and the shared completeness flag', () => {
       ]);
       expect(activeCount(el)).toBe('5');
       expect(stateManager.isAgentSetComplete('full')).toBe(true);
+    });
+    it('a server without sorted mode above 500 agents: today’s request once, counts from that page, and the flag is not set', async () => {
+      const fake = newFake(1200, 700);
+      const inner = fakeFetch(fake);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const raw =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(raw, 'http://localhost');
+          // Sorted parameters are ignored: every agents request gets the
+          // legacy list, which honours limit and cursor (default 500).
+          if (u.pathname === '/api/v1/agents' && u.searchParams.get('sort')) {
+            const legacy = new URL(u.href);
+            for (const key of ['sort', 'dir', 'fit', 'stats', 'phase'])
+              legacy.searchParams.delete(key);
+            return inner(legacy.pathname + legacy.search, init);
+          }
+          return inner(input, init);
+        })
+      );
+      const el = await mountPage('scion-page-home');
+      expect(fake.requests).toEqual(['/api/v1/agents?limit=1', '/api/v1/agents']);
+      // Counts from the 500-row page today's request returns.
+      expect(internals(el).agents.length).toBe(500);
+      expect(activeCount(el)).toBe('500');
+      expect(stateManager.isAgentSetComplete('full')).toBe(false);
+      expect(stateManager.isAgentSetComplete('compact')).toBe(false);
+      el.remove();
+
+      // The agents page cannot reuse that page: it sends its own load.
+      const before = fake.requests.length;
+      await visit('scion-page-agents');
+      expect(fake.requests.length).toBeGreaterThan(before);
+    });
+
+    it('above 500 the counts include a phase change and a create that land while home’s request is in flight', async () => {
+      const fake = newFake(1200, 100);
+      const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+      h.hold(1);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      const el = document.createElement('scion-page-home') as TestEl;
+      (el as unknown as { pageData: unknown }).pageData = { path: '/', title: 'Page', user: USER };
+      document.body.appendChild(el);
+      await el.updateComplete;
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+
+      // g-00500 is stopped in the stats the held answer will carry, and not
+      // in the store: an unknown-ID delta.
+      expect(stateManager.getAgent('g-00500')).toBeUndefined();
+      handleUpdate('agent.g-00500.status', { agentId: 'g-00500', phase: 'running' });
+      // A running agent created in flight: the held answer predates it.
+      const created = makeAgent(7000, { projectId: 'p-elsewhere', phase: 'running' });
+      handleUpdate(`agent.${created.id}.created`, { ...created, agentId: created.id });
+      (stateManager as unknown as { flush(): void }).flush();
+
+      h.release();
+      await settle(el);
+      expect(fake.requests).toHaveLength(1);
+      expect(internals(el).memberIndex).not.toBeNull();
+      expect(internals(el).memberIndex?.has('g-07000')).toBe(true);
+      expect(activeCount(el)).toBe('102');
     });
   });
 
@@ -450,7 +565,13 @@ describe('home agent counts and the shared completeness flag', () => {
     it('/projects → home with the flag not held sends only the agents request; home → /projects → home sends none', async () => {
       const fake = newFake(25);
       vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
-      visitProjects(fake);
+      // The real projects page: it loads projects and sends no agents request.
+      const [agentsOnProjects, othersOnProjects] = await cost(fake, () =>
+        visit('scion-page-projects')
+      );
+      expect(agentsOnProjects).toBe(0);
+      expect(othersOnProjects).toBe(1);
+      expect(stateManager.getProjects().map((p) => p.id)).toEqual(['p-1']);
       let el!: TestEl;
       expect(
         await cost(fake, async () => {
@@ -459,15 +580,24 @@ describe('home agent counts and the shared completeness flag', () => {
       ).toEqual([1, 0]);
       expect(activeCount(el)).toBe('25');
       el.remove();
-      visitProjects(fake);
+      // Projects and their capabilities are in state now, so the projects
+      // page reuses them.
+      expect(await cost(fake, () => visit('scion-page-projects'))).toEqual([0, 0]);
       expect(await cost(fake, () => visit('scion-page-home'))).toEqual([0, 0]);
     });
 
     it('home → project page → home fetches as today', async () => {
       const fake = newFake(25);
-      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const projectAgentRequests: string[] = [];
+      vi.stubGlobal('fetch', vi.fn(withProjectPage(fakeFetch(fake), fake, projectAgentRequests)));
       await visit('scion-page-home');
-      visitProjectPage();
+      // The real project page: its own project-scoped agents request only.
+      const page = await mountPage('scion-page-project-detail');
+      expect(fake.requests).toHaveLength(1);
+      expect(projectAgentRequests).toHaveLength(1);
+      expect(stateManager.currentScope).toEqual({ type: 'project', projectId: 'p-1' });
+      expect(stateManager.isAgentSetComplete('full')).toBe(false);
+      page.remove();
       expect(await cost(fake, () => visit('scion-page-home'))).toEqual([1, 2]);
     });
 

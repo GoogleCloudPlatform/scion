@@ -262,6 +262,7 @@ export class ScionPageHome extends LitElement {
     const current = (): boolean =>
       seq === this.agentsLoadSeq &&
       this.isConnected &&
+      // Redundant with isConnected today; kept so a scope change alone discards.
       stateManager.currentScope?.type === 'dashboard';
     const epoch = new AgentSeedEpoch();
     try {
