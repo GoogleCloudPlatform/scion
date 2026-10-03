@@ -104,7 +104,7 @@ func newReconnectHarness(t *testing.T) *reconnectHarness {
 		sessions: make(chan Session, 8),
 		done:     make(chan error, 1),
 	}
-	cfg := Config{Clock: h.clk, PingInterval: time.Hour, PongWait: 2 * time.Hour}
+	cfg := Config{Clock: h.clk, PingInterval: time.Hour, PongWait: 2 * time.Hour, WriteWait: testWriteWait}
 	dialer := transport.DialerFunc(func(ctx context.Context) (transport.Conn, error) {
 		var err error
 		select {

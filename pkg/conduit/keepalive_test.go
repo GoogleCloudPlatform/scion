@@ -35,14 +35,6 @@ func (r *rawPeer) recvUntil(typ string) *conduitv1.Frame {
 	}
 }
 
-// keepaliveWriteWait keeps the writer's per-write WriteWait timer out of
-// the keepalive tests. They jump the fake clock by tens of seconds, and a
-// ping or pong write can still be in flight on the writer goroutine (its
-// timer armed, not yet stopped) when they do. With the default 10s the
-// jump would fire that timer and end the session with ErrWriteTimeout. A
-// real write takes microseconds; TestWriteTimeout covers WriteWait.
-const keepaliveWriteWait = time.Hour
-
 // TestKeepaliveDetectsSilentPeer covers both directions: a dialer facing a
 // silent relay and a relay facing a silent dialer both ping at 30s and
 // give up at 60s without inbound traffic.
@@ -50,7 +42,7 @@ func TestKeepaliveDetectsSilentPeer(t *testing.T) {
 	for _, side := range []string{"dialer", "relay"} {
 		t.Run(side, func(t *testing.T) {
 			clk := clock.NewFake(t0)
-			cfg := Config{Clock: clk, WriteWait: keepaliveWriteWait}
+			cfg := Config{Clock: clk, WriteWait: testWriteWait}
 			var s *session
 			var raw *rawPeer
 			if side == "dialer" {
@@ -80,7 +72,7 @@ func TestKeepaliveDetectsSilentPeer(t *testing.T) {
 // last inbound frame of any type, not only pongs.
 func TestKeepaliveAnyInboundFrameProvesLiveness(t *testing.T) {
 	clk := clock.NewFake(t0)
-	s, raw := dialAgainstRaw(t, Config{Clock: clk, WriteWait: keepaliveWriteWait}, transport.MemoryOptions{Buffer: 64})
+	s, raw := dialAgainstRaw(t, Config{Clock: clk, WriteWait: testWriteWait}, transport.MemoryOptions{Buffer: 64})
 	settle(t, clk, 2)
 	clk.Advance(50 * time.Second)
 	// The peer's own ping proves liveness; wait until it was processed.
@@ -100,7 +92,7 @@ func TestKeepaliveAnyInboundFrameProvesLiveness(t *testing.T) {
 // TestKeepaliveHealthyPairSurvives runs ten ping rounds between two real
 // sessions; neither side times out.
 func TestKeepaliveHealthyPairSurvives(t *testing.T) {
-	cfg := Config{WriteWait: keepaliveWriteWait}
+	cfg := Config{WriteWait: testWriteWait}
 	p := newPair(t, cfg, cfg)
 	for i := 0; i < 10; i++ {
 		settle(t, p.clk, 4) // ping + watchdog per side
