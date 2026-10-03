@@ -24,7 +24,8 @@ import (
 // ReplayCache records consumed grant IDs. Consume must be atomic: among
 // concurrent calls with the same jti, exactly one returns fresh=true. exp is
 // the latest time the grant could still verify; the entry may be forgotten
-// after it.
+// after it. An implementation must return fresh=false once exp has passed on
+// its own clock, so that forgetting an entry can never re-admit its jti.
 type ReplayCache interface {
 	Consume(ctx context.Context, jti string, exp time.Time) (fresh bool, err error)
 }
@@ -73,6 +74,12 @@ func (c *MemoryReplayCache) Consume(ctx context.Context, jti string, exp time.Ti
 	defer c.mu.Unlock()
 	now := c.now()
 	if _, used := c.seen[jti]; used {
+		return false, nil
+	}
+	// A jti whose exp has passed on the cache's own clock is never fresh:
+	// its entry may already have been evicted, so a caller whose now trails
+	// this clock must not be able to consume it again.
+	if !now.Before(exp) {
 		return false, nil
 	}
 	if !now.Before(c.nextScan) || len(c.seen) >= c.capacity {

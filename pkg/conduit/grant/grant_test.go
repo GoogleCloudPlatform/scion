@@ -225,6 +225,27 @@ func TestMint_RejectsInvalidClaims(t *testing.T) {
 	}
 }
 
+// wireOf decodes the payload of tok into its canonical struct form, so a
+// test can change one claim and re-sign bytes that pass the canonical
+// encoding check and reach the claim check under test.
+func wireOf(t *testing.T, tok []byte) wireClaims {
+	t.Helper()
+	raw, err := b64.DecodeString(strings.Split(string(tok), ".")[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var w wireClaims
+	if err := json.Unmarshal(raw, &w); err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+func withWire(w wireClaims, mut func(*wireClaims)) wireClaims {
+	mut(&w)
+	return w
+}
+
 // forge re-signs an arbitrary header and payload with priv.
 func forge(priv ed25519.PrivateKey, hdr, payload any) []byte {
 	h, _ := json.Marshal(hdr)
@@ -253,11 +274,12 @@ func TestVerify_ForgedAndMalformed(t *testing.T) {
 	parts := strings.Split(string(good), ".")
 	_, otherPriv, _ := ed25519.GenerateKey(nil)
 	pl := payloadOf(t, good)
+	w := wireOf(t, good)
 
 	hs256 := func() []byte {
 		// Alg confusion: an HS256 token "signed" with the public key bytes.
 		pub, _ := f.keys.Lookup(f.signer.KeyID)
-		h, _ := json.Marshal(map[string]string{"alg": "HS256", "typ": TokenType, "kid": f.signer.KeyID})
+		h, _ := json.Marshal(header{"HS256", TokenType, f.signer.KeyID})
 		in := b64.EncodeToString(h) + "." + parts[1]
 		mac := hmac.New(sha256.New, pub.Key)
 		mac.Write([]byte(in))
@@ -276,21 +298,21 @@ func TestVerify_ForgedAndMalformed(t *testing.T) {
 		tok  []byte
 		want error
 	}{
-		{"forged signature (other key, same kid)", forge(otherPriv, header{Algorithm, TokenType, f.signer.KeyID}, pl), ErrSignature},
+		{"forged signature (other key, same kid)", forge(otherPriv, header{Algorithm, TokenType, f.signer.KeyID}, w), ErrSignature},
 		{"tampered payload", tamperedPayload(), ErrSignature},
 		{"flipped signature byte", []byte(parts[0] + "." + parts[1] + "." + flip(parts[2])), ErrSignature},
-		{"unknown kid", forge(otherPriv, header{Algorithm, TokenType, "cg-unknown"}, pl), ErrUnknownKey},
-		{"empty kid", forge(f.signer.Key, header{Algorithm, TokenType, ""}, pl), ErrMalformed},
-		{"alg none", forge(f.signer.Key, map[string]string{"alg": "none", "typ": TokenType, "kid": f.signer.KeyID}, pl), ErrAlgorithm},
+		{"unknown kid", forge(otherPriv, header{Algorithm, TokenType, "cg-unknown"}, w), ErrUnknownKey},
+		{"empty kid", forge(f.signer.Key, header{Algorithm, TokenType, ""}, w), ErrMalformed},
+		{"alg none", forge(f.signer.Key, header{"none", TokenType, f.signer.KeyID}, w), ErrAlgorithm},
 		{"alg confusion HS256", hs256(), ErrAlgorithm},
-		{"alg ES256", forge(f.signer.Key, header{"ES256", TokenType, f.signer.KeyID}, pl), ErrAlgorithm},
-		{"wrong typ", forge(f.signer.Key, header{Algorithm, "JWT", f.signer.KeyID}, pl), ErrMalformed},
-		{"extra header field", forge(f.signer.Key, map[string]string{"alg": Algorithm, "typ": TokenType, "kid": f.signer.KeyID, "jku": "https://evil"}, pl), ErrMalformed},
+		{"alg ES256", forge(f.signer.Key, header{"ES256", TokenType, f.signer.KeyID}, w), ErrAlgorithm},
+		{"wrong typ", forge(f.signer.Key, header{Algorithm, "JWT", f.signer.KeyID}, w), ErrMalformed},
+		{"extra header field", forge(f.signer.Key, map[string]string{"alg": Algorithm, "typ": TokenType, "kid": f.signer.KeyID, "jku": "https://evil"}, w), ErrMalformed},
 		{"payload kid differs from header", forge(f.signer.Key, header{Algorithm, TokenType, f.signer.KeyID}, with(pl, "kid", "other")), ErrMalformed},
-		{"wrong audience", forge(f.signer.Key, header{Algorithm, TokenType, f.signer.KeyID}, with(pl, "aud", "hub")), ErrAudience},
+		{"wrong audience", forge(f.signer.Key, header{Algorithm, TokenType, f.signer.KeyID}, withWire(w, func(w *wireClaims) { w.Audience = "hub" })), ErrAudience},
 		{"unknown payload field", forge(f.signer.Key, header{Algorithm, TokenType, f.signer.KeyID}, with(pl, "admin", true)), ErrMalformed},
-		{"validity window over 60s", forge(f.signer.Key, header{Algorithm, TokenType, f.signer.KeyID}, with(pl, "exp", float64(t0.Add(61*time.Second).Unix()))), ErrValidityWindow},
-		{"missing jti", forge(f.signer.Key, header{Algorithm, TokenType, f.signer.KeyID}, with(pl, "jti", "")), ErrInvalidClaims},
+		{"validity window over 60s", forge(f.signer.Key, header{Algorithm, TokenType, f.signer.KeyID}, withWire(w, func(w *wireClaims) { w.Expiry = t0.Add(61 * time.Second).Unix() })), ErrValidityWindow},
+		{"missing jti", forge(f.signer.Key, header{Algorithm, TokenType, f.signer.KeyID}, withWire(w, func(w *wireClaims) { w.JTI = "" })), ErrInvalidClaims},
 		{"two parts", []byte(parts[0] + "." + parts[1]), ErrMalformed},
 		{"four parts", append(append([]byte{}, good...), ".x"...), ErrMalformed},
 		{"padded base64", []byte(parts[0] + "=." + parts[1] + "." + parts[2]), ErrMalformed},
@@ -548,5 +570,163 @@ func TestVerify_ReplayCacheErrorFailsClosed(t *testing.T) {
 	tok := f.mint(t, baseClaims())
 	if _, err := Verify(context.Background(), tok, f.keys, baseExpect(), failingCache{}, t0); !errors.Is(err, ErrReplay) {
 		t.Fatalf("err = %v, want ErrReplay", err)
+	}
+}
+
+// forgeRaw signs exactly the given header and payload bytes with priv.
+func forgeRaw(priv ed25519.PrivateKey, hdr, payload string) []byte {
+	in := b64.EncodeToString([]byte(hdr)) + "." + b64.EncodeToString([]byte(payload))
+	return []byte(in + "." + b64.EncodeToString(ed25519.Sign(priv, []byte(in))))
+}
+
+// TestVerify_NonCanonicalEncodingRefused: token bytes are canonical. No
+// byte outside the base64url alphabet and '.', and a header (and payload)
+// that is exactly what Mint encodes, so case-variant, duplicate, reordered
+// or padded JSON keys are refused even when correctly signed.
+func TestVerify_NonCanonicalEncodingRefused(t *testing.T) {
+	f := newFixture(t)
+	good := f.mint(t, baseClaims())
+	parts := strings.Split(string(good), ".")
+	rawPayload, err := b64.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := string(rawPayload)
+	kid := f.signer.KeyID
+	insert := func(s string, at int, x string) string { return s[:at] + x + s[at:] }
+
+	tests := []struct {
+		name string
+		tok  []byte
+	}{
+		{"LF inside signature", []byte(parts[0] + "." + parts[1] + "." + insert(parts[2], 10, "\n"))},
+		{"CR inside payload", []byte(parts[0] + "." + insert(parts[1], 5, "\r") + "." + parts[2])},
+		{"LF inside header", []byte(insert(parts[0], 3, "\n") + "." + parts[1] + "." + parts[2])},
+		{"trailing newline", append(append([]byte{}, good...), '\n')},
+		{"space", []byte(parts[0] + " ." + parts[1] + "." + parts[2])},
+		{"standard base64 alphabet", []byte(strings.NewReplacer("-", "+", "_", "/").Replace(string(good)))},
+		{"uppercase header keys", forgeRaw(f.signer.Key, `{"ALG":"EdDSA","TYP":"conduit-grant+jwt","KID":"`+kid+`"}`, payload)},
+		{"mixed-case header key", forgeRaw(f.signer.Key, `{"alg":"EdDSA","Typ":"conduit-grant+jwt","kid":"`+kid+`"}`, payload)},
+		{"duplicate header key", forgeRaw(f.signer.Key, `{"alg":"none","typ":"conduit-grant+jwt","kid":"`+kid+`","alg":"EdDSA"}`, payload)},
+		{"reordered header keys", forgeRaw(f.signer.Key, `{"kid":"`+kid+`","alg":"EdDSA","typ":"conduit-grant+jwt"}`, payload)},
+		{"whitespace in header", forgeRaw(f.signer.Key, `{"alg": "EdDSA","typ":"conduit-grant+jwt","kid":"`+kid+`"}`, payload)},
+		{"uppercase payload key", forgeRaw(f.signer.Key, parts0(t, parts[0]), strings.Replace(payload, `"project_id"`, `"PROJECT_ID"`, 1))},
+		{"duplicate payload key", forgeRaw(f.signer.Key, parts0(t, parts[0]), strings.Replace(payload, `{`, `{"project_id":"proj-evil",`, 1))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache := newCache()
+			if _, err := Verify(context.Background(), tt.tok, f.keys, baseExpect(), cache, t0.Add(time.Second)); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("Verify err = %v, want ErrMalformed", err)
+			}
+			if cache.Len() != 0 {
+				t.Fatal("a refused grant consumed a jti")
+			}
+		})
+	}
+	// Control: the canonical bytes re-signed the same way still verify.
+	if _, err := Verify(context.Background(), forgeRaw(f.signer.Key, parts0(t, parts[0]), payload), f.keys, baseExpect(), newCache(), t0.Add(time.Second)); err != nil {
+		t.Fatalf("canonical re-signed token refused: %v", err)
+	}
+}
+
+func parts0(t *testing.T, seg string) string {
+	t.Helper()
+	raw, err := b64.DecodeString(seg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// TestVerify_ClockEdges pins every time comparison at ±1s: nbf, exp, the
+// skew allowance on both sides, and the key's not_after.
+func TestVerify_ClockEdges(t *testing.T) {
+	nbf, exp := t0, t0.Add(30*time.Second)
+	const skew = 5 * time.Second
+	tests := []struct {
+		name string
+		skew time.Duration
+		now  time.Time
+		want error
+	}{
+		{"nbf-1s refused", 0, nbf.Add(-time.Second), ErrNotYetValid},
+		{"nbf exactly accepted", 0, nbf, nil},
+		{"exp-1s accepted", 0, exp.Add(-time.Second), nil},
+		{"exp exactly refused", 0, exp, ErrExpired},
+		{"nbf-skew accepted", skew, nbf.Add(-skew), nil},
+		{"nbf-skew-1s refused", skew, nbf.Add(-skew - time.Second), ErrNotYetValid},
+		{"exp+skew-1s accepted", skew, exp.Add(skew - time.Second), nil},
+		{"exp+skew refused", skew, exp.Add(skew), ErrExpired},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t)
+			tok := f.mint(t, baseClaims())
+			e := baseExpect()
+			e.ClockSkew = tt.skew
+			cache := NewMemoryReplayCache(func() time.Time { return tt.now }, 0)
+			if _, err := Verify(context.Background(), tok, f.keys, e, cache, tt.now); !errors.Is(err, tt.want) {
+				t.Fatalf("Verify err = %v, want %v", err, tt.want)
+			}
+		})
+	}
+
+	t.Run("key not_after", func(t *testing.T) {
+		f := newFixture(t)
+		tok := f.mint(t, baseClaims())
+		pub, _ := f.keys.Lookup(f.signer.KeyID)
+		pub.NotAfter = t0.Add(20 * time.Second)
+		keys, err := NewKeySet(pub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Verify(context.Background(), tok, keys, baseExpect(), newCache(), pub.NotAfter.Add(-time.Second)); err != nil {
+			t.Fatalf("not_after-1s refused: %v", err)
+		}
+		tok = f.mint(t, baseClaims())
+		if _, err := Verify(context.Background(), tok, keys, baseExpect(), newCache(), pub.NotAfter); !errors.Is(err, ErrKeyExpired) {
+			t.Fatalf("not_after exactly: err = %v, want ErrKeyExpired", err)
+		}
+	})
+}
+
+// TestVerify_ReplayCacheClockAheadOfVerify: a cache whose clock runs ahead
+// of Verify's now may already have evicted a consumed jti; such a grant must
+// still be refused, never re-admitted.
+func TestVerify_ReplayCacheClockAheadOfVerify(t *testing.T) {
+	f := newFixture(t)
+	tok := f.mint(t, baseClaims())
+	exp := t0.Add(30 * time.Second)
+	cacheNow := t0
+	cache := NewMemoryReplayCache(func() time.Time { return cacheNow }, 0)
+	verifyNow := exp.Add(-time.Second)
+
+	if _, err := Verify(context.Background(), tok, f.keys, baseExpect(), cache, verifyNow); err != nil {
+		t.Fatalf("first use: %v", err)
+	}
+	// The cache clock moves past exp and evicts the entry (capacity scan).
+	cacheNow = exp.Add(MaxValidity)
+	if fresh, err := cache.Consume(context.Background(), "other", cacheNow.Add(time.Minute)); err != nil || !fresh {
+		t.Fatalf("unrelated consume: %v %v", fresh, err)
+	}
+	if cache.Len() != 1 {
+		t.Fatalf("expected the used jti to be evicted, len=%d", cache.Len())
+	}
+	// Verify's now still trails exp, but the replay must not be admitted.
+	if _, err := Verify(context.Background(), tok, f.keys, baseExpect(), cache, verifyNow); !errors.Is(err, ErrReplay) {
+		t.Fatalf("replay after eviction: err = %v, want ErrReplay", err)
+	}
+}
+
+func TestMemoryReplayCache_ExpiredIsNeverFresh(t *testing.T) {
+	c := NewMemoryReplayCache(func() time.Time { return t0 }, 0)
+	for _, exp := range []time.Time{t0, t0.Add(-time.Second)} {
+		if fresh, err := c.Consume(context.Background(), "j-"+exp.String(), exp); err != nil || fresh {
+			t.Fatalf("exp %v: fresh=%v err=%v, want not fresh", exp, fresh, err)
+		}
+	}
+	if fresh, err := c.Consume(context.Background(), "j-live", t0.Add(time.Second)); err != nil || !fresh {
+		t.Fatalf("live jti: fresh=%v err=%v", fresh, err)
 	}
 }
