@@ -24,6 +24,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -235,7 +236,8 @@ type TimestampCheck struct {
 	// Unreadable lists tables holding a value with a four-digit numeric
 	// zone abbreviation (e.g. "+0545 +0545"). The SQLite driver cannot scan
 	// such a value, so every ent read of the table fails. Each of these
-	// tables is also in NeedsRun.
+	// tables is also in NeedsRun, or in UnparseableOnly when its values do
+	// not parse (for example a date that does not exist).
 	Unreadable []string
 }
 
@@ -774,31 +776,109 @@ func containsString(list []string, s string) bool {
 	return false
 }
 
-// SnapshotSQLite writes a consistent copy of a SQLite database next to its
-// file, with VACUUM INTO, and returns the copy's path. The name is the
-// database file name followed by "." + label + "-" + the UTC time of now +
-// ".bak". It fails for an in-memory database and when the target exists, and
-// it removes a partial copy that it wrote. The copy needs about as much free
-// space as the database file.
-func SnapshotSQLite(ctx context.Context, db *sql.DB, label string, now time.Time) (string, error) {
+// ErrSnapshotInProgress is returned by SnapshotSQLite when the temporary
+// file of another snapshot exists: either a snapshot is being written now or
+// an earlier one was interrupted. SnapshotSQLite never removes it.
+var ErrSnapshotInProgress = errors.New("a snapshot is in progress or an earlier one was interrupted")
+
+// snapshotFileMode is the mode of a snapshot file, whatever the database
+// file's mode and the process umask: a snapshot is a full copy of the
+// database.
+const snapshotFileMode os.FileMode = 0o600
+
+// SQLiteSnapshot is the result of SnapshotSQLite.
+type SQLiteSnapshot struct {
+	// Path is the snapshot file.
+	Path string
+	// Reused is true when an existing snapshot was returned and no new one
+	// was written.
+	Reused bool
+}
+
+// SnapshotSQLite makes sure a consistent copy of a SQLite database exists
+// next to its file and returns it. Snapshots are named after the database
+// file: "<file>.<label>-<UTC time of now>.bak".
+//
+// If a snapshot with this label already exists it is returned and nothing
+// is written, so repeated calls (a repair retried on every boot) use the
+// disk once; the earliest snapshot holds the values from before the first
+// repair. Otherwise the copy is written with VACUUM INTO to
+// "<file>.<label>.tmp" and renamed into place when it is complete, so a
+// ".bak" file is never partial. The temporary file is created exclusively,
+// with mode snapshotFileMode, before VACUUM INTO fills it (the driver keeps
+// an existing file's mode); on failure only that file is removed. If the
+// temporary file already exists the call fails with ErrSnapshotInProgress.
+// It also fails for an in-memory database. A new copy needs about as much free space as
+// the database file.
+func SnapshotSQLite(ctx context.Context, db *sql.DB, label string, now time.Time) (SQLiteSnapshot, error) {
 	var file string
 	if err := db.QueryRowContext(ctx, "SELECT file FROM pragma_database_list WHERE name = 'main'").Scan(&file); err != nil {
-		return "", fmt.Errorf("locate database file: %w", err)
+		return SQLiteSnapshot{}, fmt.Errorf("locate database file: %w", err)
 	}
 	if file == "" {
-		return "", errors.New("the database has no file (in-memory database)")
+		return SQLiteSnapshot{}, errors.New("the database has no file (in-memory database)")
+	}
+	existing, err := existingSnapshot(file, label)
+	if err != nil {
+		return SQLiteSnapshot{}, err
+	}
+	if existing != "" {
+		return SQLiteSnapshot{Path: existing, Reused: true}, nil
+	}
+	const mode = snapshotFileMode
+	tmp := file + "." + label + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	if errors.Is(err, os.ErrExist) {
+		return SQLiteSnapshot{}, fmt.Errorf("%w: %s exists; remove it once no hub is starting on this database", ErrSnapshotInProgress, tmp)
+	}
+	if err != nil {
+		return SQLiteSnapshot{}, fmt.Errorf("create snapshot file: %w", err)
+	}
+	// Set the mode explicitly: the umask applies to OpenFile only.
+	err = f.Chmod(mode)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		_, err = db.ExecContext(ctx, "VACUUM INTO ?", tmp)
+	}
+	if err == nil {
+		err = os.Chmod(tmp, mode)
 	}
 	path := file + "." + label + "-" + now.UTC().Format("20060102T150405Z") + ".bak"
-	if _, err := os.Stat(path); err == nil {
-		return "", fmt.Errorf("snapshot %s already exists", path)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("snapshot %s: %w", path, err)
+	if err == nil {
+		err = os.Rename(tmp, path)
 	}
-	if _, err := db.ExecContext(ctx, "VACUUM INTO ?", path); err != nil {
-		_ = os.Remove(path)
-		return "", fmt.Errorf("snapshot %s: %w", path, err)
+	if err != nil {
+		_ = os.Remove(tmp)
+		return SQLiteSnapshot{}, fmt.Errorf("snapshot %s: %w", path, err)
 	}
-	return path, nil
+	return SQLiteSnapshot{Path: path}, nil
+}
+
+// existingSnapshot returns the earliest "<file>.<label>-*.bak" next to file,
+// or "" if there is none.
+func existingSnapshot(file, label string) (string, error) {
+	dir, base := filepath.Split(file)
+	if dir == "" {
+		dir = "."
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("list snapshots: %w", err)
+	}
+	prefix := base + "." + label + "-"
+	var names []string
+	for _, e := range entries {
+		if n := e.Name(); e.Type().IsRegular() && strings.HasPrefix(n, prefix) && strings.HasSuffix(n, ".bak") {
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 {
+		return "", nil
+	}
+	sort.Strings(names)
+	return filepath.Join(dir, names[0]), nil
 }
 
 // sqliteScalarTargets returns the ent time columns and the *_at columns of

@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -39,8 +40,8 @@ var utcTimestampRepairBudget = 30 * time.Minute
 // boot-time repair: <db file>.<label>-<UTC time>.bak.
 const utcTimestampSnapshotLabel = "pre-" + entadapter.UTCTimestampNormalizeKey
 
-// snapshotSQLite takes the pre-repair snapshot. A variable so tests can make
-// it fail.
+// snapshotSQLite takes, or reuses, the pre-repair snapshot. A variable so
+// tests can make it fail.
 var snapshotSQLite = entadapter.SnapshotSQLite
 
 // timestampRepairDB is the part of the store the boot-time repair uses: the
@@ -76,7 +77,9 @@ type utcTimestampRepairResult struct {
 // only records that a repair completed. On a healthy store the probe is one
 // SELECT EXISTS per ent time column. Before writing it snapshots the
 // database next to its file with VACUUM INTO and refuses to write if the
-// snapshot fails. It never returns an error and recovers from a panic: on
+// snapshot fails. The snapshot is taken once: a later attempt (after a
+// timeout, a crash, or values that cannot be parsed) reuses it, so retries
+// do not use more disk. It never returns an error and recovers from a panic: on
 // failure it logs at ERROR and boot continues, failing at Migrate as it did
 // before this repair existed. Postgres stores timestamptz and is skipped.
 func repairUnreadableTimestamps(ctx context.Context, s timestampRepairDB) (res utcTimestampRepairResult) {
@@ -105,14 +108,23 @@ func repairUnreadableTimestamps(ctx context.Context, s timestampRepairDB) (res u
 	slog.Warn(label+": tables hold timestamps that cannot be read; repairing them before the store is used",
 		"tables_unreadable", tables)
 
-	path, err := snapshotSQLite(ctx, db, utcTimestampSnapshotLabel, time.Now())
-	if err != nil {
-		slog.Error(label+": database snapshot failed; refusing to write. Free disk space next to the database "+
-			"(the snapshot needs about the database size), then restart the hub",
+	snap, err := snapshotSQLite(ctx, db, utcTimestampSnapshotLabel, time.Now())
+	switch {
+	case errors.Is(err, entadapter.ErrSnapshotInProgress):
+		slog.Error(label+": refusing to write: "+err.Error(), "tables_unreadable", tables)
+		return res
+	case err != nil:
+		slog.Error(label+": database snapshot failed; refusing to write. If the disk is full, free space next to "+
+			"the database (the snapshot needs about the database size), then restart the hub",
 			"tables_unreadable", tables, "error", err)
 		return res
+	case snap.Reused:
+		slog.Warn(label+": reusing the database snapshot from an earlier attempt; no new snapshot written", "path", snap.Path)
+	default:
+		slog.Warn(label+": database snapshot written before the repair; it is a full copy of the database, "+
+			"delete it once the repair is verified", "path", snap.Path)
 	}
-	slog.Warn(label+": database snapshot written before the repair", "path", path)
+	path := snap.Path
 
 	logs := &boundedRepairLog{}
 	rep, err := entadapter.NormalizeUTCTimestamps(ctx, db, dbDialect, logs,
@@ -125,6 +137,14 @@ func repairUnreadableTimestamps(ctx context.Context, s timestampRepairDB) (res u
 	left, err := entadapter.UnreadableTimestampTables(ctx, db, dbDialect)
 	if err != nil {
 		slog.Error(label+": re-probe after the rewrite failed; will retry next boot", "error", err)
+		return res
+	}
+	if len(left) > 0 && rep.Unparseable > 0 {
+		// The rewrite completed, so what is left does not parse; another
+		// attempt cannot change it.
+		slog.Error(label+": tables are still unreadable because they hold values that cannot be parsed; "+
+			"correct or clear the values listed above (by table, column and rowid), then restart the hub",
+			"tables_unreadable", left, "snapshot", path)
 		return res
 	}
 	if len(left) > 0 {

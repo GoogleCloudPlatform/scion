@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -175,7 +176,11 @@ func TestUTCTimestampRepair_BootRepairsUnreadableTables(t *testing.T) {
 	assert.Contains(t, out, "user_access_tokens")
 	assert.NotContains(t, out, "+0545", "a stored value reached the log")
 
-	// The snapshot holds the database as it was before the repair.
+	// The snapshot holds the database as it was before the repair, and
+	// only the owner can read it.
+	info, err := os.Stat(snaps[0])
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 	snapDB, err := sql.Open("sqlite", "file:"+snaps[0]+"?mode=ro")
 	require.NoError(t, err)
 	var created string
@@ -195,6 +200,86 @@ func TestUTCTimestampRepair_BootRepairsUnreadableTables(t *testing.T) {
 	assert.True(t, done)
 }
 
+// A value in the four-digit shape that does not parse (the date does not
+// exist) keeps its table unreadable whatever the repair does. Retries on
+// later boots must reuse the first snapshot, not write a new one each time,
+// and the log must ask for manual correction instead of promising a retry.
+func TestUTCTimestampRepair_UnparseableValueSnapshotsOnce(t *testing.T) {
+	ctx := context.Background()
+	f := newRepairFixture(t)
+	s := f.boot(t)
+	f.seed(t, s)
+	db := s.(timestampRepairDB).DB()
+	f.corrupt(t, db)
+	// Repair everything else, then leave one unparseable value behind, so
+	// that only users stays unreadable and Migrate can still run.
+	_, err := entadapter.NormalizeUTCTimestamps(ctx, db, "sqlite3", nil, entadapter.TimestampNormalizeOptions{})
+	require.NoError(t, err)
+	_, err = db.Exec("UPDATE users SET last_seen = ? WHERE id = ?", "2026-02-30 14:45:00 +0545 +0545", f.userID)
+	require.NoError(t, err)
+
+	require.NoError(t, s.Close())
+
+	var first []string
+	for boot := 1; boot <= 3; boot++ {
+		logs, restore := captureSlog(t)
+		// Boot through initStore; whether Migrate then succeeds does not
+		// matter here.
+		bs, entClient, _ := initStore(ctx, f.cfg)
+		if entClient != nil {
+			_ = entClient.Close()
+		}
+		_ = bs
+		restore()
+		out := logs.String()
+		assert.Contains(t, out, "cannot be parsed", "boot %d", boot)
+		assert.Contains(t, out, "tables_unreadable=[users]", "boot %d", boot)
+		assert.NotContains(t, out, "will retry", "boot %d", boot)
+		assert.NotContains(t, out, "2026-02-30", "a stored value reached the log")
+		snaps := f.snapshots(t)
+		require.Len(t, snaps, 1, "boot %d: %s", boot, out)
+		if boot == 1 {
+			first = snaps
+			assert.Contains(t, out, "snapshot written")
+		} else {
+			assert.Equal(t, first, snaps)
+			assert.Contains(t, out, "reusing the database snapshot")
+		}
+	}
+	marker, err := sql.Open("sqlite", "file:"+f.dbPath+"?mode=ro")
+	require.NoError(t, err)
+	defer func() { _ = marker.Close() }()
+	var n int
+	require.NoError(t, marker.QueryRow(
+		"SELECT COUNT(*) FROM hub_settings WHERE section = '_migrations' AND CAST(value AS TEXT) LIKE '%utc_timestamp_repair%'").Scan(&n))
+	assert.Zero(t, n, "no marker for a repair that did not complete")
+}
+
+func TestUTCTimestampRepair_SnapshotInProgressRefuses(t *testing.T) {
+	ctx := context.Background()
+	f := newRepairFixture(t)
+	s := f.boot(t)
+	f.seed(t, s)
+	db := s.(timestampRepairDB).DB()
+	f.corrupt(t, db)
+	tmp := f.dbPath + "." + utcTimestampSnapshotLabel + ".tmp"
+	require.NoError(t, os.WriteFile(tmp, nil, 0o600))
+
+	logs, restore := captureSlog(t)
+	defer restore()
+	res := repairUnreadableTimestamps(ctx, s.(timestampRepairDB))
+	assert.False(t, res.Completed)
+	out := logs.String()
+	assert.Contains(t, out, "refusing to write")
+	assert.Contains(t, out, tmp)
+	assert.NotContains(t, out, "disk is full", "not a disk-space failure")
+	_, err := os.Stat(tmp)
+	assert.NoError(t, err, "the other file must be left alone")
+	var created string
+	require.NoError(t, db.QueryRow("SELECT CAST(created AS TEXT) FROM users WHERE id = ?", f.userID).Scan(&created))
+	assert.Equal(t, unreadableStamp, created)
+}
+
 func TestUTCTimestampRepair_SnapshotFailureWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	f := newRepairFixture(t)
@@ -204,8 +289,8 @@ func TestUTCTimestampRepair_SnapshotFailureWritesNothing(t *testing.T) {
 	f.corrupt(t, db)
 
 	orig := snapshotSQLite
-	snapshotSQLite = func(context.Context, *sql.DB, string, time.Time) (string, error) {
-		return "", errors.New("no space left on device")
+	snapshotSQLite = func(context.Context, *sql.DB, string, time.Time) (entadapter.SQLiteSnapshot, error) {
+		return entadapter.SQLiteSnapshot{}, errors.New("no space left on device")
 	}
 	t.Cleanup(func() { snapshotSQLite = orig })
 

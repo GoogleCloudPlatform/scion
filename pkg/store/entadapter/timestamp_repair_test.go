@@ -104,24 +104,64 @@ func TestSnapshotSQLite(t *testing.T) {
 
 	snap, err := SnapshotSQLite(ctx, db, "pre-test", now)
 	require.NoError(t, err)
-	assert.Equal(t, path+".pre-test-20261002T221005Z.bak", snap)
-	cp, err := sql.Open("sqlite", "file:"+snap+"?mode=ro")
+	assert.False(t, snap.Reused)
+	assert.Equal(t, path+".pre-test-20261002T221005Z.bak", snap.Path)
+	_, err = os.Stat(path + ".pre-test.tmp")
+	assert.True(t, os.IsNotExist(err), "the temporary file must be renamed away")
+	cp, err := sql.Open("sqlite", "file:"+snap.Path+"?mode=ro")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cp.Close() })
 	assert.Equal(t, kathmanduStamp, cellText(t, cp, "users", "u1"))
 
-	_, err = SnapshotSQLite(ctx, db, "pre-test", now)
-	assert.ErrorContains(t, err, "already exists", "an existing snapshot must not be overwritten")
-
-	// A failed VACUUM INTO leaves no file behind.
-	_, err = SnapshotSQLite(ctx, db, "missing-dir/x", now)
-	require.Error(t, err)
-	_, statErr := os.Stat(path + ".missing-dir/x-20261002T221005Z.bak")
-	assert.True(t, os.IsNotExist(statErr))
+	// Later calls reuse the existing snapshot and write nothing, even in
+	// the same second, and even after the data has changed.
+	_, err = db.Exec("UPDATE users SET created = '2026-10-01 09:00:00 +0000 UTC'")
+	require.NoError(t, err)
+	for _, at := range []time.Time{now, now.Add(time.Hour)} {
+		again, err := SnapshotSQLite(ctx, db, "pre-test", at)
+		require.NoError(t, err)
+		assert.Equal(t, SQLiteSnapshot{Path: snap.Path, Reused: true}, again)
+	}
+	matches, err := filepath.Glob(path + ".pre-test-*")
+	require.NoError(t, err)
+	assert.Equal(t, []string{snap.Path}, matches, "exactly one snapshot on disk")
+	assert.Equal(t, kathmanduStamp, cellText(t, cp, "users", "u1"), "the snapshot keeps the original values")
 
 	mem, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = mem.Close() })
 	_, err = SnapshotSQLite(ctx, mem, "pre-test", now)
 	assert.ErrorContains(t, err, "in-memory")
+}
+
+// A temporary file left by another snapshot (in progress, or interrupted)
+// is reported and never removed.
+func TestSnapshotSQLite_TemporaryFileExists(t *testing.T) {
+	ctx := context.Background()
+	db, path := openOldSchema(t)
+	tmp := path + ".pre-test.tmp"
+	require.NoError(t, os.WriteFile(tmp, []byte("another writer"), 0o600))
+
+	_, err := SnapshotSQLite(ctx, db, "pre-test", time.Now())
+	require.ErrorIs(t, err, ErrSnapshotInProgress)
+	assert.Contains(t, err.Error(), tmp)
+	got, err := os.ReadFile(tmp)
+	require.NoError(t, err)
+	assert.Equal(t, "another writer", string(got), "a file this call did not create must be left alone")
+	matches, _ := filepath.Glob(path + ".pre-test-*.bak")
+	assert.Empty(t, matches)
+}
+
+// A failed copy removes only the temporary file it created and leaves no
+// snapshot behind.
+func TestSnapshotSQLite_FailureRemovesOwnFile(t *testing.T) {
+	db, path := openOldSchema(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := SnapshotSQLite(ctx, db, "pre-test", time.Now())
+	require.Error(t, err)
+	_, statErr := os.Stat(path + ".pre-test.tmp")
+	assert.True(t, os.IsNotExist(statErr))
+	matches, _ := filepath.Glob(path + ".pre-test-*")
+	assert.Empty(t, matches)
 }
