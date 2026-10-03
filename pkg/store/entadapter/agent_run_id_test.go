@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -112,7 +113,7 @@ func TestCompareAndSwapAgentRunID(t *testing.T) {
 // the swap makes the swap miss, and the loop re-reads. One interference
 // still succeeds and returns the value actually replaced (the interferer's);
 // interference on every attempt gives up with an error and leaves the
-// interferer's value in place. Not parallel: it sets a package hook.
+// interferer's value in place.
 func TestSetAgentRunID_RetriesOnConcurrentWrite(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
@@ -123,7 +124,7 @@ func TestSetAgentRunID_RetriesOnConcurrentWrite(t *testing.T) {
 
 	interfere := func(times int) *int {
 		calls := 0
-		setAgentRunIDAfterRead = func(id string) {
+		s.afterRunIDRead = func(id string) {
 			calls++
 			if calls <= times {
 				_, err := s.client.Agent.UpdateOneID(uuid.MustParse(id)).
@@ -133,7 +134,6 @@ func TestSetAgentRunID_RetriesOnConcurrentWrite(t *testing.T) {
 		}
 		return &calls
 	}
-	t.Cleanup(func() { setAgentRunIDAfterRead = nil })
 
 	t.Run("one concurrent write", func(t *testing.T) {
 		calls := interfere(1)
@@ -156,4 +156,85 @@ func TestSetAgentRunID_RetriesOnConcurrentWrite(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, fmt.Sprintf("other-%d", setAgentRunIDAttempts), got.RunID, "a failed set writes nothing")
 	})
+}
+
+// A delete that holds the row refuses SetAgentRunID with
+// store.ErrDeleteInProgress and writes nothing, so a delete's claim and a
+// start's run-ID write are ordered (ptone/scion#2550 P1 round 3). The rule
+// is the start gate's: finalizing, or deleting under a live lease, or
+// soft-deleted. A failed delete, or a deleting row whose lease has passed,
+// does not block.
+func TestSetAgentRunID_RefusedWhileDeleteHoldsRow(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	live, expired := now.Add(time.Minute), now.Add(-time.Minute)
+	for _, tc := range []struct {
+		name      string
+		state     string
+		leaseAt   *time.Time
+		deletedAt *time.Time
+		refused   bool
+	}{
+		{"no delete", "", nil, nil, false},
+		{"deleting, live lease", store.DeletionStateDeleting, &live, nil, true},
+		{"deleting, lease expired", store.DeletionStateDeleting, &expired, nil, false},
+		{"finalizing, live lease", store.DeletionStateFinalizing, &live, nil, true},
+		{"finalizing, lease expired", store.DeletionStateFinalizing, &expired, nil, true},
+		{"failed", store.DeletionStateFailed, nil, nil, false},
+		{"soft-deleted", "", nil, &now, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, projectID := newTestAgentStore(t)
+			a := makeAgent(projectID, "run-id-delete-agent")
+			require.NoError(t, s.CreateAgent(ctx, a))
+			_, err := s.SetAgentRunID(ctx, a.ID, "run-0")
+			require.NoError(t, err)
+			set := store.DeletionFields{DeletedAt: tc.deletedAt}
+			if tc.state != "" {
+				st := tc.state
+				set.State = &st
+			}
+			if tc.leaseAt != nil {
+				set.LeaseAt = tc.leaseAt
+			}
+			n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, set)
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+
+			prev, err := s.SetAgentRunID(ctx, a.ID, "run-1")
+			got, gerr := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
+			require.NoError(t, gerr)
+			if tc.refused {
+				require.ErrorIs(t, err, store.ErrDeleteInProgress)
+				assert.Equal(t, "run-0", got.RunID, "a refused set writes nothing")
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, "run-0", prev)
+				assert.Equal(t, "run-1", got.RunID)
+			}
+		})
+	}
+}
+
+// A delete that claims between SetAgentRunID's read and its swap makes the
+// swap miss on the delete predicate; the retry re-reads and refuses.
+func TestSetAgentRunID_ClaimBetweenReadAndSwapRefuses(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "run-id-claim-race-agent")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-0")
+	require.NoError(t, err)
+	lease := time.Now().Add(time.Minute)
+	deleting := store.DeletionStateDeleting
+	s.afterRunIDRead = func(id string) {
+		s.afterRunIDRead = nil
+		_, err := s.UpdateAgentDeletion(ctx, id, store.DeletionPredicate{}, store.DeletionFields{State: &deleting, LeaseAt: &lease, BumpClaim: true})
+		require.NoError(t, err)
+	}
+	_, err = s.SetAgentRunID(ctx, a.ID, "run-1")
+	require.ErrorIs(t, err, store.ErrDeleteInProgress)
+	got, err := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
+	require.NoError(t, err)
+	assert.Equal(t, "run-0", got.RunID)
 }

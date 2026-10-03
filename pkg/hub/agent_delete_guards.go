@@ -144,18 +144,36 @@ func (s *Server) startGate(ctx context.Context, a *store.Agent, entry startEntry
 		}
 	}
 	if blocked {
-		return &startRefusal{
-			HTTPStatus: http.StatusConflict,
-			Code:       ErrCodeDeleteInProgress,
-			Message:    "a delete is in progress for this agent; wait for it to finish, or force the delete",
-			Details: map[string]interface{}{
-				"agentId": a.ID,
-			},
-		}
+		return deleteInProgressRefusal(a.ID)
 	}
 
 	// Steps 2-3 (T1 P1b-3) slot in here.
 	return nil
+}
+
+// deleteInProgressRefusal is the 409 delete_in_progress answer.
+func deleteInProgressRefusal(agentID string) *startRefusal {
+	return &startRefusal{
+		HTTPStatus: http.StatusConflict,
+		Code:       ErrCodeDeleteInProgress,
+		Message:    "a delete is in progress for this agent; wait for it to finish, or force the delete",
+		Details: map[string]interface{}{
+			"agentId": agentID,
+		},
+	}
+}
+
+// deleteClaimedDuringDispatch returns the delete_in_progress refusal when a
+// start or restart dispatch failed because a delete claimed the agent after
+// the start gate passed: beginRun's run-ID write is refused once a delete
+// holds the row (store.ErrDeleteInProgress), so the start fails closed
+// before reaching the broker, rather than starting a run the delete's
+// snapshot does not name (ptone/scion#2550 P1 round 3).
+func deleteClaimedDuringDispatch(err error, agentID string) *startRefusal {
+	if !errors.Is(err, store.ErrDeleteInProgress) {
+		return nil
+	}
+	return deleteInProgressRefusal(agentID)
 }
 
 // clearFailedDeletion clears a failed delete marker after a successful

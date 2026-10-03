@@ -30,6 +30,9 @@ var (
 	ErrInvalidInput     = errors.New("invalid input")
 	ErrRevisionConflict = errors.New("revision conflict")
 	ErrQuotaExceeded    = errors.New("quota exceeded")
+	// ErrDeleteInProgress is returned by SetAgentRunID when a delete holds
+	// the agent's row (see AgentStore.SetAgentRunID).
+	ErrDeleteInProgress = errors.New("agent delete in progress")
 
 	// ErrSuperAdminBindingRestricted is returned when a non-reconciler caller
 	// attempts to create a role binding for the super-admin role definition.
@@ -349,6 +352,13 @@ type AgentStore interface {
 	// state_version, so it neither conflicts with nor invalidates a
 	// concurrent UpdateAgent, and UpdateAgent never writes run_id back.
 	// Returns ErrNotFound if the agent doesn't exist.
+	//
+	// It refuses with ErrDeleteInProgress, writing nothing, when the row is
+	// soft-deleted or a delete holds it (finalizing, or deleting under a live
+	// lease; the start gate's rule). The check is part of the write, so a
+	// delete claim and a run-ID write are ordered by the database: a claim
+	// that lands first refuses the write, and a claim that lands after it
+	// snapshots the new run ID.
 	SetAgentRunID(ctx context.Context, agentID, runID string) (previous string, err error)
 
 	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if

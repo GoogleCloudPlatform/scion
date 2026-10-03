@@ -1290,6 +1290,11 @@ func (d *HTTPAgentDispatcher) forgetRuntimeTarget(ctx context.Context, agent *st
 // conflict with the caller's own later UpdateAgent. A failed write fails
 // the dispatch: sending a run ID the row does not record would make the
 // next delete miss the entry this dispatch creates.
+// The write is refused (store.ErrDeleteInProgress) once a delete holds the
+// row, so a delete that claimed after the start gate passed fails this
+// dispatch closed, instead of leaving the delete with a snapshot that
+// names the old run; the HTTP and DM entries answer 409 delete_in_progress
+// (deleteClaimedDuringDispatch).
 //
 // The one exception is an agent with no row at all (ErrNotFound, or an ID
 // that cannot name a row, ErrInvalidInput). Dispatching such an agent is
@@ -1389,9 +1394,9 @@ func brokerStartAttempted(err error) bool {
 
 // brokerCurrentRunID returns the api.BrokerErrorDetailCurrentRunID a broker
 // reports on a failed start or restart: the run its runtime holds for the
-// agent after the failure ("" for none, unlabelled or ambiguous). ok is
-// false when err is not a broker error envelope or carries no such detail
-// (an older broker, or a re-list that failed).
+// agent after the failure ("" for an unlabelled entry or several runs). ok
+// is false when err is not a broker error envelope or carries no such
+// detail (an older broker, no entry left, or a re-list that failed).
 func brokerCurrentRunID(err error) (current string, ok bool) {
 	var statusErr *brokerStatusError
 	if !errors.As(err, &statusErr) {
@@ -1404,11 +1409,11 @@ func brokerCurrentRunID(err error) (current string, ok bool) {
 // settleFailedRun fixes the row's run ID after a start or restart that
 // failed with err (ptone/scion#2550). When the broker reports the run its
 // runtime now holds, that is recorded (compare-and-swap from the minted
-// ID): Manager.Start can fail before removing the previous entry, after
-// creating the new one, or with nothing left, and only the runtime knows
-// which. Otherwise (an older broker, a failed re-list, a transport error,
-// or a rejection before Manager.Start) shouldRevertRun decides whether to
-// put the previous value back.
+// ID): Manager.Start can fail before removing the previous entry or after
+// creating the new one, and only the runtime knows which. Otherwise (an
+// older broker, no entry left, a failed re-list, a transport error, or a
+// rejection before Manager.Start) shouldRevertRun decides whether to put
+// the previous value back; a marked failure keeps the minted ID.
 func (d *HTTPAgentDispatcher) settleFailedRun(ctx context.Context, agent *store.Agent, minted, previous string, err error) {
 	if err == nil {
 		return

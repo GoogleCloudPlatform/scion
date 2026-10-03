@@ -281,3 +281,70 @@ func TestRunID_DeleteEngineSendsRowRunID(t *testing.T) {
 		t.Errorf("broker delete runId = %q, want run-current", got)
 	}
 }
+
+// claimFirstStore runs claim just before the first SetAgentRunID: a delete
+// claim landing after the start gate passed but before the start's
+// beginRun writes its run ID.
+type claimFirstStore struct {
+	store.Store
+	once  sync.Once
+	claim func()
+}
+
+func (c *claimFirstStore) SetAgentRunID(ctx context.Context, agentID, runID string) (string, error) {
+	c.once.Do(c.claim)
+	return c.Store.SetAgentRunID(ctx, agentID, runID)
+}
+
+// N3 (round 3): a delete that claims between the start gate and beginRun
+// snapshots the old run ID. The start's run-ID write is then refused, so
+// the start fails closed with 409 delete_in_progress before reaching the
+// broker, and the delete's runId still names what exists. Without the
+// refusal the start would replace run-0 with a new run, and the delete
+// (carrying run-0) would 404 and leak it.
+func TestRunID_DeleteClaimBeforeBeginRunFailsStartClosed(t *testing.T) {
+	for _, op := range []string{"start", "restart"} {
+		t.Run(op, func(t *testing.T) {
+			ctx := context.Background()
+			srv, s := testServer(t)
+			client := &mockRuntimeBrokerClient{}
+			phase := state.PhaseStopped
+			if op == "restart" {
+				phase = state.PhaseRunning
+			}
+			agent := setupBrokerAgentInPhase(t, s, "runid-claim-"+op, phase)
+			if _, err := s.SetAgentRunID(ctx, agent.ID, "run-0"); err != nil {
+				t.Fatal(err)
+			}
+			var plan *agentDeletionPlan
+			cs := &claimFirstStore{Store: s, claim: func() {
+				var err error
+				if plan, err = srv.claimAgentDeletion(ctx, agent.ID, agentDeleteParams{}); err != nil || plan == nil {
+					t.Errorf("claim: plan %v, err %v", plan, err)
+				}
+			}}
+			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(cs, client, false, slog.Default()))
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+op, nil)
+			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), ErrCodeDeleteInProgress) {
+				t.Fatalf("%s: status %d, want 409 %s: %s", op, rec.Code, ErrCodeDeleteInProgress, rec.Body.String())
+			}
+			if plan == nil {
+				t.Fatal("the delete claim did not run")
+			}
+			if plan.snapshot.RunID != "run-0" {
+				t.Errorf("delete snapshot run = %q, want run-0", plan.snapshot.RunID)
+			}
+			if client.startCalled || client.restartCalled {
+				t.Error("the start reached the broker")
+			}
+			got, err := s.GetAgent(ctx, agent.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.RunID != "run-0" {
+				t.Errorf("row run = %q, want run-0 (the refused start writes nothing)", got.RunID)
+			}
+		})
+	}
+}

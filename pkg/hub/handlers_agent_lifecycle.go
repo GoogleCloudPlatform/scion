@@ -541,6 +541,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 
 	// If dispatch failed, return error
 	if dispatchErr != nil {
+		if ref := deleteClaimedDuringDispatch(dispatchErr, agent.ID); ref != nil {
+			ref.write(w)
+			return
+		}
 		if writeAgentTokenIssueError(w, dispatchErr) {
 			return
 		}

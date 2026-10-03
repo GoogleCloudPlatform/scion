@@ -285,12 +285,15 @@ func startAttemptedAt(runID, current string) map[string]interface{} {
 //   - When the broker reports the run its runtime holds now
 //     (currentRunId, DN1), the hub records it: Manager.Start can fail
 //     before removing the previous entry (its run is reported, and the
-//     hub adopts it), after creating the new one (the minted run), or with
-//     nothing left ("", so the next delete resolves by name).
+//     hub adopts it) or after creating the new one (the minted run); ""
+//     (an unlabelled entry, or entries of several runs) makes the next
+//     delete resolve by name.
 //   - Otherwise, a rejection before Manager.Start (no startAttempted
 //     marker) restores the previous run ID, since the previous entry is
-//     still the live one; a marked failure without currentRunId (the
-//     broker's re-list failed) keeps the minted ID; an ambiguous transport
+//     still the live one; a marked failure without currentRunId (nothing
+//     is left on any runtime, or the broker's re-list failed) keeps the
+//     minted ID, so a delayed delete spares a same-name agent created
+//     later; an ambiguous transport
 //     failure keeps it too; an older broker sends no marker, so its
 //     rejections revert as before.
 //   - A hand-off to another node (ErrLifecycleDeferred) restores the
@@ -313,7 +316,7 @@ func TestRunID_FailedStartRevertsOnlyWhenNotActedOn(t *testing.T) {
 		{"start validation rejection (400, no marker)", false, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusBadRequest, "validation_error", nil)
 		}, previous},
-		{"start Manager.Start failure, re-list failed (500, marker only)", false, func(t *testing.T) error {
+		{"start Manager.Start failure leaving no entry, or re-list failed (500, marker only)", false, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttempted("r"))
 		}, minted},
 		{"start name in use, re-list failed (409, marker only)", false, func(t *testing.T) error {
@@ -322,7 +325,7 @@ func TestRunID_FailedStartRevertsOnlyWhenNotActedOn(t *testing.T) {
 		{"start failed before removing the previous entry (current = previous)", false, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttemptedAt("r", previous))
 		}, previous},
-		{"start failed leaving no entry (current = \"\")", false, func(t *testing.T) error {
+		{"start failed leaving an unlabelled entry or several runs (current = \"\")", false, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttemptedAt("r", ""))
 		}, ""},
 		{"start name in use by another run (409, current = other)", false, func(t *testing.T) error {
@@ -336,7 +339,7 @@ func TestRunID_FailedStartRevertsOnlyWhenNotActedOn(t *testing.T) {
 		{"restart rejection (400, no marker)", true, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusBadRequest, "validation_error", nil)
 		}, previous},
-		{"restart Manager.Start failure, re-list failed (500, marker only)", true, func(t *testing.T) error {
+		{"restart Manager.Start failure leaving no entry, or re-list failed (500, marker only)", true, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttempted("r"))
 		}, minted},
 		{"restart Manager.Start not found, re-list failed (404, marker only)", true, func(t *testing.T) error {
@@ -345,7 +348,7 @@ func TestRunID_FailedStartRevertsOnlyWhenNotActedOn(t *testing.T) {
 		{"restart failed before removing the previous entry (current = previous)", true, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttemptedAt("r", previous))
 		}, previous},
-		{"restart failed leaving no entry (current = \"\")", true, func(t *testing.T) error {
+		{"restart failed leaving an unlabelled entry or several runs (current = \"\")", true, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusNotFound, "agent_not_found", startAttemptedAt("r", ""))
 		}, ""},
 		{"restart ambiguous", true, func(*testing.T) error { return errors.New("read: connection reset") }, minted},
@@ -722,5 +725,38 @@ func TestRunID_CreateAdoptsBrokerRunID(t *testing.T) {
 	requireUUID(t, "minted run ID", f.client.lastCreateReq.RunID)
 	if got := f.storedRunID(t); got != "broker-run" {
 		t.Errorf("stored run_id = %q, want the adopted broker-run", got)
+	}
+}
+
+// beginRun's refusal while a delete holds the row reaches callers as
+// store.ErrDeleteInProgress, before any broker call, and the HTTP and DM
+// entries map it to 409 delete_in_progress (N3, round 3).
+func TestDeleteClaimedDuringDispatch(t *testing.T) {
+	ctx := context.Background()
+	f := newRunIDFixture(t, "runid-claimed")
+	lease := time.Now().Add(time.Minute)
+	deleting := store.DeletionStateDeleting
+	if _, err := f.store.UpdateAgentDeletion(ctx, f.agent.ID, store.DeletionPredicate{}, store.DeletionFields{State: &deleting, LeaseAt: &lease, BumpClaim: true}); err != nil {
+		t.Fatal(err)
+	}
+	err := f.dispatcher.DispatchAgentStart(ctx, f.agent, "", false)
+	if !errors.Is(err, store.ErrDeleteInProgress) {
+		t.Fatalf("DispatchAgentStart err = %v, want ErrDeleteInProgress", err)
+	}
+	if err := f.dispatcher.DispatchAgentRestart(ctx, f.agent); !errors.Is(err, store.ErrDeleteInProgress) {
+		t.Errorf("DispatchAgentRestart err = %v, want ErrDeleteInProgress", err)
+	}
+	if f.client.startCalled || f.client.restartCalled {
+		t.Error("a dispatch reached the broker")
+	}
+	ref := deleteClaimedDuringDispatch(err, f.agent.ID)
+	if ref == nil || ref.HTTPStatus != http.StatusConflict || ref.Code != ErrCodeDeleteInProgress {
+		t.Fatalf("refusal = %+v, want 409 %s", ref, ErrCodeDeleteInProgress)
+	}
+	if dm := ref.dmError(); dm.HTTPStatus != http.StatusConflict || dm.Code != ErrCodeDeleteInProgress {
+		t.Errorf("DM error = %+v", dm)
+	}
+	if deleteClaimedDuringDispatch(errors.New("broker down"), f.agent.ID) != nil {
+		t.Error("an unrelated error maps to delete_in_progress")
 	}
 }

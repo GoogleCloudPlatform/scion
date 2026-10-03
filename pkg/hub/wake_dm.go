@@ -131,6 +131,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// restore its prior session rather than starting fresh.
 		if err := dispatcher.DispatchAgentStart(ctx, agent, "", true); err != nil {
 			s.rollbackBrokerQuota(ctx, agent, reserved)
+			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
+				return nil, ref.dmError()
+			}
 			if errors.Is(err, errBrokerLacksEmptyPerAgent) {
 				// Fail closed like the other dispatch sites (design #2703 D3).
 				return nil, &AgentDMError{
