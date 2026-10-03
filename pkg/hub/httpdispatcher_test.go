@@ -2891,8 +2891,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesGitClone(t *testing.T
 // unintended change from routing Config.Branch and Config.GitClone through
 // workspaceSpecFor (GoogleCloudPlatform/scion#1931): workspaceSpecFor reads
 // exactly the same two AppliedConfig fields buildCreateRequest read directly
-// before, so the create payload is unaffected by that refactor. RequestID is
-// a fresh UUID per call and is normalized before comparison.
+// before, so the create payload is unaffected by that refactor. The golden
+// also reflects buildCreateRequest's unconditional SCION_METADATA_MODE and
+// SCION_METADATA_MODE_SOURCE write into ResolvedEnv/EnvClassifications
+// ("block" with no GCP identity, sourced from "hub"). RequestID is a fresh
+// UUID per call and is normalized before comparison.
 func TestBuildCreateRequest_GoldenPayload(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
@@ -2971,6 +2974,14 @@ func TestBuildCreateRequest_GoldenPayload(t *testing.T) {
       "branch": "main",
       "depth": 1
     }
+  },
+  "resolvedEnv": {
+    "SCION_METADATA_MODE": "block",
+    "SCION_METADATA_MODE_SOURCE": "hub"
+  },
+  "envClassifications": {
+    "SCION_METADATA_MODE": "plain",
+    "SCION_METADATA_MODE_SOURCE": "plain"
   },
   "projectSlug": "golden-project",
   "sharedDirs": [
