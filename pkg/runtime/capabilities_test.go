@@ -71,7 +71,8 @@ func (r *emptyPerAgentCapableRuntime) SupportsEmptyPerAgentWorkspace() bool { re
 
 // TestHasEmptyPerAgentSupport pins the per-runtime empty-per-agent
 // capability a broker advertises (design #2703 P2): Cloud Run, which rejects
-// the mode at Run, reports false; Cloud Run sandbox (a per-agent copy) and a
+// the mode at Run, and substrate, which never mounts RunConfig.Workspace,
+// report false; Cloud Run sandbox (a per-agent copy) and a
 // runtime without the optional interface report true.
 func TestHasEmptyPerAgentSupport(t *testing.T) {
 	for name, tc := range map[string]struct {
@@ -80,6 +81,7 @@ func TestHasEmptyPerAgentSupport(t *testing.T) {
 	}{
 		"cloudrun":                       {rt: &CloudRunRuntime{}, want: false},
 		"cloudrun-sandbox":               {rt: &CloudRunSandboxRuntime{}, want: true},
+		"substrate":                      {rt: &SubstrateRuntime{}, want: false},
 		"runtime without the capability": {rt: &MockRuntime{}, want: true},
 		"runtime reporting true":         {rt: &emptyPerAgentCapableRuntime{MockRuntime: &MockRuntime{}, supports: true}, want: true},
 		"runtime reporting false":        {rt: &emptyPerAgentCapableRuntime{MockRuntime: &MockRuntime{}, supports: false}, want: false},

@@ -372,6 +372,17 @@ func (r *SubstrateRuntime) AsyncLaunchUnsupported() bool { return true }
 
 var _ AsyncLaunchUnsupportedRuntime = (*SubstrateRuntime)(nil)
 
+// SupportsEmptyPerAgentWorkspace reports false: Run never mounts
+// RunConfig.Workspace (the actor's filesystem comes from its template), so
+// it cannot give an agent the private agents/<slug>/workspace directory an
+// empty-per-agent project (design #2703) requires. Opting out makes a
+// broker whose default runtime is substrate stop advertising the mode, so
+// the hub fails such creates closed with 412 instead of silently running
+// the agent without its workspace.
+func (r *SubstrateRuntime) SupportsEmptyPerAgentWorkspace() bool { return false }
+
+var _ EmptyPerAgentCapableRuntime = (*SubstrateRuntime)(nil)
+
 // ExecUser returns "scion" — the tmux session runs under the scion user
 // after sciontool init sets up the environment, same as every other
 // runtime.
