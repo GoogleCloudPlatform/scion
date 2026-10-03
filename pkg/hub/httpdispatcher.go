@@ -3386,11 +3386,14 @@ func (d *HTTPAgentDispatcher) deferredDataOpResult(
 	}
 
 	// 4. Wait for completion — reads result from the DB row (authoritative).
-	// Delete operations use a shorter timeout since they are lightweight
-	// broker-side operations and should not block the caller for 90 seconds.
+	// Delete operations use a shorter timeout (dispatchDeleteTimeout) since
+	// they are lightweight broker-side operations and should not block the
+	// caller for 90 seconds — unless the caller passed an explicit budget
+	// with withDeleteWaitBudget (the delete engine, design ptone/scion#2483
+	// §2.3.1), which then is the wait's only deadline.
 	var timeoutOverrides []time.Duration
 	if op == "delete" {
-		timeoutOverrides = append(timeoutOverrides, dispatchDeleteTimeout)
+		timeoutOverrides = append(timeoutOverrides, deleteWaitTimeoutFn(ctx))
 	}
 	result, err := waitForDispatchDone(ctx, eventCh, unsub, d.store, dispatchID, timeoutOverrides...)
 	if err != nil {

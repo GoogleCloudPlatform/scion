@@ -72,16 +72,17 @@ func (nd *NotificationDispatcher) SetBrokerProxy(p *MessageBrokerProxy) {
 	nd.brokerProxy = p
 }
 
-// Start subscribes to agent status and deletion events and spawns goroutines to process them.
+// Start subscribes to agent status events and spawns a goroutine to process
+// them. DELETED notifications are not driven by the agent.deleted event: the
+// delete engine resolves them before the row changes and delivers them after
+// (ResolveDeletedNotifications, design ptone/scion#2483 §2.3).
 func (nd *NotificationDispatcher) Start() {
 	statusCh, unsubStatus := nd.events.Subscribe("project.>.agent.status")
-	deletedCh, unsubDeleted := nd.events.Subscribe("project.>.agent.deleted")
 
 	nd.wg.Add(1)
 	go func() {
 		defer nd.wg.Done()
 		defer unsubStatus()
-		defer unsubDeleted()
 		for {
 			select {
 			case evt, ok := <-statusCh:
@@ -89,11 +90,6 @@ func (nd *NotificationDispatcher) Start() {
 					return
 				}
 				nd.handleEvent(evt)
-			case evt, ok := <-deletedCh:
-				if !ok {
-					return
-				}
-				nd.handleDeletedEvent(evt)
 			case <-nd.stopCh:
 				return
 			}
@@ -196,68 +192,105 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 	}
 }
 
-// handleDeletedEvent processes an agent deletion event.
-// It fires DELETED notifications before the cascade delete removes subscriptions.
-func (nd *NotificationDispatcher) handleDeletedEvent(evt Event) {
-	var deletedEvt AgentDeletedEvent
-	if err := json.Unmarshal(evt.Data, &deletedEvt); err != nil {
-		nd.log.Error("Failed to unmarshal agent deleted event", "error", err)
-		return
+// pendingDeletedNotification is one DELETED notification resolved before an
+// agent's row changes, to be persisted and delivered after it (design
+// ptone/scion#2483 §2.3).
+type pendingDeletedNotification struct {
+	sub   store.NotificationSubscription
+	agent store.Agent // snapshot of the watched agent, taken before the delete
+}
+
+// ResolveDeletedNotifications resolves the DELETED notifications for agent
+// from a snapshot taken before the delete finalizes. It only reads (the
+// agent- and project-scoped subscriptions); nothing is persisted or sent.
+// Persist and deliver with DeliverDeletedNotifications, only after the row
+// change succeeded: a hard delete cascades both the subscriptions and the
+// agent's notification rows (CompositeStore.DeleteAgent), so resolving
+// afterwards would find nothing, and persisting before would lose the rows.
+//
+// Subscriptions are deduplicated by subscriber, and only those whose
+// triggers match DELETED are kept.
+func (nd *NotificationDispatcher) ResolveDeletedNotifications(ctx context.Context, agent *store.Agent) []pendingDeletedNotification {
+	if nd == nil || agent == nil || agent.ID == "" {
+		return nil
 	}
-
-	if deletedEvt.AgentID == "" {
-		return
-	}
-
-	ctx := context.Background()
-
-	// Collect subscriptions from both scopes
-	agentSubs, err := nd.store.GetNotificationSubscriptions(ctx, deletedEvt.AgentID)
+	agentSubs, err := nd.store.GetNotificationSubscriptions(ctx, agent.ID)
 	if err != nil {
-		nd.log.Error("Failed to get agent notification subscriptions for deleted event",
-			"agent_id", deletedEvt.AgentID, "error", err)
+		nd.log.Error("Failed to get agent notification subscriptions for deleted agent",
+			"agent_id", agent.ID, "error", err)
 		agentSubs = nil
 	}
-
-	projectSubs, err := nd.store.GetNotificationSubscriptionsByProjectScope(ctx, deletedEvt.ProjectID)
-	if err != nil {
-		nd.log.Error("Failed to get project notification subscriptions for deleted event",
-			"projectID", deletedEvt.ProjectID, "error", err)
-		projectSubs = nil
+	var projectSubs []store.NotificationSubscription
+	if agent.ProjectID != "" {
+		projectSubs, err = nd.store.GetNotificationSubscriptionsByProjectScope(ctx, agent.ProjectID)
+		if err != nil {
+			nd.log.Error("Failed to get project notification subscriptions for deleted agent",
+				"projectID", agent.ProjectID, "error", err)
+			projectSubs = nil
+		}
 	}
 
 	allSubs := append(agentSubs, projectSubs...)
-	if len(allSubs) == 0 {
-		return
-	}
-
-	// Deduplicate by subscriber and fire DELETED notifications
 	seen := make(map[string]bool)
+	var pending []pendingDeletedNotification
 	for i := range allSubs {
-		sub := &allSubs[i]
-
+		sub := allSubs[i]
 		dedupeKey := sub.SubscriberType + ":" + sub.SubscriberID
-		if seen[dedupeKey] {
+		if seen[dedupeKey] || !sub.MatchesActivity("DELETED") {
 			continue
 		}
-
-		if !sub.MatchesActivity("DELETED") {
-			continue
-		}
-
 		seen[dedupeKey] = true
-
-		// Build a synthetic status event for storeAndDispatch
-		statusEvt := AgentStatusEvent{
-			AgentID:   deletedEvt.AgentID,
-			ProjectID: deletedEvt.ProjectID,
-			Phase:     "stopped",
-			Activity:  "DELETED",
-			// The agent is gone: no delete view (explicit null on the wire).
-			Deletion: nil,
-		}
-		nd.storeAndDispatch(ctx, sub, statusEvt)
+		pending = append(pending, pendingDeletedNotification{sub: sub, agent: *agent})
 	}
+	return pending
+}
+
+// DeliverDeletedNotifications persists and delivers notifications resolved by
+// ResolveDeletedNotifications. It runs in the background on its own context,
+// so a stalled subscriber (the per-subscriber broker retry is up to 30s)
+// never holds up the delete engine or lets its lease lapse. The returned
+// channel is closed when every notification has been handled (for tests).
+func (nd *NotificationDispatcher) DeliverDeletedNotifications(ctx context.Context, pending []pendingDeletedNotification) <-chan struct{} {
+	done := make(chan struct{})
+	if nd == nil || len(pending) == 0 {
+		close(done)
+		return done
+	}
+	ctx = context.WithoutCancel(ctx)
+	go func() {
+		defer close(done)
+		for i := range pending {
+			nd.deliverDeletedNotification(ctx, &pending[i])
+		}
+	}()
+	return done
+}
+
+// deliverDeletedNotification persists and delivers one resolved DELETED
+// notification. A panic is recovered per item, so it cannot drop the
+// remaining subscribers' notifications.
+func (nd *NotificationDispatcher) deliverDeletedNotification(ctx context.Context, p *pendingDeletedNotification) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			nd.log.Error("DELETED notification delivery panicked",
+				"agent_id", p.agent.ID, "subscriptionID", p.sub.ID, "panic", fmt.Sprint(rec))
+		}
+	}()
+	evt := AgentStatusEvent{
+		AgentID:   p.agent.ID,
+		ProjectID: p.agent.ProjectID,
+		Phase:     "stopped",
+		Activity:  "DELETED",
+		// The agent is gone: no delete view (explicit null on the wire).
+		Deletion: nil,
+	}
+	// storeAndDispatch's stale-event check is intentionally skipped. It
+	// drops re-reported statuses older than the subscription, judged by the
+	// agent's last activity. A DELETED event is never a re-report: the
+	// delete is happening now, after any subscription that exists. An idle
+	// agent's last activity can predate a newer subscription, so the check
+	// would wrongly drop the event.
+	nd.storeAndDispatchForAgent(ctx, &p.sub, evt, &p.agent)
 }
 
 // storeAndDispatch creates a notification record and dispatches it to the subscriber.
@@ -292,6 +325,13 @@ func (nd *NotificationDispatcher) storeAndDispatch(ctx context.Context, sub *sto
 		}
 	}
 
+	nd.storeAndDispatchForAgent(ctx, sub, evt, agent)
+}
+
+// storeAndDispatchForAgent persists a notification for evt and dispatches it
+// to the subscriber, using agent as the watched agent (it is not re-read, so
+// it also works from a snapshot of an agent that has since been deleted).
+func (nd *NotificationDispatcher) storeAndDispatchForAgent(ctx context.Context, sub *store.NotificationSubscription, evt AgentStatusEvent, agent *store.Agent) {
 	// Use activity for matching/display; fall back to phase when activity is empty.
 	effectiveStatus := evt.Activity
 	if effectiveStatus == "" {
