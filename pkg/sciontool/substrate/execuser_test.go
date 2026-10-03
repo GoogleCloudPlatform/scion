@@ -23,16 +23,6 @@ import (
 	"testing"
 )
 
-// withExecCandidateEnv swaps runExec's CA-bundle env source for the duration
-// of the test, restoring it on cleanup -- never touching the real process
-// environment via os.Setenv.
-func withExecCandidateEnv(t *testing.T, env []string) {
-	t.Helper()
-	orig := execCandidateEnv
-	execCandidateEnv = func() []string { return env }
-	t.Cleanup(func() { execCandidateEnv = orig })
-}
-
 // TestTrustBundleEnvPairs_AllCAVarsSet is test (b): with all 5 candidate
 // vars set, every one of them is carried through, in
 // substrateenv.TrustBundleVarNames's order.
