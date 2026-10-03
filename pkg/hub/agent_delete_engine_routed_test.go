@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -135,4 +136,50 @@ func TestAgentDeleteRouted_RestoreReturnsEnrichedShape(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body["deletion"], &view))
 	assert.Equal(t, store.DeletionCodeRuntimeError, view.Code)
 	assert.True(t, mustGetAgent(t, s, agent.ID).DeletedAt.IsZero(), "restored")
+}
+
+// The finalize seam (ptone/scion#2121 attachment point) runs inside the
+// finalize transaction for soft and hard deletes; an error from it rolls the
+// finalize back: finalize_failed, the row stays live in finalizing, and a
+// retry finalizes.
+func TestAgentDeleteEngine_FinalizeSeamErrorRollsBack(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		retention time.Duration
+		wantMode  store.DeletionFinalizeMode
+	}{{"hard", 0, store.DeletionFinalizeHard}, {"soft", time.Hour, store.DeletionFinalizeSoft}} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, _, disp := engineTestServer(t)
+			srv.config.SoftDeleteRetention = tc.retention
+			agent := setupBrokerAgentInPhase(t, s, "seam-"+tc.name, state.PhaseRunning)
+
+			old := agentDeletionFinalizeSeam
+			t.Cleanup(func() { agentDeletionFinalizeSeam = old })
+			var modes []store.DeletionFinalizeMode
+			agentDeletionFinalizeSeam = func(_ context.Context, tx store.Store, a *store.Agent, mode store.DeletionFinalizeMode) error {
+				modes = append(modes, mode)
+				return errors.New("seam refused")
+			}
+
+			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+			require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+			_, details := errorBody(t, rec)
+			assert.Equal(t, store.DeletionCodeFinalizeFailed, details["deletionCode"])
+			require.NotEmpty(t, modes)
+			assert.Equal(t, tc.wantMode, modes[0])
+			got := mustGetAgent(t, s, agent.ID)
+			assert.True(t, got.DeletedAt.IsZero(), "rolled back: the row is live")
+			assert.Equal(t, store.DeletionStateFinalizing, got.DeletionState)
+
+			agentDeletionFinalizeSeam = old
+			rec = doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+			assert.Equal(t, 1, disp.callCount(), "the finalizing re-claim does not re-dispatch")
+			if tc.retention > 0 {
+				assert.False(t, mustGetAgent(t, s, agent.ID).DeletedAt.IsZero())
+			} else {
+				assert.True(t, agentGone(t, s, agent.ID))
+			}
+		})
+	}
 }

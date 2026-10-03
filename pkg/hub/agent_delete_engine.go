@@ -704,6 +704,8 @@ func (e *deletionEngine) revoke() error {
 func (e *deletionEngine) finish() (deletionOutcome, bool) {
 	s := e.s
 	agent := e.plan.snapshot
+	pred := e.claimPred(store.DeletionStateFinalizing)
+	pred.DeletedAtNull = true
 
 	if e.plan.req.Soft {
 		ctx, cancel := e.step(deleteStepTimeout)
@@ -712,8 +714,6 @@ func (e *deletionEngine) finish() (deletionOutcome, bool) {
 		stopped := string(state.PhaseStopped)
 		none := store.DeletionStateNone
 		empty := ""
-		pred := e.claimPred(store.DeletionStateFinalizing)
-		pred.DeletedAtNull = true
 		// The soft finish clears the whole marker (the claim epoch is kept),
 		// so a restored agent carries no stale banner.
 		set := store.DeletionFields{
@@ -722,7 +722,7 @@ func (e *deletionEngine) finish() (deletionOutcome, bool) {
 			ClearLeaseAt: true, ClearStartedAt: true, ClearFailedAt: true,
 		}
 		e.stopRenewal()
-		n, err := s.store.UpdateAgentDeletion(ctx, agent.ID, pred, set)
+		n, err := s.finalizeAgentDeletion(ctx, agent.ID, pred, store.DeletionFinalizeSoft, set)
 		if err != nil {
 			s.agentLifecycleLog.Error("delete engine: soft finish failed", "agent_id", agent.ID, "error", err)
 			return e.failFinalizing(store.DeletionCodeFinalizeFailed, "Failed to finalize agent delete: "+err.Error()), false
@@ -741,10 +741,14 @@ func (e *deletionEngine) finish() (deletionOutcome, bool) {
 	var err error
 	for attempt := 0; attempt < 2; attempt++ {
 		ctx, cancel := e.step(deleteStepTimeout)
-		err = s.store.DeleteAgent(ctx, agent.ID)
+		var n int
+		n, err = s.finalizeAgentDeletion(ctx, agent.ID, pred, store.DeletionFinalizeHard, store.DeletionFields{})
 		cancel()
-		if err == nil || errors.Is(err, store.ErrNotFound) {
-			return deletionOutcome{}, true
+		if err == nil {
+			if n == 1 || e.rowGone() {
+				return deletionOutcome{}, true
+			}
+			return e.lost(), false
 		}
 		if e.isLost() {
 			return e.lost(), false
@@ -752,6 +756,32 @@ func (e *deletionEngine) finish() (deletionOutcome, bool) {
 	}
 	s.agentLifecycleLog.Error("delete engine: hard delete failed", "agent_id", agent.ID, "error", err)
 	return e.failFinalizing(store.DeletionCodeFinalizeFailed, "Failed to finalize agent delete: "+err.Error()), false
+}
+
+// rowGone reports whether the agent row no longer exists (a concurrent
+// hard delete got there first).
+func (e *deletionEngine) rowGone() bool {
+	ctx, cancel := e.step(deleteShortStep)
+	defer cancel()
+	_, err := e.s.store.GetAgent(ctx, e.agentID())
+	return errors.Is(err, store.ErrNotFound)
+}
+
+// agentDeletionFinalizeSeam runs inside the finalize transaction (soft and
+// hard, including the hard delete of an incomplete create), just before
+// commit, with a transaction-scoped store. A non-nil error rolls the
+// finalize back, and the engine fails with finalize_failed. It is the
+// attachment point for lifecycle hooks and op-ID stamping
+// (ptone/scion#2121); a no-op until then. Tests may replace it.
+var agentDeletionFinalizeSeam store.DeletionFinalizeHook = func(context.Context, store.Store, *store.Agent, store.DeletionFinalizeMode) error {
+	return nil
+}
+
+// finalizeAgentDeletion is the delete engine's single terminal write: one
+// store transaction that re-checks the claim, applies the soft or hard
+// delete, and runs agentDeletionFinalizeSeam before commit.
+func (s *Server) finalizeAgentDeletion(ctx context.Context, agentID string, pred store.DeletionPredicate, mode store.DeletionFinalizeMode, set store.DeletionFields) (int, error) {
+	return s.store.FinalizeAgentDeletion(ctx, agentID, pred, mode, set, agentDeletionFinalizeSeam)
 }
 
 // --- Request side (design §2.4) ---
