@@ -16,24 +16,24 @@ package secret
 
 import "strings"
 
-// ReservedEnvTargetPrefixes lists the environment-variable name prefixes that
+// reservedEnvTargetPrefixes lists the environment-variable name prefixes that
 // are reserved for scion's own control-plane variables. These names are
 // always set by the runtime itself, so an environment-type secret may not
 // target one of them. This mirrors the existing SCION_* persistence
 // allowlist in the hub dispatcher (shouldPersistResolvedEnvKey), which
 // already treats SCION_* as a reserved system namespace.
-var ReservedEnvTargetPrefixes = []string{
+var reservedEnvTargetPrefixes = []string{
 	"SCION_",
 	"GCE_METADATA_",
 }
 
 // IsReservedEnvTarget reports whether target falls under a prefix reserved
 // for scion's own control-plane environment variables (see
-// ReservedEnvTargetPrefixes). It is meaningful only for environment-type
+// reservedEnvTargetPrefixes). It is meaningful only for environment-type
 // secret targets; other secret types are not projected into the container
 // environment.
 func IsReservedEnvTarget(target string) bool {
-	for _, prefix := range ReservedEnvTargetPrefixes {
+	for _, prefix := range reservedEnvTargetPrefixes {
 		if strings.HasPrefix(target, prefix) {
 			return true
 		}
