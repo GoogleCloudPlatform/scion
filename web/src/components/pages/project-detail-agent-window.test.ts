@@ -32,6 +32,9 @@ import { PROJECT_AGENTS_FIT_THRESHOLD } from '../../client/agent-list-window.js'
 import { AgentDrainRunner } from '../../client/agent-drain.js';
 import { holdable } from './__fixtures__/global-agents-endpoint.js';
 
+// Stop All asks for confirmation first; the tests confirm it.
+vi.mock('../shared/confirm-dialog.js', () => ({ showConfirm: vi.fn(async () => true) }));
+
 /**
  * happy-dom has no EventSource; setScope opens one. It opens on the next
  * tick, so a drain's wait for the live connection resolves at once.
@@ -238,6 +241,7 @@ interface Internals {
   setPhaseFilter(phase: string): void;
   handleAgentAction(id: string, action: string): Promise<void>;
   backgroundRefresh(trigger: string): void;
+  handleStopAll(): Promise<void>;
   onPagerSizeChange(size: number): void;
   committedLabel: string;
   pagerPageSize: number;
@@ -252,6 +256,8 @@ interface Internals {
     pageIndex: number;
     updatesAvailable: boolean;
     error: string | null;
+    loading: boolean;
+    stale: boolean;
   };
   agentStats: { total: number; running: number };
   agentsLoading: boolean;
@@ -275,6 +281,18 @@ async function flushLive(el: TestEl): Promise<void> {
   await el.updateComplete;
 }
 
+/**
+ * Waits until no agents load is in flight (page-level or the window's own
+ * page fetch), then runs the pending live flush and lets the page render.
+ */
+async function settle(el: TestEl): Promise<void> {
+  await vi.waitFor(() => {
+    expect(internals(el).agentsLoading).toBe(false);
+    expect(internals(el).agentWindow.loading).toBe(false);
+  });
+  await flushLive(el);
+}
+
 function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
   let resolve!: (v: T) => void;
   const promise = new Promise<T>((r) => {
@@ -296,6 +314,12 @@ function createRealisticFetchHandler(opts: {
   agents: Agent[];
   requests: AgentsRequest[];
   legacyTruncated?: boolean;
+  /** Sorted requests over more candidates than this answer 422 (the server's 2,000 candidate ceiling). */
+  refuseSortedAbove?: number;
+  /** Legacy pages return only the agents passing this (the server's per-item read filter). */
+  readable?: (a: Agent) => boolean;
+  /** A legacy request with this cursor answers 500. */
+  failLegacyCursor?: string;
 }) {
   return (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const rawUrl =
@@ -342,6 +366,20 @@ function createRealisticFetchHandler(opts: {
       }
 
       if (sort) {
+        if (opts.refuseSortedAbove !== undefined && list.length > opts.refuseSortedAbove) {
+          return Promise.resolve(
+            jsonResponse(
+              {
+                error: {
+                  code: 'sorted_view_unavailable',
+                  message: 'too many agents for a sorted view',
+                  details: { reason: 'too_many_candidates' },
+                },
+              },
+              422
+            )
+          );
+        }
         const dir = u.searchParams.get('dir') === 'asc' ? 1 : -1;
         const sorted = [...list].sort(
           (a, b) => dir * (a.updated ?? '').localeCompare(b.updated ?? '')
@@ -403,11 +441,19 @@ function createRealisticFetchHandler(opts: {
       // shrinks a legacy page to 20 items, so a 100-agent drain needs five
       // pages and is capped at four.
       const legacyLimit = opts.legacyTruncated ? 20 : Number(u.searchParams.get('limit') ?? '500');
+      if (
+        opts.failLegacyCursor !== undefined &&
+        u.searchParams.get('cursor') === opts.failLegacyCursor
+      ) {
+        return Promise.resolve(jsonResponse({ error: { message: 'boom' } }, 500));
+      }
       const start = Number(u.searchParams.get('cursor') ?? '0');
       const end = start + legacyLimit;
+      const readable = opts.readable;
+      const pageRows = list.slice(start, end);
       return Promise.resolve(
         jsonResponse({
-          agents: list.slice(start, end),
+          agents: readable ? pageRows.filter(readable) : pageRows,
           nextCursor: end < list.length ? String(end) : undefined,
           _capabilities: opts.projectCaps,
         })
@@ -509,12 +555,12 @@ describe('project-detail — agent list window', () => {
       input.value = 'env=prod';
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       expect(requests.length).toBe(2);
 
       // Lifecycle refresh: exactly one request.
       await internals(el).handleAgentAction('a-1', 'stop');
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       expect(requests.length).toBe(3);
     }, 20_000);
 
@@ -587,7 +633,6 @@ describe('project-detail — agent list window', () => {
       expect(requests[0].url).toContain(`fit=${PROJECT_AGENTS_FIT_THRESHOLD}`);
       expect(internals(el).agentWindow.state).toBe('paged');
 
-      const settle = () => new Promise((r) => setTimeout(r, 10));
       let n = requests.length;
       await internals(el).agentWindow.next();
       expect(requests.length - n).toBe(1);
@@ -599,19 +644,19 @@ describe('project-detail — agent list window', () => {
 
       n = requests.length;
       internals(el).toggleSort('updated'); // flips dir
-      await settle();
+      await settle(el);
       expect(requests.length - n).toBe(1);
       expect(requests[requests.length - 1].url).toContain('dir=asc');
       expect(internals(el).agentWindow.state).toBe('paged');
 
       n = requests.length;
       internals(el).setPhaseFilter('running');
-      await settle();
+      await settle(el);
       expect(requests.length - n).toBe(1);
       expect(requests[requests.length - 1].url).toContain('phase=running');
       n = requests.length;
       internals(el).setPhaseFilter('');
-      await settle();
+      await settle(el);
       expect(requests.length - n).toBe(1);
       expect(internals(el).agentWindow.state).toBe('paged');
 
@@ -624,14 +669,14 @@ describe('project-detail — agent list window', () => {
       input.value = 'env=prod';
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
-      await settle();
+      await settle(el);
       expect(requests.length - n).toBe(1);
       expect(requests[requests.length - 1].url).toContain('label=env%3Dprod');
       expect(internals(el).agentWindow.state).toBe('paged');
 
       n = requests.length;
       await internals(el).handleAgentAction('a-1', 'stop');
-      await settle();
+      await settle(el);
       expect(requests.length - n).toBe(1);
       expect(requests[requests.length - 1].url).toContain(`fit=${PROJECT_AGENTS_FIT_THRESHOLD}`);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -641,7 +686,7 @@ describe('project-detail — agent list window', () => {
       input.value = '';
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
-      await settle();
+      await settle(el);
       expect(requests.length - n).toBe(1);
       expect(internals(el).agentWindow.state).toBe('paged');
 
@@ -650,7 +695,7 @@ describe('project-detail — agent list window', () => {
       n = requests.length;
       for (const v of ['grid', 'list', 'grid']) {
         toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: v } }));
-        await settle();
+        await settle(el);
       }
       expect(requests.length - n).toBe(0);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -661,7 +706,7 @@ describe('project-detail — agent list window', () => {
       // every toggle is free.
       n = requests.length;
       toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'graph' } }));
-      await settle();
+      await settle(el);
       expect(requests.length - n).toBe(1);
       expect(requests[requests.length - 1].url).not.toContain('sort=');
       expect(internals(el).agentWindow.state).toBe('small');
@@ -669,7 +714,7 @@ describe('project-detail — agent list window', () => {
       n = requests.length;
       for (const v of ['list', 'grid', 'graph', 'list']) {
         toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: v } }));
-        await settle();
+        await settle(el);
       }
       expect(requests.length - n).toBe(0);
       expect(internals(el).agentWindow.state).toBe('small');
@@ -696,7 +741,7 @@ describe('project-detail — agent list window', () => {
 
       const n = requests.length;
       internals(el).onPagerSizeChange(100);
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       expect(requests.length - n).toBe(1);
       const url = requests[requests.length - 1].url;
       expect(url).toContain('limit=100');
@@ -734,7 +779,7 @@ describe('project-detail — agent list window', () => {
 
       // A lifecycle refresh with the SAME (still refused) label does not retry sorted mode.
       await internals(el).handleAgentAction('a-1', 'stop');
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       expect(requests.length).toBe(3);
       expect(requests[2].url).not.toContain('sort=');
 
@@ -743,7 +788,7 @@ describe('project-detail — agent list window', () => {
       input.value = 'env=prod';
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       expect(requests.length).toBe(4);
       expect(requests[3].url).toContain('sort=updated');
       expect(requests[3].url).toContain('label=env%3Dprod');
@@ -790,7 +835,7 @@ describe('project-detail — agent list window', () => {
       input.value = 'env=prod';
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
 
       const after = (el as unknown as { agents: Agent[] }).agents;
       expect(after.length).toBe(5); // previous data kept, not cleared to []
@@ -931,7 +976,7 @@ describe('project-detail — agent list window', () => {
       // exactly like a REST response that was already in flight, or served
       // from a stale read replica, when the delete happened.
       internals(el).toggleSort('updated');
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       await el.updateComplete;
 
       // The already-removed agent must not be re-counted.
@@ -961,7 +1006,7 @@ describe('project-detail — agent list window', () => {
       // (`fit` is forced to 0). The fixture still lists the already-deleted
       // agent.
       internals(el).toggleSort('updated');
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       await el.updateComplete;
 
       expect(internals(el).agentWindow.items.some((a) => a.id === agents[0].id)).toBe(false);
@@ -1031,7 +1076,7 @@ describe('project-detail — agent list window', () => {
       const requests: AgentsRequest[] = [];
       const el = await mountForcedPaged(projectId, agents, requests);
       internals(el).setPhaseFilter('running');
-      await new Promise((r) => setTimeout(r, 10)); // the phase change's own one paged refetch
+      await settle(el); // the phase change's own one paged refetch
       await el.updateComplete;
       expect(internals(el).agentWindow.state).toBe('paged');
 
@@ -1085,7 +1130,7 @@ describe('project-detail — agent list window', () => {
       input.value = 'env=prod';
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       await el.updateComplete;
       expect(internals(el).agentWindow.state).toBe('paged');
       expect(internals(el).agentStats.total).toBe(30); // only the 30 env=prod members
@@ -1128,7 +1173,7 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.items.find((a) => a.id === agents[0].id)).toBeUndefined();
     });
 
-    it('reconnect (agents-resync) raises the chip with no request (plumbing only — state.ts owns resync detection itself)', async () => {
+    it('a reconnect of the live connection raises the chip with no request', async () => {
       const projectId = 'p-paged-resync';
       const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
@@ -1136,8 +1181,14 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.state).toBe('paged');
       const before = requests.length;
 
-      stateManager.dispatchEvent(new Event('agents-resync'));
-      await el.updateComplete;
+      expect(internals(el).agentWindow.updatesAvailable).toBe(false);
+
+      // A drop and reconnect of the live connection, through state.ts's own
+      // resync detection.
+      const sse = (stateManager as unknown as { sseClientInstance: EventTarget }).sseClientInstance;
+      sse.dispatchEvent(new CustomEvent('disconnected'));
+      sse.dispatchEvent(new CustomEvent('connected'));
+      await settle(el);
 
       expect(internals(el).agentWindow.updatesAvailable).toBe(true);
       expect(requests.length).toBe(before);
@@ -1463,7 +1514,7 @@ describe('project-detail — agent list window', () => {
 
       let n = requests.length;
       internals(el).toggleSort('name');
-      await new Promise((r) => setTimeout(r, 50));
+      await settle(el);
       expect(requests.length - n).toBe(1);
       expect(requests[requests.length - 1].url).not.toContain('sort=');
       expect(internals(el).agentWindow.state).toBe('small');
@@ -1474,7 +1525,7 @@ describe('project-detail — agent list window', () => {
       internals(el).toggleSort('updated'); // dir flip
       internals(el).toggleSort('created');
       internals(el).setPhaseFilter('running');
-      await new Promise((r) => setTimeout(r, 50));
+      await settle(el);
       expect(requests.length - n).toBe(0);
       expect(internals(el).agentWindow.state).toBe('small');
     });
@@ -1491,14 +1542,14 @@ describe('project-detail — agent list window', () => {
 
       let n = requests.length;
       internals(el).toggleSort('updated'); // same field: flips dir only
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       expect(requests.length - n).toBe(1);
       expect(requests[requests.length - 1].url).toContain('sort=updated');
       expect(requests[requests.length - 1].url).toContain('dir=asc');
 
       n = requests.length;
       internals(el).toggleSort('created');
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       expect(requests.length - n).toBe(1);
       expect(requests[requests.length - 1].url).toContain('sort=created');
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -1508,7 +1559,7 @@ describe('project-detail — agent list window', () => {
       for (const v of ['grid', 'list', 'grid', 'list', 'grid', 'list']) {
         n = requests.length;
         toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: v } }));
-        await new Promise((r) => setTimeout(r, 10));
+        await settle(el);
         perToggleCosts.push(requests.length - n);
       }
       expect(perToggleCosts).toEqual([0, 0, 0, 0, 0, 0]);
@@ -1551,7 +1602,7 @@ describe('project-detail — agent list window', () => {
       expect(internals(a.el).agentWindow.state).toBe('paged');
       let n = a.agentGets();
       viewToggle(a.el)!.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'grid' } }));
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(a.el);
       await a.el.updateComplete;
       expect(a.agentGets() - n).toBe(0);
       expect(internals(a.el).agentWindow.state).toBe('paged');
@@ -1561,7 +1612,7 @@ describe('project-detail — agent list window', () => {
       viewToggle(a.el)!.dispatchEvent(
         new CustomEvent('view-change', { detail: { view: 'graph' } })
       );
-      await new Promise((r) => setTimeout(r, 50));
+      await settle(a.el);
       expect(a.agentGets() - n).toBe(1);
       expect(a.requests[a.requests.length - 1].url).toContain('limit=500');
       expect(a.requests[a.requests.length - 1].url).not.toContain('sort=');
@@ -1573,7 +1624,7 @@ describe('project-detail — agent list window', () => {
       expect(internals(b.el).agentWindow.state).toBe('paged');
       n = b.agentGets();
       internals(b.el).toggleSort('name');
-      await new Promise((r) => setTimeout(r, 50));
+      await settle(b.el);
       expect(b.agentGets() - n).toBe(1);
       expect(b.requests[b.requests.length - 1].url).not.toContain('sort=');
       expect(internals(b.el).agentWindow.state).toBe('small');
@@ -1586,7 +1637,7 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.state).toBe('paged');
 
       viewToggle(el)!.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'list' } }));
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       expect(agentGets()).toBe(1);
       expect(internals(el).agentWindow.state).toBe('paged');
     });
@@ -1599,7 +1650,7 @@ describe('project-detail — agent list window', () => {
 
       const n = agentGets();
       void internals(el).handleAgentAction(target.id, 'stop');
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       expect(posts.length).toBe(1); // still in flight
       expect(agentGets() - n).toBe(0);
       const row = internals(el).agentWindow.items.find((a) => a.id === target.id);
@@ -1609,24 +1660,93 @@ describe('project-detail — agent list window', () => {
     });
   });
 
-  describe('request counts per interaction at 25, 500 and 1,200 agents', () => {
-    type Step = [label: string, run: (el: TestEl) => void | Promise<void>];
+  describe('request counts per interaction, one test per agent count', () => {
+    type Check = (el: TestEl, agents: Agent[]) => void;
+    type Step = [label: string, run: (el: TestEl) => void | Promise<void>, check?: Check];
     const commitLabel = (el: TestEl, value: string) => {
       const input = labelInput(el)!;
       input.value = value;
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
     };
+    const clearLabel = (el: TestEl) => {
+      const input = labelInput(el)!;
+      input.value = '';
+      input.dispatchEvent(new Event('sl-clear'));
+    };
     const setView = (el: TestEl, view: string) =>
       viewToggle(el)!.dispatchEvent(new CustomEvent('view-change', { detail: { view } }));
+    const stopAll = async (el: TestEl) => {
+      await internals(el).handleStopAll();
+    };
+    const reconnect = (el: TestEl) => {
+      void el;
+      const sse = (stateManager as unknown as { sseClientInstance: EventTarget }).sseClientInstance;
+      sse.dispatchEvent(new CustomEvent('disconnected'));
+      sse.dispatchEvent(new CustomEvent('connected'));
+    };
+    /**
+     * The rendered page holds only agents passing `keep`, and as many as
+     * fit on the page: a filter that was ignored would leave other agents
+     * on it, and one applied twice would leave too few.
+     */
+    const rowsMatch =
+      (keep: (a: Agent) => boolean): Check =>
+      (el, agents) => {
+        const w = internals(el).agentWindow;
+        const items = w.items;
+        // A capped set holds only what the drain loaded.
+        const pool = w.state === 'capped' ? internals(el).agents : agents;
+        const expected = pool.filter(keep).length;
+        expect(items.every(keep)).toBe(true);
+        expect(items.length).toBe(Math.min(internals(el).pagerPageSize, expected));
+        const rows = el.shadowRoot!.querySelectorAll('.agent-table-container tbody tr');
+        expect(rows.length).toBe(items.length);
+      };
+    const onPage =
+      (index: number): Check =>
+      (el) =>
+        expect(internals(el).agentWindow.pageIndex).toBe(index);
+    const signalsReconnect: Check = (el) => {
+      const w = internals(el).agentWindow;
+      if (w.state === 'paged') {
+        expect(w.updatesAvailable).toBe(true);
+      } else if (w.state === 'capped') {
+        // The capped banner wins over the stale one; the stale flag is still set.
+        expect(w.stale).toBe(true);
+        expect(el.shadowRoot!.querySelector('.agent-window-banner')?.textContent).toContain(
+          'more exist'
+        );
+      } else {
+        expect(el.shadowRoot!.querySelector('.agent-window-banner')?.textContent).toContain(
+          'may be stale'
+        );
+      }
+    };
+    // Each step is one interaction of the request-count table: a view
+    // switch, a sort or dir change, a phase change, page navigation, a page
+    // size change, label typing, a label commit or clear (sl-change or
+    // sl-clear), a lifecycle or stop-all refresh, a reconnect, and the chip.
     const steps: Step[] = [
       ['grid', (el) => setView(el, 'grid')],
-      ['list', (el) => setView(el, 'list')],
+      ['list', (el) => setView(el, 'list'), rowsMatch(() => true)],
       ['dir flip', (el) => internals(el).toggleSort('updated')],
-      ['phase', (el) => internals(el).setPhaseFilter('running')],
-      ['phase clear', (el) => internals(el).setPhaseFilter('')],
-      ['next page', (el) => internals(el).agentWindow.next()],
-      ['prev page', (el) => internals(el).agentWindow.prev()],
+      ['created sort', (el) => internals(el).toggleSort('created')],
+      ['updated sort', (el) => internals(el).toggleSort('updated')],
+      [
+        'phase',
+        (el) => internals(el).setPhaseFilter('running'),
+        rowsMatch((a) => a.phase === 'running'),
+      ],
+      ['phase clear', (el) => internals(el).setPhaseFilter(''), rowsMatch(() => true)],
+      [
+        'next page',
+        (el) => internals(el).agentWindow.next(),
+        (el, agents) => onPage(agents.length > 25 ? 1 : 0)(el, agents),
+      ],
+      ['prev page', (el) => internals(el).agentWindow.prev(), onPage(0)],
+      ['page size change', (el) => internals(el).onPagerSizeChange(50), rowsMatch(() => true)],
+      ['page size back', (el) => internals(el).onPagerSizeChange(25), rowsMatch(() => true)],
       [
         'label typing',
         (el) => {
@@ -1635,87 +1755,188 @@ describe('project-detail — agent list window', () => {
           input.dispatchEvent(new Event('sl-input'));
         },
       ],
-      ['label commit', (el) => commitLabel(el, 'env=prod')],
+      [
+        'label commit',
+        (el) => commitLabel(el, 'env=prod'),
+        rowsMatch((a) => a.labels?.env === 'prod'),
+      ],
+      ['label clear', (el) => clearLabel(el), rowsMatch(() => true)],
+      [
+        'bare-key label commit',
+        (el) => commitLabel(el, 'team'),
+        rowsMatch((a) => a.labels?.team !== undefined),
+      ],
+      ['bare-key label clear', (el) => clearLabel(el), rowsMatch(() => true)],
       ['lifecycle refresh', (el) => internals(el).backgroundRefresh('lifecycle-refresh')],
+      ['stop-all refresh', stopAll],
+      ['reconnect', reconnect, signalsReconnect],
       ['tree', (el) => setView(el, 'graph')],
       ['list again', (el) => setView(el, 'list')],
       ['name sort', (el) => internals(el).toggleSort('name')],
-      ['updated sort', (el) => internals(el).toggleSort('updated')],
+      ['updated sort again', (el) => internals(el).toggleSort('updated')],
       ['dir flip again', (el) => internals(el).toggleSort('updated')],
-      ['phase again', (el) => internals(el).setPhaseFilter('running')],
+      [
+        'phase again',
+        (el) => internals(el).setPhaseFilter('running'),
+        rowsMatch((a) => a.phase === 'running'),
+      ],
       ['next page again', (el) => internals(el).agentWindow.next()],
       ['lifecycle refresh again', (el) => internals(el).backgroundRefresh('lifecycle-refresh')],
+      ['stop-all refresh again', stopAll],
       ['chip', (el) => internals(el).backgroundRefresh('chip')],
     ];
 
-    const cases: Array<{ count: number; costs: number[]; states: string[] }> = [
+    /** Every third agent stopped; even agents env=prod, odd env=dev; every fifth also has a bare `team` key. */
+    const mixedAgents = (count: number, projectId: string): Agent[] =>
+      Array.from({ length: count }, (_, i) =>
+        makeAgent(i, {
+          projectId,
+          phase: i % 3 === 0 ? 'stopped' : 'running',
+          labels: {
+            env: i % 2 === 0 ? 'prod' : 'dev',
+            ...(i % 5 === 0 ? { team: 'core' } : {}),
+          },
+        })
+      );
+
+    const cases: Array<{
+      name: string;
+      count: number;
+      costs: number[];
+      states: string[];
+      load?: { requests: number; state: string; banner: string };
+    }> = [
       {
+        name: '25 agents (complete, so small): only commits and refreshes send a request',
         count: 25,
         // prettier-ignore
-        costs:  [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1],
+        costs: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1],
         // prettier-ignore
-        states: ['small', 'small', 'small', 'small', 'small', 'small', 'small', 'small', 'small',
-          'small', 'small', 'small', 'small', 'small', 'small', 'small', 'small', 'small', 'small'],
+        states: [
+          'small', 'small', 'small', 'small', 'small', 'small', 'small', 'small',
+          'small', 'small', 'small', 'small', 'small', 'small', 'small', 'small',
+          'small', 'small', 'small', 'small', 'small', 'small', 'small', 'small',
+          'small', 'small', 'small', 'small', 'small',
+        ],
       },
       {
+        name: '60 agents at page size 25 (above the 50-agent fit threshold, so paged): next and prev are real page requests',
+        count: 60,
+        // prettier-ignore
+        costs: [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1],
+        // prettier-ignore
+        states: [
+          'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged',
+          'paged', 'paged', 'paged', 'paged', 'small', 'paged', 'small', 'paged',
+          'paged', 'paged', 'paged', 'small', 'small', 'small', 'small', 'small',
+          'small', 'small', 'paged', 'paged', 'paged',
+        ],
+      },
+      {
+        name: '500 agents (above the 50-agent fit threshold, so paged): each server-side change costs one request',
         count: 500,
         // prettier-ignore
-        costs:  [0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1],
+        costs: [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1],
         // prettier-ignore
-        states: ['paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged',
-          'paged', 'small', 'small', 'small', 'small', 'small', 'small', 'small', 'paged', 'paged'],
+        states: [
+          'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged',
+          'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'small', 'paged',
+          'paged', 'paged', 'paged', 'small', 'small', 'small', 'small', 'small',
+          'small', 'small', 'paged', 'paged', 'paged',
+        ],
       },
       {
+        name: '1,200 agents (paged; the tree drains three pages into a held set, after which changes are free)',
         count: 1200,
         // prettier-ignore
-        costs:  [0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 3, 0, 0, 0, 0, 0, 0, 0, 3],
+        costs: [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 3, 1, 1, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 3],
         // prettier-ignore
-        states: ['paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged',
-          'paged', 'held', 'held', 'held', 'held', 'held', 'held', 'held', 'held', 'held'],
+        states: [
+          'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged',
+          'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'held', 'paged',
+          'paged', 'paged', 'paged', 'held', 'held', 'held', 'held', 'held',
+          'held', 'held', 'held', 'held', 'held',
+        ],
+      },
+      {
+        name: '2,001 agents (above the 2,000 candidate ceiling, so sorted requests are refused and the set is a capped drain; a k=v label that narrows the set pages again)',
+        count: 2001,
+        // prettier-ignore
+        costs: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4],
+        // prettier-ignore
+        states: [
+          'capped', 'capped', 'capped', 'capped', 'capped', 'capped', 'capped', 'capped',
+          'capped', 'capped', 'capped', 'capped', 'paged', 'capped', 'capped', 'capped',
+          'capped', 'capped', 'capped', 'capped', 'capped', 'capped', 'capped', 'capped',
+          'capped', 'capped', 'capped', 'capped', 'capped',
+        ],
+        load: {
+          requests: 5, // the refused sorted request, then four drain pages
+          state: 'capped',
+          banner: '2,000 loaded (newest 2,000 checked), more exist',
+        },
       },
     ];
 
     for (const c of cases) {
-      it(`${c.count} agents: one request on page load, then the documented cost per interaction`, async () => {
-        const projectId = `p-counts-${c.count}`;
-        localStorage.setItem('scion-view-project-agents', 'list');
-        const agents = Array.from({ length: c.count }, (_, i) =>
-          makeAgent(i, { projectId, labels: { env: 'prod' } })
-        );
-        const requests: AgentsRequest[] = [];
-        vi.stubGlobal(
-          'fetch',
-          vi.fn(
-            createRealisticFetchHandler({
-              projectId,
-              projectCaps: { actions: ['read'] },
-              agents,
-              requests,
-            })
-          )
-        );
-        const el = await createComponent(projectId);
-        expect(requests.length).toBe(1);
-        expect(requests[0].url).toContain('sort=updated');
-        expect(internals(el).agentWindow.state).toBe(c.count > 50 ? 'paged' : 'small');
+      it(
+        c.name,
+        async () => {
+          const projectId = `p-counts-${c.count}`;
+          localStorage.setItem('scion-view-project-agents', 'list');
+          const agents = mixedAgents(c.count, projectId);
+          const requests: AgentsRequest[] = [];
+          vi.stubGlobal(
+            'fetch',
+            vi.fn(
+              createRealisticFetchHandler({
+                projectId,
+                projectCaps: { actions: ['read', 'stop_all'] },
+                agents,
+                requests,
+                refuseSortedAbove: 2000,
+              })
+            )
+          );
+          const el = await createComponent(projectId);
+          await settle(el);
+          expect(requests[0].url).toContain('sort=updated');
+          if (c.load) {
+            expect(requests.length).toBe(c.load.requests);
+            expect(internals(el).agentWindow.state).toBe(c.load.state);
+            expect(el.shadowRoot!.querySelector('.agent-window-banner')?.textContent).toContain(
+              c.load.banner
+            );
+          } else {
+            expect(requests.length).toBe(1);
+            expect(internals(el).agentWindow.state).toBe(
+              c.count > PROJECT_AGENTS_FIT_THRESHOLD ? 'paged' : 'small'
+            );
+          }
 
-        const costs: number[] = [];
-        const states: string[] = [];
-        for (const [, run] of steps) {
-          const n = requests.length;
-          await run(el);
-          await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false));
-          await new Promise((r) => setTimeout(r, 20));
-          costs.push(requests.length - n);
-          states.push(internals(el).agentWindow.state);
-        }
-        const named = (xs: Array<number | string>) => steps.map(([name], i) => `${name}: ${xs[i]}`);
-        expect(named(costs)).toEqual(named(c.costs));
-        expect(named(states)).toEqual(named(c.states));
-        if (c.count === 1200) {
-          expect(internals(el).agents.length).toBe(1200);
-        }
-      }, 60_000);
+          const costs: number[] = [];
+          const states: string[] = [];
+          for (const [name, run, check] of steps) {
+            const n = requests.length;
+            await run(el);
+            await settle(el);
+            costs.push(requests.length - n);
+            states.push(internals(el).agentWindow.state);
+            if (check) {
+              try {
+                check(el, agents);
+              } catch (err) {
+                throw new Error(`step "${name}": ${(err as Error).message}`);
+              }
+            }
+          }
+          const named = (xs: Array<number | string>) =>
+            steps.map(([name], i) => `${name}: ${xs[i]}`);
+          expect(named(costs)).toEqual(named(c.costs));
+          expect(named(states)).toEqual(named(c.states));
+        },
+        60_000
+      );
     }
   });
 
@@ -1752,12 +1973,12 @@ describe('project-detail — agent list window', () => {
 
       let n = requests.length;
       internals(el).backgroundRefresh('lifecycle-refresh');
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       expect(requests.length - n).toBe(0);
 
       // Name sort is not sorted-eligible, so the list view stays capped.
       viewToggle(el)!.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'list' } }));
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
       expect(requests.length - n).toBe(0);
       expect(internals(el).agentWindow.state).toBe('capped');
@@ -1774,7 +1995,7 @@ describe('project-detail — agent list window', () => {
       const refresh = el.shadowRoot!.querySelector('.agent-window-banner sl-tag') as HTMLElement;
       refresh.click();
       await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false));
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       expect(requests.length - n).toBe(4);
       expect(internals(el).agentWindow.state).toBe('capped');
     });
@@ -1913,7 +2134,7 @@ describe('project-detail — agent list window', () => {
         held = null;
         h.gate.resolve();
         await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false));
-        await new Promise((r) => setTimeout(r, 20));
+        await settle(el);
         await el.updateComplete;
       };
       const hold = (): void => {
@@ -2125,7 +2346,7 @@ describe('project-detail — agent list window', () => {
       input.value = 'env=prod';
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
 
       expect(internals(el).agentWindow.state).toBe('small'); // 10 agents is below the fit threshold
@@ -2151,7 +2372,7 @@ describe('project-detail — agent list window', () => {
       input.value = 'env'; // bare key: not sorted-eligible, goes through the legacy path
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
 
       expect(internals(el).agentWindow.state).toBe('small'); // legacy load, no nextCursor
@@ -2260,9 +2481,9 @@ describe('project-detail — agent list window', () => {
 
       // Trigger #1 (older), then #2 (newer), both now in flight.
       internals(el).backgroundRefresh('lifecycle-refresh');
-      await new Promise((r) => setTimeout(r, 5));
+      await vi.waitFor(() => expect(pending[2]).toBeDefined());
       internals(el).backgroundRefresh('lifecycle-refresh');
-      await new Promise((r) => setTimeout(r, 5));
+      await vi.waitFor(() => expect(pending[3]).toBeDefined());
 
       // Resolve the NEWER one first.
       pending[3].resolve(
@@ -2273,10 +2494,11 @@ describe('project-detail — agent list window', () => {
           stats: { total: 1, running: 1, agents: [[secondTriggerAgents[0].id, 'running']] },
         })
       );
-      await new Promise((r) => setTimeout(r, 10));
-      expect((el as unknown as { agents: Agent[] }).agents.map((a) => a.name)).toEqual([
-        'second-trigger',
-      ]);
+      await vi.waitFor(() =>
+        expect((el as unknown as { agents: Agent[] }).agents.map((a) => a.name)).toEqual([
+          'second-trigger',
+        ])
+      );
 
       // Resolve the OLDER one afterward — it must be discarded.
       pending[2].resolve(
@@ -2287,7 +2509,7 @@ describe('project-detail — agent list window', () => {
           stats: { total: 1, running: 1, agents: [[firstTriggerAgents[0].id, 'running']] },
         })
       );
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       expect((el as unknown as { agents: Agent[] }).agents.map((a) => a.name)).toEqual([
         'second-trigger',
       ]);
@@ -2358,14 +2580,13 @@ describe('project-detail — agent list window', () => {
       // Start a lifecycle refresh (a page-0 fit request) and hold its response.
       holdNextPageZeroFit = true;
       internals(el).backgroundRefresh('lifecycle-refresh');
-      await new Promise((r) => setTimeout(r, 10));
+      await vi.waitFor(() => expect(heldResolve).not.toBeNull());
       await el.updateComplete;
       expect(pagerLoading(el)).toBe(true); // the pager is disabled during the gap
 
       const requestsBeforeClick = requests.length;
       clickNext(el); // the pager's own guard makes this a no-op
-      await new Promise((r) => setTimeout(r, 10));
-      await el.updateComplete;
+      await flushLive(el);
       expect(internals(el).agentWindow.pageIndex).toBe(0); // never navigated
       expect(requests.length).toBe(requestsBeforeClick); // no mismatched-cursor request
 
@@ -2383,14 +2604,14 @@ describe('project-detail — agent list window', () => {
           },
         })
       );
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
 
       expect(internals(el).agentWindow.pageIndex).toBe(0); // lands on page 0, as the refresh intended
       expect(pagerLoading(el)).toBe(false); // re-enabled
       // Next now works normally.
       clickNext(el);
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       await el.updateComplete;
       expect(internals(el).agentWindow.pageIndex).toBe(1);
     });
@@ -2436,14 +2657,13 @@ describe('project-detail — agent list window', () => {
       const requestsBeforeRefresh = requests.length;
       holdNextSorted = true;
       internals(el).backgroundRefresh('lifecycle-refresh');
-      await new Promise((r) => setTimeout(r, 10));
+      await vi.waitFor(() => expect(heldResolve).not.toBeNull());
       await el.updateComplete;
       expect(pagerLoading(el)).toBe(false); // unlike the paged state, the gate does not fire here
       expect(requests.length).toBe(requestsBeforeRefresh + 1); // the held refresh request was sent
 
       clickNext(el); // the pager's own real guard — must not be disabled
-      await new Promise((r) => setTimeout(r, 10));
-      await el.updateComplete;
+      await flushLive(el);
       expect(internals(el).agentWindow.pageIndex).toBe(1); // local paging worked
       expect(requests.length).toBe(requestsBeforeRefresh + 1); // Next sent nothing
 
@@ -2459,7 +2679,7 @@ describe('project-detail — agent list window', () => {
           },
         })
       );
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
 
       expect(internals(el).agentWindow.state).toBe('small');
@@ -2470,11 +2690,11 @@ describe('project-detail — agent list window', () => {
         onPrev(): void;
       };
       pg.onPrev();
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       await el.updateComplete;
       expect(internals(el).agentWindow.pageIndex).toBe(0);
       clickNext(el);
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       await el.updateComplete;
       expect(internals(el).agentWindow.pageIndex).toBe(1);
     });
@@ -2531,13 +2751,13 @@ describe('project-detail — agent list window', () => {
         } else {
           (el as unknown as { onPagerSizeChange(n: number): void }).onPagerSizeChange(50);
         }
-        await new Promise((r) => setTimeout(r, 10));
+        await vi.waitFor(() => expect(heldResolve).not.toBeNull());
         await el.updateComplete;
         expect(pagerLoading(el)).toBe(true);
 
         const requestsBeforeClick = requests.length;
         clickNext(el);
-        await new Promise((r) => setTimeout(r, 10));
+        await flushLive(el);
         expect(requests.length).toBe(requestsBeforeClick); // no cursor request sent at all
         expect(internals(el).agentWindow.error).toBeNull(); // in particular, no 400
 
@@ -2550,7 +2770,7 @@ describe('project-detail — agent list window', () => {
             stats: { total: 60, running: 30, agents: agents.map((a) => [a.id, a.phase]) },
           })
         );
-        await new Promise((r) => setTimeout(r, 20));
+        await settle(el);
         await el.updateComplete;
 
         expect(internals(el).agentWindow.pageIndex).toBe(0); // the trigger's own page 0 landed
@@ -2597,7 +2817,7 @@ describe('project-detail — agent list window', () => {
 
       failNextSorted = true;
       internals(el).setPhaseFilter('stopped');
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
 
       // The failed view-change request keeps the previous page
@@ -2612,7 +2832,7 @@ describe('project-detail — agent list window', () => {
       };
       const requestsBeforeNext = requests.length;
       pg.onNext(); // the pager's own guard refuses: hasNext is false
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
 
       expect(requests.length).toBe(requestsBeforeNext); // no mismatched-cursor request was ever sent
@@ -2624,7 +2844,7 @@ describe('project-detail — agent list window', () => {
       // because any successful view-change restores it, not just a retry
       // of the one that failed.
       internals(el).setPhaseFilter('running');
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
       expect(internals(el).agentWindow.error).toBeNull();
       expect(internals(el).agentWindow.hasNext).toBe(true);
@@ -2667,7 +2887,7 @@ describe('project-detail — agent list window', () => {
 
       failNextSorted = true;
       internals(el).setPhaseFilter('stopped');
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
 
       // The rejected fetch (not a non-OK response) must still invalidate:
@@ -2681,7 +2901,7 @@ describe('project-detail — agent list window', () => {
       };
       const requestsBeforeNext = requests.length;
       pg.onNext();
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
 
       expect(requests.length).toBe(requestsBeforeNext); // no mismatched-cursor request
@@ -2730,7 +2950,7 @@ describe('project-detail — agent list window', () => {
 
       failNextSorted = true;
       internals(el).setPhaseFilter('stopped');
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
 
       // A parse failure on an otherwise-ok response must be treated exactly
@@ -2747,7 +2967,7 @@ describe('project-detail — agent list window', () => {
       };
       const requestsBeforeNext = requests.length;
       pg.onNext(); // the pager's own guard refuses: hasNext is false
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
 
       expect(requests.length).toBe(requestsBeforeNext); // no mismatched-cursor request
@@ -2756,7 +2976,7 @@ describe('project-detail — agent list window', () => {
       // A subsequent successful view-change still restores navigation, so
       // the invalidation above was not a permanent, leaked failure state.
       internals(el).setPhaseFilter('running');
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
       expect(internals(el).agentWindow.error).toBeNull();
       expect(internals(el).agentWindow.hasNext).toBe(true);
@@ -2827,7 +3047,7 @@ describe('project-detail — agent list window', () => {
       };
       const requestsBeforeNext = requests.length;
       pg.onNext();
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
       expect(requests.length).toBe(requestsBeforeNext); // no mismatched-cursor request
       expect(internals(el).agentWindow.error).toBeNull();
@@ -2896,7 +3116,7 @@ describe('project-detail — agent list window', () => {
       };
       const requestsBeforeNext = requests.length;
       pg.onNext();
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
       expect(requests.length).toBe(requestsBeforeNext); // no mismatched-cursor request
       expect(internals(el).agentWindow.error).toBeNull();
@@ -2949,7 +3169,7 @@ describe('project-detail — agent list window', () => {
       input.value = 'env=dev';
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
-      await new Promise((r) => setTimeout(r, 30));
+      await settle(el);
       await el.updateComplete;
 
       expect(internals(el).committedLabel).toBe(''); // reverted, not left at the rejected label
@@ -2965,7 +3185,7 @@ describe('project-detail — agent list window', () => {
       };
       const requestsBeforeNext = requests.length;
       pg.onNext();
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
       // Exactly one legitimate request, bound to the reverted (empty)
       // label, with no 400: this is what reverting committedLabel on a
@@ -3022,7 +3242,7 @@ describe('project-detail — agent list window', () => {
       input.value = 'env=dev';
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       await el.updateComplete;
       expect(internals(el).committedLabel).toBe('env=dev');
       const agentsAfterFirstCommit = internals(el).agents;
@@ -3085,7 +3305,7 @@ describe('project-detail — agent list window', () => {
       input.value = 'env=prod';
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
 
       // The sorted (fit) request, not the legacy path, received the 400.
       expect(requests.some((r) => r.url.includes('sort=') && r.url.includes('label=env'))).toBe(
@@ -3138,14 +3358,14 @@ describe('project-detail — agent list window', () => {
 
       holdLegacy = true;
       internals(el).toggleSort('name');
-      await new Promise((r) => setTimeout(r, 10));
+      await vi.waitFor(() => expect(heldResolve).not.toBeNull());
       await el.updateComplete;
 
       expect(el.shadowRoot?.textContent).toContain('Loading agents');
       expect(el.shadowRoot?.textContent).not.toContain('No agents match the current filter');
 
       heldResolve!(jsonResponse({ agents, _capabilities: { actions: ['read'] } }));
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       await el.updateComplete;
 
       expect(el.shadowRoot?.textContent).not.toContain('Loading agents');
@@ -3204,7 +3424,7 @@ describe('project-detail — agent list window', () => {
 
       holdNext = true;
       internals(el).backgroundRefresh('lifecycle-refresh');
-      await new Promise((r) => setTimeout(r, 10));
+      await vi.waitFor(() => expect(heldResolve).not.toBeNull());
       await el.updateComplete;
 
       // Must NOT flicker to "Loading agents…" here — this.agents already
@@ -3213,7 +3433,7 @@ describe('project-detail — agent list window', () => {
       expect(el.shadowRoot?.textContent).toContain('No agents match the current filter');
 
       heldResolve!(jsonResponse({ agents, _capabilities: { actions: ['read'] } }));
-      await new Promise((r) => setTimeout(r, 10));
+      await settle(el);
       await el.updateComplete;
       expect(el.shadowRoot?.textContent).toContain('No agents match the current filter');
     });
@@ -3248,7 +3468,7 @@ describe('project-detail — agent list window', () => {
 
     const idle = async (el: TestEl) => {
       await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false));
-      await new Promise((r) => setTimeout(r, 20));
+      await settle(el);
       await el.updateComplete;
     };
 
@@ -3372,7 +3592,7 @@ describe('project-detail — agent list window', () => {
       );
       const el = await createComponent(projectId);
       await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false));
-      await new Promise((r) => setTimeout(r, 50));
+      await settle(el);
       expect(legacy).toHaveLength(2);
       expect(legacy[1].signal?.aborted).toBe(true);
       expect(new URL(legacy[1].url, 'http://x').searchParams.get('cursor')).toBe('500');
@@ -3467,6 +3687,361 @@ describe('project-detail — agent list window', () => {
       await win.refresh();
       expect(stateManager.getAgent(id)).toBeDefined();
       expect(stateManager.getAgent(id)?.taskSummary).toBeUndefined();
+    });
+  });
+
+  describe('a refused label keeps the typed label filter on the kept rows', () => {
+    for (const path of [
+      { name: 'the sorted request', sort: 'updated' },
+      { name: 'the drain', sort: 'name' },
+    ] as const) {
+      it(`a label 400 on ${path.name} keeps the previous rows filtered by the typed label`, async () => {
+        const projectId = `p-label-400-preview-${path.sort}`;
+        localStorage.setItem('scion-view-project-agents', 'list');
+        localStorage.setItem(
+          `scion-sort-project-agents-${projectId}`,
+          JSON.stringify({ field: path.sort, dir: path.sort === 'name' ? 'asc' : 'desc' })
+        );
+        const agents = Array.from({ length: 10 }, (_, i) =>
+          makeAgent(i, { projectId, labels: { env: i % 2 === 0 ? 'prod' : 'dev' } })
+        );
+        const requests: AgentsRequest[] = [];
+        let refuse = false;
+        const inner = createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        });
+        vi.stubGlobal(
+          'fetch',
+          vi.fn((input: string | URL | Request, init?: RequestInit) => {
+            const raw =
+              typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+            const u = new URL(raw, 'http://localhost');
+            if (
+              refuse &&
+              u.pathname === `/api/v1/projects/${projectId}/agents` &&
+              u.searchParams.get('label') === 'env=prod'
+            ) {
+              requests.push({ url: raw });
+              return Promise.resolve(jsonResponse({ error: { message: 'bad label' } }, 400));
+            }
+            return inner(input, init);
+          })
+        );
+        const el = await createComponent(projectId);
+        await settle(el);
+        expect(internals(el).agentWindow.state).toBe('small');
+        expect(internals(el).agentWindow.items).toHaveLength(10);
+
+        refuse = true;
+        const n = requests.length;
+        const input = labelInput(el)!;
+        input.value = 'env=prod';
+        input.dispatchEvent(new Event('sl-input'));
+        input.dispatchEvent(new Event('sl-change'));
+        await settle(el);
+
+        expect(requests.length - n).toBe(1); // the refused request, not retried
+        expect(internals(el).committedLabel).toBe('');
+        const prodIds = agents
+          .filter((a) => a.labels?.env === 'prod')
+          .map((a) => a.id)
+          .sort();
+        const shown = internals(el)
+          .agentWindow.items.map((a) => a.id)
+          .sort();
+        expect(shown).toEqual(prodIds);
+        expect(el.shadowRoot!.querySelectorAll('.agent-table-container tbody tr')).toHaveLength(5);
+        expect(labelInput(el)!.value).toBe('env=prod');
+      });
+    }
+  });
+
+  describe('a reconnect in the local states', () => {
+    const reconnect = () => {
+      const sse = (stateManager as unknown as { sseClientInstance: EventTarget }).sseClientInstance;
+      sse.dispatchEvent(new CustomEvent('disconnected'));
+      sse.dispatchEvent(new CustomEvent('connected'));
+    };
+    const bannerText = (el: TestEl) =>
+      el.shadowRoot!.querySelector('.agent-window-banner')?.textContent ?? '';
+
+    for (const c of [
+      { state: 'small', count: 5, view: 'list', banner: 'may be stale' },
+      { state: 'held', count: 1200, view: 'graph', banner: 'may be stale' },
+      // The capped banner wins over the stale one.
+      { state: 'capped', count: 100, view: 'graph', banner: '80 loaded (newest 2,000 checked)' },
+    ] as const) {
+      it(`${c.state}: a reconnect marks the set as possibly stale with no request`, async () => {
+        const projectId = `p-reconnect-${c.state}`;
+        localStorage.setItem('scion-view-project-agents', c.view);
+        const agents = Array.from({ length: c.count }, (_, i) => makeAgent(i, { projectId }));
+        const requests: AgentsRequest[] = [];
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(
+            createRealisticFetchHandler({
+              projectId,
+              projectCaps: { actions: ['read'] },
+              agents,
+              requests,
+              legacyTruncated: c.state === 'capped',
+            })
+          )
+        );
+        const el = await createComponent(projectId);
+        await settle(el);
+        expect(internals(el).agentWindow.state).toBe(c.state);
+        expect(internals(el).agentWindow.stale).toBe(false);
+        if (c.state !== 'capped') expect(bannerText(el)).toBe('');
+        const n = requests.length;
+
+        reconnect();
+        await settle(el);
+
+        expect(internals(el).agentWindow.stale).toBe(true);
+        expect(bannerText(el)).toContain(c.banner);
+        expect(requests.length).toBe(n);
+      });
+    }
+  });
+
+  describe('drain failures and the read filter at page level', () => {
+    it('a drain whose second page fails after retries shows "Incomplete: loaded N"', async () => {
+      const projectId = 'p-drain-page2-fails';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      localStorage.setItem(
+        `scion-sort-project-agents-${projectId}`,
+        JSON.stringify({ field: 'name', dir: 'asc' })
+      );
+      const agents = Array.from({ length: 600 }, (_, i) => makeAgent(i, { projectId }));
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+            failLegacyCursor: '500',
+          })
+        )
+      );
+      const el = await createComponent(projectId);
+      await settle(el);
+      // The first page, then the second page tried three times.
+      expect(requests).toHaveLength(4);
+      expect(requests.slice(1).every((r) => r.url.includes('cursor=500'))).toBe(true);
+      expect(internals(el).agentWindow.state).toBe('capped');
+      expect(el.shadowRoot!.querySelector('.agent-window-banner')?.textContent).toContain(
+        'Incomplete: loaded 500'
+      );
+    });
+
+    it('2,001 agents of which 700 of the newest 2,000 are readable: "700 loaded (newest 2,000 checked), more exist"', async () => {
+      const projectId = 'p-drain-read-filtered';
+      localStorage.setItem('scion-view-project-agents', 'graph');
+      const agents = Array.from({ length: 2001 }, (_, i) => makeAgent(i, { projectId }));
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+            readable: (a) => Number(a.id.slice(2)) % 20 < 7,
+          })
+        )
+      );
+      const el = await createComponent(projectId);
+      await settle(el);
+      expect(requests).toHaveLength(4);
+      expect(internals(el).agentWindow.state).toBe('capped');
+      expect(internals(el).agents).toHaveLength(700);
+      expect(el.shadowRoot!.querySelector('.agent-window-banner')?.textContent).toContain(
+        '700 loaded (newest 2,000 checked), more exist'
+      );
+    });
+  });
+
+  describe('leaving the capped state', () => {
+    it('a capped set returns to paged on a switch to the updated sort', async () => {
+      const projectId = 'p-capped-to-paged';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      localStorage.setItem(
+        `scion-sort-project-agents-${projectId}`,
+        JSON.stringify({ field: 'name', dir: 'asc' })
+      );
+      const agents = Array.from({ length: 100 }, (_, i) => makeAgent(i, { projectId }));
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+            legacyTruncated: true,
+          })
+        )
+      );
+      const el = await createComponent(projectId);
+      await settle(el);
+      expect(internals(el).agentWindow.state).toBe('capped');
+      const n = requests.length;
+
+      internals(el).toggleSort('updated');
+      await settle(el);
+
+      expect(requests.length - n).toBe(1);
+      expect(requests[requests.length - 1].url).toContain('sort=updated');
+      expect(internals(el).agentWindow.state).toBe('paged');
+      expect(el.shadowRoot!.querySelector('.agent-window-banner')).toBeNull();
+    });
+
+    it('a capped set whose label was refused stays capped on a switch to the updated sort; a new label retries once', async () => {
+      const projectId = 'p-capped-refused';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 100 }, (_, i) =>
+        makeAgent(i, { projectId, labels: { env: 'prod' } })
+      );
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+            legacyTruncated: true,
+            refuseSortedAbove: 50,
+          })
+        )
+      );
+      const el = await createComponent(projectId);
+      await settle(el);
+      // The refused sorted request, then a four-page drain.
+      expect(requests).toHaveLength(5);
+      expect(internals(el).agentWindow.state).toBe('capped');
+
+      let n = requests.length;
+      internals(el).toggleSort('name');
+      await settle(el);
+      internals(el).toggleSort('updated');
+      await settle(el);
+      internals(el).toggleSort('updated'); // dir flip
+      await settle(el);
+      expect(requests.length - n).toBe(0);
+      expect(internals(el).agentWindow.state).toBe('capped');
+
+      n = requests.length;
+      const input = labelInput(el)!;
+      input.value = 'env=prod';
+      input.dispatchEvent(new Event('sl-input'));
+      input.dispatchEvent(new Event('sl-change'));
+      await settle(el);
+      expect(requests.length - n).toBe(5);
+      expect(requests[n].url).toContain('sort=updated');
+      expect(internals(el).agentWindow.state).toBe('capped');
+    });
+  });
+
+  describe('small state: a live reorder across a local page boundary', () => {
+    it('an activity bump moves an agent from page 2 to page 1 with no request and no page change', async () => {
+      const projectId = 'p-small-reorder';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })
+        )
+      );
+      const el = await createComponent(projectId);
+      await settle(el);
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('small');
+      await win.next();
+      await el.updateComplete;
+      expect(win.pageIndex).toBe(1);
+      // Updated desc: a-29 first; page 2 holds the five oldest.
+      expect(win.items.map((a) => a.id)).toEqual(['a-4', 'a-3', 'a-2', 'a-1', 'a-0']);
+
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.status`,
+        data: { agentId: 'a-0', phase: 'running', lastActivityEvent: '2026-03-01T00:00:00Z' },
+      });
+      await flushLive(el);
+
+      expect(win.pageIndex).toBe(1);
+      expect(win.items.map((a) => a.id)).toEqual(['a-5', 'a-4', 'a-3', 'a-2', 'a-1']);
+      expect(win.display[0].id).toBe('a-0');
+      expect(requests).toHaveLength(1);
+
+      await win.prev();
+      await el.updateComplete;
+      expect(win.items[0].id).toBe('a-0');
+      expect(win.items).toHaveLength(25);
+      expect(requests).toHaveLength(1);
+    });
+  });
+
+  describe('label typing and the debounce window', () => {
+    it('label typing sends no request even after the debounce window', async () => {
+      const projectId = 'p-label-debounce';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 60 }, (_, i) =>
+        makeAgent(i, { projectId, labels: { env: i % 2 === 0 ? 'prod' : 'dev' } })
+      );
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })
+        )
+      );
+      const el = await createComponent(projectId);
+      await settle(el);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      const n = requests.length;
+
+      vi.useFakeTimers();
+      try {
+        const input = labelInput(el)!;
+        for (const value of ['e', 'en', 'env', 'env=', 'env=prod']) {
+          input.value = value;
+          input.dispatchEvent(new Event('sl-input'));
+          await vi.advanceTimersByTimeAsync(100);
+        }
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(requests.length).toBe(n);
+        expect(internals(el).agentsLoading).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+      await el.updateComplete;
+      expect(requests.length).toBe(n);
+      expect(internals(el).agentWindow.items.every((a) => a.labels?.env === 'prod')).toBe(true);
     });
   });
 });
