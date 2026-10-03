@@ -75,6 +75,10 @@ export class ScionAgentPager extends LitElement {
   @property({ type: Boolean })
   showChip = false;
 
+  /** The chip's text; the global page's count-only mode says that the counts may have changed. */
+  @property({ type: String })
+  chipText = 'may have changed · Refresh';
+
   /**
    * localStorage key to persist a page-size change to; empty disables
    * persistence. This component is otherwise fully controlled: it never
@@ -202,7 +206,7 @@ export class ScionAgentPager extends LitElement {
               @click=${() => this.onChipClick()}
             >
               <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-              may have changed · Refresh
+              ${this.chipText}
             </sl-tag>`
           : nothing}
       </div>

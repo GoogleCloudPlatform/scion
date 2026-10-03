@@ -112,6 +112,13 @@ export interface AgentListViewState {
   sortDir: SortDir;
   pageSize: number;
   view: AgentListView;
+  /**
+   * The global page's client-side mode filter: a message mode, or
+   * `can_message` / `cannot_message`. Empty or omitted means none. A mode
+   * filter is never sent to the server, so a non-empty one makes the view
+   * state complete-needing.
+   */
+  modeFilter?: string;
 }
 
 /** Parameters of one paged-navigation request, passed to the host's `fetchPage`. */
@@ -158,6 +165,13 @@ export interface AgentListWindowOptions {
    * show up in the small-state list with no re-adoption step.
    */
   getHeldAgents: () => Agent[];
+  /**
+   * The paged state's add rule for an agent that is neither on the page
+   * nor a member yet, in place of the project match (`getProjectId`). The
+   * committed `k=v` label is still applied after it. The global page passes
+   * "the page was loaded for scope `all`".
+   */
+  isAddable?: (agent: Agent) => boolean;
 }
 
 /**
@@ -202,6 +216,7 @@ export class AgentListWindow extends EventTarget {
   private readonly fetchPage: PagedPageFetcher;
   private readonly getAgent: (id: string) => Agent | undefined;
   private readonly getHeldAgents: () => Agent[];
+  private readonly isAddable: ((agent: Agent) => boolean) | undefined;
 
   constructor(options: AgentListWindowOptions) {
     super();
@@ -210,6 +225,7 @@ export class AgentListWindow extends EventTarget {
     this.fetchPage = options.fetchPage;
     this.getAgent = options.getAgent;
     this.getHeldAgents = options.getHeldAgents;
+    this.isAddable = options.isAddable;
   }
 
   /** The current state (see the module comment). */
@@ -224,12 +240,14 @@ export class AgentListWindow extends EventTarget {
 
   /**
    * Whether a view state may use sorted (server-paged) requests: grid or
-   * list, `updated` or `created` sort, and a committed label that is empty
-   * or contains `=`. Everything else needs the complete set.
+   * list, `updated` or `created` sort, no mode filter, and a committed
+   * label that is empty or contains `=`. Everything else needs the
+   * complete set.
    */
   isSortedEligible(committedLabel: string): boolean {
-    const { view, sortField } = this.viewState;
+    const { view, sortField, modeFilter } = this.viewState;
     if (view !== 'grid' && view !== 'list') return false;
+    if (modeFilter) return false;
     if (sortField !== 'updated' && sortField !== 'created') return false;
     const label = committedLabel.trim();
     return label === '' || label.includes('=');
@@ -460,9 +478,17 @@ export class AgentListWindow extends EventTarget {
     this.applyChanges({ upserted: [...ids], deleted: [], unknown: new Map(), generation: 0 });
   }
 
+  /**
+   * Seed the member index from a response's stats: the IDs when present,
+   * or a count-only snapshot when the server omitted them (the global
+   * endpoint above 2,000 agents).
+   */
   private seedStats(stats: PagedPageResult['stats']): void {
-    if (stats?.agents) {
+    if (!stats) return;
+    if (stats.agents) {
       this.memberIndex.seed(stats.agents);
+    } else {
+      this.memberIndex.seedCounts(stats.total, stats.running);
     }
   }
 
@@ -512,6 +538,7 @@ export class AgentListWindow extends EventTarget {
     if (this.viewState.phaseFilter) {
       out = out.filter((a) => a.phase === this.viewState.phaseFilter);
     }
+    out = filterByMode(out, this.viewState.modeFilter ?? '');
     out = this.filterByLabel(out);
     return sortAgents(out, this.viewState.sortField, this.viewState.sortDir);
   }
@@ -630,8 +657,9 @@ export class AgentListWindow extends EventTarget {
   }
 
   /**
-   * Re-fetch the current page (the paged-state chip click, design §6.2). A
-   * no-op in the local states. If the cursor stack was invalidated, the
+   * Re-fetch the current page (the paged-state chip click, design §6.2),
+   * always with `stats=1` so the counts are refreshed too. A no-op in the
+   * local states. If the cursor stack was invalidated, the
    * current page's cursor is still stale, so this
    * refetches page 0 instead — its cursor is always `undefined`, so it
    * cannot mismatch, and it gives the user a way off a stranded page rather
@@ -639,10 +667,10 @@ export class AgentListWindow extends EventTarget {
    */
   async refresh(): Promise<void> {
     if (this._state !== 'paged') return;
-    await this.fetchPageAt(this._cursorsValid ? this._pageIndex : 0);
+    await this.fetchPageAt(this._cursorsValid ? this._pageIndex : 0, true);
   }
 
-  private async fetchPageAt(index: number): Promise<void> {
+  private async fetchPageAt(index: number, wantStats = index === 0): Promise<void> {
     const gen = ++this.generation;
     this._loading = true;
     this._error = null;
@@ -651,12 +679,12 @@ export class AgentListWindow extends EventTarget {
       const result = await this.fetchPage({
         cursor: this.cursors[index],
         limit: this.viewState.pageSize,
-        wantStats: index === 0,
+        wantStats,
       });
       if (gen !== this.generation) return;
       if (result.agents.length === 0 && index > 0) {
         // An emptied last page (design §6.2): step back one page.
-        await this.fetchPageAt(index - 1);
+        await this.fetchPageAt(index - 1, wantStats);
         return;
       }
       this.pageItems = result.agents;
@@ -697,6 +725,18 @@ export class AgentListWindow extends EventTarget {
   }
 
   /**
+   * A membership change the add rule cannot decide, for example an agent
+   * created while the global page is loaded for scope `mine` or `shared`:
+   * raises the chip while paged. Issues no request; a no-op in the local
+   * states, which keep their own add rule.
+   */
+  markMembershipChanged(): void {
+    if (this._state !== 'paged') return;
+    this._updatesAvailable = true;
+    this.notifyChange();
+  }
+
+  /**
    * Clears paged navigation after a failed view-change request: the stored
    * cursors were minted under the previous phase/label/dir (design §4.4's
    * cursor-binding contract) and would 400 if replayed under the new,
@@ -720,9 +760,13 @@ export class AgentListWindow extends EventTarget {
     this.notifyChange();
   }
 
-  /** The committed label's add rule (design §6.2's "today's add rule", mirroring the server's stats population): project match plus the committed `k=v`, if any. */
+  /** The committed label's add rule (design §6.2's "today's add rule", mirroring the server's stats population): the project match (or `isAddable`) plus the committed `k=v`, if any. */
   private passesCommittedLabel(agent: Agent): boolean {
-    if (agent.projectId !== this.getProjectId()) return false;
+    if (this.isAddable) {
+      if (!this.isAddable(agent)) return false;
+    } else if (agent.projectId !== this.getProjectId()) {
+      return false;
+    }
     const label = this.committedLabel.trim();
     if (!label || !label.includes('=')) return true;
     const eq = label.indexOf('=');
@@ -838,6 +882,14 @@ export class AgentListWindow extends EventTarget {
     for (const [id, delta] of detail.unknown) {
       if (onPage.has(id)) continue; // on-page agents are always known already.
       chip ||= this.applyOffPageUnknown(id, delta, rangeBefore);
+    }
+
+    // Count-only: the snapshot counts cannot be adjusted, so any change may
+    // have changed them.
+    if (this.memberIndex.countOnly) {
+      const any =
+        detail.upserted.length > 0 || detail.deleted.length > 0 || detail.unknown.size > 0;
+      if (any) chip = true;
     }
 
     if (resort || onPage.size !== pageSizeBefore) {
@@ -956,4 +1008,20 @@ export class AgentListWindow extends EventTarget {
   private notifyChange(): void {
     this.dispatchEvent(new Event('change'));
   }
+}
+
+/**
+ * The global page's mode filter over a list: `can_message` and
+ * `cannot_message` by messageability, any other value by message mode
+ * (`project` when unset). An empty filter returns the list itself.
+ */
+function filterByMode(list: Agent[], modeFilter: string): Agent[] {
+  if (!modeFilter) return list;
+  if (modeFilter === 'can_message') {
+    return list.filter((a) => a._messageability?.canMessage === true);
+  }
+  if (modeFilter === 'cannot_message') {
+    return list.filter((a) => a._messageability?.canMessage === false);
+  }
+  return list.filter((a) => (a.messageMode || 'project') === modeFilter);
 }
