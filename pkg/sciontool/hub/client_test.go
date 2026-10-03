@@ -64,6 +64,8 @@ func scrubHubEnv(t *testing.T) {
 		EnvHubToken,
 		EnvAgentID,
 		EnvAgentMode,
+		transportauth.EnvTransportToken,
+		transportauth.EnvTransportTokenFile,
 	} {
 		t.Setenv(key, "")
 	}
@@ -1131,7 +1133,7 @@ func TestReadTokenFile_Hardening(t *testing.T) {
 // TestEnforceTokenFileOwnerChecks_DefaultIsOff proves ReadTokenFile and
 // ChownTokenFile work against a host-written token file without ever
 // calling EnforceTokenFileOwnerChecks: the owner check it gates defaults
-// to off, which is the state every unenforced caller runs in.
+// to off, which is the state every non-substrate runtime runs in.
 func TestEnforceTokenFileOwnerChecks_DefaultIsOff(t *testing.T) {
 	home := t.TempDir()
 	cleanup := SetTokenHome(home)
@@ -1146,11 +1148,11 @@ func TestEnforceTokenFileOwnerChecks_DefaultIsOff(t *testing.T) {
 }
 
 // TestEnforceTokenFileOwnerChecks_TogglesWithoutBreakingTheLegitimateCase
-// proves turning the owner check on (an enforced caller's path) doesn't
+// proves turning the owner check on (the substrate-only path) doesn't
 // disturb the always-on checks (symlink, hardlink, FIFO, directory
 // refusals — none of which depend on the owner) and still accepts the
-// legitimate same-owner case, which is what a real enforced-caller token
-// file looks like once the host has written it or ChownTokenFile has run.
+// legitimate same-owner case, which is what a real substrate token file
+// looks like once the host has written it or ChownTokenFile has run.
 // Genuinely mismatched ownership can't be constructed without root (chown
 // to an arbitrary uid requires it), so that specific branch is exercised
 // by code reading rather than by a non-root test — the same limitation
@@ -2230,4 +2232,74 @@ func TestClient_SetSecret_ServerError(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	tests := []struct {
+		name   string
+		in     string
+		want   time.Duration
+		wantOK bool
+	}{
+		{"seconds", "3", 3 * time.Second, true},
+		{"zero", "0", 0, true},
+		{"padded", " 2 ", 2 * time.Second, true},
+		{"negative", "-1", 0, false},
+		{"empty", "", 0, false},
+		{"garbage", "soon", 0, false},
+		{"http date future", now.Add(7 * time.Second).Format(http.TimeFormat), 7 * time.Second, true},
+		{"http date past", now.Add(-time.Minute).Format(http.TimeFormat), 0, true},
+		{"leading plus", "+3", 0, false},
+		{"trailing junk", "3s", 0, false},
+		{"fractional", "1.5", 0, false},
+		{"at cap", "86400", maxRetryAfter, true},
+		{"above cap", "86401", maxRetryAfter, true},
+		{"huge (would overflow Duration)", "9300000000", maxRetryAfter, true},
+		{"beyond uint64", "99999999999999999999999", maxRetryAfter, true},
+		{"http date beyond cap", now.Add(48 * time.Hour).Format(http.TimeFormat), maxRetryAfter, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseRetryAfter(tt.in, now)
+			if ok != tt.wantOK || got != tt.want {
+				t.Errorf("parseRetryAfter(%q) = (%s, %v), want (%s, %v)", tt.in, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestClient_SendOutboundMessage_HTTPStatusError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "2")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("slow down"))
+	}))
+	defer server.Close()
+
+	c := NewClientWithConfig(server.URL, "tok", "agent-1")
+	err := c.SendOutboundMessage(context.Background(), OutboundMessage{RecipientID: "u", Msg: "hi"})
+	var se *HTTPStatusError
+	if !errors.As(err, &se) {
+		t.Fatalf("expected *HTTPStatusError, got %T: %v", err, err)
+	}
+	if se.StatusCode != http.StatusTooManyRequests || !se.HasRetryAfter || se.RetryAfter != 2*time.Second {
+		t.Errorf("unexpected error fields: %+v", se)
+	}
+	if want := "hub returned error 429: slow down"; se.Error() != want {
+		t.Errorf("Error() = %q, want %q", se.Error(), want)
+	}
+}
+
+func TestHTTPStatusError_Code(t *testing.T) {
+	for body, want := range map[string]string{
+		`{"error":{"code":"addr_unknown","message":"x"}}`: "addr_unknown",
+		`{"error":{"message":"x"}}`:                       "",
+		`not json`:                                        "",
+		``:                                                "",
+	} {
+		if got := (&HTTPStatusError{StatusCode: 400, Body: body}).Code(); got != want {
+			t.Errorf("Code() for body %q = %q, want %q", body, got, want)
+		}
+	}
 }

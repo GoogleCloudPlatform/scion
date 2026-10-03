@@ -29,9 +29,10 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
-import { isValidTimeZone } from '../../utils/time.js';
+import { formatInstantWithZone, isValidTimeZone } from '../../utils/time.js';
 import '../shared/timezone-picker.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import './admin-experiments.js';
 
 // ── Type definitions matching the Go API response ──
@@ -435,6 +436,9 @@ const hasOwn = (obj: Record<string, unknown>, key: string): boolean =>
 
 @customElement('scion-page-admin-server-config')
 export class ScionPageAdminServerConfig extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @state() private loading = true;
   @state() private saving = false;
   @state() private error: string | null = null;
@@ -2482,7 +2486,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${meta.updated_at
           ? html`<span class="section-meta-item">
               <sl-icon name="clock"></sl-icon>
-              ${new Date(meta.updated_at).toLocaleString()}
+              ${formatInstantWithZone(meta.updated_at) || meta.updated_at}
             </span>`
           : nothing}
       </div>
@@ -2878,7 +2882,9 @@ export class ScionPageAdminServerConfig extends LitElement {
           ${this.scionBuildTime
             ? html`<div class="version-item">
                 <span class="version-label">Build Time</span>
-                <span class="version-value">${this.scionBuildTime}</span>
+                <span class="version-value" title=${this.scionBuildTime}
+                  >${formatInstantWithZone(this.scionBuildTime) || this.scionBuildTime}</span
+                >
               </div>`
             : nothing}
           <div class="version-actions">
@@ -3417,8 +3423,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                   >
                   ${this.renderFieldValue(
                     'default_gcp_identity_mode',
-                    this.defaultGCPIdentityMode ||
-                      'None (runtime default: Block; Passthrough on Kubernetes)',
+                    this.defaultGCPIdentityMode || 'None (runtime default: Block; Passthrough on Kubernetes)',
                     html`${this.renderEnvBadge('default_gcp_identity_mode')}<sl-select
                         placeholder="None (runtime default: Block; Passthrough on Kubernetes)"
                         clearable

@@ -780,7 +780,7 @@ func TestManager_Start_NonEnforced_StartsServiceWithHardlinkedLogPath(t *testing
 
 // TestOpenLogs_NonEnforced_AllowsHardlinkedLogPath proves the gating: a
 // hard-linked log path is NOT refused when requirePrivilegeDrop is false —
-// a legitimately hard-linked log file under an unenforced container must
+// a legitimately hard-linked log file under a non-substrate container must
 // keep working exactly as it did before the hard-link guard existed.
 func TestOpenLogs_NonEnforced_AllowsHardlinkedLogPath(t *testing.T) {
 	cleanup := setupTestEnv(t)

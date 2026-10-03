@@ -73,9 +73,11 @@ The token value is displayed only once on creation. Store it securely.
 
 Scopes are restrictions, not grants: selecting a scope limits what the
 token may ever do, but access to any specific target is still checked on
-every request against your current authority there. For agent:attach and
-agent:port_access, that means your own agents and their descendants --
-checked per agent, not enumerated when you select the scope. Run
+every request against your current authority there. For agent:attach,
+that means your own agents and their descendants. For agent:port_access,
+it also includes agents in projects where your role grants
+agent.port_access (project owners and admins). Either is checked per
+agent, not enumerated when you select the scope. Run
 "scion hub token scopes --project <project>" to see which scopes you may
 currently select and why.
 

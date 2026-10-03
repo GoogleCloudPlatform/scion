@@ -31,6 +31,8 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { apiFetch } from '../../../client/api.js';
+import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
+import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 
 /** Shape of a search result from GET /api/v1/chat/search */
 interface SearchResult {
@@ -51,6 +53,9 @@ interface SearchResponse {
 
 @customElement('scion-chat-search')
 export class ScionChatSearch extends LitElement {
+  /** Re-renders absolute result dates when the display zone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /** Current project ID for scoped search. */
   @property()
   projectId = '';
@@ -404,7 +409,9 @@ export class ScionChatSearch extends LitElement {
     const diffDays = Math.floor(diffHrs / 24);
     if (diffDays < 7) return `${diffDays}d ago`;
 
-    return d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+    // Older than a week: a compact absolute date in the display zone; the
+    // zone is named in the element's title (the slot does not shrink).
+    return formatInstant(iso, 'date');
   }
 
   /** Sanitize snippet HTML to only allow <mark> tags. */
@@ -501,7 +508,11 @@ export class ScionChatSearch extends LitElement {
       <div class="result-item" @click=${() => this.handleResultClick(result)}>
         <div class="result-top">
           <span class="result-thread">${result.threadName || result.conversationKey}</span>
-          <span class="result-time">${this.formatTime(result.timestamp)}</span>
+          <span
+            class="result-time"
+            title=${formatInstantWithZone(result.timestamp, 'datetime-full')}
+            >${this.formatTime(result.timestamp)}</span
+          >
         </div>
         <span class="result-sender">${result.senderName}</span>
         <span class="result-snippet">${unsafeHTML(this.sanitizeSnippet(result.snippet))}</span>

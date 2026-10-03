@@ -121,10 +121,9 @@ func TestAuthorizePortRegistrationRejectsFederatedAdmin(t *testing.T) {
 		ProjectID: project.ID, OwnerID: caller.ID(), Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
-	// The caller owns the agent, so it passes authorizePortAccess via the
-	// resource-owner relationship grant (project-owner no longer carries
-	// agent.port_access, miller79/scion#88) but still lacks the hub-level
-	// permission checked by authorizePortRegistration.
+	// The caller owns the agent, so it passes authorizePortAccess (via the
+	// resource-owner grant and project-owner's agent.port_access) but still
+	// lacks the hub-level permission checked by authorizePortRegistration.
 	createTestUserWithProjectRole(t, s, caller.ID(), caller.Email(), project.ID, store.ProjectRoleOwner)
 
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", nil)

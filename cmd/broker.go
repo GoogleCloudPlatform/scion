@@ -1924,12 +1924,13 @@ func getLocalBrokerID() string {
 // Hub; it does not start the broker daemon or construct a runtime), so
 // "attach" is always included — the same missing-capability-implies-
 // supported default used everywhere else this feature answers the
-// question, applied because there is nothing here to say otherwise. A
+// question, applied because there is nothing here to say otherwise. The
+// same holds for "emptyPerAgentWorkspace" (false only for Cloud Run). A
 // runtime that actually opts out reports it once the broker itself runs
 // and registers/heartbeats with a live instance in hand (see
 // buildStoreBrokerProfiles and HeartbeatService.buildHeartbeat).
 func brokerRegistrationCapabilities() []string {
-	return []string{"sync", "attach", "reprovision"}
+	return []string{"sync", "attach", "reprovision", "emptyPerAgentWorkspace"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.

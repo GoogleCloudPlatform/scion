@@ -13,6 +13,7 @@ COPY cmd/ cmd/
 COPY internal/ internal/
 COPY resources/ resources/
 COPY harnesses/ harnesses/
+COPY third_party/ third_party/
 COPY web/*.go web/
 
 # Copy discord module

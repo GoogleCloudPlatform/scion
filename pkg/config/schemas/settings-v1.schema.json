@@ -297,7 +297,7 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["docker", "podman", "container", "kubernetes", "cloudrun", "cloudrun-instances", "cloudrun-sandbox"],
+          "enum": ["docker", "podman", "container", "kubernetes", "cloudrun", "cloudrun-instances", "cloudrun-sandbox", "substrate"],
           "description": "Runtime type. Defaults to the runtime entry name if omitted."
         },
         "host": { "type": "string" },
@@ -326,6 +326,37 @@
         "shared_dir_size": {
           "type": "string",
           "description": "Kubernetes only. Default size per shared-dir PVC (e.g. 10Gi). A profile value wins over this; a template or agent kubernetes.shared_dir_size wins over both."
+        },
+        "substrate": {
+          "type": "object",
+          "description": "Substrate-specific settings when type is \"substrate\".",
+          "properties": {
+            "api_endpoint": { "type": "string", "description": "ateapi Control gRPC endpoint, e.g. \"api.ate-system.svc:443\"." },
+            "router_endpoint": { "type": "string", "description": "atenet-router inbound endpoint, e.g. \"http://atenet-router.ate-system.svc:80\"." },
+            "token_audience": { "type": "string", "description": "TokenRequest audience for ateapi auth. Defaults to \"api.ate-system.svc\"." },
+            "ca_file": { "type": "string", "description": "Path to a PEM CA bundle verifying the ateapi Control gRPC dial. Used when cluster_trust_bundle is empty." },
+            "cluster_trust_bundle": { "type": "string", "description": "Name of a certificates.k8s.io ClusterTrustBundle verifying the ateapi Control gRPC dial. Takes precedence over ca_file." },
+            "sandbox_class": { "type": "string", "enum": ["gvisor", "microvm"], "default": "gvisor" },
+            "sandbox_config_name": { "type": "string", "description": "Name of the Substrate SandboxConfig CRD instance used by actor templates." },
+            "worker_selector": {
+              "type": "object",
+              "additionalProperties": { "type": "string" },
+              "description": "matchLabels copied into the ActorTemplate's workerSelector."
+            },
+            "snapshot_storage": { "type": "string", "description": "Object-storage base URI for actor snapshots, e.g. \"gs://bucket/prefix/\"." },
+            "egress_allow": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Additional public hostnames allowed through the per-actor EgressPolicy. No IP addresses or CIDRs are accepted; each entry must be a public FQDN (optionally wildcarded as \"*.example.com\") with a real ICANN-delegated top-level domain and at least one label below its actual public-suffix boundary, and must not be a catch-all or target a Kubernetes-internal or other reserved DNS suffix (see V1SubstrateConfig.EgressAllow and ValidateEgressAllow). This does not protect against a validly-public hostname later resolving to a private address (DNS rebinding, nip.io/sslip.io-style services) — only the egress proxy's post-resolution check can close that."
+            },
+            "egress_trust_bundle": {
+              "type": "string",
+              "enum": ["", "egress-mitm.ate.dev"],
+              "description": "Name of a Substrate trust bundle to project into every actor so it can validate the egress gateway's own TLS certificate. Required iff the cluster runs the sdsmint egress gateway and the actor makes any HTTPS/TLS request; setting it on a plain (non-sdsmint) install breaks every actor. Empty (the default) is off. The only value Substrate currently supports is \"egress-mitm.ate.dev\" (see V1SubstrateConfig.EgressTrustBundle and ValidateEgressTrustBundle)."
+            },
+            "template_ready_timeout": { "type": "string", "description": "Go duration string bounding how long Run waits for a new ActorTemplate's golden snapshot. Defaults to 10m." }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -457,23 +488,49 @@
           "$ref": "#/$defs/harnessNoAuthConfig",
           "description": "Behavior when an agent starts without credentials (NoAuth mode)."
         },
-        "thinking_budget_map": {
-          "type": "object",
-          "additionalProperties": { "type": "integer" },
-          "description": "Maps model identifiers to their thinking-budget token limits."
-        },
-        "thinking_budget_flag": {
-          "type": "string",
-          "description": "CLI flag name used to pass the thinking budget to the harness (e.g., '--thinking-budget')."
-        },
-        "thinking_budget_config_key": {
-          "type": "string",
-          "description": "Harness-native config key used to set the thinking budget in a config file."
+        "thinking": {
+          "$ref": "#/$defs/harnessThinking",
+          "description": "Maps the canonical 0-100 thinking level (SCION_THINKING_LEVEL) to harness-native values. Applied in-container by scion_harness.resolve_thinking."
         },
         "dialect": {
           "type": "object",
           "description": "Optional hook dialect metadata.",
           "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "harnessThinking": {
+      "type": "object",
+      "required": ["levels"],
+      "properties": {
+        "levels": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Ordered by strictly ascending max. A level L (0-100) maps to the value of the first entry whose max >= L. The last entry must have max: 100.",
+          "items": {
+            "type": "object",
+            "required": ["max", "value"],
+            "properties": {
+              "max": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Inclusive upper bound of the thinking level range mapped to value."
+              },
+              "value": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Harness-native thinking value (e.g. low, medium, high)."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "default": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Value emitted when SCION_THINKING_LEVEL is unset, blank or not an integer. Omit to emit nothing so the CLI's own default applies."
         }
       },
       "additionalProperties": false

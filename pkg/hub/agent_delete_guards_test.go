@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -780,9 +781,35 @@ func (c *completionFailStore) UpdateAgent(ctx context.Context, a *store.Agent) e
 	return c.Store.UpdateAgent(ctx, a)
 }
 
-// Review N3: reincarnate clears a failed marker at worker completion, pinned
-// to the claim observed at the worker's first read, and only when the
-// completion write lands (interpretation 7).
+// recordOutcomeStore intercepts the reincarnate worker's record CAS to
+// completed. With sweep set it first resolves the record to failed (as the
+// replica-safe sweep would) and then lets the real CAS run, which finds 0
+// rows; otherwise it returns an error on every attempt.
+type recordOutcomeStore struct {
+	store.Store
+	sweep bool
+}
+
+func (r *recordOutcomeStore) TryAdvanceAgentReincarnation(ctx context.Context, rec *store.AgentReincarnation, expectState string, olderThan time.Time) (bool, error) {
+	if rec.State != store.AgentReincarnationStateCompleted {
+		return r.Store.TryAdvanceAgentReincarnation(ctx, rec, expectState, olderThan)
+	}
+	if !r.sweep {
+		return false, errors.New("record CAS failed")
+	}
+	now := time.Now()
+	swept := &store.AgentReincarnation{ID: rec.ID, State: store.AgentReincarnationStateFailed, Error: "swept", UpdatedAt: now, CompletedAt: &now}
+	if ok, err := r.Store.TryAdvanceAgentReincarnation(ctx, swept, expectState, time.Time{}); err != nil || !ok {
+		return false, fmt.Errorf("test sweep did not land: ok=%v err=%v", ok, err)
+	}
+	return r.Store.TryAdvanceAgentReincarnation(ctx, rec, expectState, olderThan)
+}
+
+// Review N3: reincarnate clears a failed marker once the new generation is
+// live and the worker has won its record, pinned to the claim the handler's
+// gate admitted. The clear runs just before the completion write, so a
+// caller that sees completion also sees the cleared marker, and a failed
+// completion write (bookkeeping only) still leaves it cleared.
 func TestDeleteGate_ReincarnateCompletionClearsFailedMarker(t *testing.T) {
 	failedSeed := deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeConflict}
 	reincarnate := func(t *testing.T, srv *Server, agent *store.Agent, projectID string) {
@@ -792,6 +819,9 @@ func TestDeleteGate_ReincarnateCompletionClearsFailedMarker(t *testing.T) {
 		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	}
 
+	// This subtest alone cannot catch a regression that moves the clear
+	// back after the completion write (that only races); "completion write
+	// fails" below pins the ordering, so do not delete that one.
 	t.Run("completion clears", func(t *testing.T) {
 		srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
 		agent := newReincarnateTestAgent(t, s, project, broker, nil)
@@ -804,6 +834,13 @@ func TestDeleteGate_ReincarnateCompletionClearsFailedMarker(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, store.DeletionStateNone, got.DeletionState)
 		assert.Equal(t, int64(1), got.DeletionClaim, "the claim epoch is kept")
+		// The completion write absorbed the clear's state_version bump.
+		assert.Equal(t, rec.ToGeneration, got.Generation)
+		assert.Equal(t, store.ReincarnationStateNone, got.ReincarnationState)
+		assert.Empty(t, got.Message, "the migrating message is cleared")
+		require.NotNil(t, got.AppliedConfig)
+		require.NotNil(t, rec.NewAppliedConfig)
+		assert.Equal(t, rec.NewAppliedConfig.Task, got.AppliedConfig.Task)
 	})
 
 	t.Run("newer claim during the worker survives", func(t *testing.T) {
@@ -843,14 +880,14 @@ func TestDeleteGate_ReincarnateCompletionClearsFailedMarker(t *testing.T) {
 		assert.Equal(t, int64(2), got.DeletionClaim)
 	})
 
-	t.Run("completion write fails: marker kept", func(t *testing.T) {
+	t.Run("completion write fails: marker cleared, generation not advanced", func(t *testing.T) {
 		srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
 		agent := newReincarnateTestAgent(t, s, project, broker, nil)
 		seedAgentDeletion(t, s, agent.ID, failedSeed)
 		fs := &completionFailStore{Store: s, fromGeneration: agent.Generation, failed: make(chan struct{})}
 		srv.store = fs
 		// The worker logs "reincarnation completed" as its last act, after
-		// the (failed) completion write and the skipped clear.
+		// the clear and the (failed) completion write.
 		done := &logSignalHandler{msg: "reincarnation completed", ch: make(chan struct{})}
 		srv.agentLifecycleLog = slog.New(done)
 
@@ -867,8 +904,60 @@ func TestDeleteGate_ReincarnateCompletionClearsFailedMarker(t *testing.T) {
 		}
 		got, err := s.GetAgent(context.Background(), agent.ID)
 		require.NoError(t, err)
+		assert.Equal(t, store.DeletionStateNone, got.DeletionState, "gen N+1 is live: the start succeeded")
+		assert.Equal(t, agent.Generation, got.Generation, "the completion write did not land")
+	})
+
+	// The paths where the new generation is not confirmed as this worker's
+	// success never clear.
+	noClear := func(t *testing.T, srv *Server, s store.Store, agent *store.Agent, wait func()) {
+		t.Helper()
+		reincarnate(t, srv, agent, agent.ProjectID)
+		wait()
+		got, err := s.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
 		assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
 		assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+		assert.Equal(t, agent.Generation, got.Generation)
+	}
+	waitLog := func(t *testing.T, srv *Server, msg string) func() {
+		h := &logSignalHandler{msg: msg, ch: make(chan struct{})}
+		srv.agentLifecycleLog = slog.New(h)
+		return func() {
+			select {
+			case <-h.ch:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("worker never logged %q", msg)
+			}
+		}
+	}
+
+	t.Run("start failure: marker kept", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		disp.startErr = errors.New("start boom")
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		agent := newReincarnateTestAgent(t, s, project, broker, nil)
+		seedAgentDeletion(t, s, agent.ID, failedSeed)
+		noClear(t, srv, s, agent, func() {
+			rec := waitForReincarnationSettled(t, s, agent.ID)
+			require.Equal(t, store.AgentReincarnationStateFailed, rec.State)
+		})
+	})
+
+	t.Run("sweep won the record: marker kept", func(t *testing.T) {
+		srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
+		agent := newReincarnateTestAgent(t, s, project, broker, nil)
+		seedAgentDeletion(t, s, agent.ID, failedSeed)
+		srv.store = &recordOutcomeStore{Store: s, sweep: true}
+		noClear(t, srv, s, agent, waitLog(t, srv, "reincarnation worker: record no longer non-terminal at completion; agent already started on the new generation but bookkeeping is skipped"))
+	})
+
+	t.Run("record CAS error: marker kept", func(t *testing.T) {
+		srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
+		agent := newReincarnateTestAgent(t, s, project, broker, nil)
+		seedAgentDeletion(t, s, agent.ID, failedSeed)
+		srv.store = &recordOutcomeStore{Store: s}
+		noClear(t, srv, s, agent, waitLog(t, srv, "reincarnation worker: agent started on new generation but failed to advance the record to completed"))
 	})
 }
 

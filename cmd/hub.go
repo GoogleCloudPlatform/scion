@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
@@ -1638,9 +1639,9 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 		Slug:      slug,
 		GitRemote: normalized,
 		Labels: map[string]string{
-			"scion.dev/default-branch": defaultBranch,
-			"scion.dev/clone-url":      util.ToHTTPSCloneURL(gitURL),
-			"scion.dev/source-url":     gitURL,
+			store.LabelDefaultBranch: defaultBranch,
+			store.LabelCloneURL:      util.ToHTTPSCloneURL(gitURL),
+			store.LabelSourceURL:     gitURL,
 		},
 	})
 	if err != nil {

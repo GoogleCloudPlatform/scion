@@ -154,10 +154,7 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	txClient := tx.Client()
-	txStore := NewCompositeStore(txClient)
-	txStore.inTx = true
-	txStore.AccessConstraintStore.inTx = true
+	txStore := newTxCompositeStore(tx)
 
 	defer func() {
 		// Safety net: if Commit was not called (i.e. fn panicked or returned
@@ -173,6 +170,15 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 		return fmt.Errorf("commit transaction: %w", err)
 	}
 	return nil
+}
+
+// newTxCompositeStore returns a CompositeStore whose operations all run in
+// tx (WithTx's transactional store).
+func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
+	txStore := NewCompositeStore(tx.Client())
+	txStore.inTx = true
+	txStore.AccessConstraintStore.inTx = true
+	return txStore
 }
 
 // NewCompositeStore creates a store.Store backed entirely by the given Ent
@@ -231,6 +237,11 @@ func (c *CompositeStore) DeleteAgent(ctx context.Context, id string) error {
 	if err := c.AgentStore.DeleteAgent(ctx, id); err != nil {
 		return err
 	}
+	return c.deleteAgentDependents(ctx, id)
+}
+
+// deleteAgentDependents removes the records DeleteAgent cascades to.
+func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err

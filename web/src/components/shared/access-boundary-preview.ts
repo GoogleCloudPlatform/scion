@@ -56,6 +56,8 @@ import './access-boundary-impact-summary.js';
 import './affected-principals-table.js';
 
 import type { PageRequestDetail } from './affected-principals-table.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { formatInstantWithZone } from '../../utils/time.js';
 
 type PreviewPhase = 'idle' | 'loading' | 'polling' | 'ready' | 'committing' | 'error';
 
@@ -71,6 +73,9 @@ export interface PreviewCancelDetail {
 
 @customElement('scion-access-boundary-preview')
 export class ScionAccessBoundaryPreview extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /** The draft being previewed. */
   @property({ type: Object }) draft: AccessConstraintDraft | null = null;
 
@@ -796,16 +801,7 @@ export class ScionAccessBoundaryPreview extends LitElement {
   }
 
   private formatDatetime(iso: string): string {
-    try {
-      const date = new Date(iso);
-      if (isNaN(date.getTime())) return iso;
-      return date.toLocaleString(undefined, {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      });
-    } catch {
-      return iso;
-    }
+    return formatInstantWithZone(iso) || iso;
   }
 
   private commitButtonLabel(): string {

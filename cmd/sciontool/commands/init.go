@@ -46,6 +46,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	otellog "go.opentelemetry.io/otel/log"
@@ -97,7 +98,10 @@ Examples:
 // InitRunOptions configures a single invocation of RunInit. The zero value
 // matches `sciontool init`'s historical CLI behaviour except where noted.
 // These fields exist as a seam for an in-process caller that embeds RunInit
-// instead of going through the `sciontool init` CLI path.
+// instead of going through the `sciontool init` CLI path; substrate-serve
+// (pkg/sciontool/substrate, cmd/sciontool/commands/substrate_serve.go) is
+// the current example of such a caller and the only one that sets any of
+// them today.
 type InitRunOptions struct {
 	// DisableTermSignalForwarding controls whether RunInit skips installing
 	// its own SIGTERM/SIGINT handler that runs pre-stop hooks and gracefully
@@ -122,6 +126,66 @@ type InitRunOptions struct {
 	// command) always leaves this false — that behaviour is unchanged. A
 	// caller whose network path can't route that traffic sets this to true.
 	DisablePortForwarding bool
+
+	// DisableReExec skips RunInit's environ-purge re-exec (see
+	// reExecWithCleanEnv). That re-exec exists only to purge
+	// /proc/1/environ, which the kernel fills from the execve(2)
+	// environment and never updates afterward. An embedding caller that
+	// receives its secrets in-process — substrate-serve gets them in the
+	// bootstrap request body and applies them with os.Setenv — never had
+	// them in the kernel's copy, so there is nothing to purge; re-execing
+	// would instead replace that caller's own PID 1 with a fresh process
+	// that has none of its in-memory state. A caller that set this after
+	// receiving secrets through its OWN execve environment would leave them
+	// readable in /proc/1/environ, so only an in-process caller may set it.
+	// Staging still runs either way: the transport token file is written,
+	// SCION_TRANSPORT_TOKEN is cleared and SCION_TRANSPORT_TOKEN_FILE is
+	// set; only the re-exec is skipped. The zero value (false) keeps
+	// `sciontool init`'s behaviour unchanged.
+	DisableReExec bool
+
+	// WorkingDir sets the harness child's working directory (threaded into
+	// supervisor.Config.WorkingDir, which sets exec.Cmd.Dir — see that
+	// field's doc comment). Empty (the zero value) leaves cmd.Dir unset, so
+	// the child inherits this process's own current working directory —
+	// RunInit's unconditional behaviour for `sciontool init`.
+	//
+	// Superseded outright by ResolveWorkingDir below when both are set: its
+	// result is what reaches the harness, and this field is ignored. No
+	// caller sets both today, so this precedence is a documented default for
+	// a future caller rather than a path any current one exercises.
+	WorkingDir string
+
+	// ResolveWorkingDir, when non-nil, is called once by RunInit — directly
+	// after gitCloneWorkspace and the post-pre-start-hook ownership fixup
+	// have both run, and before anything else that starts a long-running
+	// component on the harness's behalf (sidecar services, the metadata
+	// server, the hub secret fetch) or before harnessSupervisorConfig builds
+	// the supervisor.Config — to compute the harness child's working
+	// directory in place of the static WorkingDir field above.
+	//
+	// That placement is not incidental: a resolver that needs to know
+	// whether a directory is actually usable (searchable by the scion
+	// uid/gid) has to run after every step that can change that, and before
+	// any step whose work would be wasted (and, on the fail-closed exit
+	// path, left running) if the resolver then errors. A resolver called
+	// before both has seen the workspace in whatever state the broker's
+	// bind mount left it in, which can resolve to the wrong directory.
+	//
+	// nil (the zero value) for every caller that doesn't need dynamic
+	// resolution: RunInit's behaviour is then exactly WorkingDir's own
+	// zero-value contract above, unchanged.
+	//
+	// An error from ResolveWorkingDir fails RunInit closed with
+	// exitCodeNoUsableHarnessCwd: the harness is never started, sidecar
+	// services/the metadata server/the hub secret fetch never start either,
+	// and RunInit never falls back to WorkingDir's own zero-value "inherit
+	// this process's cwd" behaviour or to "/".
+	//
+	// See pkg/sciontool/substrate / cmd/sciontool/commands/substrate_serve.go
+	// for why substrate needs all four fields above and how it resolves
+	// this one (also .design/kubernetes/substrate-runtime.md §§1, 5.6-5.7, 8).
+	ResolveWorkingDir func() (string, error)
 }
 
 // forwardsTermSignal reports whether RunInit should install its own
@@ -140,16 +204,10 @@ func (opts InitRunOptions) forwardsTermSignal() bool {
 var errPrivilegeDropRequired = errors.New("privilege drop to the scion user did not happen; refusing to start the harness as root")
 
 // requirePrivilegeDropOrFail implements RequirePrivilegeDrop's fail-closed
-// check. It is a plain function of setupHostUser's own result, not a
-// reimplementation of its logic: targetUID stays 0 (root) if and only if
-// setupHostUser could not complete a real privilege drop. Kept separate
-// from setupHostUser so it's testable without depending on the real
-// CAP_SETUID/os.Getuid() environment a unit test runs in.
-//
-// targetGID is checked against the same predicate the actual privilege drop
-// uses (UID>0 && GID>0 — see setupHostUser/adjustScionUser), not just
-// targetUID==0, so this stays fail-closed if a future caller's UID/GID
-// resolution ever produces a non-root UID paired with a still-root (0) GID.
+// check: substrate must never run the harness as root — see
+// RequirePrivilegeDrop's own doc comment, and pkg/runtime/substrate_bootstrap.go's
+// buildBootstrapEnv for why targetGID's clamp is still fail-closed even
+// though only one UID/GID pairing can occur in practice today.
 func requirePrivilegeDropOrFail(targetUID, targetGID int, requirePrivilegeDrop bool) error {
 	if requirePrivilegeDrop && (targetUID <= 0 || targetGID <= 0) {
 		return errPrivilegeDropRequired
@@ -163,10 +221,19 @@ func requirePrivilegeDropOrFail(targetUID, targetGID int, requirePrivilegeDrop b
 // reading a caller's own logged exit code can tell which failure this was.
 // RunInit reports PhaseError to the Hub and to the local agent-info state
 // before returning it, the same way the git-clone failure path does — see
-// reportInitFailure's doc comment. A caller embedding RunInit in a process
-// that doesn't exit on failure needs this signal to know the harness never
-// started.
+// reportInitFailure's doc comment. See pkg/sciontool/substrate's
+// StateInitFailed for why a caller embedding RunInit in a process that
+// doesn't exit on failure needs this signal at all.
 const exitCodePrivilegeDropRequired = 17
+
+// exitCodeNoUsableHarnessCwd is the exit code RunInit returns when
+// InitRunOptions.ResolveWorkingDir is set and returns an error — never for
+// any other reason. It stays a distinct value, the same reasoning as
+// exitCodePrivilegeDropRequired above. RunInit reports PhaseError the same
+// way — via reportInitFailure — before returning it; see
+// ResolveWorkingDir's doc comment for the fail-closed contract this
+// enforces.
+const exitCodeNoUsableHarnessCwd = 18
 
 func init() {
 	rootCmd.AddCommand(initCmd)
@@ -217,8 +284,9 @@ func resolveAgentHome(targetUID int, rootless bool) string {
 // heartbeat, that local write is a second, independent path to the same
 // result if the direct Hub call fails or the Hub isn't configured; for a
 // runtime whose broker has no such fallback, the direct Hub call is the
-// only failure signal that reaches the Hub at all. cause's message ends up
-// in the Hub-visible message and possibly
+// only failure signal that reaches the Hub at all — see
+// pkg/sciontool/substrate's StateInitFailed doc comment for why substrate
+// is one. cause's message ends up in the Hub-visible message and possibly
 // a caller's own exposed response, so callers must only pass fixed,
 // secret-free errors (as errPrivilegeDropRequired and every caller below
 // do) — never one built from raw command output or file contents.
@@ -272,7 +340,8 @@ func resolveProjectHookPath(agentHome string, requirePrivilegeDrop bool) string 
 
 // harnessSupervisorConfig builds the supervisor.Config for the harness
 // child process from RunInit's inputs. It is a pure function of its
-// arguments — it reads no globals and has no side effects — so it can be
+// arguments — it reads no globals and has no side effects — so the join
+// between InitRunOptions.WorkingDir and supervisor.Config.WorkingDir can be
 // pinned by a table-driven unit test without invoking RunInit itself.
 func harnessSupervisorConfig(opts InitRunOptions, gracePeriod time.Duration, targetUID, targetGID int, rootless bool, envOverlay map[string]string, nativeTelemetryPolicy string, secretOverrides map[string]string) supervisor.Config {
 	return supervisor.Config{
@@ -284,6 +353,7 @@ func harnessSupervisorConfig(opts InitRunOptions, gracePeriod time.Duration, tar
 		EnvOverlay:            envOverlay,
 		NativeTelemetryPolicy: nativeTelemetryPolicy,
 		SecretOverrides:       secretOverrides,
+		WorkingDir:            opts.WorkingDir,
 		RequirePrivilegeDrop:  opts.RequirePrivilegeDrop,
 	}
 }
@@ -349,7 +419,7 @@ var runEnforceTokenFileOwnerChecks = hub.EnforceTokenFileOwnerChecks
 // under supervision, and reports status/heartbeats to the Hub until the
 // child exits. It returns the process's intended exit code and never calls
 // os.Exit itself, so it is safe to call in-process from other entry points
-// (see InitRunOptions.DisableTermSignalForwarding).
+// (see InitRunOptions.DisableTermSignalForwarding for the substrate-serve case).
 //
 // This is the exact logic `sciontool init -- <cmd>` runs; it is exported
 // so other subcommands can reuse it instead of forking a copy.
@@ -419,6 +489,14 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// StatusHandler is created so it writes to the correct path.
 	agentHome := resolveAgentHome(targetUID, rootless)
 
+	// Move the bootstrap transport credential out of the environment and
+	// into the transport token file before anything else can inherit it.
+	// Child processes read the file (via SCION_TRANSPORT_TOKEN_FILE), which
+	// the refresh loop keeps current; the env value is only valid for about
+	// an hour. When staged secrets are also present, the single re-exec
+	// below restarts init with the cleaned environment for both.
+	transportCleared := stageTransportToken(targetUID, targetGID)
+
 	// Stage secrets from the SCION_STAGED_SECRETS env var. The broker
 	// serializes file and variable secrets into this single base64 blob
 	// instead of bind-mounting them from the host filesystem. We decode and
@@ -462,10 +540,28 @@ func RunInit(args []string, opts InitRunOptions) int {
 		// idempotent on the second pass.
 		//
 		// See: miller79/scion#7
-		if err := reExecWithCleanEnv(); err != nil {
-			log.Error("Re-exec to clear /proc environ failed: %v (secret remains in /proc)", err)
-			// Fall through — child-process inheritance is still blocked by
-			// os.Unsetenv, so this degrades to the pre-fix behavior.
+		//
+		// Skipped for an embedded caller (see InitRunOptions.DisableReExec).
+		if !opts.DisableReExec {
+			if err := reExecWithCleanEnv(); err != nil {
+				log.Error("Re-exec to clear /proc environ failed: %v (secret remains in /proc)", err)
+				// Fall through — child-process inheritance is still blocked by
+				// os.Unsetenv, so this degrades to the pre-fix behavior.
+			}
+		} else {
+			log.Info("RunInit embedded: skipping environ-purge re-exec")
+		}
+	} else if transportCleared {
+		// Restart init with the cleaned environment, as above. On the
+		// second pass the env var is absent and the file already exists,
+		// so this branch is not taken again. Skipped for an embedded
+		// caller (see InitRunOptions.DisableReExec).
+		if !opts.DisableReExec {
+			if err := reExecWithCleanEnv(); err != nil {
+				log.Error("Re-exec with cleaned environment failed: %v", err)
+			}
+		} else {
+			log.Info("RunInit embedded: skipping environ-purge re-exec")
 		}
 	}
 
@@ -632,6 +728,45 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// or the agent home directory. The non-root broker cannot delete
 	// root-owned files later, so we chown them now.
 	runPostPreStartOwnershipFixup(targetUID, targetGID, agentHome, opts.RequirePrivilegeDrop)
+
+	// Resolve the harness working directory now — after runGitCloneWorkspace
+	// and the post-pre-start-hook ownership fixup above have both run, and
+	// before anything that starts a long-running component on the harness's
+	// behalf (sidecar services, the metadata server, the hub secret fetch)
+	// or builds the supervisor.Config — so a resolver that depends on the
+	// workspace being present and searchable by the scion uid
+	// (substrate-serve's, in particular) sees it in its final state rather
+	// than whatever the broker's bind mount left it in, and a resolver
+	// failure exits before any of those start. See
+	// InitRunOptions.ResolveWorkingDir's doc comment for why this placement
+	// matters and what nil means for every other caller. ResolveWorkingDir's
+	// result supersedes opts.WorkingDir outright when both are set — see
+	// that field's own doc comment for why no caller does today.
+	if opts.ResolveWorkingDir != nil {
+		workingDir, err := opts.ResolveWorkingDir()
+		if err != nil {
+			log.Error("%v", err)
+			// Wrapped with a fixed prefix, like every other reportInitFailure
+			// call site below, rather than passed through directly: err's
+			// own text is bounded (ResolveWorkingDir's implementations only
+			// ever name candidate paths and uids tried — see
+			// resolveSubstrateHarnessCwd's doc comment), but reportInitFailure's
+			// own contract is "callers only pass fixed, secret-free errors",
+			// and passing a resolver's own err straight through reads like an
+			// exception to that rule rather than an instance of it.
+			reportInitFailure(agentHome, fmt.Errorf("failed to resolve harness working directory: %w", err))
+			return exitCodeNoUsableHarnessCwd
+		}
+		opts.WorkingDir = workingDir
+	}
+	// Mirror the harness child's own resolved cwd into the lifecycle
+	// manager now that it is final, so a dropped post-start/pre-stop/
+	// session-end hook (executeScriptEnforced) gets the same cwd the
+	// harness process itself runs in — "env and cwd handled the same way as
+	// the harness process". A pre-start hook runs before this line, so a
+	// dropped pre-start hook's cwd is whatever init's own cwd already is,
+	// same as this field's zero-value contract.
+	lifecycleManager.WorkloadWorkingDir = opts.WorkingDir
 
 	// Load the env overlay produced by the pre-start provisioner. Resolve
 	// any from_file references to in-memory values so secrets are not
@@ -852,10 +987,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 		sigHandler.Start()
 		defer sigHandler.Stop()
 	} else {
-		// DisableTermSignalForwarding: the caller owns SIGTERM handling for
-		// the whole process, so RunInit must not also listen for it here —
-		// doing so would shut down the child out from under the caller's own
-		// signal handling. See InitRunOptions.DisableTermSignalForwarding.
+		// DisableTermSignalForwarding (substrate-serve): the caller owns
+		// SIGTERM handling for the whole process, so RunInit must not also
+		// listen for it here — doing so would shut down the child out from
+		// under the caller's own signal handling. See
+		// InitRunOptions.DisableTermSignalForwarding.
 		log.Info("Termination-signal forwarding disabled for this init run; the child will not be stopped on SIGTERM/SIGINT by this code path")
 	}
 
@@ -955,7 +1091,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 			log.Info("Started Hub heartbeat loop (interval: %s)", hub.DefaultHeartbeatInterval)
 
 			// Skip both the port-forward tunnel manager and auto-expose when
-			// the caller sets InitRunOptions.DisablePortForwarding.
+			// the caller sets InitRunOptions.DisablePortForwarding — see that
+			// field's doc comment for why substrate-serve is the one caller
+			// that does.
 			if opts.DisablePortForwarding {
 				log.Info("port forwarding disabled: skipping port-forward tunnel manager and auto-expose")
 			} else {
@@ -1545,6 +1683,15 @@ func handleAuthReset(hubClient *hub.Client, tokenRefreshCancel *context.CancelFu
 		hubClient.SetToken(newToken)
 	}
 
+	// Reset-auth may also have written a fresh transport token. Adopt it so
+	// this process uses it immediately and the file is owned by the scion
+	// user for every other hub client in the container.
+	if adopted, err := hubClient.AdoptTransportTokenFile(targetUID, targetGID); err != nil {
+		log.Error("AUTH_RESET: Failed to adopt transport token file: %v", err)
+	} else if adopted {
+		log.TaggedInfo("AUTH_RESET", "Transport token reloaded")
+	}
+
 	// Clear any AUTH_LOST message from agent-info.json.
 	_ = statusHandler.SetMessage("")
 
@@ -1615,7 +1762,9 @@ func extractChildCommand(args []string) []string {
 // one re-executed as root. "/proc/self/exe" is the kernel's own magic
 // symlink to the already-running inode, so it always re-execs the exact
 // image already in memory, regardless of what (if anything) now sits at
-// its on-disk path.
+// its on-disk path — the same reasoning pkg/sciontool/substrate's runExec
+// gives for resolving "sh" up front via rootexec.Resolve rather than
+// leaving it for a shell to look up later.
 //
 // On success this function does not return (the process image is replaced).
 // On failure it returns an error and the caller should continue — the
@@ -1627,9 +1776,53 @@ func extractChildCommand(args []string) []string {
 // that magic symlink to the running inode at the moment of the execve
 // syscall itself — standard behavior on Linux >= 2.6, under any runtime that
 // runs a real Linux kernel beneath its own hypervisor/sandbox layer.
-func reExecWithCleanEnv() error {
-	log.Info("Re-execing to clear staged secrets from /proc/%d/environ", os.Getpid())
+//
+// A package-level func var only so a test can observe whether RunInit
+// reaches it without replacing the test binary's own process image; only
+// tests reassign it (saving and restoring the original).
+var reExecWithCleanEnv = func() error {
+	log.Info("Re-execing init (pid %d) with cleaned environment", os.Getpid())
 	return syscall.Exec(rootexec.SelfExe(), os.Args, os.Environ())
+}
+
+// stageTransportToken persists the bootstrap transport credential
+// (SCION_TRANSPORT_TOKEN) to the transport token file, owned by uid:gid,
+// then removes it from this process's environment and points children at
+// the file via SCION_TRANSPORT_TOKEN_FILE. Child processes therefore no
+// longer inherit the bootstrap-only value; they read the file, which the
+// refresh loop keeps current.
+//
+// Returns true when the env var was removed. If the file cannot be
+// written the env var is left in place so hub access keeps working until
+// it expires.
+func stageTransportToken(uid, gid int) bool {
+	tok := os.Getenv(transportauth.EnvTransportToken)
+	if tok == "" {
+		// No hub-provided transport token this start. If none was staged
+		// earlier in this process either (SCION_TRANSPORT_TOKEN_FILE survives
+		// the re-exec), remove a file left in a persisted home by an earlier
+		// configuration so it is never used.
+		if os.Getenv(transportauth.EnvTransportTokenFile) == "" {
+			if removed, err := hub.RemoveTransportTokenFile(); err != nil {
+				log.Error("Failed to remove stale transport token file: %v", err)
+			} else if removed {
+				log.Info("Removed stale transport token file (no transport token provided)")
+			}
+		}
+		return false
+	}
+	path, err := hub.SeedTransportTokenFile(tok, uid, gid)
+	if err != nil {
+		log.Error("Failed to write transport token file; leaving bootstrap value in the environment: %v", err)
+		return false
+	}
+	_ = os.Setenv(transportauth.EnvTransportTokenFile, path)
+	_ = os.Unsetenv(transportauth.EnvTransportToken)
+	// The injected expiry describes only the bootstrap value and goes stale
+	// after the first refresh; nothing in the agent reads it.
+	_ = os.Unsetenv(transportauth.EnvTransportTokenExpiry)
+	log.Info("Transport credential moved to %s", path)
+	return true
 }
 
 // setupHostUser modifies the scion user's UID/GID to match the host user.
@@ -1723,8 +1916,8 @@ var runDirectSetUID = directSetUID
 // StartReaper installs a process-wide SIGCHLD handler that Wait4(-1, ...)s
 // any reapable child — including one a later exec.Command in the *same*
 // test binary is still waiting on itself, which races os/exec's own
-// wait() and fails it with ECHILD. RunInit calls this unconditionally
-// because a real PID 1 needs it, but a
+// wait() and fails it with ECHILD. RunInit (and substrate-serve's own
+// startup) call this unconditionally because a real PID 1 needs it, but a
 // test driving RunInit directly does not, and starting it there corrupts
 // every other test in the same binary that shells out — stubbed to a
 // no-op by TestMain for exactly that reason.
@@ -1747,18 +1940,19 @@ var runSetupHostUser = setupHostUser
 
 // runGitCloneWorkspace is gitCloneWorkspace's own call site as a package
 // var, the same reason as startReaper above: a test driving RunInit needs to
-// observe and control when the workspace clone step runs, without shelling
+// observe (and, for the ordering RunInit's InitRunOptions.ResolveWorkingDir
+// depends on, control) when the workspace clone step runs, without shelling
 // out to a real git process or depending on SCION_GIT_CLONE_URL pointing at
 // a reachable remote. Production code always leaves this at its default;
 // only a test replaces it.
 var runGitCloneWorkspace = gitCloneWorkspace
 
 // runPostPreStartOwnershipFixup is postPreStartOwnershipFixup's call site as
-// a package var, for the same reason as runGitCloneWorkspace above: a test
-// driving RunInit needs to observe when this ownership fixup step runs, and
-// the real step only does anything when the calling process is root.
-// Production code always leaves this at its default; only a test replaces
-// it.
+// a package var, for the same reason as runGitCloneWorkspace above: the
+// ordering contract InitRunOptions.ResolveWorkingDir depends on must observe
+// that the resolver runs after this step, and the real step only does
+// anything when the calling process is root. Production code always leaves
+// this at its default; only a test replaces it.
 var runPostPreStartOwnershipFixup = postPreStartOwnershipFixup
 
 // postPreStartGeteuid is os.Geteuid's call site as a package var: it is a
@@ -1798,8 +1992,9 @@ func postPreStartOwnershipFixup(targetUID, targetGID int, agentHome string, requ
 }
 
 // runServicesStart is (*services.Manager).Start's call site as a package
-// var, the same reason as runGitCloneWorkspace above: a test driving RunInit
-// needs to observe that sidecar services start, without a test having to
+// var, the same reason as runGitCloneWorkspace above: the ordering contract
+// InitRunOptions.ResolveWorkingDir depends on must observe (from a test) that
+// the resolver runs before sidecar services start, without a test having to
 // spawn a real sidecar process. Production code always leaves this at its
 // default; only a test replaces it.
 var runServicesStart = func(ctx context.Context, m *services.Manager, specs []api.ServiceSpec, uid, gid int, username string, requirePrivilegeDrop bool) error {
@@ -1859,8 +2054,8 @@ var setupHostUserIsUIDMapped = isUIDMapped
 var runAdjustScionUser = adjustScionUser
 
 // setupHostUser realigns the container's "scion" user to SCION_HOST_UID/GID
-// so the harness can drop privileges from root to it.
-// requirePrivilegeDrop is RunInit's own
+// so the harness (and, for substrate, runExec's own credential drop) can
+// drop privileges from root to it. requirePrivilegeDrop is RunInit's own
 // InitRunOptions.RequirePrivilegeDrop, threaded through so the stricter
 // fail-closed checks in adjustScionUser only apply under it — see
 // adjustScionUser's doc comment for why this must not change any other
@@ -1991,9 +2186,10 @@ func setupHostUser(requirePrivilegeDrop bool) (int, int, bool) {
 // post-adjust verify that cannot confirm the target UID/GID. When true,
 // each of these returns (0, 0, false), which requirePrivilegeDropOrFail
 // turns into a fail-closed refusal to start the harness, reported through
-// RunInit's own failure path. When false, this function's return value is
-// byte-identical to the path that logs and continues past all three: every
-// other caller depends on that lenient fallback and must see it unchanged.
+// RunInit's own failure path. When false (every runtime except
+// substrate-serve), this function's return value is byte-identical to the
+// path that logs and continues past all three: every other caller depends
+// on that lenient fallback and must see it unchanged.
 func adjustScionUser(uid, gid int, hostUID, hostGID string, requirePrivilegeDrop bool) (int, int, bool) {
 	// Skip if UID/GID already match (1001 is the default)
 	currentInfo, lookupErr := scionUserLookup("scion")
@@ -2217,7 +2413,7 @@ func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir str
 	}
 
 	// Only now — after every side effect above has run unconditionally —
-	// report whether there was anything to rewrite: a
+	// report whether there was anything to rewrite: substrate's
 	// requirePrivilegeDrop=true caller fails closed on this, every other
 	// caller absorbs it (see errPasswdEntryNotRewritten's own doc comment).
 	if !hasEntry {
@@ -2611,7 +2807,8 @@ var chownTreeRootOwnedFilter = isRootOwned
 // the specified uid:gid; entries already owned by anyone else are left
 // alone. It is called after pre-start hooks to fix up files created by
 // provisioners running as root, which would otherwise be undeletable by the
-// non-root broker. Returns the number of entries the walk visited in total
+// non-root broker, and — for substrate specifically — by fixupRootfsForScion.
+// Returns the number of entries the walk visited in total
 // and the number actually rechowned. A missing root (e.g. no /workspace) is
 // a silent no-op — nil, 0, 0 — on both branches below.
 //
@@ -2691,12 +2888,13 @@ func chownTreeRootOwned(root string, uid, gid int, requirePrivilegeDrop bool) (w
 }
 
 // chownTreeRootOwnedPathBased is chownTreeRootOwned's path-based
-// implementation, used whenever requirePrivilegeDrop is false: it walks
-// with filepath.WalkDir and chowns each admitted entry with os.Lchown,
-// reading ownership directly off info.Sys().(*syscall.Stat_t). Neither
-// WalkDir nor Lchown follows a symlink AT the leaf, but both re-resolve
-// every path component above the leaf on every call, so this is not used
-// where requirePrivilegeDrop is true.
+// implementation, used whenever requirePrivilegeDrop is false, for every
+// caller including substrate's own fixupRootfsForScion: it walks with
+// filepath.WalkDir and chowns each admitted entry with os.Lchown, reading
+// ownership directly off info.Sys().(*syscall.Stat_t). Neither WalkDir nor
+// Lchown follows a symlink AT the leaf, but both re-resolve every path
+// component above the leaf on every call, so this is not used where
+// requirePrivilegeDrop is true.
 func chownTreeRootOwnedPathBased(root string, uid, gid int) (walked, changed int, err error) {
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, werr error) error {
 		if werr != nil {
@@ -2999,26 +3197,27 @@ func isClaude(childArgs []string) bool {
 // read-only (0555) so Claude Code cannot later create a symlink inside it —
 // see this function's call site for why that matters.
 //
-// requirePrivilegeDrop is RunInit's own opts.RequirePrivilegeDrop. When
-// false, this keeps the exact historical behaviour — os.MkdirAll followed
-// by os.Chmod(debugDir, ...) — unchanged: a legitimate unenforced setup may
-// bind-mount or symlink .claude itself (e.g. from a host directory), and
-// refusing that would break it, with no privilege boundary at stake to
-// justify the change.
+// requirePrivilegeDrop is RunInit's own opts.RequirePrivilegeDrop (true only
+// for substrate). On every OTHER runtime this keeps the plain
+// behaviour — os.MkdirAll followed by os.Chmod(debugDir, ...) — unchanged: a
+// legitimate non-substrate setup may bind-mount or symlink .claude itself
+// (e.g. from a host directory), and refusing that would break it, with no
+// privilege boundary at stake to justify the change.
 //
-// When true this runs as root: os.MkdirAll silently succeeds (via os.Stat,
-// which follows symlinks) if debugDir already exists as anything, including
-// a symlink, and the os.Chmod that follows it then chmods whatever that
-// symlink points at — so a scion-uid process (a sidecar service, or a
-// process a pre-start hook spawned) that plants ~/.claude/debug as a
-// symlink to an arbitrary root-owned directory before this runs gets that
-// directory chmod'd to 0555 (world-readable) by root. dirfd.EnsureDirNoFollow
-// refuses a symlinked leaf outright instead of creating/resolving through
-// it, and the chmod that follows is fchmod on the fd EnsureDirNoFollow
-// already resolved, never a path-based os.Chmod that could be redirected by
-// anything changed afterward. A refusal is logged (path only) and this
-// simply skips the chmod rather than failing init closed — a planted
-// symlink must not be able to stop the workload from starting.
+// On substrate this runs as root: os.MkdirAll silently succeeds (via
+// os.Stat, which follows symlinks) if debugDir already exists as anything,
+// including a symlink, and the os.Chmod that follows it then chmods
+// whatever that symlink points at — so a scion-uid process (a sidecar
+// service, or a process a pre-start hook spawned) that plants
+// ~/.claude/debug as a symlink to an arbitrary root-owned directory before
+// this runs gets that directory chmod'd to 0555 (world-readable) by root.
+// dirfd.EnsureDirNoFollow refuses a symlinked leaf outright instead of
+// creating/resolving through it, and the chmod that follows is fchmod on
+// the fd EnsureDirNoFollow already resolved, never a path-based os.Chmod
+// that could be redirected by anything changed afterward. A refusal is
+// logged (path only) and this simply skips the chmod rather than failing
+// init closed — a planted symlink must not be able to stop the workload
+// from starting.
 func blockClaudeDebugSymlink(debugDir string, requirePrivilegeDrop bool) {
 	if !requirePrivilegeDrop {
 		if err := os.MkdirAll(debugDir, 0755); err != nil {
@@ -3340,14 +3539,15 @@ const gcloudConfigKeepFile = "application_default_credentials.json"
 // which may be bind-mounted as a gcloud-adc secret. Clearing the config state
 // forces gcloud to re-initialize and discover the emulated metadata server.
 //
-// requirePrivilegeDrop is RunInit's own opts.RequirePrivilegeDrop. When
-// false this keeps the exact historical path-based behaviour (os.ReadDir +
-// os.RemoveAll by joined path) — unchanged, because a legitimate unenforced
-// setup may bind-mount a symlink at gcloudDir itself (e.g. a host-mounted
-// gcloud config directory) and refusing that would break it, with no
-// privilege boundary at stake to justify the behaviour change.
+// requirePrivilegeDrop is RunInit's own opts.RequirePrivilegeDrop (true only
+// for substrate). On every OTHER runtime this keeps the plain path-based
+// behaviour (os.ReadDir + os.RemoveAll by joined path) —
+// unchanged, because a legitimate non-substrate setup may bind-mount a
+// symlink at gcloudDir itself (e.g. a host-mounted gcloud config directory)
+// and refusing that would break it, with no privilege boundary at stake to
+// justify the behaviour change.
 //
-// When true this runs as root, after sidecar services have already
+// On substrate this runs as root, after sidecar services have already
 // started (so a scion-uid process may already be alive), against a
 // directory the scion user owns: a symlink planted there — deterministically
 // before this runs, or swapped mid-walk once it's a real directory being
@@ -3407,15 +3607,16 @@ func cleanGcloudConfigForMetadata(gcloudDir string, requirePrivilegeDrop bool) {
 }
 
 // readServicesYAML reads the sidecar-services config file at path.
-// requirePrivilegeDrop is RunInit's own opts.RequirePrivilegeDrop.
+// requirePrivilegeDrop is RunInit's own opts.RequirePrivilegeDrop (true only
+// for substrate).
 //
-// When false this keeps the exact historical behaviour — os.ReadFile(path),
-// which follows a symlink at any component — unchanged: a legitimate
-// unenforced setup may symlink this file (e.g. from a mounted config
-// directory), and refusing that would break it, with no privilege boundary
-// at stake to justify the change.
+// On every OTHER runtime this keeps the plain behaviour —
+// os.ReadFile(path), which follows a symlink at any component — unchanged:
+// a legitimate non-substrate setup may symlink this file (e.g. from a
+// mounted config directory), and refusing that would break it, with no
+// privilege boundary at stake to justify the change.
 //
-// When true this reads as root, after pre-start hooks have already run
+// On substrate this reads as root, after pre-start hooks have already run
 // as the workload user (which owns $HOME/.scion outright): a symlink
 // planted at path must not let root read and act on an arbitrary file's
 // content. dirfd.OpenParentNoFollow + O_NOFOLLOW refuses (rather than
@@ -3540,7 +3741,9 @@ func parseCapSetUID(statusContent string) bool {
 }
 
 // parseCapBit parses /proc/self/status content and returns whether the given
-// bit is set in the effective capability set (CapEff).
+// bit is set in the effective capability set (CapEff). Shared by
+// parseCapSetUID (above) and hasCapBit (substrate_privilege_drop.go) so they
+// can never drift in how they read the file.
 func parseCapBit(statusContent string, bit uint) bool {
 	for _, line := range strings.Split(statusContent, "\n") {
 		if strings.HasPrefix(line, "CapEff:") {

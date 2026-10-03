@@ -48,6 +48,7 @@ COPY harnesses/ ./harnesses/
 COPY pkg/ ./pkg/
 COPY proto/ ./proto/
 COPY resources/ ./resources/
+COPY third_party/ ./third_party/
 # NOTE: Do NOT copy web/*.go only — the full web/ is already in place with
 # dist/client from step 1
 
