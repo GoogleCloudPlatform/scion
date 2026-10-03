@@ -68,6 +68,13 @@ const (
 	// unresponsive.
 	githubFlightTimeout = 5 * time.Minute
 
+	// failureCacheTTL is how long a non-retryable resolution failure (see
+	// cacheableFailure) is remembered for its cacheKey. Within this window a
+	// resolution of the same ref with the same credential returns the
+	// remembered error without calling GitHub. It is kept short because the
+	// cause can be fixed at any time (the path is added, access is granted).
+	failureCacheTTL = time.Minute
+
 	// refreshFailureBackoff bounds how often a background stale-refresh is
 	// retried for the same flight key after it fails. Without this, a
 	// persistently failing ref (rate limit, outage) would start a brand new
@@ -165,6 +172,12 @@ type GitHubResolutionCache struct {
 	refreshMu          sync.Mutex
 	lastRefreshFailure map[string]time.Time
 
+	// failureMu guards failures, which holds recent non-retryable
+	// resolution failures by cacheKey (see failureCacheTTL). They are kept
+	// in memory only and are never written to the cache file.
+	failureMu sync.Mutex
+	failures  map[string]cachedFailure
+
 	// causeMu guards flightCauses, which holds, per flight key, the record
 	// of the flight currently running for it (see flightCause).
 	causeMu      sync.Mutex
@@ -205,6 +218,12 @@ type GitHubResolutionCache struct {
 	// onFlush, when non-nil, is called at the end of every Flush that wrote
 	// the file. Tests use it to wait for the delayed write without sleeping.
 	onFlush func()
+}
+
+// cachedFailure is a remembered non-retryable resolution failure.
+type cachedFailure struct {
+	err       error
+	expiresAt time.Time
 }
 
 type resolutionCacheEntry struct {
@@ -334,7 +353,56 @@ func (c *GitHubResolutionCache) putEntry(uri string, skill ResolvedSkill, isBran
 	c.evictExpired()
 	c.mu.Unlock()
 
+	c.clearFailure(uri)
 	c.scheduleSave()
+}
+
+// cacheableFailure reports whether a fetch error is worth remembering for
+// failureCacheTTL: only a not_found, which does not change between attempts
+// made close together. Retryable causes (5xx, no response), timeouts, rate
+// limits and unclassified errors are never remembered.
+func cacheableFailure(err error) bool {
+	var rerr *githubResolveError
+	return errors.As(err, &rerr) && rerr.code == SkillErrCodeNotFound
+}
+
+// recordFailure remembers err for cacheKey until failureCacheTTL from now,
+// and drops any expired failures so the map stays small.
+func (c *GitHubResolutionCache) recordFailure(cacheKey string, err error) {
+	now := time.Now()
+	c.failureMu.Lock()
+	defer c.failureMu.Unlock()
+	if c.failures == nil {
+		c.failures = make(map[string]cachedFailure)
+	}
+	for k, f := range c.failures {
+		if !now.Before(f.expiresAt) {
+			delete(c.failures, k)
+		}
+	}
+	c.failures[cacheKey] = cachedFailure{err: err, expiresAt: now.Add(failureCacheTTL)}
+}
+
+// recentFailure returns the failure remembered for cacheKey, or nil if there
+// is none or it has expired.
+func (c *GitHubResolutionCache) recentFailure(cacheKey string) error {
+	c.failureMu.Lock()
+	defer c.failureMu.Unlock()
+	f, ok := c.failures[cacheKey]
+	if !ok {
+		return nil
+	}
+	if !time.Now().Before(f.expiresAt) {
+		delete(c.failures, cacheKey)
+		return nil
+	}
+	return f.err
+}
+
+func (c *GitHubResolutionCache) clearFailure(cacheKey string) {
+	c.failureMu.Lock()
+	defer c.failureMu.Unlock()
+	delete(c.failures, cacheKey)
 }
 
 // scheduleSave requests a rewrite of the cache file after saveDelay. If a
@@ -865,6 +933,9 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 		if skill, ok := c.Get(cacheKey); ok && (accept == nil || accept(skill)) {
 			return skill, nil
 		}
+		if ferr := c.recentFailure(cacheKey); ferr != nil {
+			return ResolvedSkill{}, ferr
+		}
 
 		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), githubFlightTimeout)
 		defer cancel()
@@ -880,6 +951,9 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 
 		skill, ferr := fetch(flightCtx)
 		if ferr != nil {
+			if cacheableFailure(ferr) {
+				c.recordFailure(cacheKey, ferr)
+			}
 			return ResolvedSkill{}, ferr
 		}
 		c.putEntry(cacheKey, skill, isBranchRef)
@@ -931,6 +1005,9 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 //     GitHub rate-limit cooldown, see GitHubCooldown): the stale value is
 //     served and no refresh is started, and likewise once Close has been
 //     called.
+//   - A not_found from a fetch for cacheKey within the last failureCacheTTL
+//     is returned again without fetching (see cacheableFailure). A
+//     successful fetch for cacheKey clears it.
 //   - Otherwise, fetch runs synchronously, coalesced via flightKey and capped
 //     per credentialID (see coalesceFetch).
 //
@@ -1007,6 +1084,10 @@ func (c *GitHubResolutionCache) resolveWithFetchAccept(
 			injectStaleServe(flightKey, refreshStarted)
 			return skill, nil
 		}
+	}
+
+	if ferr := c.recentFailure(cacheKey); ferr != nil {
+		return ResolvedSkill{}, ferr
 	}
 
 	return c.coalesceFetchAccept(ctx, flightKey, credentialID, cacheKey, logRef, isBranchRef, accept, fetch)
