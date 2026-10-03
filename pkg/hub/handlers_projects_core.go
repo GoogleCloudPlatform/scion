@@ -1008,9 +1008,9 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	// Build clone URL from the project's git remote.
 	// The clone-url label may be an explicit override (e.g. local path for testing).
 	// Only convert to HTTPS if the URL looks like a remote git URL.
-	cloneURL := resolveCloneURL(project.Labels["scion.dev/clone-url"], project.GitRemote)
+	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
 
-	defaultBranch := project.Labels["scion.dev/default-branch"]
+	defaultBranch := project.Labels[store.LabelDefaultBranch]
 	if defaultBranch == "" {
 		defaultBranch = "main"
 	}
