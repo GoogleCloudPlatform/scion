@@ -375,28 +375,32 @@ func writeSharedDirStorageRecord(agentDir, backend string) error {
 		return err
 	}
 	tmpName := tmp.Name()
+	closed, renamed := false, false
+	defer func() {
+		if !closed {
+			_ = tmp.Close()
+		}
+		if !renamed {
+			_ = os.Remove(tmpName)
+		}
+	}()
 	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
 		return err
 	}
+	closed = true
 	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
 		return err
 	}
 	if err := os.Chmod(tmpName, 0o644); err != nil {
-		_ = os.Remove(tmpName)
 		return err
 	}
 	if err := os.Rename(tmpName, path); err != nil {
-		_ = os.Remove(tmpName)
 		return err
 	}
+	renamed = true
 	// Sync the directory so the rename survives a crash. Not all platforms
 	// support this; a failure here does not undo the write.
 	if d, derr := os.Open(agentDir); derr == nil {
@@ -423,6 +427,9 @@ func writeSharedDirStorageRecord(agentDir, backend string) error {
 // server.shared_dir_storage.backend. An invalid override is an error that
 // names the key.
 func selectSharedDirStorage(gs *config.VersionedSettings, profile, recorded, agentName string) (*config.V1SharedDirStorageConfig, error) {
+	if gs == nil {
+		return nil, fmt.Errorf("no global settings to choose the shared-dir storage backend for agent %q from", agentName)
+	}
 	current, source := gs.ResolveSharedDirStorage(profile)
 	var overrideErr error
 	if current != nil && source != config.SharedDirStorageGlobalSource {

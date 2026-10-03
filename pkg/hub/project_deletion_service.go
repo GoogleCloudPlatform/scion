@@ -361,6 +361,9 @@ func (svc *ProjectDeletionService) cleanupNFSSharedDirTree(ctx context.Context, 
 		}
 		return
 	}
+	if globalSettings == nil {
+		return
+	}
 	if (globalSettings.Server == nil || globalSettings.Server.SharedDirStorage == nil) &&
 		config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
 		svc.logger.ErrorContext(ctx, "global settings mention shared_dir_storage but it was not loaded (legacy format); skipping NFS shared-dir cleanup on project delete",
