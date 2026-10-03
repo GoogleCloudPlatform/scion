@@ -904,3 +904,13 @@ func (h *logSignalHandler) Handle(_ context.Context, r slog.Record) error {
 }
 func (h *logSignalHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *logSignalHandler) WithGroup(string) slog.Handler      { return h }
+
+// The guard predicates treat a nil agent as "no delete".
+func TestDeleteGuards_NilAgent(t *testing.T) {
+	assert.False(t, deletionActive(nil))
+	assert.False(t, deleteStopNoop(nil))
+	srv, _ := testServer(t)
+	blocked, err := srv.deleteBlocksStart(context.Background(), nil)
+	require.NoError(t, err)
+	assert.False(t, blocked)
+}

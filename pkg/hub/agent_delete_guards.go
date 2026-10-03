@@ -39,6 +39,9 @@ func deletionActive(a *store.Agent) bool {
 // agent is already going down: a delete is active, or the row is
 // finalizing (teardown has run, even if the lease expired).
 func deleteStopNoop(a *store.Agent) bool {
+	if a == nil {
+		return false
+	}
 	return deletionActive(a) || a.DeletionState == store.DeletionStateFinalizing
 }
 
@@ -53,6 +56,9 @@ func deleteStopNoop(a *store.Agent) bool {
 // that died before recording anything. It is evaluated only on the start
 // entries and the engine's classification, never on list views.
 func (s *Server) deleteBlocksStart(ctx context.Context, a *store.Agent) (bool, error) {
+	if a == nil {
+		return false, nil
+	}
 	if deletionActive(a) || a.DeletionState == store.DeletionStateFinalizing {
 		return true, nil
 	}

@@ -363,7 +363,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			respAgent := *agent
 			respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
 			respAgent.Deletion = store.ComputeAgentDeletion(agent, time.Now())
-			writeJSON(w, http.StatusOK, respAgent)
+			writeJSON(w, http.StatusOK, &respAgent)
 			return
 		}
 	}
