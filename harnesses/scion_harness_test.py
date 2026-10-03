@@ -10,6 +10,7 @@ Table-driven tests covering:
   - read_json_skipping_comment_lines
   - capture_auth_main
   - run() scaffold
+  - Thinking level resolution (parse/map/resolve_thinking)
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ import scion_harness as sh
 
 class TestVersionContract(unittest.TestCase):
     def test_interface_version(self):
-        self.assertEqual(sh.INTERFACE_VERSION, 2)
+        self.assertEqual(sh.INTERFACE_VERSION, 3)
 
     def test_lib_version_is_date(self):
         parts = sh.LIB_VERSION.split("-")
@@ -1664,6 +1665,206 @@ class TestResolveModel(unittest.TestCase):
         ctx = _make_ctx(harness_config={"model_aliases": {"fast": "x"}})
         with mock.patch.dict(os.environ, {"SCION_MODEL": "fast"}):
             self.assertEqual(sh.resolve_model(ctx), "fast")
+
+
+# ---------------------------------------------------------------------------
+# Thinking level resolution
+# ---------------------------------------------------------------------------
+
+_CODEX_THINKING = {
+    "levels": [
+        {"max": 25, "value": "low"},
+        {"max": 50, "value": "medium"},
+        {"max": 75, "value": "high"},
+        {"max": 100, "value": "xhigh"},
+    ],
+    "default": "medium",
+}
+
+
+class TestParseThinkingLevel(unittest.TestCase):
+    def test_unset(self):
+        for raw in (None, "", "  ", "\t\n"):
+            with self.subTest(raw=raw):
+                self.assertEqual(sh.parse_thinking_level(raw), (None, False))
+
+    def test_invalid(self):
+        for raw in ("abc", "1.5", "5x", "--5", "1e2"):
+            with self.subTest(raw=raw):
+                self.assertEqual(sh.parse_thinking_level(raw), (None, True))
+
+    def test_valid_and_clamped(self):
+        cases = {
+            "-5": 0,
+            "0": 0,
+            "150": 100,
+            "100": 100,
+            "+7": 7,
+            " 50 ": 50,
+            "25": 25,
+        }
+        for raw, want in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(sh.parse_thinking_level(raw), (want, False))
+
+
+class TestMapThinkingLevel(unittest.TestCase):
+    _CASES = [
+        (0, "low"),
+        (25, "low"),
+        (26, "medium"),
+        (50, "medium"),
+        (51, "high"),
+        (75, "high"),
+        (76, "xhigh"),
+        (100, "xhigh"),
+    ]
+
+    def test_codex_table(self):
+        for level, want in self._CASES:
+            with self.subTest(level=level):
+                self.assertEqual(sh.map_thinking_level(level, _CODEX_THINKING), want)
+
+    def test_unsorted_levels_same_result(self):
+        shuffled = dict(_CODEX_THINKING)
+        shuffled["levels"] = list(reversed(_CODEX_THINKING["levels"]))
+        for level, want in self._CASES:
+            with self.subTest(level=level):
+                self.assertEqual(sh.map_thinking_level(level, shuffled), want)
+
+    def test_above_last_max_returns_last_value(self):
+        cfg = {"levels": [{"max": 10, "value": "low"}, {"max": 60, "value": "high"}]}
+        self.assertEqual(sh.map_thinking_level(99, cfg), "high")
+
+    def test_missing_or_malformed_returns_none(self):
+        malformed = [
+            None,
+            {},
+            "levels",
+            {"levels": []},
+            {"levels": "low"},
+            {"levels": ["low"]},
+            {"levels": [{"max": "25", "value": "low"}]},
+            {"levels": [{"max": True, "value": "low"}]},
+            {"levels": [{"max": 25.0, "value": "low"}]},
+            {"levels": [{"value": "low"}]},
+            {"levels": [{"max": 100}]},
+            {"levels": [{"max": 100, "value": ""}]},
+            {"levels": [{"max": 100, "value": 3}]},
+            {"levels": [{"max": 100, "value": "high"}], "default": ""},
+            {"levels": [{"max": 100, "value": "high"}], "default": 5},
+        ]
+        for cfg in malformed:
+            with self.subTest(cfg=cfg):
+                self.assertIsNone(sh.map_thinking_level(50, cfg))
+
+
+class TestResolveThinking(unittest.TestCase):
+    def _ctx(self, harness_config: dict[str, Any] | None) -> tuple["sh.ProvisionContext", list[str], list[str]]:
+        manifest: dict[str, Any] = {}
+        if harness_config is not None:
+            manifest["harness_config"] = harness_config
+        ctx = sh.ProvisionContext("test", manifest)
+        infos: list[str] = []
+        warns: list[str] = []
+        ctx.info = infos.append  # type: ignore[method-assign]
+        ctx.warn = warns.append  # type: ignore[method-assign]
+        return ctx, infos, warns
+
+    def test_set_level_maps(self):
+        ctx, infos, warns = self._ctx({"thinking": _CODEX_THINKING})
+        self.assertEqual(sh.resolve_thinking(ctx, "60"), "high")
+        self.assertEqual(infos, ["thinking_level=60 value=high"])
+        self.assertEqual(warns, [])
+
+    def test_set_level_clamped(self):
+        ctx, infos, _ = self._ctx({"thinking": _CODEX_THINKING})
+        self.assertEqual(sh.resolve_thinking(ctx, "-10"), "low")
+        self.assertEqual(sh.resolve_thinking(ctx, "150"), "xhigh")
+        self.assertEqual(infos, ["thinking_level=0 value=low", "thinking_level=100 value=xhigh"])
+
+    def test_unset_with_default(self):
+        ctx, infos, warns = self._ctx({"thinking": _CODEX_THINKING})
+        self.assertEqual(sh.resolve_thinking(ctx, ""), "medium")
+        self.assertEqual(infos, ["thinking_level=<unset>, value=medium (default)"])
+        self.assertEqual(warns, [])
+
+    def test_invalid_with_default_warns(self):
+        ctx, infos, warns = self._ctx({"thinking": _CODEX_THINKING})
+        self.assertEqual(sh.resolve_thinking(ctx, "abc"), "medium")
+        self.assertEqual(warns, ["thinking_level='abc' is not a valid integer; value=medium (default)"])
+        self.assertEqual(infos, [])
+
+    def test_invalid_logs_stripped_value(self):
+        ctx, _, warns = self._ctx({"thinking": _CODEX_THINKING})
+        self.assertEqual(sh.resolve_thinking(ctx, "  abc \n"), "medium")
+        self.assertEqual(warns, ["thinking_level='abc' is not a valid integer; value=medium (default)"])
+        ctx, infos, _ = self._ctx({})
+        self.assertIsNone(sh.resolve_thinking(ctx, " x "))
+        self.assertEqual(infos, ["thinking_level='x' ignored (harness has no thinking map)"])
+
+    def test_unset_without_default_returns_none(self):
+        cfg = {"levels": [{"max": 100, "value": "high"}]}
+        ctx, infos, warns = self._ctx({"thinking": cfg})
+        self.assertIsNone(sh.resolve_thinking(ctx, "  "))
+        self.assertEqual(infos, ["thinking_level=<unset>, value=<cli default> (default)"])
+        self.assertEqual(warns, [])
+
+    def test_invalid_without_default_returns_none(self):
+        cfg = {"levels": [{"max": 100, "value": "high"}]}
+        ctx, _, warns = self._ctx({"thinking": cfg})
+        self.assertIsNone(sh.resolve_thinking(ctx, "1.5"))
+        self.assertEqual(warns, ["thinking_level='1.5' is not a valid integer; value=<cli default> (default)"])
+
+    def test_invalid_non_string_with_block_warns(self):
+        ctx, infos, warns = self._ctx({"thinking": _CODEX_THINKING})
+        self.assertEqual(sh.resolve_thinking(ctx, 3.5), "medium")  # type: ignore[arg-type]
+        self.assertEqual(warns, ["thinking_level='3.5' is not a valid integer; value=medium (default)"])
+        self.assertEqual(infos, [])
+
+    def test_invalid_non_string_without_block_info(self):
+        ctx, infos, warns = self._ctx({})
+        self.assertIsNone(sh.resolve_thinking(ctx, 3.5))  # type: ignore[arg-type]
+        self.assertEqual(infos, ["thinking_level='3.5' ignored (harness has no thinking map)"])
+        self.assertEqual(warns, [])
+
+    def test_no_block_set_level_info(self):
+        ctx, infos, warns = self._ctx({"model_aliases": {}})
+        self.assertIsNone(sh.resolve_thinking(ctx, "40"))
+        self.assertEqual(infos, ["thinking_level=40 ignored (harness has no thinking map)"])
+        self.assertEqual(warns, [])
+
+    def test_no_block_no_manifest_config(self):
+        ctx, infos, warns = self._ctx(None)
+        self.assertIsNone(sh.resolve_thinking(ctx, ""))
+        self.assertEqual(infos, [])
+        self.assertEqual(warns, [])
+
+    def test_malformed_block_warns_and_returns_none(self):
+        ctx, infos, warns = self._ctx({"thinking": {"levels": [{"max": "x", "value": "low"}], "default": "low"}})
+        self.assertIsNone(sh.resolve_thinking(ctx, "30"))
+        self.assertEqual(len(warns), 1)
+        self.assertIn("malformed", warns[0])
+        self.assertEqual(infos, ["thinking_level=30 ignored (harness has no thinking map)"])
+
+    def test_malformed_block_unset_level_returns_none_not_default(self):
+        ctx, _, warns = self._ctx({"thinking": {"levels": [], "default": "medium"}})
+        self.assertIsNone(sh.resolve_thinking(ctx, ""))
+        self.assertEqual(len(warns), 1)
+
+    def test_reads_env_when_raw_omitted(self):
+        ctx, _, _ = self._ctx({"thinking": _CODEX_THINKING})
+        with mock.patch.dict(os.environ, {sh.THINKING_LEVEL_ENV: "26"}):
+            self.assertEqual(sh.resolve_thinking(ctx), "medium")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(sh.THINKING_LEVEL_ENV, None)
+            self.assertEqual(sh.resolve_thinking(ctx), "medium")
+
+    def test_reads_block_from_manifest_json(self):
+        manifest = json.loads(json.dumps({"harness_config": {"thinking": _CODEX_THINKING}}))
+        ctx = sh.ProvisionContext("test", manifest)
+        ctx.info = lambda _m: None  # type: ignore[method-assign]
+        self.assertEqual(sh.resolve_thinking(ctx, "76"), "xhigh")
 
 
 # ---------------------------------------------------------------------------
