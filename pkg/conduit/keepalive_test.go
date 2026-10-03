@@ -42,7 +42,7 @@ func TestKeepaliveDetectsSilentPeer(t *testing.T) {
 	for _, side := range []string{"dialer", "relay"} {
 		t.Run(side, func(t *testing.T) {
 			clk := clock.NewFake(t0)
-			cfg := Config{Clock: clk}
+			cfg := Config{Clock: clk, WriteWait: testWriteWait}
 			var s *session
 			var raw *rawPeer
 			if side == "dialer" {
@@ -72,7 +72,7 @@ func TestKeepaliveDetectsSilentPeer(t *testing.T) {
 // last inbound frame of any type, not only pongs.
 func TestKeepaliveAnyInboundFrameProvesLiveness(t *testing.T) {
 	clk := clock.NewFake(t0)
-	s, raw := dialAgainstRaw(t, Config{Clock: clk}, transport.MemoryOptions{Buffer: 64})
+	s, raw := dialAgainstRaw(t, Config{Clock: clk, WriteWait: testWriteWait}, transport.MemoryOptions{Buffer: 64})
 	settle(t, clk, 2)
 	clk.Advance(50 * time.Second)
 	// The peer's own ping proves liveness; wait until it was processed.
@@ -92,7 +92,8 @@ func TestKeepaliveAnyInboundFrameProvesLiveness(t *testing.T) {
 // TestKeepaliveHealthyPairSurvives runs ten ping rounds between two real
 // sessions; neither side times out.
 func TestKeepaliveHealthyPairSurvives(t *testing.T) {
-	p := newPair(t, Config{}, Config{})
+	cfg := Config{WriteWait: testWriteWait}
+	p := newPair(t, cfg, cfg)
 	for i := 0; i < 10; i++ {
 		settle(t, p.clk, 4) // ping + watchdog per side
 		p.clk.Advance(DefaultPingInterval)

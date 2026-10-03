@@ -217,6 +217,13 @@ const SHARED_TEMPLATE = {
   labels: { 'scion.io/template': 'true' },
 };
 
+const EMPTY_PER_AGENT_TEMPLATE = {
+  id: 'tpl-empty',
+  name: 'Batch evaluator',
+  slug: 'batch-evaluator',
+  labels: { 'scion.io/template': 'true', 'scion.dev/workspace-mode': 'per-agent' },
+};
+
 interface FormOpts {
   templates?: unknown[];
   systemStatus?: Record<string, unknown>;
@@ -377,11 +384,11 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     expect(text(q(el, '.form-actions sl-button[variant="primary"]'))).toBe('Create Project');
   });
 
-  it('offers Git and Shared workspace directory only — no Hub-managed, From Template or Linked off-workstation', async () => {
+  it('offers Git, Shared and Empty per agent only — no Hub-managed, From Template or Linked off-workstation', async () => {
     const { el } = await createForm({ systemStatus: { embeddedBrokerID: 'b1' } });
     element = el;
 
-    expect(optionValues(el, '#mode')).toEqual(['git', 'shared']);
+    expect(optionValues(el, '#mode')).toEqual(['git', 'shared', 'empty-per-agent']);
     const modeText = text(q(el, '#mode'));
     expect(modeText).toContain('Shared workspace directory');
     expect(modeText).not.toContain('Hub-managed');
@@ -391,13 +398,48 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
   it('offers Local Directory (linked) only on a workstation hub with an embedded broker', async () => {
     let { el } = await createForm({ systemStatus: { workstation: true, embeddedBrokerID: 'b1' } });
     element = el;
-    expect(optionValues(el, '#mode')).toEqual(['git', 'shared', 'linked']);
+    expect(optionValues(el, '#mode')).toEqual(['git', 'shared', 'empty-per-agent', 'linked']);
     el.remove();
     resetHubProjectCapabilitiesCache();
 
     ({ el } = await createForm({ systemStatus: { workstation: true } }));
     element = el;
-    expect(optionValues(el, '#mode')).toEqual(['git', 'shared']);
+    expect(optionValues(el, '#mode')).toEqual(['git', 'shared', 'empty-per-agent']);
+  });
+
+  it('labels Empty directory per agent with a New badge, a hint and a deletion note', async () => {
+    const { el } = await createForm();
+    element = el;
+
+    const option = q(el, '#mode sl-option[value="empty-per-agent"]');
+    expect(text(option)).toContain('Empty directory per agent');
+    expect(text(option?.querySelector('sl-badge[slot="suffix"]'))).toBe('New');
+    expect(q(el, '#mode sl-option[value="shared"] sl-badge')).toBeNull();
+    expect(q(el, '.empty-per-agent-note')).toBeNull();
+
+    await setValue(el, '#mode', 'empty-per-agent', 'sl-change');
+    expect(text(q(el, '#mode')?.parentElement?.querySelector('.hint'))).toContain(
+      'Each agent gets its own new, empty directory.'
+    );
+    expect(text(q(el, '.empty-per-agent-note'))).toContain('deleted when the agent is deleted');
+    expect(q(el, '#gitRemote')).toBeNull();
+  });
+
+  it('Blank + Empty directory per agent posts workspaceMode per-agent with no gitRemote or label', async () => {
+    const { el, requests } = await createForm();
+    element = el;
+
+    await setValue(el, '#mode', 'empty-per-agent', 'sl-change');
+    await setValue(el, '#name', 'Scratch Runs', 'sl-input');
+    await submit(el);
+
+    expect(posts(requests)).toEqual([
+      {
+        path: '/api/v1/projects',
+        method: 'POST',
+        body: { name: 'Scratch Runs', slug: 'scratch-runs', workspaceMode: 'per-agent' },
+      },
+    ]);
   });
 
   it('shows an empty-state hint when there are no templates', async () => {
@@ -683,6 +725,33 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
         path: '/api/v1/projects/tpl-shared/clone',
         method: 'POST',
         body: { name: 'Q4 market scan', slug: 'q4-scan' },
+      },
+    ]);
+  });
+
+  it('an empty-per-agent template shows the mode on the card and clones with {name}', async () => {
+    const { el, requests } = await createForm({
+      templates: [SHARED_TEMPLATE, EMPTY_PER_AGENT_TEMPLATE],
+    });
+    element = el;
+
+    expect(text(q(el, '#startFrom sl-option[value="tpl-empty"]'))).toContain(
+      'Empty directory per agent'
+    );
+    await setValue(el, '#startFrom', 'tpl-empty', 'sl-change');
+    expect(q(el, '#templateGitRemote')).toBeNull();
+    expect(q(el, '#mode')).toBeNull();
+    expect(text(q(el, '.summary-workspace-type'))).toBe('Empty directory per agent');
+    expect(q(el, '.summary-repository')).toBeNull();
+
+    await setValue(el, '#name', 'Batch eval', 'sl-input');
+    await submit(el);
+
+    expect(posts(requests)).toEqual([
+      {
+        path: '/api/v1/projects/tpl-empty/clone',
+        method: 'POST',
+        body: { name: 'Batch eval' },
       },
     ]);
   });

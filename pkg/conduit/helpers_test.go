@@ -32,6 +32,15 @@ var t0 = time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 
 // waitTimeout bounds every real-time wait in tests. Waits are on
 // conditions, never fixed sleeps.
+// testWriteWait keeps the writer's per-write WriteWait timer out of tests
+// that jump the fake clock by WriteWait (10s) or more. A frame written
+// during or just before such a jump (a ping fired mid-jump, a pong, a
+// StreamClose) can still be in flight on the writer goroutine, its timer
+// armed but not yet stopped. The jump would then fire it and end the
+// session with ErrWriteTimeout, a flake under load. A real write takes
+// microseconds. TestWriteTimeout covers the default.
+const testWriteWait = time.Hour
+
 const waitTimeout = 10 * time.Second
 
 type testAdmitter struct {

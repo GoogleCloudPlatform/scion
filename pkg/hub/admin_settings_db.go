@@ -635,6 +635,21 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
 			return
 		}
+		// shared_dir_storage_backend "nfs" needs a complete
+		// server.shared_dir_storage.nfs block, which lives only in the
+		// global settings file. Configuration only; no mount is checked.
+		if len(runtimes) > 0 || len(profiles) > 0 {
+			if gs, _, gErr := config.LoadGlobalSettings(); gErr == nil {
+				var sdGlobal *config.V1SharedDirStorageConfig
+				if gs != nil && gs.Server != nil {
+					sdGlobal = gs.Server.SharedDirStorage
+				}
+				if errs := config.ValidateSharedDirStorageBackends(runtimes, profiles, sdGlobal); len(errs) > 0 {
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
+					return
+				}
+			}
+		}
 		// safe_to_evict on a non-Kubernetes runtime is accepted and ignored,
 		// with the same warning as config validate. A section missing from
 		// this request is checked against its current value.

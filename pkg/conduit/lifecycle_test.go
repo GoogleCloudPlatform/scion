@@ -231,7 +231,7 @@ func TestCancelRacingAccept(t *testing.T) {
 
 func TestOpenTimeout(t *testing.T) {
 	prep := &preparation{}
-	p := newPair(t, Config{}, Config{StreamHandler: prep.handler(func(ctx context.Context) bool {
+	p := newPair(t, Config{WriteWait: testWriteWait}, Config{WriteWait: testWriteWait, StreamHandler: prep.handler(func(ctx context.Context) bool {
 		<-ctx.Done()
 		return true // accept after the timeout: must be rejected
 	})})
@@ -270,7 +270,7 @@ func TestOpenTimeoutBounded(t *testing.T) {
 	// that asks for an hour and never cancels.
 	clk := clock.NewFake(t0)
 	entered := make(chan context.Context, 1)
-	s, raw := acceptAgainstRaw(t, Config{Clock: clk, PingInterval: time.Hour, PongWait: 2 * time.Hour, StreamHandler: StreamHandlerFunc(func(ctx context.Context, _ *conduitv1.StreamOpen, _ PendingStream) error {
+	s, raw := acceptAgainstRaw(t, Config{Clock: clk, PingInterval: time.Hour, PongWait: 2 * time.Hour, WriteWait: testWriteWait, StreamHandler: StreamHandlerFunc(func(ctx context.Context, _ *conduitv1.StreamOpen, _ PendingStream) error {
 		entered <- ctx
 		return nil
 	})}, transport.MemoryOptions{Buffer: 64})

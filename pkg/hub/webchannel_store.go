@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/storedtime"
 	"github.com/google/uuid"
 )
 
@@ -2091,25 +2092,14 @@ WHERE ma.message_id IN (%s)
 // parseSQLiteTime parses a timestamp read from a webchat_* TEXT column (or
 // scanned as text from an ent column) and returns it in UTC, or the zero time
 // when s is empty or unparseable. Current writers store RFC3339Nano in UTC;
-// the other layouts cover legacy rows, including the Go time.Time.String()
+// storedtime.Parse covers the legacy layouts, including the Go time.Time.String()
 // text the driver wrote for a bound time.Time.
 func parseSQLiteTime(s string) time.Time {
-	if s == "" {
+	parsed, err := storedtime.Parse(s)
+	if err != nil {
 		return time.Time{}
 	}
-	if parsed, err := time.Parse(time.RFC3339Nano, s); err == nil {
-		return parsed.UTC()
-	}
-	if parsed, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", s); err == nil {
-		return parsed.UTC()
-	}
-	if parsed, err := time.Parse("2006-01-02 15:04:05.999999999", s); err == nil {
-		return parsed.UTC()
-	}
-	if parsed, err := parseGoTimeString(s); err == nil {
-		return parsed
-	}
-	return time.Time{}
+	return parsed
 }
 
 // nullableString returns nil for empty strings, suitable for nullable TEXT columns.
