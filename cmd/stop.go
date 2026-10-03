@@ -342,6 +342,9 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 		Status  string
 		Error   string
 		Removed bool
+		// Pending is set when removal was accepted (202) but its completion
+		// could not be observed.
+		Pending string
 	}
 
 	var (
@@ -374,15 +377,27 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 					DeleteFiles:  true,
 					RemoveBranch: false,
 				}
-				if err := agentSvc.Delete(agentCtx, ag.Name, opts); err != nil {
+				outcome, err := deleteViaHubAndWait(agentCtx, agentSvc, ag.Name, opts, func() {
+					statusf("Agent '%s': removal in progress...\n", ag.Name)
+				})
+				if err != nil {
+					err = wrapHubError(err)
+				} else {
+					err = hubDeleteFailure(ag.Name, outcome, "agent kept")
+				}
+				if err != nil {
 					res.Status = "error"
-					res.Error = wrapHubError(fmt.Errorf("stopped but failed to remove: %w", err)).Error()
+					res.Error = fmt.Errorf("stopped but failed to remove: %w", err).Error()
 					mu.Lock()
 					results = append(results, res)
 					mu.Unlock()
 					return
 				}
-				res.Removed = true
+				if outcome.Confirmed() {
+					res.Removed = true
+				} else {
+					res.Pending = hubDeletePendingMessage(outcome, "removal in progress")
+				}
 			}
 
 			mu.Lock()
@@ -427,6 +442,10 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 			if r.Removed {
 				entry["removed"] = true
 			}
+			if r.Pending != "" {
+				entry["removalPending"] = true
+				entry["message"] = r.Pending
+			}
 			jsonResults[i] = entry
 		}
 		overallStatus := "success"
@@ -447,6 +466,8 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 			errs = append(errs, fmt.Sprintf("%s: %s", r.Name, r.Error))
 		} else if r.Removed {
 			statusf("Agent '%s' stopped and removed via Hub.\n", r.Name)
+		} else if r.Pending != "" {
+			statusf("Agent '%s' stopped via Hub; %s.\n", r.Name, r.Pending)
 		} else {
 			statusf("Agent '%s' stopped via Hub.\n", r.Name)
 		}
@@ -483,8 +504,30 @@ func stopAgentViaHub(hubCtx *HubContext, agentName string) error {
 			DeleteFiles:  true,
 			RemoveBranch: false,
 		}
-		if err := agentSvc.Delete(ctx, agentName, opts); err != nil {
+		outcome, err := deleteViaHubAndWait(ctx, agentSvc, agentName, opts, func() {
+			statusf("Agent '%s' stopped; removal in progress...\n", agentName)
+		})
+		if err != nil {
 			return wrapHubError(fmt.Errorf("agent stopped but failed to delete via Hub: %w", err))
+		}
+		if err := hubDeleteFailure(agentName, outcome, "agent kept"); err != nil {
+			return fmt.Errorf("agent stopped but failed to delete via Hub: %w", err)
+		}
+		if !outcome.Confirmed() {
+			// Accepted but not observed: not a failure; leave the sync state
+			// alone until the removal is known to be done.
+			msg := hubDeletePendingMessage(outcome, "removal in progress")
+			if isJSONOutput() {
+				return outputJSON(ActionResult{
+					Status:  "success",
+					Command: "stop",
+					Agent:   agentName,
+					Message: fmt.Sprintf("Agent '%s' stopped via Hub; %s.", agentName, msg),
+					Details: map[string]interface{}{"removed": false, "removalPending": true, "hub": true},
+				})
+			}
+			statusf("Agent '%s' stopped via Hub; %s.\n", agentName, msg)
+			return nil
 		}
 		if hubCtx.ProjectPath != "" {
 			// Keep sync watermark current after hub-side delete operations.
