@@ -53,6 +53,8 @@ describe('validateGitRemote', () => {
     'https://xn--bcher-kva.example/org/.github',
     'git@git.example.com:team/my..repo/',
     'http://git.example.com:80/team/repo',
+    'git.example.com:443/team/repo',
+    'https://dev.azure.com/org/My%20Project/_git/repo',
   ])('accepts %s', (remote) => {
     expect(validateGitRemote(remote)).toBeNull();
   });
@@ -143,6 +145,23 @@ describe('validateGitRemote', () => {
     'github.com/org/re%zpo',
     'git@github.com:org/repo%',
     'https://u:SECRET_%zz@github.com/org/repo',
+    // %2F inside a segment, in every form (r6 R1).
+    'https://github.com/a/o%2Fr',
+    'https://github.com/org/o%2fr',
+    'github.com/a/o%2Fr',
+    'git@github.com:a/o%2Fr',
+    // Characters outside the RFC 3986 path set, in every form (r6 R2).
+    'https://github.com/org/r\\x',
+    'github.com/org/r\\x',
+    'git@github.com:org/r\\x',
+    'https://github.com/org/r%5Cx',
+    'https://github.com/org/re"po',
+    'https://github.com/org/re|po',
+    'https://github.com/org/re^po',
+    'https://github.com/org/re`po',
+    'https://github.com/org/[repo]',
+    'git@github.com:org/re{po}',
+    'github.com/org/re<po>',
     'https://[1:2]/org/repo',
     'https://[:::]/org/repo',
     'https://[v1.x]/org/repo',
@@ -166,6 +185,8 @@ describe('validateGitRemote', () => {
     'GIT://git.example.com:9419/group/repo',
     'http://git.example.com:8080/group/repo',
     'http://u:SECRET_P@git.example.com:443/group/repo',
+    // The scheme-less form's clone-url is https (r6 R3).
+    'git.example.com:80/group/repo',
   ])('rejects git:// with a port and http:// with a non-80 port: %s', (remote) => {
     expect(validateGitRemote(remote)).toBe(GIT_REMOTE_TLS_PORT);
   });
@@ -224,7 +245,10 @@ describe('stripGitURLCredentials / sanitizeGitRemote', () => {
     );
     expect(sanitizeGitRemote('ssh://alice:SECRET@git.example.com/team/repo')).toBe(
       'ssh://alice@git.example.com/team/repo'
-    );
+    ); // Scheme-less :443 is the https default too (r6 R3); SCP has no port.
+    expect(sanitizeGitRemote('git.example.com:443/team/repo')).toBe('git.example.com/team/repo');
+    expect(normalizeGitRemote('github.com:443/test/repo')).toBe('github.com/test/repo');
+    expect(sanitizeGitRemote('git@gitserver:443/repo')).toBe('git@gitserver:443/repo');
   });
 
   it('drops the query and fragment, then credentials', () => {

@@ -36,7 +36,7 @@ export const GIT_REMOTE_SSH_PORT =
 
 /** Same text as the hub's errCloneRemoteTLSPort. */
 export const GIT_REMOTE_TLS_PORT =
-  'gitRemote: git:// URLs with a port and http:// URLs with a port other than 80 are not supported; use the https URL';
+  'gitRemote: git:// URLs with a port, http:// URLs with a port other than 80 and host:80/... remotes are not supported; use the https URL';
 
 const SCHEMES = ['https://', 'http://', 'ssh://', 'git://'];
 const SCP_LOGIN = /^[A-Za-z0-9._-]+$/;
@@ -118,7 +118,15 @@ export function stripGitURLCredentials(remote: string): string {
  */
 export function dropDefaultPort(remote: string): string {
   const schemeEnd = remote.indexOf('://');
-  if (schemeEnd < 0) return remote;
+  if (schemeEnd < 0) {
+    // Scheme-less host:443/org/repo: the clone-url is https. SCP has no port.
+    if (splitSCP(remote)) return remote;
+    const slash = remote.indexOf('/');
+    if (slash >= 0 && remote.slice(0, slash).endsWith(':443')) {
+      return remote.slice(0, slash - 4) + remote.slice(slash);
+    }
+    return remote;
+  }
   const scheme = remote.slice(0, schemeEnd).toLowerCase();
   const port = scheme === 'https' ? ':443' : scheme === 'http' ? ':80' : '';
   if (!port) return remote;
@@ -159,14 +167,35 @@ function hasOrgAndRepo(path: string): boolean {
 
 /**
  * Mirror of the hub's validRemotePath: a decoded path (no leading '/') whose
- * segments are non-empty, not "." or "..", and free of '@' and control
+ * segments are non-empty, not "." or "..", and free of '@', '\\' and control
  * characters. One trailing '/' is allowed.
  */
 function validRemotePath(path: string): boolean {
   return path
     .replace(/\/$/, '')
     .split('/')
-    .every((seg) => seg !== '' && seg !== '.' && seg !== '..' && !/[@\x00-\x1f\x7f]/.test(seg));
+    .every((seg) => seg !== '' && seg !== '.' && seg !== '..' && !hasBadSegmentChar(seg));
+}
+
+/** True when seg holds '@', '\\' or a control character (charCode loop, no control-char regex). */
+function hasBadSegmentChar(seg: string): boolean {
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg.charCodeAt(i);
+    if (c < 0x20 || c === 0x7f || c === 0x40 || c === 0x5c) return true;
+  }
+  return false;
+}
+
+// RFC 3986 path characters the hub accepts in a raw path (isRemotePathChar):
+// unreserved, sub-delims, ':', '/' and '%' (escapes are checked separately).
+const RAW_PATH = /^[A-Za-z0-9\-._~!$&'()*+,;=:/%]*$/;
+
+/**
+ * Mirror of the hub's validRawRemotePath: only RFC 3986 path characters and
+ * no %2F, which some servers decode to '/'.
+ */
+function validRawRemotePath(path: string): boolean {
+  return RAW_PATH.test(path) && !/%2f/i.test(path);
 }
 
 /** Decode %-escapes (UTF-8 or not, byte-wise like Go), or null on a malformed escape. */
@@ -178,7 +207,12 @@ function unescapePath(path: string): string | null {
 /** Mirror of the hub's validEscapedRemotePath: checks the raw and the decoded path. */
 function validEscapedRemotePath(path: string): boolean {
   const decoded = unescapePath(path);
-  return decoded !== null && validRemotePath(path) && validRemotePath(decoded);
+  return (
+    decoded !== null &&
+    validRawRemotePath(path) &&
+    validRemotePath(path) &&
+    validRemotePath(decoded)
+  );
 }
 
 function isPort(s: string): boolean {
@@ -353,6 +387,8 @@ export function validateGitRemote(remote: string): string | null {
   if (!HOSTNAME.test(host) || (colon >= 0 && !isPort(hostPort.slice(colon + 1)))) {
     return GIT_REMOTE_INVALID;
   }
+  // The clone-url is https, so :80 would be TLS to a plain-text port.
+  if (colon >= 0 && hostPort.slice(colon + 1) === '80') return GIT_REMOTE_TLS_PORT;
   return hasOrgAndRepo(path) && !path.includes('@') && validEscapedRemotePath(path)
     ? null
     : GIT_REMOTE_INVALID;
