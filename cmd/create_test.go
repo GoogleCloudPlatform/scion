@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -73,4 +74,50 @@ func TestCreateAgent_DuplicateReturnsError(t *testing.T) {
 	err := createCmd.RunE(createCmd, []string{"my-agent"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
+}
+
+// TestCreateOutput_SaysNotStarted checks that every scion create output says
+// the agent was provisioned but not started and names the command that
+// starts it.
+func TestCreateOutput_SaysNotStarted(t *testing.T) {
+	const name = "my-agent"
+	const startCmd = "scion start my-agent"
+
+	t.Run("hint", func(t *testing.T) {
+		hint := createNotStartedHint(name)
+		assert.Contains(t, hint, "not started")
+		assert.Contains(t, hint, startCmd)
+	})
+
+	t.Run("local text", func(t *testing.T) {
+		var buf bytes.Buffer
+		writeLocalCreateResult(&buf, name)
+		out := buf.String()
+		assert.Contains(t, out, "Agent 'my-agent' created successfully.")
+		assert.Contains(t, out, "not started")
+		assert.Contains(t, out, startCmd)
+	})
+
+	t.Run("local json", func(t *testing.T) {
+		r := localCreateResult(name)
+		assert.Equal(t, "success", r.Status)
+		assert.Equal(t, "create", r.Command)
+		assert.Equal(t, name, r.Agent)
+		assert.Contains(t, r.Message, startCmd)
+		assert.Equal(t, false, r.Details["started"])
+		assert.Equal(t, startCmd, r.Details["startCommand"])
+	})
+
+	t.Run("hub json details", func(t *testing.T) {
+		details := map[string]interface{}{"phase": "created"}
+		addCreateNotStartedDetails(details, name)
+		assert.Equal(t, false, details["started"])
+		assert.Equal(t, startCmd, details["startCommand"])
+		assert.Equal(t, "created", details["phase"], "existing details are kept")
+	})
+}
+
+func TestCreateCmd_HelpSaysNotStarted(t *testing.T) {
+	assert.Contains(t, createCmd.Short, "without starting")
+	assert.Contains(t, createCmd.Long, "scion start <agent-name>")
 }

@@ -63,6 +63,37 @@ starting a **stopped** or **error** agent runs a fresh session. See
     - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). Defaults to `project`. See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--notify`: Get notified via the browser or system when the spawned agent reaches a terminal state.
 
+### `scion create`
+
+Provisions a new agent without starting it. Scion writes the agent's
+directory, workspace and `prompt.md`, and the agent stays in phase `created`
+with no container. It is not started even when you pass a task. Run
+`scion start <agent-name>` to start it.
+
+The output says that the agent is provisioned but not started, and gives the
+`scion start` command. With `--format json`, `details.started` is `false` and
+`details.startCommand` holds that command.
+
+**Usage:** `scion create <agent-name> [task] [flags]`
+
+- **Arguments:**
+    - `<agent-name>`: Unique name for the agent instance.
+    - `[task]`: (Optional) The task, written to `prompt.md` for when the agent starts.
+- **Flags:**
+    - `-t, --type <string>`: Template to use.
+    - `-i, --image <string>`: Override container image.
+    - `-b, --branch <string>`: Git branch to use for the agent workspace.
+    - `-w, --workspace <string>`: Host path or project-relative subdirectory to mount as `/workspace`.
+    - `--config <path>`: Path to inline agent config file (YAML/JSON), or `-` for stdin.
+    - `--harness-config <string>` (alias `--harness`): Named harness configuration to use.
+    - `--harness-auth <string>`: Override auth method for the harness (`api-key`, `oauth-token`, `auth-file`, `vertex-ai`).
+    - `--broker <string>`: Preferred runtime broker ID or name.
+    - `--label <key=value>`: Label for the agent (repeatable).
+    - `--role <string>`: Agent role for Hub API access (`none`, `readonly`, `baseline`, `full`).
+    - `--message-mode <mode>`: Initial message mode (`none`, `lineage`, `branch`, `project`).
+    - `--service-account <string>`: GCP service account ID to assign (Hub mode).
+    - `--upload-template`, `--no-upload`, `--template-scope <scope>`: Template upload behavior in Hub mode.
+
 ### `scion stop`
 
 Stops a running agent. This is a graceful shutdown (`SIGTERM`); the agent's

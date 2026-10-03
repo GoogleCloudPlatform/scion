@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,7 +42,10 @@ The agent will be created from a template.
 
 The agent-name is required as the first argument. All subsequent arguments
 form the task prompt, which will be written to prompt.md. If no task
-arguments are provided, an empty prompt.md is created for later editing.`,
+arguments are provided, an empty prompt.md is created for later editing.
+
+The agent is provisioned but not started, even when a task is given. Run
+'scion start <agent-name>' to start it.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		agentName := api.Slugify(args[0])
@@ -184,16 +188,52 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 		}
 
 		if isJSONOutput() {
-			return outputJSON(ActionResult{
-				Status:  "success",
-				Command: "create",
-				Agent:   agentName,
-				Message: fmt.Sprintf("Agent '%s' created successfully.", agentName),
-			})
+			return outputJSON(localCreateResult(agentName))
 		}
-		fmt.Printf("Agent '%s' created successfully.\n", agentName)
+		writeLocalCreateResult(os.Stdout, agentName)
 		return nil
 	},
+}
+
+// scion create provisions an agent and never starts it; scion start launches
+// it. The helpers below make every create output say so and name the
+// follow-up command.
+
+// createStartCommand returns the command that launches an agent made by
+// scion create.
+func createStartCommand(agentName string) string {
+	return "scion start " + agentName
+}
+
+// createNotStartedHint is the line that tells the user the agent was
+// provisioned but not started, and how to start it.
+func createNotStartedHint(agentName string) string {
+	return fmt.Sprintf("Agent '%s' is provisioned but not started. Run '%s' to start it.", agentName, createStartCommand(agentName))
+}
+
+// addCreateNotStartedDetails records in JSON output details that the agent
+// was not started and the command that starts it.
+func addCreateNotStartedDetails(details map[string]interface{}, agentName string) {
+	details["started"] = false
+	details["startCommand"] = createStartCommand(agentName)
+}
+
+// localCreateResult is the JSON result of a local scion create.
+func localCreateResult(agentName string) ActionResult {
+	details := map[string]interface{}{}
+	addCreateNotStartedDetails(details, agentName)
+	return ActionResult{
+		Status:  "success",
+		Command: "create",
+		Agent:   agentName,
+		Message: fmt.Sprintf("Agent '%s' created successfully. ", agentName) + createNotStartedHint(agentName),
+		Details: details,
+	}
+}
+
+// writeLocalCreateResult prints the text result of a local scion create.
+func writeLocalCreateResult(w io.Writer, agentName string) {
+	_, _ = fmt.Fprintf(w, "Agent '%s' created successfully.\n%s\n", agentName, createNotStartedHint(agentName))
 }
 
 func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error {
@@ -292,10 +332,11 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 			Status:   "success",
 			Command:  "create",
 			Agent:    agentName,
-			Message:  fmt.Sprintf("Agent '%s' created via Hub.", agentName),
+			Message:  fmt.Sprintf("Agent '%s' created via Hub. ", agentName) + createNotStartedHint(agentName),
 			Warnings: resp.Warnings,
 			Details:  map[string]interface{}{},
 		}
+		addCreateNotStartedDetails(result.Details, agentName)
 		if resp.Agent != nil {
 			result.Details["slug"] = resp.Agent.Slug
 			phase, activity := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
@@ -336,6 +377,7 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	for _, w := range resp.Warnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 	}
+	statusf("%s\n", createNotStartedHint(agentName))
 
 	return nil
 }
