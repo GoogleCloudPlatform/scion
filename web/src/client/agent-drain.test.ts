@@ -250,6 +250,46 @@ describe('drainAgents', () => {
     expect(result.agents).toHaveLength(2);
   });
 
+  it('reports a first-page failure only when no page arrived', async () => {
+    const failing = fakeServer({ rows: rowsDesc(10), override: () => json({}, 503) });
+    const failed = await drainAgents('/x', { fetchFn: failing.fn, retryDelayMs: 0 });
+    expect(failed.firstPageFailed).toBe(true);
+
+    // Page 1 arrives with zero readable items, then page 2 keeps failing:
+    // an incomplete result, not a first-page failure.
+    const server = fakeServer({
+      rows: rowsDesc(800),
+      readable: () => false,
+      override: (attempt) => (attempt >= 1 ? json({}, 502) : undefined),
+    });
+    const result = await drainAgents('/x', { fetchFn: server.fn, retryDelayMs: 0 });
+    expect(result.agents).toHaveLength(0);
+    expect(result.requests).toBe(1);
+    expect(result.error?.status).toBe(502);
+    expect(result.firstPageFailed).toBe(false);
+  });
+
+  it('continues from an already-fetched first page and its cursor, within the same request cap', async () => {
+    const rows = rowsDesc(2600);
+    const server = fakeServer({ rows });
+    const result = await drainAgents('/x', {
+      fetchFn: server.fn,
+      firstPage: {
+        agents: rows.slice(0, 500),
+        nextCursor: '500',
+        capabilities: { actions: ['create'] },
+      },
+    });
+    // Page 1 is never requested again; pages 2-4 are, from its cursor.
+    expect(server.urls.map((u) => u.searchParams.get('cursor'))).toEqual(['500', '1000', '1500']);
+    expect(result.requests).toBe(DRAIN_MAX_REQUESTS);
+    expect(result.capped).toBe(true);
+    expect(result.agents).toHaveLength(2000);
+    expect(result.agents[0].id).toBe(rows[0].id);
+    expect(result.capabilities).toEqual({ actions: ['create'] });
+    expect(result.firstPageFailed).toBe(false);
+  });
+
   it('an aborted signal rejects with AbortError instead of resolving a partial result', async () => {
     const controller = new AbortController();
     const server = fakeServer({
@@ -441,18 +481,20 @@ describe('AgentDrainRunner (seed-epoch protocol)', () => {
     expect(openEpochs(sm)).toBe(0);
   });
 
-  it('a second run aborts the first, which resolves null; the second completes', async () => {
+  it('a second run started while the first is fetching aborts that fetch; the first resolves null', async () => {
     const sm = new StateManager();
     sm.setScope({ type: 'project', projectId: 'p1' });
     connect(sm);
     let release: (() => void) | null = null;
-    const gate = new Promise<void>((r) => (release = r));
+    const held = new Promise<void>((r) => (release = r));
     const slowRows = rowsDesc(1200);
     let calls = 0;
+    let firstSignal: AbortSignal | undefined;
     const fn: AgentDrainFetch = async (url, init) => {
       calls++;
       if (calls === 1) {
-        await gate;
+        firstSignal = init.signal;
+        await held;
         if (init.signal?.aborted) {
           const e = new Error('aborted');
           e.name = 'AbortError';
@@ -461,18 +503,86 @@ describe('AgentDrainRunner (seed-epoch protocol)', () => {
       }
       const u = new URL(url, 'http://localhost');
       const start = Number(u.searchParams.get('cursor') ?? '0');
-      return json({ agents: slowRows.slice(start, start + 500) });
+      const end = start + 500;
+      return json({
+        agents: slowRows.slice(start, end),
+        ...(end < slowRows.length ? { nextCursor: String(end) } : {}),
+      });
     };
     const runner = new AgentDrainRunner({ state: sm, fetchFn: fn });
     const first = runner.run({ url: '/x', view: 'full', isMember: () => true });
-    await Promise.resolve();
-    await Promise.resolve();
+    // The first run's own page fetch is in flight before the second starts.
+    await vi.waitFor(() => expect(calls).toBe(1));
+    expect(firstSignal?.aborted).toBe(false);
     const second = runner.run({ url: '/y', view: 'full', isMember: () => true });
+    expect(firstSignal?.aborted).toBe(true);
     release!();
     expect(await first).toBeNull();
     const r2 = await second;
     expect(r2?.complete).toBe(true);
+    expect(r2?.agents).toHaveLength(1200);
     expect(openEpochs(sm)).toBe(0);
+  });
+
+  it('a scope switch during a drain aborts its page fetch and sends no further page request', async () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'project', projectId: 'p1' });
+    connect(sm);
+    const signals: Array<AbortSignal | undefined> = [];
+    const server = fakeServer({ rows: rowsDesc(2001) });
+    const fn: AgentDrainFetch = (url, init) => {
+      signals.push(init.signal);
+      if (signals.length === 2) sm.setScope({ type: 'project', projectId: 'p2' });
+      return server.fn(url, init);
+    };
+    const runner = new AgentDrainRunner({ state: sm, fetchFn: fn, retryDelayMs: 0 });
+    const result = await runner.run({ url: '/x', view: 'full', isMember: () => true });
+    expect(result).toBeNull();
+    expect(signals[1]?.aborted).toBe(true);
+    // Page 2 was in flight when the scope changed; pages 3 and 4 are never requested.
+    expect(server.urls).toHaveLength(2);
+    expect(sm.getAgents()).toHaveLength(0);
+    expect(openEpochs(sm)).toBe(0);
+  });
+
+  it('removes its abort and scope listeners when the run ends', async () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'project', projectId: 'p1' });
+    connect(sm);
+    const added: string[] = [];
+    const removed: string[] = [];
+    const addSpy = vi.spyOn(AbortSignal.prototype, 'addEventListener').mockImplementation(function (
+      this: AbortSignal,
+      ...args
+    ) {
+      added.push(String(args[0]));
+      return EventTarget.prototype.addEventListener.apply(this, args);
+    });
+    const removeSpy = vi
+      .spyOn(AbortSignal.prototype, 'removeEventListener')
+      .mockImplementation(function (this: AbortSignal, ...args) {
+        removed.push(String(args[0]));
+        return EventTarget.prototype.removeEventListener.apply(this, args);
+      });
+    const smAdd = vi.spyOn(sm, 'addEventListener');
+    const smRemove = vi.spyOn(sm, 'removeEventListener');
+    try {
+      const server = fakeServer({ rows: rowsDesc(10) });
+      const runner = new AgentDrainRunner({ state: sm, fetchFn: server.fn });
+      const result = await runner.run({ url: '/x', view: 'full', isMember: () => true });
+      expect(result?.complete).toBe(true);
+    } finally {
+      addSpy.mockRestore();
+      removeSpy.mockRestore();
+    }
+    expect(added.filter((t) => t === 'abort').length).toBeGreaterThan(0);
+    expect(removed.filter((t) => t === 'abort').length).toBe(
+      added.filter((t) => t === 'abort').length
+    );
+    const scopeAdds = smAdd.mock.calls.filter(([t]) => t === 'scope-changed').length;
+    const scopeRemoves = smRemove.mock.calls.filter(([t]) => t === 'scope-changed').length;
+    expect(scopeAdds).toBe(1);
+    expect(scopeRemoves).toBe(1);
   });
 
   it('abort() during a drain resolves null, closes the epoch and issues no further request', async () => {
