@@ -74,3 +74,12 @@ case.
 
 - tz-refactor task 21 deletes the (now empty) format-scan allowlist and its test.
 - tz-refactor task 23 (docs) covers the full timezone order.
+
+## Review round 1
+
+Three Lows fixed: the release note and Migration bullet now say a copied
+`agent_defaults` row becomes admin-managed; the seed-sync strip of a seeded
+`profiles` row is declared as a deviation and pinned in the two-boot test;
+the file-tier warning for an empty value says it is ignored instead of
+removed. Rebased on upstream aed39948 and re-run under TZ=UTC, Asia/Tokyo
+and Asia/Kathmandu (pkg/config, cmd, and targeted pkg/hub).
