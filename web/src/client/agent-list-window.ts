@@ -47,6 +47,7 @@ import type { AgentSortField, SortDir } from '../shared/agent-sort.js';
 import { sortAgents, serverOrderCompare, serverSortKey } from '../shared/agent-sort.js';
 import type { AgentsChangedDetail, UnknownAgentDelta } from './state.js';
 import { AgentMemberIndex } from './agent-member-index.js';
+import { formatNumber } from '../utils/format-number.js';
 
 /** See the module comment for what each state means. */
 export type WindowState = 'small' | 'paged' | 'held' | 'capped';
@@ -82,7 +83,7 @@ export type AgentListView = 'grid' | 'list' | 'tree';
  * 2,000 when the server filters candidates by read access.
  */
 export function cappedTotalText(loaded: number): string {
-  return `${loaded.toLocaleString('en-US')} loaded (newest 2,000 checked), more exist`;
+  return `${formatNumber(loaded)} loaded (newest 2,000 checked), more exist`;
 }
 
 /**
@@ -372,7 +373,7 @@ export class AgentListWindow extends EventTarget {
     if (reason === 'failed') {
       return {
         kind: 'failed',
-        text: `Incomplete: loaded ${this.getHeldAgents().length.toLocaleString('en-US')}`,
+        text: `Incomplete: loaded ${formatNumber(this.getHeldAgents().length)}`,
       };
     }
     if (this._stale && this.isLocal) return { kind: 'stale', text: 'may be stale' };
