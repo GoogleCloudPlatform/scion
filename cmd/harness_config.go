@@ -290,6 +290,8 @@ var harnessConfigSyncCmd = &cobra.Command{
 
 By default the config is synced to the current project's scope on the Hub.
 Use --global to sync it to the global scope (requires hub admin rights).
+--global also reads the config from the global directory
+(~/.scion/harness-configs), so to publish a config globally it must live there.
 An existing config with the same name in the target scope is updated.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {

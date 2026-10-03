@@ -118,8 +118,10 @@ scion harness-config pull <name> --to <path>
 
 `sync`/`push` upload only changed files (compared by content hash); `pull` verifies each file's
 hash before writing. Like `install`, `sync`/`push` target the current project's Hub scope by
-default, or the global scope with `--global` (which needs hub admin rights). They create the config
-in that scope or update an existing one of the same name, and print the scope they used.
+default, or the global scope with `--global` (which needs hub admin rights). `--global` also reads
+the config from the global directory (`~/.scion/harness-configs`), so to publish a config globally
+it must live there. They create the config in that scope or update an existing one of the same name,
+and print the scope they used.
 
 ### Listing, inspecting, and resetting
 
