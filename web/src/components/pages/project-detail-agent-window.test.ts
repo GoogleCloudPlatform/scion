@@ -207,7 +207,30 @@ type TestEl = HTMLElement & {
   projectId: string;
 };
 
-async function createComponent(projectId: string): Promise<TestEl> {
+/** Whether the stubbed fetch has been asked for this project's agents list. */
+function agentsListRequested(projectId: string): boolean {
+  const mock = globalThis.fetch as unknown;
+  if (!vi.isMockFunction(mock)) return true;
+  return mock.mock.calls.some(([input]) => {
+    const raw =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.href
+          : (input as Request).url;
+    return new URL(raw, 'http://localhost').pathname === `/api/v1/projects/${projectId}/agents`;
+  });
+}
+
+/**
+ * Mounts the page and waits until its first agents request was sent and,
+ * unless the test holds that response open (`holdsFirstLoad`), until the
+ * page is idle.
+ */
+async function createComponent(
+  projectId: string,
+  opts: { holdsFirstLoad?: boolean } = {}
+): Promise<TestEl> {
   const el = document.createElement('scion-page-project-detail') as TestEl;
   el.projectId = projectId;
   // Drain retries without a delay.
@@ -221,7 +244,8 @@ async function createComponent(projectId: string): Promise<TestEl> {
   };
   document.body.appendChild(el);
   await el.updateComplete;
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await vi.waitFor(() => expect(agentsListRequested(projectId)).toBe(true));
+  if (!opts.holdsFirstLoad) await settle(el);
   await el.updateComplete;
   return el;
 }
@@ -2124,7 +2148,7 @@ describe('project-detail — agent list window', () => {
           return res;
         })
       );
-      const el = await createComponent(projectId);
+      const el = await createComponent(projectId, { holdsFirstLoad: true });
       const waitHeld = async (): Promise<string> => {
         await vi.waitFor(() => expect(held).not.toBeNull());
         return held!.url;
@@ -3477,7 +3501,7 @@ describe('project-detail — agent list window', () => {
         const projectId = `p-first-${change}`;
         const { agents, h } = setup(projectId, 60);
         h.hold();
-        const el = await createComponent(projectId);
+        const el = await createComponent(projectId, { holdsFirstLoad: true });
         expect(h.sent).toHaveLength(1);
         if (change === 'phase') internals(el).setPhaseFilter('stopped');
         else internals(el).toggleSort('updated');
@@ -3525,7 +3549,7 @@ describe('project-detail — agent list window', () => {
       const projectId = 'p-first-name';
       const { h } = setup(projectId, 60);
       h.hold();
-      const el = await createComponent(projectId);
+      const el = await createComponent(projectId, { holdsFirstLoad: true });
       expect(h.sent).toHaveLength(1);
       internals(el).toggleSort('name');
       h.release();
