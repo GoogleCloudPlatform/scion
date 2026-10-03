@@ -724,3 +724,56 @@ func TestFanOutEventBus_UserTopicBufferFullPropagatesSentinel(t *testing.T) {
 		}
 	})
 }
+
+// ErrInProcessPublish lets callers tell "the hub's own subscribers did not
+// get the message" apart from "an external spoke failed" (ptone/scion#1906).
+func TestFanOutEventBus_InProcessFailureWrappedInSentinel(t *testing.T) {
+	failing := func() *stubEventBus {
+		b := newStubEventBus()
+		b.publishFunc = func(context.Context, string, *messages.StructuredMessage) error {
+			return errors.New("spoke down")
+		}
+		return b
+	}
+	closedInproc := func() *stubEventBus {
+		b := newStubEventBus()
+		b.publishFunc = func(context.Context, string, *messages.StructuredMessage) error {
+			return ErrEventBusClosed
+		}
+		return b
+	}
+
+	for _, channel := range []string{"", "telegram"} {
+		t.Run("channel="+channel, func(t *testing.T) {
+			newMsg := func() *messages.StructuredMessage {
+				m := messages.NewInstruction("agent:a", "user:alice", "hi")
+				m.Channel = channel
+				return m
+			}
+
+			// A failing non-observer plugin spoke: error returned, but not
+			// attributed to the inprocess spoke.
+			fan := NewFanOutEventBus([]NamedEventBus{
+				{Name: InProcessBusName, Bus: newStubEventBus()},
+				{Name: "telegram", Bus: failing()},
+			}, slog.Default())
+			err := fan.Publish(context.Background(), "t", newMsg())
+			if err == nil {
+				t.Fatal("expected the plugin spoke error to be returned")
+			}
+			if errors.Is(err, ErrInProcessPublish) {
+				t.Fatalf("plugin spoke failure must not match ErrInProcessPublish: %v", err)
+			}
+
+			// A failing inprocess spoke: wrapped, cause preserved.
+			fan = NewFanOutEventBus([]NamedEventBus{
+				{Name: InProcessBusName, Bus: closedInproc()},
+				{Name: "telegram", Bus: newStubEventBus()},
+			}, slog.Default())
+			err = fan.Publish(context.Background(), "t", newMsg())
+			if !errors.Is(err, ErrInProcessPublish) || !errors.Is(err, ErrEventBusClosed) {
+				t.Fatalf("expected ErrInProcessPublish wrapping ErrEventBusClosed, got %v", err)
+			}
+		})
+	}
+}

@@ -113,6 +113,9 @@ type notificationTestEnv struct {
 	watched    *store.Agent // the agent being watched
 	subscriber *store.Agent // the agent receiving notifications
 	sub        *store.NotificationSubscription
+	// quiesceBroker, when set (startRealBrokerProxy), drains and closes the
+	// broker bus so every asynchronous deliverToUser has finished.
+	quiesceBroker func()
 }
 
 // setupNotificationTest creates an in-memory SQLite store, event publisher,

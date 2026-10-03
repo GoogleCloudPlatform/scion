@@ -23,11 +23,15 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -36,22 +40,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// notificationSettle is how long to keep watching after the first row
-// appears, so a late duplicate (the bus delivers asynchronously) is caught.
-const notificationSettle = 300 * time.Millisecond
-
 // startRealBrokerProxy wires a started MessageBrokerProxy on an in-process
 // bus into env.nd and returns the bus wrapper recording every publish.
 func (env *notificationTestEnv) startRealBrokerProxy(t *testing.T) *capturingBus {
 	t.Helper()
 	inner := eventbus.NewInProcessEventBus(slog.Default())
-	t.Cleanup(func() { _ = inner.Close() })
 	bus := &capturingBus{EventBus: inner}
-	proxy := NewMessageBrokerProxy(bus, env.store, env.pub, func() AgentDispatcher { return env.dispatcher }, slog.Default())
+	env.startBrokerProxyOn(t, bus, env.pub, func() { _ = inner.Close() })
+	return bus
+}
+
+// startBrokerProxyOn starts a MessageBrokerProxy on bus, publishing its SSE
+// and receiving lifecycle events on events, and wires it into env.nd.
+// closeBus must drain and close the bus; it becomes env.quiesceBroker.
+func (env *notificationTestEnv) startBrokerProxyOn(t *testing.T, bus eventbus.EventBus, events *ChannelEventPublisher, closeBus func()) *MessageBrokerProxy {
+	t.Helper()
+	t.Cleanup(closeBus)
+	proxy := NewMessageBrokerProxy(bus, env.store, events, func() AgentDispatcher { return env.dispatcher }, slog.Default())
 	proxy.Start()
 	t.Cleanup(proxy.Stop)
 	env.nd.SetBrokerProxy(proxy)
-	return bus
+	env.quiesceBroker = closeBus
+	return proxy
 }
 
 // useUserSubscription replaces the default agent subscription with a user
@@ -73,56 +83,61 @@ func (env *notificationTestEnv) useUserSubscription(t *testing.T, subscriberID, 
 }
 
 // userMessageSSECounter counts user.message SSE events for one user.
+// ChannelEventPublisher sends synchronously (non-blocking) into the
+// subscriber channel, so once the writers have quiesced every event is
+// already buffered and count can drain it without waiting.
 type userMessageSSECounter struct {
-	mu   sync.Mutex
-	evts []Event
+	ch <-chan Event
+	n  int
+}
+
+func countUserMessageSSE(t *testing.T, events *ChannelEventPublisher, userID string) *userMessageSSECounter {
+	t.Helper()
+	ch, unsub := events.Subscribe("user." + userID + ".message")
+	t.Cleanup(unsub)
+	return &userMessageSSECounter{ch: ch}
 }
 
 func (env *notificationTestEnv) countUserMessageSSE(t *testing.T, userID string) *userMessageSSECounter {
 	t.Helper()
-	c := &userMessageSSECounter{}
-	ch, unsub := env.pub.Subscribe("user." + userID + ".message")
-	// unsub does not close ch, so stop the reader explicitly.
-	stop, done := make(chan struct{}), make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			select {
-			case evt := <-ch:
-				c.mu.Lock()
-				c.evts = append(c.evts, evt)
-				c.mu.Unlock()
-			case <-stop:
-				return
-			}
-		}
-	}()
-	t.Cleanup(func() { unsub(); close(stop); <-done })
-	return c
+	return countUserMessageSSE(t, env.pub, userID)
 }
 
 func (c *userMessageSSECounter) count() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.evts)
+	for {
+		select {
+		case <-c.ch:
+			c.n++
+		default:
+			return c.n
+		}
+	}
 }
 
-// settledUserRows waits for the first inbox row for userID, then for the
-// settle window, and returns every row found.
+func (env *notificationTestEnv) listUserRows(t *testing.T, userID string) []store.Message {
+	t.Helper()
+	res, err := env.store.ListMessages(context.Background(), store.MessageFilter{
+		RecipientID: userID,
+		ProjectID:   env.project.ID,
+	}, store.ListOptions{})
+	require.NoError(t, err)
+	return res.Items
+}
+
+// settledUserRows waits for the first inbox row for userID, then quiesces
+// both writers before counting, so a late duplicate cannot be missed:
+// nd.Stop waits for the in-flight storeAndDispatch (the notifier's own
+// write and its publish), and closing the broker bus drains every queued
+// deliverToUser. No settle sleep is involved.
 func (env *notificationTestEnv) settledUserRows(t *testing.T, userID string) []store.Message {
 	t.Helper()
-	list := func() []store.Message {
-		res, err := env.store.ListMessages(context.Background(), store.MessageFilter{
-			RecipientID: userID,
-			ProjectID:   env.project.ID,
-		}, store.ListOptions{})
-		require.NoError(t, err)
-		return res.Items
-	}
-	require.Eventually(t, func() bool { return len(list()) > 0 }, 3*time.Second, 10*time.Millisecond,
+	require.Eventually(t, func() bool { return len(env.listUserRows(t, userID)) > 0 }, 5*time.Second, 10*time.Millisecond,
 		"the notification must be persisted to the user's inbox")
-	time.Sleep(notificationSettle)
-	return list()
+	env.nd.Stop()
+	if env.quiesceBroker != nil {
+		env.quiesceBroker()
+	}
+	return env.listUserRows(t, userID)
 }
 
 func TestNotificationDispatcher_RealBrokerPersistsUserNotificationOnce(t *testing.T) {
@@ -211,4 +226,239 @@ func TestNotificationDispatcher_BrokerPublishFailureFallsBackToInbox(t *testing.
 	rows := env.settledUserRows(t, userID)
 	require.Len(t, rows, 1)
 	assert.Equal(t, 1, sse.count())
+}
+
+// failingSpoke is a non-observer plugin spoke whose publish always fails.
+type failingSpoke struct{}
+
+func (failingSpoke) Publish(context.Context, string, *messages.StructuredMessage) error {
+	return errors.New("plugin RPC: connection refused")
+}
+func (failingSpoke) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return noopSub{}, nil
+}
+func (failingSpoke) Close() error { return nil }
+
+type noopSub struct{}
+
+func (noopSub) Unsubscribe() error { return nil }
+
+// Review finding 1: a failing non-observer plugin spoke makes FanOut return
+// an error even though inproc already queued the message for deliverToUser.
+// That must not trigger the inbox fallback (which would write a second row).
+func TestNotificationDispatcher_FailingPluginSpokeStillPersistsOnce(t *testing.T) {
+	env := setupNotificationTest(t)
+	userID := api.NewUUID()
+	env.useUserSubscription(t, userID, "COMPLETED")
+	inproc := eventbus.NewInProcessEventBus(slog.Default())
+	fan := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: inproc},
+		{Name: "telegram", Bus: failingSpoke{}},
+	}, slog.Default())
+	env.startBrokerProxyOn(t, fan, env.pub, func() { _ = inproc.Close() })
+	sse := env.countUserMessageSSE(t, userID)
+
+	env.nd.Start()
+	defer env.nd.Stop()
+	env.publishStatus("completed")
+
+	rows := env.settledUserRows(t, userID)
+	require.Len(t, rows, 1, "a plugin spoke outage must not duplicate the inbox row")
+	assert.Equal(t, 1, sse.count())
+}
+
+// Review finding 3: the agent becomes running after the proxy started and
+// the proxy never sees a lifecycle event (it listens on its own publisher),
+// so only the notifier's ensure-subscription call can create the persisting
+// subscriber. Without it the publish reaches nobody and no row is written.
+func TestNotificationDispatcher_EnsuresSubscriptionWithoutLifecycleEvent(t *testing.T) {
+	env := setupNotificationTest(t)
+	ctx := context.Background()
+	userID := api.NewUUID()
+	env.useUserSubscription(t, userID, "COMPLETED")
+
+	// No running agent at proxy start, so bootstrap subscribes nothing.
+	for _, a := range []*store.Agent{env.watched, env.subscriber} {
+		a.Phase = string(state.PhaseStopped)
+		require.NoError(t, env.store.UpdateAgent(ctx, a))
+	}
+	proxyEvents := NewChannelEventPublisher()
+	t.Cleanup(proxyEvents.Close)
+	inner := eventbus.NewInProcessEventBus(slog.Default())
+	proxy := env.startBrokerProxyOn(t, inner, proxyEvents, func() { _ = inner.Close() })
+	proxy.mu.Lock()
+	subscribed := proxy.subscribedTopics[eventbus.TopicAllUserMessages(env.project.ID)]
+	proxy.mu.Unlock()
+	require.False(t, subscribed, "precondition: no user-message subscription before the notification")
+
+	// The agent starts running; only the store changes.
+	env.watched.Phase = string(state.PhaseRunning)
+	require.NoError(t, env.store.UpdateAgent(ctx, env.watched))
+	sse := countUserMessageSSE(t, proxyEvents, userID)
+
+	env.nd.Start()
+	defer env.nd.Stop()
+	env.publishStatus("completed")
+
+	rows := env.settledUserRows(t, userID)
+	require.Len(t, rows, 1)
+	assert.Equal(t, 1, sse.count(),
+		"the row was persisted by the broker subscriber the notifier ensured (its SSE goes to the proxy's publisher)")
+}
+
+// Review finding 6: after Stop the proxy registers nothing and reports "not
+// subscribed", so the notifier falls back to the inbox write.
+func TestNotificationDispatcher_StoppedProxyFallsBackToInbox(t *testing.T) {
+	env := setupNotificationTest(t)
+	userID := api.NewUUID()
+	env.useUserSubscription(t, userID, "COMPLETED")
+	inner := eventbus.NewInProcessEventBus(slog.Default())
+	bus := &subscribeCountingBus{EventBus: inner}
+	proxy := env.startBrokerProxyOn(t, bus, env.pub, func() { _ = inner.Close() })
+	proxy.Stop()
+	before := bus.subscribes.Load()
+
+	sse := env.countUserMessageSSE(t, userID)
+	env.nd.Start()
+	defer env.nd.Stop()
+	env.publishStatus("completed")
+
+	rows := env.settledUserRows(t, userID)
+	require.Len(t, rows, 1)
+	assert.Equal(t, 1, sse.count())
+	assert.Equal(t, before, bus.subscribes.Load(), "a stopped proxy must not register subscriptions")
+	assert.False(t, proxy.subscribeProjectUserMessages(env.project.ID))
+}
+
+// subscribeCountingBus counts Subscribe calls; when gate is non-nil each
+// Subscribe signals entered and blocks until gate is closed, and returned is
+// set once the inner Subscribe has returned. failFirst makes the first
+// Subscribe fail.
+type subscribeCountingBus struct {
+	eventbus.EventBus
+	subscribes atomic.Int32
+	entered    chan struct{}
+	gate       chan struct{}
+	returned   atomic.Bool
+	failFirst  bool
+}
+
+func (b *subscribeCountingBus) Subscribe(pattern string, h eventbus.EventHandler) (eventbus.Subscription, error) {
+	n := b.subscribes.Add(1)
+	if b.gate != nil {
+		b.entered <- struct{}{}
+		<-b.gate
+	}
+	if b.failFirst && n == 1 {
+		return nil, errors.New("subscribe failed")
+	}
+	sub, err := b.EventBus.Subscribe(pattern, h)
+	b.returned.Store(true)
+	return sub, err
+}
+
+func newProxyOn(t *testing.T, bus eventbus.EventBus) *MessageBrokerProxy {
+	t.Helper()
+	s := newBrokerTestStore(t)
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	return NewMessageBrokerProxy(bus, s, events, func() AgentDispatcher { return nil }, slog.Default())
+}
+
+// Review finding 2: a concurrent caller must not be told "subscribed" before
+// the winning caller's Subscribe has returned, or its publish can reach no
+// subscriber.
+func TestSubscribeProjectUserMessages_ConcurrentCallerWaitsForSubscribe(t *testing.T) {
+	inner := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = inner.Close() })
+	bus := &subscribeCountingBus{EventBus: inner, entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	p := newProxyOn(t, bus)
+	const projectID = "11111111-1111-1111-1111-111111111111"
+
+	aDone := make(chan bool, 1)
+	go func() { aDone <- p.subscribeProjectUserMessages(projectID) }()
+	<-bus.entered // A is inside Subscribe
+
+	type result struct{ ok, subscribeReturned bool }
+	bDone := make(chan result, 1)
+	go func() {
+		ok := p.subscribeProjectUserMessages(projectID)
+		bDone <- result{ok, bus.returned.Load()}
+	}()
+	// Give B the chance to return early (the old bug); a correct B blocks
+	// until A's Subscribe returns, so this bound only delays the release.
+	var early *result
+	select {
+	case r := <-bDone:
+		early = &r
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(bus.gate)
+	require.True(t, <-aDone)
+	r := result{}
+	if early != nil {
+		r = *early
+	} else {
+		r = <-bDone
+	}
+	assert.True(t, r.ok)
+	assert.True(t, r.subscribeReturned, "a caller told \"subscribed\" must find Subscribe already returned")
+	assert.Equal(t, int32(1), bus.subscribes.Load(), "the topic is subscribed once")
+}
+
+// Concurrent callers (run with -race): exactly one Subscribe, every caller
+// told "subscribed".
+func TestSubscribeProjectUserMessages_ConcurrentCallersSubscribeOnce(t *testing.T) {
+	inner := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = inner.Close() })
+	bus := &subscribeCountingBus{EventBus: inner}
+	p := newProxyOn(t, bus)
+	const projectID = "22222222-2222-2222-2222-222222222222"
+
+	var wg sync.WaitGroup
+	var notOK atomic.Int32
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !p.subscribeProjectUserMessages(projectID) {
+				notOK.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	assert.Zero(t, notOK.Load())
+	assert.Equal(t, int32(1), bus.subscribes.Load())
+}
+
+// A failed Subscribe leaves the topic unmarked (reported as not subscribed),
+// so the next call retries instead of publishing to nobody forever.
+func TestSubscribeProjectUserMessages_FailureIsRetried(t *testing.T) {
+	inner := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = inner.Close() })
+	bus := &subscribeCountingBus{EventBus: inner, failFirst: true}
+	p := newProxyOn(t, bus)
+	const projectID = "33333333-3333-3333-3333-333333333333"
+
+	assert.False(t, p.subscribeProjectUserMessages(projectID))
+	assert.True(t, p.subscribeProjectUserMessages(projectID))
+	assert.True(t, p.subscribeProjectUserMessages(projectID))
+	assert.Equal(t, int32(2), bus.subscribes.Load())
+}
+
+// A FanOut bus without an inprocess spoke never runs handlers, so nothing
+// would persist: report not subscribed.
+func TestSubscribeProjectUserMessages_NoInProcessSpoke(t *testing.T) {
+	fan := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{{Name: "telegram", Bus: failingSpoke{}}}, slog.Default())
+	p := newProxyOn(t, fan)
+	assert.False(t, p.subscribeProjectUserMessages("44444444-4444-4444-4444-444444444444"))
+}
+
+func TestCanPersistUserDM(t *testing.T) {
+	const id = "0f8fad5b-d9cb-469f-a165-70867728950e"
+	assert.True(t, canPersistUserDM(id, true))
+	assert.True(t, canPersistUserDM("fed@example.org", false))
+	assert.False(t, canPersistUserDM("fed@example.org", true))
+	assert.False(t, canPersistUserDM(strings.ToUpper(id), true),
+		"DM keys only accept canonical UUIDs")
 }

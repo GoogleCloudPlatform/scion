@@ -333,6 +333,14 @@ func (nd *NotificationDispatcher) storeAndDispatch(ctx context.Context, sub *sto
 		// With a broker configured, the broker's deliverToUser subscription
 		// persists the published message and emits the user.message SSE
 		// event, so writing the inbox row here as well duplicated the DM.
+		//
+		// Trade-off: the fallback below writes the row only when the
+		// publish provably did not reach that subscriber (see
+		// dispatchToBroker); anything ambiguous is treated as delivered, so
+		// we prefer a possibly missing row over a duplicate. The remaining
+		// loss windows are a full subscriber buffer and an asynchronous
+		// deliverToUser store failure; both are logged with the
+		// notification ID, and neither is retried.
 		if nd.persistsViaInbox(sub) {
 			nd.createInboxMessage(ctx, sub, notif, agent)
 			if nd.brokerProxy != nil {
@@ -477,16 +485,13 @@ func (nd *NotificationDispatcher) dispatchToChannels(ctx context.Context, sub *s
 // federated (non-UUID) subscriber while G2 write-deny is ON: deliverToUser
 // cannot resolve a DM conversation for a non-UUID principal and, under
 // write-deny, drops the message, whereas createInboxMessage carries the G2
-// exemption for exactly this population. Keep this in step with the DM
-// conversation branch of MessageBrokerProxy.deliverToUser.
+// exemption for exactly this population. The rule is canPersistUserDM,
+// shared with deliverToUser.
 func (nd *NotificationDispatcher) persistsViaInbox(sub *store.NotificationSubscription) bool {
 	if nd.brokerProxy == nil {
 		return true
 	}
-	if _, err := uuid.Parse(sub.SubscriberID); err == nil {
-		return false
-	}
-	return nd.writeDenyEnabled != nil && nd.writeDenyEnabled()
+	return !canPersistUserDM(sub.SubscriberID, nd.writeDenyEnabled != nil && nd.writeDenyEnabled())
 }
 
 // notificationMessageBody picks the body for a user notification message.
@@ -507,11 +512,28 @@ func notificationMessageBody(notif *store.Notification, agent *store.Agent) stri
 // Returns false when the publish definitely did not reach that subscriber, so
 // the caller can persist directly instead.
 func (nd *NotificationDispatcher) dispatchToBroker(ctx context.Context, sub *store.NotificationSubscription, notif *store.Notification, agent *store.Agent) bool {
-	nd.brokerProxy.subscribeProjectUserMessages(sub.ProjectID)
-	err := nd.publishToBroker(ctx, sub, notif, agent)
-	// A full subscriber buffer is ambiguous (another subscriber may be the
-	// one that dropped); prefer a possibly missing row over a duplicate.
-	return err == nil || errors.Is(err, eventbus.ErrSubscriberBufferFull)
+	if !nd.brokerProxy.subscribeProjectUserMessages(sub.ProjectID) {
+		// No persisting subscriber (proxy stopped, Subscribe failed, or no
+		// inprocess spoke): plugins still get the card, the caller writes
+		// the row.
+		_ = nd.publishToBroker(ctx, sub, notif, agent)
+		return false
+	}
+	return !inProcessPublishFailed(nd.publishToBroker(ctx, sub, notif, agent))
+}
+
+// inProcessPublishFailed reports whether err proves the hub's inprocess
+// subscribers did not receive the message. A failing plugin spoke
+// (FanOutEventBus joins non-observer spoke errors) does not count: inproc
+// already queued the message for deliverToUser, and falling back would write
+// a second row. A full subscriber buffer is ambiguous (another subscriber
+// may be the one that dropped), so it is not proof either.
+func inProcessPublishFailed(err error) bool {
+	if err == nil || errors.Is(err, eventbus.ErrSubscriberBufferFull) {
+		return false
+	}
+	// ErrEventBusClosed alone covers a bare InProcessEventBus.
+	return errors.Is(err, eventbus.ErrInProcessPublish) || errors.Is(err, eventbus.ErrEventBusClosed)
 }
 
 // publishToBroker publishes the notification on the user-message topic so a
@@ -529,7 +551,7 @@ func (nd *NotificationDispatcher) publishToBroker(ctx context.Context, sub *stor
 	structuredMsg.RecipientID = sub.SubscriberID
 	structuredMsg.Status = strings.ToUpper(notif.Status)
 
-	if err := nd.brokerProxy.PublishUserMessage(ctx, sub.ProjectID, sub.SubscriberID, structuredMsg); err != nil {
+	if err := nd.brokerProxy.PublishUserMessage(withNotificationID(ctx, notif.ID), sub.ProjectID, sub.SubscriberID, structuredMsg); err != nil {
 		nd.log.Error("Failed to dispatch notification through broker",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "error", err)
 		return err
