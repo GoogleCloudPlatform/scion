@@ -15,26 +15,26 @@
  */
 
 /**
- * Create Agent auto-expose control (ptone/scion#2562 A2 F1): the control is
- * seeded from the hub default, and the SCION_AUTO_EXPOSE_* keys are sent only
- * when the user changed it, so an untouched create inherits the project, then
- * template, then hub default value on the hub.
+ * Create Agent auto-expose control (ptone/scion#2562 A2 F1, A5): the control
+ * is seeded from the hub default, and the SCION_AUTO_EXPOSE_* keys are sent
+ * only once the user operated it, so an untouched create inherits the
+ * project, then template, then hub default value on the hub.
  */
 
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
-interface CreatePrivate {
+interface CreatePrivate extends HTMLElement {
   loading: boolean;
   autoExposePortsEnabled: boolean;
-  autoExposePortsMode: string;
   updateComplete: Promise<unknown>;
-  shadowRoot: ShadowRoot | null;
   buildConfig(): { env?: Record<string, string> };
 }
 
-function stubFetch(hubDefault: boolean): void {
+let hubDefault = false;
+
+function stubFetch(): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
@@ -56,57 +56,94 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-async function mountAgentCreate(hubDefault: boolean): Promise<CreatePrivate> {
-  stubFetch(hubDefault);
-  await import('./agent-create.js');
-  const el = document.createElement('scion-page-agent-create');
-  document.body.appendChild(el);
-  const c = el as unknown as CreatePrivate;
+async function waitLoaded(c: CreatePrivate): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));
   const deadline = Date.now() + 2000;
   while (c.loading && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 5));
     await c.updateComplete;
   }
+  await c.updateComplete;
+}
+
+async function mountAgentCreate(def: boolean): Promise<CreatePrivate> {
+  hubDefault = def;
+  stubFetch();
+  const c = document.createElement('scion-page-agent-create') as CreatePrivate;
+  document.body.appendChild(c);
+  await waitLoaded(c);
   return c;
 }
 
-function sentAutoExposeKeys(c: CreatePrivate): string[] {
-  return Object.keys(c.buildConfig().env ?? {}).filter((k) => k.startsWith('SCION_AUTO_EXPOSE_'));
+function sourceLabel(c: CreatePrivate): Element {
+  const label = c.shadowRoot?.querySelector('[data-testid="auto-expose-source"]');
+  expect(label).toBeTruthy();
+  return label as Element;
+}
+
+function labelText(c: CreatePrivate): string {
+  return (sourceLabel(c).textContent ?? '').replace(/\s+/g, ' ').trim();
+}
+
+/** Operates the auto-expose checkbox the way a user click does. */
+async function clickAutoExpose(c: CreatePrivate, checked: boolean): Promise<void> {
+  const box = sourceLabel(c).parentElement?.querySelector('sl-checkbox') as
+    | (HTMLElement & { checked: boolean })
+    | null;
+  expect(box).toBeTruthy();
+  box!.checked = checked;
+  box!.dispatchEvent(new Event('sl-change'));
+  await c.updateComplete;
+}
+
+function sentAutoExposeKeys(c: CreatePrivate): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(c.buildConfig().env ?? {}).filter(([k]) => k.startsWith('SCION_AUTO_EXPOSE_'))
+  );
 }
 
 describe('agent-create auto-expose', () => {
-  for (const hubDefault of [true, false]) {
-    it(`seeds the control from the hub default (${hubDefault}) and sends no auto-expose key when untouched`, async () => {
-      const c = await mountAgentCreate(hubDefault);
-      expect(c.autoExposePortsEnabled).toBe(hubDefault);
-      expect(sentAutoExposeKeys(c)).toEqual([]);
+  for (const def of [true, false]) {
+    it(`seeds the control from the hub default (${def}) and sends no auto-expose key when untouched`, async () => {
+      const c = await mountAgentCreate(def);
+      expect(c.autoExposePortsEnabled).toBe(def);
+      expect(sentAutoExposeKeys(c)).toEqual({});
     });
   }
 
-  it('sends the auto-expose keys as explicit values once the user changes the control', async () => {
+  it('sends the auto-expose keys once the user operates the control', async () => {
     const c = await mountAgentCreate(true);
-    c.autoExposePortsEnabled = false;
-    expect(c.buildConfig().env).toMatchObject({ SCION_AUTO_EXPOSE_PORTS: 'false' });
-
-    c.autoExposePortsEnabled = true;
-    c.autoExposePortsMode = 'denylist';
-    expect(c.buildConfig().env).toMatchObject({
-      SCION_AUTO_EXPOSE_PORTS: 'true',
-      SCION_AUTO_EXPOSE_MODE: 'denylist',
-    });
+    await clickAutoExpose(c, false);
+    expect(sentAutoExposeKeys(c)).toEqual({ SCION_AUTO_EXPOSE_PORTS: 'false' });
   });
 
-  it('labels the control as inherited until it changes', async () => {
+  it('sends an explicit value equal to the hub default after unchecking and re-checking', async () => {
+    const c = await mountAgentCreate(true);
+    await clickAutoExpose(c, false);
+    await clickAutoExpose(c, true);
+    expect(sentAutoExposeKeys(c)).toMatchObject({ SCION_AUTO_EXPOSE_PORTS: 'true' });
+  });
+
+  it('labels the control as inherited, naming the hub default, until the user operates it', async () => {
     const c = await mountAgentCreate(false);
-    const label = (): string =>
-      (c.shadowRoot?.querySelector('[data-testid="auto-expose-source"]')?.textContent ?? '')
-        .replace(/\s+/g, ' ')
-        .trim();
-    await c.updateComplete;
-    expect(label()).toBe('Source: inherited');
-    c.autoExposePortsEnabled = true;
-    await c.updateComplete;
-    expect(label()).toBe('Source: explicit');
+    expect(labelText(c)).toBe(
+      'Source: inherited (hub default shown; project or template may override)'
+    );
+    await clickAutoExpose(c, false);
+    expect(labelText(c)).toBe('Source: explicit');
+  });
+
+  it('keeps a user toggle when the hub default is re-seeded by a later load', async () => {
+    const c = await mountAgentCreate(false);
+    await clickAutoExpose(c, true);
+
+    // Re-attaching reruns loadFormData, which fetches the hub default again.
+    hubDefault = false;
+    c.remove();
+    document.body.appendChild(c);
+    await waitLoaded(c);
+
+    expect(c.autoExposePortsEnabled).toBe(true);
+    expect(sentAutoExposeKeys(c)).toMatchObject({ SCION_AUTO_EXPOSE_PORTS: 'true' });
   });
 });

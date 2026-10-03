@@ -319,7 +319,7 @@ describe('agent-configure buildConfig — R2-2: untouched-form body matches the 
 });
 
 describe('effectiveAutoExposePorts', () => {
-  it('labels a value in InlineConfig.Env as explicit', async () => {
+  it('labels a value in the explicit record as explicit', async () => {
     const { effectiveAutoExposePorts } = await import('./agent-configure.js');
     expect(
       effectiveAutoExposePorts(
@@ -338,7 +338,7 @@ describe('effectiveAutoExposePorts', () => {
     });
   });
 
-  it('falls back to the hub default when AppliedConfig.Env lacks the key, ignoring InlineConfig.Env', async () => {
+  it('falls back to the hub default when AppliedConfig.Env lacks the key, ignoring the explicit record', async () => {
     const { effectiveAutoExposePorts } = await import('./agent-configure.js');
     expect(
       effectiveAutoExposePorts({ OTHER: 'x' }, { SCION_AUTO_EXPOSE_PORTS: 'false' }, true)
@@ -387,6 +387,25 @@ describe('agent-configure — auto-expose effective value, source label and save
     expect(await autoExposeSourceText(c)).toBe('Source: explicit');
     c.autoExposePortsEnabled = true;
     expect(await autoExposeSourceText(c)).toBe('Source: explicit (unsaved)');
+  });
+
+  it('keys the explicit label on CreateInputs when the agent has it', async () => {
+    // A hub stamp in InlineConfig.Env that CreateInputs lacks is not explicit.
+    const stamped = await mountAgentConfigureWithLoadedAgent({
+      model: 'golden-model',
+      env: { SCION_AUTO_EXPOSE_PORTS: 'true' },
+      inlineConfig: { env: { SCION_AUTO_EXPOSE_PORTS: 'true' } },
+      createInputs: { inlineConfig: {} },
+    });
+    expect(await autoExposeSourceText(stamped)).toBe('Source: project/template');
+
+    const recorded = await mountAgentConfigureWithLoadedAgent({
+      model: 'golden-model',
+      env: { SCION_AUTO_EXPOSE_PORTS: 'false' },
+      inlineConfig: {},
+      createInputs: { inlineConfig: { env: { SCION_AUTO_EXPOSE_PORTS: 'false' } } },
+    });
+    expect(await autoExposeSourceText(recorded)).toBe('Source: explicit');
   });
 
   it('a custom-row edit sends the rows only, never the untouched auto-expose keys', async () => {
