@@ -351,14 +351,14 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	// sorted parameters (fit, cursor exclusion), so an invalid fit is a 400
 	// for these callers exactly as for a caller with scope.
 	writeShortCircuit := func() {
-		var p agentListParams
+		p := agentListParams{view: legacyAgentListView(query)}
 		if sorted {
 			var ok bool
 			if p, ok = parseAgentListParamsAfterSortDir(w, query, agentListLimit(query), sortParam, dirParam); !ok {
 				return
 			}
 		}
-		writeJSON(w, http.StatusOK, sortedShortCircuitResponse(p))
+		writeAgentList(w, p.view, sortedShortCircuitResponse(p))
 	}
 
 	// RS2: Unauthenticated callers get an empty list immediately.
@@ -513,7 +513,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	agents, scopeCap := s.buildGlobalAgentPage(ctx, identity, items)
 
-	writeJSON(w, http.StatusOK, ListAgentsResponse{
+	writeAgentList(w, legacyAgentListView(query), ListAgentsResponse{
 		Agents:       agents,
 		NextCursor:   nextCursor,
 		TotalCount:   totalCount,
@@ -1011,6 +1011,14 @@ var errInvalidDisplayName = errors.New("invalid display name")
 // include store.ErrIdentityKeyConflict and, separately, store.ErrInvalidInput
 // for reasons unrelated to the display name itself.
 func (s *Server) createAgentWithIdentityKey(ctx context.Context, agent *store.Agent, slug string) error {
+	return s.createAgentWithIdentityKeyAndEdge(ctx, agent, slug, nil)
+}
+
+// createAgentWithIdentityKeyAndEdge is createAgentWithIdentityKey with the
+// agent's delegation edge written in the same transaction. When edge is
+// non-nil its DelegateID is set to agent.ID, and a failed edge write rolls
+// back the agent row and its identity keys. A nil edge writes no edge.
+func (s *Server) createAgentWithIdentityKeyAndEdge(ctx context.Context, agent *store.Agent, slug string, edge *store.DelegationEdge) error {
 	if _, err := api.ValidateDisplayName(slug); err != nil {
 		return fmt.Errorf("%w: %s", errInvalidDisplayName, err)
 	}
@@ -1022,8 +1030,75 @@ func (s *Server) createAgentWithIdentityKey(ctx context.Context, agent *store.Ag
 		// api.IdentityKeysFor(slug, agent.Name) collapses to the single
 		// {slug} row -- the same function rename, restore, and the backfill
 		// migration use, rather than a separately-maintained literal here.
-		return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, api.IdentityKeysFor(slug, agent.Name))
+		if err := tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, api.IdentityKeysFor(slug, agent.Name)); err != nil {
+			return err
+		}
+		if edge == nil {
+			return nil
+		}
+		edge.DelegateID = agent.ID
+		return tx.CreateDelegationEdge(ctx, edge)
 	})
+}
+
+// applyCreateEffectCeiling computes the source credential's frozen ceiling
+// and provenance for an interactive agent create, and caps role to what the
+// ceiling covers (childRoleWithinCeiling). roleExplicit is true when the
+// request named a role. On a denial it writes the response (403 with
+// details.denied_by="delegation_ceiling", or 503 for a lookup fault) and
+// returns ok=false; nothing has been written to the store at that point.
+func (s *Server) applyCreateEffectCeiling(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	role AgentRole,
+	roleExplicit bool,
+) (ceiling store.EffectCeiling, prov store.AuthorityProvenance, capped AgentRole, ok bool) {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	resource := Resource{Type: "agent", ParentType: "project", ParentID: projectID}
+
+	ceiling, prov, err := s.authzService.sourceEffectCeiling(ctx, identity)
+	if err != nil {
+		cause, structural := ceilingDenyCauseForError(err)
+		if !structural {
+			slog.ErrorContext(ctx, "agent create: effect ceiling lookup failed",
+				"project_id", projectID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Unable to evaluate the credential's delegation ceiling; retry later", nil)
+			return store.EffectCeiling{}, store.AuthorityProvenance{}, "", false
+		}
+		logAuthzDenial(r, identity, resource, ActionCreate,
+			"effect ceiling denied: "+string(cause)+": "+err.Error())
+		writeForbiddenDenial(w, ceilingSourceDenialMessage(cause), DeniedByDelegationCeiling)
+		return store.EffectCeiling{}, store.AuthorityProvenance{}, "", false
+	}
+
+	capped, cause, allowed := childRoleWithinCeiling(ceiling, role, roleExplicit)
+	if !allowed {
+		msg := reasonNoUsableRole
+		if roleExplicit {
+			msg = fmt.Sprintf("the credential's scopes do not cover agent role %q; request a role the token covers, request role=none explicitly, or create from a session", role)
+		}
+		logAuthzDenial(r, identity, resource, ActionCreate,
+			"effect ceiling denied: "+string(cause)+": "+msg)
+		writeForbiddenDenial(w, msg, DeniedByDelegationCeiling)
+		return store.EffectCeiling{}, store.AuthorityProvenance{}, "", false
+	}
+	return ceiling, prov, capped, true
+}
+
+// ceilingSourceDenialMessage is the neutral response message for a source
+// credential whose ceiling cannot be recorded.
+func ceilingSourceDenialMessage(cause DenyCause) string {
+	switch cause {
+	case DenyCauseCeilingSourceNotAllowed:
+		return "This credential kind cannot delegate agent authority"
+	case DenyCauseCeilingUnrecorded:
+		return "The credential's scope ceiling version is not supported; reissue the token"
+	default:
+		return "The creating agent's delegation record is missing or inconsistent"
+	}
 }
 
 func (s *Server) createAgentInProject(
@@ -1214,6 +1289,21 @@ func (s *Server) createAgentInProject(
 				writeForbidden(w, "Cannot delegate agent authority you do not hold: "+delegateDecision.Reason)
 				return
 			}
+		}
+	}
+
+	// Effect ceiling: freeze the source credential's ceiling and provenance
+	// for the delegation edge, and cap the child's role to what the ceiling
+	// covers. This runs after CanDelegate and before the role→NoAuth mapping
+	// so that the stored role, the edge role and NoAuth derive from the same
+	// value.
+	var edgeCeiling store.EffectCeiling
+	var edgeProvenance store.AuthorityProvenance
+	if s.authzService != nil {
+		var ok bool
+		edgeCeiling, edgeProvenance, effectiveRole, ok = s.applyCreateEffectCeiling(w, r, projectID, effectiveRole, req.AgentRole != "")
+		if !ok {
+			return
 		}
 	}
 
@@ -1808,7 +1898,26 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
-	if err := s.createAgentWithIdentityKey(ctx, agent, slug); err != nil {
+	// The delegation edge records who delegated authority to this agent,
+	// with the frozen provenance and ceiling. It is written in the same
+	// transaction as the agent row, so a failed edge write leaves no agent.
+	edgeDelegatorType := store.DelegationPrincipalUser
+	if GetAgentIdentityFromContext(ctx) != nil {
+		edgeDelegatorType = store.DelegationPrincipalAgent
+	}
+	edge := &store.DelegationEdge{
+		DelegatorType:       edgeDelegatorType,
+		DelegatorID:         createdBy,
+		DelegateType:        store.DelegationPrincipalAgent,
+		ScopeType:           store.RoleScopeProject,
+		ScopeID:             projectID,
+		Role:                string(effectiveRole),
+		Active:              true,
+		AuthorityProvenance: edgeProvenance,
+		EffectCeiling:       edgeCeiling,
+	}
+
+	if err := s.createAgentWithIdentityKeyAndEdge(ctx, agent, slug, edge); err != nil {
 		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 		if errors.Is(err, errInvalidDisplayName) {
 			writeError(w, http.StatusBadRequest, "invalid_name", err.Error(), nil)
@@ -1828,11 +1937,6 @@ func (s *Server) createAgentInProject(
 		})
 	}
 
-	// Record delegation edge (Phase 1G): track who delegated authority to this agent.
-	// Best-effort: log errors but do not fail the creation. The live delegation
-	// ceiling falls back to a safe default when no edge is found.
-	s.recordDelegationEdge(ctx, agent.ID, projectID, string(effectiveRole), createdBy)
-
 	// Create notification subscription if requested
 	if req.Notify {
 		s.createNotifySubscription(ctx, agent.ID, projectID, notifySubscriberType, notifySubscriberID, createdBy)
@@ -1846,7 +1950,7 @@ func (s *Server) createAgentInProject(
 	if project.IsEmptyPerAgent() && len(req.WorkspaceFiles) > 0 {
 		s.agentLifecycleLog.Warn("Ignoring workspace files for empty-per-agent project",
 			"agent_id", agent.ID, "project_id", project.ID, "files", len(req.WorkspaceFiles))
-		warnings = append(warnings, emptyPerAgentWorkspaceFilesIgnoredWarning)
+		warnings = append(warnings, api.WarningEmptyPerAgentWorkspaceFilesIgnored)
 		req.WorkspaceFiles = nil
 	}
 
@@ -3862,9 +3966,9 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 	// This is critical for backward compatibility: legacy agents created
 	// before the role system have tokens with old scope sets (missing
 	// ScopeProjectRead, etc.). Copying old scopes verbatim on refresh
-	// would perpetuate the gap. By re-deriving from the stored role via
-	// agentRoleAndScopes → Server.GenerateAgentToken → ScopesForRole,
-	// the refreshed token always reflects the current role definition.
+	// would perpetuate the gap. GenerateAgentTokenForAgent re-derives the
+	// scopes from the stored role and bounds them by the agent's chain
+	// ceiling, with the stored ancestry.
 	agent, err := s.store.GetAgent(r.Context(), id)
 	if err != nil {
 		slog.Warn("Token refresh: failed to look up agent for role-based scope derivation",
@@ -3888,12 +3992,11 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	agentRole, additionalScopes := agentRoleAndScopes(agent)
-	newToken, err := s.GenerateAgentToken(
-		agent.ID, agent.ProjectID, agentIdent.Ancestry(),
-		agentRole, additionalScopes,
-	)
+	newToken, err := mintAgentTokenAt(r.Context(), s, s.store, agent, mintSiteRefresh)
 	if err != nil {
+		if writeAgentTokenIssueError(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to generate refreshed token: "+err.Error(), nil)
 		return
@@ -3992,6 +4095,9 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 
 	if err := disp.DispatchAgentResetAuth(ctx, agent); err != nil {
 		slog.Error("Failed to reset agent auth", "agent_id", id, "error", err)
+		if writeAgentTokenIssueError(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"auth reset failed: "+err.Error(), nil)
 		return
@@ -4030,6 +4136,10 @@ const skillResolutionErrorCode = "skill_resolution_failed"
 // A required-skill resolution failure is relayed verbatim: the broker's
 // status, message, details and Retry-After, with no hub prefix (#2546 R2).
 func dispatchCreateErrorResponse(w http.ResponseWriter, err error) {
+	if writeAgentTokenIssueError(w, err) {
+		return
+	}
+
 	var se *brokerStatusError
 	isSkillResolution := errors.As(err, &se) && se.brokerErrorCode() == skillResolutionErrorCode
 
@@ -4052,31 +4162,11 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error) {
 	}
 }
 
-// recordDelegationEdge creates a delegation edge from the creator to the new
-// agent. The creator may be a user or an agent. Best-effort: errors are logged
-// but do not fail the operation, because the edge is supplementary — the live
-// delegation ceiling falls back to a safe default when no edge is found.
-//
-// When called from the HTTP agent-create path, the context identity determines
-// the delegator type. When called from the scheduler dispatch path (where the
-// context has no authenticated identity), the caller resolves the creator type
-// before calling recordDelegationEdgeWithType.
-func (s *Server) recordDelegationEdge(ctx context.Context, agentID, projectID, role, createdBy string) {
-	var delegatorType string
-
-	// Determine if creator is an agent or user from context identity.
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		delegatorType = store.DelegationPrincipalAgent
-	} else {
-		delegatorType = store.DelegationPrincipalUser
-	}
-
-	s.recordDelegationEdgeWithType(ctx, agentID, projectID, role, delegatorType, createdBy)
-}
-
 // recordDelegationEdgeWithType creates a delegation edge with an explicitly
-// specified delegator type. Used when the delegator type is already known
-// (e.g., from the scheduled dispatch authorization path).
+// specified delegator type. Used by the scheduled dispatch path, where the
+// caller resolves the creator type. Best-effort: errors are logged but do not
+// fail the operation. The interactive create path writes its edge inside the
+// agent-create transaction instead (createAgentWithIdentityKeyAndEdge).
 func (s *Server) recordDelegationEdgeWithType(ctx context.Context, agentID, projectID, role, delegatorType, delegatorID string) {
 	edge := &store.DelegationEdge{
 		DelegatorType: delegatorType,

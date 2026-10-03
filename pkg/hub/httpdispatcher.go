@@ -136,6 +136,9 @@ func (d *HTTPAgentDispatcher) GetClient() RuntimeBrokerClient {
 // AgentTokenGenerator generates JWT tokens for agents.
 type AgentTokenGenerator interface {
 	GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (string, error)
+	// GenerateAgentTokenForAgent issues a token for the stored agent record,
+	// bounded by its delegation chain. Every dispatcher mint site uses it.
+	GenerateAgentTokenForAgent(ctx context.Context, agent *store.Agent) (string, error)
 }
 
 // GitHubAppTokenMinter mints GitHub App installation tokens for projects.
@@ -656,20 +659,16 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		)
 	}
 
-	// Generate agent token if token generator is available
+	// Generate agent token if token generator is available. A mint error
+	// stops the dispatch before any broker request.
 	if d.tokenGenerator != nil {
-		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
+		token, err := mintAgentTokenAt(ctx, d.tokenGenerator, d.store, agent, mintSiteCreate)
 		if err != nil {
-			if d.debug {
-				d.log.Warn("Failed to generate agent token", "error", err)
-			}
-			// Continue without token - agent will operate in unauthenticated mode
-		} else {
-			req.AgentToken = token
-			if d.debug {
-				d.log.Debug("Generated agent token", "length", len(token))
-			}
+			return nil, fmt.Errorf("%s: %w", callerName, err)
+		}
+		req.AgentToken = token
+		if d.debug {
+			d.log.Debug("Generated agent token", "length", len(token))
 		}
 	} else if d.debug {
 		d.log.Debug("No token generator configured - agent will not have Hub credentials")
@@ -1309,10 +1308,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	}
 	// buildCreateRequest mints (and best-effort persists) a fresh agent
 	// credential before returning — but only when a token generator is
-	// configured and GenerateAgentToken succeeds; it otherwise tolerates the
-	// absence and carries on without one. Any failure from here on must
-	// revoke it, but only if this call actually minted one — see
-	// revokeAgentCredentialsBestEffort's doc comment.
+	// configured; with none it carries on without one. A mint error has
+	// already returned above, before any broker request, and minted nothing,
+	// so there is nothing to revoke on that path. Any failure from here on
+	// must revoke the credential, but only if this call actually minted one
+	// — see revokeAgentCredentialsBestEffort's doc comment.
 	issued := req.AgentToken != ""
 	defer func() {
 		if err != nil && issued {
@@ -2436,9 +2436,10 @@ type startEnvResult struct {
 	workspace       WorkspaceDispatchSpec
 	// tokenIssued reports whether this call actually minted a fresh Hub auth
 	// token (d.tokenGenerator succeeded and returned a non-empty token), as
-	// opposed to tolerating a nil generator or a GenerateAgentToken error and
-	// carrying on without one. DispatchAgentStart's revoke-on-failure defer
-	// must only arm when this call issued a credential to revoke.
+	// opposed to carrying on without one because no generator is configured.
+	// A mint error never reaches this struct: buildStartEnv returns the error
+	// instead. DispatchAgentStart's revoke-on-failure defer must only arm
+	// when this call issued a credential to revoke.
 	tokenIssued bool
 }
 
@@ -2456,11 +2457,24 @@ type startEnvResult struct {
 // warning's wording.
 //
 // caller is the log-message prefix ("DispatchAgentStart" or
-// "DispatchAgentRestart"); startedVerb is "start" or "restart", used only in
-// the secrets-resolution failure message, the one warning whose wording
-// differs (agent will <verb> without injected secrets) between the two
-// callers.
-func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller, startedVerb string) (startEnvResult, error) {
+// "DispatchAgentRestart"). site is the caller's mint site, mintSiteStart or
+// mintSiteRestart; it names the site in the mint audit record and gives the
+// verb of the secrets-resolution failure message, the one warning whose
+// wording differs (agent will <verb> without injected secrets) between the
+// two callers. Any other site is an error before any work is done. It
+// returns an error only for such a site, when the agent's project cannot be
+// loaded (checked before any token is minted), or when the agent token is
+// not issued.
+func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller string, site mintSite) (startEnvResult, error) {
+	var startedVerb string
+	switch site {
+	case mintSiteStart:
+		startedVerb = "start"
+	case mintSiteRestart:
+		startedVerb = "restart"
+	default:
+		return startEnvResult{}, fmt.Errorf("%s: unsupported mint site %q for a start", caller, site)
+	}
 	resolvedEnv := make(map[string]string)
 	var envClassifications map[string]api.EnvKind
 
@@ -2655,16 +2669,16 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	resolvedEnv["SCION_METADATA_MODE_SOURCE"] = "hub"
 	classifyEnv(&envClassifications, "SCION_METADATA_MODE_SOURCE", api.EnvKindPlain)
 
-	// Generate a fresh agent token for Hub authentication.
+	// Generate a fresh agent token for Hub authentication. A mint error
+	// stops the start or restart before any broker request; nothing was
+	// minted in that case, so tokenIssued stays false.
 	tokenIssued := false
 	if d.tokenGenerator != nil {
-		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
+		token, err := mintAgentTokenAt(ctx, d.tokenGenerator, d.store, agent, site)
 		if err != nil {
-			if d.debug {
-				d.log.Warn(caller+": failed to generate agent token", "error", err)
-			}
-		} else if token != "" {
+			return startEnvResult{}, fmt.Errorf("%s: %w", caller, err)
+		}
+		if token != "" {
 			resolvedEnv["SCION_AUTH_TOKEN"] = token
 			tokenIssued = true
 			// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
@@ -2756,7 +2770,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 	// Assemble the resolved env (shared with DispatchAgentRestart; see
 	// buildStartEnv).
-	startEnv, err := d.buildStartEnv(ctx, agent, "DispatchAgentStart", "start")
+	startEnv, err := d.buildStartEnv(ctx, agent, "DispatchAgentStart", mintSiteStart)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -2770,8 +2784,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 	// A failure from here on must revoke the credential buildStartEnv just
 	// minted above, but only when it actually minted one — buildStartEnv
-	// tolerates a nil tokenGenerator or a GenerateAgentToken error and
-	// carries on without a credential. Arm the revoke only when all of these hold:
+	// carries on without a credential when no tokenGenerator is configured,
+	// and a mint error has already returned above, before any broker request
+	// and before this defer is armed, having minted nothing to revoke. Arm the
+	// revoke only when all of these hold:
 	//  - priorPhase (captured above, before buildStartEnv/applyBrokerResponse
 	//    could change it) is a confirmed non-running phase
 	//    (isConfirmedNonRunningPhase: created, provisioning, stopped,
@@ -2954,7 +2970,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// so the restarted container has full credentials and Hub connectivity.
 	// This mirrors the resolution in DispatchAgentStart — without it, env vars
 	// like GOOGLE_CLOUD_PROJECT are missing and auth provisioning fails.
-	startEnv, err := d.buildStartEnv(ctx, agent, "DispatchAgentRestart", "restart")
+	startEnv, err := d.buildStartEnv(ctx, agent, "DispatchAgentRestart", mintSiteRestart)
 	if err != nil {
 		return err
 	}
@@ -3005,8 +3021,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 
 	var token string
 	if d.tokenGenerator != nil {
-		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, err = d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
+		token, err = mintAgentTokenAt(ctx, d.tokenGenerator, d.store, agent, mintSiteResetAuth)
 		if err != nil {
 			return fmt.Errorf("DispatchAgentResetAuth: failed to generate agent token: %w", err)
 		}

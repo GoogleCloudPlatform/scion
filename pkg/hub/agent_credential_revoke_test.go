@@ -97,6 +97,12 @@ func (f *fakeMintingTokenGenerator) GenerateAgentToken(agentID, projectID string
 	return "fake-agent-jwt-" + jti, nil
 }
 
+// GenerateAgentTokenForAgent is the entry point every dispatcher mint site
+// calls; it records and fails exactly as GenerateAgentToken does.
+func (f *fakeMintingTokenGenerator) GenerateAgentTokenForAgent(_ context.Context, agent *store.Agent) (string, error) {
+	return f.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, AgentRole(""), nil)
+}
+
 // lastJTI returns the most recently minted jti, for a test that only expects
 // a single GenerateAgentToken call.
 func (f *fakeMintingTokenGenerator) lastJTI() string {

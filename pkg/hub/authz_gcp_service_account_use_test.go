@@ -60,7 +60,7 @@ func seedPostBackfillAdminEdge(t *testing.T, s store.Store, agentID, projectID s
 	setBackfillCompleted(t, s)
 	adminID := tid("admin-for-" + agentID)
 	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
-	createDCEdge(t, s, store.DelegationPrincipalUser, adminID, store.DelegationPrincipalAgent, agentID,
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, adminID, store.DelegationPrincipalAgent, agentID,
 		store.RoleScopeProject, projectID, store.ProjectRoleOwner)
 }
 

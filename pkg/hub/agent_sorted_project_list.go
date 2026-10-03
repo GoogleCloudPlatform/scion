@@ -485,7 +485,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		c := complete
 		resp.Complete = &c
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeAgentList(w, p.view, resp)
 }
 
 // isSortedModeRequest reports whether query requests sorted mode: any

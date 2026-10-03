@@ -1097,6 +1097,8 @@ func (s *Server) handleExistingAgent(
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
 			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
 			switch {
+			case writeAgentTokenIssueError(w, err):
+				// Response written.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):
@@ -1180,6 +1182,8 @@ func (s *Server) handleExistingAgent(
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
 				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
 				switch {
+				case writeAgentTokenIssueError(w, err):
+					// Response written.
 				case writeEmptyPerAgentCapabilityError(w, err):
 					// 412 already written (design #2703 D3).
 				case isContainerNameConflict(err):
@@ -1292,6 +1296,8 @@ func (s *Server) handleExistingAgent(
 		// A created/provisioning agent has no prior session to resume.
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
 			switch {
+			case writeAgentTokenIssueError(w, err):
+				// Response written.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):

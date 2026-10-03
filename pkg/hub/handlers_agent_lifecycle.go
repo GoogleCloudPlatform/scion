@@ -541,6 +541,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 
 	// If dispatch failed, return error
 	if dispatchErr != nil {
+		if writeAgentTokenIssueError(w, dispatchErr) {
+			return
+		}
 		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
 			return
 		}

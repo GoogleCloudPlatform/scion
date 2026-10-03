@@ -1284,3 +1284,9 @@ func (c *CompositeStore) DB() *sql.DB {
 	}
 	return nil
 }
+
+// Dialect returns the ent dialect of the underlying driver (for example
+// dialect.SQLite or dialect.Postgres).
+func (c *CompositeStore) Dialect() string {
+	return c.client.Driver().Dialect()
+}
