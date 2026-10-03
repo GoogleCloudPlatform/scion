@@ -632,7 +632,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// writer of Message during the window (for example a message-only
 	// status POST); this write must never clobber a value that is no
 	// longer the one the stopping step set.
-	if _, err := s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
+	if completed, err := s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState:   store.ReincarnationStateNone,
 		generation:           &toGeneration,
 		appliedConfig:        fresh,
@@ -645,6 +645,11 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		// hand if this persistently fails to land.
 		s.agentLifecycleLog.Error("reincarnation worker: agent started on new generation but failed to persist completion",
 			"agent_id", agentID, "reincarnation_id", reincarnationID, "target_generation", toGeneration, "error", err)
+	} else {
+		// A successful reincarnate clears a failed delete marker (design
+		// ptone/scion#2483 §2.1). After the completion write: it bumps
+		// state_version.
+		s.clearFailedDeletion(ctx, completed)
 	}
 
 	s.agentLifecycleLog.Info("reincarnation completed",

@@ -153,6 +153,12 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	"LaunchLastReportAt": true, "LaunchOwner": true, "LaunchSeq": true,
 	"LaunchStep": true, "LaunchError": true,
 	"Launch": true,
+	// Deletion marker columns are written only through UpdateAgentDeletion
+	// (never by CreateAgent/UpdateAgent), and Deletion is computed.
+	"DeletionState": true, "DeletionClaim": true, "DeletionLeaseAt": true,
+	"DeletionStartedAt": true, "DeletionFailedAt": true, "DeletionCode": true,
+	"DeletionError": true, "DeletionPrior": true, "DeletionRequest": true,
+	"Deletion": true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {

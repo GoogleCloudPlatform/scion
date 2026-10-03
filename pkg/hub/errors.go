@@ -84,6 +84,12 @@ const (
 	// Quota enforcement error codes
 	ErrCodeQuotaExceeded = "quota_exceeded"
 
+	// ErrCodeDeleteInProgress is returned (409) by start, restart,
+	// reincarnate, restore, create-with-existing-agent and DM wake while a
+	// delete blocks starting the agent (design ptone/scion#2483 §2.1
+	// deleteBlocksStart).
+	ErrCodeDeleteInProgress = "delete_in_progress"
+
 	// Conversation resolution error codes (Tranche G read-switch)
 
 	// ErrCodeConversationNotResolved is returned when the read-switch is ON

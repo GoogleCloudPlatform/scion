@@ -832,8 +832,19 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				statusUpdate.Message = ""
 			}
 
+			// A delete in progress is sticky the same way (design
+			// ptone/scion#2483 §2.1): the delete engine owns the status
+			// fields while its lease is live, and a soft-deleted row is
+			// finished. ContainerStatus and the Heartbeat/LastSeen bump still
+			// apply. UpdateAgentStatus repeats this check inside its
+			// transaction.
+			agentDeleting := deletionActive(agent) || !agent.DeletedAt.IsZero()
+			if agentDeleting {
+				statusUpdate.Message = ""
+			}
+
 			if agentHB.Phase != "" {
-				if agentSuspended || agentReincarnating {
+				if agentSuspended || agentReincarnating || agentDeleting {
 					// Do not let the heartbeat change the phase or propagate
 					// terminal activities while suspended or reincarnating; leave
 					// statusUpdate.Phase unset so the hub's authoritative phase is
@@ -1006,7 +1017,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						}
 					}
 				}
-			} else if !agentInTerminalPhase && !agentSuspended && !agentReincarnating {
+			} else if !agentInTerminalPhase && !agentSuspended && !agentReincarnating && !agentDeleting {
 				// Legacy path: no structured fields, derive from ContainerStatus
 				// Derive phase from container status to ensure agents
 				// registered via sync (not started via hub) get proper state.
@@ -1155,7 +1166,8 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					"error", err)
 			} else {
 				// Publish SSE event so the frontend receives activity updates
-				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil {
+				// A soft-deleted row publishes nothing.
+				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil && updated.DeletedAt.IsZero() {
 					s.events.PublishAgentStatus(ctx, updated)
 				}
 			}

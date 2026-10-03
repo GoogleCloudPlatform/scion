@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
@@ -248,10 +249,14 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 	}
 
 	agent.Phase = newPhase
+	// A successful start/stop/restart clears a failed delete marker
+	// (design ptone/scion#2483 §2.1).
+	s.clearFailedDeletion(ctx, agent)
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent
 	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+	respAgent.Deletion = store.ComputeAgentDeletion(agent, time.Now())
 	writeJSON(w, http.StatusOK, respAgent)
 }
 

@@ -141,6 +141,12 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// Delete in progress (design ptone/scion#2483 §2.1).
+	if ref := s.startGate(ctx, agent, startEntryReincarnate); ref.refuses() {
+		ref.write(w)
+		return
+	}
+
 	var req ReincarnateAgentRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
