@@ -483,6 +483,69 @@ describe('scion-page-agents — agent list window', () => {
     });
   });
 
+  describe('a view change while a drain is in flight', () => {
+    /** Mounts 2,001 agents in the tree view with the first drain page held, and switches to the list view. */
+    async function switchDuringDrain(
+      fail: boolean
+    ): Promise<{ el: TestEl; sent: Array<{ url: string }> }> {
+      const fake: Fake = {
+        agents: Array.from({ length: 2001 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      const inner = fakeFetch(fake);
+      const failing = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (
+          fail &&
+          isGlobalAgentsList(new URL(raw, 'http://localhost')) &&
+          query(raw).has('sort')
+        ) {
+          return Promise.resolve(new Response('{}', { status: 500 }));
+        }
+        return inner(input, init);
+      };
+      const h = holdable(failing, isGlobalAgentsList);
+      h.hold();
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      localStorage.setItem('scion-view-agents', 'graph');
+      const el = await mountUnsettled();
+      await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+      expect(query(h.sent[0].url).has('sort')).toBe(false);
+      setView(el, 'list');
+      await el.updateComplete;
+      h.release();
+      await settle(el);
+      return { el, sent: h.sent };
+    }
+
+    it('a drain that lands capped after a switch to an eligible view sends one sorted request and ends paged', async () => {
+      const { el, sent } = await switchDuringDrain(false);
+      // Four drain pages, then one sorted request for the list view.
+      expect(sent).toHaveLength(5);
+      expect(sent.slice(0, 4).every((r) => !query(r.url).has('sort'))).toBe(true);
+      expect(query(sent[4].url).get('sort')).toBe('updated');
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('paged');
+      expect(win.planRequest('view-change', '')).toBe('none');
+      expect(internals(el).error).toBeNull();
+    });
+
+    it('a failed sorted request after the drain landed keeps the drained rows with no page error', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { el, sent } = await switchDuringDrain(true);
+      expect(sent).toHaveLength(5);
+      expect(query(sent[4].url).has('sort')).toBe(true);
+      const win = internals(el).agentWindow;
+      expect(internals(el).error).toBeNull();
+      expect(win.state).toBe('capped');
+      expect(internals(el).agents).toHaveLength(2000);
+      expect(el.shadowRoot?.querySelectorAll('tbody tr').length).toBe(25);
+      expect(el.shadowRoot?.querySelector('.error-details')).toBeNull();
+      expect(warn).toHaveBeenCalled();
+    });
+  });
+
   describe('the completeness flag and the reuse branch', () => {
     it('an unlabelled scope-all complete load sets full; revisiting /agents then issues no request', async () => {
       const fake: Fake = {

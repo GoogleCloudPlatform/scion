@@ -823,7 +823,14 @@ export class ScionPageAgents extends LitElement {
       viewEpoch !== this.viewEpoch &&
       this.agentWindow.planRequest('view-change', this.committedLabel.trim()) !== 'none'
     ) {
-      await this.loadAgentsForView('view-change');
+      // A view change, so a failure keeps the adopted rows, as a
+      // background view-change refresh does, and never becomes the page
+      // error of the load that just succeeded.
+      try {
+        await this.loadAgentsForView('view-change');
+      } catch (err) {
+        console.warn('View refresh failed:', err);
+      }
     }
   }
 
@@ -878,13 +885,16 @@ export class ScionPageAgents extends LitElement {
       // whole set is drained from the start.
       const legacy = data.complete === undefined;
       if (legacy && (phase || data.nextCursor)) {
+        // Ended here, not only in the finally below (which repeats both
+        // calls as no-ops): the drain carries no ticket, and a restarted
+        // drain runs its own epoch.
         this.agentWindow.endSortedRequest(ticket);
         if (phase || !data.nextCursor) {
-          epoch.close(); // the drain runs its own epoch.
+          epoch.close();
           return await this.drainGlobalAgents(label, gen, requestedScope);
         }
-        // The drain takes over this epoch, so live changes since the
-        // request was sent are kept.
+        // The drain takes over this epoch and closes it, so live changes
+        // since the request was sent are kept.
         return await this.drainGlobalAgents(label, gen, requestedScope, {
           firstPage: {
             agents: dropTombstoned(data.agents || [], stateManager.getDeletedAgentIds()),
