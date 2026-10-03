@@ -38,6 +38,7 @@ describe('activityLabel', () => {
     // `constructor` and `__proto__`; only an own-property check skips them.
     Object.defineProperty(Object.prototype, 'label', {
       value: 'inherited',
+      writable: true,
       configurable: true,
     });
     try {

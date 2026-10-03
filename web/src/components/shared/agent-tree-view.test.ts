@@ -311,13 +311,17 @@ describe('scion-agent-tree-view layout cache (#2388)', () => {
     expect(badgeStatus('k1')).toBe('stopped');
   });
 
-  it('leaves the status badge label unset so it uses the display label (#1571)', async () => {
-    el.agents = el.agents.map((a) => (a.id === 'k1' ? { ...a, activity: 'blocked' } : a));
-    await el.updateComplete;
+  // Not a cache test: nested here only to reuse this block's fixture and
+  // badgeStatus() helper.
+  describe('status badge label (#1571)', () => {
+    it('leaves the status badge label unset so it uses the display label (#1571)', async () => {
+      el.agents = el.agents.map((a) => (a.id === 'k1' ? { ...a, activity: 'blocked' } : a));
+      await el.updateComplete;
 
-    expect(badgeStatus('k1')).toBe('blocked');
-    const badge = el.shadowRoot!.querySelector('a.node[href="/agents/k1"] scion-status-badge');
-    expect(badge?.getAttribute('label')).toBeNull();
+      expect(badgeStatus('k1')).toBe('blocked');
+      const badge = el.shadowRoot!.querySelector('a.node[href="/agents/k1"] scion-status-badge');
+      expect(badge?.getAttribute('label')).toBeNull();
+    });
   });
 
   /** Edges whose title indicates non-messageable ("mismatch") styling. */
