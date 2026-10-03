@@ -617,12 +617,7 @@ type AgentInfo struct {
 	Runtime    string            `json:"runtime,omitempty"`
 	Profile    string            `json:"profile,omitempty"`
 	Kubernetes *AgentK8sMetadata `json:"kubernetes,omitempty"`
-	// SharedDirStorageBackend is the shared-dir storage backend ("local"
-	// or "nfs") the agent's shared dirs were first set up with. Later
-	// starts keep it even if settings change. Empty for agents created
-	// before it was recorded; those use the current settings.
-	SharedDirStorageBackend string   `json:"sharedDirStorageBackend,omitempty"`
-	Warnings                []string `json:"warnings,omitempty"`
+	Warnings   []string          `json:"warnings,omitempty"`
 	// HubOnlyEnvWarnings carries only the warnings for broker-local values
 	// of hub-only env keys (TZ) that the broker dropped for a hub-dispatched
 	// agent. They are also included in Warnings; this field lets the broker

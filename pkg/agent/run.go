@@ -1277,10 +1277,16 @@ authDone:
 	// exposure — see design §3.2.6.
 	var sharedDirStorageCfg *config.V1SharedDirStorageConfig
 	recordedSharedDirBackend := ""
-	if finalScionCfg != nil && finalScionCfg.Info != nil {
-		recordedSharedDirBackend = finalScionCfg.Info.SharedDirStorageBackend
-	}
+	// sharedDirStorageResolved is set only when the backend was chosen from
+	// successfully loaded global settings, so a start that fell back to the
+	// local layout after a load error never records that fallback.
+	sharedDirStorageResolved := false
 	if len(effectiveSharedDirs) > 0 {
+		recorded, recErr := readSharedDirStorageRecord(agentDir)
+		if recErr != nil {
+			return nil, recErr
+		}
+		recordedSharedDirBackend = recorded
 		globalSettings, _, gErr := config.LoadGlobalSettingsWithOverlay()
 		if gErr != nil {
 			// A broken global settings file must fail closed (design G5)
@@ -1339,6 +1345,7 @@ authDone:
 				return nil, err
 			}
 			sharedDirStorageCfg = cfg
+			sharedDirStorageResolved = true
 		}
 	}
 	// nfs shared_dir_storage keys its layout on hubDispatchedProjectID,
@@ -1370,15 +1377,10 @@ authDone:
 	if err != nil {
 		return nil, err
 	}
-	if len(effectiveSharedDirs) > 0 && recordedSharedDirBackend == "" {
+	if len(effectiveSharedDirs) > 0 && recordedSharedDirBackend == "" && sharedDirStorageResolved {
 		// Record the backend the agent's shared dirs were set up with, so
 		// later starts keep using it even if settings change.
-		backend := sharedDirStorageBackendName(sharedDirStorageCfg)
-		if err := updateSavedAgentInfo(opts.Name, opts.ProjectPath, func(info *api.AgentInfo) {
-			if info.SharedDirStorageBackend == "" {
-				info.SharedDirStorageBackend = backend
-			}
-		}); err != nil {
+		if err := writeSharedDirStorageRecord(agentDir, sharedDirStorageBackendName(sharedDirStorageCfg)); err != nil {
 			slog.Warn("Start: could not record the agent's shared-dir storage backend", "agent", opts.Name, "error", err)
 		}
 	}
