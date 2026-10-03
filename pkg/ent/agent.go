@@ -147,6 +147,8 @@ type Agent struct {
 	DeletionPrior string `json:"deletion_prior,omitempty"`
 	// DeletionRequest holds the value of the "deletion_request" field.
 	DeletionRequest string `json:"deletion_request,omitempty"`
+	// SoftDeleteOpID holds the value of the "soft_delete_op_id" field.
+	SoftDeleteOpID *string `json:"soft_delete_op_id,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the AgentQuery when eager-loading is set.
 	Edges        AgentEdges `json:"edges"`
@@ -208,7 +210,7 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case agent.FieldExitCode, agent.FieldCurrentTurns, agent.FieldCurrentModelCalls, agent.FieldStateVersion, agent.FieldGeneration, agent.FieldLaunchSeq, agent.FieldDeletionClaim:
 			values[i] = new(sql.NullInt64)
-		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError, agent.FieldDeletionState, agent.FieldDeletionCode, agent.FieldDeletionError, agent.FieldDeletionPrior, agent.FieldDeletionRequest:
+		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError, agent.FieldDeletionState, agent.FieldDeletionCode, agent.FieldDeletionError, agent.FieldDeletionPrior, agent.FieldDeletionRequest, agent.FieldSoftDeleteOpID:
 			values[i] = new(sql.NullString)
 		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt, agent.FieldDeletionLeaseAt, agent.FieldDeletionStartedAt, agent.FieldDeletionFailedAt:
 			values[i] = new(sql.NullTime)
@@ -634,6 +636,13 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.DeletionRequest = value.String
 			}
+		case agent.FieldSoftDeleteOpID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field soft_delete_op_id", values[i])
+			} else if value.Valid {
+				_m.SoftDeleteOpID = new(string)
+				*_m.SoftDeleteOpID = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -899,6 +908,11 @@ func (_m *Agent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("deletion_request=")
 	builder.WriteString(_m.DeletionRequest)
+	builder.WriteString(", ")
+	if v := _m.SoftDeleteOpID; v != nil {
+		builder.WriteString("soft_delete_op_id=")
+		builder.WriteString(*v)
+	}
 	builder.WriteByte(')')
 	return builder.String()
 }

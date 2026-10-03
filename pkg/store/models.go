@@ -163,6 +163,13 @@ type Agent struct {
 	DeletionPrior     string     `json:"-"` // JSON DeletionPriorState
 	DeletionRequest   string     `json:"-"` // JSON DeletionRequestInfo
 
+	// SoftDeleteOpID is the operation ID of the soft delete that set
+	// DeletedAt ("" when the agent is live or was soft-deleted before the
+	// column existed). Restore reactivates only the delegation edges
+	// deactivated under this ID. UpdateAgent writes it; no authorization
+	// decision reads it.
+	SoftDeleteOpID string `json:"-"`
+
 	// Deletion is the computed, client-facing view of the deletion_* columns
 	// (design §2.2; see ComputeAgentDeletion). Like Launch it is populated
 	// only by the hub at response time. Unlike Launch it is always present

@@ -1194,6 +1194,10 @@ type Server struct {
 	missingAgents missingAgentTracker
 	lifecycleOps  lifecycleOpTracker
 
+	// lifecycleTxHooks holds the agent lifecycle transaction hooks
+	// (agent_lifecycle_tx.go). The zero value has no hooks and is ready to use.
+	lifecycleTxHooks agentLifecycleHooks
+
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
 	authLog           *slog.Logger

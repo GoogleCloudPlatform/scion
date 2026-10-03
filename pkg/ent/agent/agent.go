@@ -142,6 +142,8 @@ const (
 	FieldDeletionPrior = "deletion_prior"
 	// FieldDeletionRequest holds the string denoting the deletion_request field in the database.
 	FieldDeletionRequest = "deletion_request"
+	// FieldSoftDeleteOpID holds the string denoting the soft_delete_op_id field in the database.
+	FieldSoftDeleteOpID = "soft_delete_op_id"
 	// EdgeProject holds the string denoting the project edge name in mutations.
 	EdgeProject = "project"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -239,6 +241,7 @@ var Columns = []string{
 	FieldDeletionError,
 	FieldDeletionPrior,
 	FieldDeletionRequest,
+	FieldSoftDeleteOpID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -675,6 +678,11 @@ func ByDeletionPrior(opts ...sql.OrderTermOption) OrderOption {
 // ByDeletionRequest orders the results by the deletion_request field.
 func ByDeletionRequest(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDeletionRequest, opts...).ToFunc()
+}
+
+// BySoftDeleteOpID orders the results by the soft_delete_op_id field.
+func BySoftDeleteOpID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSoftDeleteOpID, opts...).ToFunc()
 }
 
 // ByProjectField orders the results by project field.

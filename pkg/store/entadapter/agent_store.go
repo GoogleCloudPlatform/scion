@@ -141,6 +141,9 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		DeletionPrior:       a.DeletionPrior,
 		DeletionRequest:     a.DeletionRequest,
 	}
+	if a.SoftDeleteOpID != nil {
+		sa.SoftDeleteOpID = *a.SoftDeleteOpID
+	}
 	sa.DeletionLeaseAt = copyTimePtr(a.DeletionLeaseAt)
 	sa.DeletionStartedAt = copyTimePtr(a.DeletionStartedAt)
 	sa.DeletionFailedAt = copyTimePtr(a.DeletionFailedAt)
@@ -757,6 +760,11 @@ func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expect
 		update.ClearDeletedAt()
 	} else {
 		update.SetDeletedAt(a.DeletedAt)
+	}
+	if a.SoftDeleteOpID == "" {
+		update.ClearSoftDeleteOpID()
+	} else {
+		update.SetSoftDeleteOpID(a.SoftDeleteOpID)
 	}
 	if a.OwnerID == "" {
 		update.ClearOwnerID()

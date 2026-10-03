@@ -1199,6 +1199,26 @@ func (_u *AgentUpdate) ClearDeletionRequest() *AgentUpdate {
 	return _u
 }
 
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (_u *AgentUpdate) SetSoftDeleteOpID(v string) *AgentUpdate {
+	_u.mutation.SetSoftDeleteOpID(v)
+	return _u
+}
+
+// SetNillableSoftDeleteOpID sets the "soft_delete_op_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableSoftDeleteOpID(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetSoftDeleteOpID(*v)
+	}
+	return _u
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (_u *AgentUpdate) ClearSoftDeleteOpID() *AgentUpdate {
+	_u.mutation.ClearSoftDeleteOpID()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdate) SetProject(v *Project) *AgentUpdate {
 	return _u.SetProjectID(v.ID)
@@ -1714,6 +1734,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.DeletionRequestCleared() {
 		_spec.ClearField(agent.FieldDeletionRequest, field.TypeString)
+	}
+	if value, ok := _u.mutation.SoftDeleteOpID(); ok {
+		_spec.SetField(agent.FieldSoftDeleteOpID, field.TypeString, value)
+	}
+	if _u.mutation.SoftDeleteOpIDCleared() {
+		_spec.ClearField(agent.FieldSoftDeleteOpID, field.TypeString)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -3019,6 +3045,26 @@ func (_u *AgentUpdateOne) ClearDeletionRequest() *AgentUpdateOne {
 	return _u
 }
 
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (_u *AgentUpdateOne) SetSoftDeleteOpID(v string) *AgentUpdateOne {
+	_u.mutation.SetSoftDeleteOpID(v)
+	return _u
+}
+
+// SetNillableSoftDeleteOpID sets the "soft_delete_op_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableSoftDeleteOpID(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetSoftDeleteOpID(*v)
+	}
+	return _u
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (_u *AgentUpdateOne) ClearSoftDeleteOpID() *AgentUpdateOne {
+	_u.mutation.ClearSoftDeleteOpID()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdateOne) SetProject(v *Project) *AgentUpdateOne {
 	return _u.SetProjectID(v.ID)
@@ -3564,6 +3610,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.DeletionRequestCleared() {
 		_spec.ClearField(agent.FieldDeletionRequest, field.TypeString)
+	}
+	if value, ok := _u.mutation.SoftDeleteOpID(); ok {
+		_spec.SetField(agent.FieldSoftDeleteOpID, field.TypeString, value)
+	}
+	if _u.mutation.SoftDeleteOpIDCleared() {
+		_spec.ClearField(agent.FieldSoftDeleteOpID, field.TypeString)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{

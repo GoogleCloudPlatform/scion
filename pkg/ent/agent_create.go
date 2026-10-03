@@ -854,6 +854,20 @@ func (_c *AgentCreate) SetNillableDeletionRequest(v *string) *AgentCreate {
 	return _c
 }
 
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (_c *AgentCreate) SetSoftDeleteOpID(v string) *AgentCreate {
+	_c.mutation.SetSoftDeleteOpID(v)
+	return _c
+}
+
+// SetNillableSoftDeleteOpID sets the "soft_delete_op_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableSoftDeleteOpID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetSoftDeleteOpID(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AgentCreate) SetID(v uuid.UUID) *AgentCreate {
 	_c.mutation.SetID(v)
@@ -1411,6 +1425,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.DeletionRequest(); ok {
 		_spec.SetField(agent.FieldDeletionRequest, field.TypeString, value)
 		_node.DeletionRequest = value
+	}
+	if value, ok := _c.mutation.SoftDeleteOpID(); ok {
+		_spec.SetField(agent.FieldSoftDeleteOpID, field.TypeString, value)
+		_node.SoftDeleteOpID = &value
 	}
 	if nodes := _c.mutation.ProjectIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -2572,6 +2590,24 @@ func (u *AgentUpsert) UpdateDeletionRequest() *AgentUpsert {
 // ClearDeletionRequest clears the value of the "deletion_request" field.
 func (u *AgentUpsert) ClearDeletionRequest() *AgentUpsert {
 	u.SetNull(agent.FieldDeletionRequest)
+	return u
+}
+
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (u *AgentUpsert) SetSoftDeleteOpID(v string) *AgentUpsert {
+	u.Set(agent.FieldSoftDeleteOpID, v)
+	return u
+}
+
+// UpdateSoftDeleteOpID sets the "soft_delete_op_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateSoftDeleteOpID() *AgentUpsert {
+	u.SetExcluded(agent.FieldSoftDeleteOpID)
+	return u
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (u *AgentUpsert) ClearSoftDeleteOpID() *AgentUpsert {
+	u.SetNull(agent.FieldSoftDeleteOpID)
 	return u
 }
 
@@ -3862,6 +3898,27 @@ func (u *AgentUpsertOne) UpdateDeletionRequest() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearDeletionRequest() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearDeletionRequest()
+	})
+}
+
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (u *AgentUpsertOne) SetSoftDeleteOpID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSoftDeleteOpID(v)
+	})
+}
+
+// UpdateSoftDeleteOpID sets the "soft_delete_op_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateSoftDeleteOpID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSoftDeleteOpID()
+	})
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (u *AgentUpsertOne) ClearSoftDeleteOpID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSoftDeleteOpID()
 	})
 }
 
@@ -5319,6 +5376,27 @@ func (u *AgentUpsertBulk) UpdateDeletionRequest() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearDeletionRequest() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearDeletionRequest()
+	})
+}
+
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (u *AgentUpsertBulk) SetSoftDeleteOpID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSoftDeleteOpID(v)
+	})
+}
+
+// UpdateSoftDeleteOpID sets the "soft_delete_op_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateSoftDeleteOpID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSoftDeleteOpID()
+	})
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (u *AgentUpsertBulk) ClearSoftDeleteOpID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSoftDeleteOpID()
 	})
 }
 

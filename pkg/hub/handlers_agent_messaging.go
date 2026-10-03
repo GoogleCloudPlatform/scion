@@ -1450,30 +1450,29 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
-	agent.DeletedAt = time.Time{}
-	agent.Updated = time.Now()
-
 	// Identity-key rows persist through soft-delete (only a hard delete or
 	// purge frees them -- see composite.go's DeleteAgent/DeleteProject/
 	// PurgeDeletedAgents), so restoring an agent should normally find its own
 	// keys already reserved and in place. But an agent soft-deleted before
 	// this invariant existed, or before a backfill of it, may have no key
 	// rows at all, leaving a window where another agent could since have
-	// taken its slug or display-name key. Re-asserting the keys in the same
-	// transaction as the restore turns that window into a defensive
-	// revalidation: a genuine collision surfaces as the same
+	// taken its slug or display-name key. restoreAgentTx re-asserts the keys
+	// in the same transaction as the restore, turning that window into a
+	// defensive revalidation: a genuine collision surfaces as the same
 	// store.ErrIdentityKeyConflict (409) a create or rename would get, rather
 	// than silently restoring an agent whose key now belongs to someone else.
-	// api.IdentityKeysFor is also what the backfill migration uses, so a
-	// legacy row's empty-display-name-key tolerance is handled identically
-	// by both.
-	keys := api.IdentityKeysFor(agent.Slug, agent.Name)
-	if err := s.store.WithTx(ctx, func(tx store.Store) error {
-		if err := tx.UpdateAgent(ctx, agent); err != nil {
-			return err
+	// The same transaction reactivates the delegation edges the soft delete
+	// deactivated (a conflicting active edge is a 409) and writes the
+	// agent_restore audit record.
+	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
+		if errors.Is(err, errAgentNotSoftDeleted) {
+			BadRequest(w, "Agent is not in deleted state")
+			return
 		}
-		return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys)
-	}); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			Conflict(w, "The agent already has an active delegation that conflicts with the one being restored")
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}

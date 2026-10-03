@@ -213,6 +213,7 @@ var (
 		{Name: "deletion_error", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "deletion_prior", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "deletion_request", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "soft_delete_op_id", Type: field.TypeString, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 	}
 	// AgentsTable holds the schema information for the "agents" table.
@@ -223,7 +224,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[63]},
+				Columns:    []*schema.Column{AgentsColumns[64]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -232,7 +233,7 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[63]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[64]},
 			},
 			{
 				Name:    "agent_launch_deadline",
