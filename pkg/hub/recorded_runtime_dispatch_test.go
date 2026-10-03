@@ -422,6 +422,10 @@ func TestRecordedRuntime_DeleteRuntimeUnavailableRollsBack(t *testing.T) {
 	require.Equal(t, "7", joined.Header().Get("Retry-After"))
 	require.Contains(t, joined.Body.String(), brokerCodeRuntimeUnavailable)
 
+	// The remembered value belongs to that claim only: a later delete of the
+	// same agent does not inherit it.
+	require.Empty(t, deletionRetryAfterFor(agent.ID, got.DeletionClaim+1))
+
 	// A joiner on a hub process that did not classify the failure has no
 	// remembered value and sends the default.
 	deletionRetryAfter.Delete(agent.ID)
