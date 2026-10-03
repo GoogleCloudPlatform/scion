@@ -253,6 +253,53 @@ func TestDispatcherStartAbortsOnCeilingOrphaned(t *testing.T) {
 	assertIssueDeniedAudit(t, f.store, a.ID, mintSiteStart, string(DenyCauseCeilingOrphaned))
 }
 
+// assertCredentialUnrevoked checks that the credential seeded under jti is
+// unchanged and active.
+func assertCredentialUnrevoked(t *testing.T, s store.AgentCredentialStore, jti string, before *store.AgentCredential) {
+	t.Helper()
+	after := getTestAgentCredential(t, s, jti)
+	assert.Nil(t, after.RevokedAt, "credential is not revoked")
+	assert.Nil(t, after.RevokedBy, "no revoker recorded")
+	assert.Nil(t, after.RevokeReason, "no revoke reason recorded")
+	assert.Equal(t, before, after, "credential row is unchanged")
+}
+
+// A mint denial at the start site mints nothing, so it revokes nothing: a
+// credential the agent held before the start request stays active.
+func TestDispatcherStartMintDenialKeepsExistingCredential(t *testing.T) {
+	f := newMintFixture(t, "start-keep-cred")
+	setBackfillCompleted(t, f.store)
+	a := f.agent(t, "start-keep-cred-agent", AgentRoleFull, state.PhaseStopped)
+	jti := "start-keep-cred-jti"
+	insertTestAgentCredential(t, f.store, a.ID, f.projectID, jti)
+	before := getTestAgentCredential(t, f.store, jti)
+	require.Nil(t, before.RevokedAt)
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	assertCeilingDenied(t, rec)
+	assert.False(t, f.client.startCalled, "no broker request")
+	assertIssueDeniedAudit(t, f.store, a.ID, mintSiteStart, string(DenyCauseCeilingOrphaned))
+	assertCredentialUnrevoked(t, f.store, jti, before)
+}
+
+// A mint denial at the create site mints nothing, so it revokes nothing: a
+// credential already recorded for the agent stays active.
+func TestDispatcherCreateMintDenialKeepsExistingCredential(t *testing.T) {
+	f := newMintFixture(t, "create-keep-cred")
+	setBackfillCompleted(t, f.store)
+	a := f.agent(t, "create-keep-cred-agent", AgentRoleFull, state.PhaseCreated)
+	jti := "create-keep-cred-jti"
+	insertTestAgentCredential(t, f.store, a.ID, f.projectID, jti)
+	before := getTestAgentCredential(t, f.store, jti)
+	require.Nil(t, before.RevokedAt)
+
+	err := f.disp.DispatchAgentCreate(context.Background(), a)
+	require.ErrorIs(t, err, ErrProvenanceMissing)
+	assert.False(t, f.client.createCalled, "no broker create")
+	assertIssueDeniedAudit(t, f.store, a.ID, mintSiteCreate, string(DenyCauseCeilingOrphaned))
+	assertCredentialUnrevoked(t, f.store, jti, before)
+}
+
 // A lookup fault at the create mint: 503, no broker create, no agent row.
 func TestDispatcherCreateAbortsOnCeilingLookupError(t *testing.T) {
 	f := newMintFixture(t, "create-lookup")

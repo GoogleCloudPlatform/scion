@@ -263,6 +263,19 @@ func TestAgentCreateDeliverIDs_BoundedParentSubset(t *testing.T) {
 	})
 }
 
+// TestHubDeliveryPermissionListLiteral pins the delivery permissions an
+// agent-created edge may carry to a literal, sorted list. The list is derived
+// from hubDeliveryPermissionIDs, so adding a deliver permission to that map
+// widens agent-created edges; this test makes that a deliberate test edit.
+func TestHubDeliveryPermissionListLiteral(t *testing.T) {
+	want := []string{"env_var.deliver", "secret.deliver", "skill_injection.deliver"}
+	assert.Equal(t, want, hubDeliveryPermissionList)
+	assert.Len(t, hubDeliveryPermissionSet, len(want))
+	for _, id := range want {
+		assert.True(t, hubDeliveryPermissionSet[id], id)
+	}
+}
+
 // childEffectCeiling: bounded V1, sorted and de-duplicated; a bounded source
 // narrows the coverage; deliver IDs outside the fixed set are dropped.
 func TestChildEffectCeiling(t *testing.T) {
