@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -3678,5 +3679,55 @@ func TestGitHubSkillResolver_CancelledBeforeRetry_ReturnsCanceled(t *testing.T) 
 	}
 	if got := atomic.LoadInt32(&attempts); got != 1 {
 		t.Errorf("expected exactly 1 attempt, got %d", got)
+	}
+}
+
+// TestRetryAfter_HugeValueDoesNotOverflow checks that a Retry-After far too
+// large for time.Duration is capped (or saturated) rather than wrapping into
+// a negative or short duration, at each place the header is converted.
+func TestRetryAfter_HugeValueDoesNotOverflow(t *testing.T) {
+	// 99999999999 seconds wraps to a large positive duration; 9223372037
+	// wraps to a negative one and 18446744074 to under a second, so a cap
+	// applied after the multiplication would not catch the last two.
+	for _, huge := range []string{"99999999999", "9223372037", "18446744074"} {
+		t.Run(huge, func(t *testing.T) {
+			newResp := func(status int) *http.Response {
+				resp := &http.Response{StatusCode: status, Header: make(http.Header)}
+				resp.Header.Set("Retry-After", huge)
+				return resp
+			}
+
+			if got := githubCooldownFor(newResp(http.StatusTooManyRequests), time.Now()); got != GitHubCooldownMax {
+				t.Errorf("githubCooldownFor = %v, want GitHubCooldownMax (%v)", got, GitHubCooldownMax)
+			}
+			if got := retryDelay(newResp(http.StatusServiceUnavailable), 1); got != githubMaxBackoff {
+				t.Errorf("retryDelay = %v, want githubMaxBackoff (%v)", got, githubMaxBackoff)
+			}
+			got, ok := retryAfterDuration(newResp(http.StatusServiceUnavailable))
+			if !ok || got <= githubMaxBackoff {
+				t.Errorf("retryAfterDuration = %v, %v; want ok and longer than githubMaxBackoff", got, ok)
+			}
+		})
+	}
+}
+
+func TestSecondsUpTo(t *testing.T) {
+	cases := []struct {
+		secs int64
+		max  time.Duration
+		want time.Duration
+	}{
+		{0, time.Minute, 0},
+		{-5, time.Minute, 0},
+		{30, time.Minute, 30 * time.Second},
+		{60, time.Minute, time.Minute},
+		{61, time.Minute, time.Minute},
+		{math.MaxInt64, time.Minute, time.Minute},
+		{99999999999, time.Duration(math.MaxInt64), time.Duration(math.MaxInt64)},
+	}
+	for _, tc := range cases {
+		if got := secondsUpTo(tc.secs, tc.max); got != tc.want {
+			t.Errorf("secondsUpTo(%d, %v) = %v, want %v", tc.secs, tc.max, got, tc.want)
+		}
 	}
 }

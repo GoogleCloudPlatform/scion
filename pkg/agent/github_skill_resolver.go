@@ -1112,11 +1112,13 @@ func retryAfterDuration(resp *http.Response) (time.Duration, bool) {
 	if ra == "" {
 		return 0, false
 	}
-	seconds, err := strconv.Atoi(ra)
+	seconds, err := strconv.ParseInt(ra, 10, 64)
 	if err != nil || seconds < 0 {
 		return 0, false
 	}
-	return time.Duration(seconds) * time.Second, true
+	// Saturate rather than overflow: a huge value must still read as longer
+	// than githubMaxBackoff.
+	return secondsUpTo(seconds, time.Duration(math.MaxInt64)), true
 }
 
 // cancelOnCloseBody ties a per-attempt context's cancel func to the lifetime
@@ -1352,12 +1354,8 @@ func isRetryableResponse(resp *http.Response) bool {
 func retryDelay(resp *http.Response, attempt int) time.Duration {
 	if resp != nil {
 		if ra := resp.Header.Get("Retry-After"); ra != "" {
-			if seconds, err := strconv.Atoi(ra); err == nil && seconds >= 0 {
-				d := time.Duration(seconds) * time.Second
-				if d > githubMaxBackoff {
-					d = githubMaxBackoff
-				}
-				return d
+			if seconds, err := strconv.ParseInt(ra, 10, 64); err == nil && seconds >= 0 {
+				return secondsUpTo(seconds, githubMaxBackoff)
 			}
 		}
 	}

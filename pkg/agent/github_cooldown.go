@@ -263,7 +263,7 @@ func githubCooldownFor(resp *http.Response, now time.Time) time.Duration {
 	d := GitHubCooldownDefault
 	if ra := strings.TrimSpace(resp.Header.Get("Retry-After")); ra != "" {
 		if secs, err := strconv.ParseInt(ra, 10, 64); err == nil && secs > 0 {
-			return capCooldown(time.Duration(secs) * time.Second)
+			return secondsUpTo(secs, GitHubCooldownMax)
 		}
 		if t, err := http.ParseTime(ra); err == nil && t.After(now) {
 			return capCooldown(t.Sub(now))
@@ -277,6 +277,20 @@ func githubCooldownFor(resp *http.Response, now time.Time) time.Duration {
 		}
 	}
 	return d
+}
+
+// secondsUpTo converts a non-negative count of seconds, as read from a
+// Retry-After header, to a duration no longer than max. The comparison is
+// made in seconds, before multiplying, so a very large header value gives
+// max rather than overflowing time.Duration into a negative or short value.
+func secondsUpTo(secs int64, max time.Duration) time.Duration {
+	if secs <= 0 {
+		return 0
+	}
+	if secs >= int64(max/time.Second) {
+		return max
+	}
+	return time.Duration(secs) * time.Second
 }
 
 func capCooldown(d time.Duration) time.Duration {
