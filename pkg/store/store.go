@@ -407,6 +407,14 @@ type AgentStore interface {
 	// agent does not exist.
 	SetAgentRuntimeTarget(ctx context.Context, id string, expectedVersion int64, target, candidate string) (written bool, err error)
 
+	// SetAgentQuotaProfile records the profile an agent's broker capacity is
+	// counted against (AgentAppliedConfig.QuotaProfile) when none is recorded
+	// yet, and changes nothing else: no other applied-config key, no other
+	// column, and not state_version. It returns written=false, with no
+	// error, when a profile is already recorded, profile is empty, the
+	// applied config changed concurrently, or the agent does not exist.
+	SetAgentQuotaProfile(ctx context.Context, id, profile string) (written bool, err error)
+
 	// FindOrphanedAgents returns agents whose RuntimeBrokerID references a broker
 	// that is offline or does not exist, and who are not in terminal states
 	// (stopped, error). Agents assigned to the given currentBrokerID are excluded.
@@ -2586,6 +2594,13 @@ type QuotaStore interface {
 	// limit in every scope of scopeType, oldest first. Used where the scope
 	// IDs are not known in advance (per-profile broker reservations).
 	ListActiveReservationsByScopeType(ctx context.Context, limitDefinitionID, scopeType string) ([]*UsageReservation, error)
+
+	// MoveActiveReservationScope moves resourceID's active reservation for a
+	// limit from one scope to another in a single conditional update. It
+	// changes nothing, and returns false, when the reservation has been
+	// released or is no longer in the from scope, so a release that lands
+	// first is never undone.
+	MoveActiveReservationScope(ctx context.Context, limitDefinitionID, resourceID, fromScopeType, fromScopeID, toScopeType, toScopeID string) (moved bool, err error)
 
 	// HasActiveReservation reports whether resourceID already holds a
 	// non-released reservation for the given limit, regardless of scope.

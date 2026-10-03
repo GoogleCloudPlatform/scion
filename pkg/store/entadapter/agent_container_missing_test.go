@@ -689,3 +689,56 @@ func TestAgentStore_RuntimeTarget_RowLock(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentStore_SetAgentQuotaProfile(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	t.Run("sets the key once and changes nothing else", func(t *testing.T) {
+		a := makeAgent(projectID, "quota-profile")
+		a.AppliedConfig = &store.AgentAppliedConfig{Image: "example/image:1", Env: map[string]string{"A": "1"}}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		before, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+
+		written, err := s.SetAgentQuotaProfile(ctx, a.ID, "gke")
+		require.NoError(t, err)
+		assert.True(t, written)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "gke", got.AppliedConfig.QuotaProfile)
+		assert.Equal(t, "example/image:1", got.AppliedConfig.Image)
+		assert.Equal(t, map[string]string{"A": "1"}, got.AppliedConfig.Env)
+		assert.Equal(t, before.StateVersion, got.StateVersion, "state_version is not bumped")
+
+		written, err = s.SetAgentQuotaProfile(ctx, a.ID, "open")
+		require.NoError(t, err)
+		assert.False(t, written, "a recorded profile is never replaced")
+		got, err = s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "gke", got.AppliedConfig.QuotaProfile)
+	})
+
+	t.Run("nil applied config", func(t *testing.T) {
+		a := makeAgent(projectID, "quota-profile-nil")
+		require.NoError(t, s.CreateAgent(ctx, a))
+		written, err := s.SetAgentQuotaProfile(ctx, a.ID, "gke")
+		require.NoError(t, err)
+		assert.True(t, written)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.AppliedConfig)
+		assert.Equal(t, "gke", got.AppliedConfig.QuotaProfile)
+	})
+
+	t.Run("empty profile and unknown agent are no-ops", func(t *testing.T) {
+		a := makeAgent(projectID, "quota-profile-empty")
+		require.NoError(t, s.CreateAgent(ctx, a))
+		written, err := s.SetAgentQuotaProfile(ctx, a.ID, "")
+		require.NoError(t, err)
+		assert.False(t, written)
+		written, err = s.SetAgentQuotaProfile(ctx, "00000000-0000-0000-0000-00000000abce", "gke")
+		require.NoError(t, err)
+		assert.False(t, written)
+	})
+}

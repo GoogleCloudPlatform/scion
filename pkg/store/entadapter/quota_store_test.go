@@ -19,6 +19,7 @@ package entadapter
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -676,4 +677,99 @@ func TestQuotaStore_SeedLimitDefinitions_Idempotent(t *testing.T) {
 	list, err := qs.ListLimitDefinitions(ctx)
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
+}
+
+func TestQuotaStore_ListActiveReservationsByScopeType(t *testing.T) {
+	qs := newTestQuotaStore(t)
+	ctx := context.Background()
+
+	ld := createTestLimitDef(t, qs, "by_scope_type_limit")
+	other := createTestLimitDef(t, qs, "by_scope_type_other")
+	broker := uuid.New().String()
+	base := time.Now().Add(-time.Hour)
+	mk := func(limitID, scopeType, scopeID string, age time.Duration) string {
+		t.Helper()
+		resID := uuid.New().String()
+		_, err := qs.CreateUsageReservation(ctx, &store.UsageReservation{
+			LimitDefinitionID: limitID,
+			SubjectID:         broker,
+			ScopeType:         scopeType,
+			ScopeID:           scopeID,
+			ResourceID:        resID,
+			Reserved:          1,
+			CreatedAt:         base.Add(-age),
+		})
+		require.NoError(t, err)
+		return resID
+	}
+	newer := mk(ld.ID, store.QuotaScopeBrokerProfile, broker+"/profiles/a", time.Minute)
+	older := mk(ld.ID, store.QuotaScopeBrokerProfile, broker+"/runtimes/k8s", 2*time.Minute)
+	released := mk(ld.ID, store.QuotaScopeBrokerProfile, broker+"/profiles/a", 3*time.Minute)
+	require.NoError(t, qs.ReleaseReservation(ctx, ld.ID, released))
+	mk(ld.ID, store.QuotaScopeBroker, broker, 4*time.Minute)
+	mk(other.ID, store.QuotaScopeBrokerProfile, broker+"/profiles/a", 5*time.Minute)
+
+	got, err := qs.ListActiveReservationsByScopeType(ctx, ld.ID, store.QuotaScopeBrokerProfile)
+	require.NoError(t, err)
+	require.Len(t, got, 2, "only active rows of this limit and scope type")
+	assert.Equal(t, older, got[0].ResourceID, "oldest first")
+	assert.Equal(t, newer, got[1].ResourceID)
+	for _, r := range got {
+		assert.Equal(t, store.QuotaScopeBrokerProfile, r.ScopeType)
+		assert.Nil(t, r.ReleasedAt)
+	}
+}
+
+func TestQuotaStore_MoveActiveReservationScope(t *testing.T) {
+	qs := newTestQuotaStore(t)
+	ctx := context.Background()
+
+	ld := createTestLimitDef(t, qs, "move_scope_limit")
+	broker := uuid.New().String()
+	profileScope := broker + "/profiles/a"
+	reserve := func() string {
+		t.Helper()
+		resID := uuid.New().String()
+		_, err := qs.CreateUsageReservation(ctx, &store.UsageReservation{
+			LimitDefinitionID: ld.ID,
+			SubjectID:         broker,
+			ScopeType:         store.QuotaScopeBroker,
+			ScopeID:           broker,
+			ResourceID:        resID,
+			Reserved:          1,
+		})
+		require.NoError(t, err)
+		return resID
+	}
+	count := func(scopeType, scopeID string) int64 {
+		t.Helper()
+		n, err := qs.CountActiveReservations(ctx, ld.ID, broker, scopeType, scopeID)
+		require.NoError(t, err)
+		return n
+	}
+
+	// An active reservation in the from scope moves.
+	a := reserve()
+	moved, err := qs.MoveActiveReservationScope(ctx, ld.ID, a, store.QuotaScopeBroker, broker, store.QuotaScopeBrokerProfile, profileScope)
+	require.NoError(t, err)
+	assert.True(t, moved)
+	assert.EqualValues(t, 0, count(store.QuotaScopeBroker, broker))
+	assert.EqualValues(t, 1, count(store.QuotaScopeBrokerProfile, profileScope))
+
+	// Moving again from the old scope matches nothing.
+	moved, err = qs.MoveActiveReservationScope(ctx, ld.ID, a, store.QuotaScopeBroker, broker, store.QuotaScopeBrokerProfile, broker+"/runtimes/k8s")
+	require.NoError(t, err)
+	assert.False(t, moved)
+	assert.EqualValues(t, 1, count(store.QuotaScopeBrokerProfile, profileScope))
+
+	// A released reservation is not moved and stays released.
+	b := reserve()
+	require.NoError(t, qs.ReleaseReservation(ctx, ld.ID, b))
+	moved, err = qs.MoveActiveReservationScope(ctx, ld.ID, b, store.QuotaScopeBroker, broker, store.QuotaScopeBrokerProfile, profileScope)
+	require.NoError(t, err)
+	assert.False(t, moved)
+	has, err := qs.HasActiveReservation(ctx, ld.ID, b)
+	require.NoError(t, err)
+	assert.False(t, has)
+	assert.EqualValues(t, 1, count(store.QuotaScopeBrokerProfile, profileScope))
 }

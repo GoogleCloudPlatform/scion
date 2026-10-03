@@ -1885,6 +1885,82 @@ func (s *AgentStore) SetAgentRuntimeTarget(ctx context.Context, id string, expec
 	return true, nil
 }
 
+// SetAgentQuotaProfile implements store.AgentStore. See the interface for
+// the contract.
+//
+// Like SetAgentRuntimeTarget, the read and the conditional write run in one
+// transaction and edit only the quotaProfile key in the raw JSON, so
+// concurrent writes to other keys or columns are never undone.
+func (s *AgentStore) SetAgentQuotaProfile(ctx context.Context, id, profile string) (bool, error) {
+	if profile == "" {
+		return false, nil
+	}
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	useLock := s.usesRowLocks(ctx)
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil())
+	if useLock {
+		q = q.ForUpdate()
+	}
+	row, err := q.Select(agent.FieldAppliedConfig).Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return false, nil
+		}
+		return false, mapError(err)
+	}
+	raw := map[string]json.RawMessage{}
+	if row.AppliedConfig != "" {
+		if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
+			return false, fmt.Errorf("set quota profile for agent %s: %w", id, err)
+		}
+		if raw == nil {
+			raw = map[string]json.RawMessage{}
+		}
+	}
+	if existing, ok := raw["quotaProfile"]; ok {
+		var cur string
+		if err := json.Unmarshal(existing, &cur); err == nil && cur != "" {
+			return false, nil
+		}
+	}
+	enc, err := json.Marshal(profile)
+	if err != nil {
+		return false, err
+	}
+	raw["quotaProfile"] = enc
+	updated, err := json.Marshal(raw)
+	if err != nil {
+		return false, err
+	}
+	n, err := tx.Agent.Update().
+		Where(
+			agent.IDEQ(uid),
+			agent.DeletedAtIsNil(),
+			appliedConfigUnchanged(row.AppliedConfig),
+		).
+		SetAppliedConfig(string(updated)).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // stalledExcluded lists the activities that disqualify a running agent from
 // being marked "stalled" (terminal, already-stalled, or intentionally waiting).
 var stalledExcluded = []string{"completed", "limits_exceeded", "blocked", "stalled", "offline", "waiting_for_input"}

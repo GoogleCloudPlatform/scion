@@ -462,3 +462,29 @@ func (q *QuotaStore) ListActiveReservationsByScopeType(ctx context.Context, limi
 	}
 	return result, nil
 }
+
+// MoveActiveReservationScope moves resourceID's active reservation for a
+// limit from one scope to another with one conditional UPDATE. A
+// reservation that was released, or moved by someone else, matches
+// nothing and is left as it is.
+func (q *QuotaStore) MoveActiveReservationScope(ctx context.Context, limitDefinitionID, resourceID, fromScopeType, fromScopeID, toScopeType, toScopeID string) (bool, error) {
+	ldUID, err := parseUUID(limitDefinitionID)
+	if err != nil {
+		return false, err
+	}
+	n, err := q.client.UsageReservation.Update().
+		Where(
+			usagereservation.LimitDefinitionIDEQ(ldUID),
+			usagereservation.ResourceIDEQ(resourceID),
+			usagereservation.ScopeTypeEQ(usagereservation.ScopeType(fromScopeType)),
+			usagereservation.ScopeIDEQ(fromScopeID),
+			usagereservation.ReleasedAtIsNil(),
+		).
+		SetScopeType(usagereservation.ScopeType(toScopeType)).
+		SetScopeID(toScopeID).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
+}
