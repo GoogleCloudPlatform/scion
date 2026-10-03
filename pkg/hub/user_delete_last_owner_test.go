@@ -223,3 +223,245 @@ func TestDeprecatedAllowListDelete_SoleProjectOwnerDenied(t *testing.T) {
 	require.NoError(t, err, "denied delete must keep the invited user")
 	requireSingleOwnerBinding(t, s, project.ID, carol.ID)
 }
+
+// createOwnerBinding gives the principal a project-owner binding directly in
+// the store, optionally pending (notBefore) or expired (expiresAt).
+func createOwnerBinding(t *testing.T, s store.Store, userID, projectID string, notBefore, expiresAt *time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		NotBefore:        notBefore,
+		ExpiresAt:        expiresAt,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+}
+
+// newTestProject creates a bare project directly in the store.
+func newTestProject(t *testing.T, s store.Store, id, name string) *store.Project {
+	t.Helper()
+	p := &store.Project{ID: tid(id), Name: name, Slug: id, Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, s.CreateProject(context.Background(), p))
+	return p
+}
+
+// Sole owner of P1 and co-owner of P2: the denial lists only P1, and nothing
+// changes on either project.
+func TestDeleteUser_SoleOnOneCoOwnerOnAnotherDeniesListingOnlyOrphan(t *testing.T) {
+	srv, s, alice, bob, p1 := setupDemoPolicyTest(t)
+	ctx := context.Background()
+	p2 := newTestProject(t, s, "project-coowned", "Co-owned Project")
+	createOwnerBinding(t, s, alice.ID, p2.ID, nil, nil)
+	createOwnerBinding(t, s, bob.ID, p2.ID, nil, nil)
+	before := allBindingsFor(t, s, alice.ID)
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+alice.ID, nil)
+	requireLastOwnerDenial(t, rec, p1) // details.projects == [p1] exactly
+
+	_, err := s.GetUser(ctx, alice.ID)
+	require.NoError(t, err)
+	assert.Len(t, allBindingsFor(t, s, alice.ID), len(before), "denied delete must keep every binding")
+	assert.Len(t, projectBindingsFor(t, s, p2.ID, alice.ID), 1, "co-owned project's binding must survive")
+	assert.Len(t, projectBindingsFor(t, s, p2.ID, bob.ID), 1)
+	requireSingleOwnerBinding(t, s, p1.ID, alice.ID)
+}
+
+// The only other owner binding is pending (NotBefore in the future) or
+// expired: it is not an active owner, so the delete is denied.
+func TestDeleteUser_OtherOwnerInactiveDenied(t *testing.T) {
+	for _, tc := range []string{"pending", "expired"} {
+		t.Run(tc, func(t *testing.T) {
+			srv, s, alice, bob, project := setupDemoPolicyTest(t)
+			var notBefore, expiresAt *time.Time
+			if tc == "pending" {
+				ts := time.Now().Add(time.Hour)
+				notBefore = &ts
+			} else {
+				ts := time.Now().Add(-time.Hour)
+				expiresAt = &ts
+			}
+			createOwnerBinding(t, s, bob.ID, project.ID, notBefore, expiresAt)
+
+			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+alice.ID, nil)
+			requireLastOwnerDenial(t, rec, project)
+
+			_, err := s.GetUser(context.Background(), alice.ID)
+			require.NoError(t, err)
+			assert.Len(t, projectBindingsFor(t, s, project.ID, alice.ID), 1)
+			assert.Len(t, projectBindingsFor(t, s, project.ID, bob.ID), 1)
+		})
+	}
+}
+
+// concurrentGrantStore simulates a members-API grant to the target user that
+// commits between the guard's binding list and the cascade delete
+// (ptone/scion#2770 review M1): inside the delete transaction, right before
+// DeleteRoleBindingsForPrincipal runs, it inserts a new project-owner binding
+// for the target on grantProjectID, a project the guard never checked.
+type concurrentGrantStore struct {
+	store.Store
+	targetUserID   string
+	grantProjectID string
+	injected       bool
+}
+
+func (c *concurrentGrantStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return c.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&concurrentGrantTx{Store: tx, parent: c})
+	})
+}
+
+type concurrentGrantTx struct {
+	store.Store
+	parent *concurrentGrantStore
+}
+
+func (c *concurrentGrantTx) DeleteRoleBindingsForPrincipal(ctx context.Context, principalType, principalID string) (int, error) {
+	if principalID == c.parent.targetUserID && !c.parent.injected {
+		c.parent.injected = true
+		ownerRD, err := c.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := c.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: ownerRD.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      principalID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          c.parent.grantProjectID,
+			CreatedBy:        "concurrent-grant",
+		}); err != nil {
+			return 0, err
+		}
+	}
+	return c.Store.DeleteRoleBindingsForPrincipal(ctx, principalType, principalID)
+}
+
+// requireConflictRetry asserts the 409 conflict response for a delete that
+// raced a change to the user's role bindings.
+func requireConflictRetry(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var resp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	assert.Equal(t, ErrCodeConflict, resp.Error.Code)
+	assert.Contains(t, resp.Error.Message, "changed concurrently")
+}
+
+// A binding granted to the target between the guard's list and the cascade
+// must abort the delete with 409 conflict and roll everything back, rather
+// than silently deleting an owner binding the guard never checked.
+func TestDeleteUser_ConcurrentBindingChangeAbortsWithConflict(t *testing.T) {
+	cases := []struct {
+		name   string
+		target func(alice, carol *store.User) *store.User
+		path   func(u *store.User) string
+	}{
+		{"users", func(a, _ *store.User) *store.User { return a },
+			func(u *store.User) string { return "/api/v1/users/" + u.ID }},
+		{"allow-list", func(_, c *store.User) *store.User { return c },
+			func(u *store.User) string { return "/api/v1/admin/allow-list/" + u.Email }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, alice, bob, project := setupDemoPolicyTest(t)
+			ctx := context.Background()
+			// alice co-owns project with bob, so the guard itself allows
+			// her delete; carol (invited) holds a member binding.
+			addProjectOwner(t, srv, s, alice, bob, project.ID)
+			carol := newInvitedUser(t, s, "user-carol", "carol@test.com")
+			memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+			require.NoError(t, err)
+			_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+				RoleDefinitionID: memberRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: carol.ID,
+				ScopeType: store.RoleScopeProject, ScopeID: project.ID, CreatedBy: alice.ID,
+			})
+			require.NoError(t, err)
+
+			target := tc.target(alice, carol)
+			// The concurrent grant lands on a project the target does not
+			// own, so the guard never locks or checks it.
+			other := newTestProject(t, s, "project-other", "Other Project")
+			createOwnerBinding(t, s, bob.ID, other.ID, nil, nil)
+
+			before := allBindingsFor(t, s, target.ID)
+			require.NotEmpty(t, before)
+
+			raced := &concurrentGrantStore{Store: s, targetUserID: target.ID, grantProjectID: other.ID}
+			srv.store = raced
+
+			rec := doRequest(t, srv, http.MethodDelete, tc.path(target), nil)
+			srv.store = s
+			require.True(t, raced.injected, "precondition: the concurrent grant was injected")
+			requireConflictRetry(t, rec)
+
+			_, err = s.GetUser(ctx, target.ID)
+			require.NoError(t, err, "aborted delete must keep the user")
+			after := allBindingsFor(t, s, target.ID)
+			beforeIDs := make([]string, 0, len(before))
+			for _, b := range before {
+				beforeIDs = append(beforeIDs, b.ID)
+			}
+			afterIDs := make([]string, 0, len(after))
+			for _, b := range after {
+				afterIDs = append(afterIDs, b.ID)
+			}
+			assert.ElementsMatch(t, beforeIDs, afterIDs, "aborted delete must leave the bindings untouched")
+		})
+	}
+}
+
+// missingOwnerRoleTxStore makes the guard's project-owner role lookup return
+// store.ErrNotFound inside the delete transaction.
+type missingOwnerRoleTxStore struct{ store.Store }
+
+func (m *missingOwnerRoleTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return m.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&missingOwnerRoleTx{Store: tx})
+	})
+}
+
+type missingOwnerRoleTx struct{ store.Store }
+
+func (m *missingOwnerRoleTx) GetRoleDefinitionByName(ctx context.Context, name, scope string) (*store.RoleDefinition, error) {
+	if name == store.ProjectRoleOwner {
+		return nil, store.ErrNotFound
+	}
+	return m.Store.GetRoleDefinitionByName(ctx, name, scope)
+}
+
+// Only a not-found from DeleteUser maps to 404 on the allow-list delete; a
+// not-found inside the guard is a server error (ptone/scion#2770 review L3).
+func TestDeprecatedAllowListDelete_GuardNotFoundIsInternalError(t *testing.T) {
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+	carol := newInvitedUser(t, s, "user-carol", "carol@test.com")
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: carol.ID,
+		ScopeType: store.RoleScopeProject, ScopeID: project.ID, CreatedBy: alice.ID,
+	})
+	require.NoError(t, err)
+
+	srv.store = &missingOwnerRoleTxStore{Store: s}
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/allow-list/"+carol.Email, nil)
+	srv.store = s
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+
+	_, err = s.GetUser(ctx, carol.ID)
+	require.NoError(t, err, "failed delete must keep the invited user")
+	assert.NotEmpty(t, allBindingsFor(t, s, carol.ID))
+}

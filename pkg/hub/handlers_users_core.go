@@ -1176,8 +1176,8 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 
 		// Last-project-owner guard plus role-binding cascade
 		// (ptone/scion#2598). Runs before the user row is deleted, in the
-		// same transaction, so a concurrent membership change cannot leave
-		// a project ownerless.
+		// same transaction; a concurrent change to the user's bindings
+		// aborts the delete with 409 conflict.
 		if err := guardAndCascadeUserRoleBindingsTx(ctx, tx, user.ID, time.Now()); err != nil {
 			return err
 		}
@@ -1215,6 +1215,8 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 				"cannot delete the last super-admin; promote another user first", nil)
 		} else if errors.As(err, &lastOwnerErr) {
 			writeLastProjectOwnerDeleteError(w, lastOwnerErr)
+		} else if errors.Is(err, errUserRoleBindingsChanged) {
+			writeUserRoleBindingsChangedError(w)
 		} else {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"user deletion failed: "+err.Error(), nil)
@@ -1265,7 +1267,18 @@ func writeLastProjectOwnerDeleteError(w http.ResponseWriter, e *lastProjectOwner
 // creator — the deletion is denied unless at least one OTHER active direct
 // user owner remains. Each such project is locked with
 // LockProjectForMembership (in ID order) before counting, which serializes
-// against concurrent members-API mutations, so the check is TOCTOU-safe.
+// against concurrent members-API mutations on those projects.
+//
+// The binding list is read before any lock, so a binding granted to userID
+// concurrently (for example a new owner binding on a project that was never
+// locked or checked) is not seen by the guard. The cascade is a predicate
+// delete by principal, so it would remove such a binding too. To keep that
+// from silently orphaning a project, the number of rows the cascade deletes
+// is compared with the number of listed bindings: on a mismatch the function
+// returns errUserRoleBindingsChanged and the caller rolls back the whole
+// transaction (409 conflict, retry). What is guaranteed is therefore: a
+// concurrent change to the user's bindings aborts the delete with 409; it
+// never deletes a binding the guard did not see.
 //
 // On denial it returns *lastProjectOwnerDeleteError listing every affected
 // project. role_bindings.principal_id has no foreign key, so without the
@@ -1313,6 +1326,9 @@ func guardAndCascadeUserRoleBindingsTx(ctx context.Context, tx store.Store, user
 		ref := lastOwnerProjectRef{ID: projectID}
 		if p, err := tx.GetProject(ctx, projectID); err == nil && p != nil {
 			ref.Name = p.Name
+		} else if err != nil {
+			slog.Debug("last-owner delete guard: project name lookup failed",
+				"project_id", projectID, "error", err)
 		}
 		orphaned = append(orphaned, ref)
 	}
@@ -1320,10 +1336,26 @@ func guardAndCascadeUserRoleBindingsTx(ctx context.Context, tx store.Store, user
 		return &lastProjectOwnerDeleteError{projects: orphaned}
 	}
 
-	if len(bindings) > 0 {
-		if _, err := tx.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID); err != nil {
-			return fmt.Errorf("delete role bindings: %w", err)
-		}
+	// Always run the cascade, even when the list was empty, so a binding
+	// granted concurrently after the list is detected by the count check.
+	n, err := tx.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return fmt.Errorf("delete role bindings: %w", err)
+	}
+	if n != len(bindings) {
+		return fmt.Errorf("%w: listed %d, deleted %d", errUserRoleBindingsChanged, len(bindings), n)
 	}
 	return nil
+}
+
+// errUserRoleBindingsChanged is returned by guardAndCascadeUserRoleBindingsTx
+// when the cascade deletes a different number of bindings than the guard
+// listed, meaning the user's bindings changed concurrently. Callers map it to
+// 409 conflict; the transaction rolls back so nothing is deleted.
+var errUserRoleBindingsChanged = errors.New("the user's role bindings changed concurrently; retry")
+
+// writeUserRoleBindingsChangedError writes the 409 conflict response for
+// errUserRoleBindingsChanged.
+func writeUserRoleBindingsChangedError(w http.ResponseWriter) {
+	writeError(w, http.StatusConflict, ErrCodeConflict, errUserRoleBindingsChanged.Error(), nil)
 }
