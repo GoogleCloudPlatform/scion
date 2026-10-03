@@ -287,18 +287,18 @@ describe('scion-agent-tree-view layout cache (#2388)', () => {
     expect(viaCache).toEqual(viaFreshRecompute);
   });
 
-  /** The status-badge `label` for the node whose card links to /agents/<id>. */
-  function statusLabel(agentId: string): string | null {
+  /** The status-badge `status` for the node whose card links to /agents/<id>. */
+  function badgeStatus(agentId: string): string | null {
     return (
       el
         .shadowRoot!.querySelector(`a.node[href="/agents/${agentId}"] scion-status-badge`)
-        ?.getAttribute('label') ?? null
+        ?.getAttribute('status') ?? null
     );
   }
 
   it('renders the current status on a cache hit, not the stale cached node object (#2388 review B1)', async () => {
     const before = cachedLayout(el);
-    expect(statusLabel('k1')).toBe('running');
+    expect(badgeStatus('k1')).toBe('running');
 
     // Same id/parentId/name for every agent (topology signature unchanged,
     // so this is a cache hit), but k1's own status changed. If renderNode
@@ -308,7 +308,20 @@ describe('scion-agent-tree-view layout cache (#2388)', () => {
     await el.updateComplete;
 
     expect(cachedLayout(el)).toBe(before); // confirms this really was a cache hit
-    expect(statusLabel('k1')).toBe('stopped');
+    expect(badgeStatus('k1')).toBe('stopped');
+  });
+
+  // Not a cache test: nested here only to reuse this block's fixture and
+  // badgeStatus() helper.
+  describe('status badge label (#1571)', () => {
+    it('leaves the status badge label unset so it uses the display label (#1571)', async () => {
+      el.agents = el.agents.map((a) => (a.id === 'k1' ? { ...a, activity: 'blocked' } : a));
+      await el.updateComplete;
+
+      expect(badgeStatus('k1')).toBe('blocked');
+      const badge = el.shadowRoot!.querySelector('a.node[href="/agents/k1"] scion-status-badge');
+      expect(badge?.getAttribute('label')).toBeNull();
+    });
   });
 
   /** Edges whose title indicates non-messageable ("mismatch") styling. */

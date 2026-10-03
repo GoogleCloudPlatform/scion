@@ -27,6 +27,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { LitElement } from 'lit';
 
 /** Stand-in for the global stateManager: only the surface agent-detail.ts uses. */
 class FakeStateManager extends EventTarget {
@@ -613,6 +614,28 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS * 10);
     await Promise.resolve();
     expect(navClicks).toEqual([]);
+  });
+});
+
+describe('scion-page-agent-detail activity badge', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('uses the activity display label instead of the raw activity', async () => {
+    const el = await mount(makeAgent({ activity: 'blocked' }));
+    const badges = Array.from(el.shadowRoot?.querySelectorAll('scion-status-badge') ?? []).filter(
+      (b) => (b as unknown as { status: string }).status === 'blocked'
+    ) as Array<LitElement & { label: string }>;
+    // Header badge and the Activity info badge.
+    expect(badges).toHaveLength(2);
+    for (const badge of badges) {
+      await badge.updateComplete;
+      expect(badge.label).toBe('');
+      const text = badge.shadowRoot?.textContent ?? '';
+      expect(text).toContain('waiting');
+      expect(text).not.toContain('blocked');
+    }
   });
 });
 

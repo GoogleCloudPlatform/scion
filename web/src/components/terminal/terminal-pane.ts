@@ -35,7 +35,6 @@ import {
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
-import type { StatusType } from '../shared/status-badge.js';
 import '../shared/status-badge.js';
 import { showToast } from '../../utils/toast.js';
 import { buildAgentDMKey, chatConversationPath } from '../../client/chat-routes.js';
@@ -994,7 +993,7 @@ export class ScionTerminalPane extends LitElement {
     return !active || active === document.body || active === this || this.contains(active);
   }
 
-  private get agentDisplayStatus(): string {
+  private get agentDisplayStatus(): AgentPhase | AgentActivity {
     if (this.agentPhase === 'running' && this.agentActivity) {
       return this.agentActivity;
     }
@@ -2108,10 +2107,7 @@ export class ScionTerminalPane extends LitElement {
               </button>
             `
           : ''}
-        <scion-status-badge
-          status=${this.agentDisplayStatus as StatusType}
-          size="small"
-        ></scion-status-badge>
+        <scion-status-badge status=${this.agentDisplayStatus} size="small"></scion-status-badge>
         <div class="status-indicator">
           <span class="status-dot ${this.connected ? 'connected' : ''}"></span>
           ${this.connected ? 'Connected' : this.idle ? 'Not connected' : 'Disconnected'}

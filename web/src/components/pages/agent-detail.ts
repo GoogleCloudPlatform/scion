@@ -1291,10 +1291,7 @@ export class ScionPageAgentDetail extends LitElement {
           <div class="header-title">
             <sl-icon name="cpu"></sl-icon>
             <h1>${agent.name}</h1>
-            <scion-status-badge
-              status=${getAgentDisplayStatus(agent) as StatusType}
-              label=${getAgentDisplayStatus(agent)}
-            ></scion-status-badge>
+            <scion-status-badge status=${getAgentDisplayStatus(agent)}></scion-status-badge>
             <scion-message-mode-badge
               mode=${agent.messageMode || 'project'}
               size="medium"
@@ -1527,11 +1524,7 @@ export class ScionPageAgentDetail extends LitElement {
           <div class="info-item">
             <span class="info-label">Phase</span>
             <span class="info-value">
-              <scion-status-badge
-                status=${agent.phase as StatusType}
-                label=${agent.phase}
-                size="small"
-              ></scion-status-badge>
+              <scion-status-badge status=${agent.phase} size="small"></scion-status-badge>
             </span>
           </div>
           <div class="info-item">
@@ -1539,8 +1532,7 @@ export class ScionPageAgentDetail extends LitElement {
             <span class="info-value">
               ${agent.activity
                 ? html`<scion-status-badge
-                      status=${agent.activity as StatusType}
-                      label=${agent.activity}
+                      status=${agent.activity}
                       size="small"
                     ></scion-status-badge
                     >${(agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)) ||

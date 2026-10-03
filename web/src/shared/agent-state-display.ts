@@ -77,7 +77,13 @@ export const ACTIVITY_DISPLAY: Record<AgentActivity, StateDisplay> = {
     pulse: false,
     label: 'waiting for input',
   },
-  blocked: { emoji: '🚧', icon: 'clock-history', variant: 'neutral', pulse: false },
+  blocked: {
+    emoji: '⏸️',
+    icon: 'clock-history',
+    variant: 'neutral',
+    pulse: false,
+    label: 'waiting',
+  },
   completed: { emoji: '✅', icon: 'check-circle', variant: 'success', pulse: false },
   limits_exceeded: {
     emoji: '🚫',
@@ -106,4 +112,17 @@ export function getStateDisplay(status: string): StateDisplay {
     return ACTIVITY_DISPLAY[status as AgentActivity];
   }
   return { emoji: '', icon: '', variant: 'neutral', pulse: false };
+}
+
+/**
+ * Get the human-readable display label for an activity, if one is defined.
+ * Matching is case-insensitive and only considers own keys of
+ * ACTIVITY_DISPLAY. Returns undefined for unknown activities and for known
+ * activities without a custom label, so callers can fall back to the raw
+ * value.
+ */
+export function activityLabel(activity: string | undefined): string | undefined {
+  const key = (activity || '').toLowerCase();
+  if (!Object.hasOwn(ACTIVITY_DISPLAY, key)) return undefined;
+  return ACTIVITY_DISPLAY[key as AgentActivity].label;
 }

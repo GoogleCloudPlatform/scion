@@ -60,7 +60,6 @@ import {
   type PositionedEdge,
   type PositionedUser,
 } from '../../shared/lineage.js';
-import type { StatusType } from './status-badge.js';
 import './status-badge.js';
 import { getMessageModeDisplay, getDenialMessage } from '../../shared/message-mode.js';
 import type { MessageMode } from '../../shared/types.js';
@@ -1343,11 +1342,7 @@ export class ScionAgentTreeView extends LitElement {
           title=${`${agent.name}${agent.template ? ` — ${agent.template}` : ''}${isRoot && creator ? `\ncreated by ${creator}` : ''}`}
         >
           <span class="name">${agent.name}</span>
-          <scion-status-badge
-            status=${status as StatusType}
-            label=${status}
-            size="small"
-          ></scion-status-badge>
+          <scion-status-badge status=${status} size="small"></scion-status-badge>
           ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}
           <span
             class="mode-icon"

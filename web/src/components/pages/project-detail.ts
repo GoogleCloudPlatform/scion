@@ -43,7 +43,6 @@ import {
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
-import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
@@ -3142,8 +3141,7 @@ export class ScionPageProjectDetail extends LitElement {
         </td>
         <td>
           <scion-status-badge
-            status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
+            status=${getAgentDisplayStatus(agent)}
             size="small"
           ></scion-status-badge>
         </td>
@@ -3315,8 +3313,7 @@ export class ScionPageProjectDetail extends LitElement {
             </div>
           </div>
           <scion-status-badge
-            status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
+            status=${getAgentDisplayStatus(agent)}
             size="small"
           ></scion-status-badge>
         </div>

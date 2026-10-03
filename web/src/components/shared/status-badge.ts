@@ -54,6 +54,7 @@ export type StatusType =
   | 'thinking'
   | 'executing'
   | 'waiting_for_input'
+  | 'blocked'
   | 'completed'
   | 'limits_exceeded'
   | 'stalled'

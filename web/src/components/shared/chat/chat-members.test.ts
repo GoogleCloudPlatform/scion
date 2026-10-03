@@ -107,6 +107,11 @@ describe('scion-chat-members agent tooltip', () => {
     expect(tooltipContent(el)).toBe('thinking');
   });
 
+  it('falls back to the activity display label when one is defined', async () => {
+    const el = await mount([agent({ activity: 'blocked' })]);
+    expect(tooltipContent(el)).toBe('waiting');
+  });
+
   it('shows the last activity event as the updated time', async () => {
     const tenMinAgo = new Date(Date.now() - 10 * 60_000).toISOString();
     const el = await mount([

@@ -43,7 +43,6 @@ import {
 
 type AgentSortField = 'name' | 'status' | 'created' | 'updated';
 type SortDir = 'asc' | 'desc';
-import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
@@ -1373,11 +1372,7 @@ export class ScionPageAgents extends LitElement {
                 : ''}
             </div>
           </div>
-          <scion-status-badge
-            status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
-            size="small"
-          >
+          <scion-status-badge status=${getAgentDisplayStatus(agent)} size="small">
           </scion-status-badge>
           <scion-message-mode-badge
             mode=${agent.messageMode || 'project'}
@@ -1467,8 +1462,7 @@ export class ScionPageAgents extends LitElement {
         <td class="hide-mobile">${agent.template}</td>
         <td>
           <scion-status-badge
-            status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
+            status=${getAgentDisplayStatus(agent)}
             size="small"
           ></scion-status-badge>
         </td>
