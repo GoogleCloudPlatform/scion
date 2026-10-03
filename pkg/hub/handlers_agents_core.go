@@ -351,14 +351,14 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	// sorted parameters (fit, cursor exclusion), so an invalid fit is a 400
 	// for these callers exactly as for a caller with scope.
 	writeShortCircuit := func() {
-		var p agentListParams
+		p := agentListParams{view: legacyAgentListView(query)}
 		if sorted {
 			var ok bool
 			if p, ok = parseAgentListParamsAfterSortDir(w, query, agentListLimit(query), sortParam, dirParam); !ok {
 				return
 			}
 		}
-		writeJSON(w, http.StatusOK, sortedShortCircuitResponse(p))
+		writeAgentList(w, p.view, sortedShortCircuitResponse(p))
 	}
 
 	// RS2: Unauthenticated callers get an empty list immediately.
@@ -513,7 +513,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	agents, scopeCap := s.buildGlobalAgentPage(ctx, identity, items)
 
-	writeJSON(w, http.StatusOK, ListAgentsResponse{
+	writeAgentList(w, legacyAgentListView(query), ListAgentsResponse{
 		Agents:       agents,
 		NextCursor:   nextCursor,
 		TotalCount:   totalCount,
@@ -1957,7 +1957,7 @@ func (s *Server) createAgentInProject(
 	if project.IsEmptyPerAgent() && len(req.WorkspaceFiles) > 0 {
 		s.agentLifecycleLog.Warn("Ignoring workspace files for empty-per-agent project",
 			"agent_id", agent.ID, "project_id", project.ID, "files", len(req.WorkspaceFiles))
-		warnings = append(warnings, emptyPerAgentWorkspaceFilesIgnoredWarning)
+		warnings = append(warnings, api.WarningEmptyPerAgentWorkspaceFilesIgnored)
 		req.WorkspaceFiles = nil
 	}
 

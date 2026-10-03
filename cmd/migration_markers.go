@@ -52,6 +52,11 @@ const (
 	// of pre-#2703 non-git projects whose workspace-mode label now resolves
 	// to empty-per-agent. See cmd/boot_empty_per_agent_report.go.
 	MigrationEmptyPerAgentLegacyReport MigrationName = "empty_per_agent_legacy_report"
+	// MigrationUTCTimestampRepair records that the boot-time repair of
+	// unreadable SQLite timestamps completed. It only records completion:
+	// the probe runs on every boot regardless. See
+	// cmd/boot_utc_timestamp_repair.go.
+	MigrationUTCTimestampRepair MigrationName = "utc_timestamp_repair"
 	// MigrationRunIntentBackfill is the one-shot migration that sets
 	// agents.run_intent for rows that predate the column. See
 	// cmd/boot_run_intent_backfill.go.
@@ -208,7 +213,7 @@ func isKnownMigration(name MigrationName) bool {
 	case MigrationDMKey, MigrationBackfill, MigrationGroupRefRepair, MigrationWorkspaceModeLabel,
 		MigrationBrokerOwnershipBackfill, MigrationNonAgentDispatchStateBackfill,
 		MigrationBrokerQuotaBindingsToSettings, MigrationEmptyPerAgentLegacyReport,
-		MigrationRunIntentBackfill:
+		MigrationUTCTimestampRepair, MigrationRunIntentBackfill:
 		return true
 	default:
 		return false

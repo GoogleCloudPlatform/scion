@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package storedtime
 
 import (
 	"testing"
@@ -30,11 +30,11 @@ func mustLoadLocation(t *testing.T, name string) *time.Location {
 	return loc
 }
 
-// TestParseGoTimeString_Zones covers every zone shape the SQLite driver can
+// TestParseGoString_Zones covers every zone shape the SQLite driver can
 // have written through time.Time.String(): alphabetic, two-digit and
 // four-digit numeric abbreviations, nameless and named fixed zones, with and
 // without a monotonic-clock suffix.
-func TestParseGoTimeString_Zones(t *testing.T) {
+func TestParseGoString_Zones(t *testing.T) {
 	// 2026-01-15 is southern-hemisphere summer, so Lord_Howe is on DST (+11).
 	instant := time.Date(2026, 1, 15, 3, 4, 5, 123456789, time.UTC)
 
@@ -59,7 +59,7 @@ func TestParseGoTimeString_Zones(t *testing.T) {
 			require.Equal(t, z.wantAbbr, text[len(text)-len(z.wantAbbr):], "unexpected String() text %q", text)
 
 			for _, in := range []string{text, text + " m=+0.088686566", text + " m=-12.5"} {
-				got, err := parseGoTimeString(in)
+				got, err := ParseGoString(in)
 				require.NoError(t, err, in)
 				assert.True(t, got.Equal(instant), "%q parsed to %v, want %v", in, got, instant)
 				assert.Equal(t, time.UTC, got.Location(), in)
@@ -68,7 +68,7 @@ func TestParseGoTimeString_Zones(t *testing.T) {
 	}
 }
 
-func TestParseGoTimeString_Literals(t *testing.T) {
+func TestParseGoString_Literals(t *testing.T) {
 	tests := []struct {
 		in   string
 		want time.Time
@@ -82,14 +82,14 @@ func TestParseGoTimeString_Literals(t *testing.T) {
 		{"2026-10-01 04:00:00 +0000", time.Date(2026, 10, 1, 4, 0, 0, 0, time.UTC)},
 	}
 	for _, tt := range tests {
-		got, err := parseGoTimeString(tt.in)
+		got, err := ParseGoString(tt.in)
 		require.NoError(t, err, tt.in)
 		assert.True(t, got.Equal(tt.want), "%q parsed to %v, want %v", tt.in, got, tt.want)
 		assert.Equal(t, time.UTC, got.Location(), tt.in)
 	}
 }
 
-func TestParseGoTimeString_Rejects(t *testing.T) {
+func TestParseGoString_Rejects(t *testing.T) {
 	for _, in := range []string{
 		"",
 		"garbage",
@@ -98,7 +98,37 @@ func TestParseGoTimeString_Rejects(t *testing.T) {
 		"2026-10-01 04:00:00 UTC",
 		"2026-10-01 04:00:00 +0000 UTC extra",
 	} {
-		_, err := parseGoTimeString(in)
+		_, err := ParseGoString(in)
 		assert.Error(t, err, "%q should not parse", in)
 	}
+}
+
+func TestParse_Layouts(t *testing.T) {
+	want := time.Date(2026, 10, 1, 4, 0, 0, 500000000, time.UTC)
+	for _, in := range []string{
+		"2026-10-01T04:00:00.5Z",
+		"2026-10-01T13:00:00.5+09:00",
+		"2026-10-01 13:00:00.5+09:00",
+		"2026-10-01 04:00:00.5",
+		"2026-10-01 04:00:00.5 +0000 UTC",
+		"2026-10-01 09:45:00.5 +0545 +0545 m=+3.25",
+	} {
+		got, err := Parse(in)
+		require.NoError(t, err, in)
+		assert.True(t, got.Equal(want), "%q parsed to %v, want %v", in, got, want)
+		assert.Equal(t, time.UTC, got.Location(), in)
+	}
+}
+
+// TestParse_ErrorOmitsValue pins that a parse error never carries the input,
+// so callers may log it without leaking a stored value.
+func TestParse_ErrorOmitsValue(t *testing.T) {
+	const secretish = "not-a-time-4f2a9c"
+	for _, fn := range []func(string) (time.Time, error){Parse, ParseGoString} {
+		_, err := fn(secretish)
+		require.ErrorIs(t, err, ErrUnparseable)
+		assert.NotContains(t, err.Error(), secretish)
+	}
+	_, err := Parse("")
+	assert.ErrorIs(t, err, ErrUnparseable)
 }
