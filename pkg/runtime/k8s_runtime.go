@@ -491,10 +491,22 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	// The cleanup runs on a fresh context because ctx may already be done.
 	// cleanupArmed is set just before the first object is created, so early
 	// validation failures make no API calls.
+	//
+	// An async launch (launch hooks set, design t1-async-create-v11.md
+	// §3.8.4) skips this cleanup: its objects are removed by the launch's
+	// own cleanup from the handles reported below, and only when the hub's
+	// answer calls for it (a superseded launch must not delete anything).
+	// Keeping one cleanup owner per path avoids this cleanup deleting
+	// objects the hub has assigned to a newer launch.
+	//
+	// The hooks are a checkpoint immediately before each resource-creating
+	// or name-based deleting call, and the created object's UID reported
+	// after each true create. They are no-ops on the synchronous path.
+	hooks := config.launchHooks()
 	cleanupArmed := false
 	podCreated := false
 	defer func() {
-		if err == nil || !cleanupArmed {
+		if err == nil || !cleanupArmed || hooks.active() {
 			return
 		}
 		abandoned := ctx.Err() != nil
@@ -575,7 +587,13 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 
 	// Pre-clean stale resources from a previous agent with the same name.
 	// This handles cases where the agent was force-deleted from the hub
-	// or the pod was evicted/GC'd by K8s without proper cleanup.
+	// or the pod was evicted/GC'd by K8s without proper cleanup. These
+	// deletes are by name, so an async launch checkpoints once before them:
+	// a launch the hub has already ended must not remove a newer launch's
+	// same-named objects.
+	if err := hooks.checkpoint(ctx, CheckpointStepPreClean); err != nil {
+		return "", err
+	}
 	r.cleanupAgentSecrets(ctx, namespace, config.Name)
 	r.cleanupStalePod(ctx, namespace, config.Name)
 	cleanupArmed = true
@@ -599,7 +617,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		}
 
 		if useGKEPath {
-			if _, err := r.createSecretProviderClass(ctx, namespace, config.Name, config.ResolvedSecrets, config.Labels); err != nil {
+			if _, err := r.createSecretProviderClassWithHooks(ctx, namespace, config.Name, config.ResolvedSecrets, config.Labels, hooks); err != nil {
 				return "", fmt.Errorf("failed to create SecretProviderClass: %w", err)
 			}
 			// GKE hybrid path: the managed SM add-on lacks RBAC to sync
@@ -614,12 +632,12 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 				}
 			}
 			if len(envSecrets) > 0 {
-				if _, err := r.createAgentSecret(ctx, namespace, config.Name, envSecrets, config.Labels); err != nil {
+				if _, err := r.createAgentSecretWithHooks(ctx, namespace, config.Name, envSecrets, config.Labels, hooks); err != nil {
 					return "", fmt.Errorf("failed to create agent secret for env vars: %w", err)
 				}
 			}
 		} else {
-			if _, err := r.createAgentSecret(ctx, namespace, config.Name, config.ResolvedSecrets, config.Labels); err != nil {
+			if _, err := r.createAgentSecretWithHooks(ctx, namespace, config.Name, config.ResolvedSecrets, config.Labels, hooks); err != nil {
 				return "", fmt.Errorf("failed to launch container: %w", err)
 			}
 		}
@@ -627,7 +645,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 
 	// Create K8s Secret for ResolvedAuth files (portable alternative to hostPath).
 	if config.ResolvedAuth != nil && len(config.ResolvedAuth.Files) > 0 {
-		if err := r.createAuthFileSecret(ctx, namespace, config.Name, config.ResolvedAuth.Files, config.Labels); err != nil {
+		if err := r.createAuthFileSecretWithHooks(ctx, namespace, config.Name, config.ResolvedAuth.Files, config.Labels, hooks); err != nil {
 			return "", fmt.Errorf("failed to create auth file secret: %w", err)
 		}
 	}
@@ -641,6 +659,17 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 
 	runtimeLog.Info("Pre-create setup complete", "agent", config.Name, "namespace", namespace,
 		"phase", "pre-create", "elapsed_ms", time.Since(preCreateStart).Milliseconds())
+
+	// The pod create's checkpoint comes before the NFS provisioning lock
+	// below, not inside it: it can block for as long as the launch deadline
+	// while the Hub is unreachable, and other agents of the project would
+	// wait on the lock meanwhile. Between here and the pod create there is
+	// only local work (the lock and the pod spec), no API object creates.
+	if err := hooks.checkpoint(ctx, CheckpointStepPodCreate); err != nil {
+		// The launch is over: create nothing further. The secrets this
+		// launch created are removed by its cleanup, by UID.
+		return "", err
+	}
 
 	// --- N2-2b: Per-project advisory lock for NFS init-container provisioning ---
 	//
@@ -705,13 +734,15 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	podCreateStart := time.Now()
 	createdPod, err := r.Client.Clientset.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
-		// The deferred cleanup removes this start's Secrets. If ctx was
-		// cancelled while the request was in flight, the pod may exist even
-		// though Create reported an error; the cleanup then removes it too,
-		// matched by this start's ID.
+		// The deferred cleanup removes this start's Secrets (an async
+		// launch leaves them to its launch cleanup, by recorded UID). If ctx
+		// was cancelled while the request was in flight, the pod may exist
+		// even though Create reported an error; the cleanup then removes it
+		// too, matched by this start's ID.
 		return "", fmt.Errorf("failed to create pod: %w", err)
 	}
 	podCreated = true
+	hooks.created(api.ResourceHandle{Kind: api.ResourceKindPod, Namespace: namespace, Name: createdPod.Name, UID: string(createdPod.UID)})
 	runtimeLog.Info("Pod created", "agent", config.Name, "namespace", namespace,
 		"phase", "pod-create", "elapsed_ms", time.Since(podCreateStart).Milliseconds())
 
@@ -859,6 +890,14 @@ func writeK8sRuntimeDebugFile(config RunConfig, namespace string, pod *corev1.Po
 // are stored as individual keys named by secret name.
 // Returns the secret name, or empty string if no secrets need to be created.
 func (r *KubernetesRuntime) createAgentSecret(ctx context.Context, namespace, agentName string, secrets []api.ResolvedSecret, labels map[string]string) (string, error) {
+	return r.createAgentSecretWithHooks(ctx, namespace, agentName, secrets, labels, launchHooks{})
+}
+
+// createAgentSecretWithHooks is createAgentSecret with an async launch's
+// hooks: hooks.checkpoint runs immediately before the create, and
+// hooks.created receives the created Secret's UID (design
+// t1-async-create-v11.md §3.8.3, §3.8.4).
+func (r *KubernetesRuntime) createAgentSecretWithHooks(ctx context.Context, namespace, agentName string, secrets []api.ResolvedSecret, labels map[string]string, hooks launchHooks) (string, error) {
 	if len(secrets) == 0 {
 		return "", nil
 	}
@@ -915,15 +954,19 @@ func (r *KubernetesRuntime) createAgentSecret(ctx context.Context, namespace, ag
 		Data: data,
 	}
 
-	_, err := r.Client.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
+	if err := hooks.checkpoint(ctx, CheckpointStepSecrets); err != nil {
+		return "", err
+	}
+	created, err := r.Client.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	if k8serrors.IsAlreadyExists(err) {
 		// Delete the stale secret and retry
 		_ = r.Client.Clientset.CoreV1().Secrets(namespace).Delete(ctx, secretName, metav1.DeleteOptions{})
-		_, err = r.Client.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
+		created, err = r.Client.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	}
 	if err != nil {
 		return "", fmt.Errorf("failed to create agent secret: %w", err)
 	}
+	hooks.created(api.ResourceHandle{Kind: api.ResourceKindSecret, Namespace: namespace, Name: secretName, UID: string(created.UID)})
 
 	return secretName, nil
 }
@@ -996,6 +1039,14 @@ func divertTransportCredential(env []string, secrets []api.ResolvedSecret) ([]st
 // Secrets Store CSI driver integration. It maps GCP Secret Manager
 // references to K8s-synced secrets for environment variable injection.
 func (r *KubernetesRuntime) createSecretProviderClass(ctx context.Context, namespace, agentName string, secrets []api.ResolvedSecret, labels map[string]string) (string, error) {
+	return r.createSecretProviderClassWithHooks(ctx, namespace, agentName, secrets, labels, launchHooks{})
+}
+
+// createSecretProviderClassWithHooks is createSecretProviderClass with an
+// async launch's hooks: hooks.checkpoint runs immediately before the
+// create, and hooks.created receives the created object's UID (design
+// t1-async-create-v11.md §3.8.3, §3.8.4).
+func (r *KubernetesRuntime) createSecretProviderClassWithHooks(ctx context.Context, namespace, agentName string, secrets []api.ResolvedSecret, labels map[string]string, hooks launchHooks) (string, error) {
 	spcName := fmt.Sprintf("scion-agent-%s", agentName)
 	// envSecretName is only ever referenced below when !r.GKEMode (the
 	// secretObjects block a few lines down is skipped entirely in GKE mode).
@@ -1111,14 +1162,18 @@ func (r *KubernetesRuntime) createSecretProviderClass(ctx context.Context, names
 		},
 	}
 
-	_, err = r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).Create(ctx, spc, metav1.CreateOptions{})
+	if err := hooks.checkpoint(ctx, CheckpointStepSecrets); err != nil {
+		return "", err
+	}
+	createdSPC, err := r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).Create(ctx, spc, metav1.CreateOptions{})
 	if k8serrors.IsAlreadyExists(err) {
 		_ = r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).Delete(ctx, spcName, metav1.DeleteOptions{})
-		_, err = r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).Create(ctx, spc, metav1.CreateOptions{})
+		createdSPC, err = r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).Create(ctx, spc, metav1.CreateOptions{})
 	}
 	if err != nil {
 		return "", fmt.Errorf("failed to create SecretProviderClass: %w", err)
 	}
+	hooks.created(api.ResourceHandle{Kind: api.ResourceKindSecretProviderClass, Namespace: namespace, Name: spcName, UID: string(createdSPC.GetUID())})
 
 	return spcName, nil
 }
@@ -1396,6 +1451,14 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 // createAuthFileSecret creates a K8s Secret containing ResolvedAuth file contents
 // so that auth files can be projected into pods via volume mounts instead of hostPath.
 func (r *KubernetesRuntime) createAuthFileSecret(ctx context.Context, namespace, agentName string, files []api.FileMapping, labels map[string]string) error {
+	return r.createAuthFileSecretWithHooks(ctx, namespace, agentName, files, labels, launchHooks{})
+}
+
+// createAuthFileSecretWithHooks is createAuthFileSecret with an async
+// launch's hooks: hooks.checkpoint runs immediately before the create, and
+// hooks.created receives the created Secret's UID (design
+// t1-async-create-v11.md §3.8.3, §3.8.4).
+func (r *KubernetesRuntime) createAuthFileSecretWithHooks(ctx context.Context, namespace, agentName string, files []api.FileMapping, labels map[string]string, hooks launchHooks) error {
 	secretName := fmt.Sprintf("scion-auth-%s", agentName)
 	data := make(map[string][]byte)
 
@@ -1429,14 +1492,18 @@ func (r *KubernetesRuntime) createAuthFileSecret(ctx context.Context, namespace,
 		Data: data,
 	}
 
-	_, err := r.Client.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
+	if err := hooks.checkpoint(ctx, CheckpointStepSecrets); err != nil {
+		return err
+	}
+	created, err := r.Client.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	if k8serrors.IsAlreadyExists(err) {
 		_ = r.Client.Clientset.CoreV1().Secrets(namespace).Delete(ctx, secretName, metav1.DeleteOptions{})
-		_, err = r.Client.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
+		created, err = r.Client.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	}
 	if err != nil {
 		return fmt.Errorf("failed to create auth secret: %w", err)
 	}
+	hooks.created(api.ResourceHandle{Kind: api.ResourceKindSecret, Namespace: namespace, Name: secretName, UID: string(created.UID)})
 	return nil
 }
 
