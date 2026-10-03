@@ -3101,6 +3101,13 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/oidckeys.go", Function: "saveKeysetToDB", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset save, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
 
 	// -----------------------------------------------------------------------
+	// pkg/hub/conduit_grants.go — Conduit grant signing key ring
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/conduit_grants.go", Function: "Create", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Conduit grant key ring bootstrap, cryptographic infrastructure", Scope: "pkg/hub/conduit_grants.go"}},
+	{File: "pkg/hub/conduit_grants.go", Function: "Load", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Conduit grant key ring load, cryptographic infrastructure", Scope: "pkg/hub/conduit_grants.go"}},
+	{File: "pkg/hub/conduit_grants.go", Function: "Update", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Conduit grant key ring rotation, cryptographic infrastructure", Scope: "pkg/hub/conduit_grants.go"}},
+
+	// -----------------------------------------------------------------------
 	// pkg/hub/lifecycle_hook_executor.go — pre-start hook execution
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/lifecycle_hook_executor.go", Function: "resolveIdentityAndToken", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Pre-start hook: generates GCP token for hook execution", Scope: "pkg/hub/lifecycle_hook_executor.go"}},
