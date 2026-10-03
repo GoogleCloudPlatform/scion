@@ -1,6 +1,6 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": { "noEmit": true, "types": ["vite/client"] },
-  "include": ["paginate-all.test.ts"],
+  "include": ["paginate-all.test.ts", "state.test.ts"],
   "exclude": []
 }
