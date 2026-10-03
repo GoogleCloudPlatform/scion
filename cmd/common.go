@@ -806,6 +806,27 @@ func applyServiceAccountFlag(req *hubclient.CreateAgentRequest, saFlag string) {
 	}
 }
 
+// workspaceBootstrapNotice returns the status lines to show after an agent
+// create that collected non-git workspace files (sentFiles > 0), and whether
+// they already include the Hub's warnings. When the Hub returned no upload
+// URLs it either uses the broker's local workspace or ignored the files (for
+// example, an empty-per-agent project gives each agent an empty workspace and
+// says so in warnings). In the second case the warnings replace the
+// "Using local workspace on broker." line, which would be misleading.
+func workspaceBootstrapNotice(sentFiles, uploadURLs int, warnings []string) ([]string, bool) {
+	if sentFiles == 0 || uploadURLs > 0 {
+		return nil, false
+	}
+	if len(warnings) == 0 {
+		return []string{"Using local workspace on broker."}, false
+	}
+	lines := make([]string, 0, len(warnings))
+	for _, w := range warnings {
+		lines = append(lines, "Warning: "+w)
+	}
+	return lines, true
+}
+
 func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, inlineCfg *api.ScionConfig) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
@@ -1108,8 +1129,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	}
 
 	// Workspace bootstrap: upload files and finalize
-	if len(workspaceFiles) > 0 && len(resp.UploadURLs) == 0 {
-		statusln("Using local workspace on broker.")
+	bootstrapLines, warningsShown := workspaceBootstrapNotice(len(workspaceFiles), len(resp.UploadURLs), resp.Warnings)
+	for _, line := range bootstrapLines {
+		statusln(line)
 	}
 	if len(resp.UploadURLs) > 0 && len(workspaceFiles) > 0 {
 		statusf("Uploading workspace (%d files)...\n", len(workspaceFiles))
@@ -1219,8 +1241,10 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		phase, _ := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
 		statusf("Phase: %s\n", phase)
 	}
-	for _, w := range resp.Warnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+	if !warningsShown {
+		for _, w := range resp.Warnings {
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+		}
 	}
 
 	if !attach {
