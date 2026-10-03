@@ -66,8 +66,10 @@ const (
 	// CloseRelayRestart (relay_restart) refuses streams on a draining
 	// session and closes streams still open at the drain deadline.
 	CloseRelayRestart uint32 = 4503
-	// CloseRelayTimeout (relay_timeout) is reserved for the Phase 2 PTY
-	// contract.
+	// CloseRelayTimeout (relay_timeout) rejects a handshake whose
+	// admission outlived the handshake timeout; it carries no drain
+	// deadline, so the dialer backs off. (Also reserved for the Phase 2 PTY
+	// contract.)
 	CloseRelayTimeout uint32 = 4504
 )
 
