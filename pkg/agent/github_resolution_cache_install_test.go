@@ -229,9 +229,11 @@ func TestWithContentFlightKeyIsSeparate(t *testing.T) {
 	server, mux := newTestGitHubServer(t)
 	var commitCalls atomic.Int64
 	// A non-retryable failure, so each background refresh fails at once.
+	// Not a 404: a not_found is remembered for the cache key, which both
+	// flight keys share, and the second refresh would not reach GitHub.
 	mux.HandleFunc("/repos/acme/private/commits/main", func(w http.ResponseWriter, _ *http.Request) {
 		commitCalls.Add(1)
-		http.Error(w, "gone", http.StatusNotFound)
+		http.Error(w, "unprocessable", http.StatusUnprocessableEntity)
 	})
 
 	cache, err := newTestResolutionCache(t.TempDir(), -time.Minute)
