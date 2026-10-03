@@ -355,7 +355,8 @@ func isKubernetesRuntimeEntry(name string, rt V1RuntimeConfig) bool {
 	if t == "" {
 		t = name
 	}
-	return t == "kubernetes" || t == "k8s"
+	// "remote" is normalised to the Kubernetes runtime by the runtime factory.
+	return t == "kubernetes" || t == "k8s" || t == "remote"
 }
 
 // GetHubEndpoint returns the Hub endpoint from settings, or empty string if not configured.

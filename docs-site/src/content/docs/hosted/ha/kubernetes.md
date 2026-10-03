@@ -228,7 +228,7 @@ metadata:
     cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
 ```
 
-The setting is opt-in, and only `false` has an effect. Leaving it unset, or setting it to `true`, adds no annotation; that is the default behaviour. If you set the annotation yourself in the template's `annotations`, `safe_to_evict: false` replaces that value with `"false"`.
+The setting is opt-in, and only `false` has an effect. Leaving it unset, or setting it to `true`, adds no annotation; that is the default behaviour.
 
 You can set it on a runtime, on a profile, or on a template or agent:
 
@@ -257,8 +257,8 @@ kubernetes:
 Scion uses the first value it finds, in this order:
 
 1. The template or agent `kubernetes.safeToEvict`
-2. The active profile's `safe_to_evict`
-3. The runtime's `safe_to_evict`
+2. The agent's profile's `safe_to_evict`: the `--profile` flag, or the profile the agent was created with, falling back to the active profile
+3. The `safe_to_evict` on that profile's runtime entry
 
 An explicit `true` at a higher level wins over a `false` lower down. For example, `safeToEvict: true` on a template turns the annotation off for that template, even when the runtime sets `false`.
 
@@ -266,7 +266,7 @@ Other runtimes (Docker, Podman, Apple, Cloud Run) accept the setting and ignore 
 
 #### GKE Autopilot
 
-On GKE Autopilot, the annotation makes the pod an [extended run time pod](https://cloud.google.com/kubernetes-engine/docs/how-to/extended-duration-pods). GKE then doesn't evict the pod for scale-down or node auto-upgrades for about seven days. After that, the node can be scaled down or upgraded as usual. Before you enable it, note these points from the GKE documentation:
+On GKE Autopilot, the annotation makes the pod an [extended run time pod](https://cloud.google.com/kubernetes-engine/docs/how-to/extended-duration-pods). GKE then doesn't evict the pod for scale-down or node auto-upgrades for up to seven days. After that, the node can be scaled down or upgraded as usual. Before you enable it, note these points from the GKE documentation:
 
 - **Disruptions it doesn't prevent:** priority-based preemption, system Pod evictions, kubelet out-of-memory eviction, Compute Engine VM maintenance, node auto-repair, and anything an operator starts, such as a manual upgrade or a node drain. The [Pod Priority and Preemption](#pod-priority-and-preemption) settings above still matter.
 - **Resources and cost:** extended run time pods have higher minimum resource requests than ordinary Autopilot pods. You're billed for the requests at standard rates, and GKE places each pod on its own node where it can.

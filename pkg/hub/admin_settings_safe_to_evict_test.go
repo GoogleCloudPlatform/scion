@@ -122,3 +122,62 @@ func TestSnapshot_SafeToEvict_FromBootstrapFile(t *testing.T) {
 	snap := ops.Snapshot()
 	assertSafeToEvictEntries(t, snap.Runtimes, snap.Profiles)
 }
+
+// putWarnings decodes the "warnings" list from a PUT response.
+func putWarnings(t *testing.T, rr *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var resp struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	return resp.Warnings
+}
+
+// safe_to_evict on a non-Kubernetes runtime is saved and ignored; the save
+// response carries the same warning as config validate. A Kubernetes or
+// remote runtime gets none.
+func TestHandlePutServerConfig_SafeToEvict_FileModeWarnings(t *testing.T) {
+	srv := &Server{}
+	rr, _ := fileModePutServerConfig(t, srv, `{"runtimes":{"docker":{"type":"docker","safe_to_evict":false},
+		"far":{"type":"remote","safe_to_evict":false}},
+		"profiles":{"local":{"runtime":"docker","safe_to_evict":true},"far":{"runtime":"far","safe_to_evict":true}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	got := putWarnings(t, rr)
+	if len(got) != 2 || !strings.Contains(got[0], "profiles.local.safe_to_evict") || !strings.Contains(got[1], "runtimes.docker.safe_to_evict") {
+		t.Errorf("warnings: got %q", got)
+	}
+
+	rr, _ = fileModePutServerConfig(t, srv, safeToEvictPutBody)
+	if got := putWarnings(t, rr); len(got) != 0 {
+		t.Errorf("kubernetes runtime: want no warnings, got %q", got)
+	}
+}
+
+func TestPutServerConfigDB_SafeToEvict_Warnings(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+	put := func(body string) *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PUT: expected 200, got %d: %s", rr.Code, rr.Body.String())
+		}
+		return rr
+	}
+
+	rr := put(`{"runtimes":{"docker":{"type":"docker"},"gke":{"type":"kubernetes","safe_to_evict":false}}}`)
+	if got := putWarnings(t, rr); len(got) != 0 {
+		t.Errorf("want no warnings, got %q", got)
+	}
+
+	// Only profiles in this request: the profile is checked against the
+	// runtimes already saved.
+	rr = put(`{"profiles":{"local":{"runtime":"docker","safe_to_evict":false},"gke":{"runtime":"gke","safe_to_evict":true}}}`)
+	got := putWarnings(t, rr)
+	if len(got) != 1 || !strings.Contains(got[0], "profiles.local.safe_to_evict") {
+		t.Errorf("warnings: got %q", got)
+	}
+}

@@ -2566,9 +2566,8 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// safe-to-evict: only an explicit false (resolved from the
 	// template/agent kubernetes.safeToEvict, else the profile's, else the
 	// runtime entry's safe_to_evict) adds the annotation. Nil and true add
-	// nothing. The resolved value replaces a same-key entry from
-	// config.Annotations. The map is cloned so the caller's
-	// config.Annotations is not modified.
+	// nothing. The resolved value is authoritative for this key. The map
+	// is cloned so the caller's config.Annotations is not modified.
 	if k := config.Kubernetes; k != nil && k.SafeToEvict != nil && !*k.SafeToEvict {
 		annotations := maps.Clone(pod.Annotations)
 		if annotations == nil {

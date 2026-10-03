@@ -1513,6 +1513,28 @@ describe('scion-page-admin-server-config', () => {
       expect(values).toEqual(['false', '', 'true']);
     });
 
+    it('labels the select as ignored on non-Kubernetes runtimes', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            runtimes: {
+              k8s: { type: 'kubernetes' },
+              docker: { type: 'docker', safe_to_evict: false },
+              remote: {},
+            },
+            profiles: {
+              gke: { runtime: 'k8s' },
+              local: { runtime: 'docker' },
+              far: { runtime: 'remote' },
+            },
+          })
+        )
+      );
+      await (element as any).updateComplete;
+      // the docker runtime card and the profile that uses it
+      expect(queryAll(element, '.safe-to-evict-ignored').length).toBe(2);
+    });
+
     it('sends booleans, and clearing removes the key', async () => {
       let capturedPayload: Record<string, any> | null = null;
       element = await createComponent(

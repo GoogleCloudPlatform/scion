@@ -257,12 +257,15 @@ func TestSafeToEvictIgnoredWarnings(t *testing.T) {
 		"docker":     {Type: "docker", SafeToEvict: boolPtr(false)},
 		"podman":     {},
 		"cloudrun-x": {Type: "cloudrun"},
+		"remote-k8s": {Type: "remote", SafeToEvict: boolPtr(false)},
+		"remote":     {SafeToEvict: boolPtr(true)},
 	}
 	profiles := map[string]V1ProfileConfig{
 		"on-gke":     {Runtime: "gke", SafeToEvict: boolPtr(false)},
 		"on-podman":  {Runtime: "podman", SafeToEvict: boolPtr(true)},
 		"on-cr":      {Runtime: "cloudrun-x"},
 		"on-missing": {Runtime: "missing", SafeToEvict: boolPtr(false)},
+		"on-remote":  {Runtime: "remote-k8s", SafeToEvict: boolPtr(true)},
 	}
 	got := SafeToEvictIgnoredWarnings(runtimes, profiles)
 	require.Len(t, got, 2, "%v", got)

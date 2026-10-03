@@ -621,6 +621,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Validate shared_dir_size on runtime and profile entries (beyond JSON
 	// schema — Kubernetes quantity check), naming the offending key so a bad
 	// value is rejected here instead of failing every agent start later.
+	var saveWarnings []string
 	{
 		var runtimes opsettings.RuntimesSettings
 		var profiles opsettings.ProfilesSettings
@@ -633,6 +634,21 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if errs := config.ValidateSharedDirSizes(runtimes, profiles); len(errs) > 0 {
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
 			return
+		}
+		// safe_to_evict on a non-Kubernetes runtime is accepted and ignored,
+		// with the same warning as config validate. A section missing from
+		// this request is checked against its current value.
+		_, hasRuntimes := sectionDocs["runtimes"]
+		_, hasProfiles := sectionDocs["profiles"]
+		if hasRuntimes || hasProfiles {
+			snap := ops.Snapshot()
+			if !hasRuntimes {
+				runtimes = snap.Runtimes
+			}
+			if !hasProfiles {
+				profiles = snap.Profiles
+			}
+			saveWarnings = safeToEvictSaveWarnings(runtimes, profiles)
 		}
 	}
 	// Validate hub-level default_timezone (IANA name check; rejects "Local",
@@ -734,6 +750,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			"applied":          appliedKeys,
 			"requires_restart": []string{},
 		},
+	}
+	if len(saveWarnings) > 0 {
+		resp["warnings"] = saveWarnings
 	}
 
 	writeJSON(w, http.StatusOK, resp)

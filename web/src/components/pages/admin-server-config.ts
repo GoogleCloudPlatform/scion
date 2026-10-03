@@ -4146,6 +4146,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                   ${this.renderSafeToEvictSelect(rt.safe_to_evict, readOnly, (v) =>
                     this.updateRuntimeSafeToEvict(name, v)
                   )}
+                  ${this.renderSafeToEvictIgnored(this.isKubernetesRuntime(name))}
                 </div>
               `
             : html`
@@ -4237,6 +4238,25 @@ export class ScionPageAdminServerConfig extends LitElement {
       <sl-option value="false">false</sl-option>
       <sl-option value="true">true</sl-option>
     </sl-select>`;
+  }
+
+  /**
+   * Whether a runtime entry is a Kubernetes runtime, using the same rule as
+   * the settings validation: its type, or its name when no type is set, is
+   * kubernetes, k8s or remote.
+   */
+  private isKubernetesRuntime(name: string): boolean {
+    const rt = this.runtimes[name];
+    const t = rt?.type || name;
+    return t === 'kubernetes' || t === 'k8s' || t === 'remote';
+  }
+
+  /** Label shown under the safe_to_evict select when it would be ignored. */
+  private renderSafeToEvictIgnored(isKubernetes: boolean): TemplateResult | typeof nothing {
+    if (isKubernetes) return nothing;
+    return html`<span class="hint safe-to-evict-ignored"
+      >Ignored: this runtime is not Kubernetes.</span
+    >`;
   }
 
   private updateRuntimeSafeToEvict(name: string, value: boolean | undefined): void {
@@ -4435,6 +4455,11 @@ export class ScionPageAdminServerConfig extends LitElement {
             >
             ${this.renderSafeToEvictSelect(profile.safe_to_evict, readOnly, (v) =>
               this.updateProfileSafeToEvict(name, v)
+            )}
+            ${this.renderSafeToEvictIgnored(
+              !profile.runtime ||
+                !(profile.runtime in this.runtimes) ||
+                this.isKubernetesRuntime(profile.runtime)
             )}
           </div>
           <div class="form-field">
