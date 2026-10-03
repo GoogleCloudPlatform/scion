@@ -165,6 +165,11 @@ type GitHubResolutionCache struct {
 	refreshMu          sync.Mutex
 	lastRefreshFailure map[string]time.Time
 
+	// causeMu guards flightCauses, which holds, per flight key, the record
+	// of the flight currently running for it (see flightCause).
+	causeMu      sync.Mutex
+	flightCauses map[string]*flightCause
+
 	// lifecycleMu guards closing and the Add side of refreshWG, so Close
 	// never waits on refreshWG while a new refresh is being added to it.
 	// refreshWG counts background stale-refresh goroutines (see
@@ -722,6 +727,78 @@ func injectStaleServe(flightKey string, refreshStarted bool) {
 	}
 }
 
+// flightCause records the classified failure of the latest attempt a
+// shared fetch made and is retrying past (see recordAttemptCause). A caller
+// that stops waiting for the flight on its own deadline reports this cause
+// instead of a bare timeout (see coalesceFetchAccept). Safe for concurrent
+// use.
+type flightCause struct {
+	mu    sync.Mutex
+	cause *githubResolveError
+}
+
+func (f *flightCause) set(cause *githubResolveError) {
+	f.mu.Lock()
+	f.cause = cause
+	f.mu.Unlock()
+}
+
+func (f *flightCause) get() *githubResolveError {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cause
+}
+
+type flightCauseKey struct{}
+
+// contextWithFlightCause returns ctx carrying f, so the fetch running under
+// ctx can record attempt failures in it (see recordAttemptCause).
+func contextWithFlightCause(ctx context.Context, f *flightCause) context.Context {
+	return context.WithValue(ctx, flightCauseKey{}, f)
+}
+
+// recordAttemptCause records cause as the latest attempt failure of the
+// shared fetch running under ctx, if any. cause.msg may reach a caller, so
+// it must not carry credential material.
+func recordAttemptCause(ctx context.Context, cause *githubResolveError) {
+	if f, ok := ctx.Value(flightCauseKey{}).(*flightCause); ok {
+		f.set(cause)
+	}
+}
+
+// beginFlightCause registers a fresh flightCause for the flight now running
+// for flightKey and returns it with a func that removes it again. Flights
+// for one key never overlap (singleflight), so the registered record is
+// always that of the current flight; a later flight replaces it.
+func (c *GitHubResolutionCache) beginFlightCause(flightKey string) (*flightCause, func()) {
+	f := &flightCause{}
+	c.causeMu.Lock()
+	if c.flightCauses == nil {
+		c.flightCauses = make(map[string]*flightCause)
+	}
+	c.flightCauses[flightKey] = f
+	c.causeMu.Unlock()
+	return f, func() {
+		c.causeMu.Lock()
+		if c.flightCauses[flightKey] == f {
+			delete(c.flightCauses, flightKey)
+		}
+		c.causeMu.Unlock()
+	}
+}
+
+// lastFlightCause returns the latest attempt failure recorded by the flight
+// running for flightKey, or nil if there is none.
+func (c *GitHubResolutionCache) lastFlightCause(flightKey string) *githubResolveError {
+	c.causeMu.Lock()
+	f := c.flightCauses[flightKey]
+	c.causeMu.Unlock()
+	if f == nil {
+		return nil
+	}
+	return f.get()
+}
+
 // coalesceFetch runs fetch for cacheKey, using flightKey to coalesce
 // concurrent calls for the same ref into a single upstream fetch, and
 // credentialID to bound how many such fetches may run concurrently for a
@@ -791,6 +868,9 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 
 		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), githubFlightTimeout)
 		defer cancel()
+		cause, endCause := c.beginFlightCause(flightKey)
+		defer endCause()
+		flightCtx = contextWithFlightCause(flightCtx, cause)
 
 		release, aerr := c.acquireCredentialSlot(flightCtx, credentialID)
 		if aerr != nil {
@@ -815,14 +895,23 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 	case <-ctx.Done():
 		// A waiter whose own deadline (e.g. the resolve budget) expires
 		// before the shared flight finishes is a timeout, so classify it as
-		// one; plain cancellation stays unclassified. Both errors are wrapped
-		// so errors.As finds the code and errors.Is still matches the
-		// context error. logRef only: no credential-derived material.
+		// one; plain cancellation stays unclassified. When the flight is
+		// retrying past a classified failure (a 5xx, or no response), the
+		// waiter reports that cause and its Retry-After instead, so the
+		// caller sees why the flight has not finished. Both errors are
+		// wrapped so errors.As finds the code and errors.Is still matches
+		// the context error. logRef only: no credential-derived material.
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return ResolvedSkill{}, fmt.Errorf("%w: %w", &githubResolveError{
+			werr := &githubResolveError{
 				code: SkillErrCodeTimeout,
 				msg:  fmt.Sprintf("timed out waiting for GitHub skill resolution of %s", logRef),
-			}, ctx.Err())
+			}
+			if last := c.lastFlightCause(flightKey); last != nil {
+				werr.code = last.code
+				werr.retryAfter = last.retryAfter
+				werr.msg = fmt.Sprintf("timed out waiting for GitHub skill resolution of %s, still retrying after: %s", logRef, last.msg)
+			}
+			return ResolvedSkill{}, fmt.Errorf("%w: %w", werr, ctx.Err())
 		}
 		return ResolvedSkill{}, ctx.Err()
 	}

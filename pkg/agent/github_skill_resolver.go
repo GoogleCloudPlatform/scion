@@ -1176,6 +1176,10 @@ func (r *GitHubSkillResolver) doOnce(ctx context.Context, req *http.Request, att
 // canceled". Separately, when the server's own Retry-After exceeds
 // githubMaxBackoff, doWithRetry fails fast rather than sleeping the capped
 // backoff and retrying.
+//
+// Each failed attempt is also recorded as the latest cause of the shared
+// fetch running under ctx (see recordAttemptCause), so a caller that stops
+// waiting for that fetch on its own deadline can report it.
 func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request, attemptTimeout time.Duration, token string) (*http.Response, error) {
 	identity := GitHubCooldownIdentity(token)
 	var lastResp *http.Response
@@ -1269,6 +1273,10 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 			}
 			lastErr = err
 			lastResp = nil
+			recordAttemptCause(ctx, &githubResolveError{
+				code: classifyNetworkError(err),
+				msg:  fmt.Sprintf("%s %s got no response", noun, req.URL.Path),
+			})
 			continue
 		}
 
@@ -1284,6 +1292,11 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 		_ = resp.Body.Close()
 		lastResp = resp
 		lastErr = nil
+		recordAttemptCause(ctx, &githubResolveError{
+			code:       classifyRetryCause(resp, nil),
+			retryAfter: resp.Header.Get("Retry-After"),
+			msg:        fmt.Sprintf("%s %s failed (status %d)", noun, req.URL.Path, resp.StatusCode),
+		})
 	}
 
 	// The only way to reach here is attempt == githubMaxRetries having just
