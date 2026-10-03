@@ -34,20 +34,10 @@ func newTestProjectDeletionServiceForNFSCleanup() *ProjectDeletionService {
 	return &ProjectDeletionService{logger: slog.Default()}
 }
 
-// TestCleanupNFSSharedDirTree_LocalBackendWithNFSBlockPresent_TreeSurvives:
-// backend: local with a populated nfs sub-block underneath it (e.g. left
-// over from a prior nfs configuration) must not trigger any NFS cleanup --
-// cleanupNFSSharedDirTree gates strictly on sdCfg.Backend == "nfs", matching
-// resolveNFSSharedDirPath's own gate. The project's shared-dir tree on the
-// NFS export must survive project deletion untouched.
-func TestCleanupNFSSharedDirTree_LocalBackendWithNFSBlockPresent_TreeSurvives(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	globalScionDir := filepath.Join(tmpHome, ".scion")
-	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
-
-	mountRoot := filepath.Join(tmpHome, "srv")
-	settingsYAML := `schema_version: "1"
+// sdsLocalWithNFSBlockYAML is a global settings file whose backend is local
+// and that selects nfs nowhere, but still has a complete nfs block.
+func sdsLocalWithNFSBlockYAML(mountRoot string) string {
+	return `schema_version: "1"
 server:
   shared_dir_storage:
     backend: local
@@ -57,25 +47,82 @@ server:
         - id: scion-shared
           pv_name: pv
 `
-	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
+}
 
+// TestCleanupNFSSharedDirTree_LocalBackendWithNFSBlock_RemovesTree: the
+// backend is local and nothing selects nfs, but the nfs block is complete.
+// An agent created while nfs was selected keeps that backend through its
+// broker-side record, which the hub cannot read, so its tree is still on
+// the export. Project delete must remove the project's tree.
+func TestCleanupNFSSharedDirTree_LocalBackendWithNFSBlock_RemovesTree(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalScionDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+
+	mountRoot := filepath.Join(tmpHome, "srv")
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(sdsLocalWithNFSBlockYAML(mountRoot)), 0644))
+
+	// The tree an agent recorded on nfs left on the export.
 	projectID := "pid-local-with-nfs-block"
 	leaf := filepath.Join(mountRoot, "scion-shared", "projects", projectID, "shared-dirs", "scratchpad")
 	require.NoError(t, os.MkdirAll(leaf, 0o2775))
-	require.NoError(t, os.WriteFile(filepath.Join(leaf, "keep.txt"), []byte("must survive"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(leaf, "agent.txt"), []byte("written by an agent on nfs"), 0o644))
+	// Another project's tree is untouched.
+	other := filepath.Join(mountRoot, "scion-shared", "projects", "pid-other", "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(other, 0o2775))
 
 	svc := newTestProjectDeletionServiceForNFSCleanup()
 	svc.cleanupNFSSharedDirTree(context.Background(), projectID)
 
-	content, err := os.ReadFile(filepath.Join(leaf, "keep.txt"))
-	require.NoError(t, err, "the shared-dir tree must survive when backend is local, regardless of a populated nfs block")
-	assert.Equal(t, "must survive", string(content))
+	_, err := os.Stat(filepath.Join(mountRoot, "scion-shared", "projects", projectID))
+	assert.True(t, os.IsNotExist(err), "a complete nfs block must make delete clean the project's tree even when the backend is local")
+	_, err = os.Stat(other)
+	assert.NoError(t, err, "other projects' trees must survive")
+}
+
+// With a local backend, a complete nfs block and no export on this host,
+// cleanup warns and returns; it never logs an error and never creates
+// anything.
+func TestCleanupNFSSharedDirTree_LocalBackendWithNFSBlock_MissingExport_WarnsAndSkips(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalScionDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+	mountRoot := filepath.Join(tmpHome, "not-mounted")
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(sdsLocalWithNFSBlockYAML(mountRoot)), 0644))
+
+	buf := captureSlog(t)
+	svc := newTestProjectDeletionServiceForNFSCleanup()
+	svc.cleanupNFSSharedDirTree(context.Background(), "pid-local-missing-export")
+
+	logged := buf.String()
+	assert.Contains(t, logged, "level=WARN")
+	assert.Contains(t, logged, "not reachable on this host")
+	assert.NotContains(t, logged, "level=ERROR")
+	_, err := os.Stat(mountRoot)
+	assert.True(t, os.IsNotExist(err), "cleanup must not create the export path")
+}
+
+// With a local backend and no nfs block, cleanup is a silent no-op.
+func TestCleanupNFSSharedDirTree_LocalBackendNoNFSBlock_NoOp(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalScionDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"),
+		[]byte("schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    backend: local\n"), 0644))
+
+	buf := captureSlog(t)
+	svc := newTestProjectDeletionServiceForNFSCleanup()
+	svc.cleanupNFSSharedDirTree(context.Background(), "pid-local-no-block")
+
+	assert.NotContains(t, buf.String(), "pid-local-no-block")
 }
 
 // TestCleanupNFSSharedDirTree_NFSBackend_RemovesTree is the positive
-// counterpart: with backend: nfs actually configured, cleanup must remove
-// the project's shared-dir tree, confirming the local-backend test above is
-// actually distinguishing on Backend and not just never doing anything.
+// counterpart for the global backend: with backend: nfs configured, cleanup
+// removes the project's shared-dir tree.
 func TestCleanupNFSSharedDirTree_NFSBackend_RemovesTree(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
@@ -294,4 +341,33 @@ server:
 
 	_, err := os.Stat(filepath.Join(mountRoot, "scion-shared", "projects", projectID))
 	assert.True(t, os.IsNotExist(err))
+}
+
+// When a profile override selects nfs but there is no nfs block, cleanup
+// logs an ERROR naming the project and skips.
+func TestCleanupNFSSharedDirTree_OverrideWithoutNFSBlock_LogsErrorAndSkips(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalScionDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+profiles:
+  gke:
+    runtime: k8s
+    shared_dir_storage_backend: nfs
+server:
+  shared_dir_storage:
+    backend: local
+`), 0644))
+
+	buf := captureSlog(t)
+	svc := newTestProjectDeletionServiceForNFSCleanup()
+	svc.cleanupNFSSharedDirTree(context.Background(), "pid-override-no-block")
+
+	logged := buf.String()
+	assert.Contains(t, logged, "level=ERROR")
+	assert.Contains(t, logged, "pid-override-no-block")
 }
