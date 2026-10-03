@@ -392,6 +392,8 @@ proto:
 # uncommitted pkg/ent edits read as drift (ptone/scion#2746).
 # Exit codes: 1 = drift; 3 = go generate itself failed (not drift), shown by
 # make as "Error 3".
+# Keep in sync with the ent-generate-check step in .github/workflows/ci.yml:
+# it greps for the "go generate ./pkg/ent failed (not drift)" line below.
 ent-check:
 	@echo "Checking ent generated code is up to date..."
 	@go generate ./pkg/ent || { echo "go generate ./pkg/ent failed (not drift)"; exit 3; }
