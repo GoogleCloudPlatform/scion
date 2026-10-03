@@ -2946,7 +2946,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
 		}
 
-		effectiveID, regErr := registerGlobalProjectAndBroker(ctx, s, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings)
+		effectiveID, regErr := registerGlobalProjectAndBroker(ctx, s, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings, loadBrokerRegistrationWorkspaceStorage())
 		if regErr != nil {
 			// ERROR, not a warning: the co-located broker is how this process
 			// runs agents. Losing it silently left the Hub reporting healthy
@@ -3067,9 +3067,11 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// settings only, like shared_dir_storage: a project picked up from the
 	// working directory does not decide what the broker mounts.
 	var brokerNFS *config.V1NFSConfig
+	var workspaceStorageBackend string
 	if globalVS, _, gErr := config.LoadGlobalSettings(); gErr != nil {
 		log.Printf("WARNING: NFS mount checks disabled: loading global settings: %v", gErr)
 	} else {
+		workspaceStorageBackend = brokerWorkspaceStorageBackend(globalVS)
 		var nfsWarning string
 		brokerNFS, nfsWarning = brokerNFSConfig(globalVS)
 		if nfsWarning != "" {
@@ -3098,6 +3100,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
 		NFSConfig:                     brokerNFS,
+		WorkspaceStorageBackend:       workspaceStorageBackend,
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
 

@@ -56468,6 +56468,7 @@ type RuntimeBrokerMutation struct {
 	resources                      *string
 	runtimes                       *string
 	default_profile                *string
+	workspace_storage              *string
 	labels                         *map[string]string
 	annotations                    *map[string]string
 	endpoint                       *string
@@ -57169,6 +57170,55 @@ func (m *RuntimeBrokerMutation) ResetDefaultProfile() {
 	delete(m.clearedFields, runtimebroker.FieldDefaultProfile)
 }
 
+// SetWorkspaceStorage sets the "workspace_storage" field.
+func (m *RuntimeBrokerMutation) SetWorkspaceStorage(s string) {
+	m.workspace_storage = &s
+}
+
+// WorkspaceStorage returns the value of the "workspace_storage" field in the mutation.
+func (m *RuntimeBrokerMutation) WorkspaceStorage() (r string, exists bool) {
+	v := m.workspace_storage
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWorkspaceStorage returns the old "workspace_storage" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldWorkspaceStorage(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWorkspaceStorage is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWorkspaceStorage requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWorkspaceStorage: %w", err)
+	}
+	return oldValue.WorkspaceStorage, nil
+}
+
+// ClearWorkspaceStorage clears the value of the "workspace_storage" field.
+func (m *RuntimeBrokerMutation) ClearWorkspaceStorage() {
+	m.workspace_storage = nil
+	m.clearedFields[runtimebroker.FieldWorkspaceStorage] = struct{}{}
+}
+
+// WorkspaceStorageCleared returns if the "workspace_storage" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) WorkspaceStorageCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldWorkspaceStorage]
+	return ok
+}
+
+// ResetWorkspaceStorage resets all changes to the "workspace_storage" field.
+func (m *RuntimeBrokerMutation) ResetWorkspaceStorage() {
+	m.workspace_storage = nil
+	delete(m.clearedFields, runtimebroker.FieldWorkspaceStorage)
+}
+
 // SetLabels sets the "labels" field.
 func (m *RuntimeBrokerMutation) SetLabels(value map[string]string) {
 	m.labels = &value
@@ -57752,7 +57802,7 @@ func (m *RuntimeBrokerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RuntimeBrokerMutation) Fields() []string {
-	fields := make([]string, 0, 25)
+	fields := make([]string, 0, 26)
 	if m.name != nil {
 		fields = append(fields, runtimebroker.FieldName)
 	}
@@ -57791,6 +57841,9 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	}
 	if m.default_profile != nil {
 		fields = append(fields, runtimebroker.FieldDefaultProfile)
+	}
+	if m.workspace_storage != nil {
+		fields = append(fields, runtimebroker.FieldWorkspaceStorage)
 	}
 	if m.labels != nil {
 		fields = append(fields, runtimebroker.FieldLabels)
@@ -57862,6 +57915,8 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.Runtimes()
 	case runtimebroker.FieldDefaultProfile:
 		return m.DefaultProfile()
+	case runtimebroker.FieldWorkspaceStorage:
+		return m.WorkspaceStorage()
 	case runtimebroker.FieldLabels:
 		return m.Labels()
 	case runtimebroker.FieldAnnotations:
@@ -57921,6 +57976,8 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldRuntimes(ctx)
 	case runtimebroker.FieldDefaultProfile:
 		return m.OldDefaultProfile(ctx)
+	case runtimebroker.FieldWorkspaceStorage:
+		return m.OldWorkspaceStorage(ctx)
 	case runtimebroker.FieldLabels:
 		return m.OldLabels(ctx)
 	case runtimebroker.FieldAnnotations:
@@ -58044,6 +58101,13 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetDefaultProfile(v)
+		return nil
+	case runtimebroker.FieldWorkspaceStorage:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWorkspaceStorage(v)
 		return nil
 	case runtimebroker.FieldLabels:
 		v, ok := value.(map[string]string)
@@ -58195,6 +58259,9 @@ func (m *RuntimeBrokerMutation) ClearedFields() []string {
 	if m.FieldCleared(runtimebroker.FieldDefaultProfile) {
 		fields = append(fields, runtimebroker.FieldDefaultProfile)
 	}
+	if m.FieldCleared(runtimebroker.FieldWorkspaceStorage) {
+		fields = append(fields, runtimebroker.FieldWorkspaceStorage)
+	}
 	if m.FieldCleared(runtimebroker.FieldLabels) {
 		fields = append(fields, runtimebroker.FieldLabels)
 	}
@@ -58256,6 +58323,9 @@ func (m *RuntimeBrokerMutation) ClearField(name string) error {
 		return nil
 	case runtimebroker.FieldDefaultProfile:
 		m.ClearDefaultProfile()
+		return nil
+	case runtimebroker.FieldWorkspaceStorage:
+		m.ClearWorkspaceStorage()
 		return nil
 	case runtimebroker.FieldLabels:
 		m.ClearLabels()
@@ -58330,6 +58400,9 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 		return nil
 	case runtimebroker.FieldDefaultProfile:
 		m.ResetDefaultProfile()
+		return nil
+	case runtimebroker.FieldWorkspaceStorage:
+		m.ResetWorkspaceStorage()
 		return nil
 	case runtimebroker.FieldLabels:
 		m.ResetLabels()

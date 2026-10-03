@@ -233,8 +233,11 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// EmptyPerAgentWorkspace, like Attach, reflects the default
 			// runtime (false for Cloud Run, which rejects the mode).
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(s.runtime),
+			// Cross-broker agent move is not implemented by this broker.
+			AgentMove: false,
 		},
-		Profiles: s.buildInfoProfiles(runtimeType),
+		Profiles:         s.buildInfoProfiles(runtimeType),
+		WorkspaceStorage: s.workspaceStorageDescriptor(),
 	}
 
 	writeJSON(w, http.StatusOK, resp)

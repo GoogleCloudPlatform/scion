@@ -747,6 +747,7 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	// Profiles are persisted in the "runtimes" column (legacy naming).
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
 	sb.DefaultProfile = b.DefaultProfile
+	unmarshalRawJSON(b.WorkspaceStorage, &sb.WorkspaceStorage)
 	sb.Labels = b.Labels
 	if sb.Labels == nil {
 		sb.Labels = make(map[string]string)
@@ -774,6 +775,7 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 		SetCapabilities(marshalRawJSON(b.Capabilities)).
 		SetRuntimes(marshalRawJSON(b.Profiles)).
 		SetDefaultProfile(b.DefaultProfile).
+		SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
 		SetLabels(b.Labels).
 		SetAnnotations(b.Annotations)
 
@@ -875,6 +877,7 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetCapabilities(marshalRawJSON(b.Capabilities)).
 			SetRuntimes(marshalRawJSON(b.Profiles)).
 			SetDefaultProfile(b.DefaultProfile).
+			SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
 			SetLabels(b.Labels).
 			SetAnnotations(b.Annotations).
 			SetEndpoint(b.Endpoint).
