@@ -139,9 +139,13 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	// Publish status event (best-effort: fetch agent for ProjectID)
+	// Publish status event (best-effort: fetch agent for ProjectID). A
+	// soft-deleted row publishes nothing: its deletion was already announced,
+	// and a late report from its container must not resurrect it in clients.
 	if agent, err := s.store.GetAgent(ctx, id); err == nil {
-		s.events.PublishAgentStatus(ctx, agent)
+		if agent.DeletedAt.IsZero() {
+			s.events.PublishAgentStatus(ctx, agent)
+		}
 	} else {
 		s.agentLifecycleLog.Warn("Failed to fetch agent for status event", "agent_id", id, "error", err)
 	}
@@ -162,6 +166,25 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 // see that guard's comment.
 func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpdate) {
 	currentPhase := state.Phase(agent.Phase)
+
+	// Guard 0c: a delete in progress (design ptone/scion#2483 §2.1) owns the
+	// agent's Phase/Activity/ExitCode/ExitReason/Message, exactly like a
+	// reincarnation (Guard 0b): a dying container's report must not revive a
+	// row the delete engine is tearing down. A soft-deleted row is done — no
+	// report changes it. The store repeats this check inside the
+	// UpdateAgentStatus transaction, so a delete claim that lands between
+	// this read and that write is still honored.
+	if deletionActive(agent) || !agent.DeletedAt.IsZero() {
+		status.Phase = ""
+		status.Activity = ""
+		status.ExitCode = nil
+		status.ExitReason = ""
+		status.Message = ""
+		// The store copy of this guard also drops ClearExit; mirror it so the
+		// two stay the same predicate (reports never set it: json:"-").
+		status.ClearExit = false
+		return
+	}
 
 	// Guard 0: suspended is sticky against async status updates. When an agent
 	// is suspended, its container is being torn down, and the dying container's
@@ -319,6 +342,30 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// Delete in progress (design ptone/scion#2483 §2.1). Authz already ran
+	// in the caller. This runs before the managed-runtime branch so managed
+	// agents get the same answers.
+	switch action {
+	case api.AgentActionStart, api.AgentActionRestart:
+		entry := startEntryStart
+		if action == api.AgentActionRestart {
+			entry = startEntryRestart
+		}
+		if ref := s.startGate(ctx, agent, entry); ref.refuses() {
+			ref.write(w)
+			return
+		}
+	case api.AgentActionStop:
+		// The agent is already going down: stop is a no-op success.
+		if deleteStopNoop(agent) {
+			respAgent := *agent
+			respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+			respAgent.Deletion = store.ComputeAgentDeletion(agent, time.Now())
+			writeJSON(w, http.StatusOK, &respAgent)
+			return
+		}
 	}
 
 	// Managed agent lifecycle: handle directly without broker dispatch.
@@ -533,11 +580,15 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	agent.Phase = newPhase
+	// A successful start/stop/restart clears a failed delete marker
+	// (design ptone/scion#2483 §2.1); publish and respond from the stored
+	// row, which a racing delete claim may have kept off newPhase.
+	s.settleLifecycleWrite(ctx, agent, newPhase)
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent
 	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+	respAgent.Deletion = store.ComputeAgentDeletion(agent, time.Now())
 	writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 }
 

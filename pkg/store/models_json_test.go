@@ -97,12 +97,18 @@ func TestAgent_JSON_CanonicalKeysOnly(t *testing.T) {
 		"id", "slug", "name", "template", "projectId", "detached",
 		"created", "updated", "startedAt", "lastSeen", "lastActivityEvent",
 		"deletedAt", "messageMode", "stateVersion", "generation",
+		// deletion is an explicit null when no delete is in view (design
+		// ptone/scion#2483 §2.4); the raw deletion_* columns never appear.
+		"deletion",
 	})
 
 	var m map[string]interface{}
 	_ = json.Unmarshal(data, &m)
 	if m["projectId"] != "p-1" {
 		t.Errorf("projectId = %v, want %q", m["projectId"], "p-1")
+	}
+	if v, ok := m["deletion"]; !ok || v != nil {
+		t.Errorf("deletion = %v (present=%v), want explicit null", v, ok)
 	}
 
 	// Canonical round trip: marshal then unmarshal back into the same type.

@@ -1436,6 +1436,14 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
+	// Delete in progress (design ptone/scion#2483 §2.1): a soft-deleted row
+	// must not come back while deleteBlocksStart holds. Authz already ran in
+	// the caller.
+	if ref := s.startGate(ctx, agent, startEntryRestore); ref.refuses() {
+		ref.write(w)
+		return
+	}
+
 	agent.DeletedAt = time.Time{}
 	agent.Updated = time.Now()
 
