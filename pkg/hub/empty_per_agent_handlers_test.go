@@ -214,3 +214,25 @@ func TestRestartAgent_EmptyPerAgent_BrokerWithoutCapability_412(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, string(state.PhaseRunning), got.Phase)
 }
+
+// TestWakeAgentForDM_EmptyPerAgent_BrokerWithoutCapability_412: waking a
+// suspended agent for a DM maps the fail-closed dispatch error to 412
+// unsupported_capability, like the other sites (review #2717 r2 finding 3).
+func TestWakeAgentForDM_EmptyPerAgent_BrokerWithoutCapability_412(t *testing.T) {
+	srv, s := testServer(t)
+	project, broker := newEmptyPerAgentHandlerProject(t, s, "wake", false)
+	agent := newQuotaTestAgent(t, s, broker, project, "epah-wake", state.PhaseSuspended)
+
+	client := &mockRuntimeBrokerClient{}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
+
+	_, dmErr := srv.wakeAgentForDM(context.Background(), agent)
+	require.NotNil(t, dmErr)
+	require.Equal(t, http.StatusPreconditionFailed, dmErr.HTTPStatus, dmErr.Message)
+	require.Equal(t, ErrCodeUnsupportedCapability, dmErr.Code)
+	require.False(t, client.startCalled, "broker must not be called")
+
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(state.PhaseSuspended), got.Phase)
+}

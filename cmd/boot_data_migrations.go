@@ -75,14 +75,12 @@ func runBootDataMigrations(ctx context.Context, s store.Store) {
 		runMigrationSafe(ctx, s, "Broker ownership backfill", runBrokerOwnershipBackfill)                        // legacy ownerless runtime brokers
 		runMigrationSafe(ctx, s, "Non-agent dispatch_state backfill", runNonAgentDispatchStateBackfill)          // nc-promote-busy
 		runMigrationSafe(ctx, s, "Broker quota bindings to settings", runBrokerQuotaBindingsToSettingsMigration) // ptone/scion#2061 P2-D4
+		runMigrationSafe(ctx, s, "Empty-per-agent legacy report", reportEmptyPerAgentProjects)                   // ptone/scion#2703, read-only
 	})
 
 	// Split the residual report into reachable/unreachable (M6, §4.6).
 	reportResidualUnattributed(ctx, s)
 
-	// Read-only: surface non-git projects that now resolve to the
-	// empty-per-agent workspace mode (design #2703).
-	runMigrationSafe(ctx, s, "Empty-per-agent report", reportEmptyPerAgentProjects)
 }
 
 // runMigrationSafe calls fn inside a deferred recover. A panic is logged at

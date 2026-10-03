@@ -49,6 +49,10 @@ func TestReportEmptyPerAgentProjects(t *testing.T) {
 	got, err := s.GetProject(ctx, affected.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.WorkspaceModePerAgent, got.Labels[store.LabelWorkspaceMode])
+
+	done, err := IsMigrationComplete(ctx, s, MigrationEmptyPerAgentLegacyReport)
+	require.NoError(t, err)
+	assert.True(t, done, "completion marker written after the pass")
 }
 
 func TestReportEmptyPerAgentProjects_SilentWhenNoneAffected(t *testing.T) {
@@ -61,5 +65,35 @@ func TestReportEmptyPerAgentProjects_SilentWhenNoneAffected(t *testing.T) {
 
 	reportEmptyPerAgentProjects(ctx, s)
 
-	assert.NotContains(t, buf.String(), "Empty-per-agent report")
+	assert.NotContains(t, buf.String(), "level=WARN")
+	done, err := IsMigrationComplete(ctx, s, MigrationEmptyPerAgentLegacyReport)
+	require.NoError(t, err)
+	assert.True(t, done, "an empty pass is still a completed pass")
+}
+
+// TestReportEmptyPerAgentProjects_OneShot: after the first pass, projects
+// created as empty-per-agent on purpose are not reported (review #2717 r2
+// finding 1).
+func TestReportEmptyPerAgentProjects_OneShot(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	legacy := createTestProject(t, ctx, s, "legacy-nongit-per-agent", "", map[string]string{store.LabelWorkspaceMode: store.WorkspaceModePerAgent})
+
+	buf, restore := captureSlog(t)
+	defer restore()
+
+	reportEmptyPerAgentProjects(ctx, s)
+	require.Contains(t, buf.String(), legacy.ID, "first boot reports the legacy project")
+	done, err := IsMigrationComplete(ctx, s, MigrationEmptyPerAgentLegacyReport)
+	require.NoError(t, err)
+	require.True(t, done)
+
+	// A project deliberately created as empty-per-agent after the upgrade.
+	deliberate := createTestProject(t, ctx, s, "new-empty-per-agent", "", map[string]string{store.LabelWorkspaceMode: store.WorkspaceModePerAgent})
+	buf.Reset()
+
+	reportEmptyPerAgentProjects(ctx, s)
+	assert.NotContains(t, buf.String(), deliberate.ID)
+	assert.NotContains(t, buf.String(), legacy.ID)
+	assert.NotContains(t, buf.String(), "level=WARN")
 }

@@ -118,6 +118,30 @@ func deriveCloneWorkspaceMode(srcLabel string, cloneIsGit bool) string {
 	return srcLabel
 }
 
+// dispatchWorkspaceMode returns the workspace-mode value sent to the broker
+// (wire WorkspaceMode, start spec, SCION_WORKSPACE_MODE) for project. The
+// broker resolves it label-only (store.ResolveWorkspaceSharingMode), without
+// knowing the project's git-ness, so the value must resolve there to the
+// same mode as project.SharingMode() on the hub (design #2703 §2.3):
+//   - empty-per-agent sends the canonical value, never the bare "per-agent"
+//     label, which the broker would map to clone-per-agent;
+//   - a stored label that does not fit the project's git-ness (e.g. a legacy
+//     raw "empty-per-agent" on a git project, or "worktree-per-agent" on a
+//     non-git one) is dropped, so the broker sees an unlabelled project,
+//     matching the hub's shared-plain resolution;
+//   - any other label is forwarded unchanged, as before.
+func dispatchWorkspaceMode(project *store.Project) string {
+	mode := project.SharingMode()
+	if mode == store.SharingModeEmptyPerAgent {
+		return string(store.SharingModeEmptyPerAgent)
+	}
+	label := project.Labels[store.LabelWorkspaceMode]
+	if store.ResolveWorkspaceSharingMode(label) != mode {
+		return ""
+	}
+	return label
+}
+
 // syncsHubProjectWorkspace reports whether agents of project mount the hub's
 // project workspace directory, so the hub keeps it in sync with remote
 // brokers (GCS upload on create, sync-back on stop/sync). True for

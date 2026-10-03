@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -38,14 +39,24 @@ type emptyPerAgentFixture struct {
 
 func newEmptyPerAgentFixture(t *testing.T, name string, capable bool) *emptyPerAgentFixture {
 	t.Helper()
+	return newWorkspaceModeDispatchFixture(t, name, "", store.WorkspaceModePerAgent, capable)
+}
+
+// newWorkspaceModeDispatchFixture builds a dispatcher fixture for a project
+// with the given git remote and raw workspace-mode label.
+func newWorkspaceModeDispatchFixture(t *testing.T, name, gitRemote, label string, capable bool) *emptyPerAgentFixture {
+	t.Helper()
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
 	project := &store.Project{
-		ID:     tid("proj-epa-" + name),
-		Name:   "empty-per-agent",
-		Slug:   "empty-per-agent",
-		Labels: map[string]string{store.LabelWorkspaceMode: store.WorkspaceModePerAgent},
+		ID:        tid("proj-epa-" + name),
+		Name:      "empty-per-agent",
+		Slug:      "empty-per-agent",
+		GitRemote: gitRemote,
+	}
+	if label != "" {
+		project.Labels = map[string]string{store.LabelWorkspaceMode: label}
 	}
 	if err := memStore.CreateProject(ctx, project); err != nil {
 		t.Fatalf("create project: %v", err)
@@ -213,6 +224,80 @@ func TestEmptyPerAgent_GateFailsClosedOnProjectLookupError(t *testing.T) {
 		}
 		if endpoint == "" {
 			t.Error("expected the broker endpoint")
+		}
+	})
+}
+
+// TestDispatchWorkspaceMode: the value sent to the broker must resolve,
+// label-only, to the hub's SharingMode (review #2717 r2 finding 2).
+func TestDispatchWorkspaceMode(t *testing.T) {
+	const remote = "github.com/a/b"
+	cases := []struct {
+		name      string
+		gitRemote string
+		label     string
+		want      string
+	}{
+		{"non-git unlabelled", "", "", ""},
+		{"non-git shared", "", "shared", "shared"},
+		{"non-git per-agent", "", "per-agent", "empty-per-agent"},
+		{"non-git legacy empty-per-agent", "", "empty-per-agent", "empty-per-agent"},
+		{"non-git legacy worktree dropped", "", "worktree-per-agent", ""},
+		{"non-git legacy clone-per-agent dropped", "", "clone-per-agent", ""},
+		{"git unlabelled", remote, "", ""},
+		{"git shared", remote, "shared", "shared"},
+		{"git per-agent", remote, "per-agent", "per-agent"},
+		{"git worktree", remote, "worktree-per-agent", "worktree-per-agent"},
+		{"git legacy clone-per-agent", remote, "clone-per-agent", "clone-per-agent"},
+		{"git legacy empty-per-agent dropped", remote, "empty-per-agent", ""},
+		{"git unknown forwarded", remote, "bogus", "bogus"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &store.Project{GitRemote: tc.gitRemote}
+			if tc.label != "" {
+				p.Labels = map[string]string{store.LabelWorkspaceMode: tc.label}
+			}
+			got := dispatchWorkspaceMode(p)
+			if got != tc.want {
+				t.Fatalf("dispatchWorkspaceMode = %q, want %q", got, tc.want)
+			}
+			if rt := store.ResolveWorkspaceSharingMode(got); rt != p.SharingMode() {
+				t.Errorf("broker resolution %q != hub SharingMode %q", rt, p.SharingMode())
+			}
+		})
+	}
+}
+
+// TestDispatch_GitProjectLegacyEmptyPerAgentLabel: a git project with a raw
+// legacy "empty-per-agent" label is shared-plain on the hub, so the broker
+// must not receive empty-per-agent, and no capability is required.
+func TestDispatch_GitProjectLegacyEmptyPerAgentLabel(t *testing.T) {
+	const remote = "github.com/a/b"
+	t.Run("create", func(t *testing.T) {
+		f := newWorkspaceModeDispatchFixture(t, "git-legacy-create", remote, "empty-per-agent", false)
+		if err := f.dispatcher.DispatchAgentCreate(context.Background(), f.agent); err != nil {
+			t.Fatalf("DispatchAgentCreate (no capability needed): %v", err)
+		}
+		if got := f.client.lastCreateReq.WorkspaceMode; got != "" {
+			t.Errorf("wire WorkspaceMode = %q, want empty", got)
+		}
+	})
+	t.Run("start", func(t *testing.T) {
+		f := newWorkspaceModeDispatchFixture(t, "git-legacy-start", remote, "empty-per-agent", false)
+		f.agent.AppliedConfig.GitClone = &api.GitCloneConfig{URL: "https://github.com/a/b.git"}
+		if err := f.dispatcher.DispatchAgentStart(context.Background(), f.agent, "", false); err != nil {
+			t.Fatalf("DispatchAgentStart (no capability needed): %v", err)
+		}
+		env := f.client.lastResolvedEnv
+		if got, ok := env["SCION_WORKSPACE_MODE"]; ok {
+			t.Errorf("SCION_WORKSPACE_MODE = %q, want absent (unlabelled shared-plain)", got)
+		}
+		if env["SCION_WORKSPACE_GIT"] != "true" {
+			t.Errorf("SCION_WORKSPACE_GIT = %q, want true for a git shared-plain workspace", env["SCION_WORKSPACE_GIT"])
+		}
+		if got := f.client.lastStartExtras.Workspace.WorkspaceMode; got != "" {
+			t.Errorf("start spec WorkspaceMode = %q, want empty", got)
 		}
 	})
 }

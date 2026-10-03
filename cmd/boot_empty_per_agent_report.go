@@ -22,8 +22,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// reportEmptyPerAgentProjects logs the non-git projects whose stored
-// scion.dev/workspace-mode label now resolves to the empty-per-agent
+// reportEmptyPerAgentProjects logs, once, the legacy non-git projects whose
+// stored scion.dev/workspace-mode label now resolves to the empty-per-agent
 // workspace mode (design #2703).
 //
 // Background: before #2703, the hub stored raw labels verbatim on non-git
@@ -34,25 +34,43 @@ import (
 // clients never sent the label for non-git projects, so this should be
 // rare; the report makes any affected project visible to operators.
 //
-// The pass is read-only (no completion marker): it runs on every boot and
-// stays silent when no project is affected.
+// Legacy-only by construction: boot data migrations run before the hub
+// serves any request, so every project found on the first pass predates
+// empty-per-agent support. The completion marker then stops later boots
+// from reporting projects created as empty-per-agent on purpose.
+//
+// The pass is read-only. A listing failure is a run-level failure: the
+// marker is left unwritten and the next boot retries.
 func reportEmptyPerAgentProjects(ctx context.Context, s store.Store) {
-	affected, err := findEmptyPerAgentProjects(ctx, s)
+	done, err := IsMigrationComplete(ctx, s, MigrationEmptyPerAgentLegacyReport)
 	if err != nil {
-		slog.Error("Empty-per-agent report: failed to list projects", "error", err)
+		slog.Error("Empty-per-agent legacy report: failed to check completion marker; will attempt report",
+			"error", err)
+	} else if done {
+		slog.Debug("Empty-per-agent legacy report: already complete, skipping")
 		return
 	}
-	if len(affected) == 0 {
+
+	affected, err := findEmptyPerAgentProjects(ctx, s)
+	if err != nil {
+		slog.Error("Empty-per-agent legacy report: failed to list projects; will retry next boot", "error", err)
 		return
 	}
 	for _, p := range affected {
-		slog.Warn("Empty-per-agent report: non-git project resolves to the empty-per-agent workspace mode; its agents need a broker with the emptyPerAgentWorkspace capability",
+		slog.Warn("Empty-per-agent legacy report: non-git project now resolves to the empty-per-agent workspace mode; its agents need a broker with the emptyPerAgentWorkspace capability",
 			"project_id", p.ID,
 			"project_name", p.Name,
 			"label", p.Labels[store.LabelWorkspaceMode],
 		)
 	}
-	slog.Warn("Empty-per-agent report: pass completed", "count", len(affected))
+	if len(affected) > 0 {
+		slog.Warn("Empty-per-agent legacy report: pass completed", "count", len(affected))
+	}
+
+	if markErr := MarkMigrationComplete(ctx, s, MigrationEmptyPerAgentLegacyReport, 0); markErr != nil {
+		slog.Error("Empty-per-agent legacy report: failed to write completion marker; will retry next boot",
+			"error", markErr)
+	}
 }
 
 // findEmptyPerAgentProjects returns all projects that resolve to the

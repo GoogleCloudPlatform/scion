@@ -1133,13 +1133,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 
 	info.sharedDirs = project.SharedDirs
 	info.sharedWorkspace = project.IsSharedWorkspace()
-	info.workspaceMode = project.Labels[store.LabelWorkspaceMode]
-	if project.IsEmptyPerAgent() {
-		// Never forward the bare "per-agent" label for a non-git project:
-		// label-only resolution on the broker maps it to clone-per-agent.
-		// Send the canonical value instead (design #2703 §2.3).
-		info.workspaceMode = string(store.SharingModeEmptyPerAgent)
-	}
+	info.workspaceMode = dispatchWorkspaceMode(project)
 
 	// First check if the broker has a registered local path for this project.
 	if agent.RuntimeBrokerID != "" {
