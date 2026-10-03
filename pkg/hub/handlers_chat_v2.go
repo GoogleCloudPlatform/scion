@@ -4148,6 +4148,10 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results, nextCursor, err := wcs.SearchChatMessages(ctx, filter)
+	if errors.Is(err, ErrInvalidSearchCursor) {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidCursor, "invalid cursor: restart pagination from the first page", nil)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "search failed", nil)
 		return
