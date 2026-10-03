@@ -435,6 +435,7 @@ func (s *Server) admitAndDispatchAgentKeys(w http.ResponseWriter, r *http.Reques
 		AgentID:         target.ID,
 		AgentSlug:       target.Slug,
 		ProjectID:       target.ProjectID,
+		Runtime:         target.Runtime,
 	}
 
 	// Write the admission audit record before dispatch (ptone/scion#2184's

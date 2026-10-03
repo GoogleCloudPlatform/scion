@@ -3404,6 +3404,12 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 					Conflict(w, "Failed to delete agent on runtime broker: "+se.brokerErrorMessage())
 					return
 				}
+				// The agent's recorded runtime is not available on the
+				// broker (ptone/scion#2748): retryable, and force=true
+				// still removes the hub record above.
+				if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+					return
+				}
 				writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
 					"Failed to delete agent on runtime broker: "+err.Error(), nil)
 				return
@@ -3791,6 +3797,9 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 
 	output, exitCode, err := dispatcher.DispatchAgentExec(ctx, agent, req.Command, req.Timeout)
 	if err != nil {
+		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+			return
+		}
 		RuntimeError(w, "Failed to execute command on runtime broker: "+err.Error())
 		return
 	}

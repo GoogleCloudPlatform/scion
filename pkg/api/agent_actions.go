@@ -80,3 +80,12 @@ func RuntimeBrokerAgentActionMethod(action string) (string, bool) {
 		return "", false
 	}
 }
+
+// RecordedRuntimeQueryParam is the query parameter the hub sets on runtime
+// broker requests for an existing agent (every action except start, plus the
+// bare GET and DELETE) to the runtime type it recorded for that agent
+// (ptone/scion#2748). The broker looks for the agent only in runtimes of that
+// type and returns a retryable 503 when none is registered. Absent or empty
+// means the hub has no recorded type: the broker searches every registered
+// runtime, as before.
+const RecordedRuntimeQueryParam = "runtime"

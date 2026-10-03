@@ -432,6 +432,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					fmt.Sprintf("Cannot suspend agent: %s. Use 'stop' instead.", noResume.Error()), nil)
 				return
 			}
+			if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+				return
+			}
 			RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
 			return
 		}
@@ -449,6 +452,14 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// errors for stopping non-running containers. The subsequent
 			// Start will handle cleanup of the exited container.
 			stopErr := dispatcher.DispatchAgentStop(ctx, agent)
+			// The broker has no runtime of the agent's recorded type
+			// registered (ptone/scion#2748): the agent may still be
+			// running there, so do not start it anywhere else.
+			if writeBrokerRuntimeUnavailable(w, stopErr, agent.Runtime) {
+				slog.Warn("Restart: agent's runtime not available on broker, not starting",
+					"agent_id", id, "runtime", agent.Runtime)
+				return
+			}
 			if stopErr != nil {
 				slog.Warn("Restart: stop dispatch failed, proceeding with start",
 					"agent_id", id, "error", stopErr)
@@ -486,6 +497,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 
 	// If dispatch failed, return error
 	if dispatchErr != nil {
+		if writeBrokerRuntimeUnavailable(w, dispatchErr, agent.Runtime) {
+			return
+		}
 		RuntimeError(w, "Failed to dispatch to runtime broker: "+dispatchErr.Error())
 		return
 	}

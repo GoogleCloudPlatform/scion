@@ -106,6 +106,9 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 			writeError(w, http.StatusNotImplemented, brokerCodeRuntimeLogsUnsupported, runtimeLogsUnsupportedMessage, nil)
 			return
 		}
+		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+			return
+		}
 		writeError(w, http.StatusBadGateway, ErrCodeInternalError,
 			"Failed to retrieve logs from broker: "+err.Error(), nil)
 		return

@@ -1657,6 +1657,20 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Every request below except start acts on an existing agent: restrict
+	// its runtime lookups to the runtime type the hub recorded for it, and
+	// fail closed when this broker has no manager for that type
+	// (ptone/scion#2748). Keys applies the same check itself, after reading
+	// its body, so it can answer in its own result shape.
+	if isExistingAgentRequest(action) {
+		ctx, recorded, err := s.applyRecordedRuntime(r, id)
+		if err != nil {
+			writeRuntimeNotRegistered(w, recorded)
+			return
+		}
+		r = r.WithContext(ctx)
+	}
+
 	// Handle actions
 	if action != "" {
 		s.handleAgentAction(w, r, id, projectID, action)
@@ -2700,6 +2714,21 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 	// Bind ctx to the capped deadline so SendKeys's own internal checks
 	// (after its target-lock wait, and immediately before Exec — contract
 	// §4.2's remaining two enforcement points) observe it.
+	// Restrict the lookup to the agent's recorded runtime type, and fail
+	// closed when this broker has no manager for it (ptone/scion#2748).
+	// OutcomeKeysUnavailable is broker-assertable at 503: nothing ran.
+	rtCtx, recorded, rtErr := s.applyRecordedRuntime(r, id)
+	if rtErr != nil {
+		span.SetStatus(codes.Error, "recorded runtime not registered")
+		s.logKeysOutcome(req, agentkeys.OutcomeKeysUnavailable, time.Since(admittedAt))
+		w.Header().Set("Retry-After", recordedRuntimeRetryAfterSeconds)
+		writeKeysResult(w, req.OperationID, agentkeys.OutcomeKeysUnavailable, runtimeNotRegisteredMessage(recorded))
+		return
+	}
+	if want := recordedRuntimeFrom(rtCtx); want != "" {
+		ctx = withRecordedRuntime(ctx, want)
+	}
+
 	execCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 
@@ -3157,8 +3186,10 @@ type HasPromptResponse struct {
 func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
-	// Find the agent to get its project path
-	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
+	// Find the agent to get its project path. resolveManagerForAgent keeps
+	// the search within a recorded runtime type (ptone/scion#2748) and is the
+	// default manager otherwise.
+	agents, err := s.resolveManagerForAgent(ctx, id, projectID).List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {
 		RuntimeError(w, "Failed to list agents: "+err.Error())
 		return
@@ -4064,16 +4095,22 @@ func (s *Server) resolveAgentRuntimeTarget(ctx context.Context, id, projectID st
 		filter["scion.project_id"] = projectID
 	}
 
+	// A recorded runtime type (ptone/scion#2748) restricts the search to
+	// runtimes of that type; without one every runtime is searched.
+	useDefault := s.defaultRuntimeAllowed(ctx)
+
 	// Try the default runtime first.
-	agents, err := s.manager.List(ctx, filter)
-	if err == nil && len(agents) > 0 {
-		return s.manager, s.runtime
+	if useDefault {
+		agents, err := s.manager.List(ctx, filter)
+		if err == nil && len(agents) > 0 {
+			return s.manager, s.runtime
+		}
 	}
 
 	// Snapshot the auxiliary runtimes, sorted by identity, so manager calls
 	// happen without the lock and in a deterministic order — more than one
 	// auxiliary runtime can share a type (see auxiliaryRuntimeIdentity).
-	auxRuntimes := s.sortedAuxiliaryRuntimes()
+	auxRuntimes := s.sortedAuxiliaryRuntimesFor(ctx)
 
 	for _, aux := range auxRuntimes {
 		auxAgents, auxErr := aux.Manager.List(ctx, filter)
@@ -4086,9 +4123,11 @@ func (s *Server) resolveAgentRuntimeTarget(ctx context.Context, id, projectID st
 	// This supports pre-existing containers and solo/CLI mode.
 	if projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
-		agents, err = s.manager.List(ctx, fallbackFilter)
-		if err == nil && hasAgentInProjectOrUnlabeled(agents, projectID) {
-			return s.manager, s.runtime
+		if useDefault {
+			agents, err := s.manager.List(ctx, fallbackFilter)
+			if err == nil && hasAgentInProjectOrUnlabeled(agents, projectID) {
+				return s.manager, s.runtime
+			}
 		}
 		for _, aux := range auxRuntimes {
 			auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
@@ -4099,7 +4138,14 @@ func (s *Server) resolveAgentRuntimeTarget(ctx context.Context, id, projectID st
 	}
 
 	// Default fallback — the agent may have already been removed or the
-	// runtime is genuinely the default one (e.g. pod already deleted).
+	// runtime is genuinely the default one (e.g. pod already deleted). With
+	// a recorded runtime type the fallback stays within that type: the first
+	// allowed runtime (applyRecordedRuntime guarantees there is one).
+	if !useDefault {
+		if len(auxRuntimes) > 0 {
+			return auxRuntimes[0].Manager, auxRuntimes[0].Runtime
+		}
+	}
 	return s.manager, s.runtime
 }
 
@@ -4114,20 +4160,19 @@ func (s *Server) resolveManagerForAgent(ctx context.Context, id, projectID strin
 // runtime's manager, in deterministic (sorted-by-identity) order. Used by
 // resolveDeleteTarget to search every registered runtime rather than only
 // the one a slug-based lookup happens to resolve to first.
-func (s *Server) allManagers() []agent.Manager {
-	managers := []agent.Manager{s.manager}
-	s.auxiliaryRuntimesMu.RLock()
-	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
-	for name := range s.auxiliaryRuntimes {
-		auxNames = append(auxNames, name)
+//
+// A recorded runtime type on ctx (ptone/scion#2748) limits the list to
+// runtimes of that type.
+func (s *Server) allManagers(ctx context.Context) []agent.Manager {
+	var managers []agent.Manager
+	if s.defaultRuntimeAllowed(ctx) {
+		managers = append(managers, s.manager)
 	}
-	sort.Strings(auxNames)
-	for _, name := range auxNames {
-		if aux := s.auxiliaryRuntimes[name]; aux.Manager != nil && aux.Manager != s.manager {
+	for _, aux := range s.sortedAuxiliaryRuntimesFor(ctx) {
+		if aux.Manager != nil && aux.Manager != s.manager {
 			managers = append(managers, aux.Manager)
 		}
 	}
-	s.auxiliaryRuntimesMu.RUnlock()
 	return managers
 }
 
@@ -4587,7 +4632,7 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 		mgr   agent.Manager
 		entry api.AgentInfo
 	}
-	managers := s.allManagers()
+	managers := s.allManagers(ctx)
 
 	var listErr error
 	collect := func(filter map[string]string, accept func(api.AgentInfo) bool) []candidate {
