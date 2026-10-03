@@ -32,6 +32,7 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from './confirm-dialog.js';
+import { formatRelative } from '../../utils/time.js';
 
 @customElement('scion-secret-list')
 export class ScionSecretList extends LitElement {
@@ -261,32 +262,6 @@ export class ScionSecretList extends LitElement {
     }
   }
 
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
-  }
-
   private async copySecretRef(secret: Secret): Promise<void> {
     if (!secret.secretRef) return;
     try {
@@ -450,7 +425,7 @@ export class ScionSecretList extends LitElement {
             : html`<span class="version-badge">v${secret.version}</span>`}
         </td>
         <td class="hide-mobile">
-          <span class="meta-text">${this.formatRelativeTime(secret.updated)}</span>
+          <span class="meta-text">${formatRelative(secret.updated)}</span>
         </td>
         <td class="actions-cell">
           <sl-icon-button
