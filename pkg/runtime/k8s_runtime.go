@@ -47,6 +47,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -1244,6 +1245,133 @@ func (r *KubernetesRuntime) cleanupAgentSecrets(ctx context.Context, namespace, 
 				"kind", "SecretProviderClass", "name", spcName, "agent", agentName, "namespace", namespace, "error", err)
 		}
 	}
+}
+
+// Per-agent object name prefixes. Each is followed by the agent's pod name
+// (see createAgentSecret, createAuthFileSecret, createSecretProviderClass).
+const (
+	agentSecretPrefix     = "scion-agent-"
+	agentAuthSecretPrefix = "scion-auth-"
+)
+
+// podNameForAgentObject returns the pod name a per-agent Secret or
+// SecretProviderClass belongs to, derived from its deterministic name, and
+// false when the name is not a per-agent object name.
+func podNameForAgentObject(objectName string) (string, bool) {
+	for _, prefix := range []string{agentSecretPrefix, agentAuthSecretPrefix} {
+		if pod, ok := strings.CutPrefix(objectName, prefix); ok && pod != "" {
+			return pod, true
+		}
+	}
+	return "", false
+}
+
+// CleanupAgentResources implements AgentResourceCleaner. It removes the
+// per-agent Secrets (and, in GKE mode, the SecretProviderClass) of an agent
+// whose pod is already gone, for example after the pod was deleted outside
+// scion. Delete cannot be used for that case because the agent delete only
+// reaches Delete for a pod it can still list.
+//
+// Objects are selected by the agent's scion.name and scion.project_id
+// labels, which Run copies onto every per-agent object, so a same-named
+// agent in another project is never touched. An object is removed only when
+// all of these hold:
+//   - its name is a per-agent object name (scion-agent-* or scion-auth-*);
+//   - a Get of the pod named in it returns NotFound. Any other error (a
+//     timeout, a permission error) leaves the object and is returned, so
+//     an object is never removed on a guess.
+//
+// NotFound when deleting an object counts as success.
+//
+// Objects are looked up in the default namespace, or in every namespace
+// when ListAllNamespaces is set, the same scope List uses to find pods. An
+// agent started in another namespace (the scion.namespace label) with
+// ListAllNamespaces off is therefore not found, and its objects are left
+// in place rather than searched for.
+func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName, projectID string) error {
+	if agentName == "" || projectID == "" {
+		return nil
+	}
+	selector, err := labels.ValidatedSelectorFromSet(map[string]string{
+		"scion.name":               agentName,
+		projectkeys.LabelProjectID: projectID,
+	})
+	if err != nil {
+		return fmt.Errorf("invalid agent selector: %w", err)
+	}
+	namespace := r.DefaultNamespace
+	if r.ListAllNamespaces {
+		namespace = ""
+	}
+
+	// removable reports whether an object may be removed (see the rules
+	// above). A non-nil error means the pod lookup failed and the object
+	// must be kept.
+	removable := func(ns, objectName string) (bool, error) {
+		podName, ok := podNameForAgentObject(objectName)
+		if !ok {
+			return false, nil
+		}
+		_, err := r.Client.Clientset.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{})
+		if err == nil {
+			return false, nil
+		}
+		if k8serrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+
+	var errs []error
+	secrets, err := r.Client.Clientset.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		errs = append(errs, fmt.Errorf("failed to list agent Secrets: %w", err))
+	} else {
+		for _, s := range secrets.Items {
+			ok, err := removable(s.Namespace, s.Name)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("failed to check pod for Secret %s/%s: %w", s.Namespace, s.Name, err))
+				continue
+			}
+			if !ok {
+				continue
+			}
+			if err := r.Client.Clientset.CoreV1().Secrets(s.Namespace).Delete(ctx, s.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+				errs = append(errs, fmt.Errorf("failed to delete Secret %s/%s: %w", s.Namespace, s.Name, err))
+				continue
+			}
+			runtimeLog.Info("Removed per-agent object left after its pod was deleted",
+				"kind", "Secret", "name", s.Name, "agent", agentName, "namespace", s.Namespace)
+		}
+	}
+
+	// Run only creates a SecretProviderClass in GKE mode (see
+	// cleanupAgentSecrets), and the CRD may not be installed otherwise.
+	if r.GKEMode {
+		spcs, err := r.Client.ListSecretProviderClasses(ctx, namespace, selector.String())
+		if err != nil {
+			errs = append(errs, fmt.Errorf("failed to list agent SecretProviderClasses: %w", err))
+		} else {
+			for _, spc := range spcs.Items {
+				ns, name := spc.GetNamespace(), spc.GetName()
+				ok, err := removable(ns, name)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("failed to check pod for SecretProviderClass %s/%s: %w", ns, name, err))
+					continue
+				}
+				if !ok {
+					continue
+				}
+				if err := r.Client.DeleteSecretProviderClass(ctx, ns, name); err != nil && !k8serrors.IsNotFound(err) {
+					errs = append(errs, fmt.Errorf("failed to delete SecretProviderClass %s/%s: %w", ns, name, err))
+					continue
+				}
+				runtimeLog.Info("Removed per-agent object left after its pod was deleted",
+					"kind", "SecretProviderClass", "name", name, "agent", agentName, "namespace", ns)
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // createAuthFileSecret creates a K8s Secret containing ResolvedAuth file contents
