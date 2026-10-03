@@ -42,7 +42,7 @@ import (
 // _capabilities deep-equal the legacy path's ComputeCapabilitiesBatch-
 // derived _capabilities, action order included (the technique
 // TestListProjectAgentsSorted_CapsDeepEqualLegacy already uses for the
-// owner case); and (2) the exact decision count the design's 5+8n
+// owner case); and (2) the exact decision count the 5+8n
 // (all-readable, complete) formula predicts.
 
 // TestListProjectAgentsSorted_CapsDeepEqual_ScopedUAT exercises the one

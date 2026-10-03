@@ -179,9 +179,9 @@ func TestListProjectAgentsSorted_Race_OwnerChange_BecomesUnreadable(t *testing.T
 // --- exact decision counts for missing-row / project-drop ---------
 
 // TestListProjectAgentsSorted_Race_MissingRow_ExactDecisionCount extends the
-// existing missing-row race test with the exact decision count the design
-// requires ("no additional decision"): 1 (gate) + 1 (step-3 read) + 0 (step
-// 5a drop) + 4 (scope caps) = 6.
+// existing missing-row race test with the exact decision count required
+// (a dropped row costs no additional decision): 1 (gate) + 1 (step-3
+// read) + 0 (step 5a drop) + 4 (scope caps) = 6.
 func TestListProjectAgentsSorted_Race_MissingRow_ExactDecisionCount(t *testing.T) {
 	f := sortedListSetup(t)
 	a := f.createAgent(t, "race-missing-count", string(state.PhaseStopped), nil)

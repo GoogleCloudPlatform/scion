@@ -39,8 +39,8 @@ import (
 
 // TestListProjectAgentsSorted_CursorLabelReplayRejected proves: a cursor
 // minted under one label filter is rejected when replayed under another
-// (design 4.4: "as does a label replay"), mirroring the existing phase-replay
-// test.
+// (the label filter is part of the cursor binding), mirroring the existing
+// phase-replay test.
 func TestListProjectAgentsSorted_CursorLabelReplayRejected(t *testing.T) {
 	f := sortedListSetup(t)
 	for i := 0; i < 3; i++ {
@@ -64,7 +64,7 @@ func TestListProjectAgentsSorted_CursorLabelReplayRejected(t *testing.T) {
 
 // TestListProjectAgentsSorted_CursorCrossProjectRejected proves: a cursor
 // minted on project A is rejected when replayed against project B, since
-// the binding's endpoint string includes the project ID (design 4.4).
+// the binding's endpoint string includes the project ID.
 func TestListProjectAgentsSorted_CursorCrossProjectRejected(t *testing.T) {
 	f := sortedListSetup(t)
 	ctx := context.Background()
@@ -142,7 +142,7 @@ func TestListProjectAgentsSorted_MalformedCursor_NoSQLBeforeRejection(t *testing
 
 // TestListProjectAgentsSorted_Fit_IncompleteEvenWhenReadableAtOrBelowFit
 // proves: completeness is decided on the candidate count n, not the readable
-// count R (design 5.3 step 2) -- even when every readable agent would fit, a
+// count R -- even when every readable agent would fit, a
 // candidate pool above fit must still page.
 func TestListProjectAgentsSorted_Fit_IncompleteEvenWhenReadableAtOrBelowFit(t *testing.T) {
 	f := sortedListSetup(t)
@@ -170,8 +170,8 @@ func TestListProjectAgentsSorted_Fit_IncompleteEvenWhenReadableAtOrBelowFit(t *t
 	require.NotNil(t, resp.Complete)
 	assert.False(t, *resp.Complete, "n=6 > fit=5 must page even though R=5 <= fit")
 	// The paged response still serves exactly the readable set here (R=5
-	// fits in one page of limit=5), so no cursor is needed -- the design
-	// point is complete=false despite R<=fit, not that a cursor must exist.
+	// fits in one page of limit=5), so no cursor is needed -- the point
+	// is complete=false despite R<=fit, not that a cursor must exist.
 	assert.Equal(t, fit, resp.TotalCount)
 	assert.Len(t, resp.Agents, fit)
 }
@@ -214,7 +214,7 @@ func TestListProjectAgentsLegacy_IgnoresFitStatsDir_ByteIdentical(t *testing.T) 
 
 	// Valid values (the original test's case), plus invalid shapes such as
 	// dir=sideways, fit=0, plus two more unparsable ones -- all of these
-	// would be 400s in sorted mode (design 4.1), and must instead be
+	// would be 400s in sorted mode, and must instead be
 	// silently ignored here, exactly like the valid case.
 	extras := []string{
 		"fit=500&stats=1&dir=asc",

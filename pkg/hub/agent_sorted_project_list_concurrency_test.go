@@ -46,11 +46,11 @@ import (
 //     later page and appears only on a fresh page-0 fetch;
 //   - a key bump (heartbeat) that moves an unfetched row from "after the
 //     cursor" (not yet shown) to "before it" (newer than everything already
-//     shown): the walk skips it, exactly as design 4.5's "moves from after
-//     to before" row states.
+//     shown): the walk skips it, which is the documented contract for a
+//     row that moves from after the cursor to before it.
 //
-// The reverse crossing in the 4.5 table ("moves from before the cursor to
-// after it" => the row appears twice) needs a row's key to REGRESS, which
+// The reverse crossing (a row that moves from before the cursor to after
+// it appears twice) needs a row's key to REGRESS, which
 // this store's real write paths (every UpdateAgent/UpdateAgentStatus call
 // stamps time.Now(), monotonically non-decreasing) cannot produce for a real
 // agent; the same comparison code path handles both directions
@@ -150,7 +150,7 @@ func TestListProjectAgentsSorted_Concurrency_KeyBumpMovesRowOutOfLaterPage(t *te
 
 	// Heartbeat-style bump: moves target's key to "now", newer than
 	// everything already shown on page 0, i.e. from "after the cursor"
-	// (not yet visited) to "before it" (design 4.5).
+	// (not yet visited) to "before it".
 	require.NoError(t, f.store.UpdateAgentStatus(context.Background(), target, store.AgentStatusUpdate{Activity: "executing"}))
 
 	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodGet,
@@ -168,7 +168,7 @@ func TestListProjectAgentsSorted_Concurrency_KeyBumpMovesRowOutOfLaterPage(t *te
 // write paths in this store cannot regress a key (every write stamps
 // time.Now(), monotonically non-decreasing — see the package doc comment
 // above), so this reverse crossing ("moves from before the cursor to after
-// it" in design 4.5, the "duplicate" table row) is exercised at this
+// it", the "duplicate" case) is exercised at this
 // synthetic boundary instead of through a real mutation.
 type regressingAfterNCallsStore struct {
 	store.Store
@@ -201,14 +201,14 @@ func (r *regressingAfterNCallsStore) ListAgentMembers(ctx context.Context, filte
 // TestListProjectAgentsSorted_Concurrency_KeyRegressionDuplicatesRow proves:
 // a row already shown on an earlier page, whose key then regresses to sort
 // after the cursor, is shown again on a later page of the same walk. This
-// is the design 4.5 contract's stated behavior for that crossing direction
-// ("X appears twice"), not a bug — the test exists to prove the walk
+// is the concurrency contract's stated behavior for that crossing direction
+// (the row appears twice), not a bug — the test exists to prove the walk
 // reaches that documented outcome (via re-reading and repositioning, not an
 // offset) rather than silently deduplicating or skipping, and to pin it as
 // a regression guard since positionAfterCursor's comparison is symmetric
 // (pkg/store/agentsort.Less has no direction-specific branch): if the
 // "skip" direction (tested above) works, this proves the same code path
-// also produces the mirror-image "duplicate" outcome the design specifies.
+// also produces the mirror-image "duplicate" outcome the contract specifies.
 func TestListProjectAgentsSorted_Concurrency_KeyRegressionDuplicatesRow(t *testing.T) {
 	f := sortedListSetup(t)
 	const n = 6
