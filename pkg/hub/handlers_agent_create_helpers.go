@@ -172,7 +172,7 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, creatorName string, 
 		ac.InlineConfig = req.Config
 	}
 
-	if ac.HarnessAuth == "none" {
+	if harness.IsNoAuthType(ac.HarnessAuth) {
 		ac.NoAuth = true
 	}
 
@@ -570,7 +570,7 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 					s.agentLifecycleLog.Error("Failed to check auth credentials for fallback", "agent_id", agent.ID, "error", err)
 				} else if !hasCreds {
 					agent.AppliedConfig.NoAuth = true
-					agent.AppliedConfig.HarnessAuth = "none"
+					agent.AppliedConfig.HarnessAuth = harness.AuthTypeNone
 					s.agentLifecycleLog.Info("Auto no-auth fallback: harness supports drop-to-shell and no credentials found",
 						"agent_id", agent.ID, "harness", hc.Harness)
 				}
@@ -1088,6 +1088,12 @@ func (s *Server) handleExistingAgent(
 		if existingAgent.Phase == string(state.PhaseSuspended) {
 			existingAgent.Phase = string(state.PhaseRunning)
 		}
+		// Clear any exit reason/code left from the prior generation —
+		// including a disruption reason recorded while the agent was still
+		// running (state.ExitReasonPreempted/ExitReasonEvicted) ahead of its
+		// pod actually stopping, which describes the old pod, not this one.
+		existingAgent.ExitReason = ""
+		existingAgent.ExitCode = nil
 		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
 			s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 		}
@@ -1162,6 +1168,13 @@ func (s *Server) handleExistingAgent(
 			}
 
 			existingAgent.Phase = string(state.PhaseRunning)
+			// Clear any exit reason/code left from the prior generation —
+			// including a disruption reason recorded while the agent was
+			// still running (state.ExitReasonPreempted/ExitReasonEvicted)
+			// ahead of its pod actually stopping, which describes the old
+			// pod, not this one.
+			existingAgent.ExitReason = ""
+			existingAgent.ExitCode = nil
 			if err := s.updateAgentAfterDispatch(ctx, existingAgent); err != nil {
 				s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 			}
@@ -1193,6 +1206,13 @@ func (s *Server) handleExistingAgent(
 					"agent_id", existingAgent.ID, "agentName", existingAgent.Name, "error", err)
 			}
 		}
+		// This hard-deletes existingAgent the same way the main delete handler
+		// does, just reached via env-gather re-provisioning rather than an
+		// explicit DELETE — so it must revoke with the same reason too
+		// (ptone/scion#1956), before the row is gone and before the
+		// fall-through create below mints a credential for the new agent
+		// row's own (distinct) ID.
+		revokeAgentCredentialsBestEffort(ctx, s.store, existingAgent.ID, agentCredentialRevokeReasonDeleted)
 		if err := s.store.DeleteAgent(ctx, existingAgent.ID); err != nil {
 			writeErrorFromErr(w, err, "")
 			return existingAgentErrored
@@ -1264,6 +1284,10 @@ func (s *Server) handleExistingAgent(
 			existingAgent.Phase == string(state.PhaseProvisioning) {
 			existingAgent.Phase = string(state.PhaseRunning)
 		}
+		// Clear any exit reason/code left from the prior generation — see
+		// the equivalent clear in the resume branches above.
+		existingAgent.ExitReason = ""
+		existingAgent.ExitCode = nil
 		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
 			// Log but continue — agent was started.
 			s.agentLifecycleLog.Warn("Failed to update agent status after start", "agent_id", existingAgent.ID, "error", err)

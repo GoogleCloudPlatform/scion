@@ -241,9 +241,9 @@ func TestEffectCeilingAllows(t *testing.T) {
 // returned; principal returns all; any unrecorded hop or kind returns none.
 func TestAgentCreateDeliverIDs_BoundedParentSubset(t *testing.T) {
 	t.Run("pure deliverIDsAllowedByChain table", func(t *testing.T) {
-		for mask := 0; mask < 1<<len(hubDeliveryPermissionIDs); mask++ {
+		for mask := 0; mask < 1<<len(hubDeliveryPermissionList); mask++ {
 			var subset []string
-			for i, id := range hubDeliveryPermissionIDs {
+			for i, id := range hubDeliveryPermissionList {
 				if mask&(1<<i) != 0 {
 					subset = append(subset, id)
 				}
@@ -254,7 +254,7 @@ func TestAgentCreateDeliverIDs_BoundedParentSubset(t *testing.T) {
 			assert.Empty(t, deliverIDsAllowedByChain(ChainCeiling{Ceiling: boundedCeiling(ids...), UnrecordedHops: 1}),
 				"mask %b with an unrecorded hop", mask)
 		}
-		assert.ElementsMatch(t, hubDeliveryPermissionIDs,
+		assert.ElementsMatch(t, hubDeliveryPermissionList,
 			deliverIDsAllowedByChain(ChainCeiling{Ceiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal}}))
 		assert.Empty(t, deliverIDsAllowedByChain(ChainCeiling{Ceiling: store.EffectCeiling{}}))
 		assert.Empty(t, deliverIDsAllowedByChain(ChainCeiling{
@@ -627,7 +627,7 @@ func TestParentDeliverEligibilityStructuralGivesNone(t *testing.T) {
 
 	ids, err = f.authz(f.store, true, false).parentDeliverEligibility(ctx, p)
 	require.NoError(t, err)
-	assert.ElementsMatch(t, hubDeliveryPermissionIDs, ids, "principal chain carries every delivery ID")
+	assert.ElementsMatch(t, hubDeliveryPermissionList, ids, "principal chain carries every delivery ID")
 
 	_, err = f.authz(&edgeLookupErrStore{Store: f.store, failID: p.ID}, true, false).parentDeliverEligibility(ctx, p)
 	assert.Error(t, err, "lookup fault is returned")
@@ -753,7 +753,7 @@ func TestSourceEffectCeilingRows(t *testing.T) {
 		w := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: p.ID, ID: "jti-1"}, ProjectID: f.projectID}}
 		c, prov, err := authz.sourceEffectCeiling(ctx, w)
 		require.NoError(t, err)
-		want := append(agentScopeCoverage(ScopesForRole(AgentRoleBaseline)), hubDeliveryPermissionIDs...)
+		want := append(agentScopeCoverage(ScopesForRole(AgentRoleBaseline)), hubDeliveryPermissionList...)
 		sort.Strings(want)
 		assert.Equal(t, store.EffectCeilingBounded, c.Kind)
 		assert.Equal(t, permissions.CeilingVersionV1, c.Version)

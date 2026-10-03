@@ -129,6 +129,37 @@ Administrative actions for GCP Service Account management require `project-owner
 
 For more details on how agents assume these identities via metadata server emulation, see the [Authentication Guide](/scion/hosted/single-node/auth/#gcp-identity--metadata-emulation).
 
+### gs:// links in chat
+
+An agent's assigned GCP Identity has a second use beyond Vertex AI: when the
+`web.gcs_links` experiment is enabled on the Hub, a `gs://bucket/object`
+reference that an **agent** posts in Native Web Chat becomes a clickable
+link. Clicking it fetches the object through the Hub using the sending
+agent's *current* assigned Service Account, through a token minted on
+demand with only the read-only `devstorage.read_only` scope — never the
+broader scope the agent itself uses for Vertex AI or other Google Cloud
+calls, and never a token the browser can see or reuse directly.
+
+- **What links, and when**: only a `gs://` reference inside a message an
+  agent sent. The same text in a message you send does not link — the
+  Hub only ever reads an object on an agent's behalf, never a human's.
+- **Which identity is used**: the sending agent's *current* assigned Service
+  Account at the moment you click, resolved fresh from the message each
+  time — not a snapshot from when the message was originally posted. If the
+  agent's identity was later reassigned or removed, the fetch uses the new
+  identity (or fails, if none is assigned).
+- **Size limits and previews**: objects up to 10 MiB can be opened. PNG,
+  JPEG, GIF and WebP objects preview as images; other text — including SVG,
+  which is always shown as source rather than rendered — previews inline up
+  to 512 KB (larger text offers Download only); binary objects show "This
+  file can't be previewed." with Download.
+- **Errors and the Cloud Console fallback**: an object that can't be opened
+  (not found, access denied, or no Service Account currently assigned) shows
+  a single generic message rather than revealing which case applied; an
+  object over 10 MiB shows a size-limit message instead. Every such case also
+  offers an **Open in Cloud Console** link, so you can still inspect the
+  object with your own Google identity and permissions.
+
 ## Project Settings & Agent Limits
 
 The Hub provides a comprehensive UI for configuring project-level settings, ensuring administrators have control over resource allocation and project configurations. Access these settings via the Web Dashboard for any project you manage.

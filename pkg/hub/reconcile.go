@@ -165,6 +165,7 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 	if err != nil {
 		return "", err
 	}
+	defer s.beginLifecycleOp(agent.ID)()
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")
@@ -190,6 +191,7 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 	if err != nil {
 		return "", err
 	}
+	defer s.beginLifecycleOp(agent.ID)()
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")
@@ -205,6 +207,7 @@ func (s *Server) execDispatchRestart(ctx context.Context, d store.BrokerDispatch
 	if err != nil {
 		return "", err
 	}
+	defer s.beginLifecycleOp(agent.ID)()
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")

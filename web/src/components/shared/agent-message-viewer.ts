@@ -178,6 +178,16 @@ export class ScionAgentMessageViewer extends LitElement {
     .compose-input sl-input::part(base) {
       font-size: 0.875rem;
     }
+
+    /* This local override replaces the app-wide --sl-input-font-size-*
+       variable with a fixed value, which would otherwise defeat the
+       pointer:coarse 16px floor (see pkg/hub/web.go / web/index.html) on
+       touch — re-floor it here too, desktop unchanged. */
+    @media (pointer: coarse) {
+      .compose-input sl-input::part(base) {
+        font-size: max(16px, 0.875rem);
+      }
+    }
     .compose-actions {
       display: flex;
       align-items: center;

@@ -105,15 +105,22 @@ var recordedProvenanceRequiredIDs = []string{
 
 var recordedProvenanceRequired = toPermissionSet(recordedProvenanceRequiredIDs)
 
-// hubDeliveryPermissionIDs is the fixed set of delivery permissions an
-// agent-created edge may carry through parentDeliverEligibility.
-var hubDeliveryPermissionIDs = []string{
-	"secret.deliver",
-	"env_var.deliver",
-	"skill_injection.deliver",
-}
+// hubDeliveryPermissionList is the fixed set of delivery permissions an
+// agent-created edge may carry through parentDeliverEligibility, in sorted
+// order. It is derived from hubDeliveryPermissionIDs
+// (authz_delivery_credential.go) so the two cannot drift.
+var hubDeliveryPermissionList = sortedPermissionKeys(hubDeliveryPermissionIDs)
 
-var hubDeliveryPermissionSet = toPermissionSet(hubDeliveryPermissionIDs)
+var hubDeliveryPermissionSet = toPermissionSet(hubDeliveryPermissionList)
+
+// sortedPermissionKeys returns the keys of set in sorted order.
+func sortedPermissionKeys(set map[string]struct{}) []string {
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	return sortedUniqueIDs(ids)
+}
 
 // zeroCoverageScopeMapping is the reviewed table for agent scopes that cover
 // no registry permission. Under a bounded ceiling such a scope is issued only
@@ -592,7 +599,7 @@ func deliverIDsAllowedByChain(chain ChainCeiling) []string {
 		return nil
 	}
 	var ids []string
-	for _, d := range hubDeliveryPermissionIDs {
+	for _, d := range hubDeliveryPermissionList {
 		if EffectCeilingAllows(chain.Ceiling, d, false) {
 			ids = append(ids, d)
 		}
@@ -612,7 +619,7 @@ func isStructuralProvenanceError(err error) bool {
 }
 
 // parentDeliverEligibility returns the delivery permissions an edge created
-// by parent agent P may carry: each of hubDeliveryPermissionIDs that P's
+// by parent agent P may carry: each of hubDeliveryPermissionList that P's
 // whole chain allows (deliverIDsAllowedByChain over chainEffectCeiling(P)).
 // A structural chain outcome yields (nil, nil); a lookup fault is returned.
 func (a *AuthzService) parentDeliverEligibility(ctx context.Context, parent *store.Agent) ([]string, error) {

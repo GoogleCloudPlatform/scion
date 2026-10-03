@@ -392,6 +392,84 @@ export const GCS_FENCED_BLOCK_MSG = gcsMsg(
   '2026-02-01T00:00:31Z'
 );
 
+// ---------------------------------------------------------------------------
+// Image sniffing, SVG-as-source, octet-stream, the Content-Length
+// preview-size abort, 413, and an HTML-bodied object. Real Chromium is
+// required for these (happy-dom does not actually decode image bytes or
+// enforce the sandboxed-download behavior a navigation triggers).
+// ---------------------------------------------------------------------------
+
+export const GCS_IMAGE_PNG_MSG = gcsMsg(
+  '00000000-0000-4000-8000-000000000020',
+  `gs://${GCS_BUCKET}/photo.png`,
+  '2026-02-01T00:00:32Z'
+);
+
+export const GCS_IMAGE_JPEG_MSG = gcsMsg(
+  '00000000-0000-4000-8000-000000000021',
+  `gs://${GCS_BUCKET}/photo.jpg`,
+  '2026-02-01T00:00:33Z'
+);
+
+export const GCS_IMAGE_GIF_MSG = gcsMsg(
+  '00000000-0000-4000-8000-000000000022',
+  `gs://${GCS_BUCKET}/photo.gif`,
+  '2026-02-01T00:00:34Z'
+);
+
+export const GCS_IMAGE_WEBP_MSG = gcsMsg(
+  '00000000-0000-4000-8000-000000000023',
+  `gs://${GCS_BUCKET}/photo.webp`,
+  '2026-02-01T00:00:35Z'
+);
+
+// The hub never serves image/svg+xml; an SVG object's sniffed
+// Content-Type is its real text/plain, same as any other text object — shown
+// as source text, never as <img>, regardless of its .svg extension.
+export const GCS_SVG_MSG = gcsMsg(
+  '00000000-0000-4000-8000-000000000024',
+  `gs://${GCS_BUCKET}/diagram.svg`,
+  '2026-02-01T00:00:36Z'
+);
+
+export const GCS_SVG_BODY = '<svg xmlns="http://www.w3.org/2000/svg"><circle r="1"/></svg>';
+
+// A .png name whose actual bytes are HTML: the hub's content sniff ignores
+// both metadata and extension, so this is served as text/plain, never as an
+// image and never as text/html — the client must show it as source/code
+// text, not <img>, and its Download must still force a file download rather
+// than a rendered page.
+export const GCS_HTML_AS_PNG_MSG = gcsMsg(
+  '00000000-0000-4000-8000-000000000025',
+  `gs://${GCS_BUCKET}/fake.png`,
+  '2026-02-01T00:00:37Z'
+);
+
+export const GCS_HTML_BODY = '<html><body><h1>not a png</h1></body></html>';
+
+export const GCS_OCTET_STREAM_MSG = gcsMsg(
+  '00000000-0000-4000-8000-000000000026',
+  `gs://${GCS_BUCKET}/archive.blob`,
+  '2026-02-01T00:00:38Z'
+);
+
+// The response's Content-Length is over TEXT_PREVIEW_MAX_BYTES (512 KiB) while
+// its decoded text is under it, so only the Content-Length check can classify
+// it as too large.
+export const GCS_TOO_LARGE_INLINE_MSG = gcsMsg(
+  '00000000-0000-4000-8000-000000000027',
+  `gs://${GCS_BUCKET}/huge.txt`,
+  '2026-02-01T00:00:39Z'
+);
+
+export const GCS_TOO_LARGE_INLINE_BYTES = 512 * 1024 + 1;
+
+export const GCS_413_MSG = gcsMsg(
+  '00000000-0000-4000-8000-000000000028',
+  `gs://${GCS_BUCKET}/giant.bin`,
+  '2026-02-01T00:00:40Z'
+);
+
 export const GCS_MESSAGES: Message[] = [
   GCS_TEXT_AND_CODE_MSG,
   GCS_TRAILING_PUNCT_MSG,
@@ -424,6 +502,15 @@ export const GCS_MESSAGES: Message[] = [
   GCS_BINARY_NOTFOUND_MSG,
   GCS_TRAILING_PAREN_MSG,
   GCS_FENCED_BLOCK_MSG,
+  GCS_IMAGE_PNG_MSG,
+  GCS_IMAGE_JPEG_MSG,
+  GCS_IMAGE_GIF_MSG,
+  GCS_IMAGE_WEBP_MSG,
+  GCS_SVG_MSG,
+  GCS_HTML_AS_PNG_MSG,
+  GCS_OCTET_STREAM_MSG,
+  GCS_TOO_LARGE_INLINE_MSG,
+  GCS_413_MSG,
 ];
 
 export const GCS_MARKDOWN_BODY = '# Dev Brief\n\nShip the gs:// link viewer.\n';

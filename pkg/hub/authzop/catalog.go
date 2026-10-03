@@ -2778,6 +2778,7 @@ var EntryPointExemptions = []EntryPointExemption{
 	// Access constraint preview endpoints — hub-admin, access_constraint.admin permission
 	{Pattern: "/api/v1/admin/access-constraint-previews", Kind: ExemptionHubAdmin, Reason: "Access constraint previews, hub-admin with access_constraint.admin; PR #1445 B5 governance", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/admin/access-constraint-previews/", Kind: ExemptionHubAdmin, Reason: "Access constraint preview by ID, hub-admin with access_constraint.admin; PR #1445 B5 governance", Owner: "route_metadata.go"},
+	{Pattern: "GET /api/v1/admin/access-constraints/{id}/audit", Kind: ExemptionAuthenticationOnly, Reason: "Live access-constraint history, inline resource-scoped hub.audit.read check with privacy-preserving not-found denial", Owner: "handlers_access_constraints.go"},
 	{Pattern: "/api/v1/admin/effective-access", Kind: ExemptionAuthenticationOnly, Reason: "Admin effective-access composition, inline hub.audit.read check", Owner: "route_metadata.go"},
 }
 
@@ -2801,6 +2802,28 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/project_membership_service.go", Function: "replaceBindingTx", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "RS1 one-binding invariant: atomic binding replacement used by AddMember/UpdateMemberRole/TransferOwnership; always called from a governed service method", Scope: "pkg/hub/project_membership_service.go"}},
 	{File: "pkg/hub/project_membership_service.go", Function: "replaceBindingTx", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "RS1 one-binding invariant: atomic binding replacement cleanup; always called from a governed service method", Scope: "pkg/hub/project_membership_service.go"}},
 	{File: "pkg/hub/project_membership_service.go", Function: "MigrateMultiRoleBindings", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "RS1 R-3 pre-constraint migration: removes duplicate bindings keeping highest authority; idempotent, admin-only, runs within transaction", Scope: "pkg/hub/project_membership_service.go"}},
+	// ptone/scion#2529 P1: applyRolePlanTx is the purpose-named delete-then-
+	// create step for project_membership_set.go's SetMemberRoles (the atomic
+	// "set roles for principal" engine backing PUT/DELETE
+	// .../members/principals/{type}/{id}) — the only place that engine calls
+	// tx.CreateRoleBinding/tx.DeleteRoleBinding, keeping every direct
+	// role-binding mutation call enumerable in this one file per RS1 O-3
+	// (rs1_extended_test.go TestRS1_AST_BypassPathsDocumented). SetMemberRoles
+	// runs the credential gate and CanDelegate pre-transaction, and
+	// re-evaluates governance / custom-role authority (including the F1
+	// role_binding.* structural guard) and the actor-authority-change check
+	// under the project lock before calling applyRolePlanTx; the last-owner
+	// guard runs on the post-state afterwards in the same transaction — the
+	// same way AddMember/UpdateMemberRole/TransferOwnership govern
+	// replaceBindingTx above. Review r1 F3: this replaces the earlier
+	// generic txCreateRoleBinding/txDeleteRoleBinding forwarders, which were
+	// reusable primitives that left the governed call site invisible to this
+	// catalog; applyRolePlanTx is a single-purpose step, so this entry
+	// covers exactly what it does. A dedicated OperationID (e.g.
+	// project.membership.set) is deferred: wiring one requires a
+	// route_metadata.go entry, which is out of scope for P1.
+	{File: "pkg/hub/project_membership_service.go", Function: "applyRolePlanTx", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "governed delete-then-create step for SetMemberRoles (project_membership_set.go): credential gate and CanDelegate run pre-transaction; governance/custom-role authority, the role_binding.* guard and an actor-authority-change check are re-evaluated under the project lock inside WithTx before this call; the last-owner guard is enforced on the post-state in the same transaction and a violation rolls back every mutation", Scope: "pkg/hub/project_membership_service.go"}},
+	{File: "pkg/hub/project_membership_service.go", Function: "applyRolePlanTx", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "governed delete-then-create step for SetMemberRoles (project_membership_set.go): credential gate and CanDelegate run pre-transaction; governance/custom-role authority, the role_binding.* guard and an actor-authority-change check are re-evaluated under the project lock inside WithTx before this call; the last-owner guard is enforced on the post-state in the same transaction and a violation rolls back every mutation", Scope: "pkg/hub/project_membership_service.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_roles.go — role/binding CRUD
@@ -2814,11 +2837,12 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_roles.go", Function: "deleteRoleDefinition", Symbol: "DeleteRoleDefinition", OperationID: "role.definition.delete"},
 
 	// -----------------------------------------------------------------------
-	// pkg/hub/access_constraint_governance.go — B5 transactional governance
-	// PR #1445 moved store mutations from handlers to the governance layer:
-	// CommitBoundaryChange, compensateAuditFailure, and ReplaceRoleBinding.
+	// pkg/hub/access_constraint_governance*.go — B5 transactional governance
+	// PR #1445 moved store mutations from handlers to the governance layer.
+	// Audited creates run in the dedicated transactional helper; updates,
+	// deletes, compensations, and role-binding changes remain in the core file.
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/access_constraint_governance.go", Function: "CommitBoundaryChange", Symbol: "CreateAccessConstraint", OperationID: "access.constraint.create"},
+	{File: "pkg/hub/access_constraint_governance_auditevent.go", Function: "createAccessConstraintWithAudit", Symbol: "CreateAccessConstraint", OperationID: "access.constraint.create"},
 	{File: "pkg/hub/access_constraint_governance.go", Function: "CommitBoundaryChange", Symbol: "UpdateAccessConstraint", OperationID: "access.constraint.update"},
 	{File: "pkg/hub/access_constraint_governance.go", Function: "CommitBoundaryChange", Symbol: "DeleteAccessConstraint", OperationID: "access.constraint.delete"},
 	{File: "pkg/hub/access_constraint_governance.go", Function: "compensateAuditFailure", Symbol: "CreateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Governance compensating action: restores constraint after audit failure", Scope: "pkg/hub/access_constraint_governance.go"}},
@@ -2917,6 +2941,11 @@ var MutationClassifications = []MutationClassification{
 	// pkg/hub/handlers_agent_lifecycle.go
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_agent_lifecycle.go", Function: "suspendAgent", Symbol: "RevokeAgentCredentialsByAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent suspend revokes credentials, route-guarded by agent.update permission", Scope: "pkg/hub/handlers_agent_lifecycle.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/agent_credential_revoke.go — shared best-effort revoke helper
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/agent_credential_revoke.go", Function: "revokeAgentCredentialsBestEffort", Symbol: "RevokeAgentCredentialsByAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Shared revoke helper called from create/launch dispatch and handler cleanup paths that are themselves already route-guarded, and from the broker-HMAC-authenticated launch report endpoint; mirrors the existing delete and suspend revoke exemptions", Scope: "pkg/hub/agent_credential_revoke.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_projects_core.go — project lifecycle

@@ -107,7 +107,7 @@ func TestSAAssign2147_OtherProjectMember_Denied(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, projectB))
-	srv.createProjectMembersGroup(ctx, projectB)
+	srv.seedProjectCreatorMembership(ctx, projectB)
 
 	memberOfA := makeProjectMemberUser(t, s, projectA, tid("2147-member-of-a"), "Member A", store.GroupMemberRoleMember)
 
@@ -457,7 +457,7 @@ type memberAssignFixture struct {
 func setupMemberAssign(t *testing.T) *memberAssignFixture {
 	t.Helper()
 	f := bypassAgentsSetup(t)
-	f.srv.createProjectMembersGroup(context.Background(), f.proj)
+	f.srv.seedProjectCreatorMembership(context.Background(), f.proj)
 	member := makeProjectMemberUser(t, f.store, f.proj, tid("2147-path-member"), "Path Member", store.GroupMemberRoleMember)
 	return &memberAssignFixture{bypassAgentsFixture: f, member: member}
 }

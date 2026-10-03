@@ -84,6 +84,37 @@ type RunConfig struct {
 	// workspace (e.g. "projects/<pid>/workspace"). Used by K8s buildPod to scope
 	// the volume mount — pod sees only its project subtree (design §9.4).
 	NFSSubPath string
+	// NFSWorkspacePreCreated is true when, before the pod was built, the
+	// broker either created the NFSSubPath directory (and the directory of
+	// each shared dir served from the same claim) on its own mount of the
+	// export, or found it there with setgid and group write. Only then does
+	// the provisioning init container treat a failed chown as a warning
+	// (SCION_PROVISION_CHOWN_BEST_EFFORT), since access to those directories
+	// comes from their setgid group.
+	NFSWorkspacePreCreated bool
+	// NFSWorktreeName is set to the agent's slug for worktree-per-agent git
+	// projects on the NFS backend. NFSSubPath then names the project's
+	// shared checkout, and the agent gets its own worktree at
+	// NFSSubPath/worktrees/<agent name>: the provisioning init container
+	// adds it, and the agent container mounts it with the shared .git at
+	// /repo-root (NFSWorktreeContainerPath). Empty keeps every agent on the
+	// shared checkout at /workspace.
+	NFSWorktreeName string
+	// NFSWorktreeBranch is the branch the agent's worktree is created on.
+	// Only used with NFSWorktreeName.
+	NFSWorktreeBranch string
+	// NFSAgentDirName is set to the agent's slug for clone-per-agent git
+	// projects on the NFS backend. NFSSubPath still names the project's
+	// workspace path, and the agent gets its own directory next to it at
+	// <project>/agents/<agent name> (NFSAgentDirSubPath): the provisioning
+	// init container mounts that directory and prepares its workspace/
+	// directory without cloning, and the agent container mounts
+	// <project>/agents/<agent name>/workspace at /workspace and clones the
+	// repository into it, as on the local runtimes.
+	NFSAgentDirName string
+	// NFSAgentBranch is the branch the agent's workspace is created for,
+	// recorded by the init container. Only used with NFSAgentDirName.
+	NFSAgentBranch string
 	// NFSStorageClass is the K8s StorageClass for NFS-backed PVCs.
 	// Used when creating shared-dir PVCs on NFS. Empty uses cluster default.
 	NFSStorageClass string

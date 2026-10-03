@@ -183,3 +183,38 @@ func FindBranchForAgent(base, agentID string) (branch, worktreePath string, foun
 	}
 	return "", "", false, nil
 }
+
+// UnregisterSharerElsewhere removes agentID from the marker of every branch
+// other than keep (from all markers when keep is ""), and returns the
+// marker files it rewrote. A worktree-per-agent agent with its own mounted
+// worktree is registered under one branch only, so markers left from a
+// branch it was on before are dropped.
+//
+// Callers MUST hold the per-project advisory lock / provision mutex.
+func UnregisterSharerElsewhere(base, agentID, keep string) (rewritten []string, err error) {
+	dir := filepath.Join(base, ".git", sharerDir)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		m, err := readMarker(filepath.Join(dir, e.Name()))
+		if err != nil || m == nil || m.Branch == keep || !slices.Contains(m.Sharers, agentID) {
+			continue
+		}
+		remaining, _, err := UnregisterSharer(base, m.Branch, agentID)
+		if err != nil {
+			return rewritten, err
+		}
+		if len(remaining) > 0 {
+			rewritten = append(rewritten, sharerPath(base, m.Branch))
+		}
+	}
+	return rewritten, nil
+}

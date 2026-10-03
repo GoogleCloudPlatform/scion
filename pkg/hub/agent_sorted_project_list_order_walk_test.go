@@ -209,7 +209,7 @@ func TestListProjectAgentsSorted_PagedWalk_NonOwnerPartialRead_IndependentRefere
 			OwnerID: f.owner.ID, CreatedBy: f.owner.ID, Created: time.Now(), Updated: time.Now(),
 		}
 		require.NoError(t, f.store.CreateProject(ctx, otherProject))
-		f.srv.createProjectMembersGroup(ctx, otherProject)
+		f.srv.seedProjectCreatorMembership(ctx, otherProject)
 		for i := 0; i < 5; i++ {
 			a := &store.Agent{
 				ID: tid(fmt.Sprintf("sl-pr-%s-agent-%d", suffix, i)), Slug: fmt.Sprintf("pr-%s-%d", suffix, i), Name: fmt.Sprintf("pr-%s-%d", suffix, i),

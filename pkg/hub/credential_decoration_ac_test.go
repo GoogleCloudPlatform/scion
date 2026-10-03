@@ -313,6 +313,28 @@ func TestCredentialDecoration_AC3_MintRejectsUnsafeMetadata(t *testing.T) {
 	}
 }
 
+func TestCredentialDecoration_MintPreservesValidationErrorMessage(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := tid("e1-error-contract-p")
+	ownerID := tid("e1-error-contract-o")
+	rs4Project(t, s, projectID, ownerID)
+	rs4AddProjectRole(t, s, DevUserID, projectID, store.ProjectRoleOwner)
+
+	code, resp := e1MintTokenViaAPI(t, srv, map[string]interface{}{
+		"name": strings.Repeat("n", uatMaxNameBytes+1), "projectId": projectID, "scopes": []string{"agent:read"},
+	})
+	if code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %+v", code, resp)
+	}
+	errorBody, ok := resp["error"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("response missing structured error: %+v", resp)
+	}
+	if got, want := errorBody["message"], "invalid name: must be at most 128 bytes"; got != want {
+		t.Fatalf("validation message = %q, want %q", got, want)
+	}
+}
+
 // TestCredentialDecoration_AC_MetadataAuditAndAPIEcho closes review-3 finding
 // 2 (non-blocking): the credential_create mutation-audit AfterSummary must
 // record has_purpose/label_keys, and never the purpose/label values

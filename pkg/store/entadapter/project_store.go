@@ -382,6 +382,18 @@ func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) erro
 	return nil
 }
 
+// SetProjectOwnerID updates only the owner_id column of a project.
+func (s *ProjectStore) SetProjectOwnerID(ctx context.Context, projectID, ownerID string) error {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return err
+	}
+	if err := s.client.Project.UpdateOneID(uid).SetOwnerID(ownerID).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
 // UpdateProjectMessagingPolicy atomically updates the cross-project inbound
 // policy using optimistic concurrency on the revision counter. Returns the
 // updated project or ErrRevisionConflict if expectedRevision does not match.

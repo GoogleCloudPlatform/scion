@@ -219,6 +219,35 @@ type BrokerHeartbeat struct {
 	// snapshot alone (the pre-A2 state) is never refreshed for an
 	// already-registered broker until it re-registers with --force.
 	Capabilities *BrokerCapabilities `json:"capabilities,omitempty"`
+	// Inventory reports, per runtime target, whether the agent list in
+	// Projects is that target's complete inventory. The Hub only treats an
+	// agent missing from Projects as having no container when the agent's
+	// recorded target is listed here as complete. An older broker omits the
+	// field, and the Hub then never draws that conclusion.
+	Inventory *BrokerInventory `json:"inventory,omitempty"`
+}
+
+// BrokerInventory describes which runtime targets a heartbeat's agent list
+// covers.
+type BrokerInventory struct {
+	// Targets has one entry per runtime target the broker manages (its
+	// default runtime and each auxiliary runtime). It is empty when the
+	// heartbeat is filtered (multi-hub mode) and so claims no target.
+	Targets []InventoryTarget `json:"targets,omitempty"`
+}
+
+// InventoryTarget is one runtime target in a heartbeat inventory.
+type InventoryTarget struct {
+	// ID identifies the target: the runtime name for Docker, Podman and
+	// similar runtimes, and the runtime name with the cluster context and
+	// namespace for Kubernetes.
+	ID string `json:"id"`
+	// Runtime is the runtime name (runtime.Runtime.Name()).
+	Runtime string `json:"runtime,omitempty"`
+	// Complete is true only when the target was listed without error, so an
+	// agent on this target that is absent from the heartbeat has no
+	// container.
+	Complete bool `json:"complete"`
 }
 
 // ProjectHeartbeat is per-project status in a heartbeat.
@@ -240,6 +269,9 @@ type AgentHeartbeat struct {
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
 	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
 	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed" or "limits_exceeded"
+	// RuntimeTarget is the ID of the inventory target whose listing reported
+	// this agent (see InventoryTarget.ID).
+	RuntimeTarget string `json:"runtimeTarget,omitempty"`
 }
 
 // CreateBrokerRequest is the request to create a new broker registration.

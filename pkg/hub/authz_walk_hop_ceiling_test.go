@@ -241,11 +241,11 @@ func TestWalkHubDeliveryUsesDeliverPermission(t *testing.T) {
 	f := newAdminDelegatorFixture(t, "wdeliver")
 	with := f.agent(t, "wdeliver-with", AgentRoleFull)
 	without := f.agent(t, "wdeliver-without", AgentRoleFull)
-	f.edge(t, store.DelegationPrincipalUser, f.userID, with.ID, boundedCeiling(hubDeliveryPermissionIDs...), provSession)
+	f.edge(t, store.DelegationPrincipalUser, f.userID, with.ID, boundedCeiling(hubDeliveryPermissionList...), provSession)
 	f.edge(t, store.DelegationPrincipalUser, f.userID, without.ID, boundedCeiling("project.read"), provSession)
 	authz := f.authz(f.store, false, false)
 
-	for _, permID := range hubDeliveryPermissionIDs {
+	for _, permID := range hubDeliveryPermissionList {
 		p, ok := registryPermission(permID)
 		require.True(t, ok, permID)
 		res := Resource{Type: p.Resource, ParentType: "project", ParentID: f.projectID}

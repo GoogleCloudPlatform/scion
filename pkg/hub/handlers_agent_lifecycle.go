@@ -259,6 +259,10 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 		return &errHarnessNoResume{reason: reason}
 	}
 
+	// The container is stopped before phase=suspended is written; see
+	// beginLifecycleOp.
+	defer s.beginLifecycleOp(agent.ID)()
+
 	dispatcher := s.GetDispatcher()
 	if dispatcher != nil && agent.RuntimeBrokerID != "" {
 		s.syncWorkspaceOnStop(ctx, agent)
@@ -326,6 +330,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	if !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}
+
+	// While this lifecycle action runs, the agent's container may be
+	// legitimately absent with the row still in phase running (for example
+	// between the stop and the start of a restart); keep the heartbeat
+	// missing-container reconcile away from it until the final status write.
+	defer s.beginLifecycleOp(agent.ID)()
 
 	var newPhase string
 	var dispatchErr error
@@ -490,9 +500,17 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		zero := 0
 		statusUpdate.ExitCode = &zero
 	}
-	// When starting or restarting, propagate container status from broker response
-	if (action == api.AgentActionStart || action == api.AgentActionRestart) && agent.ContainerStatus != "" {
-		statusUpdate.ContainerStatus = agent.ContainerStatus
+	// When starting or restarting, propagate container status from broker
+	// response, and clear any exit reason/code from the prior generation —
+	// including a disruption reason recorded while the agent was still
+	// running (state.ExitReasonPreempted/ExitReasonEvicted), which the
+	// phase-transition clear in UpdateAgentStatus does not catch when the
+	// agent was already running (not stopped/error) at dispatch time.
+	if action == api.AgentActionStart || action == api.AgentActionRestart {
+		if agent.ContainerStatus != "" {
+			statusUpdate.ContainerStatus = agent.ContainerStatus
+		}
+		statusUpdate.ClearExit = true
 	}
 	if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
 		writeErrorFromErr(w, err, "")

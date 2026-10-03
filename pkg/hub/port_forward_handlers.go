@@ -516,6 +516,16 @@ func (s *Server) authorizePortAccess(w http.ResponseWriter, r *http.Request, age
 }
 
 func (s *Server) authorizePortRegistration(w http.ResponseWriter, r *http.Request, agentID string) (*store.Agent, bool) {
+	// A user access token never manages exposed ports, whatever its scopes
+	// or holder. Check that first so the caller gets this specific reason
+	// rather than a generic deny from the general access check below (which
+	// for a UAT also requires live project access).
+	if userIdent := GetUserIdentityFromContext(r.Context()); userIdent != nil {
+		if _, scoped := userIdent.(*ScopedUserIdentity); scoped {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Scoped access tokens cannot manage exposed ports", nil)
+			return nil, false
+		}
+	}
 	agent, ok := s.authorizePortAccess(w, r, agentID, ActionPortAccess)
 	if !ok {
 		return nil, false
@@ -528,10 +538,6 @@ func (s *Server) authorizePortRegistration(w http.ResponseWriter, r *http.Reques
 		return agent, true
 	}
 	if userIdent := GetUserIdentityFromContext(r.Context()); userIdent != nil {
-		if _, scoped := userIdent.(*ScopedUserIdentity); scoped {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Scoped access tokens cannot manage exposed ports", nil)
-			return nil, false
-		}
 		if s.authzService.Decide(r.Context(), AuthzRequest{
 			Principal:  principalContextForIdentity(userIdent),
 			Credential: credentialContextForIdentity(userIdent),

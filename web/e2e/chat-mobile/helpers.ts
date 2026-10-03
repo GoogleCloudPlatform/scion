@@ -324,6 +324,138 @@ export async function assertFramePinned(page: Page): Promise<void> {
 }
 
 /**
+ * Finds a visible element matching `hostSelector` anywhere in the document,
+ * including inside any shadow root at any depth (a single CSS selector
+ * cannot cross a shadow boundary, so `hostSelector` must resolve entirely
+ * within one root — typically this app's own component shadow roots, since
+ * slotted light-DOM content such as an `sl-menu`'s `sl-menu-item` children
+ * stays queryable from its parent's root). Where `hostSelector` matches more
+ * than once at a given level (for example, the same menu-item value appears
+ * once per rendered space, or a Shoelace dropdown that is open renders its
+ * closed siblings too), the first match with a non-zero rendered size wins,
+ * so an open dropdown's items are measured rather than a closed one's. If
+ * `innerSelector` is given, the result is then one more `querySelector`
+ * inside the host's *own* shadow root — the one level needed to reach a
+ * Shoelace shadow part such as `[part="base"]` or `[part="textarea"]`,
+ * which a plain CSS selector can never reach from outside.
+ *
+ * Returns the computed font-size and border-box size in CSS px, or `null`
+ * if nothing matches, so callers can assert a clear "element not found"
+ * failure instead of a confusing NaN comparison.
+ */
+export async function computedBoxDeep(
+  page: Page,
+  hostSelector: string,
+  innerSelector?: string
+): Promise<{ fontSizePx: number; widthPx: number; heightPx: number } | null> {
+  return page.evaluate(
+    ({ hostSelector, innerSelector }) => {
+      const isVisible = (el: Element): boolean => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const findIn = (root: ParentNode): Element | null => {
+        const matches = [...root.querySelectorAll(hostSelector)];
+        const visible = matches.find(isVisible);
+        if (visible) return visible;
+        for (const el of root.querySelectorAll('*')) {
+          if (el.shadowRoot) {
+            const nested = findIn(el.shadowRoot);
+            if (nested) return nested;
+          }
+        }
+        // No visible match anywhere, including nested shadow roots: fall
+        // back to the first match in this root, if any, so a genuinely
+        // hidden-but-present element (not the case any current caller
+        // hits) still reports its size rather than a confusing "not found".
+        return matches[0] ?? null;
+      };
+      const host = findIn(document);
+      if (!host) return null;
+      const el = innerSelector ? (host.shadowRoot?.querySelector(innerSelector) ?? null) : host;
+      if (!el) return null;
+      const style = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return {
+        fontSizePx: Number.parseFloat(style.fontSize),
+        widthPx: rect.width,
+        heightPx: rect.height,
+      };
+    },
+    { hostSelector, innerSelector }
+  );
+}
+
+/**
+ * How long `computedBoxDeepRetrying` retries before giving up. `toPass()`
+ * has no timeout of its own by default — without one explicitly set here,
+ * a genuinely missing element would retry silently until the *enclosing
+ * test's* timeout, turning a fast, clearly-labelled failure into a slow,
+ * confusing one.
+ */
+const COMPUTED_BOX_RETRY_TIMEOUT_MS = 10_000;
+
+/**
+ * Like `computedBoxDeep`, but retries (for up to
+ * `COMPUTED_BOX_RETRY_TIMEOUT_MS`) until a match is found, instead of only
+ * checking once.
+ *
+ * Several of this suite's fixtures land on a URL that redirects once mock
+ * data loads (see `openChatRail`'s doc comment): that redirect is a full
+ * client-side navigation, and the app's router handles every navigation by
+ * removing the old page element and creating a new one. A single
+ * `computedBoxDeep` call that happens to run in that gap — or before a late-
+ * upgrading custom element's shadow root exists — finds nothing even though
+ * the page is correct a moment later. Fixing each fixture's own wait
+ * narrows the window but does not provably close it for every call site, so
+ * every measurement in this suite that does not already sit behind an
+ * explicit `locator.waitFor()` uses this instead of the one-shot version.
+ *
+ * Only "not found" is retried: the returned box's values are asserted by
+ * the caller, outside this retry loop, so a genuine size/font regression
+ * still fails on the first (and every) attempt rather than being masked.
+ */
+export async function computedBoxDeepRetrying(
+  page: Page,
+  hostSelector: string,
+  innerSelector?: string
+): Promise<{ fontSizePx: number; widthPx: number; heightPx: number }> {
+  let result: { fontSizePx: number; widthPx: number; heightPx: number } | null = null;
+  await expect(async () => {
+    result = await computedBoxDeep(page, hostSelector, innerSelector);
+    expect(
+      result,
+      `${hostSelector}${innerSelector ? ' ' + innerSelector : ''} was found`
+    ).not.toBeNull();
+  }).toPass({ timeout: COMPUTED_BOX_RETRY_TIMEOUT_MS });
+  return result!;
+}
+
+/**
+ * The deepest actually-focused element, following `shadowRoot.activeElement`
+ * down through every open shadow root a plain `document.activeElement`
+ * would otherwise stop at (it only reports the top-level custom element
+ * hosting the real focus target, e.g. `scion-chat-composer` rather than its
+ * inner `<textarea>`). Returns the element's tag name in lowercase, or
+ * `null` if nothing is focused (`document.activeElement` is `<body>`).
+ */
+export async function deepActiveElementTagName(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    let el: Element | null = document.activeElement;
+    while (el) {
+      const root = (el as Element & { shadowRoot?: ShadowRoot }).shadowRoot;
+      const next = root?.activeElement ?? null;
+      if (!next || next === el) break;
+      el = next;
+    }
+    if (!el || el === document.body) return null;
+    return el.tagName.toLowerCase();
+  });
+}
+
+/**
  * Appends a very tall, zero-opacity element directly to `<body>` and
  * returns a cleanup function. Used to confirm frame mode actually stops a
  * stray oversized element from making the document scrollable, rather than

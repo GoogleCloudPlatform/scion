@@ -183,7 +183,7 @@ func TestAgentCreateDeliverIDs_PrincipalParent(t *testing.T) {
 	assert.Equal(t, store.SourceCredentialAgent, cEdge.SourceCredentialKind)
 	assert.Equal(t, string(permissions.BoundaryKindProject), cEdge.BoundaryKind)
 	assert.Equal(t, f.proj.ID, cEdge.BoundaryProjectID)
-	assert.Equal(t, sortedUniqueIDs(hubDeliveryPermissionIDs), deliverOf(cEdge.PermissionIDs), "every delivery permission")
+	assert.Equal(t, sortedUniqueIDs(hubDeliveryPermissionList), deliverOf(cEdge.PermissionIDs), "every delivery permission")
 	assert.Equal(t, rowFiveIDs(t, f.srv, parent), withoutDeliver(cEdge.PermissionIDs))
 }
 
@@ -401,11 +401,11 @@ func TestAgentCreateDeliverIDs_MultiHop(t *testing.T) {
 	c, cEdge := f.childOf(t, p, "chain-multi-c")
 	d, dEdge := f.childOf(t, c, "chain-multi-d")
 
-	all := sortedUniqueIDs(hubDeliveryPermissionIDs)
+	all := sortedUniqueIDs(hubDeliveryPermissionList)
 	assert.Equal(t, all, deliverOf(cEdge.PermissionIDs), "C")
 	assert.Equal(t, all, deliverOf(dEdge.PermissionIDs), "D")
 	for _, edge := range []*store.DelegationEdge{pEdge, cEdge, dEdge} {
-		for _, permID := range hubDeliveryPermissionIDs {
+		for _, permID := range hubDeliveryPermissionList {
 			p, ok := registryPermission(permID)
 			require.True(t, ok)
 			res := Resource{Type: p.Resource, ParentType: "project", ParentID: f.proj.ID}
@@ -449,7 +449,7 @@ func TestParentDeliverEligibility_SourceNotAllowedGivesNone(t *testing.T) {
 
 	ids, err := mf.srv.authzService.parentDeliverEligibility(ctx, parent)
 	require.NoError(t, err)
-	assert.Equal(t, sortedUniqueIDs(hubDeliveryPermissionIDs), sortedUniqueIDs(ids), "dev-local authority on")
+	assert.Equal(t, sortedUniqueIDs(hubDeliveryPermissionList), sortedUniqueIDs(ids), "dev-local authority on")
 
 	mf.srv.authzService.setDevLocalAuthorityEnabled(false)
 	ids, err = mf.srv.authzService.parentDeliverEligibility(ctx, parent)

@@ -556,7 +556,7 @@ func (m *ControlChannelManager) TunnelRequest(ctx context.Context, brokerID stri
 
 	hc := m.GetConnection(brokerID)
 	if hc == nil {
-		err := fmt.Errorf("broker %s not connected", brokerID)
+		err := fmt.Errorf("broker %s not connected: %w", brokerID, errStartBrokerNotConnected)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
