@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -412,4 +413,54 @@ func TestHubCloneTransportNote(t *testing.T) {
 	assert.Contains(t, hubCloneTransportNote("git@h:r.git"), "SSH clone")
 	assert.Contains(t, hubCloneTransportNote("git://h/r"), "git:// clone")
 	assert.Contains(t, hubCloneTransportNote("/srv/repo"), "path")
+}
+
+// The hub lists only brokers the caller may use in a 422 no_runtime_broker.
+// When that list is empty, the CLI surfaces the hub's message instead of
+// prompting; with a non-empty list off a terminal, it asks for --broker.
+func TestCreateAgentWithBrokerResolution_NoRuntimeBroker(t *testing.T) {
+	const projectID = "proj-nrb"
+	for _, tc := range []struct {
+		name      string
+		brokers   []map[string]interface{}
+		wantInErr string
+	}{
+		{"empty list", []map[string]interface{}{}, "No runtime brokers available for this project that you have permission to use"},
+		{"missing list", nil, "No runtime brokers available for this project that you have permission to use"},
+		{"usable brokers, non-interactive", []map[string]interface{}{{"id": "b1", "name": "one", "status": "online"}}, "--broker"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				details := map[string]interface{}{}
+				if tc.brokers != nil {
+					details["availableBrokers"] = tc.brokers
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]interface{}{
+					"code":    "no_runtime_broker",
+					"message": "No runtime brokers available for this project that you have permission to use",
+					"details": details,
+				}})
+			}))
+			t.Cleanup(srv.Close)
+			client, err := hubclient.New(srv.URL)
+			require.NoError(t, err)
+			hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
+
+			var resp *hubclient.CreateAgentResponse
+			stdout, _ := captureStdIO(t, func() {
+				resp, err = createAgentWithBrokerResolution(context.Background(), hubCtx, projectID,
+					&hubclient.CreateAgentRequest{Name: "a"})
+			})
+			require.Error(t, err)
+			assert.Nil(t, resp)
+			assert.Contains(t, err.Error(), tc.wantInErr)
+			assert.Equal(t, 1, calls, "must not retry")
+			assert.NotContains(t, stdout, "Select a broker")
+			assert.NotContains(t, stdout, "Use runtime broker")
+		})
+	}
 }
