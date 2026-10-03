@@ -1,0 +1,155 @@
+{
+  "metadata": {
+    "name": "test-agent",
+    "namespace": "default"
+  },
+  "spec": {
+    "volumes": [
+      {
+        "name": "workspace",
+        "emptyDir": {}
+      },
+      {
+        "name": "agent-secrets",
+        "secret": {
+          "secretName": "scion-agent-test-agent",
+          "items": [
+            {
+              "key": "SSH_KEY",
+              "path": "SSH_KEY"
+            },
+            {
+              "key": "GEMINI_OAUTH",
+              "path": "GEMINI_OAUTH"
+            },
+            {
+              "key": "TLS_CERT",
+              "path": "TLS_CERT"
+            },
+            {
+              "key": "scion-telemetry-gcp-credentials",
+              "path": "scion-telemetry-gcp-credentials"
+            },
+            {
+              "key": "secrets.json",
+              "path": "secrets.json"
+            }
+          ]
+        }
+      },
+      {
+        "name": "auth-files",
+        "secret": {
+          "secretName": "scion-auth-test-agent"
+        }
+      }
+    ],
+    "containers": [
+      {
+        "name": "agent",
+        "image": "test:latest",
+        "command": [
+          "sh",
+          "-c",
+          "while [ ! -f /tmp/.scion-home-ready ]; do sleep 0.2; done; exec sciontool init -- sh -c \"$SCION_START_CMD\""
+        ],
+        "workingDir": "/workspace",
+        "env": [
+          {
+            "name": "SCION_START_CMD",
+            "value": "tmux new-session -d -s scion -n agent sh -c 'sleep infinity; echo $? \u003e /tmp/scion-harness-exit-code' \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent \\; attach-session -t scion"
+          },
+          {
+            "name": "API_KEY",
+            "valueFrom": {
+              "secretKeyRef": {
+                "name": "scion-agent-test-agent",
+                "key": "API_KEY"
+              }
+            }
+          },
+          {
+            "name": "SCION_OTEL_GCP_CREDENTIALS",
+            "value": "/home/scion/.config/gcloud/telemetry.json"
+          },
+          {
+            "name": "SCION_HOST_UID",
+            "value": "1001"
+          },
+          {
+            "name": "SCION_HOST_GID",
+            "value": "1002"
+          },
+          {
+            "name": "HOME",
+            "value": "/home/scion"
+          },
+          {
+            "name": "USER",
+            "value": "scion"
+          },
+          {
+            "name": "LOGNAME",
+            "value": "scion"
+          }
+        ],
+        "resources": {
+          "limits": {
+            "cpu": "2",
+            "ephemeral-storage": "10Gi",
+            "memory": "4Gi"
+          },
+          "requests": {
+            "cpu": "250m",
+            "ephemeral-storage": "10Gi",
+            "memory": "512Mi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "workspace",
+            "mountPath": "/workspace"
+          },
+          {
+            "name": "agent-secrets",
+            "readOnly": true,
+            "mountPath": "/etc/ssl/cert.pem",
+            "subPath": "TLS_CERT"
+          },
+          {
+            "name": "agent-secrets",
+            "readOnly": true,
+            "mountPath": "/run/scion/agent-secrets"
+          },
+          {
+            "name": "auth-files",
+            "readOnly": true,
+            "mountPath": "/run/scion/auth-files"
+          }
+        ],
+        "imagePullPolicy": "IfNotPresent",
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "allowPrivilegeEscalation": false
+        },
+        "stdin": true,
+        "tty": true
+      }
+    ],
+    "restartPolicy": "Never",
+    "securityContext": {
+      "runAsUser": 1000,
+      "runAsGroup": 1000,
+      "runAsNonRoot": true,
+      "fsGroup": 1002,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    }
+  },
+  "status": {}
+}
