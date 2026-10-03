@@ -660,6 +660,9 @@ func assertSQLiteTablesReadable(t *testing.T, b backend) {
 		}
 		tables = append(tables, n)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate table names: %v", err)
+	}
 	_ = rows.Close()
 
 	checked := 0
@@ -681,6 +684,9 @@ func assertSQLiteTablesReadable(t *testing.T, b backend) {
 			if isEnt || isWebchat {
 				timeCols = append(timeCols, c)
 			}
+		}
+		if err := cols.Err(); err != nil {
+			t.Fatalf("iterate table_info %s: %v", table, err)
 		}
 		_ = cols.Close()
 
@@ -706,6 +712,9 @@ func assertSQLiteTablesReadable(t *testing.T, b backend) {
 				if !canonicalEntTime.MatchString(v) {
 					t.Errorf("%s.%s = %q: want the canonical UTC form (t.UTC().String())", table, c.name, v)
 				}
+			}
+			if err := vals.Err(); err != nil {
+				t.Fatalf("iterate %s.%s: %v", table, c.name, err)
 			}
 			_ = vals.Close()
 		}
