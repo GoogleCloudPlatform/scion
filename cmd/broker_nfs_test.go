@@ -19,6 +19,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"strings"
 	"testing"
 
@@ -113,6 +114,7 @@ func TestBrokerNFSConfig_RejectsInvalidShares(t *testing.T) {
 		"server leading dash": func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].Server = "-oexec" },
 		"ipv6 server":         func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].Server = "fd00::2" },
 		"bracketed ipv6":      func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].Server = "[fd00::2]" },
+		"brackets":            func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].Server = "[nfs-host]" },
 		"duplicate id": func(vs *config.VersionedSettings) {
 			vs.Server.WorkspaceStorage.NFS.Shares = append(vs.Server.WorkspaceStorage.NFS.Shares, share1)
 		},
@@ -304,6 +306,18 @@ func TestCheckDoctorNFSMounts(t *testing.T) {
 				t.Errorf("remediation %q missing %q", res.Remediation, tc.wantRemedy)
 			}
 		})
+	}
+}
+
+// TestDefaultNFSDoctorProbe_ReadsMountTable verifies that doctor's default
+// probe uses the shared mount-table lookup: "/" is always mounted.
+func TestDefaultNFSDoctorProbe_ReadsMountTable(t *testing.T) {
+	if _, err := os.Stat("/proc/mounts"); err != nil {
+		t.Skip("no /proc/mounts")
+	}
+	_, mounted, err := defaultNFSDoctorProbe().mountSource("/")
+	if err != nil || !mounted {
+		t.Fatalf("mountSource(/) = %v, %v; want mounted", mounted, err)
 	}
 }
 

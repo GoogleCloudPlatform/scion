@@ -748,6 +748,27 @@ func TestExecRunCommand_DescendantHoldsPipe(t *testing.T) {
 	}
 }
 
+// TestExecRunCommand_DescendantOutsideGroup verifies the WaitDelay
+// backstop: a descendant that moved to its own session survives the group
+// kill and keeps the output pipe open, and the call still returns shortly
+// after commandWaitDelay rather than when the descendant exits.
+func TestExecRunCommand_DescendantOutsideGroup(t *testing.T) {
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("setsid not available")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := execRunCommand(ctx, "sh", "-c", "setsid sleep 12 & wait")
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("execRunCommand = %v, want a cancellation error", err)
+	}
+	if limit := commandWaitDelay + 4*time.Second; elapsed > limit {
+		t.Fatalf("execRunCommand returned after %s, want within %s", elapsed, limit)
+	}
+}
+
 // TestEnsureShareMounted_SerializesMounts verifies that concurrent
 // dispatch-time checks never run Mount for the share at the same time.
 func TestEnsureShareMounted_SerializesMounts(t *testing.T) {
