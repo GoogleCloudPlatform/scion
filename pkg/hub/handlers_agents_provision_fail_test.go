@@ -166,3 +166,94 @@ func TestCreateAgent_ProvisionOnlyOtherFailureStaysWarning(t *testing.T) {
 		})
 	}
 }
+
+// createLifecycleTestAgent stores an agent on the test broker in the given phase.
+func createLifecycleTestAgent(t *testing.T, s store.Store, project *store.Project, name string, phase state.Phase) *store.Agent {
+	t.Helper()
+	agent := &store.Agent{
+		ID:              tid("agent-" + name),
+		Slug:            name,
+		Name:            name,
+		ProjectID:       project.ID,
+		RuntimeBrokerID: tid("broker-create"),
+		Phase:           string(phase),
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), agent))
+	return agent
+}
+
+func TestAgentLifecycle_StartRelaysSkillResolutionError(t *testing.T) {
+	for _, action := range []string{"start", "restart"} {
+		t.Run(action, func(t *testing.T) {
+			disp := &skillFailDispatcher{startErr: brokerSkillError(http.StatusTooManyRequests, "rate_limited", "30")}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			agent := createLifecycleTestAgent(t, s, project, "lc-"+action, state.PhaseStopped)
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
+
+			assertSkillErrorRelayed(t, rec, http.StatusTooManyRequests, "rate_limited")
+			assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+		})
+	}
+}
+
+// TestAgentLifecycle_StartCallerDenialStays404 pins that a skill the caller
+// cannot read (reported by the broker as not_found) stays a 404 on start.
+func TestAgentLifecycle_StartCallerDenialStays404(t *testing.T) {
+	disp := &skillFailDispatcher{startErr: brokerSkillError(http.StatusNotFound, "not_found", "")}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	agent := createLifecycleTestAgent(t, s, project, "lc-denied", state.PhaseStopped)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+
+	assertSkillErrorRelayed(t, rec, http.StatusNotFound, "not_found")
+}
+
+// TestAgentLifecycle_StartOtherErrorStays502 pins that non-skill start
+// failures keep the generic 502.
+func TestAgentLifecycle_StartOtherErrorStays502(t *testing.T) {
+	for _, err := range []error{
+		errors.New("connection refused"),
+		&brokerStatusError{StatusCode: http.StatusNotFound, Body: `{"error":{"code":"not_found","message":"agent not found"}}`},
+	} {
+		disp := &skillFailDispatcher{startErr: err}
+		srv, s, project := setupCreateAgentServer(t, disp)
+		agent := createLifecycleTestAgent(t, s, project, "lc-other", state.PhaseStopped)
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+
+		require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	}
+}
+
+// TestCreateAgent_ExistingAgentStartRelaysSkillResolutionError covers the
+// create calls that start an existing agent in place (suspended, stopped with
+// resume, and created/provisioning).
+func TestCreateAgent_ExistingAgentStartRelaysSkillResolutionError(t *testing.T) {
+	tests := []struct {
+		name   string
+		phase  state.Phase
+		resume bool
+	}{
+		{name: "suspended", phase: state.PhaseSuspended},
+		{name: "stopped resume", phase: state.PhaseStopped, resume: true},
+		{name: "created", phase: state.PhaseCreated},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := &skillFailDispatcher{startErr: brokerSkillError(http.StatusGatewayTimeout, "timeout", "")}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			agent := createLifecycleTestAgent(t, s, project, "existing-skill-fail", tc.phase)
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name:      agent.Name,
+				ProjectID: project.ID,
+				Task:      "x",
+				Resume:    tc.resume,
+			})
+
+			require.True(t, disp.startCalled, "the existing agent must have been started")
+			assertSkillErrorRelayed(t, rec, http.StatusGatewayTimeout, "timeout")
+		})
+	}
+}

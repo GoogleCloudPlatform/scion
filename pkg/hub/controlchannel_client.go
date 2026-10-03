@@ -614,7 +614,7 @@ func (c *ControlChannelBrokerClient) doRequest(ctx context.Context, brokerID, me
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body)}
+		return nil, &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body), RetryAfter: resp.Headers["Retry-After"]}
 	}
 
 	return resp, nil
