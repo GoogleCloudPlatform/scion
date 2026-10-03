@@ -210,9 +210,10 @@ func TestStart_EmptyPerAgent_PersistedModeWithoutFlag(t *testing.T) {
 }
 
 // TestStart_EmptyPerAgent_NFSFailsClosed pins that empty-per-agent on NFS
-// workspace storage is refused before anything is started, rather than
-// taking the WorktreePerAgent default or silently going node-local (design
-// #2703 P2; NFS per-agent support is P3).
+// workspace storage with a runtime other than Kubernetes is refused before
+// anything is started: only the Kubernetes runtime mounts the agent's own
+// directory on the export (design #2703 P3), so any other runtime would
+// get the project's shared workspace path.
 func TestStart_EmptyPerAgent_NFSFailsClosed(t *testing.T) {
 	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -245,8 +246,8 @@ func TestStart_EmptyPerAgent_NFSFailsClosed(t *testing.T) {
 			"SCION_WORKSPACE_MODE": "empty-per-agent",
 		},
 	})
-	if !errors.Is(err, runtime.ErrEmptyPerAgentNFSUnsupported) {
-		t.Fatalf("Start error = %v, want ErrEmptyPerAgentNFSUnsupported", err)
+	if !errors.Is(err, errEmptyPerAgentNFSRuntime) {
+		t.Fatalf("Start error = %v, want errEmptyPerAgentNFSRuntime", err)
 	}
 	if ran {
 		t.Fatalf("runtime Run must not be called; got workspace %q backend %q", captured.Workspace, captured.WorkspaceBackendName)

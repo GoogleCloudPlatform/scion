@@ -140,6 +140,11 @@ type RunConfig struct {
 	// NFSAgentBranch is the branch the agent's workspace is created for,
 	// recorded by the init container. Only used with NFSAgentDirName.
 	NFSAgentBranch string
+	// NFSAgentDirEmpty marks an NFSAgentDirName agent of an empty-per-agent
+	// project: the mounts are the same, but the init container prepares an
+	// empty workspace with no branch record (SCION_WORKSPACE_MODE
+	// empty-per-agent) and nothing clones into it. NFSAgentBranch is unused.
+	NFSAgentDirEmpty bool
 	// NFSStorageClass is the K8s StorageClass for NFS-backed PVCs.
 	// Used when creating shared-dir PVCs on NFS. Empty uses cluster default.
 	NFSStorageClass string

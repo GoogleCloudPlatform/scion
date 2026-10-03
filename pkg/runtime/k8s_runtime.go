@@ -2217,7 +2217,14 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// directory instead of the shared checkout. An older sciontool
 		// ignores these and, with no clone settings, only creates and
 		// chowns the agent's directory; the agent container then clones.
-		if nfsAgentDir {
+		// Empty-per-agent: the same agent directory, with an empty
+		// workspace and no branch.
+		if nfsAgentDir && config.NFSAgentDirEmpty {
+			initEnv = append(initEnv,
+				corev1.EnvVar{Name: "SCION_WORKSPACE_MODE", Value: string(store.SharingModeEmptyPerAgent)},
+				corev1.EnvVar{Name: "SCION_AGENT_SLUG", Value: config.NFSAgentDirName},
+			)
+		} else if nfsAgentDir {
 			initEnv = append(initEnv,
 				corev1.EnvVar{Name: "SCION_WORKSPACE_MODE", Value: string(store.SharingModeClonePerAgent)},
 				corev1.EnvVar{Name: "SCION_AGENT_SLUG", Value: config.NFSAgentDirName},

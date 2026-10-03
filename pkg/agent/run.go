@@ -1400,6 +1400,7 @@ authDone:
 	nfsWorktreeBranch := ""
 	nfsAgentDirName := ""
 	nfsAgentBranch := ""
+	nfsAgentDirEmpty := false
 
 	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
 		sharingMode := store.SharingModeWorktreePerAgent
@@ -1407,12 +1408,17 @@ authDone:
 			sharingMode = store.SharingModeSharedPlain
 		}
 		// Empty-per-agent never takes the WorktreePerAgent default above: it
-		// has no shared checkout. It is node-local or pod-local (EmptyDir), and NFS storage fails
-		// closed until NFS per-agent support lands (design #2703 P3).
+		// has no shared checkout. Without NFS storage it is node-local (or
+		// pod-local EmptyDir on Kubernetes). With NFS storage it gets its
+		// own agent directory on the export (design #2703 P3), which only
+		// the Kubernetes runtime can mount: see nfsEmptyAgentDirSelection.
+		var emptyAgentDirName string
 		if emptyPerAgent {
 			sharingMode = store.SharingModeEmptyPerAgent
-			if err := runtime.CheckWorkspaceBackendMode(settings.Server.WorkspaceStorage, sharingMode); err != nil {
-				return nil, err
+			var selErr error
+			emptyAgentDirName, selErr = nfsEmptyAgentDirSelection(m.Runtime.Name(), settings.Server.WorkspaceStorage, opts.Name)
+			if selErr != nil {
+				return nil, selErr
 			}
 		}
 		// On Kubernetes, a git project dispatched in worktree-per-agent mode
@@ -1469,7 +1475,18 @@ authDone:
 			if sharedDirStorage == nil {
 				claimSharedDirNames = sharedDirNames
 			}
-			if agentDirName != "" && mount.PVClaimName != "" {
+			if emptyAgentDirName != "" {
+				// Empty-per-agent: only the agent's own directory is ever
+				// mounted, never the project's workspace path resolved
+				// above. Without a PV claim the pod could not mount it, so
+				// stop instead of falling back to the project's path.
+				if mount.PVClaimName == "" {
+					return nil, errEmptyPerAgentNFSNoClaim
+				}
+				nfsWorkspacePreCreated, err = ensureNFSAgentWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, emptyAgentDirName)
+				nfsAgentDirName = emptyAgentDirName
+				nfsAgentDirEmpty = true
+			} else if agentDirName != "" && mount.PVClaimName != "" {
 				nfsWorkspacePreCreated, err = ensureNFSAgentWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, agentDirName)
 				nfsAgentDirName = agentDirName
 				nfsAgentBranch = agentBranch
@@ -1490,7 +1507,10 @@ authDone:
 			}
 
 			workspaceBackendName = backend.Name()
-			if mount.HostPath != "" {
+			// Empty-per-agent keeps its private node-local path as the
+			// workspace source: mount.HostPath is the project's shared
+			// workspace, which this agent must never see.
+			if mount.HostPath != "" && !nfsAgentDirEmpty {
 				effectiveWorkspace = mount.HostPath
 			}
 			if mount.Target != "" {
@@ -1593,6 +1613,9 @@ authDone:
 		// agent mounts agents/<agent name>/workspace and clones into it.
 		NFSAgentDirName: nfsAgentDirName,
 		NFSAgentBranch:  nfsAgentBranch,
+		// Set only for empty-per-agent projects on the NFS backend: the
+		// agent directory's workspace stays empty (no branch, no clone).
+		NFSAgentDirEmpty: nfsAgentDirEmpty,
 		// F-111 (design §9): drives the k8s runtime's NFS init container's
 		// clone-vs-plain-provision choice (nfsProvisionCommand), not whether
 		// provisioning happens at all — the init container is now gated
