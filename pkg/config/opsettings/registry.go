@@ -40,6 +40,30 @@ type Section struct {
 // would otherwise fail the strict subdomain pattern.
 const dns1123SubdomainOrEmptyPattern = `^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 
+// dns1123LabelOrEmptyPattern mirrors the runtime namespace pattern in
+// settings-v1.schema.json: a DNS-1123 label (the Kubernetes namespace name
+// format, at most 63 characters), or the empty string for the runtime's
+// default namespace.
+const dns1123LabelOrEmptyPattern = `^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+
+// kubernetesServiceAccountMappingsSchema mirrors
+// kubernetes_service_account_mappings in settings-v1.schema.json: lowercase
+// GCP service account email keys, Kubernetes ServiceAccount name values
+// (DNS-1123 subdomain, at most 253 characters).
+func kubernetesServiceAccountMappingsSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"propertyNames": map[string]interface{}{
+			"pattern": `^[a-z0-9]([a-z0-9-]*[a-z0-9])?@([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+gserviceaccount\.com$`,
+		},
+		"additionalProperties": map[string]interface{}{
+			"type":      "string",
+			"pattern":   `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`,
+			"maxLength": 253,
+		},
+	}
+}
+
 // Registry is the single source of truth for Layer-0 vs Layer-1 classification.
 // Every Layer-1 section is listed here; any koanf key not owned by a section is
 // Layer-0 (bootstrap) and must not be written via the admin API.
@@ -473,7 +497,7 @@ func compileSchemas() {
 					"type":                     map[string]interface{}{"type": "string"},
 					"host":                     map[string]interface{}{"type": "string"},
 					"context":                  map[string]interface{}{"type": "string"},
-					"namespace":                map[string]interface{}{"type": "string"},
+					"namespace":                map[string]interface{}{"type": "string", "maxLength": 63, "pattern": dns1123LabelOrEmptyPattern},
 					"env":                      map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
 					"sync":                     map[string]interface{}{"type": "string"},
 					"gke":                      map[string]interface{}{"type": "boolean"},
@@ -483,6 +507,9 @@ func compileSchemas() {
 					"shared_dir_storage_class": map[string]interface{}{"type": "string"},
 					"shared_dir_size":          map[string]interface{}{"type": "string"},
 					"safe_to_evict":            map[string]interface{}{"type": "boolean"},
+
+					// GCP identity "assign" on Kubernetes.
+					"kubernetes_service_account_mappings": kubernetesServiceAccountMappingsSchema(),
 				},
 			},
 		},
@@ -520,6 +547,9 @@ func compileSchemas() {
 					"shared_dir_storage_class": map[string]interface{}{"type": "string"},
 					"shared_dir_size":          map[string]interface{}{"type": "string"},
 					"safe_to_evict":            map[string]interface{}{"type": "boolean"},
+
+					// GCP identity "assign" on Kubernetes.
+					"kubernetes_service_account_mappings": kubernetesServiceAccountMappingsSchema(),
 				},
 			},
 		},

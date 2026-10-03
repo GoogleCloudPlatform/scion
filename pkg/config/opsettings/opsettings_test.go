@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -1746,5 +1747,50 @@ func TestSafeToEvictSchemaValidation(t *testing.T) {
 		if errs := Validate(sec, json.RawMessage(doc)); len(errs) == 0 {
 			t.Errorf("%s: expected a non-boolean safe_to_evict to be rejected", sec)
 		}
+	}
+}
+
+// TestKubernetesAssignSettingsSchemaValidation checks the runtimes and
+// profiles section schemas for kubernetes_service_account_mappings and the
+// runtime namespace, which use the same patterns as settings-v1.schema.json.
+func TestKubernetesAssignSettingsSchemaValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		section   string
+		doc       string
+		wantValid bool
+	}{
+		{name: "runtime mapping", section: "runtimes", wantValid: true,
+			doc: `{"k8s": {"type": "kubernetes", "kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa"}}}`},
+		{name: "profile mapping", section: "profiles", wantValid: true,
+			doc: `{"prod": {"runtime": "k8s", "kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": "profile-ksa"}}}`},
+		{name: "runtime mapping key not a GSA email", section: "runtimes",
+			doc: `{"k8s": {"kubernetes_service_account_mappings": {"not-a-gsa-email": "agent-worker-ksa"}}}`},
+		{name: "profile mapping uppercase key", section: "profiles",
+			doc: `{"prod": {"kubernetes_service_account_mappings": {"Agent-Worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa"}}}`},
+		{name: "runtime mapping invalid KSA name", section: "runtimes",
+			doc: `{"k8s": {"kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": "Not_A_Valid_KSA"}}}`},
+		{name: "profile mapping empty KSA name", section: "profiles",
+			doc: `{"prod": {"kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": ""}}}`},
+		{name: "runtime mapping KSA name too long", section: "runtimes",
+			doc: `{"k8s": {"kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": "` + strings.Repeat("a", 254) + `"}}}`},
+		{name: "runtime namespace label", section: "runtimes", wantValid: true,
+			doc: `{"k8s": {"type": "kubernetes", "namespace": "scion-agents"}}`},
+		{name: "runtime namespace empty means unset", section: "runtimes", wantValid: true,
+			doc: `{"k8s": {"type": "kubernetes", "namespace": ""}}`},
+		{name: "runtime namespace uppercase", section: "runtimes",
+			doc: `{"k8s": {"type": "kubernetes", "namespace": "Scion-Agents"}}`},
+		{name: "runtime namespace too long", section: "runtimes",
+			doc: `{"k8s": {"type": "kubernetes", "namespace": "` + strings.Repeat("a", 64) + `"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := Validate(tc.section, json.RawMessage(tc.doc))
+			if tc.wantValid && len(errs) > 0 {
+				t.Errorf("expected the document to pass, got errors: %v", errs)
+			}
+			if !tc.wantValid && len(errs) == 0 {
+				t.Error("expected the document to fail validation")
+			}
+		})
 	}
 }
