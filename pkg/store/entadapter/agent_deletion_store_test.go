@@ -117,9 +117,19 @@ func TestUpdateAgentDeletion_ClearFields(t *testing.T) {
 	a := makeAgent(projectID, "del-clear")
 	require.NoError(t, s.CreateAgent(ctx, a))
 	seedDeletion(t, s, a.ID, store.DeletionStateFailed, time.Now(), store.DeletionCodeRuntimeError)
+	n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, store.DeletionFields{
+		Error: strPtr("boom"), Prior: strPtr(`{"phase":"running"}`), Request: strPtr(`{"soft":true}`),
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	seeded, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.Equal(t, "boom", seeded.DeletionError)
+	require.NotNil(t, seeded.DeletionStartedAt)
 
-	n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{States: []string{store.DeletionStateFailed}}, store.DeletionFields{
+	n, err = s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{States: []string{store.DeletionStateFailed}}, store.DeletionFields{
 		State: strPtr(store.DeletionStateNone), Code: strPtr(""),
+		Error: strPtr(""), Prior: strPtr(""), Request: strPtr(""),
 		ClearLeaseAt: true, ClearStartedAt: true, ClearFailedAt: true,
 	})
 	require.NoError(t, err)
@@ -128,6 +138,9 @@ func TestUpdateAgentDeletion_ClearFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "", got.DeletionState)
 	assert.Equal(t, "", got.DeletionCode)
+	assert.Equal(t, "", got.DeletionError)
+	assert.Equal(t, "", got.DeletionPrior)
+	assert.Equal(t, "", got.DeletionRequest)
 	assert.Nil(t, got.DeletionLeaseAt)
 	assert.Nil(t, got.DeletionStartedAt)
 	assert.Nil(t, got.DeletionFailedAt)
@@ -411,4 +424,63 @@ func TestAgentStore_UpdateAgentStatus_DeletionGuard(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "error", got.Phase)
 	})
+}
+
+// Review round 2 (A): every DeletionFields field written through
+// UpdateAgentDeletion reads back through GetAgent (entAgentToStore), and
+// every field can be cleared again.
+func TestUpdateAgentDeletion_RoundTripsEveryColumn(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "del-roundtrip")
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	lease, started, failed := base.Add(time.Minute), base.Add(-time.Minute), base.Add(-time.Second)
+	claim := int64(7)
+	n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, store.DeletionFields{
+		State: strPtr(store.DeletionStateFailed), Claim: &claim,
+		LeaseAt: &lease, StartedAt: &started, FailedAt: &failed,
+		Code: strPtr(store.DeletionCodeConflict), Error: strPtr("broker busy"),
+		Prior: strPtr(`{"phase":"running"}`), Request: strPtr(`{"soft":true}`),
+		Phase: strPtr("stopping"), Activity: strPtr("idle"),
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
+	assert.Equal(t, int64(7), got.DeletionClaim)
+	require.NotNil(t, got.DeletionLeaseAt)
+	require.NotNil(t, got.DeletionStartedAt)
+	require.NotNil(t, got.DeletionFailedAt)
+	assert.WithinDuration(t, lease, *got.DeletionLeaseAt, time.Millisecond)
+	assert.WithinDuration(t, started, *got.DeletionStartedAt, time.Millisecond)
+	assert.WithinDuration(t, failed, *got.DeletionFailedAt, time.Millisecond)
+	assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+	assert.Equal(t, "broker busy", got.DeletionError)
+	assert.Equal(t, `{"phase":"running"}`, got.DeletionPrior)
+	assert.Equal(t, `{"soft":true}`, got.DeletionRequest)
+	assert.Equal(t, "stopping", got.Phase)
+	assert.Equal(t, "idle", got.Activity)
+
+	n, err = s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, store.DeletionFields{
+		State: strPtr(store.DeletionStateNone),
+		Code:  strPtr(""), Error: strPtr(""), Prior: strPtr(""), Request: strPtr(""),
+		ClearLeaseAt: true, ClearStartedAt: true, ClearFailedAt: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DeletionStateNone, got.DeletionState)
+	assert.Equal(t, int64(7), got.DeletionClaim, "the claim epoch is kept")
+	assert.Nil(t, got.DeletionLeaseAt)
+	assert.Nil(t, got.DeletionStartedAt)
+	assert.Nil(t, got.DeletionFailedAt)
+	assert.Empty(t, got.DeletionCode)
+	assert.Empty(t, got.DeletionError)
+	assert.Empty(t, got.DeletionPrior)
+	assert.Empty(t, got.DeletionRequest)
 }

@@ -376,7 +376,9 @@ func (s *Server) advanceListedRecord(ctx context.Context, rec *store.AgentReinca
 // resume=false) → complete. ctx is expected to be a detached context
 // (context.Background()-derived), independent of the HTTP request that
 // triggered this — see handleReincarnateAgent for why that matters for
-// self-migration.
+// self-migration. admittedDeletionClaim is the delete claim the handler's
+// startGate admitted; the completion step's failed-marker clear is pinned
+// to it.
 //
 // fresh is the new generation's AppliedConfig, already fully resolved by
 // buildFreshAppliedConfig at request time (before the 202 was returned); this
@@ -421,7 +423,7 @@ func (s *Server) advanceListedRecord(ctx context.Context, rec *store.AgentReinca
 // carries a Phase or Activity while a migration is in flight, so the
 // worker is the sole writer of §3.9's "migrating to generation N+1" for
 // both self and non-self migrations.
-func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string, plan *ReincarnationPlan, toGeneration int) {
+func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string, plan *ReincarnationPlan, toGeneration int, admittedDeletionClaim int64) {
 	defer func() {
 		if p := recover(); p != nil {
 			s.agentLifecycleLog.Error("reincarnation worker panicked",
@@ -473,9 +475,6 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "failed to record stopping state: "+err.Error(), previous)
 		return
 	}
-	// The delete claim as of this first read; the completion step's
-	// failed-marker clear is pinned to it (see clearFailedDeletion).
-	admittedDeletionClaim := agent.DeletionClaim
 
 	// A stop failure is fatal, checked BEFORE any config write. The broker
 	// itself already treats "already stopped" and "not found" as success

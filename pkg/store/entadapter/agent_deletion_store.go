@@ -37,12 +37,10 @@ func copyTimePtr(t *time.Time) *time.Time {
 }
 
 // entAgentDeletionActive is store.Agent.DeletionActive on an ent row, for
-// writers that already hold the locked ent.Agent.
+// writers that already hold the locked ent.Agent. It delegates through
+// entAgentToStore so there is a single definition of the predicate.
 func entAgentDeletionActive(a *ent.Agent, now time.Time) bool {
-	if a.DeletionState != store.DeletionStateDeleting && a.DeletionState != store.DeletionStateFinalizing {
-		return false
-	}
-	return a.DeletionLeaseAt != nil && a.DeletionLeaseAt.After(now)
+	return entAgentToStore(a).DeletionActive(now)
 }
 
 // updateAgentDeletionAttempts bounds UpdateAgentDeletion's retry when its

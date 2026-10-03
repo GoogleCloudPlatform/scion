@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -200,6 +201,11 @@ func TestDeleteGate_SuccessfulStartClearsFailedMarker(t *testing.T) {
 				srv.SetEventPublisher(pub)
 				agent := setupBrokerAgentInPhase(t, s, "dg-clear-"+action+"-"+string(rune('a'+i)), state.PhaseStopped)
 				seedAgentDeletion(t, s, agent.ID, seed)
+				errMsg, prior, request := "broker busy", `{"phase":"stopped"}`, `{"soft":true}`
+				n, err := s.UpdateAgentDeletion(context.Background(), agent.ID, store.DeletionPredicate{},
+					store.DeletionFields{Error: &errMsg, Prior: &prior, Request: &request})
+				require.NoError(t, err)
+				require.Equal(t, 1, n)
 
 				rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -214,7 +220,11 @@ func TestDeleteGate_SuccessfulStartClearsFailedMarker(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, store.DeletionStateNone, got.DeletionState)
 				assert.Empty(t, got.DeletionCode)
+				assert.Empty(t, got.DeletionError)
+				assert.Empty(t, got.DeletionPrior)
+				assert.Empty(t, got.DeletionRequest)
 				assert.Nil(t, got.DeletionLeaseAt)
+				assert.Nil(t, got.DeletionStartedAt)
 				assert.Nil(t, got.DeletionFailedAt)
 				assert.Equal(t, int64(1), got.DeletionClaim, "the claim epoch is kept")
 
@@ -813,12 +823,36 @@ func TestDeleteGate_ReincarnateCompletionClearsFailedMarker(t *testing.T) {
 		assert.Equal(t, int64(2), got.DeletionClaim)
 	})
 
+	// Review round 2 (D): the clear is pinned to the claim the handler's gate
+	// admitted, so a delete that claims between admission and the worker's
+	// first read (here: right after the reincarnation record is created)
+	// keeps its marker.
+	t.Run("claim between admission and worker survives", func(t *testing.T) {
+		srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
+		agent := newReincarnateTestAgent(t, s, project, broker, nil)
+		seedAgentDeletion(t, s, agent.ID, failedSeed)
+		srv.store = &admissionClaimStore{Store: s, t: t}
+
+		reincarnate(t, srv, agent, project.ID)
+		rec := waitForReincarnationSettled(t, s, agent.ID)
+		require.Equal(t, store.AgentReincarnationStateCompleted, rec.State)
+		got, err := s.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
+		assert.Equal(t, store.DeletionCodeRuntimeError, got.DeletionCode)
+		assert.Equal(t, int64(2), got.DeletionClaim)
+	})
+
 	t.Run("completion write fails: marker kept", func(t *testing.T) {
 		srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
 		agent := newReincarnateTestAgent(t, s, project, broker, nil)
 		seedAgentDeletion(t, s, agent.ID, failedSeed)
 		fs := &completionFailStore{Store: s, fromGeneration: agent.Generation, failed: make(chan struct{})}
 		srv.store = fs
+		// The worker logs "reincarnation completed" as its last act, after
+		// the (failed) completion write and the skipped clear.
+		done := &logSignalHandler{msg: "reincarnation completed", ch: make(chan struct{})}
+		srv.agentLifecycleLog = slog.New(done)
 
 		reincarnate(t, srv, agent, project.ID)
 		select {
@@ -826,12 +860,47 @@ func TestDeleteGate_ReincarnateCompletionClearsFailedMarker(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("worker never reached its completion write")
 		}
-		// The clear would run synchronously right after a landed write; give
-		// the worker time to finish, then check nothing cleared the marker.
-		time.Sleep(200 * time.Millisecond)
+		select {
+		case <-done.ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("worker never finished")
+		}
 		got, err := s.GetAgent(context.Background(), agent.ID)
 		require.NoError(t, err)
 		assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
 		assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
 	})
 }
+
+// admissionClaimStore seeds a newer delete failure right after the
+// reincarnate handler creates its record: after the gate, before the worker.
+type admissionClaimStore struct {
+	store.Store
+	t *testing.T
+}
+
+func (a *admissionClaimStore) CreateAgentReincarnation(ctx context.Context, rec *store.AgentReincarnation) error {
+	if err := a.Store.CreateAgentReincarnation(ctx, rec); err != nil {
+		return err
+	}
+	seedAgentDeletion(a.t, a.Store, rec.AgentID, deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError})
+	return nil
+}
+
+// logSignalHandler closes ch the first time a record with message msg is
+// logged.
+type logSignalHandler struct {
+	msg  string
+	ch   chan struct{}
+	once sync.Once
+}
+
+func (h *logSignalHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *logSignalHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Message == h.msg {
+		h.once.Do(func() { close(h.ch) })
+	}
+	return nil
+}
+func (h *logSignalHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *logSignalHandler) WithGroup(string) slog.Handler      { return h }
