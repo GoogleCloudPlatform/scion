@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { setPreferredTimeZone } from '../../utils/time.js';
 
 // ── Shared mock data builders ──
 
@@ -289,6 +290,28 @@ describe('scion-page-admin-server-config', () => {
       expect(metaText).toContain('Database');
       expect(metaText).toContain('rev 5');
       expect(metaText).toContain('admin@test.com');
+    });
+
+    it('section metadata time renders in the display zone, 24-hour, with a zone label (tz-refactor task 20)', async () => {
+      const config = makeBaseConfig({
+        settings_tier: 'db',
+        section_metadata: {
+          // Midnight in Tokyo (UTC+9); the browser zone is pinned to UTC.
+          endpoints: { source: 'db', revision: 5, updated_at: '2026-07-01T15:00:00Z' },
+        },
+      });
+      setPreferredTimeZone('Asia/Tokyo');
+      try {
+        element = await createComponent(createFetchHandler(config));
+        const metaText = () => query(element!, '.section-meta')?.textContent ?? '';
+        expect(metaText()).toContain('Jul 2, 2026, 00:00 (Asia/Tokyo)');
+
+        setPreferredTimeZone('UTC');
+        await element.updateComplete;
+        expect(metaText()).toContain('Jul 1, 2026, 15:00 (UTC)');
+      } finally {
+        setPreferredTimeZone('');
+      }
     });
 
     it('section metadata renders source:File for file-sourced sections', async () => {

@@ -30,6 +30,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { render } from 'lit';
 import { setPreferredTimeZone } from '../../utils/time.js';
 
 await import('./admin-access-boundaries.js');
@@ -149,6 +150,20 @@ describe('admin and access-boundary time formatting (tz-refactor task 20)', () =
     expect(page.formatFutureTime('2026-10-03T12:00:00Z')).toBe('in 2 days');
     expect(page.formatFutureTime('2026-10-01T11:00:00Z')).toBe('now');
     expect(page.formatFutureTime('bogus')).toBe('bogus');
+  });
+
+  it('scheduler tick count renders through formatNumber', () => {
+    const container = document.createElement('div');
+    render(
+      el('scion-page-admin-scheduler').renderOverview({
+        tickCount: 12345,
+        tickInterval: '1m',
+        activeTimers: 2,
+        recurringHandlers: [],
+      }),
+      container
+    );
+    expect(container.querySelector('.stat-value')?.textContent).toBe('12,345');
   });
 
   it('metrics dashboard numbers format through formatNumber', () => {
