@@ -172,10 +172,6 @@ func syncsHubProjectWorkspace(project *store.Project) bool {
 	return project.GitRemote == "" || project.IsSharedWorkspace()
 }
 
-// emptyPerAgentWorkspaceFilesIgnoredWarning is returned in the agent create
-// response when workspaceFiles are sent for an empty-per-agent project.
-const emptyPerAgentWorkspaceFilesIgnoredWarning = "workspace files were ignored: this project gives each agent an empty workspace directory"
-
 // brokerLacksEmptyPerAgentDetail is the user-facing tail of the 412 the web
 // and CLI show verbatim. Upgrading does not help a Cloud Run or Substrate
 // broker, so it names the cause and the brokers that can run the project.

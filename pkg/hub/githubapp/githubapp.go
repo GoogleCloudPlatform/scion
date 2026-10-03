@@ -169,7 +169,7 @@ func (c *Client) trackRateLimit(resp *http.Response) {
 		slog.Warn("GitHub API rate limit running low",
 			"remaining", rl.Remaining,
 			"limit", rl.Limit,
-			"reset", rl.Reset.Format(time.RFC3339))
+			"reset", rl.Reset.UTC().Format(time.RFC3339))
 	}
 }
 

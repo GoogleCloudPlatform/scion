@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -117,6 +117,11 @@ test-hub-sqlite:
 # TestListActiveZonePrefixedSchedules: its prefix match compiles to LIKE, whose
 # case sensitivity differs between the two backends.
 #
+# It also includes the utc-timestamp-normalize JSON tests
+# (TestUTCTimestampNormalizeJSON_*, ptone/scion#2499): the JSON-embedded
+# timestamp rewrite is the part of that operation that runs on Postgres, with
+# its own SQL (jsonb casts, id keyset).
+#
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
 # first; on -v test output, any "--- SKIP" line (including an indented
@@ -149,7 +154,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
@@ -243,6 +248,13 @@ check-security-marker-gates:
 cli-time-zones:
 	@./hack/check-cli-time-zones.sh
 
+## time-literals: Verify server-side times are formatted in UTC and bound in each column family's canonical form
+# NOTE: same caveat as check-authz-guards above -- make collapses the
+# script's exit 1 (violations) and exit 3/4 (nothing was analysed) into one
+# code. CI invokes the script directly to tell those apart.
+time-literals:
+	@./hack/check-time-literals.sh
+
 ## check-harness-coverage: Verify every harnesses/<name>/Dockerfile has a build step in each full-catalog cloudbuild-*.yaml
 # NOTE: same caveat as check-authz-guards above -- make collapses the
 # script's exit 1 (a harness is out of sync) and exit 2 (could not run) into
@@ -259,7 +271,7 @@ check-route-authz-manifest:
 	@./hack/check-route-authz-manifest.sh
 
 ## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
-check-custom: compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones
+check-custom: compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals
 	@echo "All custom checks passed."
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
@@ -364,7 +376,7 @@ proto:
 		--proto_path=proto \
 		--go_out=. --go_opt=module=github.com/GoogleCloudPlatform/scion \
 		--go-grpc_out=. --go-grpc_opt=module=github.com/GoogleCloudPlatform/scion \
-		proto/broker/v1/broker.proto
+		proto/broker/v1/broker.proto proto/conduit/v1/conduit.proto
 	@echo "Proto generation done."
 
 ## proto-check: Verify generated protobuf code is up to date
@@ -375,9 +387,10 @@ proto-check:
 		--proto_path=proto \
 		--go_out=$$TMP --go_opt=module=github.com/GoogleCloudPlatform/scion \
 		--go-grpc_out=$$TMP --go-grpc_opt=module=github.com/GoogleCloudPlatform/scion \
-		proto/broker/v1/broker.proto && \
+		proto/broker/v1/broker.proto proto/conduit/v1/conduit.proto && \
 	diff $$TMP/proto/broker/v1/broker.pb.go proto/broker/v1/broker.pb.go && \
 	diff $$TMP/proto/broker/v1/broker_grpc.pb.go proto/broker/v1/broker_grpc.pb.go && \
+	diff $$TMP/proto/conduit/v1/conduit.pb.go proto/conduit/v1/conduit.pb.go && \
 	rm -rf $$TMP && \
 	echo "Proto generated code is up to date." || \
 	(rm -rf $$TMP; echo "Proto generated code is out of date. Run 'make proto' to regenerate."; exit 1)

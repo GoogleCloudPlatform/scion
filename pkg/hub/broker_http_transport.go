@@ -350,7 +350,7 @@ func (t *brokerHTTPTransport) DeleteAgent(ctx context.Context, brokerID, brokerE
 	}
 	endpoint += deleteProjectPathQuery(ctx)
 	if softDelete {
-		endpoint += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(deletedAt.Format(time.RFC3339)))
+		endpoint += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(deletedAt.UTC().Format(time.RFC3339)))
 	}
 
 	resp, err := t.doRequest(ctx, brokerID, http.MethodDelete, endpoint, nil)

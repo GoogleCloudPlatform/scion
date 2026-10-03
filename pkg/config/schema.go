@@ -108,7 +108,7 @@ func DetectSettingsFormat(data []byte) (version string, isLegacy bool) {
 // V1RuntimeConfig, not on the legacy RuntimeConfig. A file using any of them
 // without schema_version is loaded as v1 so the key is not dropped by the
 // legacy loader.
-var v1RuntimeIndicatorKeys = []string{"type", "cloudrun", "gke", "list_all_namespaces", "shared_dir_storage_class", "shared_dir_size", "safe_to_evict"}
+var v1RuntimeIndicatorKeys = []string{"type", "cloudrun", "gke", "list_all_namespaces", "shared_dir_storage_class", "shared_dir_size", "safe_to_evict", "shared_dir_storage_backend"}
 
 // hasV1RuntimeIndicators reports whether a parsed settings map contains v1-only
 // runtime fields (v1RuntimeIndicatorKeys) that are absent from the legacy
@@ -146,7 +146,9 @@ func hasV1RuntimeIndicators(raw map[string]interface{}) bool {
 // or if the data cannot be parsed.
 //
 // For schema version "1" it also checks value formats the schema cannot
-// express, such as shared_dir_size being a Kubernetes quantity.
+// express, such as shared_dir_size being a Kubernetes quantity, and that a
+// shared_dir_storage_backend of "nfs" has a complete
+// server.shared_dir_storage.nfs block.
 func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, error) {
 	errs, err := validateAgainstSchema(data, schemaVersion, settingsSchemaFiles)
 	if err != nil || schemaVersion != "1" {
@@ -155,11 +157,15 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 	var vs struct {
 		Runtimes map[string]V1RuntimeConfig `yaml:"runtimes"`
 		Profiles map[string]V1ProfileConfig `yaml:"profiles"`
+		Server   struct {
+			SharedDirStorage *V1SharedDirStorageConfig `yaml:"shared_dir_storage"`
+		} `yaml:"server"`
 	}
 	// A decode failure here (e.g. a wrongly typed field) is already
 	// reported by the schema pass above.
 	if yaml.Unmarshal(data, &vs) == nil {
 		errs = append(errs, ValidateSharedDirSizes(vs.Runtimes, vs.Profiles)...)
+		errs = append(errs, ValidateSharedDirStorageBackends(vs.Runtimes, vs.Profiles, vs.Server.SharedDirStorage)...)
 	}
 	return errs, nil
 }

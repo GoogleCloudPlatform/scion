@@ -2366,7 +2366,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "project", projectID, "agent")
 	}
 
-	writeJSON(w, http.StatusOK, ListAgentsResponse{
+	writeAgentList(w, legacyAgentListView(query), ListAgentsResponse{
 		Agents:       agents,
 		NextCursor:   result.NextCursor,
 		TotalCount:   result.TotalCount,

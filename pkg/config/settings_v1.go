@@ -201,6 +201,173 @@ func (vs *VersionedSettings) ResolveSharedDirDefaultsWithSource(profileName stri
 	return storageClass, size, sizeKey
 }
 
+// ResolveProfileValue returns a per-profile setting with the standard
+// precedence used by per-profile overrides: the profile's own value, else
+// the value on the profile's runtime entry. The zero value of T means
+// "not set" at that level. key is the settings key name used to build the
+// returned source ("profiles.NAME.KEY" or "runtimes.NAME.KEY"). If
+// profileName is empty, vs.ActiveProfile is used. A nil vs, an unknown
+// profile, or a profile and runtime entry that both leave the value unset
+// yield the zero value and an empty source, meaning the caller's global
+// value applies. Because the zero value means "not set", a bool or numeric
+// key cannot express an explicit false or 0 override with T = bool or
+// int; for such keys use a pointer type (for example T = *bool), so nil
+// means unset.
+//
+// Example, for a string key:
+//
+//	v, src := ResolveProfileValue(vs, profile, "shared_dir_storage_backend",
+//		func(p V1ProfileConfig) string { return p.SharedDirStorageBackend },
+//		func(r V1RuntimeConfig) string { return r.SharedDirStorageBackend })
+//
+// Call it on settings whose source matches the key's scope: keys that a
+// project must not set should be read from LoadGlobalSettings or
+// LoadGlobalSettingsWithOverlay, not from project-merged settings.
+func ResolveProfileValue[T comparable](vs *VersionedSettings, profileName, key string,
+	fromProfile func(V1ProfileConfig) T, fromRuntime func(V1RuntimeConfig) T) (value T, source string) {
+	var zero T
+	if vs == nil {
+		return zero, ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok {
+		return zero, ""
+	}
+	if v := fromProfile(profile); v != zero {
+		return v, "profiles." + profileName + "." + key
+	}
+	if rt, ok := vs.Runtimes[profile.Runtime]; ok {
+		if v := fromRuntime(rt); v != zero {
+			return v, "runtimes." + profile.Runtime + "." + key
+		}
+	}
+	return zero, ""
+}
+
+// ResolveProfileSetting is ResolveProfileValue for string settings, where
+// "" means not set.
+func (vs *VersionedSettings) ResolveProfileSetting(profileName, key string,
+	fromProfile func(V1ProfileConfig) string, fromRuntime func(V1RuntimeConfig) string) (value, source string) {
+	return ResolveProfileValue(vs, profileName, key, fromProfile, fromRuntime)
+}
+
+// SharedDirStorageGlobalSource is the source key ResolveSharedDirStorage
+// returns when no profile or runtime entry overrides the backend.
+const SharedDirStorageGlobalSource = "server.shared_dir_storage.backend"
+
+// ResolveSharedDirStorage returns the shared-dir storage config that
+// applies to agents using profileName: the backend comes from the
+// profile's shared_dir_storage_backend, else its runtime entry's, else
+// server.shared_dir_storage.backend. The nfs block always comes from
+// server.shared_dir_storage.nfs. source names the key the backend came
+// from. The result is nil when nothing is configured (the local layout).
+// The returned config is a copy when an override applies; the global
+// block is never modified.
+//
+// Call this only on settings from LoadGlobalSettings or
+// LoadGlobalSettingsWithOverlay: like server.shared_dir_storage itself,
+// the overrides must not be settable from a project's own settings.
+//
+// A dispatch-time NFS mount check should choose the backend through this
+// method too, so it agrees with the start path.
+func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V1SharedDirStorageConfig, source string) {
+	if vs == nil {
+		return nil, ""
+	}
+	var global *V1SharedDirStorageConfig
+	if vs.Server != nil {
+		global = vs.Server.SharedDirStorage
+	}
+	backend, source := vs.ResolveProfileSetting(profileName, "shared_dir_storage_backend",
+		func(p V1ProfileConfig) string { return p.SharedDirStorageBackend },
+		func(r V1RuntimeConfig) string { return r.SharedDirStorageBackend })
+	if backend == "" {
+		if global == nil {
+			return nil, ""
+		}
+		return global, SharedDirStorageGlobalSource
+	}
+	out := &V1SharedDirStorageConfig{Backend: backend}
+	if global != nil {
+		out.NFS = global.NFS
+	}
+	return out, source
+}
+
+// SharedDirStorageNFSAnywhere reports whether the global backend or any
+// runtime or profile override selects nfs, and returns the nfs-backed
+// config to use for project-wide operations such as cleanup. It is nil
+// when no setting selects nfs. Like ResolveSharedDirStorage, call it only
+// on global settings.
+func (vs *VersionedSettings) SharedDirStorageNFSAnywhere() (cfg *V1SharedDirStorageConfig, onlyOverrides bool) {
+	if vs == nil {
+		return nil, false
+	}
+	var global *V1SharedDirStorageConfig
+	if vs.Server != nil {
+		global = vs.Server.SharedDirStorage
+	}
+	if global != nil && global.Backend == "nfs" {
+		return global, false
+	}
+	found := false
+	for _, rt := range vs.Runtimes {
+		if rt.SharedDirStorageBackend == "nfs" {
+			found = true
+		}
+	}
+	for _, p := range vs.Profiles {
+		if p.SharedDirStorageBackend == "nfs" {
+			found = true
+		}
+	}
+	if !found {
+		return nil, false
+	}
+	out := &V1SharedDirStorageConfig{Backend: "nfs"}
+	if global != nil {
+		out.NFS = global.NFS
+	}
+	return out, true
+}
+
+// ValidateSharedDirStorageBackends checks shared_dir_storage_backend on
+// every runtime and profile entry: the value must be empty, "local" or
+// "nfs", and "nfs" needs a complete server.shared_dir_storage.nfs block
+// (global may be nil). This checks configuration only; it never looks at
+// the filesystem. Each error's Path names the settings key. Results are
+// sorted by path.
+func ValidateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig, global *V1SharedDirStorageConfig) []ValidationError {
+	var errs []ValidationError
+	check := func(path, backend string) {
+		switch backend {
+		case "", "local":
+			return
+		case "nfs":
+			cfg := &V1SharedDirStorageConfig{Backend: "nfs"}
+			if global != nil {
+				cfg.NFS = global.NFS
+			}
+			if err := cfg.Validate(); err != nil {
+				errs = append(errs, ValidationError{Path: path, Message: "selects \"nfs\", which needs a complete server.shared_dir_storage.nfs block (" + err.Error() + ")"})
+			}
+		default:
+			errs = append(errs, ValidationError{Path: path, Message: fmt.Sprintf("must be \"local\" or \"nfs\" (got %q)", backend)})
+		}
+	}
+	for name, rt := range runtimes {
+		check("runtimes."+name+".shared_dir_storage_backend", rt.SharedDirStorageBackend)
+	}
+	for name, p := range profiles {
+		check("profiles."+name+".shared_dir_storage_backend", p.SharedDirStorageBackend)
+	}
+	sort.Slice(errs, func(i, j int) bool { return errs[i].Path < errs[j].Path })
+	return errs
+}
+
 // ValidateSharedDirSize checks that a shared_dir_size value parses as a
 // positive Kubernetes resource quantity (for example 10Gi or 1Ti). Empty is
 // valid and means "not set".
@@ -1521,6 +1688,12 @@ type V1RuntimeConfig struct {
 	// safe_to_evict wins over it, and a template's or agent's
 	// kubernetes.safeToEvict wins over both. See ResolveSafeToEvict.
 	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// SharedDirStorageBackend overrides server.shared_dir_storage.backend
+	// ("local" or "nfs") for agents whose profile uses this runtime entry.
+	// A profile's own value wins over it. The nfs details always come from
+	// server.shared_dir_storage.nfs. Read from global settings only; see
+	// ResolveSharedDirStorage.
+	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
 	CloudRun *CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
@@ -1743,6 +1916,12 @@ type V1ProfileConfig struct {
 	// loses to a template's or agent's kubernetes.safeToEvict. Only false
 	// has an effect. See ResolveSafeToEvict.
 	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// SharedDirStorageBackend overrides server.shared_dir_storage.backend
+	// ("local" or "nfs") for agents using this profile. It wins over the
+	// same key on the profile's runtime entry. The nfs details always come
+	// from server.shared_dir_storage.nfs. Read from global settings only;
+	// see ResolveSharedDirStorage.
+	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
 }
 
 // resolveEffectiveProjectPath resolves the effective project path for settings loading.
@@ -3250,6 +3429,25 @@ func LoadGlobalSettings() (*VersionedSettings, []string, error) {
 		return nil, nil, fmt.Errorf("resolving global settings directory: %w", err)
 	}
 	return loadGlobalSettingsOnly(globalDir)
+}
+
+// LoadGlobalSettingsWithOverlay is LoadGlobalSettings plus the
+// process-wide DB settings overlay (co-located hub and broker), which
+// replaces the runtimes, profiles, harness_configs and image_registry
+// sections with the hub's stored values. No project-level settings file is
+// ever merged, so a project still cannot set a value read from here. The
+// overlay is read on every call, so a change made through the hub settings
+// API applies to the next call without a restart. The returned settings
+// are a fresh copy; the overlay itself is never modified.
+func LoadGlobalSettingsWithOverlay() (*VersionedSettings, []string, error) {
+	vs, warnings, err := LoadGlobalSettings()
+	if err != nil {
+		return nil, warnings, err
+	}
+	if o := globalOverlay; o != nil && vs != nil {
+		o.Apply(vs)
+	}
+	return vs, warnings, nil
 }
 
 // GlobalSettingsMentions reports whether the RAW bytes of the global
