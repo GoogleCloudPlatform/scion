@@ -242,6 +242,7 @@ func TestMintConduitGrant_TCPTargetRules(t *testing.T) {
 		{"missing host", map[string]string{"port": "3000"}, errConduitInvalid},
 		{"non-canonical port", map[string]string{"host": "127.0.0.1", "port": "03000"}, errConduitInvalid},
 		{"port out of range", map[string]string{"host": "127.0.0.1", "port": "70000"}, errConduitInvalid},
+		{"agent_id on an agent target", map[string]string{"host": "127.0.0.1", "port": "3000", grant.ParamAgentID: "x"}, errConduitInvalid},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -255,6 +256,10 @@ func TestMintConduitGrant_TCPTargetRules(t *testing.T) {
 	}
 }
 
+func (f *conduitFixture) brokerTarget() grant.Target {
+	return grant.Target{Kind: grant.TargetKindBroker, ID: "broker-1", EndpointIncarnation: "b", SessionID: "s", ConnectionEpoch: 1}
+}
+
 func TestMintConduitGrant_TargetBinding(t *testing.T) {
 	f := newConduitFixture(t)
 	ctx := context.Background()
@@ -265,21 +270,126 @@ func TestMintConduitGrant_TargetBinding(t *testing.T) {
 	_, _, err := f.srv.mintConduitGrant(ctx, req)
 	assert.ErrorIs(t, err, errConduitInvalid)
 
-	req.Target = grant.Target{Kind: grant.TargetKindBroker, ID: "broker-2", EndpointIncarnation: "b", SessionID: "s", ConnectionEpoch: 1}
+	req.Target = f.brokerTarget()
+	req.Target.ID = "broker-2"
 	_, _, err = f.srv.mintConduitGrant(ctx, req)
 	assert.ErrorIs(t, err, errConduitInvalid)
 
-	req.Target.ID = "broker-1"
+	// A broker grant carries the authorized agent; an agent grant does not
+	// (the target is the agent itself).
+	req.Target = f.brokerTarget()
 	tok, claims, err := f.srv.mintConduitGrant(ctx, req)
 	require.NoError(t, err)
 	assert.NotEmpty(t, tok)
 	assert.Equal(t, req.Target, claims.Target)
 	assert.Equal(t, f.agent.ProjectID, claims.ProjectID)
 	assert.LessOrEqual(t, claims.Expiry.Sub(claims.NotBefore), grant.MaxValidity)
+	assert.Equal(t, map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: "3000", grant.ParamAgentID: f.agent.ID}, claims.Stream.Params)
+
+	_, claims, err = f.mint(f.owner, tcpHeader("3000"))
+	require.NoError(t, err)
+	assert.NotContains(t, claims.Stream.Params, grant.ParamAgentID)
 
 	req.Target.Kind = "user"
 	_, _, err = f.srv.mintConduitGrant(ctx, req)
 	assert.ErrorIs(t, err, errConduitInvalid)
+}
+
+// TestMintConduitGrant_BrokerGrantBoundToAgent: a broker serves many agents,
+// so a broker grant names the agent it was authorized for. The caller cannot
+// change it, and a target expecting another agent refuses the grant.
+func TestMintConduitGrant_BrokerGrantBoundToAgent(t *testing.T) {
+	f := newConduitFixture(t)
+	ctx := context.Background()
+	mintFor := func(h grant.StreamHeader) ([]byte, *grant.Claims, error) {
+		return f.srv.mintConduitGrant(ctx, conduitGrantRequest{Identity: f.owner, Agent: f.agent, Stream: h, Target: f.brokerTarget()})
+	}
+
+	for _, tc := range []struct {
+		name string
+		h    grant.StreamHeader
+		want error
+	}{
+		{"tcp, hub sets agent", tcpHeader("3000"), nil},
+		{"tcp, caller repeats the agent", grant.StreamHeader{Kind: grant.StreamKindTCP, Params: map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: "3000", grant.ParamAgentID: f.agent.ID}}, nil},
+		{"tcp, caller names another agent", grant.StreamHeader{Kind: grant.StreamKindTCP, Params: map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: "3000", grant.ParamAgentID: "other-agent"}}, errConduitInvalid},
+		{"tcp, caller sends an empty agent", grant.StreamHeader{Kind: grant.StreamKindTCP, Params: map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: "3000", grant.ParamAgentID: ""}}, errConduitInvalid},
+		{"logs, hub sets agent", grant.StreamHeader{Kind: grant.StreamKindLogs}, nil},
+		{"pty, caller names another agent", grant.StreamHeader{Kind: grant.StreamKindPTY, Params: map[string]string{grant.ParamAgentID: "other-agent"}}, errConduitInvalid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, claims, err := mintFor(tc.h)
+			if tc.want != nil {
+				assert.ErrorIs(t, err, tc.want)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, f.agent.ID, claims.Stream.Params[grant.ParamAgentID])
+		})
+	}
+
+	// The broker, routing to agent Y, refuses a grant minted for agent X.
+	tok, _, err := mintFor(tcpHeader("3000"))
+	require.NoError(t, err)
+	pubs, err := f.srv.ConduitGrantPublicKeys(ctx)
+	require.NoError(t, err)
+	keys, err := grant.NewKeySet(pubs...)
+	require.NoError(t, err)
+	verifyAs := func(agentID string) error {
+		h := tcpHeader("3000")
+		h.Params[grant.ParamAgentID] = agentID
+		_, err := grant.Verify(ctx, tok, keys, grant.Expectation{
+			Target: f.brokerTarget(), Header: h, ProjectID: f.agent.ProjectID, Issuer: conduitGrantIssuer,
+		}, grant.NewMemoryReplayCache(f.clock.Now, 0), f.clock.Now())
+		return err
+	}
+	assert.ErrorIs(t, verifyAs("other-agent"), grant.ErrStream)
+	assert.NoError(t, verifyAs(f.agent.ID))
+}
+
+// TestMintConduitGrant_StreamParamAllowList: only tcp takes caller params
+// (host and port); every other kind takes none.
+func TestMintConduitGrant_StreamParamAllowList(t *testing.T) {
+	f := newConduitFixture(t)
+	for _, tc := range []struct {
+		name string
+		h    grant.StreamHeader
+		want error
+	}{
+		{"pty without params", grant.StreamHeader{Kind: grant.StreamKindPTY}, nil},
+		{"pty with empty params", grant.StreamHeader{Kind: grant.StreamKindPTY, Params: map[string]string{}}, nil},
+		{"pty with a command", grant.StreamHeader{Kind: grant.StreamKindPTY, Params: map[string]string{"cmd": "sh"}}, errConduitInvalid},
+		{"ssh with a user", grant.StreamHeader{Kind: grant.StreamKindSSH, Params: map[string]string{"user": "root"}}, errConduitInvalid},
+		{"logs with a source", grant.StreamHeader{Kind: grant.StreamKindLogs, Params: map[string]string{"source": "/etc"}}, errConduitInvalid},
+		{"events with a filter", grant.StreamHeader{Kind: grant.StreamKindEvents, Params: map[string]string{"filter": "*"}}, errConduitInvalid},
+		{"pty with tcp params", grant.StreamHeader{Kind: grant.StreamKindPTY, Params: map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: "3000"}}, errConduitInvalid},
+		{"tcp with an extra param", grant.StreamHeader{Kind: grant.StreamKindTCP, Params: map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: "3000", "x": "y"}}, errConduitInvalid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, claims, err := f.mint(f.owner, tc.h)
+			if tc.want != nil {
+				assert.ErrorIs(t, err, tc.want)
+				return
+			}
+			require.NoError(t, err)
+			assert.Empty(t, claims.Stream.Params)
+		})
+	}
+}
+
+// TestMintConduitGrant_PermissionCheckedBeforeTarget: a caller without port
+// access gets the same refusal whether or not the port is exposed, so it
+// cannot probe which ports are.
+func TestMintConduitGrant_PermissionCheckedBeforeTarget(t *testing.T) {
+	f := newConduitFixture(t)
+	_, _, errExposed := f.mint(f.stranger, tcpHeader("3000"))
+	_, _, errUnexposed := f.mint(f.stranger, tcpHeader("4000"))
+	_, _, errReserved := f.mint(f.stranger, tcpHeader("9810"))
+	_, _, errMalformed := f.mint(f.stranger, tcpHeader("03000"))
+	for _, err := range []error{errExposed, errUnexposed, errReserved, errMalformed} {
+		require.ErrorIs(t, err, errConduitForbidden)
+		assert.Equal(t, errExposed.Error(), err.Error())
+	}
 }
 
 func TestMintConduitGrant_ViaTunnelRequiresTunnelAction(t *testing.T) {
