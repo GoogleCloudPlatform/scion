@@ -338,6 +338,13 @@ export class ScionPageChat extends LitElement {
   private _onConversationMarkedUnread = this._handleConversationMarkedUnread.bind(this);
   private _unreadDMRequestId = 0;
   /**
+   * Bumped whenever the user navigates within the page (opens a thread or a
+   * DM, resets the view) and when the page is removed. A lookup the user
+   * started captures it and gives up if it has changed, so a late answer
+   * never overrides what the user did since.
+   */
+  private _userNavSeq = 0;
+  /**
    * Which view (a project, or the hub) last claimed the members sidebar, for
    * the two loaders that don't go through the hub walk's own guards.
    * Bumped by every call to loadV2Members (which replaces the arrays with
@@ -1185,6 +1192,7 @@ export class ScionPageChat extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     ++this._unreadDMRequestId;
+    ++this._userNavSeq;
     ++this._hubMembersGeneration;
     this._mobileLayoutQuery?.removeEventListener('change', this._onMobileLayoutChange);
     this._mobileLayoutQuery = null;
@@ -1439,12 +1447,35 @@ export class ScionPageChat extends LitElement {
    * names, overriding a manual swipe away from it.
    */
   private isAlreadyViewingThread(projectId: string, threadId: string): boolean {
+    return !!this.openThread(projectId, threadId);
+  }
+
+  /** The open conversation, if it is this thread; otherwise null. */
+  private openThread(projectId: string, threadId: string): V2ConversationState | null {
+    const conv = this.v2Conversation;
+    return conv && !conv.isDM && conv.projectId === projectId && conv.conversationKey === threadId
+      ? conv
+      : null;
+  }
+
+  /** Does the current URL still name this readable thread route? */
+  private routeNamesThread(slug: string, threadId: string): boolean {
+    const match = window.location.pathname.match(/\/chat\/([^/]+)\/([^/]+)$/);
     return (
-      !!this.v2Conversation &&
-      !this.v2Conversation.isDM &&
-      this.v2Conversation.projectId === projectId &&
-      this.v2Conversation.conversationKey === threadId
+      !!match && decodeURIComponent(match[1]) === slug && decodeURIComponent(match[2]) === threadId
     );
+  }
+
+  /** Does the current URL still name this space route, on a mounted page? */
+  private routeNamesSpace(slug: string): boolean {
+    const match = window.location.pathname.match(/\/chat\/([^/]+)$/);
+    return this.isConnected && !!match && decodeURIComponent(match[1]) === slug;
+  }
+
+  /** Does the current URL still name this peer-ID DM route? */
+  private routeNamesDMPeer(peerId: string): boolean {
+    const match = window.location.pathname.match(/\/chat\/dm\/([^/]+)$/);
+    return !!match && decodeURIComponent(match[1]) === peerId;
   }
 
   private parseV2Route(): void {
@@ -1465,16 +1496,16 @@ export class ScionPageChat extends LitElement {
       // lands on only to redirect forward again.
       const slug = this._projectIdToSlug.get(projectId);
       if (slug) {
-        const viewing = this.isAlreadyViewingThread(projectId, topicId);
-        if (viewing && this.v2Conversation && this.v2Conversation.projectSlug !== slug) {
-          this.v2Conversation = { ...this.v2Conversation, projectSlug: slug };
+        const open = this.openThread(projectId, topicId);
+        if (open && open.projectSlug !== slug) {
+          this.v2Conversation = { ...open, projectSlug: slug };
         }
         void replaceRoute(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(topicId)}`).then(
           () => {
             // The shell titles itself from the path it now records; put the
             // open thread's own title back on top.
-            const conv = this.v2Conversation;
-            if (conv && this.isAlreadyViewingThread(projectId, topicId)) {
+            const conv = this.openThread(projectId, topicId);
+            if (conv) {
               dispatchPageTitle(this, conv.threadName ? `#${conv.threadName}` : 'Thread', 'Chat');
             }
           }
@@ -1604,7 +1635,7 @@ export class ScionPageChat extends LitElement {
           }
         } else {
           // User ID not available — resolve via API
-          void this.resolveDMByPeerId(segment, peerKind);
+          void this.resolveDMByPeerId(segment, peerKind, '', { fromRoute: true });
         }
       }
       return;
@@ -1682,6 +1713,16 @@ export class ScionPageChat extends LitElement {
   private async resolveSlugAndOpenThread(slug: string, threadId: string): Promise<void> {
     const projectId = await this.resolveProjectBySlug(slug);
     if (!projectId) return;
+    // While the lookup was in flight the rail may have opened this thread
+    // (and the user swiped away from it), or the user may have moved on to
+    // another conversation. Only open it if the URL still names it and it is
+    // not already open.
+    if (
+      !this.routeNamesThread(slug, threadId) ||
+      this.isAlreadyViewingThread(projectId, threadId)
+    ) {
+      return;
+    }
 
     const known = this.knownThreadMeta(threadId);
     this.v2Conversation = {
@@ -1706,7 +1747,10 @@ export class ScionPageChat extends LitElement {
    */
   private async resolveSlugAndOpenSpace(slug: string): Promise<void> {
     const projectId = await this.resolveProjectBySlug(slug);
-    if (projectId) {
+    // The rail can load during the await and the user open a thread from it,
+    // or the page be rebuilt; only open the space if it is still what the
+    // URL names on this page.
+    if (projectId && this.routeNamesSpace(slug)) {
       void this.selectSpaceBySlug(slug, projectId);
     }
     // If resolution fails, leave the URL in place — it's just a 404 space.
@@ -1768,6 +1812,8 @@ export class ScionPageChat extends LitElement {
 
     // Find #general thread (or fall back to first thread) for this space
     const threads = await this.loadSpaceThreads(projectId);
+    // Same as after the slug lookup: a thread opened during the await wins.
+    if (!this.routeNamesSpace(slug)) return;
     const target = threads.find((t: { isGeneral: boolean }) => t.isGeneral) || threads[0];
     if (target) {
       this.v2Conversation = {
@@ -2187,6 +2233,7 @@ export class ScionPageChat extends LitElement {
     threadName: string;
     defaultAgent?: string;
   }): void {
+    ++this._userNavSeq;
     // Determine the slug for the readable URL
     const slug = detail.projectSlug || this._projectIdToSlug.get(detail.projectId) || '';
 
@@ -2228,6 +2275,7 @@ export class ScionPageChat extends LitElement {
 
   /** Reset to the global /chat view (no conversation selected). */
   private handleResetView(): void {
+    ++this._userNavSeq;
     this.v2Conversation = null;
     this.v2MembersExpanded = true; // Always show tray in base view
     // No conversation to show — put the mobile view back on the rail.
@@ -2348,8 +2396,28 @@ export class ScionPageChat extends LitElement {
   private async resolveDMByPeerId(
     peerId: string,
     peerKind: 'user' | 'agent' = 'user',
-    displayName = ''
+    displayName = '',
+    opts: { fromRoute?: boolean } = {}
   ): Promise<void> {
+    // A lookup can be overtaken while it awaits. A route-driven one opens the
+    // DM only if the URL still names this peer and its DM is not already open
+    // (a re-parse on rail-loaded starts another); one the user started opens
+    // it only if they have not navigated since, including by opening another
+    // DM. Either way a late answer never moves the panel the user has since
+    // moved. The URL alone cannot tell this for a user-started lookup: an
+    // earlier lookup's own push changes it without the user doing anything.
+    const startSeq = this._userNavSeq;
+    const superseded = (): boolean =>
+      opts.fromRoute
+        ? !this.routeNamesDMPeer(peerId) ||
+          (!!this.v2Conversation?.isDM && this.v2Conversation.peerId === peerId)
+        : this._userNavSeq !== startSeq;
+    // A DM the user opened gets its own URL, as openDM gives it when the key
+    // is known; otherwise the next re-parse of the old route would close it.
+    const pushIfOpenedByUser = (dmKey: string): void => {
+      if (!opts.fromRoute) this.pushDMPath(dmKey);
+    };
+
     // 1. Try to find an existing DM via the DM list API (no user ID needed).
     try {
       const res = await apiFetch('/api/v1/chat/dms');
@@ -2367,6 +2435,7 @@ export class ScionPageChat extends LitElement {
         };
         const dm = data.dms?.find((d) => d.peerId === peerId);
         if (dm) {
+          if (superseded()) return;
           const peerName = dm.peerName || dm.peerSlug || dm.peerEmail || displayName || dm.peerId;
           this.v2Conversation = {
             conversationKey: dm.conversationKey,
@@ -2381,6 +2450,7 @@ export class ScionPageChat extends LitElement {
             muted: dm.muted === true,
           };
           this.mobilePanel = 'center';
+          pushIfOpenedByUser(dm.conversationKey);
           dispatchPageTitle(this, peerName, 'Chat');
           return;
         }
@@ -2414,6 +2484,7 @@ export class ScionPageChat extends LitElement {
     // 3. Retry key construction with the potentially-refreshed user ID.
     const key = this.buildDMKey(peerId, peerKind);
     if (key) {
+      if (superseded()) return;
       this.v2Conversation = {
         conversationKey: key,
         projectId: this.inheritedProjectId(),
@@ -2426,6 +2497,7 @@ export class ScionPageChat extends LitElement {
         peerKind,
       };
       this.mobilePanel = 'center';
+      pushIfOpenedByUser(key);
       dispatchPageTitle(this, displayName || 'DM', 'Chat');
       return;
     }
@@ -3185,6 +3257,7 @@ export class ScionPageChat extends LitElement {
 
   /** Open the DM conversation with a member in the centre panel. */
   private openDM(memberId: string, memberKind: 'user' | 'agent', displayName: string): void {
+    ++this._userNavSeq;
     const dmKey = this.buildDMKey(memberId, memberKind);
     if (dmKey) {
       this.v2Conversation = {
@@ -3200,11 +3273,7 @@ export class ScionPageChat extends LitElement {
       };
       this.mobilePanel = 'center';
 
-      // Update the URL with the full DM key so parseV2Route can use it directly.
-      const dmPath = `/chat/dm/${encodeURIComponent(dmKey)}`;
-      const base = import.meta.env.BASE_URL;
-      const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + dmPath : dmPath;
-      window.history.pushState({}, '', browserPath);
+      this.pushDMPath(dmKey);
 
       dispatchPageTitle(this, displayName, 'Chat');
       return;
@@ -3212,6 +3281,14 @@ export class ScionPageChat extends LitElement {
 
     // User ID not available — resolve via API
     void this.resolveDMByPeerId(memberId, memberKind, displayName);
+  }
+
+  /** Push the DM's full-key URL, which parseV2Route matches directly. */
+  private pushDMPath(dmKey: string): void {
+    const dmPath = `/chat/dm/${encodeURIComponent(dmKey)}`;
+    const base = import.meta.env.BASE_URL;
+    const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + dmPath : dmPath;
+    window.history.pushState({}, '', browserPath);
   }
 
   /**
@@ -5071,6 +5148,7 @@ export class ScionPageChat extends LitElement {
     name: string;
     defaultAgent?: string;
   }): void {
+    ++this._userNavSeq;
     const slug = this._projectIdToSlug.get(topic.projectId) || '';
     this.v2Conversation = {
       conversationKey: topic.id,

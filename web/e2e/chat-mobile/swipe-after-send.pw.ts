@@ -283,6 +283,49 @@ test('a thread opened from a legacy link is not reverted or rebuilt when the rai
   ).toBe('left');
 });
 
+test('a reloaded thread is not reverted when its slow slug lookup resolves after Send', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name === 'desktop-1440', 'the mobile panel track is mobile-only');
+  await setupChatMobileMocks(page);
+  await mockSuccessfulSend(page);
+  // A cold load of a readable thread URL (a reload, or a shared link) looks
+  // the slug up while the rail loads. Hold that lookup until after the user
+  // has sent and swiped away; the rail opens the thread in the meantime.
+  let releaseLookup: () => void = () => {};
+  const lookupHeld = new Promise<void>((resolve) => {
+    releaseLookup = resolve;
+  });
+  await page.route(/\/api\/v1\/projects\?slug=/, async (route) => {
+    await lookupHeld;
+    await route.fulfill({
+      json: { items: [{ id: PROJECT_A.id, slug: PROJECT_A.slug, name: PROJECT_A.name }] },
+    });
+  });
+
+  await page.goto(`/chat/${PROJECT_A.slug}/${GENERAL_THREAD_ID}`, {
+    waitUntil: 'domcontentloaded',
+  });
+  await expect(page.locator('.v2-thread-header')).toBeVisible({ timeout: 15_000 });
+  expect(await currentPanel(page)).toBe('center');
+  await page.waitForTimeout(400);
+
+  await sendFromComposer(page);
+  await page.waitForTimeout(300);
+  await swipeRightToRail(page);
+  expect(await currentPanel(page)).toBe('left');
+
+  const lookupDone = page.waitForResponse(/\/api\/v1\/projects\?slug=/);
+  releaseLookup();
+  await lookupDone;
+  await page.waitForTimeout(500);
+
+  expect(
+    await currentPanel(page),
+    'a late slug lookup must not revert a manual swipe back to the rail'
+  ).toBe('left');
+});
+
 test('rewriting a legacy thread link in place keeps the router and the open thread in step', async ({
   page,
 }) => {
@@ -333,4 +376,56 @@ test('rewriting a legacy thread link in place keeps the router and the open thre
     PROJECT_A.slug
   );
   expect(await page.title(), 'the rewrite must not replace the thread title').toBe(titleBefore);
+});
+
+test('a thread opened from a reloaded space link is not left when the slow slug lookup resolves', async ({
+  page,
+}, testInfo) => {
+  const mobile = testInfo.project.name !== 'desktop-1440';
+  await setupChatMobileMocks(page);
+  // A cold load of a space URL (a reload while on the rail, or a shared
+  // link) looks the slug up while the rail loads. Hold that lookup until the
+  // user has opened a thread from the rail.
+  let releaseLookup: () => void = () => {};
+  const lookupHeld = new Promise<void>((resolve) => {
+    releaseLookup = resolve;
+  });
+  await page.route(/\/api\/v1\/projects\?slug=/, async (route) => {
+    await lookupHeld;
+    await route.fulfill({
+      json: { items: [{ id: PROJECT_A.id, slug: PROJECT_A.slug, name: PROJECT_A.name }] },
+    });
+  });
+
+  await page.goto(`/chat/${PROJECT_A.slug}`, { waitUntil: 'domcontentloaded' });
+  if (!mobile) {
+    // Desktop opens the space's #general on its own once the rail loads.
+    await page.waitForURL(new RegExp(`/chat/${PROJECT_A.slug}/${GENERAL_THREAD_ID}$`), {
+      timeout: 15_000,
+    });
+  }
+  const chosen = 'thread-04';
+  const row = page.locator('.thread-item', { hasText: `${chosen} discussion` }).first();
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  await row.click();
+  await page.waitForURL(new RegExp(`/chat/${PROJECT_A.slug}/${chosen}$`), { timeout: 10_000 });
+  await expect(page.locator('.v2-thread-header')).toBeVisible({ timeout: 10_000 });
+  await page.waitForTimeout(400);
+  if (mobile) expect(await currentPanel(page)).toBe('center');
+
+  const lookupDone = page.waitForResponse(/\/api\/v1\/projects\?slug=/);
+  releaseLookup();
+  await lookupDone;
+  await page.waitForTimeout(1_000);
+
+  expect(
+    new URL(page.url()).pathname,
+    'a late slug lookup must not navigate away from the thread the user opened'
+  ).toBe(`/chat/${PROJECT_A.slug}/${chosen}`);
+  if (mobile) {
+    expect(
+      await currentPanel(page),
+      'a late slug lookup must not send the user back to the rail'
+    ).toBe('center');
+  }
 });
