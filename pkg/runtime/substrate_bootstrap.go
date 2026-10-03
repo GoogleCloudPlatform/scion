@@ -727,17 +727,17 @@ func (e *bootstrapPathRejectedError) Error() string {
 
 // maxEmbeddedErrorBytes bounds how much of a control-server-supplied body or
 // stderr this file ever embeds directly in a returned error's message:
-// postBootstrap's own non-2xx response body (read via this same cap), and
-// doExec's non-2xx response body and a failed command's captured stderr.
+// postBootstrap's and doExec's non-2xx response bodies, and a failed exec
+// command's captured stderr.
 // The control server's own output caps (substrate-runtime.md §5.1) are
 // sized for a diagnostic response body, not an error string — embedding up
 // to 4 MiB of stderr in a Go error turns one failed exec into a
-// multi-megabyte log line. truncateForError enforces this for doExec,
-// after redaction.
+// multi-megabyte log line. truncateForError enforces this, after
+// redaction.
 const maxEmbeddedErrorBytes = 4096
 
-// maxErrorBodyReadBytes bounds how much of a non-2xx exec response body
-// doExec reads before redacting it and truncating the result to
+// maxErrorBodyReadBytes bounds how much of a non-2xx response body doExec
+// and postBootstrap read before redacting it and truncating the result to
 // maxEmbeddedErrorBytes. Reading well past the embedded size matters for
 // redaction: a secret that straddles the final cut is redacted as a whole
 // before the cut is made, and one that straddles this read limit instead
@@ -770,7 +770,15 @@ func truncateForError(s string) string {
 // than being treated as an idempotent no-op, and 422 becomes
 // bootstrapPathRejectedError (see its doc comment) rather than falling into
 // the generic "other write failures" case below.
-func postBootstrap(ctx context.Context, router *substrate.RouterClient, atespace, actorName, nonce string, req bootstrapRequest) error {
+//
+// redact is applied to the full non-2xx response body before any part of it
+// is truncated and embedded in the returned error, so a secret straddling
+// the truncation point is still recognized and removed. nil means no
+// redaction.
+func postBootstrap(ctx context.Context, router *substrate.RouterClient, atespace, actorName, nonce string, req bootstrapRequest, redact func(string) string) error {
+	if redact == nil {
+		redact = func(s string) string { return s }
+	}
 	ctx, cancel := context.WithTimeout(ctx, bootstrapRequestTimeout)
 	defer cancel()
 
@@ -794,15 +802,16 @@ func postBootstrap(ctx context.Context, router *substrate.RouterClient, atespace
 	if resp.StatusCode == http.StatusConflict {
 		return errBootstrapHijacked
 	}
-	msg, _ := io.ReadAll(io.LimitReader(resp.Body, maxEmbeddedErrorBytes))
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyReadBytes))
+	msg := redact(string(raw))
 	if resp.StatusCode == http.StatusUnprocessableEntity {
-		code, path, detail, ok := parseBootstrapPathError(string(msg))
+		code, path, detail, ok := parseBootstrapPathError(msg)
 		if !ok {
-			detail = string(msg)
+			detail = msg
 		}
-		return &bootstrapPathRejectedError{code: code, path: path, detail: detail}
+		return &bootstrapPathRejectedError{code: code, path: path, detail: truncateForError(detail)}
 	}
-	return fmt.Errorf("substrate: bootstrap %s/%s failed: status %d: %s", atespace, actorName, resp.StatusCode, string(msg))
+	return fmt.Errorf("substrate: bootstrap %s/%s failed: status %d: %s", atespace, actorName, resp.StatusCode, truncateForError(msg))
 }
 
 // maxExecStdinBytes bounds the raw (pre-base64) stdin payload doExec will

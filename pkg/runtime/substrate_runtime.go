@@ -483,7 +483,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		Files:        files,
 		StartCmd:     startCmd,
 		ControlToken: controlToken,
-	}); err != nil {
+	}, func(s string) string { return redactEnvValues(s, substrateSecretCandidates(cfg)) }); err != nil {
 		if errors.Is(err, errBootstrapHijacked) {
 			// Treat as a compromise indicator, not a retry: delete the
 			// actor and its egress policy so nothing keeps running under

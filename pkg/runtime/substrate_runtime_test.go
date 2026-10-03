@@ -948,7 +948,7 @@ func TestSubstrateRun_BootstrapPathRejectedSurfacesCodeAndPathNoContent(t *testi
 		Files:        []bootstrapFile{{Path: rejectedPath, ContentB64: "eA=="}},
 		StartCmd:     "true",
 		ControlToken: "tok",
-	})
+	}, nil)
 	var pathErr *bootstrapPathRejectedError
 	if !errors.As(postErr, &pathErr) {
 		t.Fatalf("errors.As(postBootstrap's err, *bootstrapPathRejectedError) = false, want true; err = %v", postErr)
@@ -1632,6 +1632,42 @@ func TestSubstrateExec_SecretStraddlingResponseBodyCutIsRedacted(t *testing.T) {
 	assertNoSecretPrefix(t, err.Error())
 	if !strings.Contains(err.Error(), "truncated") {
 		t.Errorf("Exec() error lacks a truncation marker, so the cut was never exercised: %s", err)
+	}
+}
+
+// TestSubstrateRun_SecretStraddlingBootstrapBodyCutIsRedacted: a failed
+// bootstrap's response body carries one of the agent's own env values
+// beginning just before the maxEmbeddedErrorBytes cut. postBootstrap must
+// redact the full body before truncating it; truncating first (or reading
+// only up to the cut) leaves the secret's leading bytes in Run's error,
+// because the cut-off remainder no longer matches the value Run's final
+// redaction pass searches for. Both the generic non-2xx path and the 422
+// path whose body does not parse (which embeds the body as detail) are
+// covered.
+func TestSubstrateRun_SecretStraddlingBootstrapBodyCutIsRedacted(t *testing.T) {
+	body := strings.Repeat("x", maxEmbeddedErrorBytes-10) + straddleSecret + strings.Repeat("y", maxEmbeddedErrorBytes)
+	for name, status := range map[string]int{
+		"generic non-2xx": http.StatusInternalServerError,
+		"unparseable 422": http.StatusUnprocessableEntity,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := &callRecorder{}
+			rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
+			defer closeServer()
+			fa.bootstrapStatus = status
+			fa.bootstrapBody = body
+
+			cfg := testSubstrateRunConfig()
+			cfg.Env = append(cfg.Env, "ANTHROPIC_API_KEY="+straddleSecret)
+			_, err := rt.Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("Run() expected an error for a failed bootstrap, got nil")
+			}
+			assertNoSecretPrefix(t, err.Error())
+			if !strings.Contains(err.Error(), "truncated") {
+				t.Errorf("Run() error lacks a truncation marker, so the cut was never exercised: %s", err)
+			}
+		})
 	}
 }
 
