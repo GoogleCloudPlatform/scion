@@ -117,12 +117,6 @@ test-hub-sqlite:
 # TestListActiveZonePrefixedSchedules: its prefix match compiles to LIKE, whose
 # case sensitivity differs between the two backends.
 #
-# It also includes the Conduit registry suite (TestConduitRegistry_*,
-# ptone/scion#2778): design conduit v2.1 §3.4 requires relay_instances,
-# conduit_sessions and conduit_principal_epochs to behave identically on
-# Postgres and SQLite (generation/epoch upsert ... RETURNING, generation-CAS
-# deletes, concurrent epoch allocation), so the same suite runs on both.
-#
 # It also includes the utc-timestamp-normalize JSON tests
 # (TestUTCTimestampNormalizeJSON_*, ptone/scion#2499): the JSON-embedded
 # timestamp rewrite is the part of that operation that runs on Postgres, with

@@ -59,7 +59,21 @@ const (
 	// HeaderWant carries the caller's registry.Want (JSON) so the owning
 	// relay re-checks admission with the same expectation.
 	HeaderWant = "X-Conduit-Want"
+	// HeaderPeerTarget and HeaderPeerTargetGeneration name the relay the
+	// request is meant for: its instance id and registered generation
+	// (SetPeerTarget). Both are covered by the HMAC signature, and the
+	// serving relay refuses a request that names another instance or
+	// generation than its own current ones.
+	HeaderPeerTarget           = "X-Conduit-Peer-Target"
+	HeaderPeerTargetGeneration = "X-Conduit-Peer-Target-Generation"
 )
+
+// SetPeerTarget names the relay a relay-peer request is meant for. Call it
+// before PeerAuth.Sign.
+func SetPeerTarget(req *http.Request, instanceID string, generation int64) {
+	req.Header.Set(HeaderPeerTarget, instanceID)
+	req.Header.Set(HeaderPeerTargetGeneration, strconv.FormatInt(generation, 10))
+}
 
 // hmacPeerKeyInfo is the HKDF info label for the relay-peer HMAC key. It
 // separates this key from every other use of the input secret.
@@ -96,7 +110,8 @@ type HMACPeerAuthConfig struct {
 }
 
 // HMACPeerAuth signs the method, request URI, timestamp, nonce, caller id,
-// body digest and Want header with HMAC-SHA256. Verify refuses a stale
+// body digest, Want header and target relay (instance id and generation)
+// with HMAC-SHA256. Verify refuses a stale
 // timestamp or a nonce it has already seen within the skew window. It is
 // the non-GCP relay-peer mechanism (on GCP the hub uses OIDC ID tokens).
 type HMACPeerAuth struct {
@@ -144,6 +159,7 @@ func (a *HMACPeerAuth) mac(req *http.Request, peer, ts, nonce string) []byte {
 	for _, part := range []string{
 		req.Method, req.URL.RequestURI(), ts, nonce, peer,
 		req.Header.Get(HeaderBodySHA256), req.Header.Get(HeaderWant),
+		req.Header.Get(HeaderPeerTarget), req.Header.Get(HeaderPeerTargetGeneration),
 	} {
 		m.Write([]byte(strconv.Itoa(len(part))))
 		m.Write([]byte{':'})

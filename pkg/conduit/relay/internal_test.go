@@ -24,6 +24,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"runtime"
 	"strings"
 	"testing"
@@ -209,12 +210,15 @@ func TestOwnerAdmissionReadErrorFailsClosed(t *testing.T) {
 
 // --- C7: relay-peer identity and user sessions ---
 
-func signed(t *testing.T, auth relay.PeerAuth, method, url string, body []byte, want string) *http.Request {
+// signed builds a relay-peer request for the relay to (its instance id and
+// current generation), signed with auth (nil: unsigned).
+func signed(t *testing.T, to *relay.Relay, auth relay.PeerAuth, method, url string, body []byte, want string) *http.Request {
 	t.Helper()
 	req, err := http.NewRequest(method, url, bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
+	relay.SetPeerTarget(req, to.InstanceID(), to.Generation())
 	if body != nil {
 		sum := sha256.Sum256(body)
 		req.Header.Set(relay.HeaderBodySHA256, hex.EncodeToString(sum[:]))
@@ -264,16 +268,16 @@ func TestInternalAPIRejectsUnauthenticatedPeer(t *testing.T) {
 			name string
 			req  func() *http.Request
 		}{
-			{"no identity", func() *http.Request { return signed(t, nil, rt.method, rt.url, rt.body, want) }},
-			{"wrong key", func() *http.Request { return signed(t, wrongKey, rt.method, rt.url, rt.body, want) }},
-			{"stale timestamp", func() *http.Request { return signed(t, stale, rt.method, rt.url, rt.body, want) }},
+			{"no identity", func() *http.Request { return signed(t, p.a.Relay, nil, rt.method, rt.url, rt.body, want) }},
+			{"wrong key", func() *http.Request { return signed(t, p.a.Relay, wrongKey, rt.method, rt.url, rt.body, want) }},
+			{"stale timestamp", func() *http.Request { return signed(t, p.a.Relay, stale, rt.method, rt.url, rt.body, want) }},
 			{"tampered want", func() *http.Request {
-				r := signed(t, p.w.PeerAuth("relay-b"), rt.method, rt.url, rt.body, want)
+				r := signed(t, p.a.Relay, p.w.PeerAuth("relay-b"), rt.method, rt.url, rt.body, want)
 				r.Header.Set(relay.HeaderWant, `{"project_id":"other","incarnation":"L1"}`)
 				return r
 			}},
 			{"tampered path", func() *http.Request {
-				r := signed(t, p.w.PeerAuth("relay-b"), rt.method, rt.url, rt.body, want)
+				r := signed(t, p.a.Relay, p.w.PeerAuth("relay-b"), rt.method, rt.url, rt.body, want)
 				r.URL.Path = strings.Replace(r.URL.Path, p.rec.SessionID, "other", 1) + "x"
 				return r
 			}},
@@ -286,7 +290,7 @@ func TestInternalAPIRejectsUnauthenticatedPeer(t *testing.T) {
 		}
 	}
 	t.Run("replayed nonce", func(t *testing.T) {
-		req := signed(t, p.w.PeerAuth("relay-b"), http.MethodGet, base+"self", nil, "")
+		req := signed(t, p.a.Relay, p.w.PeerAuth("relay-b"), http.MethodGet, base+"self", nil, "")
 		replay := req.Clone(context.Background())
 		if got := do(t, req); got != http.StatusOK {
 			t.Fatalf("first request %d, want 200", got)
@@ -296,12 +300,118 @@ func TestInternalAPIRejectsUnauthenticatedPeer(t *testing.T) {
 		}
 	})
 	t.Run("rpc body swapped after signing", func(t *testing.T) {
-		req := signed(t, p.w.PeerAuth("relay-b"), http.MethodPost, routes[1].url, rpcBody, want)
+		req := signed(t, p.a.Relay, p.w.PeerAuth("relay-b"), http.MethodPost, routes[1].url, rpcBody, want)
 		other, _ := proto.Marshal(&conduitv1.RpcRequest{RequestId: "r2", Method: "exec"})
 		req.Body = io.NopCloser(bytes.NewReader(other))
 		req.ContentLength = int64(len(other))
 		if got := do(t, req); got != http.StatusBadRequest {
 			t.Fatalf("status %d, want 400 (digest mismatch)", got)
+		}
+	})
+}
+
+// TestInternalAPIBindsTargetRelay: relay-peer signatures bind the target
+// relay instance and generation. A request signed for another instance or
+// generation is refused as a stale route (409), a request without a target
+// or with a target changed after signing is unauthenticated (401), and a
+// request signed for an earlier generation is refused by the restarted
+// relay.
+func TestInternalAPIBindsTargetRelay(t *testing.T) {
+	p := newPair(t, echoConfig())
+	base := p.a.Internal.URL + relay.InternalPathPrefix
+	want := `{"project_id":"` + project + `","incarnation":"L1"}`
+	rpcBody, _ := proto.Marshal(&conduitv1.RpcRequest{RequestId: "r1"})
+	gen := p.a.Relay.Generation()
+	routes := []struct {
+		name, method, url string
+		body              []byte
+	}{
+		{"self", http.MethodGet, base + "self", nil},
+		{"rpc", http.MethodPost, base + "sessions/" + p.rec.SessionID + "/rpc", rpcBody},
+		{"stream", http.MethodGet, base + "sessions/" + p.rec.SessionID + "/stream", nil},
+	}
+	for _, rt := range routes {
+		for _, tc := range []struct {
+			name   string
+			target func(*http.Request)
+			// retarget changes the target after signing.
+			retarget   func(*http.Request)
+			wantStatus int
+		}{
+			{name: "wrong instance", target: func(r *http.Request) { relay.SetPeerTarget(r, "relay-b", gen) }, wantStatus: http.StatusConflict},
+			{name: "stale generation", target: func(r *http.Request) { relay.SetPeerTarget(r, "relay-a", gen-1) }, wantStatus: http.StatusConflict},
+			{name: "future generation", target: func(r *http.Request) { relay.SetPeerTarget(r, "relay-a", gen+1) }, wantStatus: http.StatusConflict},
+			{name: "no target", target: func(r *http.Request) {
+				r.Header.Del(relay.HeaderPeerTarget)
+				r.Header.Del(relay.HeaderPeerTargetGeneration)
+			}, wantStatus: http.StatusUnauthorized},
+			{name: "target changed after signing", target: func(r *http.Request) { relay.SetPeerTarget(r, "relay-b", gen) },
+				retarget: func(r *http.Request) { relay.SetPeerTarget(r, "relay-a", gen) }, wantStatus: http.StatusUnauthorized},
+		} {
+			t.Run(rt.name+"/"+tc.name, func(t *testing.T) {
+				req, err := http.NewRequest(rt.method, rt.url, bytes.NewReader(rt.body))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if rt.body != nil {
+					sum := sha256.Sum256(rt.body)
+					req.Header.Set(relay.HeaderBodySHA256, hex.EncodeToString(sum[:]))
+				}
+				req.Header.Set(relay.HeaderWant, want)
+				tc.target(req)
+				if err := p.w.PeerAuth("relay-b").Sign(req); err != nil {
+					t.Fatal(err)
+				}
+				if tc.retarget != nil {
+					tc.retarget(req)
+				}
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+				if resp.StatusCode != tc.wantStatus {
+					t.Fatalf("status %d, want %d", resp.StatusCode, tc.wantStatus)
+				}
+				if tc.wantStatus == http.StatusConflict {
+					if got := resp.Header.Get(relay.HeaderStaleReason); got != "relay_target_mismatch" {
+						t.Fatalf("stale reason %q, want relay_target_mismatch", got)
+					}
+				}
+			})
+		}
+	}
+
+	t.Run("remote session with a stale generation is a stale route", func(t *testing.T) {
+		rec := p.rec
+		rec.RelayGeneration = gen - 1
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		rs := relay.NewRemoteSession(p.b.Peers, p.a.Internal.URL, rec, p.want)
+		if _, err := rs.Call(ctx, &conduitv1.RpcRequest{RequestId: "r1"}); !errors.Is(err, relay.ErrStaleRoute) {
+			t.Fatalf("Call = %v, want ErrStaleRoute", err)
+		}
+	})
+
+	t.Run("request signed before a restart is refused after it", func(t *testing.T) {
+		captured := signed(t, p.a.Relay, p.w.PeerAuth("relay-b"), http.MethodGet, base+"self", nil, "")
+		restarted := p.w.StartNode("relay-a", nil)
+		if restarted.Relay.Generation() <= gen {
+			t.Fatalf("restarted generation %d, want > %d", restarted.Relay.Generation(), gen)
+		}
+		replay := captured.Clone(context.Background())
+		u, err := url.Parse(restarted.Internal.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replay.URL.Scheme, replay.URL.Host, replay.Host = u.Scheme, u.Host, u.Host
+		if got := do(t, replay); got != http.StatusConflict {
+			t.Fatalf("replayed request %d, want 409", got)
+		}
+		fresh := signed(t, restarted.Relay, p.w.PeerAuth("relay-b"), http.MethodGet, restarted.Internal.URL+relay.InternalPathPrefix+"self", nil, "")
+		if got := do(t, fresh); got != http.StatusOK {
+			t.Fatalf("request for the new generation %d, want 200", got)
 		}
 	})
 }
@@ -315,13 +425,13 @@ func TestInternalStreamCapabilityChecks(t *testing.T) {
 	url := p.a.Internal.URL + relay.InternalPathPrefix + "sessions/" + p.rec.SessionID + "/stream"
 	t.Run("missing capability", func(t *testing.T) {
 		want := `{"project_id":"` + project + `","incarnation":"L1"}`
-		if got := do(t, signed(t, p.w.PeerAuth("relay-b"), http.MethodGet, url, nil, want)); got != http.StatusBadRequest {
+		if got := do(t, signed(t, p.a.Relay, p.w.PeerAuth("relay-b"), http.MethodGet, url, nil, want)); got != http.StatusBadRequest {
 			t.Fatalf("status %d, want 400", got)
 		}
 	})
 	t.Run("kind differs from the capability", func(t *testing.T) {
 		want := `{"project_id":"` + project + `","incarnation":"L1","capability":"pty"}`
-		req := signed(t, p.w.PeerAuth("relay-b"), http.MethodGet, url, nil, want)
+		req := signed(t, p.a.Relay, p.w.PeerAuth("relay-b"), http.MethodGet, url, nil, want)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		c, resp, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(url, "http"), req.Header)
@@ -367,7 +477,7 @@ func TestUserSessionNotRoutable(t *testing.T) {
 	_, wel := p.a.MustDial("u", relaytest.UserHello("user-1"), conduit.Config{})
 	url := p.a.Internal.URL + relay.InternalPathPrefix + "sessions/" + wel.GetSessionId() + "/rpc"
 	body, _ := proto.Marshal(&conduitv1.RpcRequest{RequestId: "r1"})
-	if got := do(t, signed(t, p.w.PeerAuth("relay-b"), http.MethodPost, url, body, `{"incarnation":""}`)); got != http.StatusForbidden {
+	if got := do(t, signed(t, p.a.Relay, p.w.PeerAuth("relay-b"), http.MethodPost, url, body, `{"incarnation":""}`)); got != http.StatusForbidden {
 		t.Fatalf("status %d, want 403", got)
 	}
 }
