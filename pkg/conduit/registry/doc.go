@@ -33,12 +33,16 @@
 //     a relay only deletes rows it created in its current generation
 //     ([Registry.DeleteSessionCAS]); on startup it sweeps rows of its own
 //     older generations ([Registry.SweepOwnOlderGenerations]).
-//   - Generations are derived from the database (an atomic upsert that
-//     increments the stored value), never from wall time, so they are
-//     strictly increasing per instance_id even if the clock goes backwards.
-//     The reaper therefore never deletes relay_instances rows; only
-//     [Registry.PruneRelayInstances] removes rows that have had no sessions
-//     and no heartbeat for a long horizon (default 7 days).
+//   - Generations are assigned by one atomic upsert. Re-registering an
+//     existing instance_id gets stored+1: database-derived and clock-immune,
+//     strictly increasing even if the clock goes backwards. A new row (first
+//     registration, or after [Registry.PruneRelayInstances]) is seeded with
+//     the Registry clock's Unix milliseconds, so generations stay monotonic
+//     across a prune provided clocks are not wrong by more than the prune
+//     horizon. The reaper keeps relay_instances rows so that live
+//     re-registrations never depend on the clock; only PruneRelayInstances
+//     removes rows that have had no sessions and no heartbeat for a long
+//     horizon (default 7 days).
 //   - connection_epoch comes from a durable per-principal counter
 //     (conduit_principal_epochs) bumped by upsert … RETURNING in the same
 //     transaction as the session insert. It is never derived from existing

@@ -230,13 +230,19 @@ func (r *Registry) ForgetPrincipalEpoch(ctx context.Context, principalKind, prin
 // ReapStaleRelays is the singleton reaper body: it deletes every session
 // whose relay has not been seen for longer than staleAfter (<=0 ⇒
 // Config.RelayStaleAfter, default 60s), cascading the relay's death to its
-// sessions. Relay rows are kept so generations stay
-// monotonic. The caller (1d) runs it under leader election. A relay that
+// sessions. Relay rows are kept so re-registration stays stored+1 and never
+// depends on the clock. An explicit staleAfter below Config.RelayStaleAfter
+// returns ErrInvalidInput, so a misconfigured caller cannot reap the
+// sessions of relays that are heartbeating normally. The caller (1d) runs it under leader election. A relay that
 // comes back after being reaped finds TouchSession returning
 // ErrSessionNotFound for its old sessions and must close them.
 func (r *Registry) ReapStaleRelays(ctx context.Context, staleAfter time.Duration, now time.Time) (int, error) {
 	if staleAfter <= 0 {
 		staleAfter = r.cfg.RelayStaleAfter
+	}
+	if staleAfter < r.cfg.RelayStaleAfter {
+		return 0, fmt.Errorf("%w: relay reap horizon %s is below RelayStaleAfter %s",
+			ErrInvalidInput, staleAfter, r.cfg.RelayStaleAfter)
 	}
 	return r.store.DeleteSessionsOfStaleRelays(ctx, now.UTC().Add(-staleAfter))
 }
@@ -271,10 +277,17 @@ func (r *Registry) ReapStaleSessions(ctx context.Context, olderThan time.Duratio
 // anyway. A pruned id that later re-registers is seeded with a clock-based
 // generation (see RegisterRelay), so it never reuses a generation an old
 // process might still hold, provided clocks are not wrong by more than
-// the prune horizon. Run it from the same singleton as ReapStaleRelays.
+// the prune horizon. An explicit olderThan below Config.RelayStaleAfter
+// returns ErrInvalidInput, so live idle relays are never pruned; callers
+// should keep it far larger than the expected clock skew (the default 7d).
+// Run it from the same singleton as ReapStaleRelays.
 func (r *Registry) PruneRelayInstances(ctx context.Context, olderThan time.Duration, now time.Time) (int, error) {
 	if olderThan <= 0 {
 		olderThan = DefaultRelayPruneAfter
+	}
+	if olderThan < r.cfg.RelayStaleAfter {
+		return 0, fmt.Errorf("%w: relay prune horizon %s is below RelayStaleAfter %s",
+			ErrInvalidInput, olderThan, r.cfg.RelayStaleAfter)
 	}
 	return r.store.DeleteIdleRelays(ctx, now.UTC().Add(-olderThan))
 }

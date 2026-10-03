@@ -44,9 +44,8 @@ type PrincipalSessions struct {
 type Store interface {
 	// RegisterRelay upserts the relay row and atomically assigns the next
 	// generation (r.Generation, the caller's seed, for a new row; stored+1
-	// otherwise), resetting
-	// endpoints, started_at, last_seen and draining=false. It returns the
-	// new generation.
+	// otherwise), resetting endpoints, started_at, last_seen and
+	// draining=false. It returns the new generation.
 	RegisterRelay(ctx context.Context, r RelayInstance) (int64, error)
 	// HeartbeatRelay sets last_seen iff the stored generation equals gen;
 	// otherwise (or if the row is missing) it returns ErrRelaySuperseded.

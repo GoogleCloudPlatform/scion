@@ -25,9 +25,12 @@ import (
 // RelayInstance is one row per running Conduit relay process (design
 // conduit v2.1 §3.4, table relay_instances). The primary key is the relay's
 // instance_id; generation increases strictly on every RegisterRelay for the
-// same instance_id and is derived from the database (never wall time), so a
-// previous incarnation of the same instance can be fenced by
-// generation-CAS. Session rows reference it with ON DELETE CASCADE.
+// same instance_id, so a previous incarnation of the same instance can be
+// fenced by generation-CAS. Re-registration of an existing row is stored+1
+// (database-derived, clock-immune); a new row (first registration or after
+// a prune) is seeded with the registry clock's Unix milliseconds, so
+// generations stay monotonic across a prune provided clocks are not wrong
+// by more than the prune horizon. Session rows reference it with ON DELETE CASCADE.
 //
 // Rows are NOT deleted by the stale-relay reaper (it deletes the relay's
 // sessions only): keeping the row is what keeps generation monotonic for a

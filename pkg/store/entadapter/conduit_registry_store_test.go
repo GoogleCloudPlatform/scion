@@ -157,7 +157,8 @@ func TestConduitRegistry_RegisterRelay_GenerationStrictlyIncreasing(t *testing.T
 	var last int64
 	for i := 0; i < 5; i++ {
 		// The clock goes BACKWARDS on every restart: generations must still
-		// increase because they come from the database, not wall time.
+		// increase because re-registration is stored+1 (database-derived);
+		// only a brand-new row is seeded from the clock.
 		f.clock.Set(conduitT0.Add(-time.Duration(i) * time.Hour))
 		gen := f.registerRelay("relay-1")
 		assert.Greater(t, gen, last, "restart %d", i)
@@ -229,7 +230,7 @@ func TestConduitRegistry_SupersededRelayIsFenced(t *testing.T) {
 	g1 := f.registerRelay("relay-1")
 	g2 := f.registerRelay("relay-1")
 
-	// A zombie of generation 1 can neither insert, heartbeat nor drain.
+	// A zombie of the previous generation (g1) can neither insert, heartbeat nor drain.
 	_, err := f.reg.InsertSessionWithNextEpoch(f.ctx, agentSession("s-z", "relay-1", g1, "inc-A"))
 	assert.ErrorIs(t, err, registry.ErrRelaySuperseded)
 	assert.ErrorIs(t, f.reg.HeartbeatRelay(f.ctx, "relay-1", g1), registry.ErrRelaySuperseded)
@@ -753,6 +754,39 @@ func TestConduitRegistry_PruneRelayInstances_OnlyIdleAndStale(t *testing.T) {
 	assert.Equal(t, 1, n)
 	assert.ErrorIs(t, f.reg.TouchSession(f.ctx, "b-1"), registry.ErrSessionNotFound)
 	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-fresh", fresh))
+}
+
+func TestConduitRegistry_RelayJobHorizonFloors(t *testing.T) {
+	// r3-F2: an explicit horizon below Config.RelayStaleAfter would act on
+	// relays that are heartbeating normally, so both relay jobs refuse it
+	// without touching the database. The floor itself is accepted.
+	f := newConduitFixture(t)
+	gen := f.registerRelay("relay-1")
+	f.insert(brokerSession("b-1", "relay-1", gen, "binc", ""))
+	idle := f.registerRelay("relay-idle")
+
+	// Both relays last heartbeated 59s ago: live under the 60s floor.
+	f.clock.Advance(registry.DefaultRelayStaleAfter - time.Second)
+	below := registry.DefaultRelayStaleAfter - time.Second
+
+	_, err := f.reg.ReapStaleRelays(f.ctx, below, f.clock.Now())
+	assert.ErrorIs(t, err, registry.ErrInvalidInput)
+	_, err = f.reg.PruneRelayInstances(f.ctx, below, f.clock.Now())
+	assert.ErrorIs(t, err, registry.ErrInvalidInput)
+	require.NoError(t, f.reg.TouchSession(f.ctx, "b-1"))
+	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-idle", idle))
+
+	// Exactly the floor is accepted and acts only on rows older than it.
+	f.clock.Advance(registry.DefaultRelayStaleAfter + time.Second)
+	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-idle", idle))
+	n, err := f.reg.ReapStaleRelays(f.ctx, registry.DefaultRelayStaleAfter, f.clock.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, n) // relay-1's session; relay-idle is fresh
+	n, err = f.reg.PruneRelayInstances(f.ctx, registry.DefaultRelayStaleAfter, f.clock.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, n) // relay-1 (now idle and stale); relay-idle is fresh
+	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-idle", idle))
+	assert.ErrorIs(t, f.reg.HeartbeatRelay(f.ctx, "relay-1", gen), registry.ErrRelaySuperseded)
 }
 
 func TestConduitRegistry_CapabilitiesSQLDefault(t *testing.T) {
