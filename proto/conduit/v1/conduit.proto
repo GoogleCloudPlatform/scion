@@ -1,0 +1,212 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package scion.conduit.v1;
+
+option go_package = "github.com/GoogleCloudPlatform/scion/proto/conduit/v1;conduitv1";
+
+// Frame is the single wire unit of a conduit session. Every transport
+// (ws binary message, grpc stream message, h1pair batch entry) carries
+// exactly one Frame per message.
+message Frame {
+  oneof body {
+    Hello hello = 1;
+    Welcome welcome = 2;
+    GoAway go_away = 3;
+    AuthRefresh auth_refresh = 4;
+    Ping ping = 5;
+    Pong pong = 6;
+
+    RpcRequest rpc_request = 10;
+    RpcResponse rpc_response = 11;
+    RpcCancel rpc_cancel = 12;
+
+    StreamOpen stream_open = 20;
+    StreamAccept stream_accept = 21;
+    StreamData stream_data = 22;
+    StreamWindow stream_window = 23;
+    StreamClose stream_close = 24;
+    StreamResize stream_resize = 25;
+  }
+}
+
+// PrincipalKind identifies who dialed the session. Canonical strings:
+// broker, agent, user, relay-peer. The zero value is rejected.
+enum PrincipalKind {
+  PRINCIPAL_KIND_UNSPECIFIED = 0;
+  PRINCIPAL_KIND_BROKER = 1;
+  PRINCIPAL_KIND_AGENT = 2;
+  PRINCIPAL_KIND_USER = 3;
+  PRINCIPAL_KIND_RELAY_PEER = 4;
+}
+
+// StreamKind defines the target-side semantics of a stream. Canonical
+// strings: tcp, pty, ssh, logs, events. The zero value is rejected so that
+// an unset kind never means tcp.
+enum StreamKind {
+  STREAM_KIND_UNSPECIFIED = 0;
+  STREAM_KIND_TCP = 1;
+  STREAM_KIND_PTY = 2;
+  STREAM_KIND_SSH = 3;
+  STREAM_KIND_LOGS = 4;
+  STREAM_KIND_EVENTS = 5;
+}
+
+// Hello is the first frame sent by the dialer. The credential is not part
+// of Hello; it travels in transport headers.
+message Hello {
+  PrincipalKind principal_kind = 1;
+  string principal_id = 2;
+  string client_version = 3;
+  Capabilities capabilities = 4;
+  // Reserved for the second-connection data contingency; unused in Phase 1.
+  string role = 5;
+}
+
+// Capabilities is structured metadata about what the dialer can serve.
+// stream_kinds holds canonical stream kind strings (e.g. "tcp"), so the
+// protojson form matches the registry capabilities column.
+message Capabilities {
+  repeated string stream_kinds = 1;
+  repeated string rpc = 2;
+  string endpoint_incarnation = 3;
+  string exec_scope = 4;
+  TransportLimits transport_limits = 5;
+}
+
+message TransportLimits {
+  uint32 max_frame = 1;
+  uint32 idle_timeout_s = 2;
+}
+
+// Welcome is the relay's reply to an admitted Hello.
+message Welcome {
+  string session_id = 1;
+  string relay_instance_id = 2;
+  int64 connection_epoch = 3;
+  uint32 ping_interval_ms = 4;
+  uint32 max_frame = 5;
+  uint32 lifetime_hint_s = 6;
+  // Every grant verification key still within not_after.
+  repeated GrantKey grant_keys = 7;
+}
+
+message GrantKey {
+  string kid = 1;
+  // 32-byte Ed25519 public key.
+  bytes public_key = 2;
+  int64 not_after_unix = 3;
+}
+
+// GoAway announces a planned drain. Streams opened by the receiver with an
+// id above last_stream_id are refused with 4503; accepted streams may finish
+// until drain_deadline_ms, after which they are closed with 4503. A GoAway
+// sent before Welcome (drain_deadline_ms = 0) rejects the handshake with
+// code (4401/4403).
+message GoAway {
+  uint32 last_stream_id = 1;
+  uint32 code = 2;
+  string reason = 3;
+  uint32 reconnect_after_ms = 4;
+  uint32 drain_deadline_ms = 5;
+}
+
+// AuthRefresh re-presents a credential in-band. stream_id 0 refreshes the
+// session identity; a nonzero value is reserved for per-stream
+// re-authorization.
+message AuthRefresh {
+  bytes credential = 1;
+  uint32 stream_id = 2;
+}
+
+message Ping {
+  uint64 nonce = 1;
+}
+
+message Pong {
+  uint64 nonce = 1;
+}
+
+// RpcRequest is HTTP over the session (same fields as the control channel
+// RequestEnvelope).
+message RpcRequest {
+  string request_id = 1;
+  string method = 2;
+  string path = 3;
+  string query = 4;
+  map<string, string> headers = 5;
+  bytes body = 6;
+}
+
+message RpcResponse {
+  string request_id = 1;
+  int32 status = 2;
+  map<string, string> headers = 3;
+  bytes body = 4;
+}
+
+message RpcCancel {
+  string request_id = 1;
+}
+
+// StreamOpen proposes a stream. Odd stream ids are opened by the dialer,
+// even ids by the relay. initial_window is the opener's receive window for
+// this stream.
+message StreamOpen {
+  uint32 stream_id = 1;
+  StreamKind kind = 2;
+  map<string, string> params = 3;
+  bytes grant = 4;
+  uint32 initial_window = 5;
+  // Bound on the opening state; 0 means the default (15s).
+  uint32 open_timeout_ms = 6;
+}
+
+// StreamAccept accepts a stream. initial_window is the acceptor's receive
+// window for this stream.
+message StreamAccept {
+  uint32 stream_id = 1;
+  uint32 initial_window = 2;
+}
+
+// StreamData carries at most 64 KiB of payload. fin half-closes the
+// sender's direction.
+message StreamData {
+  uint32 stream_id = 1;
+  bytes data = 2;
+  bool fin = 3;
+}
+
+// StreamWindow grants send credit (HTTP/2 style). stream_id 0 grants
+// session-level credit.
+message StreamWindow {
+  uint32 stream_id = 1;
+  uint32 increment = 2;
+}
+
+// StreamClose terminates a stream. code 0 is a normal close; 4499 cancels a
+// stream in the opening state; 4503 is relay_restart (drain).
+message StreamClose {
+  uint32 stream_id = 1;
+  uint32 code = 2;
+  string reason = 3;
+}
+
+message StreamResize {
+  uint32 stream_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}

@@ -82,6 +82,10 @@ type SyncToFinalizeResponse struct {
 	FilesApplied int `json:"filesApplied"`
 	// BytesTransferred is the total bytes transferred.
 	BytesTransferred int64 `json:"bytesTransferred"`
+	// Warnings lists non-fatal issues, e.g. uploaded files ignored because
+	// the project gives each agent an empty workspace directory
+	// (api.WarningEmptyPerAgentWorkspaceFilesIgnored).
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // WorkspaceStatusResponse is the response from getting workspace status.
