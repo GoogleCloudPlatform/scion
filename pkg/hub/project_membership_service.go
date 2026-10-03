@@ -980,8 +980,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		}
 		var gdErr *governanceDenialError
 		if errors.As(txErr, &gdErr) {
-			d := gdErr.decision
-			return nil, &d
+			return nil, &gdErr.decision
 		}
 		if govDenial := isGovernanceError(txErr); govDenial != nil {
 			return nil, govDenial
@@ -1187,8 +1186,7 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		}
 		var gdErr *governanceDenialError
 		if errors.As(txErr, &gdErr) {
-			d := gdErr.decision
-			return nil, &d
+			return nil, &gdErr.decision
 		}
 		if govDenial := isGovernanceError(txErr); govDenial != nil {
 			return nil, govDenial

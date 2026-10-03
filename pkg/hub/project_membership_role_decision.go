@@ -189,25 +189,46 @@ func (svc *ProjectMembershipService) customRoleAuthorities(ctx context.Context, 
 // governance check; rd is the created role definition and is read only by
 // the structural and CanDelegate checks. a is read only by the credential,
 // actor-authority and governance checks. memberRoleCheckCanDelegate must
-// only be selected outside a transaction.
+// only be selected outside a transaction. A selected check whose input (a or
+// rd) is nil is a caller bug and is refused with an internal error rather
+// than a panic.
 func (svc *ProjectMembershipService) memberRoleDecision(ctx context.Context, actor UserIdentity, projectID string, a *memberActorAuthority, ch planChange, rd *store.RoleDefinition, checks memberRoleCheck) (*MembershipDecision, string) {
-	if checks&memberRoleCheckCredential != 0 && a.credentialDenial != nil {
-		return a.credentialDenial, ""
+	if checks&memberRoleCheckCredential != 0 {
+		if a == nil {
+			return memberRoleDecisionMissingInput("actor authority"), ""
+		}
+		if a.credentialDenial != nil {
+			return a.credentialDenial, ""
+		}
 	}
 	if checks&memberRoleCheckStructural != 0 {
+		if rd == nil {
+			return memberRoleDecisionMissingInput("role definition"), ""
+		}
 		if d := checkNoRoleBindingPermissionInCreatedCustomRoles([]*store.RoleDefinition{rd}); d != nil {
 			return d, ""
 		}
 	}
-	if checks&memberRoleCheckActorAuthority != 0 && a.authorityDenial != nil {
-		return a.authorityDenial, ""
+	if checks&memberRoleCheckActorAuthority != 0 {
+		if a == nil {
+			return memberRoleDecisionMissingInput("actor authority"), ""
+		}
+		if a.authorityDenial != nil {
+			return a.authorityDenial, ""
+		}
 	}
 	if checks&memberRoleCheckGovernance != 0 {
+		if a == nil {
+			return memberRoleDecisionMissingInput("actor authority"), ""
+		}
 		if d := svc.governanceDecisionForChange(a.role, a.isDirectOwner, a.hubOverride, a.customAuth, ch); d != nil {
 			return d, ""
 		}
 	}
 	if checks&memberRoleCheckCanDelegate != 0 && svc.authz != nil {
+		if rd == nil {
+			return memberRoleDecisionMissingInput("role definition"), ""
+		}
 		delDecision := svc.authz.CanDelegate(ctx, actor, GrantDescriptor{
 			Type:             GrantTypeRoleBinding,
 			RoleDefinitionID: rd.ID,
@@ -220,4 +241,10 @@ func (svc *ProjectMembershipService) memberRoleDecision(ctx context.Context, act
 		return nil, delDecision.Reason
 	}
 	return nil, ""
+}
+
+// memberRoleDecisionMissingInput is the internal-error refusal for a
+// memberRoleDecision call that selected a check without supplying its input.
+func memberRoleDecisionMissingInput(input string) *MembershipDecision {
+	return &MembershipDecision{Allowed: false, DenialCode: ErrCodeInternalError, Reason: "membership decision: missing " + input, HTTPStatus: 500}
 }

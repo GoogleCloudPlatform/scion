@@ -110,3 +110,43 @@ func TestSetMemberRoles_HubOverride_ReachableBySuperAdminOverHTTP(t *testing.T) 
 	require.Less(t, rec.Code, 300, rec.Body.String())
 	assert.Empty(t, mmrBindingsFor(t, f.store, "user", f.member.ID, f.projectID))
 }
+
+// TestSetMemberRoles_MemberRoleDecision_NilInputRefusedAsInternalError pins
+// the nil guards in memberRoleDecision: a check selected without its input
+// (a for credential, actor authority and governance; rd for structural and
+// CanDelegate) is refused with an internal error instead of panicking.
+func TestSetMemberRoles_MemberRoleDecision_NilInputRefusedAsInternalError(t *testing.T) {
+	f := setupMMRFixture(t)
+	svc := f.srv.membershipService
+	require.NotNil(t, svc.authz, "the CanDelegate guard only runs with an authorizer")
+	ctx := mmrServiceCtx(f.owner.ID, f.owner.Email)
+	actor := mmrServiceIdentity(f.owner.ID, f.owner.Email)
+	owner, err := svc.memberActorAuthorityPreTx(ctx, f.owner.ID, f.projectID, true, false, true, false)
+	require.NoError(t, err)
+	add := planChange{op: MembershipOpAdd, roleName: f.memberRD.Name}
+
+	for _, tc := range []struct {
+		name  string
+		a     *memberActorAuthority
+		rd    *store.RoleDefinition
+		check memberRoleCheck
+		input string
+	}{
+		{"credential/nil a", nil, f.memberRD, memberRoleCheckCredential, "actor authority"},
+		{"structural/nil rd", owner, nil, memberRoleCheckStructural, "role definition"},
+		{"actor authority/nil a", nil, f.memberRD, memberRoleCheckActorAuthority, "actor authority"},
+		{"governance/nil a", nil, f.memberRD, memberRoleCheckGovernance, "actor authority"},
+		{"CanDelegate/nil rd", owner, nil, memberRoleCheckCanDelegate, "role definition"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var d *MembershipDecision
+			require.NotPanics(t, func() {
+				d, _ = svc.memberRoleDecision(ctx, actor, f.projectID, tc.a, add, tc.rd, tc.check)
+			})
+			assert.Equal(t, memberRoleDecisionMissingInput(tc.input), d)
+			require.NotNil(t, d)
+			assert.Equal(t, ErrCodeInternalError, d.DenialCode)
+			assert.Equal(t, http.StatusInternalServerError, d.HTTPStatus)
+		})
+	}
+}
