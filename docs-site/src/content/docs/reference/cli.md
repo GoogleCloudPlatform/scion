@@ -73,7 +73,10 @@ provisioning. While waiting, each launch step is printed to stderr (nothing
 extra under `--format json`). If the wait times out, or you press Ctrl-C, only
 the wait stops: the launch continues on the Hub, and re-running
 `scion start <agent-name>` resumes waiting. Ctrl-C exits with status 130 and
-SIGTERM with 143; a failed launch or a timeout exits 1. If the agent's create did not
+SIGTERM with 143; a failed launch or a timeout exits 1. Network errors and
+Hub answers of 5xx, 408 or 429 are retried while waiting; any other 4xx (for
+example 401 or 403) stops the wait at once with the Hub's error, and the launch
+continues on the Hub. If the agent's create did not
 complete (for example the image could not be pulled), the error shows the
 stored template and task. Delete the agent and create it again
 (`scion delete <agent-name>`, then `scion start` with the same template and
