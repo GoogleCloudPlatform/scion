@@ -39,6 +39,9 @@ const (
 const (
 	DefaultRelayStaleAfter   = 60 * time.Second
 	DefaultSessionStaleAfter = 90 * time.Second
+	// DefaultSessionReapAfter is how old a session's own last_seen must be
+	// before ReapStaleSessions removes it (well beyond the 90s staleness).
+	DefaultSessionReapAfter = 10 * time.Minute
 	// DefaultRelayPruneAfter is how long a relay row with no sessions must
 	// have been stale before PruneRelayInstances removes it.
 	DefaultRelayPruneAfter = 7 * 24 * time.Hour

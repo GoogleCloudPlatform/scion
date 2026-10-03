@@ -40,6 +40,10 @@ type Config struct {
 	// SessionStaleAfter is how old a session's last_seen may be before the
 	// session is no longer live. Default 90s.
 	SessionStaleAfter time.Duration
+	// SessionReapAfter is how old a session's last_seen must be before
+	// ReapStaleSessions deletes the row regardless of its relay's state.
+	// It must exceed SessionStaleAfter by a wide margin. Default 10m.
+	SessionReapAfter time.Duration
 	// Clock supplies timestamps for writes and admission checks. Default:
 	// the wall clock.
 	Clock Clock
@@ -58,6 +62,9 @@ func New(store Store, cfg Config) *Registry {
 	}
 	if cfg.SessionStaleAfter <= 0 {
 		cfg.SessionStaleAfter = DefaultSessionStaleAfter
+	}
+	if cfg.SessionReapAfter <= 0 {
+		cfg.SessionReapAfter = DefaultSessionReapAfter
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = ClockFunc(time.Now)
@@ -152,6 +159,13 @@ func validateSession(rec SessionRecord) error {
 		return fmt.Errorf("%w: relay_generation must be positive", ErrInvalidInput)
 	case rec.PrincipalKind != PrincipalUser && rec.EndpointIncarnation == "":
 		return fmt.Errorf("%w: %s sessions need an endpoint_incarnation", ErrInvalidInput, rec.PrincipalKind)
+	// Mirror the Want rules so a row that could never be routed is refused
+	// at handshake instead of silently consuming an epoch: agent lookups
+	// always carry a project, broker lookups never do.
+	case rec.PrincipalKind == PrincipalAgent && rec.ProjectID == "":
+		return fmt.Errorf("%w: agent sessions need a project_id", ErrInvalidInput)
+	case rec.PrincipalKind == PrincipalBroker && rec.ProjectID != "":
+		return fmt.Errorf("%w: broker sessions must not carry a project_id", ErrInvalidInput)
 	}
 	return nil
 }
@@ -171,6 +185,10 @@ func (r *Registry) SetSessionDraining(ctx context.Context, sessionID string) err
 // DeleteSessionCAS deletes a session row only if it was created by
 // relayInstanceID in generation relayGen. A stale generation (e.g. an old
 // disconnect arriving after replacement) deletes nothing.
+//
+// The owning relay (1d) should retry a delete that fails with an error
+// (e.g. a transient database failure); it is idempotent. ReapStaleSessions
+// is the backstop for rows whose delete never succeeds.
 func (r *Registry) DeleteSessionCAS(ctx context.Context, sessionID, relayInstanceID string, relayGen int64) (bool, error) {
 	return r.store.DeleteSessionCAS(ctx, sessionID, relayInstanceID, relayGen)
 }
@@ -190,8 +208,9 @@ func (r *Registry) ForgetPrincipalEpoch(ctx context.Context, principalKind, prin
 }
 
 // ReapStaleRelays is the singleton reaper body: it deletes every session
-// whose relay has not been seen for longer than staleAfter (cascading the
-// relay's death to its sessions). Relay rows are kept so generations stay
+// whose relay has not been seen for longer than staleAfter (<=0 ⇒
+// Config.RelayStaleAfter, default 60s), cascading the relay's death to its
+// sessions. Relay rows are kept so generations stay
 // monotonic. The caller (1d) runs it under leader election. A relay that
 // comes back after being reaped finds TouchSession returning
 // ErrSessionNotFound for its old sessions and must close them.
@@ -200,6 +219,26 @@ func (r *Registry) ReapStaleRelays(ctx context.Context, staleAfter time.Duration
 		staleAfter = r.cfg.RelayStaleAfter
 	}
 	return r.store.DeleteSessionsOfStaleRelays(ctx, now.UTC().Add(-staleAfter))
+}
+
+// ReapStaleSessions deletes session rows whose own last_seen is older than
+// olderThan (<=0 ⇒ Config.SessionReapAfter, default 10m), whatever their
+// relay's state. It is the backstop for rows a live relay failed to delete
+// (see DeleteSessionCAS). Such rows are already neither eligible nor
+// admissible (session_stale); this only stops them accumulating. It is one
+// write-first DELETE and never touches the epoch table. olderThan must
+// exceed Config.SessionStaleAfter, so a live session that missed a
+// heartbeat or two is never touched; otherwise it returns ErrInvalidInput.
+// Run it from the same singleton as ReapStaleRelays.
+func (r *Registry) ReapStaleSessions(ctx context.Context, olderThan time.Duration, now time.Time) (int, error) {
+	if olderThan <= 0 {
+		olderThan = r.cfg.SessionReapAfter
+	}
+	if olderThan <= r.cfg.SessionStaleAfter {
+		return 0, fmt.Errorf("%w: session reap horizon %s must exceed SessionStaleAfter %s",
+			ErrInvalidInput, olderThan, r.cfg.SessionStaleAfter)
+	}
+	return r.store.DeleteStaleSessions(ctx, now.UTC().Add(-olderThan))
 }
 
 // PruneRelayInstances deletes relay_instances rows that have no sessions and

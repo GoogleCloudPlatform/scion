@@ -61,7 +61,7 @@ func TestEpochCurrent_ByPrincipalKind(t *testing.T) {
 }
 
 func TestInsertSession_Validation(t *testing.T) {
-	ok := SessionRecord{SessionID: "s", PrincipalKind: PrincipalAgent, PrincipalID: "a", RelayInstanceID: "r", RelayGeneration: 1, Transport: TransportWS, EndpointIncarnation: "i"}
+	ok := SessionRecord{SessionID: "s", PrincipalKind: PrincipalAgent, PrincipalID: "a", ProjectID: "p", RelayInstanceID: "r", RelayGeneration: 1, Transport: TransportWS, EndpointIncarnation: "i"}
 	mut := func(f func(*SessionRecord)) SessionRecord { r := ok; f(&r); return r }
 	cases := map[string]SessionRecord{
 		"relay-peer":           mut(func(r *SessionRecord) { r.PrincipalKind = PrincipalRelayPeer }),
@@ -72,6 +72,8 @@ func TestInsertSession_Validation(t *testing.T) {
 		"empty relay":          mut(func(r *SessionRecord) { r.RelayInstanceID = "" }),
 		"zero generation":      mut(func(r *SessionRecord) { r.RelayGeneration = 0 }),
 		"agent no incarnation": mut(func(r *SessionRecord) { r.EndpointIncarnation = "" }),
+		"agent no project":     mut(func(r *SessionRecord) { r.ProjectID = "" }),
+		"broker with project":  mut(func(r *SessionRecord) { r.PrincipalKind = PrincipalBroker }),
 	}
 	reg := New(&FaultStore{}, Config{}) // Inner is nil: validation must reject before the store is touched
 	for name, rec := range cases {
@@ -83,11 +85,15 @@ func TestInsertSession_Validation(t *testing.T) {
 	assert.NoError(t, validateSession(mut(func(r *SessionRecord) {
 		r.PrincipalKind, r.EndpointIncarnation = PrincipalUser, ""
 	})), "user sessions need no incarnation")
+	assert.NoError(t, validateSession(mut(func(r *SessionRecord) {
+		r.PrincipalKind, r.ProjectID = PrincipalBroker, ""
+	})), "broker sessions without a project are valid")
 }
 
 func TestNew_Defaults(t *testing.T) {
 	r := New(nil, Config{})
 	assert.Equal(t, DefaultRelayStaleAfter, r.cfg.RelayStaleAfter)
+	assert.Equal(t, DefaultSessionReapAfter, r.cfg.SessionReapAfter)
 	assert.Equal(t, DefaultSessionStaleAfter, r.cfg.SessionStaleAfter)
 	assert.WithinDuration(t, time.Now(), r.now(), time.Minute)
 }
