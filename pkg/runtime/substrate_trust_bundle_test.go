@@ -165,12 +165,11 @@ func TestBuildActorTemplate_EgressTrustBundleSet(t *testing.T) {
 
 // TestBuildActorTemplate_EnvNamesMatchSharedTrustBundleVarNames is the
 // template-side half of the tie between buildActorTemplate's Env and
-// pkg/sciontool/substrate's execAsUserCmd -w candidate list
-// (TestExecAsUserCmd_CandidateNamesMatchTemplateEnvNames covers the other
-// half): both derive from substrateenv.TrustBundleVarNames directly, so a
-// name added to the template without updating that shared slice (or vice
-// versa) is caught here rather than surfacing as exec silently losing a
-// var the template already carries.
+// pkg/sciontool/substrate's own trustBundleEnvPairs candidate list: both
+// derive from substrateenv.TrustBundleVarNames directly, so a name added to
+// the template without updating that shared slice (or vice versa) is
+// caught here rather than surfacing as exec silently losing a var the
+// template already carries.
 func TestBuildActorTemplate_EnvNamesMatchSharedTrustBundleVarNames(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("f", 64)
 	sc := config.V1SubstrateConfig{EgressTrustBundle: "egress-mitm.ate.dev"}

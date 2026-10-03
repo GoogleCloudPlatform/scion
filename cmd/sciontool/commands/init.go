@@ -1725,9 +1725,9 @@ func extractChildCommand(args []string) []string {
 // one re-executed as root. "/proc/self/exe" is the kernel's own magic
 // symlink to the already-running inode, so it always re-execs the exact
 // image already in memory, regardless of what (if anything) now sits at
-// its on-disk path — the same reasoning execAsUserCmd's doc comment
-// (pkg/sciontool/substrate) gives for resolving "sh"/"su" up front rather
-// than leaving them for a shell to look up later.
+// its on-disk path — the same reasoning pkg/sciontool/substrate's runExec
+// gives for resolving "sh" up front via rootexec.Resolve rather than
+// leaving it for a shell to look up later.
 //
 // On success this function does not return (the process image is replaced).
 // On failure it returns an error and the caller should continue — the
@@ -2013,8 +2013,8 @@ var setupHostUserIsUIDMapped = isUIDMapped
 var runAdjustScionUser = adjustScionUser
 
 // setupHostUser realigns the container's "scion" user to SCION_HOST_UID/GID
-// so the harness (and, for substrate, execAsUserCmd) can drop privileges
-// from root to it. requirePrivilegeDrop is RunInit's own
+// so the harness (and, for substrate, runExec's own credential drop) can
+// drop privileges from root to it. requirePrivilegeDrop is RunInit's own
 // InitRunOptions.RequirePrivilegeDrop, threaded through so the stricter
 // fail-closed checks in adjustScionUser only apply under it — see
 // adjustScionUser's doc comment for why this must not change any other

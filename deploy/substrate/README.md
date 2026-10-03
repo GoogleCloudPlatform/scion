@@ -227,10 +227,10 @@ module, but is only **additive** for curl, git, and Node — those keep
 trusting the public root set too, so a curl/git success on its own isn't
 proof the gateway did the validating (check the certificate issuer, or force
 curl to use only the projected bundle with
-`--capath /nonexistent --cacert /run/ate/trust-bundle.pem`). When set, the
-image needs util-linux ≥ 2.35 (`su`'s `-w`/`--whitelist-environment` flag) to
-carry these vars across the `su -` login shell substrate-serve's exec path
-uses; scion's images already satisfy this.
+`--capath /nonexistent --cacert /run/ate/trust-bundle.pem`). substrate-serve's
+exec path (`/scion/v1/exec`) carries these vars through explicitly via a
+direct credential drop (never `su`), so no particular `su` version or
+feature needs to be present in the image for them to survive it.
 
 **Setting this on a plain (non-sdsmint) install breaks every actor** — with
 nothing backing the `ClusterTrustBundle` name, the actor fails to start

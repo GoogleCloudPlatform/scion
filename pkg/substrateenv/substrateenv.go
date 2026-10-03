@@ -21,10 +21,11 @@
 //   - pkg/runtime's buildActorTemplate sets exactly these vars (to the
 //     bundle file, except SSL_CERT_DIR which gets the bundle's mount
 //     directory) on the actor's container Env;
-//   - pkg/sciontool/substrate's execAsUserCmd passes exactly the subset of
-//     these names that are actually set to `su -w`, so exec-invoked
-//     commands don't lose the bundle to `su -`'s login-shell environment
-//     reset.
+//   - pkg/sciontool/substrate's runExec passes exactly the subset of these
+//     names that are actually set into its exec-invoked commands' own
+//     environment explicitly (see trustBundleEnvPairs), since a child
+//     process's environment there is built from scratch rather than
+//     inherited.
 //
 // A name added to one list but not the other is exactly the defect class
 // this package exists to prevent: an exec-invoked TLS client would keep
@@ -39,7 +40,7 @@ package substrateenv
 
 // TrustBundleVarNames lists every env var name buildActorTemplate points at
 // the projected egress-gateway trust bundle, in the fixed order
-// buildActorTemplate emits them (and su -w's whitelist, when built,
+// buildActorTemplate emits them (and trustBundleEnvPairs, when built,
 // preserves). Every name's value is the bundle file itself
 // (substrateTrustBundleFile in pkg/runtime) except SSL_CERT_DIR, whose
 // value is the bundle's mount directory (substrateTrustBundleMountPath) —

@@ -236,10 +236,11 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 		// projected bundle — never per-agent config or a secret, so setting
 		// them here does not weaken the "Env carries no secrets" invariant
 		// above. The names come from substrateenv.TrustBundleVarNames, the
-		// single source of truth shared with
-		// pkg/sciontool/substrate's execAsUserCmd (which of these names
-		// `su -w` must preserve across the `su -` login-shell env reset for
-		// exec-invoked commands) — see that package's doc comment.
+		// single source of truth shared with pkg/sciontool/substrate's
+		// runExec (which passes exactly the subset of these names that are
+		// actually set into its exec-invoked commands' own environment
+		// explicitly, since that environment is built from scratch rather
+		// than inherited) — see that package's doc comment.
 		//
 		// SSL_CERT_DIR=/run/ate is set deliberately, not left at its
 		// default. SSL_CERT_DIR makes the gateway CA exclusive for Go and Python
@@ -297,18 +298,20 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 				// exec as root, and dropping from root to the scion user —
 				// via the supervisor's own syscall.Credential drop
 				// (pkg/sciontool/supervisor/supervisor.go's Run, ~lines
-				// 113-150) and su (via execAsUserCmd, used for `sciontool
-				// substrate-serve exec`) — as well as RunInit's own chowns of
-				// the log file and workspace immediately after that drop,
-				// all need capabilities this default set doesn't grant. See
+				// 113-150) and the exec control-plane endpoint's own
+				// syscall.Credential drop (pkg/sciontool/substrate's
+				// runExec, used for `sciontool substrate-serve exec`) — as
+				// well as RunInit's own chowns of the log file and
+				// workspace immediately after that drop, all need
+				// capabilities this default set doesn't grant. See
 				// substratecaps.Required for exactly which ones and the
 				// evidence behind each — the same capabilities Docker's
 				// default set already grants, which is why this only
 				// surfaces on Substrate. These are added here, not assumed
 				// from a container default, so they apply inside the gVisor
-				// sentry the actor runs in; su drops them (along with every
-				// other capability) for the scion process tree it execs
-				// into, so nothing scion-owned ever runs privileged.
+				// sentry the actor runs in; a direct credential drop grants
+				// the dropped-to process none of them, so nothing
+				// scion-owned ever runs privileged.
 				SecurityContext: &ateapipb.SecurityContext{
 					Capabilities: &ateapipb.Capabilities{
 						// Clone, not the package-level slice itself: any

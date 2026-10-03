@@ -63,12 +63,12 @@ var Required = []Capability{
 	{
 		Name:   "SETUID",
 		EffBit: 7,
-		Why:    "su (via execAsUserCmd, used by `sciontool substrate-serve exec`) and the supervisor's own syscall.Credential drop (pkg/sciontool/supervisor's Run, which execs the harness with a Uid/Gid-bearing Credential) both need CAP_SETUID to leave root.",
+		Why:    "the exec control-plane endpoint's own syscall.Credential drop (pkg/sciontool/substrate's runExec, used by `sciontool substrate-serve exec`) and the supervisor's own syscall.Credential drop (pkg/sciontool/supervisor's Run, which execs the harness with a Uid/Gid-bearing Credential) both need CAP_SETUID to leave root.",
 	},
 	{
 		Name:   "SETGID",
 		EffBit: 6,
-		Why:    "su and the supervisor's own syscall.Credential drop also both need CAP_SETGID (setgroups(2)/setgid(2)) to leave root, for the same two consumers as SETUID.",
+		Why:    "runExec's and the supervisor's own syscall.Credential drops also both need CAP_SETGID (setgroups(2)/setgid(2)) to leave root, for the same two consumers as SETUID.",
 	},
 	{
 		Name:   "CHOWN",

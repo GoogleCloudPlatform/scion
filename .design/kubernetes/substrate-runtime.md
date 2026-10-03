@@ -251,10 +251,11 @@ into the same `sciontool` binary as every other subcommand.
   fails to write or the privilege-drop precondition fails
   (`privilegeDropPreconditionFailedMsg`).
 - `POST /scion/v1/exec` — auth: `Bearer <control_token>` from bootstrap.
-  Body `{"argv":[...], "user":"scion"|"root", "timeout_s":N}`, response
+  Body `{"argv":[...], "user":"scion", "timeout_s":N}` (`"root"` is refused;
+  the endpoint only ever runs the agent workload), response
   `{"stdout":"...","stderr":"...","exit_code":N}`. Output is capped at 4 MiB
-  per stream (truncated, with a flag on the response). Runs as the requested
-  user via the same su/exec-user semantics other runtimes use.
+  per stream (truncated, with a flag on the response). Runs as the scion
+  user via a direct `syscall.Credential` drop (`runExec`), never `su`.
 
 Not currently supported: `/pty`, `/rehydrate`, `/tunnel/open`.
 
@@ -630,7 +631,8 @@ to `/run/ate/trust-bundle.pem`, and sets `NODE_EXTRA_CA_CERTS`,
 `GIT_SSL_CAINFO`, `SSL_CERT_FILE`, `CURL_CA_BUNDLE` (all pointing at that
 file) and `SSL_CERT_DIR=/run/ate` — the shared variable names live in
 `pkg/substrateenv.TrustBundleVarNames`, so `buildActorTemplate` and the
-serve-side `su -w` exec path (§5.1, `execAsUserCmd`) never drift apart. `SSL_CERT_DIR`
+serve-side exec path (§5.1, `runExec`'s own credential-drop environment)
+never drift apart. `SSL_CERT_DIR`
 is exclusive for Go and Python `ssl`, and only additive for curl, git and
 Node (see `deploy/substrate/README.md` for the full breakdown). Leaving
 `egress_trust_bundle` empty is byte-identical to today and keeps the
@@ -638,9 +640,10 @@ template's content-address unchanged (§3); setting it on a plain
 (non-sdsmint) install breaks every actor at start, since nothing backs the
 named `ClusterTrustBundle`.
 
-When set, the image needs util-linux ≥ 2.35 (`su -w`); this is only
-exercised when a CA-bundle var is actually set, so plain installs are
-unaffected either way.
+`runExec`'s direct credential drop carries these vars through explicitly
+regardless (see §5.1); unlike the login-shell-based mechanism this replaced,
+nothing here depends on a particular `su` version being present in the
+image.
 
 ## 8. Privilege drop and rootfs
 
@@ -671,13 +674,13 @@ assumptions were written against Docker's defaults, which don't hold here:
 
   | Capability | Reason |
   |---|---|
-  | `SETUID` | `su` (exec-user switching) and the supervisor's own credential drop both need it to leave root. |
+  | `SETUID` | The exec control-plane endpoint's own direct credential drop (`runExec`) and the supervisor's own credential drop both need it to leave root. |
   | `SETGID` | Same two consumers, for `setgroups`/`setgid`. |
   | `CHOWN` | `RunInit` unconditionally chowns the log file and the workspace/home tree from root to the scion user once a drop is expected. |
   | `DAC_OVERRIDE` | `RunInit`'s root phase writes into the scion-owned `0700` home (created by the rootfs fixup) and appends to the log after it has already been chowned to the scion user — without this, root is subject to the same permission check as any other non-owning UID, and (a second, independent effect) log writes after the chown fail silently, dropping every later init log line including the one that would have explained the failure. |
 
-  `su` unconditionally drops all of these for the scion process tree once
-  the switch happens.
+  A direct `syscall.Credential` drop grants the dropped-to process none of
+  these, so nothing scion-owned ever runs with them.
 - **Non-fatal, observed warnings:** gVisor `--allow-suid` is disabled;
   `RLIMIT_MEMLOCK` gives `EPERM`.
 

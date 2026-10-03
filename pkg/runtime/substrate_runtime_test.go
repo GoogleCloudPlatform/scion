@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -40,7 +41,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	sciontoolsubstrate "github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
@@ -1714,33 +1714,29 @@ func TestSubstrateExecWithStdin_ProbeStopsBeforeRealCommandOnOldServer(t *testin
 	}
 }
 
-// fakeWhoamiAsScion installs a "whoami" stand-in, via
-// pkg/sciontool/substrate's exported SetExecResolveForTest seam, that always
-// prints "scion" regardless of this test process's own real identity. The
-// real control server's exec wrapper embeds whatever that seam resolves for
-// "whoami" directly into its generated script (see
-// pkg/sciontool/substrate/execuser.go's execAsUserCmd), and takes its direct
-// "exec sh -c" branch — never invoking su — whenever the wrapper's own
-// "$(whoami) = $1" check matches; with this stub in place that's true for
-// any caller targeting "scion" (which is all of these tests, matching
-// SubstrateRuntime.ExecUser()'s hard-coded value), exactly the branch that
-// already runs when the process genuinely is "scion". "sh" and "su" still
-// resolve through the real rootexec.Resolve unchanged, so this substitutes
-// only the identity check's own answer, not the shell that runs the command.
-// Restores the seam in t.Cleanup.
-func fakeWhoamiAsScion(t *testing.T) {
+// fakeScionUserIsCurrentIdentity installs a *user.User stand-in, via
+// pkg/sciontool/substrate's exported SetExecUserLookupForTest seam, naming
+// "scion" but carrying THIS test process's own real uid/gid rather than a
+// real "scion" account's. The real control server's exec path
+// (pkg/sciontool/substrate's runExec, via execUserCredential) skips its own
+// credential drop whenever the resolved target's uid/gid already match the
+// caller's own euid/egid (see execUserCredential's doc comment for why:
+// Go's exec implementation calls setgroups() for any non-nil Credential,
+// which needs CAP_SETGID even to set an unchanged group list); with this
+// stub in place that's true for any caller targeting "scion" (which is all
+// of these tests, matching SubstrateRuntime.ExecUser()'s hard-coded value),
+// so this runs for real on any user rather than needing real root/CAP_SETUID
+// or a genuine "scion" account on the test machine. Restores the seam in
+// t.Cleanup.
+func fakeScionUserIsCurrentIdentity(t *testing.T) {
 	t.Helper()
-	dir := t.TempDir()
-	whoamiPath := filepath.Join(dir, "whoami")
-	if err := os.WriteFile(whoamiPath, []byte("#!/bin/sh\necho scion\n"), 0o755); err != nil {
-		t.Fatalf("write whoami stand-in: %v", err)
+	me, err := user.Current()
+	if err != nil {
+		t.Fatalf("resolve current user: %v", err)
 	}
-
-	restore := sciontoolsubstrate.SetExecResolveForTest(func(name string) (string, error) {
-		if name == "whoami" {
-			return whoamiPath, nil
-		}
-		return rootexec.Resolve(name)
+	fakeUser := &user.User{Uid: me.Uid, Gid: me.Gid, Username: "scion", HomeDir: me.HomeDir}
+	restore := sciontoolsubstrate.SetExecUserLookupForTest(func(username string) (*user.User, error) {
+		return fakeUser, nil
 	})
 	t.Cleanup(restore)
 }
@@ -1748,8 +1744,8 @@ func fakeWhoamiAsScion(t *testing.T) {
 // newRealSubstrateServeHarness starts a real pkg/sciontool/substrate.Server
 // behind httptest, bootstraps it for real over HTTP, and returns a
 // SubstrateRuntime pointed at it plus the agent id to use — no fake stands
-// in for either the client or the server. fakeWhoamiAsScion makes the
-// server's own real exec-as-user wrapper take its direct branch regardless
+// in for either the client or the server. fakeScionUserIsCurrentIdentity
+// makes the server's own real exec path skip its credential drop regardless
 // of which user is actually running the test, so this runs for real on any
 // user rather than being skipped. SetPrivateRootTmpDirForTest redirects the
 // server's private-scratch-directory bootstrap step at a throwaway
@@ -1758,7 +1754,7 @@ func fakeWhoamiAsScion(t *testing.T) {
 // already a no-op in production code, so nothing else needs redirecting.
 func newRealSubstrateServeHarness(t *testing.T) (*SubstrateRuntime, string) {
 	t.Helper()
-	fakeWhoamiAsScion(t)
+	fakeScionUserIsCurrentIdentity(t)
 
 	restoreTmpDir := sciontoolsubstrate.SetPrivateRootTmpDirForTest(t.TempDir())
 	t.Cleanup(restoreTmpDir)
