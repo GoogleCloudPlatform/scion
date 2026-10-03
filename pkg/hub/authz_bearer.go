@@ -116,8 +116,8 @@ func bearerGateInputsFor(principal PrincipalContext, credential CredentialContex
 // kernel, relationship grants and access constraints still decide the
 // request, with the ceiling applied again as a kernel restriction.
 //
-// trace receives the stage outcome; it may be nil. memo is the optional
-// request-scoped project-admission memo.
+// trace receives the stage outcome; it may be nil. memo is the
+// request-scoped project-admission memo, or nil.
 func (a *AuthzService) evaluateBearerGate(ctx context.Context, principal PrincipalContext, in bearerGateInputs, target Resource, evidence TargetScopeEvidence, action Action, permissionID string, memo *ProjectAdmissionCache, trace *bearerGateTrace) *Decision {
 	if trace == nil {
 		trace = &bearerGateTrace{}
@@ -145,7 +145,7 @@ func (a *AuthzService) evaluateBearerGate(ctx context.Context, principal Princip
 	trace.TargetScope = scope
 	if scope.Kind == TargetScopeUnknown || !scope.Valid() {
 		trace.Stage = bearerStageTargetUnknown
-		return &Decision{Allowed: false, Reason: bearerReasonTargetUnknown}
+		return &Decision{Allowed: false, Reason: unresolvedTargetReason(target)}
 	}
 	if !BoundaryAllows(in.boundary, scope) {
 		trace.Stage = bearerStageOutsideBoundary
@@ -191,4 +191,200 @@ func (a *AuthzService) evaluateBearerGate(ctx context.Context, principal Princip
 
 	trace.Stage = bearerStagePassed
 	return nil
+}
+
+// bearerGateRun carries the request-scoped inputs and the outcome of one
+// bearer gate evaluation through decide's body. A nil *bearerGateRun is
+// valid: it supplies no memo and records nothing.
+type bearerGateRun struct {
+	memo  *ProjectAdmissionCache
+	trace bearerGateTrace
+}
+
+func (r *bearerGateRun) memoOrNil() *ProjectAdmissionCache {
+	if r == nil {
+		return nil
+	}
+	return r.memo
+}
+
+func (r *bearerGateRun) traceOrNil() *bearerGateTrace {
+	if r == nil {
+		return nil
+	}
+	return &r.trace
+}
+
+// Bearer evaluation stages reported in BearerEvaluation.Stage. The first
+// five name the bearer gate stage that denied. BearerStageAuthority means
+// the gate passed and the principal's live authority (role bindings,
+// groups, relationship grants, access constraints and the ceiling as a
+// kernel restriction) denied. BearerStageError means the request was
+// rejected before the gate (for example an unsupported principal, a
+// missing permission ID) or a store or resolution fault denied it at any
+// stage. An allowed evaluation has an empty Stage.
+const (
+	BearerStageBoundaryInvalid = bearerStageBoundaryInvalid
+	BearerStageTargetUnknown   = bearerStageTargetUnknown
+	BearerStageOutsideBoundary = bearerStageOutsideBoundary
+	BearerStageCeiling         = bearerStageCeiling
+	BearerStageProjectAccess   = bearerStageProjectAccess
+	BearerStageAuthority       = "authority"
+	BearerStageError           = "error"
+)
+
+// BearerOptions carries the inputs to EvaluateBearerCeiling other than the
+// principal, boundary, ceiling, permission and target.
+type BearerOptions struct {
+	// Evidence is the server-constructed collection-level classification
+	// of the target. The zero value classifies the target from the
+	// Resource alone.
+	Evidence TargetScopeEvidence
+	// Explain requests decision provenance, as AuthzRequest.Explain does.
+	Explain bool
+	// Memo is a request-scoped project-admission memo, or nil. It must
+	// never be shared across requests. nil uses no memo.
+	Memo *ProjectAdmissionCache
+}
+
+// BearerEvaluation is the result of EvaluateBearerCeiling.
+type BearerEvaluation struct {
+	// Decision is the full decision, including kernel and relationship
+	// provenance when requested. It is not audited.
+	Decision Decision
+	// Stage names the stage that denied; empty when allowed. See the
+	// BearerStage constants.
+	Stage string
+	// TargetScope is the resolved target scope, set once the boundary was
+	// found valid.
+	TargetScope TargetScope
+	// AccessSource is the evidence that admitted a project target, set
+	// when the project-access stage admitted the request.
+	AccessSource ProjectAccessSource
+}
+
+// Reason EvaluateBearerCeiling reports for inputs it rejects before
+// evaluation.
+const (
+	bearerReasonUnsupportedPrincipal = "bearer evaluation requires a local user principal"
+	bearerReasonPermissionRequired   = "bearer evaluation requires a known canonical permission ID"
+)
+
+// EvaluateBearerCeiling answers: may user, presenting a bearer credential
+// confined to boundary and ceiling, perform permissionID on target at
+// evaluation time? It computes
+//
+//	boundary valid
+//	∧ BoundaryAllows(boundary, ResolveTargetScope(target, opts.Evidence))
+//	∧ ceiling allows permissionID
+//	∧ (project target ⇒ ProjectTargetAdmission(user, project, permissionID, target))
+//	∧ user's live authority on target (role bindings, groups, windows,
+//	  relationship grants, access constraints, with the ceiling applied as a
+//	  kernel restriction)
+//
+// by running decide's audit-free body on a UAT-kind request built from
+// exactly these arguments. A real UAT request and this call therefore pass
+// through the same gate and the same kernel code.
+//
+// Inputs:
+//   - user must be a local user principal carrying an interactive-session
+//     identity (an *AuthenticatedUser). Any other principal, including a
+//     UAT-backed identity, a dev, agent, broker or federated identity, or a
+//     nil identity, denies with BearerStageError.
+//   - permissionID is the exact canonical permission evaluated. It is never
+//     derived from target or action; the action is taken from the
+//     permission's registry row. An empty or unknown ID denies with
+//     BearerStageError.
+//   - target is the actual target of the request, never an invented one.
+//
+// The evaluation reads only its arguments: it never reads an identity,
+// credential, or scopes from ctx. Every store or evaluation error denies.
+// It emits no decision audit; the caller decorates and audits its own
+// outer decision exactly once.
+func (a *AuthzService) EvaluateBearerCeiling(
+	ctx context.Context,
+	user PrincipalContext,
+	boundary TokenBoundary,
+	ceiling permissions.FrozenPermissionCeiling,
+	permissionID string,
+	target Resource,
+	opts BearerOptions,
+) BearerEvaluation {
+	if isNilIdentity(user.Identity) ||
+		principalContextForIdentity(user.Identity).Kind != PrincipalKindUser ||
+		credentialContextForIdentity(user.Identity).Kind != CredentialKindInteractive {
+		return BearerEvaluation{
+			Decision: Decision{Allowed: false, Reason: bearerReasonUnsupportedPrincipal},
+			Stage:    BearerStageError,
+		}
+	}
+	action, ok := registryActionFor(permissionID)
+	if !ok {
+		return BearerEvaluation{
+			Decision: Decision{Allowed: false, Reason: bearerReasonPermissionRequired},
+			Stage:    BearerStageError,
+		}
+	}
+
+	b := boundary
+	run := &bearerGateRun{memo: opts.Memo}
+	decision := a.decideWithBearerRun(ctx, AuthzRequest{
+		Principal: user,
+		Credential: CredentialContext{
+			Kind:     CredentialKindUAT,
+			Boundary: &b,
+			Ceiling:  ceiling,
+		},
+		Resource:       target,
+		Action:         action,
+		Permission:     permissionID,
+		Explain:        opts.Explain,
+		TargetEvidence: opts.Evidence,
+	}, run)
+
+	result := BearerEvaluation{
+		Decision:     decision,
+		TargetScope:  run.trace.TargetScope,
+		AccessSource: run.trace.AccessSource,
+	}
+	switch {
+	case decision.Allowed:
+		result.Stage = ""
+	case decision.IsIndeterminate(), run.trace.Stage == "":
+		result.Stage = BearerStageError
+	case run.trace.Stage == bearerStagePassed:
+		result.Stage = BearerStageAuthority
+	default:
+		result.Stage = run.trace.Stage
+	}
+	return result
+}
+
+// registryActionFor returns the action of permissionID's registry row.
+// ok is false for an empty or unregistered ID.
+func registryActionFor(permissionID string) (Action, bool) {
+	if permissionID == "" {
+		return "", false
+	}
+	for _, p := range permissions.Registry {
+		if p.ID == permissionID {
+			return Action(p.Action), true
+		}
+	}
+	return "", false
+}
+
+// unresolvedTargetReason names why a target whose scope cannot be resolved
+// is denied. A typed resource with no project association is hub-level; a
+// target that names a project without identifying it is outside the token's
+// project; anything else is unresolvable.
+func unresolvedTargetReason(target Resource) string {
+	switch {
+	case target.Type == "project" || target.ParentType == "project":
+		return bearerReasonOutsideProject
+	case target.Type != "":
+		return bearerReasonHubLevelResource
+	default:
+		return bearerReasonTargetUnknown
+	}
 }

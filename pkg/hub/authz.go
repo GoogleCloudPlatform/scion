@@ -486,6 +486,14 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 // All grants are traced to either a RoleBinding or a named relationship grant.
 // All reductions are traced to a named restriction. No undocumented bypasses.
 func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decision {
+	return a.decideWithBearerRun(ctx, request, nil)
+}
+
+// decideWithBearerRun is decide's body. bearer, when non-nil, supplies the
+// request-scoped project-admission memo to the bearer gate (step 1) and
+// receives the gate's outcome; nil uses no memo and records nothing. It
+// never changes the authorization result. It emits no decision audit.
+func (a *AuthzService) decideWithBearerRun(ctx context.Context, request AuthzRequest, bearer *bearerGateRun) Decision {
 	derivedPrincipal := principalContextForIdentity(request.Principal.Identity)
 	derivedCredential := credentialContextForIdentity(request.Principal.Identity)
 
@@ -673,13 +681,13 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// A UAT-kind credential is confined to its boundary and permission
 	// ceiling, and a project target additionally requires the holder's
 	// current access to that project (evaluateBearerGate,
-	// authz_bearer.go). This is a credential constraint, not a bypass: it
+	// authz_bearer.go). This is a credential constraint, not an allow path: it
 	// can only narrow, never widen. It runs before the kernel and before
 	// relationship grants, so neither can reach a target outside the
 	// boundary or a project the holder cannot currently access.
 	if credential.Kind == CredentialKindUAT {
 		if in, ok := bearerGateInputsFor(principal, credential); ok {
-			if denied := a.evaluateBearerGate(ctx, principal, in, request.Resource, request.TargetEvidence, request.Action, permissionID, nil, nil); denied != nil {
+			if denied := a.evaluateBearerGate(ctx, principal, in, request.Resource, request.TargetEvidence, request.Action, permissionID, bearer.memoOrNil(), bearer.traceOrNil()); denied != nil {
 				return decorateDecision(*denied, request, principal, credential, auditPermissionID(request))
 			}
 		}
