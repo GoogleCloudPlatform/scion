@@ -78,6 +78,7 @@ import {
 } from '../shared/file-editor.js';
 import type { FileEditorDataSource } from '../shared/file-editor.js';
 import { showToast } from '../../utils/toast.js';
+import { stopAllNotices, type StopAllResult } from '../../utils/stop-all.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
@@ -2248,9 +2249,9 @@ export class ScionPageProjectDetail extends LitElement {
         throw new Error(await extractApiError(response, 'Failed to stop agents'));
       }
 
-      const result = (await response.json()) as { stopped: number; failed: number; scope?: string };
-      if (result.failed > 0) {
-        showToast(`Stopped ${result.stopped} agents, ${result.failed} failed.`, 'warning');
+      const result = (await response.json()) as StopAllResult;
+      for (const notice of stopAllNotices(result)) {
+        showToast(notice.message, notice.variant);
       }
 
       this.backgroundRefresh();

@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -158,6 +159,44 @@ func TestRunIntent_OfflineStopIsQueued(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, pending)
 	got = requireRunIntent(t, s, agent.ID, store.RunIntentStopped)
+	assert.Equal(t, "stopped", got.ContainerStatus)
+}
+
+// A queued stop is drained locally when this node holds the broker's
+// control channel, with no command bus to carry the signal.
+func TestRunIntent_OfflineStopDrainsLocallyWhenBrokerConnected(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	disp := &runIntentDispatcher{}
+	srv.SetDispatcher(disp)
+	srv.commandBus = nil
+	_, broker, agent := setupOfflineBrokerAgent(t, s, "ri-local")
+	_, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", nil)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	pending, err := s.ListPendingDispatch(ctx, broker.ID)
+	require.NoError(t, err)
+	require.Len(t, pending, 1, "the stop is queued while the broker is not connected")
+
+	// The broker connects to this node just after the stop was queued.
+	require.NotNil(t, srv.controlChannel)
+	srv.controlChannel.mu.Lock()
+	srv.controlChannel.connections[broker.ID] = &BrokerConnection{brokerID: broker.ID, streams: map[string]*StreamProxy{}}
+	srv.controlChannel.mu.Unlock()
+	t.Cleanup(func() {
+		srv.controlChannel.mu.Lock()
+		delete(srv.controlChannel.connections, broker.ID)
+		srv.controlChannel.mu.Unlock()
+	})
+
+	srv.wakeBrokerDrain(ctx, broker.ID)
+	require.Eventually(t, func() bool {
+		p, err := s.ListPendingDispatch(ctx, broker.ID)
+		return err == nil && len(p) == 0 && disp.stops.Load() == 1
+	}, 10*time.Second, 20*time.Millisecond, "the local drain applies the queued stop")
+	got := requireRunIntent(t, s, agent.ID, store.RunIntentStopped)
 	assert.Equal(t, "stopped", got.ContainerStatus)
 }
 

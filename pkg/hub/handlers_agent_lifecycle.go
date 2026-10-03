@@ -731,9 +731,17 @@ func (s *Server) wakeBrokerDrain(ctx context.Context, brokerID string) {
 		}
 	}
 	if s.controlChannel != nil && s.controlChannel.IsConnected(brokerID) {
-		go s.reconcileBroker(context.WithoutCancel(ctx), brokerID)
+		go func() {
+			dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), brokerDrainWakeTimeout)
+			defer cancel()
+			s.reconcileBroker(dctx, brokerID)
+		}()
 	}
 }
+
+// brokerDrainWakeTimeout bounds the local drain wakeBrokerDrain starts. A
+// drain cut short leaves its rows queued for the next drain.
+const brokerDrainWakeTimeout = 5 * time.Minute
 
 // agentLifecycleResponse is the lifecycle action response: the agent, plus
 // any warnings the dispatch raised. Warnings is omitted when empty, so the

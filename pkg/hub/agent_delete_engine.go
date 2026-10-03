@@ -526,7 +526,8 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 
 	// A delete is a stop: record it before anything is dispatched. The
 	// claim already holds the row, so a failed write is logged rather than
-	// failing the delete.
+	// failing the delete. A rollback leaves this intent in place (see
+	// rollback).
 	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
 		s.agentLifecycleLog.Warn("Failed to record run intent for agent delete",
 			"agent_id", agent.ID, "error", err)
@@ -669,6 +670,11 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 			}
 		},
 	}
+	// The run intent stays stopped, as dispatch recorded it, even when the
+	// prior phase restored here is a live one (including a broker that was
+	// unavailable): a failed delete is treated like a stop whose dispatch
+	// failed. Nothing acts on a live agent with intent stopped yet, so this
+	// only records what the user last asked for.
 	n, err := e.s.store.UpdateAgentDeletion(ctx, e.agentID(), e.claimPred(store.DeletionStateDeleting), set)
 	if err != nil {
 		e.s.agentLifecycleLog.Error("delete engine: rollback write failed",
