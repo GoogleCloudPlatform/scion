@@ -111,6 +111,10 @@ test-hub-sqlite:
 # tests do, so they belong in this job's Postgres coverage rather than running
 # only against SQLite.
 #
+# It also includes the secret-value compare-and-swap tests
+# (TestUpdateSecretValueIfVersion*): the Conduit grant key ring rotation relies
+# on this conditional UPDATE, and HA hubs run it on Postgres.
+#
 # It also includes the ListSchedules keyset-cursor tests (TestListSchedules_*,
 # ptone/scion#2502): the keyset compares and binds `created` timestamps, whose
 # storage and precision differ between SQLite and Postgres. It also includes
@@ -149,7 +153,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUpdateSecretValueIfVersion)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
