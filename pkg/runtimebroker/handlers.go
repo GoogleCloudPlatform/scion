@@ -1047,6 +1047,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		NoAuth:             req.NoAuth,
 		Attach:             req.Attach,
 		WorkspaceMode:      req.WorkspaceMode,
+		RunID:              req.RunID,
 		HTTPRequest:        r,
 		Operation:          opCreate,
 		// Threaded only for the workspace-source checks; the download
@@ -2053,6 +2054,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// instead of failing closed with "no skill resolver available"
 		// (#1960). ProjectID is not repeated here: it is already scoped via
 		// the projectId query parameter on this endpoint.
+		//
+		// RunID is the hub-minted identity of the run this start begins
+		// (ptone/scion#2550); see CreateAgentRequest.RunID.
+		RunID                string                           `json:"runId,omitempty"`
 		HubEndpoint          string                           `json:"hubEndpoint,omitempty"`
 		UserID               string                           `json:"userId,omitempty"`
 		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
@@ -2174,6 +2179,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		SharedDirs:               startReq.SharedDirs,
 		AgentToken:               startContextAgentToken,
 		WorkspaceMode:            startReq.WorkspaceMode,
+		RunID:                    startReq.RunID,
 		HTTPRequest:              r,
 		Operation:                opHTTPStart,
 	})
@@ -2583,6 +2589,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		UserID               string                           `json:"userId,omitempty"`
 		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
 		PreResolvedSkills    *hubclient.ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
+		// RunID is the hub-minted identity of the run this restart starts
+		// (ptone/scion#2550); see CreateAgentRequest.RunID.
+		RunID string `json:"runId,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
@@ -2625,6 +2634,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		HubEndpoint:              restartReq.HubEndpoint,
 		ResolvedEnv:              restartReq.ResolvedEnv,
 		EnvClassifications:       restartReq.EnvClassifications,
+		RunID:                    restartReq.RunID,
 		HTTPRequest:              r,
 		Operation:                opHTTPRestart,
 	})

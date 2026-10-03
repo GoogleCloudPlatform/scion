@@ -308,6 +308,12 @@ type CreateAgentRequest struct {
 	// LaunchID is the Hub's launch identifier (BeginLaunch's return value),
 	// echoed back on every report for this launch.
 	LaunchID string `json:"launchId,omitempty"`
+	// RunID is the Hub-minted identity of the run this create starts
+	// (ptone/scion#2550), distinct from LaunchID. The broker labels the
+	// runtime entry with it (api.LabelRunID) so a later delete carrying it
+	// targets only this run. Empty from an older hub; pkg/agent then mints
+	// one itself.
+	RunID string `json:"runId,omitempty"`
 	// LaunchTimeoutSeconds is the remaining launch budget at send time
 	// (ceil(launch_deadline - send time)), not the Hub's configured
 	// launchTimeout setting.

@@ -117,6 +117,10 @@ type startContextInputs struct {
 	// runLaunch), so it is threaded here only so the workspace-source
 	// checks see it as the explicit source it is.
 	WorkspaceStoragePath string
+	// RunID is the hub-minted per-run identity for this dispatch
+	// (ptone/scion#2550), passed to StartOptions.RunID. Empty from an older
+	// hub; pkg/agent then mints one itself.
+	RunID string
 
 	// HTTP request (for hub connection resolution)
 	HTTPRequest *http.Request
@@ -667,6 +671,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// and re-clones an existing populated workspace only in that case,
 		// never on start or restart (GoogleCloudPlatform/scion#1931).
 		FreshProvision: in.Operation == opCreate,
+		RunID:          in.RunID,
 	}
 
 	if in.Attach {
