@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 )
 
 func writeTestFile(t *testing.T, path, content string) {
@@ -373,7 +375,9 @@ func TestRunHarnessProvision_HarnessOutputsDirEnv(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
-			outDir := filepath.Join(t.TempDir(), "outputs")
+			memRoot := t.TempDir()
+			t.Cleanup(hooks.SetHarnessDirsRootForTest(memRoot))
+			outDir := filepath.Join(memRoot, "outputs")
 			t.Setenv("SCION_HARNESS_OUTPUTS_DIR", outDir)
 			t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
 
@@ -416,13 +420,47 @@ func TestRunHarnessProvision_RelativeHarnessDirRejected(t *testing.T) {
 	}
 }
 
+// TestRunHarnessProvision_HarnessDirOutsideMemDirRejected checks that a
+// directory override outside the in-memory directory stops provisioning
+// before the provisioner runs.
+func TestRunHarnessProvision_HarnessDirOutsideMemDirRejected(t *testing.T) {
+	for _, tc := range []struct{ env, value string }{
+		{"SCION_HARNESS_OUTPUTS_DIR", "/"},
+		{"SCION_HARNESS_OUTPUTS_DIR", "/etc"},
+		{"SCION_HARNESS_SECRETS_DIR", "/run/scion/mem/../agent-secrets"},
+		{"SCION_HARNESS_SECRETS_DIR", "/run/scion/memx"},
+	} {
+		t.Run(tc.env+"="+tc.value, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("SCION_HARNESS_OUTPUTS_DIR", "")
+			t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+			t.Setenv(tc.env, tc.value)
+			bundle := filepath.Join(home, ".scion", "harness")
+			ran := filepath.Join(home, "ran")
+			scriptPath := filepath.Join(bundle, "touch.sh")
+			writeTestFile(t, scriptPath, "#!/bin/sh\ntouch '"+ran+"'\nexit 0\n")
+			_ = os.Chmod(scriptPath, 0755)
+			err := runHarnessProvision(context.Background(), writeManifest(t, bundle, baseManifest(t, home, scriptPath)))
+			if err == nil || !strings.Contains(err.Error(), tc.env+" must be a directory below /run/scion/mem") {
+				t.Fatalf("err = %v", err)
+			}
+			if _, err := os.Stat(ran); err == nil {
+				t.Error("provisioner ran")
+			}
+		})
+	}
+}
+
 // TestScrubSecrets_HarnessSecretsDir checks that staged secret values are
-// read from SCION_HARNESS_SECRETS_DIR when set and from the bundle's
-// secrets/ when unset.
+// read from the bundle's secrets/ always, and also from
+// SCION_HARNESS_SECRETS_DIR when it is set.
 func TestScrubSecrets_HarnessSecretsDir(t *testing.T) {
 	home := t.TempDir()
 	bundle := filepath.Join(home, ".scion", "harness")
-	memDir := filepath.Join(t.TempDir(), "harness-secrets")
+	memRoot := t.TempDir()
+	t.Cleanup(hooks.SetHarnessDirsRootForTest(memRoot))
+	memDir := filepath.Join(memRoot, "harness-secrets")
 	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), "bundle-secret-value\n")
 	writeTestFile(t, filepath.Join(memDir, "A"), "memory-secret-value\n")
 	m := &containerProvisionManifest{HarnessBundleDir: bundle}
@@ -433,7 +471,11 @@ func TestScrubSecrets_HarnessSecretsDir(t *testing.T) {
 		t.Errorf("unset: %q", got)
 	}
 	t.Setenv("SCION_HARNESS_SECRETS_DIR", memDir)
-	if got := scrubSecrets(line, m); got != "bundle-secret-value [REDACTED]" {
+	if got := scrubSecrets(line, m); got != "[REDACTED] [REDACTED]" {
 		t.Errorf("set: %q", got)
+	}
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "/etc")
+	if got := scrubSecrets(line, m); got != "[REDACTED] memory-secret-value" {
+		t.Errorf("rejected override: %q", got)
 	}
 }

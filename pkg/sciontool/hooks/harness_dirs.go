@@ -19,6 +19,66 @@ const (
 	HarnessSecretsDirEnv = "SCION_HARNESS_SECRETS_DIR"
 )
 
+// DefaultHarnessDirsRoot is the in-memory directory of NFS-home pods (the
+// runtime's k8sMemDir). The directory overrides must name a directory below
+// it.
+const DefaultHarnessDirsRoot = "/run/scion/mem"
+
+// harnessDirsRoot is DefaultHarnessDirsRoot outside tests.
+var harnessDirsRoot = DefaultHarnessDirsRoot
+
+// SetHarnessDirsRootForTest points the directory override check at root
+// and returns a function that restores the default. For tests only.
+func SetHarnessDirsRootForTest(root string) (restore func()) {
+	prev := harnessDirsRoot
+	harnessDirsRoot = root
+	return func() { harnessDirsRoot = prev }
+}
+
+// harnessDirOverride returns the cleaned value of env var name, or "" when
+// it is unset or empty. The value must be an absolute path below the
+// in-memory directory, and no existing component of it may be a symbolic
+// link.
+func harnessDirOverride(name string) (string, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(v) {
+		return "", fmt.Errorf("%s must be an absolute path, got %q", name, v)
+	}
+	clean := filepath.Clean(v)
+	root := filepath.Clean(harnessDirsRoot)
+	if !strings.HasPrefix(clean, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("%s must be a directory below %s, got %q", name, root, v)
+	}
+	if err := checkNoSymlinkComponents(clean); err != nil {
+		return "", fmt.Errorf("%s: %w", name, err)
+	}
+	return clean, nil
+}
+
+// checkNoSymlinkComponents fails if any existing component of the absolute
+// clean path p, including p itself, is a symbolic link. Components that do
+// not exist yet end the walk.
+func checkNoSymlinkComponents(p string) error {
+	cur := string(filepath.Separator)
+	for _, part := range strings.Split(strings.TrimPrefix(p, cur), string(filepath.Separator)) {
+		cur = filepath.Join(cur, part)
+		fi, err := os.Lstat(cur)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symbolic link", cur)
+		}
+	}
+	return nil
+}
+
 // HarnessDirs holds the effective outputs and secrets directories of a
 // harness bundle.
 type HarnessDirs struct {
@@ -32,25 +92,28 @@ type HarnessDirs struct {
 
 // ResolveHarnessDirs returns the outputs and secrets directories for the
 // bundle at bundleDir, from HarnessOutputsDirEnv and HarnessSecretsDirEnv
-// when set, else bundleDir/outputs and bundleDir/secrets. A value that is
-// not an absolute path is an error.
+// when set, else bundleDir/outputs and bundleDir/secrets. A set value must
+// be a directory below the in-memory directory (see harnessDirOverride);
+// anything else is an error.
 func ResolveHarnessDirs(bundleDir string) (HarnessDirs, error) {
 	d := HarnessDirs{
 		Bundle:  bundleDir,
 		Outputs: filepath.Join(bundleDir, "outputs"),
 		Secrets: filepath.Join(bundleDir, "secrets"),
 	}
-	if v := os.Getenv(HarnessOutputsDirEnv); v != "" {
-		if !filepath.IsAbs(v) {
-			return HarnessDirs{}, fmt.Errorf("%s must be an absolute path, got %q", HarnessOutputsDirEnv, v)
-		}
-		d.Outputs, d.outputsSet = filepath.Clean(v), true
+	v, err := harnessDirOverride(HarnessOutputsDirEnv)
+	if err != nil {
+		return HarnessDirs{}, err
 	}
-	if v := os.Getenv(HarnessSecretsDirEnv); v != "" {
-		if !filepath.IsAbs(v) {
-			return HarnessDirs{}, fmt.Errorf("%s must be an absolute path, got %q", HarnessSecretsDirEnv, v)
-		}
-		d.Secrets, d.secretsSet = filepath.Clean(v), true
+	if v != "" {
+		d.Outputs, d.outputsSet = v, true
+	}
+	v, err = harnessDirOverride(HarnessSecretsDirEnv)
+	if err != nil {
+		return HarnessDirs{}, err
+	}
+	if v != "" {
+		d.Secrets, d.secretsSet = v, true
 	}
 	return d, nil
 }

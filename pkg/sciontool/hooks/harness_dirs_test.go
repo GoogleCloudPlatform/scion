@@ -5,6 +5,7 @@ Copyright 2026 The Scion Authors.
 package hooks
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -77,6 +78,81 @@ func TestResolveHarnessDirs_RelativeValueRejected(t *testing.T) {
 				t.Errorf("err = %v, want %s named", err, env)
 			}
 		})
+	}
+}
+
+func TestResolveHarnessDirs_OutsideMemDirRejected(t *testing.T) {
+	values := []string{
+		"/",
+		"/etc",
+		"/run/scion/agent-secrets",
+		"/run/scion/mem/../agent-secrets",
+		"/run/scion/memx",
+		"/run/scion/memx/outputs",
+		"/run/scion/mem",
+		"/run/scion/mem/",
+		"/home/scion/.scion/harness/outputs",
+	}
+	for _, env := range []string{HarnessOutputsDirEnv, HarnessSecretsDirEnv} {
+		for _, v := range values {
+			t.Run(env+"="+v, func(t *testing.T) {
+				t.Setenv(HarnessOutputsDirEnv, "")
+				t.Setenv(HarnessSecretsDirEnv, "")
+				t.Setenv(env, v)
+				_, err := ResolveHarnessDirs("/home/scion/.scion/harness")
+				if err == nil || !strings.Contains(err.Error(), env) || !strings.Contains(err.Error(), "below "+DefaultHarnessDirsRoot) {
+					t.Errorf("err = %v, want rejection naming %s and %s", err, env, DefaultHarnessDirsRoot)
+				}
+			})
+		}
+	}
+}
+
+func TestResolveHarnessDirs_SymlinkComponentRejected(t *testing.T) {
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "mem")
+	if err := os.MkdirAll(filepath.Join(root, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(tmp, "other")
+	if err := os.Mkdir(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	linkedRoot := filepath.Join(tmp, "linked-mem")
+	if err := os.Symlink(root, linkedRoot); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(SetHarnessDirsRootForTest(root))
+	t.Setenv(HarnessSecretsDirEnv, "")
+
+	for _, tc := range []struct {
+		value string
+		ok    bool
+	}{
+		{filepath.Join(root, "real"), true},
+		{filepath.Join(root, "real", "not-yet"), true},
+		{filepath.Join(root, "not-yet", "outputs"), true},
+		{filepath.Join(root, "link"), false},
+		{filepath.Join(root, "link", "outputs"), false},
+	} {
+		t.Setenv(HarnessOutputsDirEnv, tc.value)
+		_, err := ResolveHarnessDirs("/b")
+		if tc.ok && err != nil {
+			t.Errorf("%s: %v", tc.value, err)
+		}
+		if !tc.ok && (err == nil || !strings.Contains(err.Error(), "symbolic link")) {
+			t.Errorf("%s: err = %v, want symbolic link rejection", tc.value, err)
+		}
+	}
+
+	// A root reached through a symbolic link is rejected too.
+	t.Cleanup(SetHarnessDirsRootForTest(linkedRoot))
+	t.Setenv(HarnessOutputsDirEnv, filepath.Join(linkedRoot, "real"))
+	if _, err := ResolveHarnessDirs("/b"); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Errorf("linked root: err = %v", err)
 	}
 }
 
