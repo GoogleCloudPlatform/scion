@@ -21,24 +21,28 @@ import "path/filepath"
 // harness-config directory. They are not part of the config: they must not be
 // uploaded by harness-config sync and must not count towards the revision.
 //
-//   - "*.bak.[0-9]*": backups written by backupFile as
+//   - "*.bak.<8 digits>T<6 digits>Z": backups written by backupFile as
 //     <file>.bak.<UTC timestamp 20060102T150405Z>, e.g.
 //     config.yaml.bak.20261003T193320Z or provision.py.bak.20261003T193320Z.
-//     The leading digit keeps ordinary names such as notes.bak.md included.
+//     The exact timestamp shape keeps names such as notes.bak.md or
+//     release.bak.1 included.
 //   - ".*.tmp-*": leftovers of an interrupted atomic write, which creates
 //     os.CreateTemp(dir, "."+<file>+".tmp-*"), e.g. .provision.py.tmp-123456.
 //
 // The patterns are matched against the basename, so they apply at any depth.
+// A directory whose name matches is skipped with everything below it, both by
+// transfer.CollectFiles and by ComputeHarnessConfigRevision.
 // They are in the format transfer.CollectFiles accepts as exclude patterns, so
 // file collection and IsHarnessConfigTransientFile share one definition.
 var HarnessConfigTransientPatterns = []string{
-	"*.bak.[0-9]*",
+	"*.bak.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z",
 	".*.tmp-*",
 }
 
-// IsHarnessConfigTransientFile reports whether the file at path (only its
-// basename is considered) is a backup or atomic-write temp file that must be
-// excluded from harness-config sync and from ComputeHarnessConfigRevision.
+// IsHarnessConfigTransientFile reports whether the file or directory at path
+// (only its basename is considered) is a backup or atomic-write temp file that
+// must be excluded from harness-config sync and from
+// ComputeHarnessConfigRevision.
 func IsHarnessConfigTransientFile(path string) bool {
 	base := filepath.Base(path)
 	for _, pattern := range HarnessConfigTransientPatterns {

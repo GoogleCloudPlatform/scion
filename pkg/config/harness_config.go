@@ -393,7 +393,15 @@ func ComputeHarnessConfigRevision(dirPath string) string {
 		".gitkeep":        true,
 	}
 	walk := func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil || d.IsDir() {
+		if walkErr != nil {
+			return nil
+		}
+		if d.IsDir() {
+			// Prune transient directories like transfer.CollectFiles does,
+			// so sync and revision see the same file set.
+			if path != dirPath && IsHarnessConfigTransientFile(d.Name()) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if skipBasenames[d.Name()] || IsHarnessConfigTransientFile(d.Name()) {

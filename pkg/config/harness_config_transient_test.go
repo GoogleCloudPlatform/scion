@@ -25,18 +25,22 @@ import (
 
 func TestIsHarnessConfigTransientFile(t *testing.T) {
 	cases := map[string]bool{
-		"config.yaml.bak.20261003T193320Z":        true,
-		"provision.py.bak.20261003T193320Z":       true,
-		"home/.claude/x.json.bak.20261003T19332Z": true,
-		".config.yaml.tmp-123456789":              true,
-		"home/.provision.py.tmp-42":               true,
-		"config.yaml":                             false,
-		"dialect.yaml":                            false,
-		"provision.py":                            false,
-		"notes.bak.md":                            false,
-		"config.yaml.bak":                         false,
-		"file.tmp-1":                              false,
-		".bashrc":                                 false,
+		"config.yaml.bak.20261003T193320Z":         true,
+		"provision.py.bak.20261003T193320Z":        true,
+		"home/.claude/x.json.bak.20261003T193320Z": true,
+		"x.json.bak.20261003T19332Z":               false,
+		"release.bak.1":                            false,
+		"foo.bak.2.yaml":                           false,
+		"config.yaml.bak.20261003T193320Z.old":     false,
+		".config.yaml.tmp-123456789":               true,
+		"home/.provision.py.tmp-42":                true,
+		"config.yaml":                              false,
+		"dialect.yaml":                             false,
+		"provision.py":                             false,
+		"notes.bak.md":                             false,
+		"config.yaml.bak":                          false,
+		"file.tmp-1":                               false,
+		".bashrc":                                  false,
 	}
 	for name, want := range cases {
 		if got := IsHarnessConfigTransientFile(name); got != want {
@@ -121,5 +125,26 @@ func TestComputeHarnessConfigRevisionIgnoresTransientFiles(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "dialect.yaml"), "dialect: changed\n")
 	if got := ComputeHarnessConfigRevision(dir); got == before {
 		t.Error("revision unchanged after editing dialect.yaml")
+	}
+}
+
+func TestComputeHarnessConfigRevisionPrunesTransientDirs(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), "harness: claude\n")
+	before := ComputeHarnessConfigRevision(dir)
+
+	writeFile(t, filepath.Join(dir, "home.bak.20261003T193320Z", "settings.json"), "{}\n")
+	writeFile(t, filepath.Join(dir, ".home.tmp-123", "settings.json"), "{}\n")
+	if got := ComputeHarnessConfigRevision(dir); got != before {
+		t.Errorf("revision changed after adding files under transient dirs: %q -> %q", before, got)
+	}
+
+	// CollectFiles prunes the same directories.
+	files, err := transfer.CollectFiles(dir, HarnessConfigTransientPatterns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Path != "config.yaml" {
+		t.Errorf("collected %v, want only config.yaml", files)
 	}
 }
