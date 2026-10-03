@@ -3197,43 +3197,60 @@ func TestParity_T5_SecretProgenyRawLoop(t *testing.T) {
 	// admission stage needs a real stored agent row plus a resolvable
 	// delegation-edge chain to an active, admitted project-Beta user,
 	// independent of the progeny sharing-source relationship
-	// (gf.projectOwnerID, via Ancestry).
-	agentID := tid("t5-secret-agent")
+	// (gf.projectOwnerID, via Ancestry). project.secret_read requires
+	// recorded provenance on every delegation hop, so the allow path seeds
+	// a recorded edge; the sibling agent below carries an unrecorded edge
+	// and is denied.
 	betaMemberID := tid("t5-beta-member")
 	createDCUser(t, gf.store, betaMemberID, "t5-beta-member@test.com", gf.projectBeta.ID, store.ProjectRoleAdmin)
-	require.NoError(t, gf.store.CreateAgent(context.Background(), &store.Agent{
-		ID: agentID, Slug: "t5-secret-agent", Name: "t5-secret-agent",
-		ProjectID: gf.projectBeta.ID, Phase: "running",
-		OwnerID: betaMemberID, Ancestry: []string{gf.projectOwnerID},
-	}))
-	createDCEdge(t, gf.store, store.DelegationPrincipalUser, betaMemberID, store.DelegationPrincipalAgent, agentID, store.RoleScopeProject, gf.projectBeta.ID, string(AgentRoleFull))
-	agent := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agentID},
-		ProjectID: gf.projectBeta.ID,
-		Ancestry:  []string{gf.projectOwnerID},
-		Scopes:    allRegisteredAgentScopes(),
-	}}
+	newAgent := func(slug string, seedEdge func(t *testing.T, s store.Store, delegatorType, delegatorID, delegateType, delegateID, scopeType, scopeID, role string)) AgentIdentity {
+		agentID := tid(slug)
+		require.NoError(t, gf.store.CreateAgent(context.Background(), &store.Agent{
+			ID: agentID, Slug: slug, Name: slug,
+			ProjectID: gf.projectBeta.ID, Phase: "running",
+			OwnerID: betaMemberID, Ancestry: []string{gf.projectOwnerID},
+		}))
+		seedEdge(t, gf.store, store.DelegationPrincipalUser, betaMemberID, store.DelegationPrincipalAgent, agentID, store.RoleScopeProject, gf.projectBeta.ID, string(AgentRoleFull))
+		return &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: agentID},
+			ProjectID: gf.projectBeta.ID,
+			Ancestry:  []string{gf.projectOwnerID},
+			Scopes:    allRegisteredAgentScopes(),
+		}}
+	}
 	secretRes := Resource{Type: "secret", ID: gf.secretID}
 	p := permissions.Permission{ID: "project.secret_read", Action: string(ActionRead)}
-
 	ctx := context.Background()
-	refStore := newMemoTestStore(gf.store)
-	refAuthz, refEmit := newRecordingAuthz(refStore)
-	refDecision := decideExplicit(t, refAuthz, agent, secretRes, p)
+	decidePair := func(agent AgentIdentity) (Decision, Decision) {
+		refStore := newMemoTestStore(gf.store)
+		refAuthz, refEmit := newRecordingAuthz(refStore)
+		refDecision := decideExplicit(t, refAuthz, agent, secretRes, p)
+
+		candStore := newMemoTestStore(gf.store)
+		candAuthz, candEmit := newRecordingAuthz(candStore)
+		candDecision := candAuthz.Decide(withAuthzInputMemo(ctx), AuthzRequest{
+			Principal:  principalContextForIdentity(agent),
+			Credential: credentialContextForIdentity(agent),
+			Resource:   secretRes,
+			Action:     ActionRead,
+			Permission: p.ID,
+		})
+
+		assertDecisionsEqual(t, refDecision, candDecision, "memo-ctx candidate must match the reference")
+		assertAuditSequenceEqual(t, refEmit.snapshot(), candEmit.snapshot())
+		return refDecision, candDecision
+	}
+
+	refDecision, _ := decidePair(newAgent("t5-secret-agent", seedRecordedDelegationEdge))
 	require.True(t, refDecision.Allowed, "reference progeny secret read must be allowed: %q", refDecision.Reason)
 
-	candStore := newMemoTestStore(gf.store)
-	candAuthz, candEmit := newRecordingAuthz(candStore)
-	candDecision := candAuthz.Decide(withAuthzInputMemo(ctx), AuthzRequest{
-		Principal:  principalContextForIdentity(agent),
-		Credential: credentialContextForIdentity(agent),
-		Resource:   secretRes,
-		Action:     ActionRead,
-		Permission: p.ID,
-	})
-
-	assertDecisionsEqual(t, refDecision, candDecision, "memo-ctx candidate must match the reference")
-	assertAuditSequenceEqual(t, refEmit.snapshot(), candEmit.snapshot())
+	// The same row through an unrecorded edge is denied at the hop ceiling,
+	// identically on both sides.
+	unrecRef, unrecCand := decidePair(newAgent("t5-secret-agent-unrecorded", createDCEdge))
+	assert.False(t, unrecRef.Allowed, "reference progeny secret read through an unrecorded edge must be denied")
+	assert.Equal(t, DenyCauseCeilingUnrecorded, unrecRef.DenyCause, "reference deny cause: reason=%q", unrecRef.Reason)
+	assert.Contains(t, unrecRef.Reason, "project.secret_read requires recorded provenance")
+	assert.Equal(t, DenyCauseCeilingUnrecorded, unrecCand.DenyCause, "candidate deny cause: reason=%q", unrecCand.Reason)
 }
 
 // TestParity_T8_SecretUseRuntimeRow is row T8: raw Decide,
@@ -3265,7 +3282,9 @@ func TestParity_T8_SecretUseRuntimeRow(t *testing.T) {
 	// UATScope), so no standard seeded user role grants it; f.delegatorID
 	// needs an explicit role binding for it, or the ceiling denies "the
 	// delegator does not hold secret.use" even though the progeny grant
-	// itself succeeds.
+	// itself succeeds. secret.use also requires recorded provenance on
+	// every delegation hop, so the allow path seeds a recorded edge; the
+	// sibling agent below carries an unrecorded edge and is denied.
 	t8RD := createTestRoleDefinition(t, s, "t8-secret-use-role", store.RoleScopeProject, []string{"secret.use"})
 	_, err := s.CreateRoleBinding(context.Background(), &store.RoleBinding{
 		RoleDefinitionID: t8RD.ID,
@@ -3276,44 +3295,57 @@ func TestParity_T8_SecretUseRuntimeRow(t *testing.T) {
 		CreatedBy:        "test",
 	})
 	require.NoError(t, err)
-	useAgentID := tid("t8-use-agent")
-	createDCAgent(t, s, useAgentID, f.projectID, f.delegatorID, AgentRoleFull)
-	createDCEdge(t, s, store.DelegationPrincipalUser, f.delegatorID, store.DelegationPrincipalAgent, useAgentID, store.RoleScopeProject, f.projectID, string(AgentRoleFull))
-	useAgent := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: useAgentID},
-		ProjectID: f.projectID,
-		Ancestry:  []string{f.delegatorID},
-		Scopes:    allRegisteredAgentScopes(),
-	}}
+	newUseAgent := func(slug string, seedEdge func(t *testing.T, s store.Store, delegatorType, delegatorID, delegateType, delegateID, scopeType, scopeID, role string)) AgentIdentity {
+		useAgentID := tid(slug)
+		createDCAgent(t, s, useAgentID, f.projectID, f.delegatorID, AgentRoleFull)
+		seedEdge(t, s, store.DelegationPrincipalUser, f.delegatorID, store.DelegationPrincipalAgent, useAgentID, store.RoleScopeProject, f.projectID, string(AgentRoleFull))
+		return &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: useAgentID},
+			ProjectID: f.projectID,
+			Ancestry:  []string{f.delegatorID},
+			Scopes:    allRegisteredAgentScopes(),
+		}}
+	}
 
 	ctx := context.Background()
-	refStore := newMemoTestStore(s)
-	refAuthz, refEmit := newRecordingAuthz(refStore)
-	refDecision := decideExplicit(t, refAuthz, useAgent, secretRes, p)
-	require.Len(t, refEmit.snapshot(), 1, "audit invariant: exactly one audit record per decision (reference)")
+	decidePair := func(useAgent AgentIdentity) (Decision, Decision) {
+		refStore := newMemoTestStore(s)
+		refAuthz, refEmit := newRecordingAuthz(refStore)
+		refDecision := decideExplicit(t, refAuthz, useAgent, secretRes, p)
+		require.Len(t, refEmit.snapshot(), 1, "audit invariant: exactly one audit record per decision (reference)")
 
-	candStore := newMemoTestStore(s)
-	candAuthz, candEmit := newRecordingAuthz(candStore)
-	mctx := withAuthzInputMemo(ctx)
-	candDecision := candAuthz.Decide(mctx, AuthzRequest{
-		Principal:  principalContextForIdentity(useAgent),
-		Credential: credentialContextForIdentity(useAgent),
-		Resource:   secretRes,
-		Action:     ActionUse,
-		Permission: p.ID,
-	})
-	require.Len(t, candEmit.snapshot(), 1, "audit invariant: exactly one audit record per decision (candidate)")
+		candStore := newMemoTestStore(s)
+		candAuthz, candEmit := newRecordingAuthz(candStore)
+		mctx := withAuthzInputMemo(ctx)
+		candDecision := candAuthz.Decide(mctx, AuthzRequest{
+			Principal:  principalContextForIdentity(useAgent),
+			Credential: credentialContextForIdentity(useAgent),
+			Resource:   secretRes,
+			Action:     ActionUse,
+			Permission: p.ID,
+		})
+		require.Len(t, candEmit.snapshot(), 1, "audit invariant: exactly one audit record per decision (candidate)")
 
+		// Compare the audit sequence, not just the Decision.
+		assertAuditSequenceEqual(t, refEmit.snapshot(), candEmit.snapshot())
+		assertDecisionsEqual(t, refDecision, candDecision)
+		return refDecision, candDecision
+	}
+
+	refDecision, _ := decidePair(newUseAgent("t8-use-agent", seedRecordedDelegationEdge))
 	// H2: the progeny grant must actually be what allowed secret.use,
 	// not some other path (e.g. a vacuously-passing deny on both sides).
 	require.True(t, refDecision.Allowed, "reference secret.use must be allowed via the progeny grant: reason=%q", refDecision.Reason)
 	assert.Contains(t, refDecision.Reason, "progeny", "H2: the reference Reason must show the progeny grant")
 	assert.Contains(t, refDecision.Reason, "relationship grant", "H2: the reference Reason must show a relationship grant, not a role binding")
 
-	// Compare the audit sequence, not just the Decision.
-	assertAuditSequenceEqual(t, refEmit.snapshot(), candEmit.snapshot())
-
-	assertDecisionsEqual(t, refDecision, candDecision)
+	// The same row through an unrecorded edge is denied at the hop ceiling,
+	// identically on both sides.
+	unrecRef, unrecCand := decidePair(newUseAgent("t8-use-agent-unrecorded", createDCEdge))
+	assert.False(t, unrecRef.Allowed, "reference secret.use through an unrecorded edge must be denied")
+	assert.Equal(t, DenyCauseCeilingUnrecorded, unrecRef.DenyCause, "reference deny cause: reason=%q", unrecRef.Reason)
+	assert.Contains(t, unrecRef.Reason, "secret.use requires recorded provenance")
+	assert.Equal(t, DenyCauseCeilingUnrecorded, unrecCand.DenyCause, "candidate deny cause: reason=%q", unrecCand.Reason)
 }
 
 // =============================================================================
