@@ -115,6 +115,42 @@ func TestApplyInlineConfigUpdate_CollapsesExistingDuplicates(t *testing.T) {
 	}
 }
 
+// TestApplyInlineConfigUpdate_HigherRankedScopeReplacesTemplate verifies,
+// through MergeScionConfig as well as the collapse, that when the Hub sends a
+// reference with a higher-ranked scope than the existing template entry, the
+// Hub's entry replaces it, while a lower-ranked one does not.
+func TestApplyInlineConfigUpdate_HigherRankedScopeReplacesTemplate(t *testing.T) {
+	srv, _ := newTestServerWithProvisionCapture()
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+	agentName := "rank-agent"
+
+	cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{
+		Skills: []api.SkillReference{
+			{URI: "skill://scion/global/alpha", Scope: "template"},
+			{URI: "skill://scion/global/beta", Scope: "template"},
+			{URI: "skill://scion/global/gamma", Scope: "template"},
+		},
+	})
+
+	srv.applyInlineConfigUpdate(agentName, projectDir, &api.ScionConfig{
+		Skills: []api.SkillReference{
+			// project outranks template: replaces it.
+			{URI: "skill://scion/global/alpha", Optional: true, Scope: "project"},
+			// hub ranks below template: the template entry stays.
+			{URI: "skill://scion/global/beta", Optional: true, Scope: "hub"},
+		},
+	}, false)
+
+	want := []api.SkillReference{
+		{URI: "skill://scion/global/beta", Scope: "template"},
+		{URI: "skill://scion/global/gamma", Scope: "template"},
+		{URI: "skill://scion/global/alpha", Optional: true, Scope: "project"},
+	}
+	if got := readAgentSkills(t, cfgPath); !reflect.DeepEqual(got, want) {
+		t.Fatalf("skills after apply\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
 func TestDedupeSkillReferences(t *testing.T) {
 	tests := []struct {
 		name string
@@ -160,15 +196,15 @@ func TestDedupeSkillReferences(t *testing.T) {
 			},
 		},
 		{
-			name: "higher-ranked later duplicate replaces in first position",
+			name: "higher-ranked later duplicate replaces and takes its own position",
 			in: []api.SkillReference{
 				{URI: "a", Scope: "hub"},
 				{URI: "b"},
 				{URI: "a", Optional: true, Scope: "project"},
 			},
 			want: []api.SkillReference{
-				{URI: "a", Optional: true, Scope: "project"},
 				{URI: "b"},
+				{URI: "a", Optional: true, Scope: "project"},
 			},
 		},
 		{
@@ -179,6 +215,34 @@ func TestDedupeSkillReferences(t *testing.T) {
 			},
 			want: []api.SkillReference{
 				{URI: "a", Optional: true, Scope: "template"},
+			},
+		},
+		{
+			// a and b share an install name: at install, the later of two
+			// equal-rank entries wins, so the latest order (b then a) must
+			// survive the collapse.
+			name: "equal-rank winners keep the latest relative order",
+			in: []api.SkillReference{
+				{URI: "skill://scion/global/foo", Scope: "hub"},
+				{URI: "skill://scion/project/p/foo", Scope: "hub"},
+				{URI: "skill://scion/project/p/foo", Scope: "hub"},
+				{URI: "skill://scion/global/foo", Scope: "hub"},
+			},
+			want: []api.SkillReference{
+				{URI: "skill://scion/project/p/foo", Scope: "hub"},
+				{URI: "skill://scion/global/foo", Scope: "hub"},
+			},
+		},
+		{
+			name: "lower-ranked duplicate dropped without moving the winner",
+			in: []api.SkillReference{
+				{URI: "a", Scope: "project"},
+				{URI: "b"},
+				{URI: "a", Scope: "hub"},
+			},
+			want: []api.SkillReference{
+				{URI: "a", Scope: "project"},
+				{URI: "b"},
 			},
 		},
 	}
