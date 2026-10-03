@@ -2877,6 +2877,24 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				recipDispatchState = store.MessageDispatchDeferred
 			}
 
+			// ptone/scion#1839: per-member deliverability gate, mirroring
+			// the phase gate on direct sends (handleAgentMessage,
+			// ExecuteAgentDM, deliverToAgent). A non-running member cannot
+			// receive terminal input; dispatching would leave a
+			// "dispatched" row the broker then silently drops. Evaluated
+			// before the row is built so it is persisted already failed
+			// (one write; the SSE event carries the true state) and stays
+			// visible in history. Deferred (reincarnating) members are
+			// exempt: they are saved for catch-up instead.
+			var gateErr *AgentDMError
+			var gateReason *string
+			if !recipDeferred {
+				if gateErr = validateGroupMemberDeliverable(agent); gateErr != nil {
+					recipDispatchState = store.MessageDispatchFailed
+					gateReason = &gateErr.Message
+				}
+			}
+
 			agentMsg := *msg
 			agentMsg.Type = messages.TypeGroupSet
 			agentMsg.Recipient = "agent:" + agent.Slug
@@ -2897,6 +2915,8 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				GroupID:       groupID,
 				DispatchState: recipDispatchState,
 				CreatedAt:     time.Now(),
+
+				DispatchFailureReason: gateReason,
 			}
 			// Phase 5 dual-write: resolve-or-create conversation for group set message.
 			// B5 SECURITY: derive sender from authenticated context, never payload.
@@ -2986,30 +3006,28 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				continue
 			}
 
-			// ptone/scion#1839: per-member deliverability gate, mirroring
-			// the phase gate on direct sends (handleAgentMessage,
-			// ExecuteAgentDM, deliverToAgent). A non-running member cannot
-			// receive terminal input; dispatching would leave a
-			// "dispatched" row the broker then silently drops. The row is
-			// already persisted above, so it is marked failed (visible in
-			// history) and the member gets a failure result. The reason is
-			// hub-generated, so it is safe to return to the caller.
-			if phaseErr := validateAgentDeliverable(agent); phaseErr != nil {
-				if persisted {
-					if markErr := s.markFailed(ctx, storeMsg.ID, phaseErr.Message); markErr != nil {
-						s.messageLog.Error("Failed to mark set message as failed", "id", storeMsg.ID, "error", markErr)
-					}
-				}
-				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: phaseErr.Message}
+			// ptone/scion#1839: the row was persisted already failed by the
+			// gate above. The reason is hub-generated, so it is safe to
+			// return to the caller.
+			if gateErr != nil {
+				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: gateErr.Message}
 				continue
 			}
 
-			if dispatcher == nil {
-				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "dispatcher not available"}
-				continue
-			}
-			if agent.RuntimeBrokerID == "" {
-				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "agent has no runtime broker"}
+			// ptone/scion#1839: the row was persisted as "dispatched"; when
+			// there is no way to dispatch it, mark it failed so history does
+			// not show a delivery that never happened. Hub-generated reasons.
+			if dispatcher == nil || agent.RuntimeBrokerID == "" {
+				reason := "dispatcher not available"
+				if dispatcher != nil {
+					reason = "agent has no runtime broker"
+				}
+				if persisted {
+					if markErr := s.markFailed(ctx, storeMsg.ID, reason); markErr != nil {
+						s.messageLog.Error("Failed to mark set message as failed", "id", storeMsg.ID, "error", markErr)
+					}
+				}
+				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: reason}
 				continue
 			}
 
@@ -3023,8 +3041,10 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			retryCtx, retryCancel := context.WithTimeout(groupDispatchCtx, 30*time.Second)
 			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, plainMessage, interrupt, &agentMsg); err != nil {
 				retryCancel()
-				if markErr := s.markFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
-					s.messageLog.Error("Failed to mark set message as failed", "id", storeMsg.ID, "error", markErr)
+				if persisted {
+					if markErr := s.markFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
+						s.messageLog.Error("Failed to mark set message as failed", "id", storeMsg.ID, "error", markErr)
+					}
 				}
 				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
 				continue

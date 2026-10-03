@@ -143,6 +143,9 @@ func TestGroupMessage_CarriesMessageIDAndGatesNonRunningMember(t *testing.T) {
 	stoppedRows := rowsByAgent(t, s, agents["grp-stopped"].ID)
 	require.Len(t, stoppedRows, 1)
 	assert.Equal(t, store.MessageDispatchFailed, stoppedRows[0].DispatchState)
+	require.NotNil(t, stoppedRows[0].DispatchFailureReason,
+		"the gate reason must be persisted with the row (born failed, one write)")
+	assert.Contains(t, *stoppedRows[0].DispatchFailureReason, "stopped")
 	var stoppedResult *GroupMessageRecipientResult
 	for i := range resp.Results {
 		if resp.Results[i].Recipient == "agent:grp-stopped" {
@@ -210,4 +213,117 @@ func TestProcessMentions_CarriesMessageID(t *testing.T) {
 	got := mockDispatchesTo(dispatcher, "mention-target")
 	require.Len(t, got, 1)
 	assert.Equal(t, rows[0].ID, got[0].messageID, "mention dispatch must carry its persisted message ID")
+}
+
+// groupResult returns the per-recipient result for recipient, failing the
+// test if it is absent.
+func groupResult(t *testing.T, resp GroupMessageResponse, recipient string) GroupMessageRecipientResult {
+	t.Helper()
+	for _, r := range resp.Results {
+		if r.Recipient == recipient {
+			return r
+		}
+	}
+	t.Fatalf("no result for %s in %+v", recipient, resp.Results)
+	return GroupMessageRecipientResult{}
+}
+
+// sendGroup posts a group[] message from a user to recipients via the
+// handler and returns the decoded response.
+func sendGroup(t *testing.T, srv *Server, projectID, via string, recipients string) GroupMessageResponse {
+	t.Helper()
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/projects/"+projectID+"/agents/"+via+"/message",
+		MessageRequest{StructuredMessage: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Sender:    "user:1839",
+			SenderID:  DevUserID,
+			Recipient: recipients,
+			Msg:       "group hello",
+			Type:      messages.TypeInstruction,
+		}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp GroupMessageResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	return resp
+}
+
+// A suspended member gets a group-specific reason: group sends never wake,
+// so the generic "use --wake" hint would point at a flag the group path
+// does not accept.
+func TestGroupMessage_SuspendedMemberGetsGroupSpecificReason(t *testing.T) {
+	srv, s := testServer(t)
+	projectID, agents := setupGroupTest(t, s, "1839-susp", map[string]string{
+		"grp-running":   string(state.PhaseRunning),
+		"grp-suspended": string(state.PhaseSuspended),
+	})
+	dispatcher := &brokerMockDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	resp := sendGroup(t, srv, projectID, "grp-running", "group[agent:grp-running,agent:grp-suspended]")
+	assert.Equal(t, 1, resp.Delivered)
+
+	res := groupResult(t, resp, "agent:grp-suspended")
+	assert.Equal(t, "failed", res.Status)
+	assert.Contains(t, res.Error, "group messages do not wake agents")
+	assert.Contains(t, res.Error, "--wake")
+
+	assert.Empty(t, mockDispatchesTo(dispatcher, "grp-suspended"))
+	rows := rowsByAgent(t, s, agents["grp-suspended"].ID)
+	require.Len(t, rows, 1)
+	assert.Equal(t, store.MessageDispatchFailed, rows[0].DispatchState)
+	require.NotNil(t, rows[0].DispatchFailureReason)
+	assert.Equal(t, res.Error, *rows[0].DispatchFailureReason)
+
+	// Direct sends keep the generic reason.
+	assert.NotContains(t, validateAgentDeliverable(agents["grp-suspended"]).Message, "group messages")
+}
+
+// A running member that cannot be dispatched (no runtime broker, or no
+// dispatcher at all) must not be left as a silent "dispatched" row.
+func TestGroupMessage_UndispatchableMemberRowMarkedFailed(t *testing.T) {
+	t.Run("no runtime broker", func(t *testing.T) {
+		srv, s := testServer(t)
+		projectID, agents := setupGroupTest(t, s, "1839-nobrk", map[string]string{
+			"grp-running":  string(state.PhaseRunning),
+			"grp-nobroker": string(state.PhaseRunning),
+		})
+		agents["grp-nobroker"].RuntimeBrokerID = ""
+		require.NoError(t, s.UpdateAgent(context.Background(), agents["grp-nobroker"]))
+		srv.SetDispatcher(&brokerMockDispatcher{})
+
+		resp := sendGroup(t, srv, projectID, "grp-running", "group[agent:grp-running,agent:grp-nobroker]")
+		res := groupResult(t, resp, "agent:grp-nobroker")
+		assert.Equal(t, "failed", res.Status)
+		assert.Equal(t, "agent has no runtime broker", res.Error)
+
+		rows := rowsByAgent(t, s, agents["grp-nobroker"].ID)
+		require.Len(t, rows, 1)
+		assert.Equal(t, store.MessageDispatchFailed, rows[0].DispatchState)
+		require.NotNil(t, rows[0].DispatchFailureReason)
+		assert.Equal(t, "agent has no runtime broker", *rows[0].DispatchFailureReason)
+	})
+
+	t.Run("no dispatcher", func(t *testing.T) {
+		srv, s := testServer(t)
+		projectID, agents := setupGroupTest(t, s, "1839-nodisp", map[string]string{
+			"grp-a": string(state.PhaseRunning),
+			"grp-b": string(state.PhaseRunning),
+		})
+		require.Nil(t, srv.GetDispatcher(), "test server must start without a dispatcher")
+
+		resp := sendGroup(t, srv, projectID, "grp-a", "group[agent:grp-a,agent:grp-b]")
+		assert.Equal(t, 0, resp.Delivered)
+		for _, slug := range []string{"grp-a", "grp-b"} {
+			res := groupResult(t, resp, "agent:"+slug)
+			assert.Equal(t, "failed", res.Status)
+			assert.Equal(t, "dispatcher not available", res.Error)
+			rows := rowsByAgent(t, s, agents[slug].ID)
+			require.Len(t, rows, 1)
+			assert.Equal(t, store.MessageDispatchFailed, rows[0].DispatchState, slug)
+			require.NotNil(t, rows[0].DispatchFailureReason)
+			assert.Equal(t, "dispatcher not available", *rows[0].DispatchFailureReason)
+		}
+	})
 }

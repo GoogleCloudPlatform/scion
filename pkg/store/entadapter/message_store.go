@@ -176,6 +176,11 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 	if msg.DispatchedAt != nil {
 		create.SetDispatchedAt(*msg.DispatchedAt)
 	}
+	// A row may be born failed (e.g. a group member that is not
+	// deliverable), so its reason must persist with the same write.
+	if msg.DispatchFailureReason != nil {
+		create.SetDispatchFailureReason(*msg.DispatchFailureReason)
+	}
 	if !msg.CreatedAt.IsZero() {
 		create.SetCreated(msg.CreatedAt)
 	}
