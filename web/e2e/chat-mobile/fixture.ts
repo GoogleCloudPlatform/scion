@@ -17,9 +17,19 @@
 import { expect, type Page } from '@playwright/test';
 import { setupChatMobileMocks, PROJECT_A } from './mock-api.js';
 
-/** Install the mocks and land on the rail for PROJECT_A (mobilePanel defaults to 'left'). */
-export async function openChatRail(page: Page): Promise<void> {
+/**
+ * Install the mocks and land on the rail for PROJECT_A (mobilePanel defaults to 'left').
+ *
+ * `overrideMocks`, when given, runs after the shared mocks are installed and
+ * before navigation, so any route it adds takes precedence over the shared
+ * one for the same URL (Playwright runs the most recently added route first).
+ */
+export async function openChatRail(
+  page: Page,
+  overrideMocks?: (page: Page) => Promise<void>
+): Promise<void> {
   await setupChatMobileMocks(page);
+  if (overrideMocks) await overrideMocks(page);
   await page.goto(`/chat/space/${PROJECT_A.id}`, { waitUntil: 'domcontentloaded' });
   // The legacy /chat/space/{id} URL triggers a client-side redirect to the
   // readable slug URL once spaces load (parseV2Route's legacySpaceMatch ->
