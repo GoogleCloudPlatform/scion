@@ -626,6 +626,11 @@ export class StateManager extends EventTarget {
     }
   }
 
+  /** The signed-in user's id, or '' before it is known. */
+  getCurrentUserId(): string {
+    return this.currentUserId;
+  }
+
   /**
    * Record the signed-in user so scoped subscriptions can include the
    * per-user notification subject. Called by the app bootstrap once the
