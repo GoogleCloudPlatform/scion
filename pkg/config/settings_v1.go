@@ -1875,6 +1875,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		}
 		return versionedEnvKeyMapper(key), value
 	}), nil)
+	splitKoanfListKeys(k, conduitV1EnvListKeys)
 	// SCION_OTEL_INSECURE is a plaintext switch. Its value is the inverse of
 	// telemetry.cloud.tls.enabled, so a key-only mapper cannot apply it.
 	if raw, present := os.LookupEnv("SCION_OTEL_INSECURE"); present && raw != "" {
@@ -1994,6 +1995,13 @@ func versionedEnvKeyMapper(s string) string {
 	}
 
 	return key
+}
+
+// conduitV1EnvListKeys are the v1 keys of the conduit list settings whose
+// env vars hold comma-separated lists.
+var conduitV1EnvListKeys = []string{
+	"server.hub.conduit.peer_service_accounts",
+	"server.hub.conduit.tcp_allowed_ports",
 }
 
 // knownCompoundFields lists multi-word snake_case field names used in server config.

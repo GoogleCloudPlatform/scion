@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/knadh/koanf/providers/confmap"
+	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -59,6 +61,8 @@ func TestHubConduitConfig_Validate(t *testing.T) {
 		{name: "peer auth oidc", cfg: HubConduitConfig{PeerAuth: "oidc"}},
 		{name: "peer auth unknown", cfg: HubConduitConfig{PeerAuth: "mtls"}, wantErr: []string{"peer_auth"}},
 		{name: "peer SA not an email", cfg: HubConduitConfig{PeerServiceAccounts: []string{"hub"}}, wantErr: []string{"peer_service_accounts"}},
+		{name: "peer SA comma list in one entry", cfg: HubConduitConfig{PeerServiceAccounts: []string{"a@p.iam.gserviceaccount.com,b@p.iam.gserviceaccount.com"}}, wantErr: []string{"peer_service_accounts"}},
+		{name: "peer SA with inner space", cfg: HubConduitConfig{PeerServiceAccounts: []string{"a@p.iam.gserviceaccount.com b@p"}}, wantErr: []string{"peer_service_accounts"}},
 		{name: "peer SA padded", cfg: HubConduitConfig{PeerServiceAccounts: []string{" hub@p.iam.gserviceaccount.com"}}, wantErr: []string{"peer_service_accounts"}},
 		{name: "instance id", cfg: HubConduitConfig{InstanceID: "hub-east-1.example_0"}},
 		{name: "instance id with space", cfg: HubConduitConfig{InstanceID: "hub 1"}, wantErr: []string{"instance_id"}},
@@ -184,10 +188,49 @@ server:
 		assert.Equal(t, "9s", cfg.Hub.Conduit.ReconnectWindow)
 	})
 
+	t.Run("list env vars", func(t *testing.T) {
+		tests := []struct {
+			name, sas, ports string
+			wantSAs          []string
+			wantPorts        []int
+		}{
+			{name: "comma lists, trimmed", sas: "a@p.iam.gserviceaccount.com, b@p.iam.gserviceaccount.com ", ports: "22, 3000,",
+				wantSAs: []string{"a@p.iam.gserviceaccount.com", "b@p.iam.gserviceaccount.com"}, wantPorts: []int{22, 3000}},
+			{name: "single entries", sas: "a@p.iam.gserviceaccount.com", ports: "8080",
+				wantSAs: []string{"a@p.iam.gserviceaccount.com"}, wantPorts: []int{8080}},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Setenv(conduitSchemaEnvVar(t, "peer_service_accounts"), tt.sas)
+				t.Setenv(conduitSchemaEnvVar(t, "tcp_allowed_ports"), tt.ports)
+				cfg, err := LoadGlobalConfig(configPath)
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantSAs, cfg.Hub.Conduit.PeerServiceAccounts)
+				assert.Equal(t, tt.wantPorts, cfg.Hub.Conduit.TCPAllowedPorts)
+				assert.NoError(t, cfg.Hub.Conduit.Validate())
+			})
+		}
+	})
+
 	t.Run("instance id env", func(t *testing.T) {
 		t.Setenv(conduitSchemaEnvVar(t, "instance_id"), "hub-east-1")
 		cfg, err := LoadGlobalConfig(configPath)
 		require.NoError(t, err)
 		assert.Equal(t, "hub-east-1", cfg.Hub.Conduit.InstanceID)
 	})
+}
+
+// TestConduitListKeysSplit: the bootstrap (opsettings) and v1 env paths
+// split the conduit list settings' comma-separated env values.
+func TestConduitListKeysSplit(t *testing.T) {
+	for _, keys := range [][]string{commaSplitKoanfKeys, conduitV1EnvListKeys} {
+		k := koanf.New(".")
+		require.NoError(t, k.Load(confmap.Provider(map[string]interface{}{
+			"server.hub.conduit.peer_service_accounts": "a@p.iam.gserviceaccount.com, b@p.iam.gserviceaccount.com",
+			"server.hub.conduit.tcp_allowed_ports":     "22,3000",
+		}, "."), nil))
+		splitKoanfListKeys(k, keys)
+		assert.Equal(t, []string{"a@p.iam.gserviceaccount.com", "b@p.iam.gserviceaccount.com"}, k.Strings("server.hub.conduit.peer_service_accounts"))
+		assert.Equal(t, []int{22, 3000}, k.Ints("server.hub.conduit.tcp_allowed_ports"))
+	}
 }

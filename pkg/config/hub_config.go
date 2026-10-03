@@ -1241,6 +1241,7 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 		key = envKeyToConfigKey(key)
 		return key
 	}), nil)
+	splitKoanfListKeys(k, envListConfigKeys)
 
 	// Unmarshal into GlobalConfig struct
 	config := &GlobalConfig{
@@ -1698,13 +1699,29 @@ func embeddedAgentDefaultsKoanfMap() map[string]interface{} {
 var commaSplitKoanfKeys = []string{
 	"server.hub.admin_emails",
 	"server.auth.authorized_domains",
+	"server.hub.conduit.peer_service_accounts",
+	"server.hub.conduit.tcp_allowed_ports",
+}
+
+// envListConfigKeys are the GlobalConfig koanf keys (as mapped by
+// envKeyToConfigKey) of list settings whose SCION_SERVER_* env var holds a
+// comma-separated list.
+var envListConfigKeys = []string{
+	"hub.conduit.peerServiceAccounts",
+	"hub.conduit.tcpAllowedPorts",
 }
 
 // splitCommaSeparatedKoanfKeys splits comma-separated string values into slices
 // for known list keys. Koanf's env provider loads all values as strings, but
 // list fields must be slices for correct JSON serialization by ExtractSectionFromKoanf.
 func splitCommaSeparatedKoanfKeys(k *koanf.Koanf) {
-	for _, key := range commaSplitKoanfKeys {
+	splitKoanfListKeys(k, commaSplitKoanfKeys)
+}
+
+// splitKoanfListKeys replaces a string value of each listed key with the
+// comma-separated list it holds (entries trimmed, empty entries dropped).
+func splitKoanfListKeys(k *koanf.Koanf, keys []string) {
+	for _, key := range keys {
 		if !k.Exists(key) {
 			continue
 		}
@@ -1736,6 +1753,7 @@ func applyEnvOverrides(gc *GlobalConfig) error {
 		key := strings.TrimPrefix(s, "SCION_SERVER_")
 		return envKeyToConfigKey(key)
 	}), nil)
+	splitKoanfListKeys(k, envListConfigKeys)
 
 	if err := k.Unmarshal("", gc); err != nil {
 		return err

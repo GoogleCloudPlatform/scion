@@ -992,7 +992,7 @@
             "tcp_allowed_ports": {
               "type": "array",
               "items": { "type": "integer", "minimum": 1, "maximum": 65535 },
-              "description": "Additional agent-local ports a TCP stream grant may target besides the agent's exposed ports. The reserved ports (9810, 18380) are always refused. Empty (the default) means exposed ports only; this setting never narrows access to exposed ports.",
+              "description": "Additional agent-local ports a TCP stream grant may target besides the agent's exposed ports. The reserved ports (9810, 18380) are always refused. Empty (the default) means exposed ports only; this setting never narrows access to exposed ports. The env var takes a comma-separated list.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_TCPALLOWEDPORTS",
               "x-since": "1"
             },
@@ -1018,7 +1018,7 @@
             "peer_service_accounts": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "OIDC peer auth: service-account emails allowed to call the internal relay API. Default: this node's own service account.",
+              "description": "OIDC peer auth: service-account emails allowed to call the internal relay API. Default: this node's own service account. The env var takes a comma-separated list.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_PEERSERVICEACCOUNTS",
               "x-since": "1"
             },

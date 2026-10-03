@@ -178,7 +178,7 @@ func (c HubConduitConfig) Validate() error {
 		errs = append(errs, fmt.Errorf("invalid server.hub.conduit.peer_auth %q: want auto, oidc or hmac", c.PeerAuth))
 	}
 	for _, sa := range c.PeerServiceAccounts {
-		if !strings.Contains(sa, "@") || strings.TrimSpace(sa) != sa {
+		if !strings.Contains(sa, "@") || strings.TrimSpace(sa) != sa || strings.ContainsAny(sa, ", \t") {
 			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.peer_service_accounts entry %q: want a service-account email", sa))
 		}
 	}
