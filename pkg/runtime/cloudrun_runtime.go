@@ -946,14 +946,27 @@ func sanitizeGCPLabelValue(value string) string {
 var errEmptyPerAgentCloudRun = errors.New("cloudrun: empty-per-agent workspaces are not supported on the Cloud Run runtime, " +
 	"which always mounts the project's shared workspace; use a Docker, Podman, Apple or Kubernetes broker for this project")
 
-// rejectEmptyPerAgentOnCloudRun fails when cfg starts an empty-per-agent
-// agent, identified by SCION_WORKSPACE_MODE in its env.
-func rejectEmptyPerAgentOnCloudRun(cfg RunConfig) error {
+// isEmptyPerAgentRun reports whether cfg starts an empty-per-agent agent,
+// identified by SCION_WORKSPACE_MODE in its env. Runtimes that cannot
+// provide the private workspace use it to refuse the mode at Run, which
+// backs up their SupportsEmptyPerAgentWorkspace=false opt-out for requests
+// that reach the broker before its first heartbeat corrects the static
+// registration capabilities.
+func isEmptyPerAgentRun(cfg RunConfig) bool {
 	for _, kv := range cfg.Env {
 		k, v, ok := strings.Cut(kv, "=")
 		if ok && k == "SCION_WORKSPACE_MODE" && store.ResolveWorkspaceSharingMode(v) == store.SharingModeEmptyPerAgent {
-			return errEmptyPerAgentCloudRun
+			return true
 		}
+	}
+	return false
+}
+
+// rejectEmptyPerAgentOnCloudRun fails when cfg starts an empty-per-agent
+// agent.
+func rejectEmptyPerAgentOnCloudRun(cfg RunConfig) error {
+	if isEmptyPerAgentRun(cfg) {
+		return errEmptyPerAgentCloudRun
 	}
 	return nil
 }

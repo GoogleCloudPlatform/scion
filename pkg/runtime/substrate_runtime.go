@@ -391,7 +391,20 @@ func (r *SubstrateRuntime) ExecUser() string { return "scion" }
 // Run implements the 9 steps of substrate-runtime.md §4. Any failure after
 // CreateActor triggers best-effort cleanup (delete the actor and its
 // egress policy) before returning.
+// errEmptyPerAgentSubstrate is returned by SubstrateRuntime.Run for an
+// empty-per-agent agent (design #2703).
+var errEmptyPerAgentSubstrate = errors.New("substrate: empty-per-agent workspaces are not supported on the substrate runtime, " +
+	"which does not mount the agent's workspace directory; use a Docker, Podman, Apple or Kubernetes broker for this project")
+
 func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
+	// Checked before anything touches the control plane: substrate never
+	// mounts RunConfig.Workspace, so it cannot give the agent its private
+	// directory. SupportsEmptyPerAgentWorkspace=false keeps the hub from
+	// dispatching here once the broker's heartbeat reports it; this covers
+	// the window before that, as Cloud Run's rejectEmptyPerAgentOnCloudRun does.
+	if isEmptyPerAgentRun(cfg) {
+		return "", errEmptyPerAgentSubstrate
+	}
 	// Fail fast on a misconfigured egress_allow before touching the control
 	// plane at all. NewSubstrateRuntime already validates this at
 	// construction time; this is a defensive re-check in case a
