@@ -55,18 +55,23 @@ type memConn struct {
 }
 
 func (c *memConn) ReadFrame() ([]byte, error) {
-	// A closed pipe fails fast, even with frames still buffered, which
-	// mirrors a dropped connection.
+	// Frames written before Close are still delivered, as on a WebSocket
+	// whose close message follows its last data message.
 	select {
-	case <-c.shared.done:
-		return nil, ErrClosed
+	case b := <-c.in:
+		return b, nil
 	default:
 	}
 	select {
 	case b := <-c.in:
 		return b, nil
 	case <-c.shared.done:
-		return nil, ErrClosed
+		select {
+		case b := <-c.in:
+			return b, nil
+		default:
+			return nil, ErrClosed
+		}
 	}
 }
 
