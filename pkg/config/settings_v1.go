@@ -201,34 +201,54 @@ func (vs *VersionedSettings) ResolveSharedDirDefaultsWithSource(profileName stri
 	return storageClass, size, sizeKey
 }
 
-// ResolveProfileSetting returns a per-profile setting with the standard
-// precedence: the profile's own value, else the value on the profile's
-// runtime entry. key is the settings key name used to build the returned
-// source ("profiles.NAME.KEY" or "runtimes.NAME.KEY"). If profileName is
-// empty, ActiveProfile is used. An unknown profile, or a profile and
-// runtime entry that both leave the value empty, yields ("", ""), meaning
-// the caller's global value applies.
-func (vs *VersionedSettings) ResolveProfileSetting(profileName, key string,
-	fromProfile func(V1ProfileConfig) string, fromRuntime func(V1RuntimeConfig) string) (value, source string) {
+// ResolveProfileValue returns a per-profile setting with the standard
+// precedence used by per-profile overrides: the profile's own value, else
+// the value on the profile's runtime entry. The zero value of T means
+// "not set" at that level. key is the settings key name used to build the
+// returned source ("profiles.NAME.KEY" or "runtimes.NAME.KEY"). If
+// profileName is empty, vs.ActiveProfile is used. A nil vs, an unknown
+// profile, or a profile and runtime entry that both leave the value unset
+// yield the zero value and an empty source, meaning the caller's global
+// value applies.
+//
+// Example, for a string key:
+//
+//	v, src := ResolveProfileValue(vs, profile, "shared_dir_storage_backend",
+//		func(p V1ProfileConfig) string { return p.SharedDirStorageBackend },
+//		func(r V1RuntimeConfig) string { return r.SharedDirStorageBackend })
+//
+// Call it on settings whose source matches the key's scope: keys that a
+// project must not set should be read from LoadGlobalSettings or
+// LoadGlobalSettingsWithOverlay, not from project-merged settings.
+func ResolveProfileValue[T comparable](vs *VersionedSettings, profileName, key string,
+	fromProfile func(V1ProfileConfig) T, fromRuntime func(V1RuntimeConfig) T) (value T, source string) {
+	var zero T
 	if vs == nil {
-		return "", ""
+		return zero, ""
 	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile
 	}
 	profile, ok := vs.Profiles[profileName]
 	if !ok {
-		return "", ""
+		return zero, ""
 	}
-	if v := fromProfile(profile); v != "" {
+	if v := fromProfile(profile); v != zero {
 		return v, "profiles." + profileName + "." + key
 	}
 	if rt, ok := vs.Runtimes[profile.Runtime]; ok {
-		if v := fromRuntime(rt); v != "" {
+		if v := fromRuntime(rt); v != zero {
 			return v, "runtimes." + profile.Runtime + "." + key
 		}
 	}
-	return "", ""
+	return zero, ""
+}
+
+// ResolveProfileSetting is ResolveProfileValue for string settings, where
+// "" means not set.
+func (vs *VersionedSettings) ResolveProfileSetting(profileName, key string,
+	fromProfile func(V1ProfileConfig) string, fromRuntime func(V1RuntimeConfig) string) (value, source string) {
+	return ResolveProfileValue(vs, profileName, key, fromProfile, fromRuntime)
 }
 
 // SharedDirStorageGlobalSource is the source key ResolveSharedDirStorage
